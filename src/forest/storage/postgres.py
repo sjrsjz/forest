@@ -52,6 +52,13 @@ class PostgresStore:
         async with self.pool.connection() as conn, conn.transaction():
             # Database-wide serialization also covers an initially missing table.
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (679330170781,))
+            bot_identity = await (await conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE c.relname='forest_bot_identity' AND c.relkind IN ('r','p') "
+                "AND n.nspname NOT IN ('pg_catalog','information_schema')) AS present"
+            )).fetchone()
+            if bot_identity and bot_identity["present"]:
+                raise ForestError("DATABASE_SCOPE_MISMATCH", "Bot database cannot be a deployment authority")
             await conn.execute(
                 "CREATE TABLE IF NOT EXISTS forest_schema_migrations ("
                 "version text PRIMARY KEY, checksum text NOT NULL, "

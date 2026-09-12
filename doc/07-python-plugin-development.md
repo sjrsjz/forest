@@ -1,6 +1,6 @@
 # 原生 Python 插件与开发体验详细设计
 
-> 状态：待实现的 SDK 与工具链设计。本文所有 `forest.sdk` 名称、装饰器及 CLI 命令都是拟定接口，不表示当前仓库已提供可运行实现。
+> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@service`、state/tasks/operations SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check` 和单次 `forest dev`。本文的 `@plugin/@command`、声明自动生成、记忆/回复/通用服务代理、完整资源 SDK 与自动 watch 仍是目标接口；真实示例见 [counter](../examples/counter/python/counter.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
 
 ## 1. 插件作者看到的接口
 

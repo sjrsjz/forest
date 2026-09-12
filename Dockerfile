@@ -14,6 +14,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM build AS test
 COPY tests ./tests
+COPY examples ./examples
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-editable
 ENV PATH="/app/.venv/bin:$PATH" \
