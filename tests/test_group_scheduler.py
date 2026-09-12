@@ -6,6 +6,7 @@ import pytest
 from test_messages import event, receive
 from test_messages import messages as messages
 
+from forest.agent import AgentExecutionError, RunDisposition
 from forest.errors import ForestError
 from forest.group_scheduler import GroupScheduler
 
@@ -24,7 +25,9 @@ async def row(repository, query, params=()):
 
 
 async def replies(repository, expected):
-    return (await row(repository, "SELECT count(*) AS n FROM public.bot_conversation_replies"))["n"] == expected
+    return (await row(repository, "SELECT count(*) AS n FROM public.bot_conversation_replies"))[
+        "n"
+    ] == expected
 
 
 def scheduler(repository, lease, execute, **kwargs):
@@ -46,8 +49,14 @@ async def test_silent_input_is_drained_without_execution_or_send(messages):
         await instance.start()
 
         async def drained():
-            current = await row(repository, "SELECT context_applied_seq,processed_mailbox_revision,mailbox_revision FROM public.bot_conversations")
-            return current["context_applied_seq"] == 20 and current["processed_mailbox_revision"] == current["mailbox_revision"]
+            current = await row(
+                repository,
+                "SELECT context_applied_seq,processed_mailbox_revision,mailbox_revision FROM public.bot_conversations",
+            )
+            return (
+                current["context_applied_seq"] == 20
+                and current["processed_mailbox_revision"] == current["mailbox_revision"]
+            )
 
         await until(drained)
         assert not executed
@@ -64,8 +73,18 @@ async def test_same_group_serial_other_group_parallel_and_queued_tail_stays_out(
 
     async def execute(actor, selected, context):
         group = context["conversation"]["channel_id"]
-        invocations.append((group, selected["run_id"], [u["ingress_seq"] for u in context["units"] if u["kind"] == "INPUT"]))
-        assert all("source" in u and u["author"]["principal_ref"] for u in context["units"] if u["kind"] == "INPUT")
+        invocations.append(
+            (
+                group,
+                selected["run_id"],
+                [u["ingress_seq"] for u in context["units"] if u["kind"] == "INPUT"],
+            )
+        )
+        assert all(
+            "source" in u and u["author"]["principal_ref"]
+            for u in context["units"]
+            if u["kind"] == "INPUT"
+        )
         if group == "group-1" and not first_started.is_set():
             first_started.set()
             await release.wait()
@@ -165,7 +184,10 @@ async def test_actor_renewal_keeps_long_callback_valid(messages):
         await instance.start()
         await asyncio.wait_for(started.wait(), 5)
         await asyncio.sleep(0.8)
-        current = await row(repository, "SELECT actor_expires_at>clock_timestamp() AS live FROM public.bot_conversations")
+        current = await row(
+            repository,
+            "SELECT actor_expires_at>clock_timestamp() AS live FROM public.bot_conversations",
+        )
         assert current["live"]
         release.set()
         await until(lambda: replies(repository, 1))
@@ -174,7 +196,9 @@ async def test_actor_renewal_keeps_long_callback_valid(messages):
         await instance.close()
 
 
-async def test_close_cancels_callback_and_restart_resumes_same_run_without_duplicate_input(messages):
+async def test_close_cancels_callback_and_restart_resumes_same_run_without_duplicate_input(
+    messages,
+):
     repository, lease, _ = messages
     started, cancelled = asyncio.Event(), asyncio.Event()
     original = []
@@ -194,7 +218,9 @@ async def test_close_cancels_callback_and_restart_resumes_same_run_without_dupli
     await first.close()
     assert cancelled.is_set()
     assert await replies(repository, 0)
-    assert (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))["status"] == "CLAIMED"
+    assert (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))[
+        "status"
+    ] == "CLAIMED"
 
     async def recovered(actor, selected, context):
         assert selected["status"] == "RESUME"
@@ -206,7 +232,9 @@ async def test_close_cancels_callback_and_restart_resumes_same_run_without_dupli
     try:
         await second.start()
         await until(lambda: replies(repository, 1))
-        assert (await row(repository, "SELECT count(*) AS n FROM public.bot_context_input_batches"))["n"] == 1
+        assert (
+            await row(repository, "SELECT count(*) AS n FROM public.bot_context_input_batches")
+        )["n"] == 1
     finally:
         await second.close()
 
@@ -259,7 +287,9 @@ async def test_budget_failure_and_callback_failure_are_durable_terminal_claims(m
         await instance.start()
 
         async def failed():
-            return (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))["status"] == "FAILED"
+            return (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))[
+                "status"
+            ] == "FAILED"
 
         await until(failed)
         assert called == []
@@ -270,7 +300,12 @@ async def test_budget_failure_and_callback_failure_are_durable_terminal_claims(m
         instance.notify()
 
         async def failed_twice():
-            return (await row(repository, "SELECT count(*) AS n FROM public.bot_conversation_triggers WHERE status='FAILED'"))["n"] == 2
+            return (
+                await row(
+                    repository,
+                    "SELECT count(*) AS n FROM public.bot_conversation_triggers WHERE status='FAILED'",
+                )
+            )["n"] == 2
 
         await until(failed_twice)
         assert len(called) == 1
@@ -343,8 +378,9 @@ async def test_uncooperative_callback_retains_capacity_and_cannot_publish_after_
 
     await receive(repository, lease, 1, trigger=True)
     capacity = asyncio.Semaphore(1)
-    instance = scheduler(repository, lease, stubborn, global_slots=capacity,
-                         cancellation_timeout=0.05, actor_ttl=0.3)
+    instance = scheduler(
+        repository, lease, stubborn, global_slots=capacity, cancellation_timeout=0.05, actor_ttl=0.3
+    )
     try:
         await instance.start()
         await asyncio.wait_for(started.wait(), 5)
@@ -364,4 +400,102 @@ async def test_uncooperative_callback_retains_capacity_and_cannot_publish_after_
         await instance.close()
     assert not capacity.locked()
     assert await replies(repository, 0)
-    assert (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))["status"] == "CLAIMED"
+    assert (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))[
+        "status"
+    ] == "CLAIMED"
+
+
+async def test_agent_quantum_releases_capacity_but_resumes_same_session_and_final_cut(messages):
+    repository, lease, _ = messages
+    started, release = asyncio.Event(), asyncio.Event()
+    capacity = asyncio.Semaphore(1)
+    order, runs, final_revisions, final_inputs = [], [], {}, []
+
+    async def execute(actor, selected, context):
+        group = context["conversation"]["channel_id"]
+        order.append(group)
+        if group == "a":
+            runs.append((selected["session_id"], selected["run_id"]))
+            if len(runs) == 1:
+                started.set()
+                await release.wait()
+                return RunDisposition("YIELD", selected["run_id"], 1)
+            boundary = await repository.select_input(actor, "next-safe-model", mode="SAFE_POINT")
+            current = await repository.context(actor, run_id=selected["run_id"])
+            final_revisions[selected["run_id"]] = boundary["input_revision"]
+            final_inputs.extend(
+                unit["ingress_seq"] for unit in current["units"] if unit["kind"] == "INPUT"
+            )
+            return RunDisposition("FINAL_READY", selected["run_id"], 2)
+        return [[{"type": "text", "text": "other group"}]]
+
+    async def finalize(actor, disposition, delivery):
+        assert not capacity.locked()  # Actual provider capacity was released.
+        return await repository.finalize_reply(
+            actor,
+            "final:" + disposition.run_id,
+            run_id=disposition.run_id,
+            expected_input_revision=final_revisions[disposition.run_id],
+            reply_parts=[[{"type": "text", "text": "from final snapshot"}]],
+            delivery=delivery,
+        )
+
+    await receive(repository, lease, 1, trigger=True, group="a")
+    instance = scheduler(
+        repository,
+        lease,
+        execute,
+        max_concurrency=1,
+        global_slots=capacity,
+        finalize_agent=finalize,
+    )
+    try:
+        await instance.start()
+        await asyncio.wait_for(started.wait(), 5)
+        await receive(repository, lease, 2, group="a")
+        await receive(repository, lease, 3, trigger=True, group="a")
+        await receive(repository, lease, 4, group="a")
+        await receive(repository, lease, 5, trigger=True, group="a")
+        await receive(repository, lease, 6, group="a")
+        await receive(repository, lease, 1, trigger=True, group="b")
+        await instance.run_once()
+        release.set()
+        await until(lambda: replies(repository, 2))
+        assert order == ["a", "b", "a"]
+        assert len(set(runs)) == 1
+        assert final_inputs == [1, 2, 3, 4, 5]
+        assert list(final_revisions.values()) == [2]
+    finally:
+        release.set()
+        await instance.close()
+
+
+async def test_agent_recovery_error_does_not_terminalize_persisted_run(messages):
+    repository, lease, _ = messages
+    raised = asyncio.Event()
+
+    async def execute(actor, selected, context):
+        raised.set()
+        raise AgentExecutionError(
+            "AGENT_RECOVERY_REQUIRED", "Dispatch receipt needs reconciliation", 503
+        )
+
+    await receive(repository, lease, 1, trigger=True)
+    instance = scheduler(repository, lease, execute)
+    try:
+        await instance.start()
+        await asyncio.wait_for(raised.wait(), 5)
+
+        async def idle():
+            return not instance.active_conversations
+
+        await until(idle)
+        assert (await row(repository, "SELECT status FROM public.bot_conversation_runs"))[
+            "status"
+        ] == "RUNNING"
+        assert (await row(repository, "SELECT status FROM public.bot_conversation_triggers"))[
+            "status"
+        ] == "CLAIMED"
+        assert await replies(repository, 0)
+    finally:
+        await instance.close()

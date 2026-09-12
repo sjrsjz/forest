@@ -1,6 +1,6 @@
 # Forest 实现状态与验证记录
 
-更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核、OneBot HTTP 与 P2 插件升级切片；首版框架仍在实现中。**可以从页面管理插件版本、组件配置、账号连接、群聊和发送记录，开发 CLI 支持自动重载，内核支持持久 KV 格式迁移。当前对话响应为模板组件，完整 Agent 与多模态记忆尚未完成。
+更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核、OneBot HTTP、P2 插件升级和 P3 持久 Agent 运行切片；首版框架仍在实现中。**页面支持模型、人格、图文能力、工具权限、预算、审批与运行取消。模型/工具步骤以数据库安全点接入群消息，输入投影保留作者及群来源，裁剪不调用摘要 API。完整定时/子 Agent、多模态长期记忆和管理 Shell 仍待实现。
 
 ## 1. 当前可以执行的流程
 
@@ -10,7 +10,7 @@
 
 插件流程是：静态构建完整包 → 启动无生产权限的候选 Worker → 校验配置和服务 → 在专用 Bot 数据库接纳代际与调用 → 经宿主代理读写组件状态 → 记录结果并回收。`forest plugin build/check/lock/import/export` 提供开发工具，`forest dev --package` 执行一次服务调用，`forest dev --watch` 持续监听完整包。开发源变化固定新 desired；失效候选不能越过最新请求发布，重启恢复持久 last-good。见 [P2 包/环境说明](p2-plugin-packages.md)。
 
-Web 新流程为：创建 Bot → 供应器按冻结计划创建专用数据库和受限角色 → Fleet 启动该 Bot 宿主 → 预览并提交组件配置 → 候选准备与排空切换 → 生效修订推进 → 页面调用组件。双 Bot 计数器、热改倍率与完整重启恢复已有真实 HTTP/PostgreSQL/Worker 测试；后台暂只提供随发行版安装的内置组件。
+Web 新流程为：创建 Bot → 供应器按冻结计划创建专用数据库和受限角色 → Fleet 启动该 Bot 宿主 → 预览并提交组件配置 → 候选准备与排空切换 → 生效修订推进 → 页面调用组件。双 Bot 计数器、热改倍率与完整重启恢复已有真实 HTTP/PostgreSQL/Worker 测试；后台支持发行版内置组件和通过完整 ZIP 导入的可信插件。
 
 P1 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置 → 实际 API 身份探测 → 持久发布 Binding/connection epoch → HMAC 验证消息后持久 ACK → 全量 Context/最后触发切口 → 公平群 Actor → 模板 Worker → 最终回复和发送意图原子提交 → 事务外 HTTP → SENT/NOT_SENT/UNKNOWN。受限 `#forest help/status` 独立处理并使用 CONTROL 发送通道，普通业务暂停不关闭接收。详细行为和未实现边界见 [P1 接入说明](p1-integration.md)。
 
@@ -88,19 +88,36 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树及 Web/Fleet 接线；仍缺通用事件/Job、自动声明生成、完整资源 SDK 和其余消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
-| P3 Agent 与上下文 | 上下文基础已实现 | 持久 Session/Run、触发排队、最后触发切口、静默排空与零摘要裁剪已接入；仍缺模型/工具安全点 checkpoint、审批/取消/定时与子 Agent 完整执行 |
-| P4 多模态多主干记忆 | 未开始 | 每 Bot 全局图文记忆、每群主干、原生图文嵌入、图片/混合召回、模型输入投影、来源/删除屏障、合流 reducer |
+| P3 Agent 与上下文 | 持久运行切片已接通 | 模型/工具安全点 checkpoint、审批/取消/未知结果对账、Web 模型配置和图文投影已接入；通用定时任务、子 Agent 与相关完整恢复仍待实现 |
+| P4 多模态多主干记忆 | 媒体基础已接通 | 原图存储和模型输入投影已接入；每 Bot 全局多主干记忆、原生图文嵌入、图片/混合召回、来源/删除屏障与合流 reducer 仍待实现 |
 | P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、受限群聊 help/status；完整类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 
 部署配置及已实现 Bot 状态/生命周期事实均保存相应审计/outbox，尚无通用后台消费者、投递重试或外部效果对账。配置页直接读取 PostgreSQL 当前生效值，因此这个管理闭环不依赖 outbox 消费来宣称生效。原生 Worker 的 state RPC 也不能被视为完整 Agent 工具或平台 Effect 系统。
 
-当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿或 Web 备份恢复。已有组件配置历史页面，可将历史配置重新预览并作为新修订提交；恢复时仍使用当前持久状态。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、插件、组件和 OneBot 连接管理，尚不能配置模型或管理记忆。
+当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿或 Web 备份恢复。已有组件配置历史页面，可将历史配置重新预览并作为新修订提交；恢复时仍使用当前持久状态。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、插件、组件、OneBot 连接及 Agent 模型配置和审批，长期记忆管理尚未接入。
 
 ## 4. 验证证据与适用范围
 
-本轮 P2 使用独立 PostgreSQL 17.10、真实原生 Worker 与非 root Docker 测试；没有使用真实 QQ、LLM 或 Embedding 凭据。
+本轮 P3 使用独立 PostgreSQL 17.10、真实原生 Worker、本地 TCP HTTP/SSE 服务与非 root Docker 测试。真实 Edge 加独立 Compose 已验证模型配置、秘密不回显、Agent 回复、重启恢复、原插件版本与双 Bot 流程。测试端点是明确的本地测试服务，没有使用真实 QQ、付费 LLM 或 Embedding 凭据。
+
+P3 的事务和执行细节见 [Agent 运行](p3-agent.md)及[状态与并发边界](p3-agent-state.md)。旧库升级测试从 001–012 非空数据库迁移至 017，保留旧上下文、调用、媒体来源、密钥与停用状态，并按已有动作映射增加相应 Agent 管理权限；不会把只读签发者升级为可写权限。
+
+| P3 持久 Agent 切片 | 结果 | 范围 |
+|---|---|---|
+| Windows 全量基线 | `664 passed, 4 skipped`，724.91 秒 | Python 3.11.13、真实 PostgreSQL；四项跳过属于 POSIX/大小写专项 |
+| Windows 旧库升级增补 | `6 passed`，3.52 秒 | 全量收集后新增的 001–012→017 非空旧库、完整/只读/空权限/停用签发者 |
+| 非 root Linux 全量 | `673 passed, 1 skipped`，594.74 秒 | 含 6 项旧库升级测试；仅跳过 Windows DACL |
+| Edge + 独立 Compose | 通过 | 初始化、双 Bot、插件版本/历史、OneBot、模型 Web 配置、实际 Agent HTTP 回复、密钥与重启恢复、注销 |
+| Edge Agent 表单专项 | 通过 | 真实共享 API 参数/幂等头、审批、读取/应用草稿、Bot 切换和移动布局 |
+| Agent 状态与执行 | 已包含于全量 | 原子安全点、工具组/触发裁剪保护、持久重试/UNKNOWN、审批、只读与运行中撤权、取消、FINAL_READY 和最终提交回滚 |
+| 多模态与成本 | 已包含于全量 | HTTP/SSE、文本/图片投影、图片真实解码、后台权限复核、跨群配额、日预算、超时与客户端关闭 |
+| 最终镜像核对 | 通过 | 92 个已安装运行文件与工作区 SHA-256 逐项一致 |
+
+Windows 基线运行期间仅增加旧库升级测试，并修正 `agent-panel.js` 调用公共管理 API 的参数格式；Python 运行代码未改动。Linux 全量包含增补测试，使用同一 Python 运行代码；其镜像中的该单个 JS 文件随后由最终发布镜像替换。前端修改后重新通过完整 Edge/Compose 与表单专项验证，最终镜像 92 个运行文件全部与工作区一致。测试期间的重复 ZIP 名称警告来自刻意构造的非法包。
+
+以下 P2 是提交 `184952e` 的历史验证，使用独立 PostgreSQL、真实原生 Worker 与非 root Docker；没有使用真实 QQ、LLM 或 Embedding 凭据。
 
 | P2 插件升级切片 | 结果 | 范围 |
 |---|---|---|
@@ -163,8 +180,8 @@ Windows 全量运行期间只调整了 `app.js` 的 Bot 切换表单竞态及 `t
 
 [浏览器验收脚本](../scripts/smoke_browser.py)创建独立随机 `forest-e2e-*` Compose project 和临时端口，执行上表所列部署与双 Bot 流程。脚本 `finally` 清理自己的容器与卷，截图保存在 `.local/browser-artifacts/`。本轮实际使用 Windows 上安装的 Edge；`--browser` 可指定浏览器。
 
-P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最后触发切口、发送 UNKNOWN 对账、连接回收与 HTTP 重启测试，见 `test_messages`、`test_group_scheduler`、`test_delivery`、`test_platform`、`test_web_bindings`。P2 增加离线运行环境、迁移、watch 与 Web 插件验证。通用 reducer、完整 ModelStep/工具安全点、多模态索引/删除竞争、Agent checkpoint 恢复，以及持续容量压力仍需后续实现和可执行证据。
+P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最后触发切口、发送 UNKNOWN 对账、连接回收与 HTTP 重启测试。P2 增加离线运行环境、迁移、watch 与 Web 插件验证。P3 增加模型/工具安全点、checkpoint 恢复、审批/取消、图文投影和真实 HTTP 纵向测试，详见 [P3 说明](p3-agent.md)。通用 reducer、多模态长期索引/删除竞争及持续容量压力仍需后续实现和可执行证据。
 
 ## 5. 下一步
 
-继续补齐通用事件/Job、声明工具链和资源契约，推进 P2 热重载恢复、P3 完整 Agent 与 P4 多模态记忆。已接通的 Web/Fleet、OneBot/Binding、消息/发送与调用树作为后续基础；完整依赖运行环境、checkpoint/操作恢复与管理 Shell 仍按 01–12 实施。当前切片可运行，不代表整个 P0 或首版框架已经完成。
+继续补齐通用事件/Job、定时与子 Agent、资源契约，推进 P4 多主干多模态记忆与 P5 完整管理和容量治理。已接通的 Web/Fleet、插件运行环境、OneBot/Binding、消息/发送、调用树和持久 Agent 作为后续基础；首版目标仍按 01–12 实施，当前切片可运行不代表整个目标已经完成。

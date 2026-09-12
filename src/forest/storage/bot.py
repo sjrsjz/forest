@@ -60,6 +60,7 @@ class CallGrant:
     dependency_components: tuple[str, ...] = ()
     admission_lane: str = "DATA"
     control_service: str | None = None
+    agent_tool_id: str | None = None
 
 
 def _digest(value: Any) -> str:
@@ -1296,6 +1297,7 @@ class BotStore:
         expected_worker_incarnation: str | None = None,
         expected_route_epoch: int | None = None,
         dependency_components: tuple[str, ...] = (),
+        agent_tool_id: str | None = None,
     ) -> CallGrant:
         return await self._admit(
             lease,
@@ -1309,6 +1311,7 @@ class BotStore:
             expected_worker_incarnation=expected_worker_incarnation,
             expected_route_epoch=expected_route_epoch,
             dependency_components=dependency_components,
+            agent_tool_id=agent_tool_id,
         )
 
     async def admit_control(
@@ -1372,6 +1375,7 @@ class BotStore:
         dependency_components: tuple[str, ...] = (),
         admission_lane: str = "DATA",
         control_service: str | None = None,
+        agent_tool_id: str | None = None,
     ) -> CallGrant:
         self._ttl(timeout_seconds)
         dependencies = self._dependencies(component_id, dependency_components)
@@ -1380,6 +1384,13 @@ class BotStore:
             route = routes[component_id]
             runtime = await self._runtime(conn)
             await self._host(conn, lease, runtime)
+            agent_authority = None
+            if agent_tool_id is not None:
+                from forest.storage.agent import AgentStore
+
+                agent_authority = await AgentStore.guard_tool_call_in(
+                    conn, self.bot_id, agent_tool_id, input_digest=input_digest
+                )
             if (
                 expected_policy_revision is not None
                 and runtime["policy_revision"] != expected_policy_revision
@@ -1392,6 +1403,11 @@ class BotStore:
                 if route["generation_id"] is not None
                 else None
             )
+            if agent_authority is not None and (
+                generation is None or agent_authority["tool_def"].get("package_digest")
+                not in {None, generation["package_digest"]}
+            ):
+                raise ForestError("AGENT_TOOL_CONTRACT_CHANGED", "Frozen Agent tool package changed", 409)
             if (
                 (
                     expected_generation_id is not None
@@ -1429,6 +1445,7 @@ class BotStore:
                     or old["parent_call_id"] is not None
                     or old["admission_lane"] != admission_lane
                     or old["control_service"] != control_service
+                    or old["agent_tool_id"] != agent_tool_id
                 ):
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "Call identity already binds different input"
@@ -1487,9 +1504,9 @@ class BotStore:
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components,admission_lane,control_service) "
+                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components,admission_lane,control_service,agent_tool_id) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s) RETURNING *",
+                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -1510,6 +1527,7 @@ class BotStore:
                         list(dependencies),
                         admission_lane,
                         control_service,
+                        agent_tool_id,
                     ),
                 )
             ).fetchone()
@@ -1553,7 +1571,8 @@ class BotStore:
             current = row["parent_call_id"]
         chain.reverse()
         for depth, row in enumerate(chain):
-            if row["root_call_id"] != chain[0]["call_id"] or row["call_depth"] != depth:
+            if (row["root_call_id"] != chain[0]["call_id"] or row["call_depth"] != depth
+                    or row["agent_tool_id"] != chain[0]["agent_tool_id"]):
                 raise ForestError(
                     "INVALID_CALL_TREE", "Call ancestry does not match its immutable root"
                 )
@@ -1699,9 +1718,9 @@ class BotStore:
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,parent_call_id,root_call_id,call_depth,dependency_components) "
+                    "policy_revision,deadline_at,input_digest,parent_call_id,root_call_id,call_depth,dependency_components,agent_tool_id) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s) RETURNING *",
+                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -1723,6 +1742,7 @@ class BotStore:
                         parent["root_call_id"],
                         parent["call_depth"] + 1,
                         list(dependencies),
+                        parent["agent_tool_id"],
                     ),
                 )
             ).fetchone()
@@ -1846,7 +1866,14 @@ class BotStore:
         assert call is not None
         return call, host
 
-    async def _guard_time(self, conn: AsyncConnection, host: dict, grant: CallGrant) -> None:
+    async def _guard_time(self, conn: AsyncConnection, host: dict, grant: CallGrant,
+                          *, require_write=False) -> None:
+        if grant.agent_tool_id is not None:
+            from forest.storage.agent import AgentStore
+
+            authority = await AgentStore.guard_tool_call_in(conn, self.bot_id, grant.agent_tool_id)
+            if require_write and authority["tool_def"].get("effect") == "read":
+                raise ForestError("AGENT_TOOL_READ_ONLY", "This tool cannot write component state", 403)
         now = await self._now(conn)
         if host["expires_at"] <= now:
             raise ForestError("STALE_HOST", "Host lease expired before commit")
@@ -1894,6 +1921,7 @@ class BotStore:
         value = json.loads(json.dumps(value, allow_nan=False))
         async with self.pool.connection() as conn, conn.transaction():
             _, host = await self._guard(conn, grant)
+            await self._guard_time(conn, host, grant, require_write=True)
             previous = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_state_steps WHERE bot_id=%s AND call_id=%s AND operation_id=%s",
@@ -2038,6 +2066,7 @@ class BotStore:
         expected_policy_revision: int,
         *,
         admission_lane="DATA",
+        agent_tool_id=None,
     ) -> dict | None:
         """Receipt query under current host/policy, independent of old call leases."""
         async with self.pool.connection() as conn, conn.transaction():
@@ -2065,6 +2094,12 @@ class BotStore:
                 raise ForestError(
                     "IDEMPOTENCY_CONFLICT", "Call operation belongs to a different admission lane"
                 )
+            if result is not None and result["agent_tool_id"] != agent_tool_id:
+                raise ForestError("IDEMPOTENCY_CONFLICT", "Call has different Agent authority")
+            if agent_tool_id is not None:
+                from forest.storage.agent import AgentStore
+
+                await AgentStore.guard_tool_call_in(conn, self.bot_id, agent_tool_id)
             await self._host(conn, lease, runtime)
             return result
 

@@ -65,6 +65,29 @@ def main() -> None:
         token = compose("exec", "-T", "forest", "forest", "setup-token").strip()
         password = secrets.token_urlsafe(32)
         api_token, webhook_secret = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+        model_key = secrets.token_urlsafe(24)
+
+        def start_model():
+            source = '''import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+KEY = __KEY__
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_POST(self):
+        if self.path != '/v1/chat/completions' or self.headers.get('Authorization') != 'Bearer ' + KEY:
+            self.send_error(403); return
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if body.get('model') != 'browser-model' or body.get('stream') is not False:
+            self.send_error(422); return
+        raw = json.dumps({'id':'browser-completion','model':'browser-model',
+            'choices':[{'index':0,'finish_reason':'stop','message':{
+                'role':'assistant','content':'浏览器 Agent 已回复'}}],
+            'usage':{'prompt_tokens':10,'completion_tokens':10,'total_tokens':20}}).encode()
+        self.send_response(200); self.send_header('Content-Type','application/json')
+        self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
+HTTPServer(('127.0.0.1',5901),Handler).serve_forever()
+'''.replace("__KEY__", repr(model_key))
+            compose("exec", "-T", "-d", "forest", "python", "-c", source)
 
         def start_onebot():
             # Disposable test transport inside the disposable Forest container;
@@ -96,6 +119,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             compose("exec", "-T", "-d", "forest", "python", "-c", source)
 
         start_onebot()
+        start_model()
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True,
@@ -221,6 +245,26 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             resolution.locator('button').click()
             expect(page.locator('#delivery-list')).to_contain_text('SKIPPED', timeout=15000)
             expect(page.locator('#delivery-list form')).to_have_count(0)
+            expect(page.locator('#bot-agent')).to_be_visible()
+            page.locator('#agent-config [name="endpoint"]').fill('http://127.0.0.1:5901/v1')
+            page.locator('#agent-config [name="model"]').fill('browser-model')
+            page.locator('#agent-config [name="api_key"]').fill(model_key)
+            page.locator('#agent-config [name="enabled"]').check()
+            page.locator('#agent-config [name="stream"]').uncheck()
+            page.locator('#agent-config button[type="submit"]').click()
+            expect(page.locator('#agent-preview')).to_be_visible()
+            assert model_key not in page.locator('#agent-config-diff').text_content()
+            page.locator('#agent-apply').click()
+            expect(page.locator('#agent-config-status')).to_contain_text('配置修订 1')
+            expect(page.locator('#agent-config [name="api_key"]')).to_have_value('')
+            page.locator('#binding-config [name="response_mode"]').select_option('agent')
+            page.locator('#binding-config button[type="submit"]').click()
+            page.locator('#apply-binding').click()
+            expect(page.locator('#binding-state')).to_contain_text('已生效 2', timeout=30000)
+            group_message(4, '/chat 使用真正 Agent 链路')
+            expect(page.locator('#delivery-list')).to_contain_text('浏览器 Agent 已回复', timeout=20000)
+            page.locator('#agent-refresh').click()
+            expect(page.locator('#agent-runs')).to_contain_text('COMPLETED', timeout=15000)
             page.bring_to_front()
             page.screenshot(path=str(artifacts / "bots-desktop.png"), full_page=True)
             page.set_viewport_size({"width": 390, "height": 844})
@@ -228,6 +272,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             compose("restart", "forest")
             compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "90")
             start_onebot()
+            start_model()
             page.goto(origin)
             expect(page.locator("#configuration")).to_be_visible(timeout=20000)
             expect(page.locator("#revision")).to_have_text("1")
@@ -239,8 +284,10 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             invoke(1, "：14（状态修订 3）")
             page.locator('#binding-list button').first.click()
             expect(page.locator('#binding-state')).to_contain_text('在线', timeout=30000)
-            group_message(4, '/chat 重启后继续')
-            expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 4', timeout=20000)
+            expect(page.locator('#agent-config [name="model"]')).to_have_value('browser-model')
+            expect(page.locator('#agent-config [name="api_key"]')).to_have_value('')
+            group_message(5, '/chat 重启后继续')
+            expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 5', timeout=20000)
             select_bot(page, beta)
             invoke(1, "：4（状态修订 2）")
 
@@ -325,6 +372,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Bot configuration and state recover after restart",
                         "OneBot Web configuration and credentials stay private",
                         "real HTTP ingress, silent context, template reply and delivery",
+                        "Web model configuration, real Agent HTTP reply and credential recovery after restart",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
                         "logout revocation",

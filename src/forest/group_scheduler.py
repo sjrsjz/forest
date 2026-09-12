@@ -1,8 +1,8 @@
-"""Fair, recoverable P1 conversation execution over the PostgreSQL mailbox.
+"""Fair conversation scheduling over durable input and Agent checkpoints.
 
-The callback is a trusted host integration, currently a command service rather
-than an LLM Agent. Its input and context are fixed before invocation. A future
-Agent runner owns model/tool checkpoints and calls MessageStore at safe points.
+An Agent quantum closes one model/tool causal group and returns a persisted
+disposition. Releasing a real execution slot does not release the DB Session.
+Legacy component callbacks remain single-reply invocations.
 """
 
 from __future__ import annotations
@@ -13,12 +13,14 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from uuid import uuid4
 
+from forest.agent import AgentExecutionError, RunDisposition
 from forest.errors import ForestError
 from forest.storage.bot import HostLease
 from forest.storage.delivery import DeliveryStore
 from forest.storage.messages import ActorLease, MessageStore
 
-Execute = Callable[[ActorLease, dict, dict], Awaitable[list[list[dict]]]]
+Execute = Callable[[ActorLease, dict, dict], Awaitable[list[list[dict]] | RunDisposition]]
+FinalizeAgent = Callable[[ActorLease, RunDisposition, DeliveryStore], Awaitable[dict]]
 
 
 class GroupScheduler:
@@ -28,6 +30,7 @@ class GroupScheduler:
         *,
         lease: HostLease | Callable[[], HostLease],
         execute: Execute,
+        finalize_agent: FinalizeAgent | None = None,
         delivery: DeliveryStore | None = None,
         max_concurrency: int = 8,
         global_slots: asyncio.Semaphore | None = None,
@@ -39,18 +42,22 @@ class GroupScheduler:
         max_queued: int = 1024,
     ):
         if not (
-            type(max_concurrency) is int and 1 <= max_concurrency <= 64
+            type(max_concurrency) is int
+            and 1 <= max_concurrency <= 64
             and 0.01 <= poll_interval <= 60
             and 0.15 <= actor_ttl <= 120
             and 0 < execution_timeout <= 3600
             and 0.01 <= cancellation_timeout <= 30
-            and type(scan_page_size) is int and 1 <= scan_page_size <= 1024
-            and type(max_queued) is int and max_concurrency <= max_queued <= 4096
+            and type(scan_page_size) is int
+            and 1 <= scan_page_size <= 1024
+            and type(max_queued) is int
+            and max_concurrency <= max_queued <= 4096
         ):
             raise ValueError("Invalid group scheduler resource bounds")
         self.messages = messages
         self._lease_source = lease
         self.execute = execute
+        self.finalize_agent = finalize_agent
         self.delivery = delivery or DeliveryStore(messages.store)
         self.max_concurrency = max_concurrency
         self.global_slots = global_slots or asyncio.Semaphore(max_concurrency)
@@ -151,7 +158,9 @@ class GroupScheduler:
                 return 0
             await self.messages.expire_classifications(lease, limit=self.scan_page_size)
             rows = await self.messages.pending(
-                lease, limit=self.scan_page_size, after_conversation_id=self._cursor,
+                lease,
+                limit=self.scan_page_size,
+                after_conversation_id=self._cursor,
             )
             self._cursor = rows[-1]["conversation_id"] if rows else None
             now = asyncio.get_running_loop().time()
@@ -160,8 +169,12 @@ class GroupScheduler:
                     self._backoff.pop(key)
             for row in rows:
                 key = row["conversation_id"]
-                if (key in self._queued or key in self._active or key in self._backoff
-                        or len(self._queue) >= self.max_queued):
+                if (
+                    key in self._queued
+                    or key in self._active
+                    or key in self._backoff
+                    or len(self._queue) >= self.max_queued
+                ):
                     continue
                 self._queued.add(key)
                 self._queue.append(key)
@@ -190,7 +203,9 @@ class GroupScheduler:
         try:
             while True:
                 await asyncio.sleep(self.actor_ttl / 3)
-                actor_box[0] = await self.messages.renew_actor(actor_box[0], ttl_seconds=self.actor_ttl)
+                actor_box[0] = await self.messages.renew_actor(
+                    actor_box[0], ttl_seconds=self.actor_ttl
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -226,28 +241,48 @@ class GroupScheduler:
         slot_acquired = False
         try:
             actor = await self.messages.acquire_actor(
-                self._lease(), conversation_id, self.owner_id, ttl_seconds=self.actor_ttl,
+                self._lease(),
+                conversation_id,
+                self.owner_id,
+                ttl_seconds=self.actor_ttl,
             )
             actor_box.append(actor)
             renewal = asyncio.create_task(
-                self._renew(actor_box, asyncio.current_task()), name="renew:" + conversation_id,
+                self._renew(actor_box, asyncio.current_task()),
+                name="renew:" + conversation_id,
             )
             batch = await self.messages.select_input(actor, "input:" + str(uuid4()), mode="IDLE")
             if batch["status"] in {"IDLE", "WAIT_INPUT"}:
                 # WAIT_INPUT remains durable without a hot queue.empty() loop.
-                self._backoff[conversation_id] = asyncio.get_running_loop().time() + self.poll_interval
+                self._backoff[conversation_id] = (
+                    asyncio.get_running_loop().time() + self.poll_interval
+                )
                 return
             if batch.get("kind") == "SILENT_DRAIN":
                 self.errors.pop(conversation_id, None)
                 return
             if batch["status"] not in {"INPUT", "INPUT_BUDGET_EXCEEDED", "RESUME"}:
-                raise ForestError("SCHEDULER_STATE", "Unexpected conversation preparation result", 409)
+                raise ForestError(
+                    "SCHEDULER_STATE", "Unexpected conversation preparation result", 409
+                )
             run_id = batch["run_id"]
             context = await self.messages.context(actor_box[0], run_id=run_id)
-            if batch["status"] == "INPUT_BUDGET_EXCEEDED" or context["budget_exceeded"]:
-                await self.messages.end_run(actor_box[0], run_id=run_id,
-                                            reason="context_budget_exceeded", delivery=self.delivery)
-                self._error(conversation_id, ForestError("CONTEXT_BUDGET_EXCEEDED", "Input budget exceeded", 422))
+            if (
+                batch["status"] == "INPUT_BUDGET_EXCEEDED" or context["budget_exceeded"]
+            ) and not batch.get("agent_phase"):
+                # Once attached, the Agent owns its preparation and terminal
+                # boundary. A saved FINAL_READY may commit even when today's
+                # canonical budget no longer admits another model request.
+                await self.messages.end_run(
+                    actor_box[0],
+                    run_id=run_id,
+                    reason="context_budget_exceeded",
+                    delivery=self.delivery,
+                )
+                self._error(
+                    conversation_id,
+                    ForestError("CONTEXT_BUDGET_EXCEEDED", "Input budget exceeded", 422),
+                )
                 return
             await self.global_slots.acquire()
             slot_acquired = True
@@ -256,32 +291,89 @@ class GroupScheduler:
             # Waiting for another Bot's slot cannot extend authority. Re-read
             # guarded canonical context after the wait; no queued tail enters it.
             context = await self.messages.context(actor_box[0], run_id=run_id)
-            execution = asyncio.create_task(self.execute(actor_box[0], batch, context), name="execute:" + run_id)
+            execution = asyncio.create_task(
+                self.execute(actor_box[0], batch, context), name="execute:" + run_id
+            )
             try:
-                parts = await asyncio.wait_for(asyncio.shield(execution), timeout=self.execution_timeout)
+                parts = await asyncio.wait_for(
+                    asyncio.shield(execution), timeout=self.execution_timeout
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 callback_stopped = await self._cancel_execution(execution)
                 if not callback_stopped:
-                    raise ForestError("SCHEDULER_CLEANUP_FAILED", "Execution callback did not stop", 503) from exc
-                await self.messages.end_run(actor_box[0], run_id=run_id,
-                                            reason=self._code(exc), delivery=self.delivery)
+                    raise ForestError(
+                        "SCHEDULER_CLEANUP_FAILED", "Execution callback did not stop", 503
+                    ) from exc
+                if isinstance(exc, AgentExecutionError):
+                    # Its durable model/tool attempt may already have run. An
+                    # unrelated callback failure cannot terminalize those facts.
+                    self._error(conversation_id, exc)
+                    return
+                await self.messages.end_run(
+                    actor_box[0], run_id=run_id, reason=self._code(exc), delivery=self.delivery
+                )
                 self._error(conversation_id, exc)
                 return
             self.global_slots.release()
             slot_acquired = False
             if self._closed or asyncio.current_task().cancelling():
                 raise asyncio.CancelledError
+            if isinstance(parts, RunDisposition):
+                if parts.run_id != run_id:
+                    raise ForestError(
+                        "AGENT_RUN_MISMATCH", "Disposition belongs to another Run", 409
+                    )
+                if parts.status == "FINAL_READY":
+                    if self.finalize_agent is None:
+                        raise ForestError(
+                            "AGENT_FINALIZER_MISSING",
+                            "No Agent final commit owner is configured",
+                            503,
+                        )
+                    # The durable final snapshot owns its input_revision. New
+                    # input is never selected between FINAL_READY and commit.
+                    await self.finalize_agent(actor_box[0], parts, self.delivery)
+                elif parts.status == "FAILED":
+                    self._error(
+                        conversation_id,
+                        ForestError(parts.error_code or "AGENT_FAILED", "Agent execution ended"),
+                    )
+                    return
+                elif parts.status not in {
+                    "YIELD",
+                    "WAIT_INPUT",
+                    "WAIT_TOOL",
+                    "WAIT_APPROVAL",
+                    "BLOCKED_UNKNOWN",
+                    "COMPLETED",
+                    "CANCELLED",
+                }:
+                    raise ForestError(
+                        "AGENT_DISPOSITION_INVALID", "Unknown Agent scheduling disposition", 409
+                    )
+                self.errors.pop(conversation_id, None)
+                return
             try:
                 await self.messages.finalize_reply(
-                    actor_box[0], "group-reply:" + run_id, run_id=run_id,
-                    expected_input_revision=batch["input_revision"], reply_parts=parts, delivery=self.delivery,
+                    actor_box[0],
+                    "group-reply:" + run_id,
+                    run_id=run_id,
+                    expected_input_revision=batch["input_revision"],
+                    reply_parts=parts,
+                    delivery=self.delivery,
                 )
             except ForestError as exc:
-                if exc.code in {"INVALID_REPLY", "INVALID_MESSAGE", "INVALID_DELIVERY", "DELIVERY_TOO_LARGE"}:
-                    await self.messages.end_run(actor_box[0], run_id=run_id,
-                                                reason=exc.code, delivery=self.delivery)
+                if exc.code in {
+                    "INVALID_REPLY",
+                    "INVALID_MESSAGE",
+                    "INVALID_DELIVERY",
+                    "DELIVERY_TOO_LARGE",
+                }:
+                    await self.messages.end_run(
+                        actor_box[0], run_id=run_id, reason=exc.code, delivery=self.delivery
+                    )
                 raise
             self.errors.pop(conversation_id, None)
         except asyncio.CancelledError:
@@ -308,8 +400,10 @@ class GroupScheduler:
 
     async def close(self) -> None:
         if self._close_task is None or (
-            self._close_task.done() and not self._close_task.cancelled()
-            and self._close_task.exception() is not None and not self._orphaned
+            self._close_task.done()
+            and not self._close_task.cancelled()
+            and self._close_task.exception() is not None
+            and not self._orphaned
         ):
             self._close_task = asyncio.create_task(self._close(), name="close:" + self.owner_id)
         await asyncio.shield(self._close_task)

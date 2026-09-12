@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前可运行的是多 Bot 管理、原生插件升级和 OneBot HTTP 接入切片；首版框架仍在实现中。**后台可导入插件、管理配置版本、配置账号、观察群聊队列和核对发送结果；消息持久入库，同群串行、跨群并行，支持模板回复与受限群聊 `#forest help/status`。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。完整 Agent、多模态长期记忆与通用管理 Shell 尚未完成，边界见[实现状态](doc/implementation-status.md)。
+**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP 和持久 Agent 运行；首版框架仍在实现中。**后台可配置模型、人格、图文能力、工具授权与预算，并管理插件、账号、运行审批和发送结果。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。定时/子 Agent、多模态长期记忆和完整管理 Shell 仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -24,6 +24,8 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 「插件包管理」支持导入可信 Python 插件的完整 ZIP，并按版本为 Bot 配置和启用。常见 schema 自动生成字段，复杂配置在页面内编辑 JSON；配置历史可载入草稿并作为新修订应用。坏版本不会替换当前有效实例，重启也优先恢复当前生效版本。详见 [Web 插件管理](doc/p2-web-plugin-management.md)。
 
 在 Bot 页面「QQ 账号连接」登记 OneBot 11 账号，填写 HTTP API 地址、访问令牌、上报签名密钥，预览并应用。将页面提供的上报地址和相同密钥填入所用 OneBot 实现。系统先调用 `get_login_info` 校验账号，再启用连接；密钥不回显。默认仅记录消息，选择「模板回复」后可通过 @、`/chat` 或私聊触发。群聊管理的管理员 QQ 号在同一表单配置，不自动信任平台群管理员身份。
+
+使用模型对话时，在「Agent 与模型」设置 Chat Completions 兼容基础地址、模型和密钥，预览并启用，再将账号回复模式设为「Agent 对话」。工具审批、运行取消和未知工具结果核实也在此页面处理。图片来源需明确允许；文本模型调用时只投影文本，原始多模态记录保留。详细语义与能力边界见 [P3 Agent 说明](doc/p3-agent.md)。
 
 Docker 内连接宿主机 OneBot 时，API 地址可使用 `http://host.docker.internal:5700`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。OneBot 上报必须能访问 Forest 的 HTTP 入口。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)。
 
@@ -60,7 +62,7 @@ uv run --frozen forest setup-token --data-dir .forest
 
 ## 原生插件开发切片
 
-当前可运行示例是 [examples/counter](examples/counter/python/counter.py)：继承 `Plugin`，使用 `@service` 声明异步服务，通过 `ctx.state` 读取和提交版本化状态，通过 `ctx.operations.stable()` 派生重试不变的步骤 ID。示例随包提供 `module.toml` 和输入、输出、配置 schema；自动生成 manifest、`@plugin/@command` 和自动 watch 尚未实现。
+当前可运行示例是 [examples/counter](examples/counter/python/counter.py)：继承 `Plugin`，使用 `@service` 声明异步服务，通过 `ctx.state` 读取和提交版本化状态，通过 `ctx.operations.stable()` 派生重试不变的步骤 ID。示例随包提供 `module.toml` 和输入、输出、配置 schema；开发 watch 已实现，自动生成 manifest 与 `@plugin/@command` 尚未实现。
 
 以下命令不需要 Bot 数据库：
 
@@ -95,7 +97,7 @@ uv run --frozen forest dev --bot dev-counter --package examples/counter --servic
 forest dev --bot example --watch examples/counter --grant state.read --grant state.write
 ```
 
-外部依赖通过离线 wheelhouse 与完整锁定清单装入独立不可变环境；插件不继承宿主的第三方库。包导入导出和锁文件命令见 [插件开发说明](doc/p2-plugin-packages.md)，持久状态格式升级见 [迁移说明](doc/p2-state-migration.md)。当前不迁移 Python 调用栈，完整 Agent checkpoint 在后续阶段实现。
+外部依赖通过离线 wheelhouse 与完整锁定清单装入独立不可变环境；插件不继承宿主的第三方库。包导入导出和锁文件命令见 [插件开发说明](doc/p2-plugin-packages.md)，持久状态格式升级见 [迁移说明](doc/p2-state-migration.md)。当前不迁移 Python 调用栈；Agent 使用宿主数据库中的持久 checkpoint 恢复，不能把插件 KV 迁移等同于运行栈迁移。
 
 跨组件调用使用 `ctx.services.call(name, payload, contract_major=1, operation_id=ctx.operations.stable(step))`。调用方必须同时声明 manifest `requires` 与 `service.call:<name>` 能力，宿主按固定依赖和当前路由生成子调用权限，Worker 不提供目标 Bot 或 CallGrant。`Kernel.install_many()` 在执行插件前验证服务唯一性、契约和依赖 DAG，按依赖顺序安装、逆序回收。它是有逐项回执的批量操作；失败不撤销已经成功发布的组件。当前可选依赖在安装时固定，后续依赖变更需要显式重载调用方。
 

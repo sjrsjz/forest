@@ -1,4 +1,5 @@
 import { bindingsPanel } from './bindings.js';
+import { agentPanel } from './agent-panel.js';
 import { schemaForm } from './schema-form.js';
 
 const $ = (id) => document.getElementById(id);
@@ -94,6 +95,7 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   bindingPanel.reset();
+  modelPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; packageRows = []; selectionEpoch++; packageReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
   $('bot-detail').classList.add('hidden'); $('create-bot-form').reset();
@@ -130,6 +132,7 @@ let botPlan = null, botApplyKey = null, createKey = null, invokeKey = null, rena
 let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0;
 let readConfigFields, readInvokeFields, historyBefore = null, importKey = null;
 const bindingPanel = bindingsPanel(api, busy, notice);
+const modelPanel = agentPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -230,6 +233,7 @@ async function readBotConfig() {
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
   bindingPanel.reset();
+  modelPanel.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
   renameKey = null; retryKey = null;
@@ -252,6 +256,8 @@ async function selectBot(id) {
     await loadPackages(); if (epoch !== selectionEpoch) return;
     await readBotConfig(); if (epoch !== selectionEpoch) return;
     await bindingPanel.select(row);
+    if (epoch !== selectionEpoch) return;
+    await modelPanel.select(row);
   }
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));

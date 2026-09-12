@@ -25,6 +25,7 @@ from starlette.staticfiles import StaticFiles
 
 from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
+from forest.management.agent_api import install_agent_routes
 from forest.management.authority import WebAuthority
 from forest.management.bindings_api import install_binding_routes
 from forest.management.bots_api import install_bot_routes
@@ -584,6 +585,7 @@ def create_app(settings: WebSettings) -> FastAPI:
 
     install_bot_routes(app, runtime)
     install_binding_routes(app, runtime)
+    install_agent_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")
 

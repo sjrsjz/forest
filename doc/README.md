@@ -12,6 +12,8 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P2 插件包与依赖环境](p2-plugin-packages.md) | 完整 ZIP、开发版本、离线锁、平台与 SDK 隔离 |
 | [P2 持久状态迁移](p2-state-migration.md) | 纯迁移接口、双次验证、状态/路由原子发布与故障恢复 |
 | [P2 Web 插件管理](p2-web-plugin-management.md) | 导入与启用、通用表单、版本切换、历史配置与重启恢复 |
+| [P3 Agent 运行](p3-agent.md) | 模型/工具安全点、持久尝试、图文投影、Web 模型配置与审批 |
+| [P3 Agent 状态与并发](p3-agent-state.md) | 许可、预算、精确切口、工具观察、取消与最终提交恢复 |
 | [01 架构设计](01-architecture.md) | 系统边界、技术方向、模块职责、部署方式、架构决策 |
 | [02 微内核与生命周期详细设计](02-kernel-lifecycle.md) | 包与组件契约、依赖解析、资源所有权、加载/卸载、热重载、故障恢复 |
 | [03 通信与调度详细设计](03-communication-scheduling.md) | 消息格式、服务调用、事件、流、顺序、背压、取消、幂等、发送回执 |

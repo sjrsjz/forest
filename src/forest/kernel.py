@@ -707,8 +707,13 @@ class Kernel:
         contract_major: int = 1,
         timeout: float = 30,
         expected_policy_revision: int | None = None,
+        agent_tool_id: str | None = None,
     ) -> Any:
         self._authority()
+        if agent_tool_id is not None and (
+            not isinstance(agent_tool_id, str) or not 1 <= len(agent_tool_id) <= 128
+        ):
+            raise ForestError("INVALID_CALL", "Agent tool identity must be a bounded string", 422)
         if expected_policy_revision is not None and (
             type(expected_policy_revision) is not int or expected_policy_revision < 1
         ):
@@ -736,6 +741,7 @@ class Kernel:
                     contract_major=contract_major,
                     timeout=timeout,
                     expected_policy_revision=expected_policy_revision,
+                    agent_tool_id=agent_tool_id,
                 )
         finally:
             self._call_count -= 1
@@ -908,6 +914,7 @@ class Kernel:
         parent_call_id: str | None = None,
         expected_policy_revision: int | None = None,
         admission_lane: str = "DATA",
+        agent_tool_id: str | None = None,
     ) -> Any:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
@@ -961,7 +968,8 @@ class Kernel:
         async def existing_call():
             if parent is None:
                 return await self.store.authorized_call(
-                    authority, operation_id, policy_revision, admission_lane=admission_lane
+                    authority, operation_id, policy_revision, admission_lane=admission_lane,
+                    agent_tool_id=agent_tool_id,
                 )
             return await self.store.authorized_child_call(parent[1], operation_id, policy_revision)
 
@@ -1012,6 +1020,7 @@ class Kernel:
                 expected_route_epoch=component.route_epoch,
                 dependency_components=dependencies,
                 **({"service_name": service} if admission_lane == "CONTROL" else {}),
+                **({"agent_tool_id": agent_tool_id} if parent is None and admission_lane == "DATA" else {}),
             )
         except ForestError as exc:
             if exc.code in {"CALL_COMPLETED", "OPERATION_PENDING"}:

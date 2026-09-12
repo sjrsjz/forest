@@ -45,12 +45,43 @@
         <div id="bot-components" class="hidden columns"><div class="card"><h2>组件配置</h2><form id="bot-config-form"><label>可用组件<select id="bot-package"></select></label><div id="bot-config-fields"></div><label class="check"><input id="bot-grants" type="checkbox" required><span id="bot-grants-label">允许组件读取和写入本 Bot 的持久状态</span></label><div class="actions"><button type="submit">预览组件变更</button><button id="reload-bot-config" type="button" class="subtle">读取最新配置</button></div></form><div id="bot-config-preview" class="hidden"><h3>待应用配置</h3><pre id="bot-config-diff"></pre><button id="bot-config-apply">应用组件变更</button></div></div>
         <div class="card"><h2>运行状态</h2><dl><dt>期望修订</dt><dd id="bot-desired">0</dd><dt>生效修订</dt><dd id="bot-effective">0</dd></dl><p id="bot-runtime-status" role="status" class="muted"></p><p class="hint">配置通过检查并完成组件切换后才标记生效。等待期间可继续使用已有组件。</p><h3>调用组件服务</h3><form id="bot-invoke-form"><label>服务<select id="bot-service"></select></label><div id="bot-invoke-fields"></div><button type="submit">调用组件</button></form><p id="bot-invoke-result" role="status"></p></div></div>
         <div class="card"><h2>配置历史与切换进度</h2><p class="hint">历史配置会作为新的修订提交；状态迁移失败时，当前生效版本继续提供服务。</p><button id="read-bot-history" class="subtle">读取配置历史</button><div id="bot-history"></div><button id="bot-history-more" class="subtle hidden">更早的修订</button><details><summary>最近组件切换操作</summary><ol id="bot-operations"></ol></details></div>
+        <section id="bot-agent" class="card hidden">
+          <h2>Agent 与模型</h2><p id="agent-config-status" role="status"></p>
+          <p class="hint">先配置模型，再将账号的回复模式设为 Agent。所有群消息都进入短期上下文；同群串行、跨群并行，裁剪不调用摘要模型。</p>
+          <form id="agent-config"><fieldset disabled><div class="columns"><div>
+            <label class="check"><input name="enabled" type="checkbox">启用此 Bot 的 Agent</label>
+            <label>模型 API 地址<input name="endpoint" type="url" required maxlength="2048" placeholder="https://example.com/v1"></label>
+            <label>模型名称<input name="model" maxlength="200"></label>
+            <label>API 密钥<input name="api_key" type="password" autocomplete="new-password" maxlength="4096" placeholder="留空保留已有密钥"></label>
+            <label class="check"><input name="clear_api_key" type="checkbox">清除已有 API 密钥</label>
+            <label>人格与系统指令<textarea name="system_prompt" rows="6" maxlength="16000"></textarea></label>
+            <label class="check"><input name="vision" type="checkbox">模型支持图片输入</label>
+            <label class="check"><input name="tool_calls" type="checkbox">模型支持工具调用</label>
+            <label class="check"><input name="stream" type="checkbox">使用流式模型响应</label>
+            <label class="check"><input name="stream_usage" type="checkbox">流式响应包含用量</label>
+          </div><div>
+            <label>上下文容量（token）<input name="context_tokens" type="number" min="1024" max="262144" required></label>
+            <label>每次最大输出（token）<input name="max_output_tokens" type="number" min="64" max="32768" required></label>
+            <label>每日 Bot 预算（token）<input name="daily_token_budget" type="number" min="1024" max="100000000" required></label>
+            <label>每轮最多模型步骤<input name="max_steps" type="number" min="1" max="64" required></label>
+            <label>运行期限（秒）<input name="run_timeout" type="number" min="10" max="3600" required></label>
+            <label>模型请求超时（秒）<input name="model_timeout" type="number" min="1" max="300" required></label>
+            <label>模型输出限制参数<select name="output_token_parameter"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label>
+            <label>每张图片预留 token 上限<input name="image_token_upper_bound" type="number" min="1" max="262144" required></label>
+            <label>允许抓取图片的来源（每行一个 HTTP origin）<textarea name="media_allowed_origins" rows="3" placeholder="https://images.example.com"></textarea></label>
+            <p class="hint">不支持图片的模型只接收文本投影，原始图片引用仍保留。图片来源需明确允许。</p>
+          </div></div>
+          <details><summary>工具授权</summary><p class="hint">每项填写 name、component_id、service、contract_major、description、authority（trigger / binding_admin）、approval（always / never）和 effect（read / idempotent / non_idempotent）。工具依据具体触发消息的作者授权。</p><label>允许的工具（JSON 数组）<textarea name="allowed_tools" rows="8" spellcheck="false">[]</textarea></label></details>
+          <div class="actions"><button type="submit">预览 Agent 变更</button><button id="agent-reload" type="button" class="subtle">读取最新配置</button></div></fieldset></form>
+          <div id="agent-preview" class="hidden"><h3>待应用 Agent 配置</h3><pre id="agent-config-diff"></pre><button id="agent-apply">应用 Agent 变更</button></div>
+          <h3>运行与工具审批</h3><button id="agent-refresh" class="subtle">刷新运行记录</button><div id="agent-runs"></div>
+        </section>
         <section id="bot-bindings" class="hidden">
           <div class="columns"><div class="card"><h2>QQ 账号连接</h2><p class="hint">每个账号只属于一个 Bot，所有群共享该 Bot 的存储。</p><div id="binding-list"></div><button id="refresh-bindings" class="subtle">刷新连接状态</button></div>
           <div class="card"><h2>添加 OneBot 账号</h2><form id="binding-create"><label>QQ 账号<input name="self_id" required inputmode="numeric" pattern="[1-9][0-9]{0,19}" maxlength="20"></label><label>连接名称<input name="display_name" required maxlength="120"></label><button type="submit">登记账号</button></form><p class="hint">登记后配置连接，再启用接收消息。</p></div></div>
           <div id="binding-detail" class="card hidden"><h2 id="binding-name"></h2><p id="binding-state" role="status"></p><label>OneBot HTTP 上报地址<input id="binding-webhook" readonly></label><p class="hint">在 OneBot 实现中设置此上报地址、相同的签名密钥及 API 访问令牌。容器内的 127.0.0.1 指向 Forest 容器；Docker Desktop 连接宿主机可使用 host.docker.internal。</p>
             <form id="binding-config"><div class="columns"><div><label class="check"><input name="enabled" type="checkbox">启用此连接</label><label>OneBot HTTP API 地址<input name="api_base_url" type="url" required maxlength="2048"></label><label>API 访问令牌<input name="access_token" type="password" autocomplete="new-password" maxlength="4096" placeholder="留空保留已有令牌"></label><label>上报签名密钥<input name="webhook_secret" type="password" autocomplete="new-password" minlength="16" maxlength="4096" placeholder="至少 16 个字符；留空保留"></label><label>群聊管理员 QQ 号<input name="admin_user_ids" maxlength="1400" placeholder="多个账号用逗号分隔"></label></div>
-            <div><label>回复模式<select name="response_mode"><option value="disabled">仅记录消息，保持静默</option><option value="component">模板回复（接入验证）</option></select></label><label>回复模板<textarea name="response_template" required maxlength="2000" rows="3"></textarea></label><p class="hint">可用变量：{sender}、{text}、{group}。模板回复不调用语言模型。</p><label class="check"><input name="trigger_mentions" type="checkbox">被 @ 时触发</label><label>触发前缀<input name="trigger_prefix" maxlength="64" placeholder="留空禁用前缀触发"></label><label class="check"><input name="private_trigger" type="checkbox">私聊消息触发</label></div></div><div class="actions"><button type="submit">预览连接变更</button><button id="reload-binding" type="button" class="subtle">读取最新连接配置</button></div></form>
+            <div><label>回复模式<select name="response_mode"><option value="disabled">仅记录消息，保持静默</option><option value="component">模板回复（接入验证）</option><option value="agent">Agent 对话</option></select></label><label>回复模板<textarea name="response_template" required maxlength="2000" rows="3"></textarea></label><p class="hint">可用变量：{sender}、{text}、{group}。模板回复不调用语言模型。</p><label class="check"><input name="trigger_mentions" type="checkbox">被 @ 时触发</label><label>触发前缀<input name="trigger_prefix" maxlength="64" placeholder="留空禁用前缀触发"></label><label class="check"><input name="private_trigger" type="checkbox">私聊消息触发</label></div></div><div class="actions"><button type="submit">预览连接变更</button><button id="reload-binding" type="button" class="subtle">读取最新连接配置</button></div></form>
             <div id="binding-preview" class="hidden"><h3>待应用连接变更</h3><pre id="binding-diff"></pre><button id="apply-binding">应用连接变更</button></div>
           </div>
           <div class="card"><h2>群聊队列</h2><div id="conversation-list" aria-live="polite"></div></div>

@@ -29,7 +29,7 @@ class Registration(Body):
 class BindingValues(Body):
     enabled: bool = False
     api_base_url: str = Field(default="http://127.0.0.1:5700", max_length=2048)
-    response_mode: Literal["disabled", "component"] = "disabled"
+    response_mode: Literal["disabled", "component", "agent"] = "disabled"
     response_template: str = Field(default="{sender}，收到：{text}", min_length=1, max_length=2000)
     trigger_mentions: bool = True
     trigger_prefix: str = Field(default="/chat", max_length=64)

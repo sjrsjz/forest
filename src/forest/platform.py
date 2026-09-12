@@ -107,8 +107,11 @@ class BindingRuntime:
         self.delivery_worker = DeliveryWorker(
             self.delivery, self.kernel._authority, self.prepare, on_error=self._delivery_error
         )
+        from forest.agent_runtime import AgentRuntime
         from forest.group_scheduler import GroupScheduler
         from forest.shell import ShellDispatcher
+
+        self.agent = AgentRuntime(self)
 
         self.scheduler = GroupScheduler(
             self.messages,
@@ -116,6 +119,8 @@ class BindingRuntime:
             execute=self.execute,
             delivery=self.delivery,
             global_slots=global_slots,
+            finalize_agent=self.agent.runner.finalize,
+            execution_timeout=3600,
         )
         self.shell = ShellDispatcher(
             self.messages, self.bindings, self.delivery, self.kernel._authority
@@ -485,7 +490,7 @@ class BindingRuntime:
                 for s in event["segments"]
             )
             trigger = (
-                config["response_mode"] == "component"
+                config["response_mode"] in {"component", "agent"}
                 and not event["author"].get("is_self")
                 and (
                     (config["trigger_mentions"] and mention)
@@ -515,6 +520,8 @@ class BindingRuntime:
         if connection.row["binding_epoch"] != actor.binding_epoch:
             raise ForestError("STALE_BINDING", "Conversation belongs to an old connection", 409)
         config = connection.row["config"]
+        if selected.get("agent_phase") is not None or config["response_mode"] == "agent":
+            return await self.agent.runner.advance(actor, selected, context)
         if config["response_mode"] != "component":
             raise ForestError("RESPONDER_DISABLED", "This Binding has no active responder", 409)
         await self.ensure_components(("forest.reply",))
@@ -603,7 +610,7 @@ class BindingRuntime:
         for task in (*self._jobs.values(), *self._component_jobs.values(), *self._tasks):
             task.cancel()
         errors = []
-        for closer in (self.scheduler.close, self.shell.close, self.delivery_worker.close):
+        for closer in (self.scheduler.close, self.shell.close, self.delivery_worker.close, self.agent.close):
             try:
                 await closer()
             except Exception as exc:

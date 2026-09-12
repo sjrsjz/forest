@@ -37,6 +37,8 @@ function reply(path, method, body) {
   if (path==='/bots/bot-a') return fixture.bot;
   if (path==='/provision-jobs/job-a') return {events:[]};
   if (path==='/packages') return method==='POST' ? packages[0] : {packages:fixture.packages,errors:{}};
+  if (path.endsWith('/agent/configuration')) return {revision:0,values:{enabled:false,allowed_tools:[]},has_api_key:false};
+  if (path.endsWith('/agent/runs')) return {runs:[],approvals:[]};
   if (path.endsWith('/bindings')) return {bindings:[]};
   if (path.endsWith('/conversations')) return {conversations:[]};
   if (path.endsWith('/delivery')) return {parts:[]};
@@ -91,7 +93,7 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for name in ("app.js", "schema-form.js", "bindings.js", "style.css"):
+            for name in ("app.js", "schema-form.js", "bindings.js", "agent-panel.js", "style.css"):
                 resources["/static/" + name] = ((static / name).read_bytes(),
                     "text/css" if name.endswith(".css") else "text/javascript")
             if self.path not in resources:
