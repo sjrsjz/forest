@@ -1,0 +1,75 @@
+name: forest
+
+services:
+  initialize:
+    image: python:3.11.13-slim
+    pull_policy: missing
+    user: "0:0"
+    command: ["python", "/opt/forest/container_init.py"]
+    restart: "no"
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./scripts/container_init.py:/opt/forest/container_init.py:ro
+      - forest_data:/data
+      - forest_secrets:/run/forest-secrets
+      - postgres_data:/var/lib/forest-postgres:ro
+
+  postgres:
+    image: postgres:17.10-alpine3.23
+    pull_policy: missing
+    restart: unless-stopped
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: forest
+      POSTGRES_USER: forest
+      POSTGRES_PASSWORD_FILE: /run/forest-secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - forest_secrets:/run/forest-secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forest -d forest"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    shm_size: 128mb
+
+  forest:
+    build: .
+    image: forest:local
+    restart: unless-stopped
+    init: true
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      FOREST_DATABASE_PASSWORD_FILE: /run/forest-secrets/postgres_password
+      FOREST_DATABASE_HOST: postgres
+      FOREST_DATA_DIR: /data
+      FOREST_PUBLIC_ORIGIN: ${FOREST_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+    ports:
+      - "127.0.0.1:${FOREST_HTTP_PORT:-8080}:8080"
+    volumes:
+      - forest_data:/data
+      - forest_secrets:/run/forest-secrets:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+
+volumes:
+  postgres_data:
+  forest_data:
+  forest_secrets:

@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local runtime, private test database, browser captures and dependency caches
+.forest/
+.local/
+.cache/
+.pytest_cache/
+.ruff_cache/
+test-results/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example

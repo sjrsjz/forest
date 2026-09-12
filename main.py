@@ -1,6 +1,4 @@
-def main():
-    print("Hello from forest!")
-
+from forest.cli import main
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forest · 管理后台</title><link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside><a class="brand" href="/">◈ Forest</a><span class="muted">机器人管理</span><nav><span class="selected">部署设置</span></nav><p class="aside-note">P0 开发预览<br>初始化 · 身份 · 配置</p></aside>
+  <main>
+    <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><button id="logout" class="subtle">退出登录</button></div></header>
+    <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+    <section id="loading"><p>正在连接管理服务…</p></section>
+    <section id="setup" class="hidden card narrow">
+      <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库。Bot 和模型配置将在后续实施阶段接入。</p>
+      <form id="setup-form">
+        <label>一次性配对码<input name="token" type="password" required autocomplete="off" maxlength="512"></label>
+        <p class="hint">在部署终端执行 <code>forest setup-token</code> 获取，有效期 15 分钟。</p>
+        <label id="dsn-label">PostgreSQL 连接地址<input name="dsn" type="password" placeholder="postgresql://用户:密码@主机:5432/数据库" autocomplete="off" maxlength="4096"></label>
+        <p id="managed-db" class="hint hidden">使用随部署提供的 PostgreSQL，数据库凭据由服务端管理。</p>
+        <label>管理员账号<input name="username" autocomplete="username" required maxlength="80" pattern="[a-zA-Z0-9_.-]+"></label>
+        <label>管理员密码<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label>
+        <button type="submit">完成初始化</button>
+      </form>
+    </section>
+    <section id="login" class="hidden card narrow">
+      <h2>登录管理后台</h2><p class="muted">继续管理你的部署。</p>
+      <form id="login-form"><label>账号<input name="username" autocomplete="username" required maxlength="80"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label><button type="submit">登录</button></form>
+    </section>
+    <section id="configuration" class="hidden">
+      <div class="summary"><div><span class="dot"></span> 管理服务在线</div><div>配置版本 <strong id="revision">0</strong></div><div>当前状态 <strong id="config-state">默认配置</strong></div></div>
+      <div class="columns"><div class="card">
+        <h2>部署设置</h2><p class="muted">先预览变更，再应用到当前部署。</p>
+        <form id="config-form"><label>后台显示名称<input name="display_name" required maxlength="80"></label><label>新登录会话有效时长（分钟）<input name="session_ttl_minutes" type="number" required min="5" max="1440"></label><p class="hint">时长修改用于后续登录，不改变已经建立的会话。</p><div class="actions"><button type="submit">预览变更</button><button id="reload" type="button" class="subtle">读取最新配置</button></div></form>
+      </div><div class="card"><h2>生效状态</h2><p class="muted">保存与生效由服务端事务确认。其他窗口同时修改时，当前提交会提示冲突。</p><dl><dt>期望修订</dt><dd id="desired">—</dd><dt>生效修订</dt><dd id="effective">—</dd></dl><p class="hint">此切片只开放可即时发布的后台设置；Bot、热重载与模型管理尚未实现。</p></div></div>
+      <div id="preview" class="card hidden"><h2>确认变更</h2><ul id="diff"></ul><p id="effect" class="muted"></p><button id="apply">应用变更</button></div>
+    </section>
+  </main>
+  <script type="module" src="/static/app.js"></script>
+</body></html>
