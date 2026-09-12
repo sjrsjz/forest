@@ -25,7 +25,12 @@ from starlette.staticfiles import StaticFiles
 
 from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
-from forest.security import digest_token, hash_password, random_token, verify_password
+from forest.management.authority import WebAuthority
+from forest.management.bots_api import install_bot_routes
+from forest.management.catalog import BotCatalog
+from forest.management.fleet import BotFleet
+from forest.management.provision import BotProvisioner
+from forest.security import SecretVault, digest_token, hash_password, random_token, verify_password
 from forest.storage.postgres import PostgresStore
 
 DEFAULT_VALUES = {"display_name": "Forest", "session_ttl_minutes": 480}
@@ -149,6 +154,12 @@ class ManagementRuntime:
         self.password_slots = asyncio.Semaphore(4)
         self.attempts = AttemptLimiter()
         self.recovery_error: str | None = None
+        self.catalog: BotCatalog | None = None
+        self.authority: WebAuthority | None = None
+        self.fleet: BotFleet | None = None
+        self.provisioner: BotProvisioner | None = None
+        self.service_tasks: list[asyncio.Task] = []
+        self.service_errors: dict[str, str] = {}
 
     async def connect(self, dsn: str, *, migrate: bool = True) -> PostgresStore:
         store = PostgresStore(dsn)
@@ -186,20 +197,54 @@ class ManagementRuntime:
                 await asyncio.to_thread(
                     self.bootstrap.complete, plan["setup_id"], plan["plan_digest"]
                 )
+            vault = await asyncio.to_thread(SecretVault, self.settings.data_dir)
+            authority = WebAuthority(candidate, vault, plan["deployment_id"])
+            await authority.initialize()
+            catalog = BotCatalog(candidate, vault, managed_dsn=self.settings.managed_dsn)
+            fleet = BotFleet(catalog, authority, self.settings.data_dir)
+            await fleet.initialize()
         except BaseException:
             await candidate.close()
             raise
+        await self.close_services()
         if self.store is not None:
             await self.store.close()
         self.store = candidate
+        self.catalog, self.authority, self.fleet = catalog, authority, fleet
+        self.provisioner = BotProvisioner(catalog)
+        self.service_tasks = [
+            asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
+            asyncio.create_task(fleet.run_forever(), name="bot-fleet"),
+        ]
         self.recovery_error = None
+
+    async def close_services(self) -> None:
+        if self.provisioner is not None:
+            await self.provisioner.close()
+        for task in self.service_tasks:
+            task.cancel()
+        await asyncio.gather(*self.service_tasks, return_exceptions=True)
+        self.service_tasks.clear()
+        if self.fleet is not None:
+            await self.fleet.close()
 
     async def recovery_loop(self) -> None:
         while True:
             await asyncio.sleep(5)
-            if self.store is not None:
-                continue
             async with self.setup_lock:
+                if self.store is not None:
+                    for index, (name, factory) in enumerate((
+                        ("bot-provisioning", self.provisioner.run_forever),
+                        ("bot-fleet", self.fleet.run_forever),
+                    )):
+                        task = self.service_tasks[index]
+                        if task.done():
+                            error = None if task.cancelled() else task.exception()
+                            self.service_errors[name] = (
+                                error.code if isinstance(error, ForestError) else "BACKGROUND_SERVICE_RESTARTED"
+                            )
+                            self.service_tasks[index] = asyncio.create_task(factory(), name=name)
+                    continue
                 try:
                     await self.restore()
                 except Exception as exc:
@@ -259,6 +304,7 @@ def create_app(settings: WebSettings) -> FastAPI:
             recovery.cancel()
             with suppress(asyncio.CancelledError):
                 await recovery
+            await runtime.close_services()
             if runtime.store is not None:
                 await runtime.store.close()
 
@@ -318,6 +364,7 @@ def create_app(settings: WebSettings) -> FastAPI:
         result["database_ready"] = runtime.store is not None
         result["managed_database_available"] = settings.managed_dsn is not None
         result["recovery_error"] = runtime.recovery_error
+        result["background_errors"] = runtime.service_errors
         return result
 
     @app.post("/management/v1/setup")
@@ -517,6 +564,7 @@ def create_app(settings: WebSettings) -> FastAPI:
             session_token_hash=digest_token(request.cookies["forest_session"]),
         )
 
+    install_bot_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")
 

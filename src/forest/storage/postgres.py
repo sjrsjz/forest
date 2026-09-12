@@ -351,9 +351,12 @@ class PostgresStore:
     @staticmethod
     async def _active_session(conn: AsyncConnection, token_hash: str, subject_id: str) -> None:
         session = await (await conn.execute(
-            "SELECT account_id, revoked_at, expires_at > clock_timestamp() AS unexpired "
+            "SELECT account_id, revoked_at, expires_at "
             "FROM web_sessions WHERE token_hash = %s FOR UPDATE", (token_hash,),
         )).fetchone()
+        # A projected clock comparison may be evaluated before waiting for the
+        # row lock. Re-read database time once this transaction owns the row.
+        now = await (await conn.execute("SELECT clock_timestamp() AS now")).fetchone()
         if (session is None or session["account_id"] != subject_id
-                or session["revoked_at"] is not None or not session["unexpired"]):
+                or session["revoked_at"] is not None or session["expires_at"] <= now["now"]):
             raise ForestError("SESSION_INVALID", "Management session has expired or was revoked", status=401)

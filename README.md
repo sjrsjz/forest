@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前可运行的是 P0 的后台管理闭环与原生插件内核切片，整个 P0 尚未完成。**后台支持浏览器初始化、登录和部署配置；开发入口支持不可变 Python 包、独立 Worker、受监督 SDK 调用、单 Bot PostgreSQL 状态及同 schema 的排空替换。WebUI 尚不能创建或接入 Bot，QQ、Agent、记忆和群聊 Shell 仍未实现。完整能力与验证边界见[实现状态](doc/implementation-status.md)。
+**当前可运行的是 P0 的多 Bot 管理与原生组件切片，整个 P0 尚未完成。**后台支持初始化、登录、创建独立 Bot 存储、组件配置预览和热切换；内核支持依赖调度、跨 Worker 服务调用、受监督调用树和持久状态。QQ 接入、Agent、记忆和群聊 Shell 仍未实现。完整能力与验证边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -19,6 +19,8 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 
 进入配置页后，修改显示名称或会话时长，点击预览差异，再应用。显示名称在后台读取新配置时生效，会话时长影响后续登录；已有会话保留原到期时间。两个窗口基于同一旧版本提交时，后提交者收到 `REVISION_CONFLICT`，原草稿保留，需要读取新版本后重新预览。
 
+进入「Bot 与组件」，填写名称并创建 Bot。托管模式为每个 Bot 创建独立数据库与受限账号，页面展示创建进度；服务中断后按同一持久计划恢复。存储就绪后，配置内置计数器的显示名称和倍率，授权状态读写，预览并应用。期望修订先保存，组件成功启动或完成排空切换后才推进生效修订。「调用组件」可验证各 Bot 状态独立，修改倍率后计数继续保留。当前后台提供内置组件，任意第三方包上传与完整插件市场尚未接入。
+
 查看状态或停止服务：
 
 ```sh
@@ -27,7 +29,7 @@ docker compose logs --tail 100 forest
 docker compose down
 ```
 
-普通 `down` 保留命名卷。`forest_data` 包含本地初始化状态和加密主密钥，`forest_secrets` 包含数据库凭据，`postgres_data` 包含部署事实；恢复部署需要保留三者。当前还没有 Web 备份、密码重置或存储迁移功能，不能通过删除初始化状态绕过恢复流程。
+普通 `down` 保留命名卷。`forest_data` 包含本地初始化状态、加密主密钥和包快照，`forest_secrets` 包含数据库凭据，`postgres_data` 包含部署及托管 Bot 数据库；恢复部署需要保留三者。当前还没有 Web 备份、密码重置或存储迁移功能，不能通过删除初始化状态绕过恢复流程。
 
 ## 使用 Python 开发
 
@@ -47,6 +49,8 @@ uv run --frozen forest setup-token --data-dir .forest
 打开同一后台地址，在初始化页面填写配对码、PostgreSQL URI 和管理员信息。URI 必须明确指定单个目标的主机、数据库和用户，例如 `postgresql://forest:your-password@127.0.0.1:5432/forest`。数据库定位及凭据在首次初始化中冻结并加密保存；日常配置在 WebUI 中修改。
 
 初始化使用受限本地 SQLite 仅保存安装状态，业务配置、账号和会话使用 PostgreSQL。冻结目标后只能恢复原计划，数据库暂时不可达时会后台重试；已完成的部署会先核对数据库初始化身份，不会对空库重新建立管理员。
+
+原生模式没有托管 PostgreSQL 配置时，可在创建 Bot 页面填写已准备好的空数据库连接，使用该数据库的专用所有者账号。Bot 运行账号不能有超级用户、建库或建角色权限；既有业务库、部署库及其他 Bot 库会被拒绝。存储连接加密保存在后端，普通配置仍通过页面完成。
 
 ## 原生插件开发切片
 
@@ -79,7 +83,9 @@ uv run --frozen forest dev --bot dev-counter --package examples/counter --servic
 
 空库的第一次调用应返回 `{"status":"completed","result":{"value":1,"revision":1}}`。同一个 `operation-id` 和输入重试读取原结果；新的加一操作使用新 ID，省略该参数会自动生成新 ID。一次状态步骤已提交而整次调用随后失败时，状态提交仍然保留，失败调用不会自动重新执行。
 
-`FOREST_BOT_DSN` 与 `dev` 是开发验证入口，不是普通管理员的配置方式。日常配置仍以 WebUI 为目标入口，当前后台仅开放显示名称与新会话有效期。内核已有排空替换 API，但上述 CLI 不持续运行、不监视文件，也不提供 QQ 接入或完整热重载恢复。
+`FOREST_BOT_DSN` 与 `dev` 是开发验证入口。日常 Bot 创建与内置组件配置可直接通过 WebUI 完成。内核已有排空替换 API，但上述 CLI 不持续运行、不监视文件，也不提供 QQ 接入或完整 checkpoint 恢复。
+
+跨组件调用使用 `ctx.services.call(name, payload, contract_major=1, operation_id=ctx.operations.stable(step))`。调用方必须同时声明 manifest `requires` 与 `service.call:<name>` 能力，宿主按固定依赖和当前路由生成子调用权限，Worker 不提供目标 Bot 或 CallGrant。`Kernel.install_many()` 在执行插件前验证服务唯一性、契约和依赖 DAG，按依赖顺序安装、逆序回收。它是有逐项回执的批量操作；失败不撤销已经成功发布的组件。当前可选依赖在安装时固定，后续依赖变更需要显式重载调用方。
 
 ## 远程入口与端口
 
@@ -105,7 +111,7 @@ uv run --frozen pytest -q
 uv run --frozen ruff check .
 ```
 
-完整数据库测试需要 `FOREST_TEST_DSN` 指向**专门的测试 PostgreSQL**。测试账户需要创建数据库和 schema 的权限：repository 测试创建随机 `forest_test_*` schema，Web、BotStore、Kernel 测试分别创建随机 `forest_web_*`、`forest_bot_*`、`forest_kernel_*` 数据库，结束后只清理自己创建的资源。不要指向真实部署或共享业务数据库。
+完整数据库测试需要 `FOREST_TEST_DSN` 指向**专门的测试 PostgreSQL**。测试账号需要超级用户权限，以验证建库、受限角色、SCRAM 归属与跨库隔离；各测试分配随机 schema/数据库/角色，结束后只清理自己创建的资源。不要指向真实部署或共享业务数据库。
 
 可单独创建临时测试实例，以下凭据仅用于这个 loopback 测试容器：
 
@@ -137,4 +143,4 @@ Windows 已有 Edge 时可直接指定浏览器：
 uv run --frozen python scripts/smoke_browser.py --browser 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 ```
 
-脚本验证首次初始化、登录、预览应用、双窗口冲突、服务重启后持久配置和注销撤销；`finally` 清理本次随机 project 的容器及卷，保留 `.local/browser-artifacts/` 下的截图。它不会操作普通 `forest` Compose project。浏览器、Linux 与外部服务的实际验证结果以[实现状态](doc/implementation-status.md)为准，测试脚本存在不代表已经通过。
+脚本验证首次初始化、登录、部署配置、双 Bot 创建与状态隔离、组件热切换、双窗口冲突、服务重启恢复和注销撤销；`finally` 清理本次随机 project 的容器及卷，保留 `.local/browser-artifacts/` 下的截图。它不会操作普通 `forest` Compose project。浏览器、Linux 与外部服务的实际验证结果以[实现状态](doc/implementation-status.md)为准，测试脚本存在不代表已经通过。

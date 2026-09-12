@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["value","revision","label"],"properties":{"value":{"type":"integer"},"revision":{"type":"integer","minimum":1},"label":{"type":"string"}}}

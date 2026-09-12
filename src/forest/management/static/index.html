@@ -5,13 +5,14 @@
   <title>Forest · 管理后台</title><link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <aside><a class="brand" href="/">◈ Forest</a><span class="muted">机器人管理</span><nav><span class="selected">部署设置</span></nav><p class="aside-note">P0 开发预览<br>初始化 · 身份 · 配置</p></aside>
+  <aside><a class="brand" href="/">◈ Forest</a><span class="muted">机器人管理</span><p class="aside-note">开发预览<br>独立 Bot · 组件 · 配置</p></aside>
   <main>
     <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><button id="logout" class="subtle">退出登录</button></div></header>
     <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署设置</button><button id="nav-bots" class="subtle">Bot 与组件</button></nav>
     <section id="loading"><p>正在连接管理服务…</p></section>
     <section id="setup" class="hidden card narrow">
-      <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库。Bot 和模型配置将在后续实施阶段接入。</p>
+      <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库，然后创建各自独立的 Bot。</p>
       <form id="setup-form">
         <label>一次性配对码<input name="token" type="password" required autocomplete="off" maxlength="512"></label>
         <p class="hint">在部署终端执行 <code>forest setup-token</code> 获取，有效期 15 分钟。</p>
@@ -31,8 +32,18 @@
       <div class="columns"><div class="card">
         <h2>部署设置</h2><p class="muted">先预览变更，再应用到当前部署。</p>
         <form id="config-form"><label>后台显示名称<input name="display_name" required maxlength="80"></label><label>新登录会话有效时长（分钟）<input name="session_ttl_minutes" type="number" required min="5" max="1440"></label><p class="hint">时长修改用于后续登录，不改变已经建立的会话。</p><div class="actions"><button type="submit">预览变更</button><button id="reload" type="button" class="subtle">读取最新配置</button></div></form>
-      </div><div class="card"><h2>生效状态</h2><p class="muted">保存与生效由服务端事务确认。其他窗口同时修改时，当前提交会提示冲突。</p><dl><dt>期望修订</dt><dd id="desired">—</dd><dt>生效修订</dt><dd id="effective">—</dd></dl><p class="hint">此切片只开放可即时发布的后台设置；Bot、热重载与模型管理尚未实现。</p></div></div>
+      </div><div class="card"><h2>生效状态</h2><p class="muted">保存与生效由服务端事务确认。其他窗口同时修改时，当前提交会提示冲突。</p><dl><dt>期望修订</dt><dd id="desired">—</dd><dt>生效修订</dt><dd id="effective">—</dd></dl><p class="hint">在「Bot 与组件」中创建 Bot 并配置组件。</p></div></div>
       <div id="preview" class="card hidden"><h2>确认变更</h2><ul id="diff"></ul><p id="effect" class="muted"></p><button id="apply">应用变更</button></div>
+    </section>
+    <section id="bots" class="hidden">
+      <p class="muted">每个 Bot 使用独立存储。当前可管理原生组件；QQ 接入、Agent 与记忆功能仍在开发中。</p>
+      <div class="columns"><div class="card"><h2>你的 Bot</h2><div id="bot-list" aria-live="polite"></div><button id="refresh-bots" class="subtle">刷新列表</button></div>
+      <div class="card"><h2>创建 Bot</h2><form id="create-bot-form"><label>显示名称<input name="display_name" required maxlength="120"></label><label>存储方式<select name="mode"><option value="managed">自动创建独立数据库</option><option value="external">连接已有空数据库</option></select></label><label id="bot-dsn-label" class="hidden">数据库连接地址<input name="dsn" type="password" autocomplete="off" maxlength="4096"></label><p class="hint">自动创建可在服务重启后继续。已有数据库应为空，并使用无超级用户权限的专用账号。</p><button type="submit">创建 Bot</button></form></div></div>
+      <div id="bot-detail" class="hidden">
+        <div class="card"><h2 id="bot-name"></h2><p id="bot-status" class="muted"></p><form id="rename-bot-form" class="actions"><label>修改显示名称<input name="display_name" required maxlength="120"></label><button type="submit">保存名称</button></form><button id="retry-bot" class="subtle hidden">重试存储创建</button><details><summary>创建进度</summary><ol id="bot-job-events"></ol></details></div>
+        <div id="bot-components" class="hidden columns"><div class="card"><h2>组件配置</h2><form id="bot-config-form"><label>可用组件<select id="bot-package"></select></label><div id="bot-config-fields"></div><label class="check"><input id="bot-grants" type="checkbox" required>允许组件读取和写入本 Bot 的持久状态</label><div class="actions"><button type="submit">预览组件变更</button><button id="reload-bot-config" type="button" class="subtle">读取最新配置</button></div></form><div id="bot-config-preview" class="hidden"><h3>待应用配置</h3><pre id="bot-config-diff"></pre><button id="bot-config-apply">应用组件变更</button></div></div>
+        <div class="card"><h2>运行状态</h2><dl><dt>期望修订</dt><dd id="bot-desired">0</dd><dt>生效修订</dt><dd id="bot-effective">0</dd></dl><p id="bot-runtime-status" role="status" class="muted"></p><p class="hint">配置通过检查并完成组件切换后才标记生效。等待期间可继续使用已有组件。</p><h3>试运行计数器</h3><form id="bot-invoke-form"><label>本次增加量<input name="increment" type="number" required min="1" max="1000" value="1"></label><button type="submit">调用组件</button></form><p id="bot-invoke-result" role="status"></p></div></div>
+      </div>
     </section>
   </main>
   <script type="module" src="/static/app.js"></script>

@@ -1,6 +1,6 @@
 # Forest 实现状态与验证记录
 
-更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**P0 目前包含独立 Web 管理与原生插件内核两个可运行切片；整个 P0 和首版框架仍在实现中。**后台还未接入 Bot 管理，开发命令与内核测试不代表 QQ、Agent 或记忆系统已经可用。
+更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**P0 已接通 Web 多 Bot 管理、组件配置与原生微内核；整个 P0 和首版框架仍在实现中。**可以从页面创建独立 Bot、配置和热切换内置组件；这些结果不代表 QQ、Agent 或记忆系统已经可用。
 
 ## 1. 当前可以执行的流程
 
@@ -9,6 +9,8 @@
 可操作命令见[根 README](../README.md)。Docker Compose 提供应用、私网 PostgreSQL 和一次性卷初始化服务；原生 Python 模式允许在首次 Web 初始化时填写 PostgreSQL URI。
 
 新增的插件流程是：静态构建完整包 → 启动无生产权限的候选 Worker → 校验配置和服务 → 在专用 Bot 数据库接纳代际与调用 → 经宿主代理读写组件状态 → 记录结果并回收。`forest plugin build/check` 不需要数据库，`forest dev` 在 `FOREST_BOT_DSN` 指定的开发库中执行一次服务调用。程序接口还支持对已运行组件进行同 schema 的 drain 替换；CLI 尚无持续 watch。
+
+Web 新流程为：创建 Bot → 供应器按冻结计划创建专用数据库和受限角色 → Fleet 启动该 Bot 宿主 → 预览并提交组件配置 → 候选准备与排空切换 → 生效修订推进 → 页面调用组件。双 Bot 计数器、热改倍率与完整重启恢复已有真实 HTTP/PostgreSQL/Worker 测试；后台暂只提供随发行版安装的内置组件。
 
 | 能力 | 当前实现及边界 | 主要证据 |
 |---|---|---|
@@ -28,27 +30,32 @@
 | 最终提交守卫 | 在实际状态读写/调用完成事务核验当前 Bot、宿主、代际、调用、期限、取消、权限与维护修订；CAS 与幂等在同一目标事务裁决 | [BotStore](../src/forest/storage/bot.py)、[内核集成测试](../tests/test_kernel.py) |
 | 生命周期协调 | 候选预热与正式写入分离；freeze/drain 后按目标库发布路由；同 schema 的 snapshot/restore；失败撤权、回收、受限恢复与宿主租约接管 | [kernel.py](../src/forest/kernel.py)、[内核集成测试](../tests/test_kernel.py) |
 | 开发 CLI | `plugin build` 静态构建，`plugin check` 候选运行检查，`dev` 在专用开发库执行一次指定服务；JSON 可经标准输入提供 | [cli.py](../src/forest/cli.py)、[README 用法](../README.md#原生插件开发切片) |
+| 依赖与服务 | required/optional、契约 major/range、安装前 DAG 校验、依赖先启动；精确 `service.call:<name>`、调用树深度和共享 deadline | [kernel.py](../src/forest/kernel.py)、[服务集成测试](../tests/test_services.py) |
+| 调用树排空 | 持久记录依赖闭包预留；禁止新树进入冻结目标，已接纳树可完成子调用；所有预留与自身调用排空后才 QUIESCENT/发布 | [调用树迁移](../src/forest/storage/bot_migrations/002_call_trees.sql)、[调用树测试](../tests/test_child_calls.py) |
+| Bot 目录与供应 | 独立角色/数据库、加密固定计划、CAS/幂等、逐 DDL 许可、lease/epoch；SCRAM verifier 与 DB owner 对账，不接管陌生资源 | [目录](../src/forest/management/catalog.py)、[供应器](../src/forest/management/provision.py)、[测试](../tests/test_bot_catalog.py) |
+| Web 到 Bot 授权 | 30 秒用途限定 Ed25519 票据；目标库检查签名、Bot、输入、计划、当前 policy/admission 与最终期限，记录原票据依据 | [签发器](../src/forest/management/authority.py)、[BotControl](../src/forest/storage/control.py)、[授权测试](../tests/test_web_authority.py) |
+| 组件配置生效 | 目标库持久 plan/desired/CAS；生命周期发布同事务验证当前 desired、包、配置、grants、policy，推进 effective | [控制迁移](../src/forest/storage/bot_migrations/003_control.sql)、[Web/Bot 集成测试](../tests/test_web_bots.py) |
 
 ## 2. 已实现配置契约
 
-当前 WebUI 只支持部署资源 `resource_key=deployment`，这张配置表不替代新增 BotStore 的独立存储域。管理配置 schema 封闭，拒绝未知字段。
+部署设置使用资源 `resource_key=deployment`，这张配置表不替代独立 BotStore。Bot 组件配置在各目标库的 `bot_config_*` 表中保存。管理配置 schema 封闭，拒绝未知字段。
 
 | 字段 | 默认值 | 合法范围 | 生效范围 |
 |---|---|---|---|
 | `display_name` | `Forest` | 1–80 字符 | 后台读取最新配置时使用的新显示名称 |
 | `session_ttl_minutes` | `480` | 整数，5–1440 分钟 | 后续登录会话的到期时间；不修改已有会话 |
 
-两个字段都属于当前管理切片的动态配置，所以 `desired` 与 `effective` 在同一提交中推进。返回值包含各自的 revision、values、schema digest 和创建时间；head 为 0 时返回空修订，由服务端提供默认值。管理 API 尚未接入需要代际切换、重启或迁移的配置，不能用此行为推断未来所有配置都立即生效。
+两个部署字段都属于动态配置，所以 `desired` 与 `effective` 在同一提交中推进。返回值包含各自的 revision、values、schema digest 和创建时间；head 为 0 时返回空修订，由服务端提供默认值。组件配置则先保存 desired，由 Fleet 完成代际切换后推进 effective。重启时持久 effective 表示最后成功发布的修订，页面还检查本次宿主实际加载的修订和 Worker 状态；不能仅凭旧 effective 指针显示运行就绪。
 
 Web 请求采用“服务器保存计划 → 页面显示差异 → 按 plan ID/digest、expected revision 与稳定幂等键提交”的流程。配置竞争属于显式仲裁，不宣称可交换或最后写入覆盖。计划通常有效 10 分钟；同一次已成功请求的重试不因为计划过期而重复创建修订。
 
 ### 2.1 当前插件包与配置
 
-包格式限定 `runtime=python-worker`、一个 `scope=bot` 组件、`state_schema=1`、`reload_mode=drain`；服务声明输入/输出 JSON schema 和契约 major.minor。当前能力只提供显式 `state.read/state.write`，尚不接纳跨组件启动依赖；不支持的约束或 manifest 字段会明确拒绝，不能把未执行的 `memory_mb` 等限制显示为受保护。
+包格式限定 `runtime=python-worker`、一个 `scope=bot` 组件、`state_schema=1`、`reload_mode=drain`；服务声明输入/输出 JSON schema 和契约 major.minor。能力包括显式 `state.read/state.write` 与 `service.call:<name>`，跨组件依赖必须同时在 manifest 声明。服务重复、缺少必需依赖、契约不兼容和依赖环在执行插件前拒绝；缺少可选依赖时固定降级状态。不支持的约束或 manifest 字段会明确拒绝，不能把未执行的 `memory_mb` 等限制显示为受保护。
 
 资源字段包含 `max_frame_bytes`、`max_inflight`、`max_queue_items`、`max_state_inflight`、`max_owned_tasks`，生命周期字段包含 prepare/start/drain/stop 的 timeout。它们约束本切片的 IPC、调用与受监督任务，不能等同操作系统沙箱、CPU/内存硬配额或完整资源 SDK。普通 Python 插件仍要求可信来源。
 
-`check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。此入口服务插件开发，尚未连接 WebUI 的 Bot 配置修订和 desired/effective 页面。管理员的日常配置仍应通过目标设计中的 WebUI 完成，不要求手改插件目录文件；开发者目前显式维护包 manifest 与 schema，和管理员配置是不同职责。
+`check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。管理员可在 WebUI 创建 Bot、编辑内置计数器配置并查看 desired/effective，无需编辑插件文件。开发者仍显式维护包 manifest 与 schema；Web 上传第三方包、完整模型/平台配置表单尚未接入。
 
 ### 2.2 状态、调用与替换的实际语义
 
@@ -58,13 +65,27 @@ BotStore 首次迁移要求专用空库，已经初始化的库只接受其固�
 
 排空替换要求新旧包均满足当前 schema，路由在目标 Bot 库切换，旧代不能继续提交；候选失败保留或按守卫恢复可用旧代。过期宿主由新 incarnation 接管，旧宿主/旧 Worker 的最终写入被 fencing 拒绝。当前存在 JSON snapshot/restore 钩子和持久状态保留，但没有任意状态迁移、Python 栈迁移、完整 checkpoint 恢复器或后台自动恢复全部未完成操作。
 
+### 2.3 已实现服务调用与 Web 控制边界
+
+`ctx.services.call()` 的目标只包含服务名、契约 major、输入、稳定 operation ID 与可选更短 timeout。宿主依据已安装服务目录和调用者 manifest 选择本 Bot 目标，分配 child CallGrant；子调用继承根树期限上界和权限修订，深度上限 8，组件环和越权调用被拒绝。父调用结束前必须处理完子调用；父取消、失权、到期或代际变化会阻止后代最终写入。调用回执不能跨父调用树恢复成新的子调用权限。
+
+一次顶层接纳同时记录可能调用的依赖闭包。目标冻结后不接纳新的相关调用树，但已有树可以在 QUIESCING 阶段调用该目标；所有自身调用和预留树排空后，宿主才调用 quiesce 并进入 QUIESCENT。候选发布在数据库再次检查屏障。可选依赖和降级状态在安装时固定，依赖出现不会静默扩张已有调用者的权限。
+
+`install_many` 是预校验 DAG 后按序执行的批量操作，不是多组件原子事务。若中途失败，已成功发布的组件及逐项回执保留，失败候选按其独立生命周期清理；不能通过“回滚批量”撤销已经发生的状态或外部效果。
+
+Web 账号和会话在部署库，Bot 配置和执行权限在目标库。后端签发的 Ed25519 票据最多有效 30 秒，绑定主体、会话修订、目标、action、固定 operation ID、输入/计划摘要和 Bot policy。目标最终许可事务验证票据与当前权限，记录票据依据；Worker 和浏览器不取得票据或数据库凭据。会话撤销停止后续签发，在途票据仍保留最多 30 秒窗口；目标 policy 撤销会即时阻止尚未接纳的旧权限动作。服务接纳到 Kernel admission 之间仍固定原 policy 版本，不能借后来的组件重载升级旧请求权限。签名实现使用 [cryptography Ed25519 API](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/ed25519/)。
+
+Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角色名及加密凭据。角色创建把预先冻结的随机 SCRAM verifier 与角色同时提交，数据库创建使用该已证明归属的角色作为 owner；后续 COMMENT 仅作辅助标记。崩溃发生在 CREATE 与 COMMENT 之间也能对账，不凭名称接管现有对象。每次 DDL 前接纳短效许可并检查 lease/epoch 与当前管理员；外部 DDL 没有跨连接事务 fence，已许可的在途效果按同一不可变计划核对。退出浏览器不取消已接纳任务，禁用原管理员阻止后续许可，另一当前管理员可以显式重试原计划。
+
+托管 Bot 角色没有 SUPERUSER/CREATEDB/CREATEROLE，各 Bot 库撤销 PUBLIC CONNECT；测试验证 Bot A 不能登录 Bot B 库。外部存储要求专用非特权账号和空库，拒绝不匹配身份或已有业务表。目录不提供数据库删除；失败创建保留同计划资源以便恢复。
+
 ## 3. 与完整设计的差距
 
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
-| P0 契约与可靠内核 | 部分实现 | 已有管理和原生 Worker/SDK/Scoped Store 切片；仍缺依赖 DAG、完整消息/服务契约、自动声明生成、通用服务调用与事件/Job、完整资源 SDK，以及管理与 Bot 内核接线 |
-| P1 群聊与多 Bot | 未完成 | 已有独立 Bot 数据库与组件作用域基础；尚无 Web Bot 创建/接入、OneBot/Binding、全量入站、作者来源、同群串行跨群并行、公平调度与可靠发送 |
-| P2 热重载与恢复 | 基础协议部分实现 | 已有不可变包、generation/fencing、同 schema 排空与路由切换；仍缺自动 watch、完整依赖环境锁定、任意状态迁移、checkpoint/操作自动恢复、需代际生效的 Web 配置 |
+| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树及 Web/Fleet 接线；仍缺通用事件/Job、自动声明生成、完整资源 SDK 和其余消息契约 |
+| P1 群聊与多 Bot | 未完成 | 已有 Web 多 Bot 创建、独立运行/存储与恢复；尚无 OneBot/Binding、全量入站、作者来源、同群串行跨群并行、公平调度与可靠发送 |
+| P2 热重载与恢复 | 基础协议部分实现 | 已有不可变包、调用树排空、路由与配置原子发布；仍缺自动 watch、完整依赖环境锁定、任意状态迁移、checkpoint/操作自动恢复 |
 | P3 Agent 与上下文 | 未开始 | Session/Run、下一模型调用切口接入、触发排队、静默排空、零摘要裁剪、工具/审批/取消/定时与子 Agent |
 | P4 多模态多主干记忆 | 未开始 | 每 Bot 全局图文记忆、每群主干、原生图文嵌入、图片/混合召回、模型输入投影、来源/删除屏障、合流 reducer |
 | P5 完整管理与容量 | 未开始 | 完整 WebUI、群聊 Shell、共用类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理 |
@@ -73,24 +94,36 @@ BotStore 首次迁移要求专用空库，已经初始化的库只接受其固�
 
 部署配置及已实现 Bot 状态/生命周期事实均保存相应审计/outbox，尚无通用后台消费者、投递重试或外部效果对账。配置页直接读取 PostgreSQL 当前生效值，因此这个管理闭环不依赖 outbox 消费来宣称生效。原生 Worker 的 state RPC 也不能被视为完整 Agent 工具或平台 Effect 系统。
 
-当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿、配置历史页面、回退操作或 Web 备份恢复。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台还不能创建 Bot、连接 QQ、配置模型或管理记忆；这些是后续实现工作，不能从页面与目录命名推断已存在。
+当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿、配置历史页面、回退操作或 Web 备份恢复。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot 创建与组件配置，尚不能连接 QQ、配置模型或管理记忆。
 
 ## 4. 验证证据与适用范围
 
-验证分为本轮内核结果与此前管理切片记录。此前 Linux/浏览器结果证明当时的管理实现，不代表新增内核已经接受相同平台的验证。没有接入真实 QQ、LLM 或 Embedding 服务。
+本轮多 Bot/服务调用切片在 Windows、非 root Linux 容器与真实 Edge 浏览器中完成验证。Linux 镜像内的源码及全部测试与待提交工作区逐文件核对一致。没有接入真实 QQ、LLM 或 Embedding 服务。
 
-本轮新增内核已在 Windows 与非 root Linux 容器中完成全量测试，两者均连接真实 PostgreSQL。以下计数是已经结束的测试结果，不是待执行计划；后续改动仍需重跑相应检查。
+两套全量测试均连接专用 PostgreSQL 17.10。以下结果均已执行结束：
+
+| 当前多 Bot/服务切片 | 结果 | 范围 |
+|---|---|---|
+| Windows / Python 3.11 全量 | `259 passed, 4 skipped`，163.01 秒 | 当前全部测试；跳过 3 项 POSIX 专项及大小写路径碰撞 |
+| 非 root Linux Docker 全量 | `262 passed, 1 skipped`，132.63 秒 | 当前全部测试；仅跳过 Windows DACL |
+| 真实 Edge + 独立 Compose | 通过 | 初始化、登录、部署配置、双 Bot 创建/隔离、组件热改、双窗口冲突保留草稿、重启恢复、注销撤销及桌面/移动页面 |
+| 调用树专项 | `16 passed` | 祖先权限/期限/取消、深度与循环、依赖预留、QUIESCENT 屏障、父结束与子准入竞争 |
+| 跨 Worker 服务专项 | `18 passed` | DAG、版本/schema、能力、背压、子调用稳定回执、短期限恢复和目标冻结后迟到子调用 |
+| Fleet 恢复专项 | `9 passed` | 失权重建、旧进程回收、同修订崩溃恢复、独立并发、退避、超时清理与固定 Web policy |
+| Web 票据及发布竞争 | `24 passed` | 严格票据、跨 Bot/用途/签名、锁等待到期、撤权窗口、CAS/幂等、过期 host/operation 与配置发布整体回滚 |
+| 目录、部署库与升级专项 | `38 passed` | 供应/归属与恢复、许可/heartbeat 锁等待到期、会话到期、001→003 原事实保留与调用树回填 |
+| 静态检查与镜像一致性 | 通过 | Ruff、git 补丁空白；Docker 中源码/测试与工作区的差异列表为空 |
+
+以下为上一内核切片 `3fd9097` 与更早管理切片的历史记录，保留用于追溯：
 
 | 验证 | 已有结果 | 能证明的范围 |
 |---|---|---|
-| 本轮：Windows / Python 3.11 全测试，真实 PostgreSQL | `162 passed, 4 skipped`，46.62 秒 | 既有管理与新增包/Worker/BotStore/Kernel 回归；跳过 3 项 POSIX 专项及 1 项大小写路径碰撞测试 |
-| 本轮：非 root Linux Docker / Python 3.11 全测试，真实 PostgreSQL | `165 passed, 1 skipped`，26.16 秒 | 当前代码的管理、原生 Worker、内核和数据库回归；仅跳过 Windows DACL 专项 |
-| 本轮：不可变包 | Windows `45 passed, 1 skipped` | 静态构建不执行代码、完整快照/篡改检测、schema/资源约束、链接/捕获竞态及失败工件清理；跳过大小写路径碰撞 |
-| 本轮：真实 Worker / SDK | `27 passed` | 真实解释器和认证 IPC、候选权限、服务调用、有界队列/任务、取消/回收、调用 Context 绑定及状态 RPC 清理 |
-| 本轮：BotStore / Kernel | `25 passed` / `15 passed` | 真实数据库隔离与 CAS、host/generation/call fencing、同 schema 排空替换、错误恢复、启动/关闭/取消及幂等回归 |
-| 本轮：`forest plugin check` | 实际命令通过 | 示例包的静态检查、候选启动/健康检查与回收；不代表完整开发 watch 或真实平台接入 |
-| 本轮：`forest dev` 独立进程与持久幂等 | 三个宿主进程依次调用 `first / first / second`，得到 value/revision：`1/1 → 1/1 → 2/2` | 使用 stdin JSON 与临时独立 Bot 数据库；宿主退出重启后状态保留，同操作不重复加一；测试结束只清理本次数据库 |
-| 本轮：静态与补丁检查 | 全仓库 Ruff、页面 JavaScript 语法、`git diff --check` 通过 | 当前 Python/JavaScript 静态问题及空白检查，不代替执行或浏览器测试 |
+| 上一内核切片：Windows 全量 | `162 passed, 4 skipped`，46.62 秒 | 当时管理、包/Worker/BotStore/Kernel 回归 |
+| 上一内核切片：Linux 全量 | `165 passed, 1 skipped`，26.16 秒 | 当时非 root 管理、Worker、内核和数据库回归 |
+| 上一内核切片：不可变包 | Windows `45 passed, 1 skipped` | 静态构建、完整快照、schema/资源、链接/捕获竞态及失败工件清理 |
+| 上一内核切片：Worker / SDK | `27 passed` | 真实解释器、认证 IPC、队列/任务、取消/回收及调用 Context |
+| 上一内核切片：BotStore / Kernel | `25 passed` / `15 passed` | 数据库隔离、CAS、fencing、同 schema 排空及错误恢复 |
+| 上一内核切片：开发 CLI | 实际 `plugin check` 和三个独立 `dev` 宿主通过 | `first / first / second` 得到 value/revision `1/1 → 1/1 → 2/2`，状态持久且同操作不重复加一 |
 | 上一管理切片：Windows / Python 3.11 全测试，独立 PostgreSQL 17.10 | `50 passed, 3 skipped`，13.31 秒 | 安全、bootstrap、repository 与 HTTP 管理；3 项为当时 Windows 不适用的 POSIX/符号链接测试 |
 | 上一管理切片：PostgreSQL repository 专项 | `10 passed` | 两连接/不同管理员与两个独立进程的 CAS 竞争；初始化唯一性；锁等待后撤销；outbox 回滚；计划/幂等及迁移不可变性 |
 | 上一管理切片：Linux 容器 / Python 3.11、真实 PostgreSQL | `52 passed, 1 skipped`，6.69 秒 | POSIX 权限及当时的管理/事务测试，跳过 Windows DACL 专项；不证明新增 Worker/Kernel 的 Linux 结果 |
@@ -101,10 +134,10 @@ BotStore 首次迁移要求专用空库，已经初始化的库只接受其固�
 
 测试运行方式见[README 测试说明](../README.md#运行测试)。未设置 `FOREST_TEST_DSN` 时 PostgreSQL 测试会跳过，这类结果不能用作事务验收证据。HTTP 测试通过 ASGI transport 调用真实应用和真实 PostgreSQL；它不等同于浏览器渲染测试。
 
-[浏览器验收脚本](../scripts/smoke_browser.py)创建独立的随机 `forest-e2e-*` Compose project，默认选择临时端口，执行首次初始化、登录、预览应用、双窗口冲突、重启持久化和注销撤销。脚本 `finally` 清理自己创建的容器与卷，截图保存在 `.local/browser-artifacts/`。浏览器使用 Playwright Chromium，或 `--browser` 指定已安装的 Edge/Chromium。
+[浏览器验收脚本](../scripts/smoke_browser.py)创建独立随机 `forest-e2e-*` Compose project 和临时端口，执行上表所列部署与双 Bot 流程。脚本 `finally` 清理自己的容器与卷，截图保存在 `.local/browser-artifacts/`。本轮实际使用 Windows 上安装的 Edge；`--browser` 可指定浏览器。
 
-本轮新增的验证范围包括真实子进程失败/取消与资源回收、包快照完整性、Bot 隔离、数据库状态 CAS、宿主接管/旧代拒写、候选失败和同 schema 替换。Linux 结果覆盖当前新增内核；本轮没有重新执行真实浏览器流程，界面证据仍属于上一管理切片。仍未覆盖的首版门槛包括通用 reducer 性质、Agent 输入切口竞态、发送 UNKNOWN 对账、多模态索引/删除竞争、完整依赖环境与 checkpoint 恢复，以及持续容量压力；这些依赖对应实现，后续必须提供可执行证据。
+仍未覆盖的首版门槛包括通用 reducer 性质、Agent 输入切口竞态、发送 UNKNOWN 对账、多模态索引/删除竞争、完整依赖环境与 checkpoint 恢复，以及持续容量压力；这些依赖对应实现，后续必须提供可执行证据。
 
 ## 5. 下一步
 
-继续补齐 P0 的契约与资源边界，将独立管理底座连接到已有 BotStore/Kernel；扩展依赖解析、声明工具链和通用服务/事件/Job。随后按 01–12 推进真实平台消息、完整热重载恢复、Agent、多模态记忆与后台管理，保持实现状态和验证证据同步。当前两个切片可运行，不代表整个 P0 或首版框架已经完成。
+继续补齐 P0 的通用事件/Job、声明工具链和资源契约，推进 P1 的 OneBot/Binding、持久全量消息、公平调度及可靠发送。已接通的 Web/Fleet、依赖解析与调用树作为后续基础；完整依赖运行环境、checkpoint/操作恢复、Agent、多模态记忆和群聊 Shell 仍按 01–12 实施。当前切片可运行，不代表整个 P0 或首版框架已经完成。

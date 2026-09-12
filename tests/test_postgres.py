@@ -287,6 +287,53 @@ async def test_session_revocation_is_checked_inside_config_commit(store):
 
 
 @pytest.mark.asyncio
+async def test_session_expiry_is_checked_after_waiting_for_unchanged_session_row(store):
+    repository, dsn = store
+    subject = await initialized(repository)
+    await repository.create_session("expiring-token", "csrf", subject,
+                                     datetime.now(timezone.utc) + timedelta(seconds=3))
+    payload = dict(await plan(repository, subject), session_token_hash="expiring-token")
+    assert (await repository.apply_config(**payload))["head_revision"] == 1
+    # Receipt replay has only the entry authority check. A later check on the
+    # new-commit path must not accidentally hide the expired-session defect.
+    task = None
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as blocker:
+        try:
+            async with blocker.transaction():
+                await blocker.execute("SELECT * FROM web_sessions WHERE token_hash='expiring-token' FOR UPDATE")
+                task = asyncio.create_task(repository.apply_config(**payload))
+                async with asyncio.timeout(4):
+                    while True:
+                        async with repository.pool.connection() as observer:
+                            state = await (await observer.execute(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() "
+                                "AND wait_event_type='Lock' AND query LIKE 'SELECT account_id, revoked_at%') AS blocked,"
+                                "(SELECT expires_at>clock_timestamp() FROM web_sessions WHERE token_hash='expiring-token') AS unexpired"
+                            )).fetchone()
+                        if state["blocked"]:
+                            assert state["unexpired"]
+                            break
+                        await asyncio.sleep(0.01)
+                async with asyncio.timeout(4):
+                    while True:
+                        async with repository.pool.connection() as observer:
+                            row = await (await observer.execute(
+                                "SELECT expires_at<=clock_timestamp() AS expired FROM web_sessions WHERE token_hash='expiring-token'"
+                            )).fetchone()
+                        if row["expired"]:
+                            break
+                        await asyncio.sleep(0.02)
+            with pytest.raises(ForestError) as caught:
+                await asyncio.wait_for(task, 1)
+            assert caught.value.code == "SESSION_INVALID"
+            assert (await repository.read_config("deployment"))["head_revision"] == 1
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_migrations_verified_and_facts_immutable(store):
     repository, dsn = store
     other = PostgresStore(dsn)

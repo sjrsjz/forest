@@ -195,6 +195,51 @@ class TasksHandle:
         return self._owner.spawn_owned(coroutine, name=name)
 
 
+class ServicesHandle:
+    def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
+        self._rpc = rpc
+        self._scope = scope
+
+    async def call(
+        self,
+        service: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        contract_major: int = 1,
+        timeout: float | None = None,
+    ) -> Any:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No component service gateway is available", 403)
+        if not isinstance(service, str) or not 1 <= len(service) <= 128:
+            raise ForestError("INVALID_SERVICE_REQUEST", "A bounded service name is required", 422)
+        if type(contract_major) is not int or contract_major < 1:
+            raise ForestError(
+                "INVALID_SERVICE_REQUEST", "Contract major must be a positive integer", 422
+            )
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ForestError(
+                "INVALID_SERVICE_REQUEST", "A stable service operation ID is required", 422
+            )
+        if timeout is not None and (type(timeout) not in {int, float} or not 0 < timeout <= 120):
+            raise ForestError(
+                "INVALID_SERVICE_REQUEST",
+                "Service timeout must be greater than zero and at most 120 seconds",
+                422,
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "service": service,
+                "payload": payload,
+                "contract_major": contract_major,
+                "operation_id": operation_id,
+                "timeout": timeout,
+            },
+        )
+
+
 class PluginContext:
     def __init__(
         self,
@@ -204,17 +249,26 @@ class PluginContext:
         task_limit: int = 64,
         scope: CallScope | None = None,
         task_owner: OwnedTasks | None = None,
+        service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
         self._scope = scope
         self._rpc = rpc
+        self._service_rpc = service_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
         self.state = StateHandle(rpc, scope)
         self.tasks = TasksHandle(self._task_owner, scope)
         self.operations = OperationsHandle(scope)
+        self.services = ServicesHandle(service_rpc, scope)
 
     def _for_call(self, scope: CallScope) -> PluginContext:
-        return PluginContext(self.config, self._rpc, scope=scope, task_owner=self._task_owner)
+        return PluginContext(
+            self.config,
+            self._rpc,
+            scope=scope,
+            task_owner=self._task_owner,
+            service_rpc=self._service_rpc,
+        )
 
     @property
     def call_id(self) -> str:

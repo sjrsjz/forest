@@ -53,6 +53,10 @@ class CallGrant:
     cancel_epoch: int
     deadline_at: datetime
     input_digest: str
+    parent_call_id: str | None = None
+    root_call_id: str | None = None
+    call_depth: int = 0
+    dependency_components: tuple[str, ...] = ()
 
 
 def _digest(value: Any) -> str:
@@ -380,6 +384,48 @@ class BotStore:
             raise ForestError("ROUTE_NOT_FOUND", "Component route does not exist", status=404)
         return row
 
+    async def _routes(self, conn: AsyncConnection, component_ids) -> dict[str, dict]:
+        """Acquire the complete immutable routing fence set before Bot/call locks."""
+        return {
+            component: await self._route(conn, component)
+            for component in sorted(set(component_ids))
+        }
+
+    async def _all_routes(self, conn: AsyncConnection) -> None:
+        await (
+            await conn.execute(
+                "SELECT component_id FROM public.bot_component_routes WHERE bot_id=%s "
+                "ORDER BY component_id FOR UPDATE",
+                (self.bot_id,),
+            )
+        ).fetchall()
+
+    @staticmethod
+    def _dependencies(component_id: str, dependencies) -> tuple[str, ...]:
+        if (
+            not isinstance(dependencies, (tuple, list))
+            or len(dependencies) > 64
+            or any(
+                not isinstance(item, str) or not item or len(item) > 200 for item in dependencies
+            )
+        ):
+            raise ForestError(
+                "INVALID_DEPENDENCIES",
+                "Dependency reservations must be bounded component IDs",
+                status=400,
+            )
+        if component_id in dependencies:
+            raise ForestError(
+                "CALL_CYCLE", "A component cannot reserve itself as a synchronous dependency"
+            )
+        return tuple(sorted(set(dependencies)))
+
+    @staticmethod
+    def _grant_value(row: dict) -> CallGrant:
+        value = {key: row[key] for key in CallGrant.__dataclass_fields__}
+        value["dependency_components"] = tuple(value["dependency_components"])
+        return CallGrant(**value)
+
     async def get_route(self, component_id: str) -> dict | None:
         async with self.pool.connection() as conn:
             await self._identity(conn)
@@ -417,10 +463,23 @@ class BotStore:
         *,
         config: dict | None = None,
         instance_id: str | None = None,
+        capability_grants: tuple[str, ...] | list[str] = (),
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
         instance_id = instance_id or generation_id
+        if (
+            not isinstance(capability_grants, (list, tuple))
+            or len(capability_grants) > 64
+            or any(
+                not isinstance(item, str) or not item or len(item) > 200
+                for item in capability_grants
+            )
+        ):
+            raise ForestError(
+                "INVALID_GRANTS", "Generation capability grants must be bounded names", status=400
+            )
+        grants = sorted(set(capability_grants))
         async with self.pool.connection() as conn, conn.transaction():
             await self._identity(conn)
             await conn.execute(
@@ -449,6 +508,7 @@ class BotStore:
                 "worker_incarnation": worker_incarnation,
                 "host_incarnation": lease.incarnation,
                 "host_owner_epoch": lease.owner_epoch,
+                "capability_grants": grants,
             }
             if existing:
                 if any(existing[key] != value for key, value in fixed.items()):
@@ -457,8 +517,8 @@ class BotStore:
             row = await (
                 await conn.execute(
                     "INSERT INTO public.bot_generations(bot_id,generation_id,component_id,package_digest,config_digest,"
-                    "config,instance_id,worker_incarnation,host_incarnation,host_owner_epoch,status) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PREPARING') RETURNING *",
+                    "config,instance_id,worker_incarnation,host_incarnation,host_owner_epoch,capability_grants,status) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PREPARING') RETURNING *",
                     (
                         self.bot_id,
                         generation_id,
@@ -470,6 +530,7 @@ class BotStore:
                         worker_incarnation,
                         lease.incarnation,
                         lease.owner_epoch,
+                        Jsonb(grants),
                     ),
                 )
             ).fetchone()
@@ -590,7 +651,7 @@ class BotStore:
             if resource["operation_id"] and resource["operation_id"] != operation_id:
                 await conn.execute(
                     "UPDATE public.bot_lifecycle_operations SET phase='ABANDONED',error_code='LEASE_EXPIRED' "
-                    "WHERE bot_id=%s AND operation_id=%s AND phase IN ('PLAN','FROZEN')",
+                    "WHERE bot_id=%s AND operation_id=%s AND phase IN ('PLAN','FROZEN','QUIESCENT')",
                     (self.bot_id, resource["operation_id"]),
                 )
             epoch = resource["op_epoch"] + 1
@@ -703,7 +764,7 @@ class BotStore:
         self._ttl(ttl_seconds)
         async with self.pool.connection() as conn, conn.transaction():
             operation, _, _ = await self._lifecycle(conn, lease, operation_id, op_epoch)
-            if operation["phase"] not in {"PLAN", "FROZEN"}:
+            if operation["phase"] not in {"PLAN", "FROZEN", "QUIESCENT"}:
                 raise ForestError(
                     "INVALID_OPERATION_PHASE", "Terminal operation has no renewable lease"
                 )
@@ -725,7 +786,7 @@ class BotStore:
     async def freeze(self, lease: HostLease, operation_id: str, op_epoch: int) -> dict:
         async with self.pool.connection() as conn, conn.transaction():
             operation, route, _ = await self._lifecycle(conn, lease, operation_id, op_epoch)
-            if operation["phase"] == "FROZEN":
+            if operation["phase"] in {"FROZEN", "QUIESCENT"}:
                 return operation
             if operation["phase"] != "PLAN":
                 raise ForestError(
@@ -757,21 +818,10 @@ class BotStore:
         self, conn: AsyncConnection, component_id: str, route: dict, runtime: dict, lease: HostLease
     ) -> None:
         await conn.execute(
-            "UPDATE public.bot_calls SET status='FAILED',error_code='CALL_FENCED' WHERE bot_id=%s "
-            "AND component_id=%s AND status='ADMITTED' AND (deadline_at<=clock_timestamp() "
-            "OR owner_epoch<>%s OR host_incarnation<>%s OR storage_generation<>%s OR maintenance_epoch<>%s "
-            "OR policy_revision<>%s OR route_epoch<>%s OR generation_id IS DISTINCT FROM %s)",
-            (
-                self.bot_id,
-                component_id,
-                lease.owner_epoch,
-                lease.incarnation,
-                runtime["storage_generation"],
-                runtime["maintenance_epoch"],
-                runtime["policy_revision"],
-                route["route_epoch"],
-                route["generation_id"],
-            ),
+            "UPDATE public.bot_calls c SET status='FAILED',error_code='CALL_FENCED' WHERE c.bot_id=%s "
+            "AND (c.component_id=%s OR %s=ANY(c.dependency_components)) AND c.status='ADMITTED' "
+            "AND NOT EXISTS (SELECT 1 FROM public.bot_live_calls l WHERE l.bot_id=c.bot_id AND l.call_id=c.call_id)",
+            (self.bot_id, component_id, component_id),
         )
 
     async def inflight(self, component_id: str) -> int:
@@ -779,21 +829,62 @@ class BotStore:
             await self._identity(conn)
             row = await (
                 await conn.execute(
-                    "SELECT count(*) AS n FROM public.bot_calls c "
-                    "JOIN public.bot_runtime_state b ON b.bot_id=c.bot_id "
-                    "JOIN public.bot_host_lease h ON h.bot_id=c.bot_id "
-                    "JOIN public.bot_component_routes r ON r.bot_id=c.bot_id AND r.component_id=c.component_id "
-                    "JOIN public.bot_generations g ON g.bot_id=c.bot_id AND g.generation_id=c.generation_id "
-                    "WHERE c.bot_id=%s AND c.component_id=%s AND c.status='ADMITTED' AND c.deadline_at>clock_timestamp() "
-                    "AND b.status='ACTIVE' AND c.storage_generation=b.storage_generation "
-                    "AND c.maintenance_epoch=b.maintenance_epoch AND c.policy_revision=b.policy_revision "
-                    "AND c.owner_epoch=h.owner_epoch AND c.host_incarnation=h.incarnation AND h.expires_at>clock_timestamp() "
-                    "AND c.route_epoch=r.route_epoch AND c.generation_id=r.generation_id AND g.status IN ('ACTIVE','QUIESCING')",
-                    (self.bot_id, component_id),
+                    "SELECT count(*) AS n FROM public.bot_live_calls WHERE bot_id=%s "
+                    "AND (component_id=%s OR %s=ANY(dependency_components))",
+                    (self.bot_id, component_id, component_id),
                 )
             ).fetchone()
             assert row is not None
             return row["n"]
+
+    async def _quiesce_locked(
+        self, conn: AsyncConnection, lease: HostLease, operation: dict, route: dict, runtime: dict
+    ) -> dict:
+        if operation["phase"] == "QUIESCENT":
+            return operation
+        if operation["phase"] != "FROZEN":
+            raise ForestError("INVALID_OPERATION_PHASE", "Quiescence requires frozen admission")
+        if route["route_epoch"] != operation["expected_route_epoch"]:
+            raise ForestError("ROUTE_CONFLICT", "Component route changed before quiescence")
+        await self._reap(conn, operation["component_id"], route, runtime, lease)
+        pending = await (
+            await conn.execute(
+                "SELECT count(*) AS n FROM public.bot_live_calls WHERE bot_id=%s "
+                "AND (component_id=%s OR %s=ANY(dependency_components))",
+                (self.bot_id, operation["component_id"], operation["component_id"]),
+            )
+        ).fetchone()
+        if pending and pending["n"]:
+            raise ForestError(
+                "DRAIN_PENDING", "Admitted calls or reserved dependency callers have not finished"
+            )
+        await self._host(conn, lease, runtime)
+        if operation["lease_until"] <= await self._now(conn):
+            raise ForestError("STALE_OPERATION", "Lifecycle lease expired before quiescence")
+        await conn.execute(
+            "UPDATE public.bot_generations SET status='QUIESCENT' WHERE bot_id=%s AND generation_id=%s "
+            "AND status='QUIESCING'",
+            (self.bot_id, route["generation_id"]),
+        )
+        row = await (
+            await conn.execute(
+                "UPDATE public.bot_lifecycle_operations SET phase='QUIESCENT' WHERE bot_id=%s AND operation_id=%s RETURNING *",
+                (self.bot_id, operation["operation_id"]),
+            )
+        ).fetchone()
+        await self._event(
+            conn,
+            "lifecycle.quiescent",
+            operation["operation_id"],
+            {"component_id": operation["component_id"]},
+        )
+        assert row is not None
+        return row
+
+    async def quiesce_operation(self, lease: HostLease, operation_id: str, op_epoch: int) -> dict:
+        async with self.pool.connection() as conn, conn.transaction():
+            operation, route, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
+            return await self._quiesce_locked(conn, lease, operation, route, runtime)
 
     async def publish(self, lease: HostLease, operation_id: str, op_epoch: int) -> dict:
         async with self.pool.connection() as conn, conn.transaction():
@@ -804,7 +895,7 @@ class BotStore:
                         "ROUTE_CONFLICT", "The committed route has subsequently changed"
                     )
                 return route
-            if operation["phase"] != "FROZEN":
+            if operation["phase"] not in {"FROZEN", "QUIESCENT"}:
                 raise ForestError(
                     "INVALID_OPERATION_PHASE", "Publication requires frozen admission"
                 )
@@ -819,15 +910,7 @@ class BotStore:
                 raise ForestError(
                     "CANDIDATE_NOT_READY", "Candidate has no current ready execution instance"
                 )
-            await self._reap(conn, operation["component_id"], route, runtime, lease)
-            pending = await (
-                await conn.execute(
-                    "SELECT count(*) AS n FROM public.bot_calls WHERE bot_id=%s AND component_id=%s AND status='ADMITTED'",
-                    (self.bot_id, operation["component_id"]),
-                )
-            ).fetchone()
-            if pending and pending["n"]:
-                raise ForestError("DRAIN_PENDING", "Previously admitted calls have not finished")
+            operation = await self._quiesce_locked(conn, lease, operation, route, runtime)
             # Recheck time-based authorities after all call locks and drain work.
             await self._host(conn, lease, runtime)
             if operation["lease_until"] <= await self._now(conn):
@@ -867,6 +950,12 @@ class BotStore:
                 operation_id,
                 {"generation_id": candidate["generation_id"], "route_epoch": result["route_epoch"]},
             )
+            # Publication triggers may acquire configuration business locks.
+            # Revalidate elapsed-time authority after those locks as well, so a
+            # blocked effective-config update cannot outlive its host/operation.
+            await self._host(conn, lease, runtime)
+            if operation["lease_until"] <= await self._now(conn):
+                raise ForestError("STALE_OPERATION", "Lifecycle lease expired during publication")
             assert result is not None
             return result
 
@@ -884,7 +973,7 @@ class BotStore:
             if route["route_epoch"] == operation["expected_route_epoch"] and route["generation_id"]:
                 old = await self._generation(conn, route["generation_id"])
                 live = (
-                    old["status"] in {"ACTIVE", "QUIESCING"}
+                    old["status"] in {"ACTIVE", "QUIESCING", "QUIESCENT"}
                     and old["host_incarnation"] == lease.incarnation
                 )
                 await conn.execute(
@@ -928,6 +1017,7 @@ class BotStore:
     ) -> None:
         async with self.pool.connection() as conn, conn.transaction():
             generation = await self._generation(conn, generation_id)
+            await self._all_routes(conn)
             route = await self._route(conn, generation["component_id"])
             await self._host(conn, lease)
             generation = await self._generation(conn, generation_id)
@@ -946,11 +1036,15 @@ class BotStore:
                     "WHERE bot_id=%s AND component_id=%s",
                     (self.bot_id, generation["component_id"]),
                 )
-            await conn.execute(
-                "UPDATE public.bot_calls SET status='FAILED',error_code=%s "
-                "WHERE bot_id=%s AND generation_id=%s AND status='ADMITTED'",
-                ("GENERATION_" + status, self.bot_id, generation_id),
-            )
+            calls = await (
+                await conn.execute(
+                    "SELECT call_id FROM public.bot_calls WHERE bot_id=%s AND generation_id=%s AND status='ADMITTED' "
+                    "ORDER BY call_depth,call_id",
+                    (self.bot_id, generation_id),
+                )
+            ).fetchall()
+            for call in calls:
+                await self._end_call_tree(conn, call["call_id"], "FAILED", "GENERATION_" + status)
             await self._host(conn, lease)
             await self._event(
                 conn,
@@ -972,10 +1066,13 @@ class BotStore:
         expected_generation_id: str | None = None,
         expected_worker_incarnation: str | None = None,
         expected_route_epoch: int | None = None,
+        dependency_components: tuple[str, ...] = (),
     ) -> CallGrant:
         self._ttl(timeout_seconds)
+        dependencies = self._dependencies(component_id, dependency_components)
         async with self.pool.connection() as conn, conn.transaction():
-            route = await self._route(conn, component_id)
+            routes = await self._routes(conn, (component_id, *dependencies))
+            route = routes[component_id]
             runtime = await self._runtime(conn)
             await self._host(conn, lease, runtime)
             if (
@@ -1024,6 +1121,7 @@ class BotStore:
                     or old["operation_id"] != operation_id
                     or old["component_id"] != component_id
                     or old["input_digest"] != input_digest
+                    or old["parent_call_id"] is not None
                 ):
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "Call identity already binds different input"
@@ -1057,12 +1155,28 @@ class BotStore:
                 or generation["host_owner_epoch"] != lease.owner_epoch
             ):
                 raise ForestError("STALE_GENERATION", "Route has no current active Worker")
+            for dependency in dependencies:
+                reserved = routes[dependency]
+                if not reserved["admission"] or not reserved["generation_id"]:
+                    raise ForestError(
+                        "ADMISSION_CLOSED", "A reserved dependency is paused or reloading"
+                    )
+                target = await self._generation(conn, reserved["generation_id"])
+                if (
+                    target["status"] != "ACTIVE"
+                    or target["host_incarnation"] != lease.incarnation
+                    or target["host_owner_epoch"] != lease.owner_epoch
+                ):
+                    raise ForestError(
+                        "ADMISSION_CLOSED", "A reserved dependency has no current active Worker"
+                    )
             row = await (
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "clock_timestamp()+%s*interval '1 second',%s) RETURNING *",
+                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -1079,6 +1193,8 @@ class BotStore:
                         runtime["policy_revision"],
                         timeout_seconds,
                         input_digest,
+                        call_id,
+                        list(dependencies),
                     ),
                 )
             ).fetchone()
@@ -1089,13 +1205,245 @@ class BotStore:
                 {"call_id": call_id, "component_id": component_id},
             )
             assert row is not None
-            return CallGrant(**{key: row[key] for key in CallGrant.__dataclass_fields__})
+            return self._grant_value(row)
+
+    async def _chain(self, conn: AsyncConnection, call_id: str) -> list[dict]:
+        """Read immutable ancestry before acquiring any runtime or call locks."""
+        chain: list[dict] = []
+        current = call_id
+        seen: set[str] = set()
+        while current is not None:
+            if current in seen or len(chain) >= 9:
+                raise ForestError(
+                    "INVALID_CALL_TREE", "Call ancestry is cyclic or exceeds its depth limit"
+                )
+            seen.add(current)
+            row = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s",
+                    (self.bot_id, current),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError(
+                    "CALL_NOT_FOUND", "Admitted call ancestry does not exist", status=404
+                )
+            chain.append(row)
+            current = row["parent_call_id"]
+        chain.reverse()
+        for depth, row in enumerate(chain):
+            if row["root_call_id"] != chain[0]["call_id"] or row["call_depth"] != depth:
+                raise ForestError(
+                    "INVALID_CALL_TREE", "Call ancestry does not match its immutable root"
+                )
+        return chain
+
+    async def admit_child(
+        self,
+        parent_grant: CallGrant,
+        target_component_id: str,
+        call_id: str,
+        operation_id: str,
+        input_digest: str,
+        timeout_seconds: float = 60,
+        *,
+        expected_policy_revision: int | None = None,
+        expected_generation_id: str | None = None,
+        expected_worker_incarnation: str | None = None,
+        expected_route_epoch: int | None = None,
+        dependency_components: tuple[str, ...] = (),
+    ) -> CallGrant:
+        self._ttl(timeout_seconds)
+        dependencies = self._dependencies(target_component_id, dependency_components)
+        if target_component_id == parent_grant.component_id:
+            raise ForestError(
+                "CALL_CYCLE", "Synchronous calls cannot return to an ancestor component"
+            )
+        if target_component_id not in parent_grant.dependency_components or not set(
+            dependencies
+        ).issubset(parent_grant.dependency_components):
+            raise ForestError(
+                "DEPENDENCY_DENIED",
+                "Child target and dependencies must belong to the parent's reserved closure",
+                status=403,
+            )
+        async with self.pool.connection() as conn, conn.transaction():
+            parent, host = await self._guard(
+                conn,
+                parent_grant,
+                extra_components=(target_component_id, *dependencies),
+            )
+            chain = await self._chain(conn, parent_grant.call_id)
+            if target_component_id in {row["component_id"] for row in chain}:
+                raise ForestError(
+                    "CALL_CYCLE", "Synchronous calls cannot return to an ancestor component"
+                )
+            if parent["call_depth"] >= 8:
+                raise ForestError(
+                    "CALL_DEPTH_EXCEEDED", "Synchronous call nesting is limited to eight levels"
+                )
+            if (
+                expected_policy_revision is not None
+                and parent["policy_revision"] != expected_policy_revision
+            ):
+                raise ForestError(
+                    "POLICY_REVOKED", "Target component admission grant was revoked", status=403
+                )
+            route = await self._route(
+                conn, target_component_id
+            )  # Already held in the sorted fence set.
+            generation = (
+                await self._generation(conn, route["generation_id"])
+                if route["generation_id"]
+                else None
+            )
+            if (
+                (
+                    expected_generation_id is not None
+                    and route["generation_id"] != expected_generation_id
+                )
+                or (
+                    expected_route_epoch is not None
+                    and route["route_epoch"] != expected_route_epoch
+                )
+                or (
+                    expected_worker_incarnation is not None
+                    and (
+                        generation is None
+                        or generation["worker_incarnation"] != expected_worker_incarnation
+                    )
+                )
+            ):
+                raise ForestError("STALE_ROUTE", "Selected child Worker changed before admission")
+            previous = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND (operation_id=%s OR call_id=%s)",
+                    (self.bot_id, operation_id, call_id),
+                )
+            ).fetchall()
+            if previous:
+                old = previous[0]
+                if (
+                    len(previous) != 1
+                    or old["operation_id"] != operation_id
+                    or old["parent_call_id"] != parent_grant.call_id
+                    or old["root_call_id"] != parent_grant.root_call_id
+                    or old["component_id"] != target_component_id
+                    or old["input_digest"] != input_digest
+                ):
+                    raise ForestError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "Child operation already belongs to another parent or input",
+                    )
+                if old["status"] == "COMPLETED":
+                    raise ForestError(
+                        "CALL_COMPLETED",
+                        "Child operation already completed",
+                        details={"result": old["result"]},
+                    )
+                if old["status"] in {"FAILED", "CANCELLED"}:
+                    raise ForestError(
+                        "CALL_FAILED",
+                        "Child operation already terminated",
+                        details={"error_code": old["error_code"]},
+                    )
+                raise ForestError("OPERATION_PENDING", "Child operation is already admitted")
+            if generation is None or generation["status"] not in {"ACTIVE", "QUIESCING"}:
+                raise ForestError(
+                    "ADMISSION_CLOSED", "Child target is not an active or draining generation"
+                )
+            if (
+                generation["host_incarnation"] != host["incarnation"]
+                or generation["host_owner_epoch"] != host["owner_epoch"]
+            ):
+                raise ForestError("STALE_GENERATION", "Child target belongs to an old host")
+            count = await (
+                await conn.execute(
+                    "SELECT count(*) AS n FROM public.bot_calls WHERE bot_id=%s AND root_call_id=%s",
+                    (self.bot_id, parent_grant.root_call_id),
+                )
+            ).fetchone()
+            if count and count["n"] >= 256:
+                raise ForestError(
+                    "CALL_TREE_LIMIT",
+                    "A call tree may contain at most 256 admitted calls",
+                    status=429,
+                )
+            await self._guard_time(conn, host, parent_grant)
+            row = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
+                    "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
+                    "policy_revision,deadline_at,input_digest,parent_call_id,root_call_id,call_depth,dependency_components) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        self.bot_id,
+                        call_id,
+                        operation_id,
+                        target_component_id,
+                        generation["generation_id"],
+                        route["route_epoch"],
+                        generation["worker_incarnation"],
+                        host["host_id"],
+                        host["incarnation"],
+                        host["owner_epoch"],
+                        parent["storage_generation"],
+                        parent["maintenance_epoch"],
+                        parent["policy_revision"],
+                        parent["deadline_at"],
+                        timeout_seconds,
+                        input_digest,
+                        parent["call_id"],
+                        parent["root_call_id"],
+                        parent["call_depth"] + 1,
+                        list(dependencies),
+                    ),
+                )
+            ).fetchone()
+            await self._event(
+                conn,
+                "call.admitted",
+                operation_id,
+                {
+                    "call_id": call_id,
+                    "component_id": target_component_id,
+                    "parent_call_id": parent["call_id"],
+                    "root_call_id": parent["root_call_id"],
+                    "call_depth": parent["call_depth"] + 1,
+                },
+            )
+            assert row is not None
+            return self._grant_value(row)
+
+    async def authorized_child_call(
+        self, parent_grant: CallGrant, operation_id: str, expected_policy_revision: int
+    ) -> dict | None:
+        async with self.pool.connection() as conn, conn.transaction():
+            await self._guard(conn, parent_grant)
+            if parent_grant.policy_revision != expected_policy_revision:
+                raise ForestError("POLICY_REVOKED", "Child receipt grant was revoked", status=403)
+            child = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s",
+                    (self.bot_id, operation_id),
+                )
+            ).fetchone()
+            if child is not None and (
+                child["parent_call_id"] != parent_grant.call_id
+                or child["root_call_id"] != parent_grant.root_call_id
+            ):
+                raise ForestError("IDEMPOTENCY_CONFLICT", "Child receipt belongs to another parent")
+            return child
 
     async def _guard(
-        self, conn: AsyncConnection, grant: CallGrant, *, pending: bool = True
+        self, conn: AsyncConnection, grant: CallGrant, *, pending: bool = True, extra_components=()
     ) -> tuple[dict, dict]:
         self._scope(grant)
-        route = await self._route(conn, grant.component_id)
+        chain = await self._chain(conn, grant.call_id)
+        routes = await self._routes(
+            conn, (*[row["component_id"] for row in chain], *extra_components)
+        )
         runtime = await self._runtime(conn)
         host = await self._host(
             conn,
@@ -1108,37 +1456,64 @@ class BotStore:
             ),
             runtime,
         )
-        call = await (
-            await conn.execute(
-                "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s FOR UPDATE",
-                (self.bot_id, grant.call_id),
-            )
-        ).fetchone()
-        if call is None:
-            raise ForestError("CALL_NOT_FOUND", "Admitted call does not exist", status=404)
-        if call["cancel_epoch"] != grant.cancel_epoch or call["status"] == "CANCELLED":
-            raise ForestError("CALL_CANCELLED", "Call cancellation committed before this operation")
-        if any(call[key] != value for key, value in asdict(grant).items()):
-            raise ForestError(
-                "INVALID_GRANT", "Call grant does not match its host-admitted identity", status=403
-            )
-        if (
-            route["route_epoch"] != grant.route_epoch
-            or route["generation_id"] != grant.generation_id
-        ):
-            raise ForestError("STALE_ROUTE", "Component route was replaced")
-        generation = await self._generation(conn, grant.generation_id)
-        if generation["status"] not in {"ACTIVE", "QUIESCING"}:
-            raise ForestError("STALE_GENERATION", "Generation no longer has execution authority")
-        if runtime["storage_generation"] != grant.storage_generation:
-            raise ForestError("STALE_STORAGE", "Bot storage generation changed")
-        if runtime["policy_revision"] != grant.policy_revision:
-            raise ForestError("POLICY_REVOKED", "Call authorization revision is stale", status=403)
-        if runtime["maintenance_epoch"] != grant.maintenance_epoch:
-            raise ForestError("STALE_MAINTENANCE", "Maintenance intent invalidated this call")
-        if pending and call["status"] != "ADMITTED":
-            raise ForestError("CALL_TERMINAL", "Call has already terminated")
+        call = None
+        for ancestor in chain:
+            current = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s FOR UPDATE",
+                    (self.bot_id, ancestor["call_id"]),
+                )
+            ).fetchone()
+            assert current is not None
+            is_leaf = current["call_id"] == grant.call_id
+            if current["status"] == "CANCELLED" or (
+                is_leaf and current["cancel_epoch"] != grant.cancel_epoch
+            ):
+                raise ForestError("CALL_CANCELLED", "Call or ancestor cancellation committed first")
+            if is_leaf:
+                compared = dict(
+                    current, dependency_components=tuple(current["dependency_components"])
+                )
+                if any(compared[key] != value for key, value in asdict(grant).items()):
+                    raise ForestError(
+                        "INVALID_GRANT",
+                        "Call grant does not match its host-admitted identity",
+                        status=403,
+                    )
+                call = current
+            route = routes[current["component_id"]]
+            if (
+                route["route_epoch"] != current["route_epoch"]
+                or route["generation_id"] != current["generation_id"]
+            ):
+                raise ForestError("STALE_ROUTE", "A caller or target component route was replaced")
+            generation = await self._generation(conn, current["generation_id"])
+            if generation["status"] not in {"ACTIVE", "QUIESCING"}:
+                raise ForestError(
+                    "STALE_GENERATION", "A caller or target generation lost execution authority"
+                )
+            if (
+                current["host_id"] != host["host_id"]
+                or current["host_incarnation"] != host["incarnation"]
+                or current["owner_epoch"] != host["owner_epoch"]
+            ):
+                raise ForestError("STALE_HOST", "A call ancestor belongs to an old host")
+            if runtime["storage_generation"] != current["storage_generation"]:
+                raise ForestError("STALE_STORAGE", "Bot storage generation changed")
+            if runtime["policy_revision"] != current["policy_revision"]:
+                raise ForestError(
+                    "POLICY_REVOKED", "Call authorization revision is stale", status=403
+                )
+            if runtime["maintenance_epoch"] != current["maintenance_epoch"]:
+                raise ForestError(
+                    "STALE_MAINTENANCE", "Maintenance intent invalidated the call tree"
+                )
+            if current["status"] != "ADMITTED" and (not is_leaf or pending):
+                raise ForestError("CALL_TERMINAL", "Call or ancestor has already terminated")
+            if current["deadline_at"] <= await self._now(conn):
+                raise ForestError("CALL_EXPIRED", "A call or ancestor deadline has elapsed")
         await self._guard_time(conn, host, grant)
+        assert call is not None
         return call, host
 
     async def _guard_time(self, conn: AsyncConnection, host: dict, grant: CallGrant) -> None:
@@ -1273,6 +1648,15 @@ class BotStore:
                 return call
             if call["status"] != "ADMITTED":
                 raise ForestError("CALL_TERMINAL", "Failed call cannot be completed")
+            descendants = await self._descendants(conn, grant.call_id)
+            if any(
+                row["call_id"] != grant.call_id and row["status"] == "ADMITTED"
+                for row in descendants
+            ):
+                raise ForestError(
+                    "CHILDREN_PENDING",
+                    "A call cannot finish before all of its child calls terminate",
+                )
             await self._guard_time(conn, host, grant)
             row = await (
                 await conn.execute(
@@ -1307,12 +1691,19 @@ class BotStore:
                 raise ForestError(
                     "POLICY_REVOKED", "Component receipt grant was revoked", status=403
                 )
-            return await (
+            result = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s",
                     (self.bot_id, operation_id),
                 )
             ).fetchone()
+            if result is not None and result["parent_call_id"] is not None:
+                raise ForestError(
+                    "CHILD_AUTHORITY_REQUIRED",
+                    "Child receipts require their live parent call authority",
+                    status=403,
+                )
+            return result
 
     async def _call_for_host(self, conn: AsyncConnection, lease: HostLease, call_id: str) -> dict:
         call = await (
@@ -1323,7 +1714,10 @@ class BotStore:
         ).fetchone()
         if call is None:
             raise ForestError("CALL_NOT_FOUND", "Admitted call does not exist", status=404)
-        await self._route(conn, call["component_id"])
+        # Cancellation/failure can touch a dynamic descendant subtree. Reserving
+        # all existing routes first prevents a child from introducing a new lock
+        # after this transaction has acquired runtime or parent-call locks.
+        await self._all_routes(conn)
         await self._host(conn, lease)
         call = await (
             await conn.execute(
@@ -1337,6 +1731,48 @@ class BotStore:
         await self._host(conn, lease)
         return call
 
+    async def _descendants(self, conn: AsyncConnection, call_id: str) -> list[dict]:
+        return await (
+            await conn.execute(
+                "WITH RECURSIVE subtree AS (SELECT call_id FROM public.bot_calls WHERE bot_id=%s AND call_id=%s "
+                "UNION SELECT c.call_id FROM public.bot_calls c JOIN subtree p ON c.parent_call_id=p.call_id WHERE c.bot_id=%s) "
+                "SELECT c.* FROM public.bot_calls c JOIN subtree t ON c.call_id=t.call_id "
+                "WHERE c.bot_id=%s ORDER BY c.call_depth,c.call_id",
+                (self.bot_id, call_id, self.bot_id, self.bot_id),
+            )
+        ).fetchall()
+
+    async def _end_call_tree(
+        self, conn: AsyncConnection, call_id: str, status: str, error_code: str
+    ) -> dict:
+        descendants = await self._descendants(conn, call_id)
+        # Caller owns the complete route set and runtime/host rows already.
+        # Lock all affected calls in root-to-leaf canonical order before updates.
+        for row in descendants:
+            await conn.execute(
+                "SELECT call_id FROM public.bot_calls WHERE bot_id=%s AND call_id=%s FOR UPDATE",
+                (self.bot_id, row["call_id"]),
+            )
+        await conn.execute(
+            "UPDATE public.bot_calls SET status=%s,error_code=%s,cancel_epoch=cancel_epoch+%s "
+            "WHERE bot_id=%s AND call_id=ANY(%s) AND status='ADMITTED'",
+            (
+                status,
+                error_code,
+                1 if status == "CANCELLED" else 0,
+                self.bot_id,
+                [row["call_id"] for row in descendants],
+            ),
+        )
+        result = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s",
+                (self.bot_id, call_id),
+            )
+        ).fetchone()
+        assert result is not None
+        return result
+
     async def cancel_call(
         self, lease: HostLease, call_id: str, expected_cancel_epoch: int = 0
     ) -> dict:
@@ -1346,13 +1782,8 @@ class BotStore:
                 return call
             if call["cancel_epoch"] != expected_cancel_epoch:
                 raise ForestError("CANCEL_CONFLICT", "Call cancellation revision changed")
-            row = await (
-                await conn.execute(
-                    "UPDATE public.bot_calls SET status='CANCELLED',cancel_epoch=cancel_epoch+1,error_code='CALL_CANCELLED' "
-                    "WHERE bot_id=%s AND call_id=%s RETURNING *",
-                    (self.bot_id, call_id),
-                )
-            ).fetchone()
+            row = await self._end_call_tree(conn, call_id, "CANCELLED", "CALL_CANCELLED")
+            await self._host(conn, lease)
             await self._event(conn, "call.cancelled", call["operation_id"], {"call_id": call_id})
             assert row is not None
             return row
@@ -1362,12 +1793,8 @@ class BotStore:
             call = await self._call_for_host(conn, lease, call_id)
             if call["status"] != "ADMITTED":
                 return call
-            row = await (
-                await conn.execute(
-                    "UPDATE public.bot_calls SET status='FAILED',error_code=%s WHERE bot_id=%s AND call_id=%s RETURNING *",
-                    (error_code, self.bot_id, call_id),
-                )
-            ).fetchone()
+            row = await self._end_call_tree(conn, call_id, "FAILED", error_code)
+            await self._host(conn, lease)
             await self._event(
                 conn,
                 "call.failed",

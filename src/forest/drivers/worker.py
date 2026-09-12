@@ -34,6 +34,14 @@ class WorkerRuntime:
         self.stopping = False
 
     async def state_rpc(self, call_id: str, action: str, payload: dict) -> Any:
+        return await self._rpc("state", call_id, payload, action=action)
+
+    async def service_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("service", call_id, payload)
+
+    async def _rpc(
+        self, kind: str, call_id: str, payload: dict, *, action: str | None = None
+    ) -> Any:
         if len(self.state_pending) >= self.limits.max_state_inflight:
             raise ForestError("OVERLOADED", "Worker state request capacity exhausted", 429)
         identifier = str(uuid4())
@@ -42,7 +50,7 @@ class WorkerRuntime:
         try:
             await self.writer.send(
                 {
-                    "kind": "state",
+                    "kind": kind,
                     "id": identifier,
                     "call_id": call_id,
                     "action": action,
@@ -127,7 +135,10 @@ class WorkerRuntime:
                         "CONFIGURATION_INVALID", "Plugin configuration must be a JSON object", 422
                     )
                 self.ctx = PluginContext(
-                    config, self.state_rpc, task_limit=self.limits.max_owned_tasks
+                    config,
+                    self.state_rpc,
+                    task_limit=self.limits.max_owned_tasks,
+                    service_rpc=self.service_rpc,
                 )
                 await self.plugin.prepare(self.ctx, self.ctx.config, payload.get("restored_state"))
                 self.state = "PREPARED"
@@ -240,7 +251,7 @@ class WorkerRuntime:
             while not self.stopping:
                 message = await read_frame(reader, self.limits.max_frame_bytes)
                 kind = message.get("kind")
-                if kind == "state_result":
+                if kind in {"state_result", "service_result"}:
                     future = self.state_pending.get(message.get("id"))
                     if future is None or future.done():
                         continue

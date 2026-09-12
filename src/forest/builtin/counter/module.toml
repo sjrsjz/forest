@@ -1,0 +1,22 @@
+manifest_version = 1
+package_id = "forest.counter"
+version = "0.1.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "counter:Counter"
+
+[[components]]
+id = "forest.counter"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[components.capabilities]
+requests = ["state.read", "state.write"]
+
+[[components.provides]]
+name = "counter.increment"
+contract = "1.0"
+input_schema = "schemas/input.json"
+output_schema = "schemas/output.json"

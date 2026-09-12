@@ -98,6 +98,54 @@ def main() -> None:
             page.screenshot(path=str(artifacts / "configuration-desktop.png"), full_page=True)
             page.set_viewport_size({"width": 390, "height": 844})
             page.screenshot(path=str(artifacts / "configuration-mobile.png"), full_page=True)
+            page.set_viewport_size({"width": 1360, "height": 1000})
+            page.locator("#nav-bots").click()
+
+            def create_bot(name: str, multiplier: int) -> str:
+                page.locator('#create-bot-form [name="display_name"]').fill(name)
+                page.locator('#create-bot-form button').click()
+                expect(page.locator("#bot-name")).to_have_text(name)
+                expect(page.locator("#bot-components")).to_be_visible(timeout=45000)
+                page.locator('#bot-config-fields [name="label"]').fill(name)
+                page.locator('#bot-config-fields [name="multiplier"]').fill(str(multiplier))
+                page.locator("#bot-grants").check()
+                page.locator('#bot-config-form button[type="submit"]').click()
+                expect(page.locator("#bot-config-preview")).to_be_visible()
+                page.locator("#bot-config-apply").click()
+                expect(page.locator("#bot-effective")).to_have_text("1", timeout=30000)
+                expect(page.locator("#bot-runtime-status")).to_have_text("组件已生效并运行中", timeout=30000)
+                return page.locator("#bot-list button").filter(has_text=name).get_attribute("data-bot-id")
+
+            def select_bot(page, bot_id: str) -> None:
+                page.locator(f'#bot-list button[data-bot-id="{bot_id}"]').click()
+                expect(page.locator("#bot-runtime-status")).to_have_text("组件已生效并运行中", timeout=30000)
+
+            def invoke(value: int, expected: str) -> None:
+                page.locator('#bot-invoke-form [name="increment"]').fill(str(value))
+                page.locator('#bot-invoke-form button').click()
+                expect(page.locator("#bot-invoke-result")).to_contain_text(expected, timeout=15000)
+
+            alpha = create_bot("Alpha 浏览器 Bot", 2)
+            invoke(3, "：6（状态修订 1）")
+            beta = create_bot("Beta 浏览器 Bot", 1)
+            invoke(3, "：3（状态修订 1）")
+            select_bot(page, alpha)
+            rival.locator("#nav-bots").click()
+            select_bot(rival, alpha)
+            rival.locator('#bot-config-fields [name="multiplier"]').fill("77")
+            page.locator('#bot-config-fields [name="multiplier"]').fill("4")
+            page.locator('#bot-config-form button[type="submit"]').click()
+            page.locator("#bot-config-apply").click()
+            expect(page.locator("#bot-effective")).to_have_text("2", timeout=30000)
+            expect(page.locator("#bot-runtime-status")).to_have_text("组件已生效并运行中", timeout=30000)
+            rival.locator('#bot-config-form button[type="submit"]').click()
+            expect(rival.locator("#notice")).to_contain_text("REVISION_CONFLICT")
+            expect(rival.locator('#bot-config-fields [name="multiplier"]')).to_have_value("77")
+            invoke(1, "：10（状态修订 2）")
+            page.bring_to_front()
+            page.screenshot(path=str(artifacts / "bots-desktop.png"), full_page=True)
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.screenshot(path=str(artifacts / "bots-mobile.png"), full_page=True)
             compose("restart", "forest")
             compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "90")
             page.goto(origin)
@@ -106,6 +154,11 @@ def main() -> None:
             expect(page.locator('#config-form [name="display_name"]')).to_have_value(
                 "Forest 浏览器验证"
             )
+            page.locator("#nav-bots").click()
+            select_bot(page, alpha)
+            invoke(1, "：14（状态修订 3）")
+            select_bot(page, beta)
+            invoke(1, "：4（状态修订 2）")
             page.locator("#logout").click()
             expect(page.locator("#login")).to_be_visible()
             rival.reload()
@@ -122,6 +175,10 @@ def main() -> None:
                         "apply",
                         "two-tab conflict",
                         "restart persistence",
+                        "two isolated Bot databases and Workers",
+                        "component preview/apply and hot reload",
+                        "component two-tab conflict preserves draft",
+                        "Bot configuration and state recover after restart",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

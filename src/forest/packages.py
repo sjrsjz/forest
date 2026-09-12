@@ -35,56 +35,118 @@ IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
 MANIFEST_SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "required": ["manifest_version", "runtime", "kernel_api", "package_id",
-                                    "version", "entrypoint", "components"],
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "manifest_version",
+        "runtime",
+        "kernel_api",
+        "package_id",
+        "version",
+        "entrypoint",
+        "components",
+    ],
     "properties": {
         "manifest_version": {"type": "integer", "const": 1},
-        **{key: {"type": "string"} for key in
-           ("runtime", "kernel_api", "package_id", "version", "entrypoint")},
-        "components": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
-            "type": "object", "additionalProperties": False,
-            "required": ["id", "scope", "state_schema", "reload_mode",
-                                            "config_schema", "provides"],
-            "properties": {
-                **{key: {"type": "string"} for key in
-                   ("id", "scope", "reload_mode", "config_schema")},
-                "state_schema": {"type": "integer"},
-                "state_mode": {"const": "durable"},
-                "checkpoint_schema": {"type": "integer", "const": 1},
-                "requires": {"type": "array"},
-                "resources": {"type": "object", "additionalProperties": False,
-                              "properties": {
-                                  "max_frame_bytes": {"type": "integer", "minimum": 1024,
-                                                      "maximum": 262144},
-                                  "max_queue_items": {"type": "integer", "minimum": 0,
-                                                      "maximum": 256},
-                                  **{key: {"type": "integer", "minimum": 1, "maximum": 256}
-                                     for key in ("max_inflight", "max_state_inflight",
-                                                 "max_owned_tasks")},
-                              }},
-                "lifecycle": {"type": "object", "additionalProperties": False,
-                              "properties": {
-                                  key: {"type": "number", "exclusiveMinimum": 0, "maximum": 120}
-                                  for key in ("prepare_timeout_s", "start_timeout_s",
-                                              "drain_timeout_s", "stop_timeout_s")}},
-                "capabilities": {"type": "object", "additionalProperties": False,
-                                 "properties": {
-                    "requests": {"type": "array", "items": {"type": "string"}}}},
-                "provides": {"type": "array", "items": {
-                    "type": "object", "additionalProperties": False, "required":
-                    ["name", "contract", "input_schema", "output_schema"], "properties": {
-                        key: {"type": "string"} for key in
-                        ("name", "contract", "input_schema", "output_schema")}}},
+        **{
+            key: {"type": "string"}
+            for key in ("runtime", "kernel_api", "package_id", "version", "entrypoint")
+        },
+        "components": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "scope",
+                    "state_schema",
+                    "reload_mode",
+                    "config_schema",
+                    "provides",
+                ],
+                "properties": {
+                    **{
+                        key: {"type": "string"}
+                        for key in ("id", "scope", "reload_mode", "config_schema")
+                    },
+                    "state_schema": {"type": "integer"},
+                    "state_mode": {"const": "durable"},
+                    "checkpoint_schema": {"type": "integer", "const": 1},
+                    "requires": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["name", "contract"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "contract": {"type": "string"},
+                                "required": {"type": "boolean"},
+                                "startup_dependency": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "resources": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "max_frame_bytes": {
+                                "type": "integer",
+                                "minimum": 1024,
+                                "maximum": 262144,
+                            },
+                            "max_queue_items": {"type": "integer", "minimum": 0, "maximum": 256},
+                            **{
+                                key: {"type": "integer", "minimum": 1, "maximum": 256}
+                                for key in ("max_inflight", "max_state_inflight", "max_owned_tasks")
+                            },
+                        },
+                    },
+                    "lifecycle": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            key: {"type": "number", "exclusiveMinimum": 0, "maximum": 120}
+                            for key in (
+                                "prepare_timeout_s",
+                                "start_timeout_s",
+                                "drain_timeout_s",
+                                "stop_timeout_s",
+                            )
+                        },
+                    },
+                    "capabilities": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {"requests": {"type": "array", "items": {"type": "string"}}},
+                    },
+                    "provides": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["name", "contract", "input_schema", "output_schema"],
+                            "properties": {
+                                key: {"type": "string"}
+                                for key in ("name", "contract", "input_schema", "output_schema")
+                            },
+                        },
+                    },
+                },
             },
-        }},
+        },
     },
 }
 
 
 def digest_json(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                         allow_nan=False).encode("utf-8")
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
@@ -92,9 +154,38 @@ def _fail(code: str, message: str) -> None:
     raise ForestError(code, message, 422)
 
 
+def contract_range(contract: str) -> tuple[tuple[int, int], tuple[int, int] | None]:
+    """Explicit major.minor or >=major.minor,<major.minor, without implicit coercion."""
+    if not isinstance(contract, str) or len(contract) > 64:
+        _fail("INVALID_DEPENDENCY", "Dependency contract must be a version or bounded range")
+    exact = re.fullmatch(r"([1-9]\d*)\.(\d+)", contract)
+    if exact:
+        return (int(exact[1]), int(exact[2])), None
+    interval = re.fullmatch(r">=([1-9]\d*)\.(\d+),<([1-9]\d*)\.(\d+)", contract)
+    if interval:
+        lower, upper = (int(interval[1]), int(interval[2])), (int(interval[3]), int(interval[4]))
+        if lower < upper:
+            return lower, upper
+    _fail("INVALID_DEPENDENCY", "Supported contracts are major.minor or >=major.minor,<major.minor")
+
+
+def contract_matches(contract: str, provided: str) -> bool:
+    lower, upper = contract_range(contract)
+    version = tuple(map(int, provided.split(".")))
+    return version == lower if upper is None else lower <= version < upper
+
+
 def _signature(item: os.stat_result) -> tuple:
-    return (item.st_dev, item.st_ino, item.st_mode, item.st_size, item.st_mtime_ns,
-            item.st_ctime_ns, item.st_nlink, getattr(item, "st_reparse_tag", 0))
+    return (
+        item.st_dev,
+        item.st_ino,
+        item.st_mode,
+        item.st_size,
+        item.st_mtime_ns,
+        item.st_ctime_ns,
+        item.st_nlink,
+        getattr(item, "st_reparse_tag", 0),
+    )
 
 
 def _reject_link(info: os.stat_result) -> None:
@@ -106,7 +197,9 @@ def _capture(root: Path) -> dict[str, bytes]:
     try:
         return _capture_files(root)
     except OSError as exc:
-        raise ForestError("PACKAGE_CHANGED", "Package became unavailable during capture", 422) from exc
+        raise ForestError(
+            "PACKAGE_CHANGED", "Package became unavailable during capture", 422
+        ) from exc
 
 
 def _capture_files(root: Path) -> dict[str, bytes]:
@@ -141,9 +234,13 @@ def _capture_files(root: Path) -> dict[str, bytes]:
                 continue
             rel = path.relative_to(root).as_posix()
             stem = name.split(".", 1)[0].upper()
-            if (name.startswith(".env") or re.search(r'[<>:"\\|?*\x00-\x1f]', name)
-                    or name.endswith((".", " ")) or stem in {"CON", "PRN", "AUX", "NUL"}
-                    or re.fullmatch(r"(?:COM|LPT)[1-9]", stem)):
+            if (
+                name.startswith(".env")
+                or re.search(r'[<>:"\\|?*\x00-\x1f]', name)
+                or name.endswith((".", " "))
+                or stem in {"CON", "PRN", "AUX", "NUL"}
+                or re.fullmatch(r"(?:COM|LPT)[1-9]", stem)
+            ):
                 _fail("PACKAGE_FILE_REJECTED", "Package contains a private or nonportable path")
             if rel.casefold() in names:
                 _fail("PACKAGE_PATH_COLLISION", "Package has case-insensitive path collisions")
@@ -157,17 +254,23 @@ def _capture_files(root: Path) -> dict[str, bytes]:
                 _fail("PACKAGE_FILE_REJECTED", "Package entries must be ordinary single-link files")
             if info.st_size > MAX_FILE_BYTES or len(captured) >= MAX_PACKAGE_FILES:
                 _fail("PACKAGE_TOO_LARGE", "Package exceeds file limits")
-            flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_NONBLOCK", 0))
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
             with os.fdopen(os.open(path, flags), "rb") as stream:
                 before = os.fstat(stream.fileno())
                 if _signature(info) != _signature(before):
                     _fail("PACKAGE_CHANGED", "Package entry changed before being read")
                 content = stream.read(MAX_FILE_BYTES + 1)
                 after = os.fstat(stream.fileno())
-            if (_signature(before) != _signature(after)
-                    or _signature(after) != _signature(path.lstat())
-                    or len(content) != after.st_size):
+            if (
+                _signature(before) != _signature(after)
+                or _signature(after) != _signature(path.lstat())
+                or len(content) != after.st_size
+            ):
                 _fail("PACKAGE_CHANGED", "Package changed while being captured")
             total += len(content)
             if len(content) > MAX_FILE_BYTES or total > MAX_PACKAGE_BYTES:
@@ -186,11 +289,13 @@ def _schema(files: dict[str, bytes], reference: str) -> dict:
     if parts.is_absolute() or ".." in parts.parts or reference not in files:
         _fail("INVALID_SCHEMA", "Schema must be contained in the immutable package")
     try:
+
         def reject_constant(value):
             raise ValueError(f"Non-finite JSON number: {value}")
 
         value = json.loads(files[reference], parse_constant=reject_constant)
         Draft202012Validator.check_schema(value)
+
         # Resolve no network or external filesystem references during admission.
         def references(node):
             if isinstance(node, dict):
@@ -205,6 +310,7 @@ def _schema(files: dict[str, bytes], reference: str) -> dict:
             elif isinstance(node, list):
                 for item in node:
                     references(item)
+
         references(value)
         if not isinstance(value, dict):
             _fail("INVALID_SCHEMA", "Schema must be a JSON object")
@@ -223,7 +329,9 @@ def _manifest(files: dict[str, bytes]) -> dict:
     try:
         digest_json(manifest)
     except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
-        raise ForestError("INVALID_MANIFEST", "Manifest must contain finite JSON values", 422) from exc
+        raise ForestError(
+            "INVALID_MANIFEST", "Manifest must contain finite JSON values", 422
+        ) from exc
     if manifest.get("manifest_version") != 1 or manifest.get("runtime") != "python-worker":
         _fail("UNSUPPORTED_MANIFEST", "Only manifest v1 and python-worker are implemented")
     if manifest.get("kernel_api") != ">=1.0,<2.0":
@@ -241,14 +349,22 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _fail("ENTRYPOINT_MISSING", "Entrypoint is absent from package python/ directory")
     components = manifest.get("components")
     if not isinstance(components, list) or len(components) != 1:
-        _fail("UNSUPPORTED_COMPONENT_SET", "This runtime currently supports one component per package")
+        _fail(
+            "UNSUPPORTED_COMPONENT_SET", "This runtime currently supports one component per package"
+        )
     component = components[0]
     if not IDENTIFIER.fullmatch(component.get("id", "")) or component.get("scope") != "bot":
         _fail("INVALID_COMPONENT", "A valid Bot-scoped component is required")
     if component.get("state_schema") != 1 or component.get("reload_mode") != "drain":
         _fail("UNSUPPORTED_STATE_SCHEMA", "This slice supports state schema 1 and drain only")
-    if component.get("requires"):
-        _fail("DEPENDENCIES_NOT_IMPLEMENTED", "Cross-component service dependencies are not available yet")
+    dependencies = component.get("requires", [])
+    dependency_names = set()
+    for dependency in dependencies:
+        name = dependency["name"]
+        if not IDENTIFIER.fullmatch(name) or name in dependency_names:
+            _fail("INVALID_DEPENDENCY", "Dependency service names must be valid and unique")
+        contract_range(dependency["contract"])
+        dependency_names.add(name)
     _schema(files, component.get("config_schema"))
     services = component.get("provides", [])
     if not services or len(services) > 32:
@@ -259,21 +375,31 @@ def _manifest(files: dict[str, bytes]) -> dict:
         if not IDENTIFIER.fullmatch(name) or name in names:
             _fail("INVALID_SERVICES", "Service names must be valid and unique")
         names.add(name)
-        if not re.fullmatch(r"[1-9]\d*\.\d+", service.get("contract", "")):
+        if len(service.get("contract", "")) > 64 or not re.fullmatch(
+            r"[1-9]\d*\.\d+", service.get("contract", "")
+        ):
             _fail("INVALID_SERVICES", "A service contract major.minor is required")
         _schema(files, service.get("input_schema"))
         _schema(files, service.get("output_schema"))
     capabilities = component.get("capabilities", {}).get("requests", [])
-    if not isinstance(capabilities, list) or any(
-        item not in {"state.read", "state.write"} for item in capabilities
-    ) or len(capabilities) != len(set(capabilities)):
-        _fail("UNSUPPORTED_CAPABILITY", "This SDK slice supports explicit state.read/state.write requests")
+    allowed_capabilities = {"state.read", "state.write"} | {
+        "service.call:" + name for name in dependency_names
+    }
+    if any(item not in allowed_capabilities for item in capabilities) or len(capabilities) != len(
+        set(capabilities)
+    ):
+        _fail(
+            "UNSUPPORTED_CAPABILITY",
+            "Capabilities must be state.read/state.write or an explicitly declared service.call:<name>",
+        )
     for relative, source in files.items():
         if relative.endswith(".py"):
             try:
                 compile(source, relative, "exec", dont_inherit=True)
             except (SyntaxError, ValueError) as exc:
-                raise ForestError("PACKAGE_SYNTAX_ERROR", f"Invalid Python in {relative}", 422) from exc
+                raise ForestError(
+                    "PACKAGE_SYNTAX_ERROR", f"Invalid Python in {relative}", 422
+                ) from exc
     return manifest
 
 
@@ -300,8 +426,9 @@ class PackageSnapshot:
 
     def _verified_files(self) -> dict[str, bytes]:
         files = _capture(self.root)
-        actual = digest_json({name: hashlib.sha256(value).hexdigest()
-                              for name, value in files.items()})
+        actual = digest_json(
+            {name: hashlib.sha256(value).hexdigest() for name, value in files.items()}
+        )
         if actual != self.digest or _manifest(files) != self.manifest:
             _fail("PACKAGE_TAMPERED", "The immutable package no longer matches its captured digest")
         return files
@@ -327,18 +454,25 @@ class PackageCatalog:
         manifest = _manifest(captured)
         if captured != _capture(source):
             _fail("PACKAGE_CHANGED", "Package must remain stable throughout capture")
-        digest = digest_json({name: hashlib.sha256(value).hexdigest()
-                              for name, value in captured.items()})
+        digest = digest_json(
+            {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
+        )
         destination = self.root / digest.removeprefix("sha256:")
         with sqlite3.connect(self.root / "catalog.sqlite3", timeout=10) as db:
             db.execute("PRAGMA synchronous=FULL")
-            db.execute("CREATE TABLE IF NOT EXISTS packages (package_id TEXT, version TEXT, "
-                       "digest TEXT NOT NULL, PRIMARY KEY(package_id,version))")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS packages (package_id TEXT, version TEXT, "
+                "digest TEXT NOT NULL, PRIMARY KEY(package_id,version))"
+            )
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT digest FROM packages WHERE package_id=? AND version=?",
-                             (manifest["package_id"], manifest["version"])).fetchone()
+            row = db.execute(
+                "SELECT digest FROM packages WHERE package_id=? AND version=?",
+                (manifest["package_id"], manifest["version"]),
+            ).fetchone()
             if row is not None and row[0] != digest:
-                _fail("PACKAGE_VERSION_CONFLICT", "A package version cannot silently change content")
+                _fail(
+                    "PACKAGE_VERSION_CONFLICT", "A package version cannot silently change content"
+                )
             if not destination.exists():
                 staging = self.root / (".capture-" + uuid4().hex)
                 staging.mkdir(mode=0o700)
@@ -354,19 +488,24 @@ class PackageCatalog:
                             target.chmod(0o400)
                     staging.rename(destination)
                 except OSError as exc:
-                    raise ForestError("PACKAGE_STORAGE_ERROR", "Unable to publish package artifact",
-                                      500) from exc
+                    raise ForestError(
+                        "PACKAGE_STORAGE_ERROR", "Unable to publish package artifact", 500
+                    ) from exc
                 finally:
                     # Only this build's still-unpublished directory may be removed. Check the
                     # resolved parent and reparse status before any recursive Windows cleanup.
                     if staging.exists():
                         info = staging.lstat()
-                        if (not stat.S_ISLNK(info.st_mode)
-                                and not getattr(info, "st_reparse_tag", 0)
-                                and staging.resolve().parent == self.root.resolve()):
+                        if (
+                            not stat.S_ISLNK(info.st_mode)
+                            and not getattr(info, "st_reparse_tag", 0)
+                            and staging.resolve().parent == self.root.resolve()
+                        ):
                             shutil.rmtree(staging)
             snapshot = PackageSnapshot(destination, digest, manifest)
             snapshot.verify()
-            db.execute("INSERT OR IGNORE INTO packages VALUES (?,?,?)",
-                       (manifest["package_id"], manifest["version"], digest))
+            db.execute(
+                "INSERT OR IGNORE INTO packages VALUES (?,?,?)",
+                (manifest["package_id"], manifest["version"], digest),
+            )
         return snapshot

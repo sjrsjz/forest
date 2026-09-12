@@ -60,6 +60,7 @@ class WorkerLimits:
 
 
 StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
+ServiceHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 
 
 class PythonWorker:
@@ -71,10 +72,12 @@ class PythonWorker:
         *,
         limits: WorkerLimits | None = None,
         python_executable: str = sys.executable,
+        service_handler: ServiceHandler | None = None,
     ):
         self.package = snapshot
         self.identity = identity
         self.state_handler = state_handler
+        self.service_handler = service_handler
         self.limits = limits or WorkerLimits()
         self.python_executable = python_executable
         self.state = "NEW"
@@ -261,7 +264,7 @@ class PythonWorker:
                                 int(error.get("status", 500)),
                             )
                         )
-                elif message.get("kind") == "state":
+                elif message.get("kind") in {"state", "service"}:
                     request_id = message.get("id")
                     if (
                         not isinstance(request_id, str)
@@ -276,12 +279,12 @@ class PythonWorker:
                     if len(self._state_tasks) >= self.limits.max_state_inflight:
                         await self._writer.send(
                             {
-                                "kind": "state_result",
+                                "kind": message["kind"] + "_result",
                                 "id": request_id,
                                 "ok": False,
                                 "error": {
                                     "code": "OVERLOADED",
-                                    "message": "Host state gateway capacity exhausted",
+                                    "message": "Host RPC gateway capacity exhausted",
                                     "status": 429,
                                 },
                             }
@@ -302,8 +305,10 @@ class PythonWorker:
             asyncio.create_task(self.terminate())
 
     def _state_done(self, request_id: str) -> None:
-        self._state_tasks.pop(request_id, None)
+        task = self._state_tasks.pop(request_id, None)
         self._state_call_ids.pop(request_id, None)
+        if task is not None and not task.cancelled() and task.exception() is not None:
+            self._fail_pending()
 
     async def _close_state_calls(self, call_id: str) -> None:
         tasks = [
@@ -317,7 +322,8 @@ class PythonWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _handle_state(self, message: dict) -> None:
-        result = {"kind": "state_result", "id": message["id"]}
+        kind = message["kind"]
+        result = {"kind": kind + "_result", "id": message["id"]}
         try:
             call_id, action, payload = (
                 message.get("call_id"),
@@ -335,24 +341,38 @@ class PythonWorker:
                     "State request has no active host-owned invocation",
                     403,
                 )
-            expected = (
-                {"key"}
-                if action == "get"
-                else {"key", "value", "expected_revision", "operation_id"}
-                if action == "commit"
-                else None
-            )
-            if expected is None or not isinstance(payload, dict) or payload.keys() != expected:
-                raise ForestError(
-                    "STATE_REQUEST_INVALID", "State request contains unsupported fields", 422
+            if kind == "service":
+                expected = {"service", "payload", "contract_major", "operation_id", "timeout"}
+                if not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "SERVICE_REQUEST_INVALID",
+                        "Service request contains unsupported fields",
+                        422,
+                    )
+                if self.service_handler is None:
+                    raise ForestError("CAPABILITY_DENIED", "No service gateway is available", 403)
+                value = await self.service_handler(self.identity, call_id, payload)
+            else:
+                expected = (
+                    {"key"}
+                    if action == "get"
+                    else {"key", "value", "expected_revision", "operation_id"}
+                    if action == "commit"
+                    else None
                 )
-            if not isinstance(payload["key"], str) or not 1 <= len(payload["key"]) <= 128:
-                raise ForestError(
-                    "STATE_REQUEST_INVALID", "State key must contain 1 to 128 characters", 422
-                )
-            if self.state_handler is None:
-                raise ForestError("CAPABILITY_DENIED", "This worker has no state capability", 403)
-            value = await self.state_handler(self.identity, call_id, action, payload)
+                if expected is None or not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "STATE_REQUEST_INVALID", "State request contains unsupported fields", 422
+                    )
+                if not isinstance(payload["key"], str) or not 1 <= len(payload["key"]) <= 128:
+                    raise ForestError(
+                        "STATE_REQUEST_INVALID", "State key must contain 1 to 128 characters", 422
+                    )
+                if self.state_handler is None:
+                    raise ForestError(
+                        "CAPABILITY_DENIED", "This worker has no state capability", 403
+                    )
+                value = await self.state_handler(self.identity, call_id, action, payload)
             result.update(ok=True, value=value)
         except ForestError as error:
             result.update(ok=False, error=error.as_dict() | {"status": error.status})
@@ -370,12 +390,14 @@ class PythonWorker:
         except ForestError:
             await self._writer.send(
                 {
-                    "kind": "state_result",
+                    "kind": kind + "_result",
                     "id": message["id"],
                     "ok": False,
                     "error": {
-                        "code": "STATE_RESULT_INVALID",
-                        "message": "Host state result exceeds JSON protocol limits",
+                        "code": "STATE_RESULT_INVALID"
+                        if kind == "state"
+                        else "SERVICE_RESULT_INVALID",
+                        "message": "Host RPC result exceeds JSON protocol limits",
                         "status": 413,
                     },
                 }
