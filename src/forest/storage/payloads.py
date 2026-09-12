@@ -1,0 +1,330 @@
+"""Host-owned removable content with permanent identities and source closure.
+
+The caller supplies *trusted* source dependencies; this layer does not authorize
+Conversation input or grant a Worker access to arbitrary payload IDs. All `_in`
+methods require an existing transaction and the caller's normal ownership locks.
+Lock order: existing route/runtime/host/Conversation -> memory clock -> payload.
+Legacy repositories still have plaintext copies until their retention migration.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from psycopg.types.json import Jsonb
+
+from forest.errors import ForestError
+from forest.memory_types import SourceRef
+from forest.packages import digest_json
+from forest.storage.bot import BotStore, HostLease
+
+MAX_BYTES = 32 * 1024 * 1024
+MAX_SOURCES = 4096
+MAX_PARENTS = 256
+OWNER_KINDS = frozenset({
+    "memory.source", "memory.assertion", "memory.artifact", "memory.evidence",
+    "memory.query", "memory.embedding", "memory.vector", "memory.index",
+    "media.source", "media.capture", "media.variant", "model.snapshot", "model.manifest",
+    "model.request", "model.result", "agent.tool", "agent.observation", "agent.child",
+    "context.parts", "reply.parts", "delivery.payload", "delivery.request", "delivery.receipt",
+    "kernel.result", "state.value", "state.migration", "control.result", "control.config",
+    "control.audit", "control.outbox", "job.definition", "shell.arguments",
+})
+
+
+def _identifier(value: str) -> str:
+    if (not isinstance(value, str) or not value or len(value.encode()) > 256
+            or any(ord(c) < 32 for c in value)):
+        raise ForestError("INVALID_PAYLOAD_REFERENCE", "Invalid payload reference", 422)
+    return value
+
+
+def _json(value: Any) -> bytes:
+    try:
+        result = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False, allow_nan=False).encode()
+    except (ValueError, TypeError, OverflowError, RecursionError, UnicodeError) as exc:
+        raise ForestError("INVALID_PAYLOAD", "Payload must be bounded JSON", 422) from exc
+    if len(result) > MAX_BYTES:
+        raise ForestError("PAYLOAD_TOO_LARGE", "Payload exceeds storage limit", 413)
+    return result
+
+
+@dataclass(frozen=True)
+class PayloadRef:
+    payload_id: str
+    digest: str
+    encoding: str
+    byte_length: int
+    state: str
+
+
+class PayloadStore:
+    def __init__(self, store: BotStore):
+        self.store = store
+
+    async def lock_in(self, conn) -> dict:
+        await conn.execute("INSERT INTO public.bot_memory_clock(bot_id) VALUES (%s) "
+                           "ON CONFLICT DO NOTHING", (self.store.bot_id,))
+        return await (await conn.execute(
+            "SELECT * FROM public.bot_memory_clock WHERE bot_id=%s FOR UPDATE",
+            (self.store.bot_id,),
+        )).fetchone()
+
+    async def _epoch_in(self, conn, expected: int) -> dict:
+        if type(expected) is not int or expected < 0:
+            raise ForestError("INVALID_DELETION_EPOCH", "Expected deletion epoch is required", 422)
+        clock = await self.lock_in(conn)
+        if clock["deletion_epoch"] != expected:
+            raise ForestError("DELETION_CONFLICT", "Memory deletion epoch changed", 409)
+        return clock
+
+    async def epoch(self, lease: HostLease) -> int:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            clock = await self.lock_in(conn)
+            await self.store._host(conn, lease)
+            return clock["deletion_epoch"]
+
+    @staticmethod
+    def _sources(sources) -> tuple[SourceRef, ...]:
+        values = tuple(sources)
+        if len(values) > MAX_SOURCES or any(type(value) is not SourceRef for value in values):
+            raise ForestError("INVALID_SOURCE_MANIFEST", "Invalid source dependency set", 422)
+        return tuple(sorted(set(values)))
+
+    async def _check_sources_in(self, conn, sources: tuple[SourceRef, ...]):
+        if not sources:
+            return
+        rows = await (await conn.execute(
+            "SELECT source_unit_id,part_id FROM public.bot_payload_suppression "
+            "WHERE bot_id=%s AND source_unit_id=ANY(%s)",
+            (self.store.bot_id, sorted({s.source_unit_id for s in sources})),
+        )).fetchall()
+        targets = {(row["source_unit_id"], row["part_id"]) for row in rows}
+        for source in sources:
+            if any(unit == source.source_unit_id and
+                   (part == "*" or source.part_id == "*" or part == source.part_id)
+                   for unit, part in targets):
+                raise ForestError("SOURCE_SUPPRESSED", "A source dependency was removed", 409)
+
+    async def _header_in(self, conn, payload_id: str) -> dict:
+        _identifier(payload_id)
+        row = await (await conn.execute(
+            "SELECT * FROM public.bot_payload_headers WHERE bot_id=%s AND payload_id=%s",
+            (self.store.bot_id, payload_id),
+        )).fetchone()
+        if row is None:
+            raise ForestError("PAYLOAD_NOT_FOUND", "Payload does not exist in this Bot", 404)
+        return row
+
+    async def require_available_in(self, conn, payload_ids, *, expected_deletion_epoch: int):
+        await self._epoch_in(conn, expected_deletion_epoch)
+        ids = tuple(payload_ids)
+        if len(ids) > MAX_PARENTS:
+            raise ForestError("PAYLOAD_DEPENDENCY_LIMIT", "Too many payload dependencies", 422)
+        for payload_id in sorted(set(ids)):
+            row = await self._header_in(conn, payload_id)
+            if row["state"] != "ACTIVE":
+                raise ForestError("PAYLOAD_ERASED", "Payload content is no longer available", 410)
+            await self._check_sources_in(conn, tuple(SourceRef(**s) for s in row["manifest"]["sources"]))
+            exists = await (await conn.execute(
+                "SELECT 1 FROM public.bot_payload_bodies WHERE bot_id=%s AND payload_id=%s",
+                (self.store.bot_id, payload_id),
+            )).fetchone()
+            if not exists:
+                raise ForestError("PAYLOAD_INCOMPLETE", "Payload body was not admitted", 409)
+
+    async def _put_in(self, conn, *, owner_kind, owner_id, content, encoding, sources,
+                      parents, expected_deletion_epoch) -> PayloadRef:
+        if owner_kind not in OWNER_KINDS:
+            raise ForestError("INVALID_PAYLOAD_OWNER", "Unsupported payload owner kind", 422)
+        _identifier(owner_id)
+        if type(content) is not bytes or len(content) > MAX_BYTES:
+            raise ForestError("PAYLOAD_TOO_LARGE", "Payload exceeds storage limit", 413)
+        source_set = self._sources(sources)
+        parent_set = tuple(sorted(set(_identifier(p) for p in parents)))
+        if len(parent_set) > MAX_PARENTS:
+            raise ForestError("PAYLOAD_DEPENDENCY_LIMIT", "Too many payload dependencies", 422)
+        # Serialize all content admissions and suppressions. Parent references
+        # are flattened once, so deleting a source finds the transitive closure
+        # without graph traversal while holding database locks.
+        await self.lock_in(conn)
+        parent_sources = []
+        for parent in parent_set:
+            row = await self._header_in(conn, parent)
+            parent_sources.extend(SourceRef(**s) for s in row["manifest"]["sources"])
+        source_set = self._sources((*source_set, *parent_sources))
+        manifest = {"sources": [asdict(s) for s in source_set], "parents": list(parent_set)}
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        input_digest = digest_json([owner_kind, owner_id, encoding, digest, manifest])
+        payload_id = "payload:" + digest_json([self.store.bot_id, owner_kind, owner_id])
+        row = await (await conn.execute(
+            "SELECT * FROM public.bot_payload_headers WHERE bot_id=%s AND payload_id=%s",
+            (self.store.bot_id, payload_id),
+        )).fetchone()
+        if row:
+            if row["input_digest"] != input_digest:
+                raise ForestError("PAYLOAD_CONFLICT", "Payload owner already has different content", 409)
+            # A receipt survives deletion. Returning its state never restores a
+            # body and does not authorize reading or dispatching old content.
+            return PayloadRef(payload_id, row["digest"], row["encoding"], row["byte_length"], row["state"])
+        await self._epoch_in(conn, expected_deletion_epoch)
+        await self.require_available_in(conn, parent_set, expected_deletion_epoch=expected_deletion_epoch)
+        await self._check_sources_in(conn, source_set)
+        if payload_id in parent_set:
+            raise ForestError("PAYLOAD_DEPENDENCY_CYCLE", "Payload cannot depend on itself", 422)
+        await conn.execute(
+            "INSERT INTO public.bot_payload_headers(bot_id,payload_id,owner_kind,owner_id,encoding,digest,"
+            "byte_length,input_digest,manifest,accepted_deletion_epoch) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (self.store.bot_id, payload_id, owner_kind, owner_id, encoding, digest, len(content),
+             input_digest, Jsonb(manifest), expected_deletion_epoch),
+        )
+        for source in source_set:
+            await conn.execute(
+                "INSERT INTO public.bot_payload_sources(bot_id,payload_id,source_unit_id,source_revision,part_id) "
+                "VALUES (%s,%s,%s,%s,%s)",
+                (self.store.bot_id, payload_id, source.source_unit_id, source.source_revision, source.part_id),
+            )
+        for parent in parent_set:
+            await conn.execute(
+                "INSERT INTO public.bot_payload_derivations(bot_id,payload_id,parent_payload_id) VALUES (%s,%s,%s)",
+                (self.store.bot_id, payload_id, parent),
+            )
+        await conn.execute(
+            "INSERT INTO public.bot_payload_bodies(bot_id,payload_id,content) VALUES (%s,%s,%s)",
+            (self.store.bot_id, payload_id, content),
+        )
+        return PayloadRef(payload_id, digest, encoding, len(content), "ACTIVE")
+
+    async def put_json_in(self, conn, *, owner_kind, owner_id, value, sources=(), parents=(),
+                          expected_deletion_epoch: int) -> PayloadRef:
+        return await self._put_in(conn, owner_kind=owner_kind, owner_id=owner_id, content=_json(value),
+                                  encoding="json", sources=sources, parents=parents,
+                                  expected_deletion_epoch=expected_deletion_epoch)
+
+    async def put_bytes_in(self, conn, *, owner_kind, owner_id, value: bytes, sources=(), parents=(),
+                           expected_deletion_epoch: int) -> PayloadRef:
+        return await self._put_in(conn, owner_kind=owner_kind, owner_id=owner_id, content=value,
+                                  encoding="bytes", sources=sources, parents=parents,
+                                  expected_deletion_epoch=expected_deletion_epoch)
+
+    async def put_json(self, lease: HostLease, **kwargs) -> PayloadRef:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            result = await self.put_json_in(conn, **kwargs)
+            await self.store._host(conn, lease)
+            return result
+
+    async def put_bytes(self, lease: HostLease, **kwargs) -> PayloadRef:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            result = await self.put_bytes_in(conn, **kwargs)
+            await self.store._host(conn, lease)
+            return result
+
+    async def read_bytes_in(self, conn, payload_id: str, *, expected_deletion_epoch: int) -> bytes:
+        await self.require_available_in(conn, (payload_id,), expected_deletion_epoch=expected_deletion_epoch)
+        row = await (await conn.execute(
+            "SELECT content FROM public.bot_payload_bodies WHERE bot_id=%s AND payload_id=%s",
+            (self.store.bot_id, payload_id),
+        )).fetchone()
+        return bytes(row["content"])
+
+    async def read_json_in(self, conn, payload_id: str, *, expected_deletion_epoch: int) -> Any:
+        data = await self.read_bytes_in(conn, payload_id, expected_deletion_epoch=expected_deletion_epoch)
+        header = await self._header_in(conn, payload_id)
+        if header["encoding"] != "json":
+            raise ForestError("PAYLOAD_ENCODING_MISMATCH", "Payload is not JSON", 409)
+        return json.loads(data)
+
+    async def read_json(self, lease: HostLease, payload_id: str, *, expected_deletion_epoch: int):
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            result = await self.read_json_in(conn, payload_id, expected_deletion_epoch=expected_deletion_epoch)
+            await self.store._host(conn, lease)
+            return result
+
+    async def forget_sources(self, lease: HostLease, operation_id: str, targets,
+                              *, expected_deletion_epoch: int) -> dict:
+        """Internal storage primitive, not yet a public complete memory-forget API.
+
+        Revisions never escape a permanent suppression. This erases only bodies
+        governed by this repository; legacy copies remain until migrated.
+        """
+        _identifier(operation_id)
+        refs = self._sources(targets)
+        values = [{"source_unit_id": unit, "part_id": part}
+                  for unit, part in sorted({(s.source_unit_id, s.part_id) for s in refs})]
+        if not values:
+            raise ForestError("INVALID_FORGET_TARGET", "At least one source is required", 422)
+        digest = digest_json([expected_deletion_epoch, values])
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            await self.lock_in(conn)
+            previous = await (await conn.execute(
+                "SELECT * FROM public.bot_payload_forget_requests WHERE bot_id=%s AND operation_id=%s",
+                (self.store.bot_id, operation_id),
+            )).fetchone()
+            if previous:
+                if previous["input_digest"] != digest:
+                    raise ForestError("FORGET_CONFLICT", "Forget operation has different targets", 409)
+                result = {"operation_id": operation_id, "deletion_epoch": previous["deletion_epoch"]}
+            else:
+                clock = await self._epoch_in(conn, expected_deletion_epoch)
+                epoch = clock["deletion_epoch"] + 1
+                await conn.execute(
+                    "INSERT INTO public.bot_payload_forget_requests(bot_id,operation_id,input_digest,targets,"
+                    "deletion_epoch) VALUES (%s,%s,%s,%s,%s)",
+                    (self.store.bot_id, operation_id, digest, Jsonb(values), epoch),
+                )
+                for target in values:
+                    await conn.execute(
+                        "INSERT INTO public.bot_payload_suppression(bot_id,source_unit_id,part_id,operation_id,"
+                        "deletion_epoch) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (self.store.bot_id, target["source_unit_id"], target["part_id"], operation_id, epoch),
+                    )
+                await conn.execute(
+                    "UPDATE public.bot_memory_clock SET deletion_epoch=%s,fact_revision=fact_revision+1 "
+                    "WHERE bot_id=%s", (epoch, self.store.bot_id),
+                )
+                await conn.execute(
+                    "UPDATE public.bot_payload_headers h SET state='REVOKED',forget_operation_id=%s "
+                    "WHERE h.bot_id=%s AND h.state='ACTIVE' AND EXISTS(SELECT 1 FROM public.bot_payload_sources s,"
+                    "jsonb_array_elements(%s::jsonb) t WHERE s.bot_id=h.bot_id AND s.payload_id=h.payload_id "
+                    "AND s.source_unit_id=t->>'source_unit_id' "
+                    "AND (s.part_id='*' OR t->>'part_id'='*' OR s.part_id=t->>'part_id'))",
+                    (operation_id, self.store.bot_id, Jsonb(values)),
+                )
+                result = {"operation_id": operation_id, "deletion_epoch": epoch}
+                await self.store._event(conn, "memory.payload_sources_revoked", operation_id, result)
+            await self.store._host(conn, lease)
+            return result
+
+    async def scrub(self, lease: HostLease, *, limit: int = 64) -> dict:
+        """One bounded, atomic database-only batch; host takeover needs no I/O lease."""
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ForestError("INVALID_SCRUB_LIMIT", "Scrub limit must be 1 to 256", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            await self.lock_in(conn)
+            rows = await (await conn.execute(
+                "SELECT payload_id FROM public.bot_payload_headers WHERE bot_id=%s AND state='REVOKED' "
+                "ORDER BY payload_id LIMIT %s FOR UPDATE", (self.store.bot_id, limit),
+            )).fetchall()
+            ids = [row["payload_id"] for row in rows]
+            if ids:
+                await conn.execute("DELETE FROM public.bot_payload_bodies WHERE bot_id=%s AND payload_id=ANY(%s)",
+                                   (self.store.bot_id, ids))
+                await conn.execute("UPDATE public.bot_payload_headers SET state='SCRUBBED' "
+                                   "WHERE bot_id=%s AND payload_id=ANY(%s)", (self.store.bot_id, ids))
+            remaining = await (await conn.execute(
+                "SELECT count(*) AS count FROM public.bot_payload_headers WHERE bot_id=%s AND state='REVOKED'",
+                (self.store.bot_id,),
+            )).fetchone()
+            await self.store._host(conn, lease)
+            return {"removed": len(ids), "remaining": remaining["count"],
+                    "scope": "managed_payload_bodies", "storage_reclaim_required": True}

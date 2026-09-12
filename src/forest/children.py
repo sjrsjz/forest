@@ -33,9 +33,14 @@ class ChildScheduler:
             self.task = asyncio.create_task(self._loop(), name=self.owner_id)
 
     async def _loop(self):
-        while True:
+        while not self.closed:
             try:
                 pending = await self.store.pending(self.host_lease())
+                # A dependency may consume cancellation while completing its
+                # read. The durable close flag still fences this returned work;
+                # close already captured the set of workers it must reclaim.
+                if self.closed:
+                    return
                 for row in pending:
                     identifier = row["child_id"]
                     if identifier in self.workers or len(self.workers) >= 2:

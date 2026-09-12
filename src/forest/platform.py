@@ -89,6 +89,7 @@ class BindingRuntime:
         self.packages = dict(packages)
         self.bindings = BindingStore(bot.store)
         self.messages = MessageStore(bot.store, self.bindings)
+        self.memory_sources = self.messages._memory_sources()
         self.delivery = DeliveryStore(bot.store, self.bindings)
         self.connections: dict[str, Connection] = {}
         self.errors: dict[str, str] = {}
@@ -187,6 +188,7 @@ class BindingRuntime:
                 asyncio.create_task(self.run_forever(), name="binding-supervisor"),
                 asyncio.create_task(self.delivery_worker.run_forever(), name="binding-delivery"),
                 asyncio.create_task(self._health_loop(), name="binding-health"),
+                asyncio.create_task(self._memory_backfill_loop(), name="memory-source-backfill"),
             ]
             if self.scheduler.task is not None:
                 self._tasks.append(self.scheduler.task)
@@ -212,6 +214,35 @@ class BindingRuntime:
                 self._fatal("PLATFORM_CHILD_FAILED")
                 return
             await asyncio.sleep(0.1)
+
+    async def _memory_backfill_loop(self):
+        """Incremental legacy source recovery; no model or network dependency.
+
+        Each bounded repository batch validates current ownership. Memory
+        recovery errors remain visible and retry without stopping live input.
+        The task belongs to the platform supervisor and is cancelled on close.
+        """
+        while not self._closed.is_set():
+            delay = 10
+            try:
+                async with asyncio.timeout(5):
+                    result = await self.memory_sources.backfill(self.kernel._authority(), limit=32)
+                self.errors.pop("memory_sources", None)
+                delay = 0.25 if result["more_possible"] else 5
+            except asyncio.CancelledError:
+                raise
+            except ForestError as exc:
+                if exc.code in _LOST_AUTHORITY:
+                    raise
+                self.errors["memory_sources"] = exc.code[:128]
+            except (TimeoutError, psycopg.Error, PoolTimeout):
+                self.errors["memory_sources"] = "MEMORY_SOURCE_BACKFILL_UNAVAILABLE"
+            except Exception:
+                self.errors["memory_sources"] = "MEMORY_SOURCE_BACKFILL_FAILED"
+            try:
+                await asyncio.wait_for(self._closed.wait(), delay)
+            except TimeoutError:
+                pass
 
     async def ensure_components(self, component_ids=None):
         ids = tuple(self.packages) if component_ids is None else tuple(component_ids)

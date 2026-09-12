@@ -75,6 +75,18 @@ class MessageStore:
         self.bindings = bindings
         self.context_token_budget = context_token_budget
 
+    def _memory_sources(self):
+        from forest.storage.memory_sources import MemorySourceStore
+
+        return MemorySourceStore(self)
+
+    async def _register_memory_input(self, conn, conversation, event_id, *, reconstructed=False):
+        inbox = await (await conn.execute(
+            "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+            (self.store.bot_id, event_id),
+        )).fetchone()
+        return await self._memory_sources().register_input_in(conn, conversation, inbox, reconstructed=reconstructed)
+
     def _normalized(self, raw: dict) -> dict:
         value = _json(raw)
         if not isinstance(value, dict):
@@ -220,6 +232,7 @@ class MessageStore:
             if existing:
                 if existing["input_digest"] != input_digest:
                     raise ForestError("INGEST_CONFLICT", "Platform message identity was reused", 409)
+                await self._register_memory_input(conn, conversation, event_id, reconstructed=True)
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
                 return {"conversation_id": conversation_id, "event_id": event_id,
                         "ingress_seq": existing["ingress_seq"], "duplicate": True,
@@ -276,6 +289,7 @@ class MessageStore:
             )
             if decision is not None:
                 await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
+            await self._register_memory_input(conn, conversation, event_id)
             await self.store._event(conn, "conversation.input", event_id,
                                     {"conversation_id": conversation_id, "ingress_seq": seq})
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
@@ -318,6 +332,7 @@ class MessageStore:
         if existing:
             if existing["input_digest"] != digest or existing["origin"] != "job":
                 raise ForestError("INGEST_CONFLICT", "Internal Job identity was reused", 409)
+            await self._register_memory_input(conn, conversation, event_id, reconstructed=True)
             return {"event_id": event_id, "trigger_id": trigger_id,
                     "conversation_id": conversation_id, "ingress_seq": existing["ingress_seq"]}
         if conversation["next_ingress_seq"] - conversation["context_applied_seq"] > 10000:
@@ -339,6 +354,7 @@ class MessageStore:
         )
         await self._classify_in(conn, conversation_id, event_id, "TRIGGER", "job-trigger-v1",
                                 occurrence["occurrence_id"])
+        await self._register_memory_input(conn, conversation, event_id)
         await self.store._event(conn, "job.trigger_enqueued", event_id,
                                 {"occurrence_id": occurrence["occurrence_id"],
                                  "conversation_id": conversation_id, "ingress_seq": seq})
@@ -969,6 +985,7 @@ class MessageStore:
             "WHERE bot_id=%s AND conversation_id=%s",
             (end, revision, self.store.bot_id, actor.conversation_id),
         )
+        await self._memory_sources().accept_batch_in(conn, conversation, batch)
         budget_ok = await self._compact(conn, actor.conversation_id)
         await self.store._event(conn, "conversation.input_applied", operation_id,
                                 {"conversation_id": actor.conversation_id, "input_batch_id": batch_id})
@@ -1215,6 +1232,7 @@ class MessageStore:
         if existing:
             if existing["input_digest"] != value_digest:
                 raise ForestError("REPLY_CONFLICT", "Reply operation was already used", 409)
+            await self._memory_sources().register_reply_in(conn, conversation, existing, reconstructed=True)
             await self._actor_final(conn, actor, binding)
             return existing
         session = await self._session(conn, conversation)
@@ -1259,6 +1277,7 @@ class MessageStore:
             "kind,reply_id,estimated_tokens) VALUES (%s,%s,%s,%s,0,'REPLY',%s,%s)",
             (self.store.bot_id, actor.conversation_id, reply_id, revision, reply_id, _tokens(parts)),
         )
+        await self._memory_sources().register_reply_in(conn, conversation, reply)
         await conn.execute(
             "UPDATE public.bot_conversation_triggers SET status='ANSWERED',answered_reply_id=%s "
             "WHERE bot_id=%s AND claimed_run_id=%s AND status='CLAIMED'",

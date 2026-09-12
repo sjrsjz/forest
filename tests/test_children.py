@@ -342,6 +342,48 @@ async def test_real_http_child_scheduler_closes_resources_and_parent_alone_sends
     assert scheduler.task.done() and not scheduler.workers
 
 
+async def test_scheduler_close_fences_scan_result_after_dependency_consumes_cancellation():
+    entered = asyncio.Event()
+    executed = []
+    scans = 0
+
+    async def pending(host):
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Model the pool/driver boundary returning a completed result
+                # after cancellation was delivered during its internal wait.
+                return [{"child_id": "child-returned-during-close"}]
+        return []
+
+    async def execute(child_id):
+        executed.append(child_id)
+        await asyncio.Event().wait()
+
+    scheduler = ChildScheduler(
+        SimpleNamespace(pending=pending), lambda: None, None, poll_interval=0.01
+    )
+    scheduler._execute = execute
+    try:
+        await scheduler.start()
+        await asyncio.wait_for(entered.wait(), 2)
+        async with asyncio.timeout(1):
+            await scheduler.close()
+        assert scheduler.task.done() and not scheduler.workers
+        assert scans == 1 and executed == []
+    finally:
+        # Even the pre-fix implementation creates an unowned late worker. The
+        # regression test must reclaim that task when its assertion fails.
+        tasks = [scheduler.task, *scheduler.workers.values()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def test_child_multimodal_input_uses_selected_immutable_parent_capture(messages):
     from test_media import configure, context, media_server, picture
     from test_media import respond as serve_image
