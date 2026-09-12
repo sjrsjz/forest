@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.management.authority import WebAuthority
 from forest.management.catalog import BotCatalog
+from forest.management.packages import PackageRegistry
 from forest.packages import PackageCatalog, PackageSnapshot
 from forest.platform import BindingRuntime
 from forest.storage.bot import BotStore
@@ -61,6 +63,10 @@ class BotFleet:
         self.bots: dict[str, ManagedBot] = {}
         self.errors: dict[str, str] = {}
         self.packages: dict[str, PackageSnapshot] = {}
+        self.package_metadata: dict[str, dict] = {}
+        self.artifacts = PackageCatalog(data_dir / "artifacts")
+        self.registry = PackageRegistry(catalog, self.artifacts)
+        self.package_errors: dict[str, str] = {}
         self.infrastructure_packages: dict[str, PackageSnapshot] = {}
         self.group_slots = asyncio.Semaphore(32)
         self._closed = False
@@ -132,20 +138,30 @@ class BotFleet:
             )
         )
         self.packages[snapshot.digest] = snapshot
+        self.package_metadata[snapshot.digest] = await asyncio.to_thread(self.describe_package, snapshot)
         for name in ("onebot", "reply"):
             package = await asyncio.to_thread(
                 PackageCatalog(self.data_dir / "artifacts").build,
                 Path(__file__).resolve().parents[1] / "builtin" / name,
             )
             self.infrastructure_packages[package.component["id"]] = package
+        for digest in await self.registry.registered():
+            try:
+                package = await asyncio.to_thread(self.artifacts.get, digest)
+                self.package_metadata[digest] = await asyncio.to_thread(self.describe_package, package)
+                self.packages[digest] = package
+            except (ForestError, OSError) as error:
+                self.package_errors[digest] = self._code(error, "PACKAGE_UNAVAILABLE")
 
-    def available_packages(self) -> list[dict]:
-        return [
-            {
+    @staticmethod
+    def describe_package(p: PackageSnapshot) -> dict:
+        return {
                 "package_digest": p.digest,
                 "package_id": p.manifest["package_id"],
                 "version": p.manifest["version"],
                 "component_id": p.component["id"],
+                "state_schema": p.component["state_schema"],
+                "state_migrations": p.component.get("state_migrations", []),
                 "config_schema": p.schema(p.component["config_schema"]),
                 "grants": p.component.get("capabilities", {}).get("requests", []),
                 "services": [
@@ -153,8 +169,9 @@ class BotFleet:
                     for s in p.component["provides"]
                 ],
             }
-            for p in self.packages.values()
-        ]
+
+    def available_packages(self) -> list[dict]:
+        return copy.deepcopy(list(self.package_metadata.values()))
 
     def validate(self, component_id: str, values: dict) -> None:
         if set(values) != {"package_digest", "config", "grants"}:
@@ -164,7 +181,7 @@ class BotFleet:
         snapshot = self.packages.get(values["package_digest"])
         if snapshot is None or snapshot.component["id"] != component_id:
             raise ForestError("PACKAGE_UNAVAILABLE", "Select an available component package", 422)
-        if not Draft202012Validator(snapshot.schema(snapshot.component["config_schema"])).is_valid(
+        if not Draft202012Validator(self.package_metadata[snapshot.digest]["config_schema"]).is_valid(
             values["config"]
         ):
             raise ForestError(
@@ -255,6 +272,15 @@ class BotFleet:
         for revision in desired:
             component, number = revision["component_id"], revision["revision"]
             loaded = bot.kernel.components.get(component)
+            if (loaded is None or not loaded.worker.alive) and revision.get("effective_values") and revision["effective_revision"] != number:
+                try:
+                    await self._activate(bot, component, revision["effective_revision"],
+                                         revision["effective_values"], recover_effective=True)
+                    loaded = bot.kernel.components.get(component)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    bot.errors[component] = self._code(exc, "RECOVERY_FAILED")
             if (
                 bot.applied.get(component) == number
                 and loaded is not None
@@ -268,18 +294,7 @@ class BotFleet:
                 continue
             try:
                 values = revision["values"]
-                self.validate(component, values)
-                operation_id = "config-activate:" + str(uuid4())
-                await bot.control.bind_activation(
-                    bot.kernel._authority(), component, number, operation_id
-                )
-                await bot.kernel.install(
-                    self.packages[values["package_digest"]],
-                    config=values["config"],
-                    grants=frozenset(values["grants"]),
-                    operation_id=operation_id,
-                )
-                bot.applied[component] = number
+                await self._activate(bot, component, number, values)
                 bot.errors.pop(component, None)
                 bot.retries.pop(component, None)
             except asyncio.CancelledError:
@@ -298,6 +313,17 @@ class BotFleet:
                     asyncio.get_running_loop().time() + self._delay(failures),
                 )
         self.errors.pop(bot.store.bot_id, None)
+
+    async def _activate(self, bot, component, revision, values, *, recover_effective=False):
+        self.validate(component, values)
+        operation_id = "config-activate:" + str(uuid4())
+        await bot.control.bind_activation(
+            bot.kernel._authority(), component, revision, operation_id,
+            **({"recover_effective": True} if recover_effective else {}),
+        )
+        await bot.kernel.install(self.packages[values["package_digest"]],
+            config=values["config"], grants=frozenset(values["grants"]), operation_id=operation_id)
+        bot.applied[component] = revision
 
     async def _reconcile(self, bot: ManagedBot) -> None:
         while not self._closed:

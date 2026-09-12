@@ -14,7 +14,7 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.bot import BotStore, HostLease
 
-ACTIONS = ("config.read", "config.plan", "config.apply", "service.invoke",
+ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "service.invoke",
            "binding.create", "binding.read", "binding.plan", "binding.apply",
            "message.read", "message.cancel", "delivery.reconcile")
 _REVISION_CLAIMS = frozenset(
@@ -219,12 +219,37 @@ class BotControl:
                 )
             ).fetchone()
             await self._time(conn, claims)
-            return row or {
+            result = row or {
                 "desired_revision": 0,
                 "effective_revision": 0,
                 "desired_values": None,
                 "effective_values": None,
             }
+            operations = await (await conn.execute(
+                "SELECT operation_id,phase,error_code,created_at,op_epoch,candidate_generation_id "
+                "FROM public.bot_lifecycle_operations WHERE bot_id=%s AND component_id=%s "
+                "ORDER BY created_at DESC,operation_id DESC LIMIT 10",
+                (self.store.bot_id, component_id),
+            )).fetchall()
+            result["operations"] = [
+                {**op, "created_at": op["created_at"].isoformat()} for op in operations
+            ]
+            await self._time(conn, claims)
+            return result
+
+    async def history(self, ticket: dict, operation_id: str, payload: dict) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            claims = await self._guard(conn, ticket, "config.history", operation_id, payload)
+            rows = await (await conn.execute(
+                "SELECT r.revision,r.previous_revision,r.values,r.operation_id,w.subject_id,w.created_at "
+                "FROM public.bot_config_revisions r JOIN public.bot_web_operations w "
+                "USING(bot_id,operation_id) WHERE r.bot_id=%s AND r.component_id=%s "
+                "AND r.revision < %s ORDER BY r.revision DESC LIMIT 51",
+                (self.store.bot_id, payload["component_id"], payload["before"]),
+            )).fetchall()
+            await self._time(conn, claims)
+            return {"revisions": [{**r, "created_at": r["created_at"].isoformat()} for r in rows[:50]],
+                    "next_before": rows[49]["revision"] if len(rows) > 50 else None}
 
     async def plan(self, ticket: dict, operation_id: str, payload: dict) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -334,15 +359,18 @@ class BotControl:
             await self.store._host(conn, lease)
             return await (
                 await conn.execute(
-                    "SELECT r.*,h.effective_revision FROM public.bot_config_heads h "
+                    "SELECT r.*,h.effective_revision,e.values AS effective_values FROM public.bot_config_heads h "
                     "JOIN public.bot_config_revisions r ON (r.bot_id,r.component_id,r.revision)="
-                    "(h.bot_id,h.component_id,h.desired_revision) WHERE h.bot_id=%s ORDER BY h.component_id",
+                    "(h.bot_id,h.component_id,h.desired_revision) "
+                    "LEFT JOIN public.bot_config_revisions e ON (e.bot_id,e.component_id,e.revision)="
+                    "(h.bot_id,h.component_id,h.effective_revision) WHERE h.bot_id=%s ORDER BY h.component_id",
                     (self.store.bot_id,),
                 )
             ).fetchall()
 
     async def bind_activation(
-        self, lease: HostLease, component_id: str, revision: int, operation_id: str
+        self, lease: HostLease, component_id: str, revision: int, operation_id: str,
+        *, recover_effective: bool = False,
     ) -> None:
         async with self.store.pool.connection() as conn, conn.transaction():
             runtime = await self.store._runtime(conn)
@@ -355,7 +383,7 @@ class BotControl:
                     (self.store.bot_id, component_id, revision),
                 )
             ).fetchone()
-            if saved is None or head["desired_revision"] != revision:
+            if saved is None or head["effective_revision" if recover_effective else "desired_revision"] != revision:
                 raise ForestError(
                     "CONFIGURATION_SUPERSEDED", "A newer configuration is pending", 409
                 )
@@ -369,9 +397,9 @@ class BotControl:
                     403,
                 )
             await conn.execute(
-                "INSERT INTO public.bot_config_activations(bot_id,operation_id,component_id,revision,host_incarnation) "
-                "VALUES (%s,%s,%s,%s,%s)",
-                (self.store.bot_id, operation_id, component_id, revision, lease.incarnation),
+                "INSERT INTO public.bot_config_activations(bot_id,operation_id,component_id,revision,host_incarnation,recover_effective) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (self.store.bot_id, operation_id, component_id, revision, lease.incarnation, recover_effective),
             )
             await self.store._host(conn, lease, runtime)
 

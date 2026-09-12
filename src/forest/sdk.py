@@ -300,6 +300,16 @@ class Plugin:
         self.ctx = ctx
         self._snapshot = restored_state
 
+    async def migrate(self, state: dict, *, from_schema: int, to_schema: int) -> dict:
+        """Pure durable values transformation; no live CallContext or state writes.
+
+        Revisions and deleted-key fences belong to the host. A version transition
+        must be declared in the immutable manifest and implemented explicitly.
+        """
+        if from_schema != to_schema:
+            raise ForestError("STATE_MIGRATION_MISSING", "No state migration is implemented", 422)
+        return state
+
     async def start(self) -> None:
         pass
 

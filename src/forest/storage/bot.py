@@ -18,6 +18,7 @@ from importlib.resources import files
 from typing import Any
 from uuid import uuid4
 
+from jsonschema import Draft202012Validator
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -466,6 +467,9 @@ class BotStore:
         config: dict | None = None,
         instance_id: str | None = None,
         capability_grants: tuple[str, ...] | list[str] = (),
+        state_schema: int = 1,
+        state_value_schema: dict | None = None,
+        state_migrations: list[dict] | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -482,6 +486,18 @@ class BotStore:
                 "INVALID_GRANTS", "Generation capability grants must be bounded names", status=400
             )
         grants = sorted(set(capability_grants))
+        if type(state_schema) is not int or state_schema < 1:
+            raise ForestError("STATE_SCHEMA_INVALID", "State schema must be a positive integer", 422)
+        state_value_schema = json.loads(json.dumps(state_value_schema or {}, allow_nan=False))
+        state_migrations = json.loads(json.dumps(state_migrations or [], allow_nan=False))
+        if not isinstance(state_migrations, list) or len(state_migrations) > 64 or any(
+            not isinstance(item, dict) or set(item) != {"from_schema", "to_schema"}
+            or type(item["from_schema"]) is not int or item["from_schema"] < 1
+            or type(item["to_schema"]) is not int or item["to_schema"] != state_schema
+            or item["from_schema"] == state_schema for item in state_migrations
+        ):
+            raise ForestError("STATE_MIGRATION_INVALID", "Invalid generation migration contract", 422)
+        Draft202012Validator.check_schema(state_value_schema)
         async with self.pool.connection() as conn, conn.transaction():
             await self._identity(conn)
             await conn.execute(
@@ -495,6 +511,10 @@ class BotStore:
             )
             await self._route(conn, component_id)
             await self._host(conn, lease)
+            await conn.execute(
+                "INSERT INTO public.bot_component_state_heads(bot_id,component_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (self.bot_id, component_id),
+            )
             existing = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_generations WHERE bot_id=%s AND generation_id=%s",
@@ -511,6 +531,9 @@ class BotStore:
                 "host_incarnation": lease.incarnation,
                 "host_owner_epoch": lease.owner_epoch,
                 "capability_grants": grants,
+                "state_schema": state_schema,
+                "state_value_schema": state_value_schema,
+                "state_migrations": state_migrations,
             }
             if existing:
                 if any(existing[key] != value for key, value in fixed.items()):
@@ -519,8 +542,8 @@ class BotStore:
             row = await (
                 await conn.execute(
                     "INSERT INTO public.bot_generations(bot_id,generation_id,component_id,package_digest,config_digest,"
-                    "config,instance_id,worker_incarnation,host_incarnation,host_owner_epoch,capability_grants,status) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PREPARING') RETURNING *",
+                    "config,instance_id,worker_incarnation,host_incarnation,host_owner_epoch,capability_grants,state_schema,state_value_schema,state_migrations,status) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PREPARING') RETURNING *",
                     (
                         self.bot_id,
                         generation_id,
@@ -533,6 +556,9 @@ class BotStore:
                         lease.incarnation,
                         lease.owner_epoch,
                         Jsonb(grants),
+                        state_schema,
+                        Jsonb(state_value_schema),
+                        Jsonb(state_migrations),
                     ),
                 )
             ).fetchone()
@@ -586,13 +612,186 @@ class BotStore:
             await self._host(conn, lease)
             rows = await (
                 await conn.execute(
-                    "SELECT key,revision,value FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s ORDER BY key",
+                    "SELECT key,revision,value FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s AND NOT deleted ORDER BY key",
                     (self.bot_id, component_id),
                 )
             ).fetchall()
-            return {
+            result = {
                 row["key"]: {"revision": row["revision"], "value": row["value"]} for row in rows
             }
+            await self._host(conn, lease)
+            return result
+
+    async def state_schema(self, lease: HostLease, component_id: str) -> int:
+        async with self.pool.connection() as conn, conn.transaction():
+            await self._route(conn, component_id)
+            await self._host(conn, lease)
+            row = await (await conn.execute(
+                "SELECT state_schema FROM public.bot_component_state_heads WHERE bot_id=%s AND component_id=%s",
+                (self.bot_id, component_id),
+            )).fetchone()
+            await self._host(conn, lease)
+            return row["state_schema"] if row else 1
+
+    async def _state_source(self, conn: AsyncConnection, component_id: str) -> tuple[dict, dict]:
+        head = await (await conn.execute(
+            "SELECT * FROM public.bot_component_state_heads WHERE bot_id=%s AND component_id=%s FOR UPDATE",
+            (self.bot_id, component_id),
+        )).fetchone()
+        if head is None:
+            raise ForestError("STATE_HEAD_MISSING", "Component has no durable state authority", 409)
+        rows = await (await conn.execute(
+            "SELECT key,revision,value,deleted FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s ORDER BY key",
+            (self.bot_id, component_id),
+        )).fetchall()
+        return head, {row["key"]: {key: value for key, value in row.items() if key != "key"} for row in rows}
+
+    @staticmethod
+    def _state_values(rows: dict) -> dict:
+        return {key: row["value"] for key, row in rows.items() if not row["deleted"]}
+
+    @staticmethod
+    def _validate_state_values(values: dict, schema: dict) -> dict:
+        try:
+            encoded = json.dumps(values, allow_nan=False, ensure_ascii=False)
+            encoded_size = len(encoded.encode())
+            result = json.loads(encoded)
+        except (ValueError, TypeError, UnicodeError):
+            raise ForestError("STATE_MIGRATION_INVALID", "State must contain finite JSON values", 422) from None
+        if (
+            not isinstance(result, dict) or len(result) > 512 or encoded_size > 120_000
+            or any(not isinstance(key, str) or not 1 <= len(key) <= 200 for key in result)
+            or not Draft202012Validator(schema).is_valid(result)
+        ):
+            raise ForestError("STATE_MIGRATION_INVALID", "State violates its bounded durable contract", 422)
+        return result
+
+    async def capture_state_migration(self, lease: HostLease, operation_id: str, op_epoch: int) -> dict:
+        """Freeze an immutable final source after all admitted writes drained."""
+        async with self.pool.connection() as conn, conn.transaction():
+            operation, route, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
+            operation = await self._quiesce_locked(conn, lease, operation, route, runtime)
+            previous = await (await conn.execute(
+                "SELECT * FROM public.bot_state_migration_sources WHERE bot_id=%s AND operation_id=%s",
+                (self.bot_id, operation_id),
+            )).fetchone()
+            if previous:
+                await self._host(conn, lease, runtime)
+                if operation["lease_until"] <= await self._now(conn):
+                    raise ForestError("STALE_OPERATION", "Lifecycle lease expired during state capture replay")
+                return previous
+            candidate = await self._generation(conn, operation["candidate_generation_id"])
+            head, rows = await self._state_source(conn, operation["component_id"])
+            self._validate_state_values(self._state_values(rows), {})
+            source = await (await conn.execute(
+                "INSERT INTO public.bot_state_migration_sources(bot_id,operation_id,component_id,"
+                "source_generation_id,source_route_epoch,source_schema,source_revision,source_digest,source_rows,target_schema) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (self.bot_id, operation_id, operation["component_id"], route["generation_id"],
+                 route["route_epoch"], head["state_schema"], head["revision"], _digest(rows), Jsonb(rows), candidate["state_schema"]),
+            )).fetchone()
+            await self._host(conn, lease, runtime)
+            if operation["lease_until"] <= await self._now(conn):
+                raise ForestError("STALE_OPERATION", "Lifecycle lease expired during state capture")
+            return source
+
+    async def stage_state_migration(
+        self, lease: HostLease, operation_id: str, op_epoch: int, *, source_digest: str,
+        first_values: dict, repeated_values: dict,
+    ) -> dict:
+        # Freeze both independent worker results before waiting on authority locks.
+        first_values = self._validate_state_values(first_values, {})
+        repeated_values = self._validate_state_values(repeated_values, {})
+        if _digest(first_values) != _digest(repeated_values):
+            raise ForestError("STATE_MIGRATION_NONDETERMINISTIC", "Repeated migration changed its result", 422)
+        async with self.pool.connection() as conn, conn.transaction():
+            operation, _, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
+            if operation["phase"] != "QUIESCENT":
+                raise ForestError("INVALID_OPERATION_PHASE", "State migration requires final quiescence")
+            source = await (await conn.execute(
+                "SELECT * FROM public.bot_state_migration_sources WHERE bot_id=%s AND operation_id=%s",
+                (self.bot_id, operation_id),
+            )).fetchone()
+            if source is None or source["source_digest"] != source_digest:
+                raise ForestError("STATE_SOURCE_CONFLICT", "Migration source receipt differs")
+            candidate = await self._generation(conn, operation["candidate_generation_id"])
+            self._validate_state_values(first_values, candidate["state_value_schema"])
+            if source["source_generation_id"] is not None and source["source_schema"] != candidate["state_schema"] and {
+                "from_schema": source["source_schema"], "to_schema": candidate["state_schema"]
+            } not in candidate["state_migrations"]:
+                raise ForestError("STATE_MIGRATION_MISSING", "Generation did not declare this source schema", 422)
+            if source["source_schema"] == source["target_schema"] and first_values != self._state_values(source["source_rows"]):
+                raise ForestError("STATE_MIGRATION_INVALID", "Same-version reload must preserve durable values", 422)
+            previous = await (await conn.execute(
+                "SELECT * FROM public.bot_state_migration_results WHERE bot_id=%s AND operation_id=%s",
+                (self.bot_id, operation_id),
+            )).fetchone()
+            if previous:
+                if previous["result_digest"] != _digest(first_values):
+                    raise ForestError("IDEMPOTENCY_CONFLICT", "Migration result is already immutable")
+                await self._host(conn, lease, runtime)
+                if operation["lease_until"] <= await self._now(conn):
+                    raise ForestError("STALE_OPERATION", "Lifecycle lease expired during migration replay")
+                return previous
+            result = await (await conn.execute(
+                "INSERT INTO public.bot_state_migration_results(bot_id,operation_id,source_digest,result_digest,result_values) "
+                "VALUES (%s,%s,%s,%s,%s) RETURNING *",
+                (self.bot_id, operation_id, source_digest, _digest(first_values), Jsonb(first_values)),
+            )).fetchone()
+            await self._host(conn, lease, runtime)
+            if operation["lease_until"] <= await self._now(conn):
+                raise ForestError("STALE_OPERATION", "Lifecycle lease expired during migration staging")
+            return result
+
+    async def _publish_state(self, conn: AsyncConnection, operation: dict, route: dict, candidate: dict) -> None:
+        source = await (await conn.execute(
+            "SELECT * FROM public.bot_state_migration_sources WHERE bot_id=%s AND operation_id=%s",
+            (self.bot_id, operation["operation_id"]),
+        )).fetchone()
+        head, rows = await self._state_source(conn, operation["component_id"])
+        if source is None:
+            # Legacy trusted callers can publish only an unchanged state contract.
+            if head["state_schema"] != candidate["state_schema"]:
+                raise ForestError("STATE_MIGRATION_REQUIRED", "Schema transition has no staged state receipt")
+            self._validate_state_values(self._state_values(rows), candidate["state_value_schema"])
+            return
+        if (source["source_revision"] != head["revision"] or source["source_schema"] != head["state_schema"]
+            or source["source_digest"] != _digest(rows) or source["source_generation_id"] != route["generation_id"]
+            or source["source_route_epoch"] != route["route_epoch"]):
+            raise ForestError("STATE_SOURCE_CONFLICT", "Durable state changed after final capture")
+        staged = await (await conn.execute(
+            "SELECT * FROM public.bot_state_migration_results WHERE bot_id=%s AND operation_id=%s",
+            (self.bot_id, operation["operation_id"]),
+        )).fetchone()
+        if staged is None or staged["source_digest"] != source["source_digest"]:
+            raise ForestError("STATE_MIGRATION_REQUIRED", "Candidate has no verified shadow state")
+        values = self._validate_state_values(staged["result_values"], candidate["state_value_schema"])
+        if source["target_schema"] == head["state_schema"]:
+            return
+        for key in sorted(set(rows) | set(values)):
+            previous = rows.get(key, {"revision": 0})["revision"]
+            deleted, value = key not in values, values.get(key)
+            await conn.execute(
+                "INSERT INTO public.bot_state_revisions(bot_id,component_id,key,revision,previous_revision,value,operation_id,migration_operation_id,deleted) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.bot_id, operation["component_id"], key, previous+1, previous, Jsonb(value),
+                 operation["operation_id"], operation["operation_id"], deleted),
+            )
+            await conn.execute(
+                "INSERT INTO public.bot_component_state(bot_id,component_id,key,revision,value,deleted) VALUES (%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (bot_id,component_id,key) DO UPDATE SET revision=EXCLUDED.revision,value=EXCLUDED.value,deleted=EXCLUDED.deleted",
+                (self.bot_id, operation["component_id"], key, previous+1, Jsonb(value), deleted),
+            )
+        await conn.execute(
+            "UPDATE public.bot_component_state_heads SET state_schema=%s,revision=revision+1,migration_operation_id=%s "
+            "WHERE bot_id=%s AND component_id=%s",
+            (source["target_schema"], operation["operation_id"], self.bot_id, operation["component_id"]),
+        )
+        await self._event(conn, "state.migrated", operation["operation_id"], {
+            "component_id": operation["component_id"], "source_schema": source["source_schema"],
+            "target_schema": source["target_schema"], "source_revision": source["source_revision"],
+            "source_digest": source["source_digest"], "result_digest": staged["result_digest"],
+        })
 
     async def begin_operation(
         self,
@@ -640,9 +839,17 @@ class BotStore:
                     and existing["host_owner_epoch"] == lease.owner_epoch
                 ):
                     return existing
-                raise ForestError(
-                    "RESOURCE_BUSY", "Another lifecycle operation owns this component"
-                )
+                holder = await (await conn.execute(
+                    "SELECT host_incarnation,host_owner_epoch FROM public.bot_lifecycle_operations WHERE bot_id=%s AND operation_id=%s",
+                    (self.bot_id, resource["operation_id"]),
+                )).fetchone()
+                if holder and holder["host_incarnation"] == lease.incarnation and holder["host_owner_epoch"] == lease.owner_epoch:
+                    raise ForestError(
+                        "RESOURCE_BUSY", "Another lifecycle operation owns this component"
+                    )
+                # A new authoritative host may abandon an orphan operation now;
+                # its predecessor can never regain publication authority even if
+                # the longer component operation lease has not elapsed yet.
             if route["route_epoch"] != expected_route_epoch:
                 raise ForestError("ROUTE_CONFLICT", "Component route changed")
             if (
@@ -720,7 +927,8 @@ class BotStore:
             ).fetchone()
 
     async def _lifecycle(
-        self, conn: AsyncConnection, lease: HostLease, operation_id: str, op_epoch: int
+        self, conn: AsyncConnection, lease: HostLease, operation_id: str, op_epoch: int,
+        *, terminal_cleanup: bool = False,
     ) -> tuple[dict, dict, dict]:
         operation = await (
             await conn.execute(
@@ -754,8 +962,8 @@ class BotStore:
             if (
                 resource["operation_id"] != operation_id
                 or resource["op_epoch"] != op_epoch
-                or resource["lease_until"] <= now
-                or operation["lease_until"] <= now
+                or (not terminal_cleanup and resource["lease_until"] <= now)
+                or (not terminal_cleanup and operation["lease_until"] <= now)
             ):
                 raise ForestError("STALE_OPERATION", "Lifecycle lease expired or was replaced")
         return operation, route, runtime
@@ -914,6 +1122,7 @@ class BotStore:
                 )
             operation = await self._quiesce_locked(conn, lease, operation, route, runtime)
             # Recheck time-based authorities after all call locks and drain work.
+            await self._publish_state(conn, operation, route, candidate)
             await self._host(conn, lease, runtime)
             if operation["lease_until"] <= await self._now(conn):
                 raise ForestError("STALE_OPERATION", "Lifecycle lease expired before publication")
@@ -970,7 +1179,12 @@ class BotStore:
         self, lease: HostLease, operation_id: str, op_epoch: int, error_code: str = "ABORTED"
     ) -> dict:
         async with self.pool.connection() as conn, conn.transaction():
-            operation, route, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
+            # A current host can terminate its own expired operation while its
+            # exact resource token still matches. This grants no publish/renew
+            # authority, and cannot unfreeze a successor's operation or route.
+            operation, route, runtime = await self._lifecycle(
+                conn, lease, operation_id, op_epoch, terminal_cleanup=True
+            )
             if operation["phase"] in {"FAILED", "ABANDONED"}:
                 return operation
             if operation["phase"] == "COMMITTED":
@@ -982,6 +1196,7 @@ class BotStore:
                 live = (
                     old["status"] in {"ACTIVE", "QUIESCING", "QUIESCENT"}
                     and old["host_incarnation"] == lease.incarnation
+                    and old["host_owner_epoch"] == lease.owner_epoch
                 )
                 await conn.execute(
                     "UPDATE public.bot_component_routes SET admission=%s,control_admission=%s WHERE bot_id=%s AND component_id=%s",
@@ -1014,6 +1229,7 @@ class BotStore:
                 (self.bot_id, operation["component_id"]),
             )
             await self._event(conn, "lifecycle.failed", operation_id, {"error_code": error_code})
+            await self._host(conn, lease, runtime)
             assert result is not None
             return result
 
@@ -1643,13 +1859,14 @@ class BotStore:
                 "CONTROL_SCOPE_DENIED", "Control codec cannot read business state", 403
             )
         async with self.pool.connection() as conn, conn.transaction():
-            await self._guard(conn, grant)
+            _, host = await self._guard(conn, grant)
             row = await (
                 await conn.execute(
                     "SELECT revision,value FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s AND key=%s",
                     (self.bot_id, grant.component_id, key),
                 )
             ).fetchone()
+            await self._guard_time(conn, host, grant)
             return row or {"revision": 0, "value": None}
 
     async def commit_state(
@@ -1674,6 +1891,7 @@ class BotStore:
         payload_digest = _digest(
             {"key": key, "expected_revision": expected_revision, "value": value}
         )
+        value = json.loads(json.dumps(value, allow_nan=False))
         async with self.pool.connection() as conn, conn.transaction():
             _, host = await self._guard(conn, grant)
             previous = await (
@@ -1690,6 +1908,7 @@ class BotStore:
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "State step identity binds different input"
                     )
+                await self._guard_time(conn, host, grant)
                 return previous["receipt"]
             await conn.execute(
                 "INSERT INTO public.bot_component_state(bot_id,component_id,key,revision) VALUES (%s,%s,%s,0) ON CONFLICT DO NOTHING",
@@ -1708,6 +1927,11 @@ class BotStore:
                     "Component state changed",
                     details={"current_revision": state["revision"]},
                 )
+            generation = await self._generation(conn, grant.generation_id)
+            _, rows = await self._state_source(conn, grant.component_id)
+            values = self._state_values(rows)
+            values[key] = value
+            self._validate_state_values(values, generation["state_value_schema"])
             await self._guard_time(conn, host, grant)
             receipt = {
                 "operation_id": operation_id,
@@ -1742,8 +1966,12 @@ class BotStore:
                 ),
             )
             await conn.execute(
-                "UPDATE public.bot_component_state SET revision=%s,value=%s WHERE bot_id=%s AND component_id=%s AND key=%s",
+                "UPDATE public.bot_component_state SET revision=%s,value=%s,deleted=false WHERE bot_id=%s AND component_id=%s AND key=%s",
                 (expected_revision + 1, Jsonb(value), self.bot_id, grant.component_id, key),
+            )
+            await conn.execute(
+                "UPDATE public.bot_component_state_heads SET revision=revision+1 WHERE bot_id=%s AND component_id=%s",
+                (self.bot_id, grant.component_id),
             )
             await self._event(
                 conn,
@@ -1757,6 +1985,7 @@ class BotStore:
                     "revision": expected_revision + 1,
                 },
             )
+            await self._guard_time(conn, host, grant)
             return receipt
 
     async def finish_call(self, grant: CallGrant, result: Any) -> dict:

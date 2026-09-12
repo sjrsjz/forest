@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import io
 import json
 import os
 import secrets
 import socket
 import subprocess
+import zipfile
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 from uuid import uuid4
@@ -241,6 +243,66 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 4', timeout=20000)
             select_bot(page, beta)
             invoke(1, "：4（状态修订 2）")
+
+            # Import complete native packages through the authenticated WebUI.
+            # Two versions share a component, and history restore preserves its
+            # current durable count instead of restoring an old state snapshot.
+            def plugin_archive(version):
+                output = io.BytesIO()
+                source = root / 'src/forest/builtin/counter'
+                with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                    for path in source.rglob('*'):
+                        if not path.is_file() or '__pycache__' in path.parts:
+                            continue
+                        content = path.read_bytes()
+                        content = content.replace(b'counter.increment', b'browser.increment')
+                        if path.name == 'module.toml':
+                            content = content.replace(b'forest.counter', b'demo.browser').replace(
+                                b'version = "0.1.0"', f'version = "{version}"'.encode())
+                        archive.writestr(path.relative_to(source).as_posix(), content)
+                return output.getvalue()
+
+            page.locator('summary').filter(has_text='插件包管理').click()
+            for version in ('1.0.0', '2.0.0'):
+                page.locator('#package-import-form [name="archive"]').set_input_files({
+                    'name': f'plugin-{version}.zip', 'mimeType': 'application/zip',
+                    'buffer': plugin_archive(version),
+                })
+                page.locator('#package-import-form button').click()
+                expect(page.locator('#package-list')).to_contain_text(f'demo.browser · {version}')
+            page.locator('#bot-package').select_option(label='demo.browser · 1.0.0')
+            expect(page.locator('#bot-desired')).to_have_text('0')
+            page.locator('#bot-config-fields [name="label"]').fill('Web 插件')
+            page.locator('#bot-config-fields [name="multiplier"]').fill('2')
+            page.locator('#bot-grants').check()
+            page.locator('#bot-config-form button[type="submit"]').click()
+            expect(page.locator('#bot-config-preview')).to_be_visible()
+            page.locator('#bot-config-apply').click()
+            expect(page.locator('#bot-effective')).to_have_text('1', timeout=30000)
+            expect(page.locator('#bot-runtime-status')).to_have_text('组件已生效并运行中', timeout=30000)
+            invoke(2, '：4（状态修订 1）')
+            page.locator('#bot-package').select_option(label='demo.browser · 2.0.0')
+            expect(page.locator('#bot-config-fields [name="label"]')).to_have_value('Web 插件')
+            page.locator('#bot-config-fields [name="multiplier"]').fill('5')
+            page.locator('#bot-config-form button[type="submit"]').click()
+            expect(page.locator('#bot-config-preview')).to_be_visible()
+            page.locator('#bot-config-apply').click()
+            expect(page.locator('#bot-effective')).to_have_text('2', timeout=30000)
+            expect(page.locator('#bot-runtime-status')).to_have_text('组件已生效并运行中', timeout=30000)
+            invoke(1, '：9（状态修订 2）')
+            page.locator('#read-bot-history').click()
+            expect(page.locator('#bot-history button')).to_have_count(2)
+            page.locator('#bot-history button').last.click()
+            expect(page.locator('#bot-config-fields [name="multiplier"]')).to_have_value('2')
+            page.locator('#bot-config-form button[type="submit"]').click()
+            expect(page.locator('#bot-config-preview')).to_be_visible()
+            page.locator('#bot-config-apply').click()
+            expect(page.locator('#bot-effective')).to_have_text('3', timeout=30000)
+            expect(page.locator('#bot-runtime-status')).to_have_text('组件已生效并运行中', timeout=30000)
+            invoke(1, '：11（状态修订 3）')
+            page.screenshot(path=str(artifacts / 'packages-mobile.png'), full_page=True)
+            page.set_viewport_size({"width": 1360, "height": 1000})
+            page.screenshot(path=str(artifacts / 'packages-desktop.png'), full_page=True)
             page.locator("#logout").click()
             expect(page.locator("#login")).to_be_visible()
             rival.reload()
@@ -264,6 +326,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "OneBot Web configuration and credentials stay private",
                         "real HTTP ingress, silent context, template reply and delivery",
                         "UNKNOWN operator reconciliation and restart connection recovery",
+                        "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

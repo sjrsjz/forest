@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前可运行的是多 Bot 管理、原生组件和 OneBot HTTP 接入切片；首版框架仍在实现中。**后台可配置账号、观察群聊队列和核对发送结果；消息持久入库，同群串行、跨群并行，支持模板回复与受限群聊 `#forest help/status`。内核支持热切换、跨 Worker 服务调用和持久状态。完整 Agent、多模态长期记忆与通用管理 Shell 尚未完成，边界见[实现状态](doc/implementation-status.md)。
+**当前可运行的是多 Bot 管理、原生插件升级和 OneBot HTTP 接入切片；首版框架仍在实现中。**后台可导入插件、管理配置版本、配置账号、观察群聊队列和核对发送结果；消息持久入库，同群串行、跨群并行，支持模板回复与受限群聊 `#forest help/status`。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。完整 Agent、多模态长期记忆与通用管理 Shell 尚未完成，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -19,7 +19,9 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 
 进入配置页后，修改显示名称或会话时长，点击预览差异，再应用。显示名称在后台读取新配置时生效，会话时长影响后续登录；已有会话保留原到期时间。两个窗口基于同一旧版本提交时，后提交者收到 `REVISION_CONFLICT`，原草稿保留，需要读取新版本后重新预览。
 
-进入「Bot 与组件」，填写名称并创建 Bot。托管模式为每个 Bot 创建独立数据库与受限账号，页面展示创建进度；服务中断后按同一持久计划恢复。存储就绪后，配置内置计数器的显示名称和倍率，授权状态读写，预览并应用。期望修订先保存，组件成功启动或完成排空切换后才推进生效修订。「调用组件」可验证各 Bot 状态独立，修改倍率后计数继续保留。当前后台提供内置组件，任意第三方包上传与完整插件市场尚未接入。
+进入「Bot 与组件」，填写名称并创建 Bot。托管模式为每个 Bot 创建独立数据库与受限账号，页面展示创建进度；服务中断后按同一持久计划恢复。存储就绪后，配置内置计数器的显示名称和倍率，授权状态读写，预览并应用。期望修订先保存，组件成功启动或完成排空切换后才推进生效修订。「调用组件」可验证各 Bot 状态独立，修改倍率后计数继续保留。
+
+「插件包管理」支持导入可信 Python 插件的完整 ZIP，并按版本为 Bot 配置和启用。常见 schema 自动生成字段，复杂配置在页面内编辑 JSON；配置历史可载入草稿并作为新修订应用。坏版本不会替换当前有效实例，重启也优先恢复当前生效版本。详见 [Web 插件管理](doc/p2-web-plugin-management.md)。
 
 在 Bot 页面「QQ 账号连接」登记 OneBot 11 账号，填写 HTTP API 地址、访问令牌、上报签名密钥，预览并应用。将页面提供的上报地址和相同密钥填入所用 OneBot 实现。系统先调用 `get_login_info` 校验账号，再启用连接；密钥不回显。默认仅记录消息，选择「模板回复」后可通过 @、`/chat` 或私聊触发。群聊管理的管理员 QQ 号在同一表单配置，不自动信任平台群管理员身份。
 
@@ -87,7 +89,13 @@ uv run --frozen forest dev --bot dev-counter --package examples/counter --servic
 
 空库的第一次调用应返回 `{"status":"completed","result":{"value":1,"revision":1}}`。同一个 `operation-id` 和输入重试读取原结果；新的加一操作使用新 ID，省略该参数会自动生成新 ID。一次状态步骤已提交而整次调用随后失败时，状态提交仍然保留，失败调用不会自动重新执行。
 
-`FOREST_BOT_DSN` 与 `dev` 是开发验证入口。日常 Bot 创建与内置组件配置可直接通过 WebUI 完成。内核已有排空替换 API，但上述 CLI 不持续运行、不监视文件，也不提供 QQ 接入或完整 checkpoint 恢复。
+`FOREST_BOT_DSN` 与 `dev` 是开发验证入口。日常 Bot 创建与组件配置直接通过 WebUI 完成。持续开发可使用以下命令；首次配置和 grants 固定，后续源码保存不会扩大权限。修改 helper、schema 或资源也会自动重载，失败保留旧实例，重启从持久 last-good 工件恢复。
+
+```sh
+forest dev --bot example --watch examples/counter --grant state.read --grant state.write
+```
+
+外部依赖通过离线 wheelhouse 与完整锁定清单装入独立不可变环境；插件不继承宿主的第三方库。包导入导出和锁文件命令见 [插件开发说明](doc/p2-plugin-packages.md)，持久状态格式升级见 [迁移说明](doc/p2-state-migration.md)。当前不迁移 Python 调用栈，完整 Agent checkpoint 在后续阶段实现。
 
 跨组件调用使用 `ctx.services.call(name, payload, contract_major=1, operation_id=ctx.operations.stable(step))`。调用方必须同时声明 manifest `requires` 与 `service.call:<name>` 能力，宿主按固定依赖和当前路由生成子调用权限，Worker 不提供目标 Bot 或 CallGrant。`Kernel.install_many()` 在执行插件前验证服务唯一性、契约和依赖 DAG，按依赖顺序安装、逆序回收。它是有逐项回执的批量操作；失败不撤销已经成功发布的组件。当前可选依赖在安装时固定，后续依赖变更需要显式重载调用方。
 

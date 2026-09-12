@@ -7,6 +7,7 @@ validation does not import user code. Runtime identity is allocated by the kerne
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -15,6 +16,8 @@ import sqlite3
 import stat
 import sys
 import tomllib
+import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -27,7 +30,9 @@ from forest.security import private_directory
 
 SKIPPED = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
 MAX_FILE_BYTES = 4 * 1024 * 1024
-MAX_PACKAGE_BYTES = 32 * 1024 * 1024
+MAX_WHEEL_BYTES = 32 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
+MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_PACKAGE_FILES = 512
 MAX_PACKAGE_ENTRIES = 4096
 MAX_PACKAGE_DEPTH = 32
@@ -52,6 +57,7 @@ MANIFEST_SCHEMA = {
             key: {"type": "string"}
             for key in ("runtime", "kernel_api", "package_id", "version", "entrypoint")
         },
+        "dependency_lock": {"type": "string"},
         "components": {
             "type": "array",
             "minItems": 1,
@@ -72,7 +78,19 @@ MANIFEST_SCHEMA = {
                         key: {"type": "string"}
                         for key in ("id", "scope", "reload_mode", "config_schema")
                     },
-                    "state_schema": {"type": "integer"},
+                    "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                    "state_value_schema": {"type": "string"},
+                    "state_migrations": {
+                        "type": "array", "maxItems": 64,
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "required": ["from_schema", "to_schema"],
+                            "properties": {
+                                key: {"type": "integer", "minimum": 1, "maximum": 2147483647}
+                                for key in ("from_schema", "to_schema")
+                            },
+                        },
+                    },
                     "state_mode": {"const": "durable"},
                     "checkpoint_schema": {"type": "integer", "const": 1},
                     "requires": {
@@ -202,6 +220,13 @@ def _capture(root: Path) -> dict[str, bytes]:
         ) from exc
 
 
+def source_fingerprint(source: Path) -> str:
+    """Watch/build share one complete, portable capture and exclusion policy."""
+    return digest_json({
+        name: hashlib.sha256(value).hexdigest() for name, value in _capture(source).items()
+    })
+
+
 def _capture_files(root: Path) -> dict[str, bytes]:
     captured: dict[str, bytes] = {}
     names: set[str] = set()
@@ -252,7 +277,8 @@ def _capture_files(root: Path) -> dict[str, bytes]:
                 continue
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 _fail("PACKAGE_FILE_REJECTED", "Package entries must be ordinary single-link files")
-            if info.st_size > MAX_FILE_BYTES or len(captured) >= MAX_PACKAGE_FILES:
+            file_limit = MAX_WHEEL_BYTES if rel.endswith(".whl") else MAX_FILE_BYTES
+            if info.st_size > file_limit or len(captured) >= MAX_PACKAGE_FILES:
                 _fail("PACKAGE_TOO_LARGE", "Package exceeds file limits")
             flags = (
                 os.O_RDONLY
@@ -264,7 +290,7 @@ def _capture_files(root: Path) -> dict[str, bytes]:
                 before = os.fstat(stream.fileno())
                 if _signature(info) != _signature(before):
                     _fail("PACKAGE_CHANGED", "Package entry changed before being read")
-                content = stream.read(MAX_FILE_BYTES + 1)
+                content = stream.read(file_limit + 1)
                 after = os.fstat(stream.fileno())
             if (
                 _signature(before) != _signature(after)
@@ -273,7 +299,7 @@ def _capture_files(root: Path) -> dict[str, bytes]:
             ):
                 _fail("PACKAGE_CHANGED", "Package changed while being captured")
             total += len(content)
-            if len(content) > MAX_FILE_BYTES or total > MAX_PACKAGE_BYTES:
+            if len(content) > file_limit or total > MAX_PACKAGE_BYTES:
                 _fail("PACKAGE_TOO_LARGE", "Package exceeds byte limits")
             captured[rel] = content
     for directory, initial in directories:
@@ -355,8 +381,17 @@ def _manifest(files: dict[str, bytes]) -> dict:
     component = components[0]
     if not IDENTIFIER.fullmatch(component.get("id", "")) or component.get("scope") != "bot":
         _fail("INVALID_COMPONENT", "A valid Bot-scoped component is required")
-    if component.get("state_schema") != 1 or component.get("reload_mode") != "drain":
-        _fail("UNSUPPORTED_STATE_SCHEMA", "This slice supports state schema 1 and drain only")
+    if component.get("reload_mode") != "drain":
+        _fail("UNSUPPORTED_STATE_SCHEMA", "Only drain reload is supported")
+    if "state_value_schema" in component:
+        _schema(files, component["state_value_schema"])
+    migration_sources = set()
+    for migration in component.get("state_migrations", []):
+        if (migration["to_schema"] != component["state_schema"]
+                or migration["from_schema"] == migration["to_schema"]
+                or migration["from_schema"] in migration_sources):
+            _fail("INVALID_STATE_MIGRATION", "Migration sources must uniquely target candidate state")
+        migration_sources.add(migration["from_schema"])
     dependencies = component.get("requires", [])
     dependency_names = set()
     for dependency in dependencies:
@@ -398,8 +433,16 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 compile(source, relative, "exec", dont_inherit=True)
             except (SyntaxError, ValueError) as exc:
                 raise ForestError(
-                    "PACKAGE_SYNTAX_ERROR", f"Invalid Python in {relative}", 422
+                    "PACKAGE_SYNTAX_ERROR", f"Invalid Python in {relative}", 422,
+                    details={"file": relative, "line": getattr(exc, "lineno", None),
+                             "column": getattr(exc, "offset", None), "phase": "syntax"},
                 ) from exc
+    if "dependency_lock" in manifest:
+        from forest.environments import validate_lock
+
+        validate_lock(files, manifest["dependency_lock"])
+    elif any(path.endswith(".whl") for path in files):
+        _fail("INVALID_DEPENDENCY_LOCK", "Vendored wheels require an explicit dependency lock")
     return manifest
 
 
@@ -441,7 +484,7 @@ class PackageCatalog:
     def __init__(self, root: Path) -> None:
         self.root = private_directory(root)
 
-    def build(self, source: Path) -> PackageSnapshot:
+    def build(self, source: Path, *, development: bool = False) -> PackageSnapshot:
         try:
             _reject_link(source.lstat())
             source = source.resolve(strict=True)
@@ -451,9 +494,100 @@ class PackageCatalog:
         if catalog_root == source or catalog_root.is_relative_to(source):
             _fail("INVALID_PACKAGE_PATH", "Artifact catalog cannot be inside the source package")
         captured = _capture(source)
-        manifest = _manifest(captured)
+        _manifest(captured)
         if captured != _capture(source):
             _fail("PACKAGE_CHANGED", "Package must remain stable throughout capture")
+        if development:
+            source_digest = digest_json(
+                {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
+            ).removeprefix("sha256:")
+            # The manifest has already passed TOML/schema validation. Replace the
+            # top-level version only; no source file is changed by a dev build.
+            lines = captured["module.toml"].decode("utf-8").splitlines(keepends=True)
+            replaced = False
+            for index, line in enumerate(lines):
+                if line.lstrip().startswith("["):
+                    break
+                if re.match(r"\s*version\s*=", line):
+                    base = _manifest(captured)["version"].split("+", 1)[0]
+                    lines[index] = f'version = "{base}+dev.{source_digest}"\n'
+                    replaced = True
+                    break
+            if not replaced:
+                _fail("INVALID_MANIFEST", "Development builds require a top-level version")
+            captured["module.toml"] = "".join(lines).encode("utf-8")
+        return self._publish(captured)
+
+    def import_archive(
+        self, data: bytes, *, check_manifest: Callable[[dict], None] | None = None,
+        bind_version: bool = True,
+    ) -> PackageSnapshot:
+        """Validate a complete ZIP before publishing any package file."""
+        if not isinstance(data, bytes) or len(data) > MAX_ARCHIVE_BYTES:
+            _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
+        captured = archive_files(data)
+        manifest = _manifest(captured)
+        if check_manifest is not None:
+            # Deployment namespace policy must reject before the local artifact
+            # registry reserves an immutable package_id/version pair.
+            check_manifest(manifest)
+        return self._publish(captured, bind_version=bind_version)
+
+    def export_archive(self, digest: str) -> bytes:
+        files = self.get(digest)._verified_files()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, content in sorted(files.items()):
+                entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                entry.create_system = 3
+                entry.external_attr = (stat.S_IFREG | 0o400) << 16
+                archive.writestr(entry, content)
+        result = output.getvalue()
+        if len(result) > MAX_ARCHIVE_BYTES:
+            _fail("PACKAGE_TOO_LARGE", "Exported ZIP exceeds the archive limit")
+        return result
+
+    def get(self, digest: str) -> PackageSnapshot:
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            _fail("INVALID_PACKAGE_DIGEST", "Package digest must be SHA-256")
+        rows = self._rows("SELECT digest FROM packages WHERE digest=?", (digest,))
+        if not rows:
+            rows = self._rows("SELECT digest FROM artifacts WHERE digest=?", (digest,),
+                              table="artifacts")
+        if not rows:
+            raise ForestError("PACKAGE_NOT_FOUND", "Package artifact is not registered", 404)
+        root = self.root / digest.removeprefix("sha256:")
+        files = _capture(root)
+        snapshot = PackageSnapshot(root, digest, _manifest(files))
+        snapshot.verify()
+        return snapshot
+
+    def find(self, package_id: str, version: str) -> PackageSnapshot:
+        rows = self._rows(
+            "SELECT digest FROM packages WHERE package_id=? AND version=?", (package_id, version)
+        )
+        if not rows:
+            raise ForestError("PACKAGE_NOT_FOUND", "Package version is not registered", 404)
+        return self.get(rows[0][0])
+
+    def list(self) -> list[PackageSnapshot]:
+        return [self.get(row[0]) for row in self._rows(
+            "SELECT DISTINCT digest FROM packages ORDER BY package_id,version", ()
+        )]
+
+    def _rows(self, query: str, parameters: tuple, *, table: str = "packages") -> list[tuple]:
+        path = self.root / "catalog.sqlite3"
+        if not path.exists():
+            return []
+        with sqlite3.connect(path, timeout=10) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                              (table,)).fetchone():
+                return []
+            return db.execute(query, parameters).fetchall()
+
+    def _publish(self, captured: dict[str, bytes], *, bind_version: bool = True) -> PackageSnapshot:
+        manifest = _manifest(captured)
         digest = digest_json(
             {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
         )
@@ -464,12 +598,13 @@ class PackageCatalog:
                 "CREATE TABLE IF NOT EXISTS packages (package_id TEXT, version TEXT, "
                 "digest TEXT NOT NULL, PRIMARY KEY(package_id,version))"
             )
+            db.execute("CREATE TABLE IF NOT EXISTS artifacts (digest TEXT PRIMARY KEY)")
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT digest FROM packages WHERE package_id=? AND version=?",
                 (manifest["package_id"], manifest["version"]),
             ).fetchone()
-            if row is not None and row[0] != digest:
+            if bind_version and row is not None and row[0] != digest:
                 _fail(
                     "PACKAGE_VERSION_CONFLICT", "A package version cannot silently change content"
                 )
@@ -504,8 +639,95 @@ class PackageCatalog:
                             shutil.rmtree(staging)
             snapshot = PackageSnapshot(destination, digest, manifest)
             snapshot.verify()
-            db.execute(
-                "INSERT OR IGNORE INTO packages VALUES (?,?,?)",
-                (manifest["package_id"], manifest["version"], digest),
-            )
+            db.execute("INSERT OR IGNORE INTO artifacts VALUES (?)", (digest,))
+            if bind_version:
+                db.execute(
+                    "INSERT OR IGNORE INTO packages VALUES (?,?,?)",
+                    (manifest["package_id"], manifest["version"], digest),
+                )
         return snapshot
+
+
+def archive_files(
+    data: bytes, *, max_files: int = MAX_PACKAGE_FILES, max_bytes: int = MAX_PACKAGE_BYTES,
+    max_file_bytes: int = MAX_FILE_BYTES, allow_wheels: bool = True,
+) -> dict[str, bytes]:
+    """Bounded portable ZIP decoder, shared by package and wheel admission.
+
+    Never uses extract()/extractall(). Paths are validated before inflation;
+    links, ambiguous paths, duplicate members and unsupported compression fail.
+    """
+    files: dict[str, bytes] = {}
+    seen: set[str] = set()
+    kinds: dict[str, bool] = {}
+    spellings: dict[str, str] = {}
+    total = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_PACKAGE_ENTRIES:
+                _fail("PACKAGE_TOO_LARGE", "ZIP exceeds entry limits")
+            for entry in entries:
+                name = entry.filename
+                directory = entry.is_dir()
+                relative = name[:-1] if directory else name
+                parts = relative.split("/")
+                if (not relative or len(name) > 1024 or entry.orig_filename != name
+                        or len(parts) > MAX_PACKAGE_DEPTH):
+                    _fail("PACKAGE_FILE_REJECTED", "ZIP contains an invalid path")
+                for part in parts:
+                    stem = part.split(".", 1)[0].upper()
+                    if (not part or part in {".", ".."} or part.startswith(".env")
+                            or re.search(r'[<>:"\\|?*\x00-\x1f]', part)
+                            or part.endswith((".", " "))
+                            or stem in {"CON", "PRN", "AUX", "NUL"}
+                            or re.fullmatch(r"(?:COM|LPT)[1-9]", stem)):
+                        _fail("PACKAGE_FILE_REJECTED", "ZIP contains a nonportable/private path")
+                if any(part in SKIPPED for part in (parts if directory else parts[:-1])):
+                    _fail("PACKAGE_FILE_REJECTED", "ZIP contains excluded source/cache directories")
+                key = relative.casefold()
+                if key in seen:
+                    _fail("PACKAGE_PATH_COLLISION", "ZIP contains duplicate or colliding paths")
+                seen.add(key)
+                # Implicit parent directories also participate in collision checks.
+                for length in range(1, len(parts)):
+                    original_parent = "/".join(parts[:length])
+                    parent = original_parent.casefold()
+                    if parent in spellings and spellings[parent] != original_parent:
+                        _fail("PACKAGE_PATH_COLLISION", "ZIP has case-colliding directory names")
+                    spellings[parent] = original_parent
+                    if parent in kinds and not kinds[parent]:
+                        _fail("PACKAGE_PATH_COLLISION", "ZIP file shadows a directory")
+                    kinds[parent] = True
+                if key in kinds and kinds[key] != directory:
+                    _fail("PACKAGE_PATH_COLLISION", "ZIP file shadows a directory")
+                kinds[key] = directory
+                if key in spellings and spellings[key] != relative:
+                    _fail("PACKAGE_PATH_COLLISION", "ZIP has case-colliding directory names")
+                spellings[key] = relative
+                mode = (entry.external_attr >> 16) & 0xFFFF
+                file_type = stat.S_IFMT(mode)
+                if file_type not in ({0, stat.S_IFDIR} if directory else {0, stat.S_IFREG}):
+                    _fail("PACKAGE_LINK_REJECTED", "ZIP links and special files are rejected")
+                if entry.flag_bits & 1 or entry.compress_type not in {
+                    zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED,
+                }:
+                    _fail("INVALID_PACKAGE_ARCHIVE", "Unsupported ZIP encryption/compression")
+                if directory:
+                    if entry.file_size:
+                        _fail("INVALID_PACKAGE_ARCHIVE", "ZIP directory contains file content")
+                    continue
+                limit = MAX_WHEEL_BYTES if allow_wheels and name.endswith(".whl") else max_file_bytes
+                if len(files) >= max_files or entry.file_size > limit:
+                    _fail("PACKAGE_TOO_LARGE", "ZIP exceeds file limits")
+                total += entry.file_size
+                if total > max_bytes:
+                    _fail("PACKAGE_TOO_LARGE", "ZIP exceeds expanded byte limit")
+                with archive.open(entry) as stream:
+                    value = stream.read(limit + 1)
+                if len(value) != entry.file_size or len(value) > limit:
+                    _fail("INVALID_PACKAGE_ARCHIVE", "ZIP entry size does not match content")
+                files[name] = value
+        return files
+    except (zipfile.BadZipFile, NotImplementedError, OSError, ValueError, EOFError) as exc:
+        raise ForestError("INVALID_PACKAGE_ARCHIVE", "Invalid complete package ZIP", 422) from exc

@@ -100,11 +100,9 @@ async def test_real_process_identity_environment_and_stable_operations(tmp_path,
         assert first["payload"] == {"text": "图文 DTO"}
         assert not any(first["environment"].values())
         assert worker.pid == worker.process.pid
-        assert worker.process.args[1:] == [
-            "-I",
-            "-m",
-            "forest.drivers.worker",
-        ]
+        assert worker.process.args[1:5] == ["-I", "-S", "-B", "-c"]
+        assert worker.process.args[-2:] == worker.environment.search_paths
+        worker.environment.verify()
     finally:
         await worker.stop()
     assert not worker.alive and worker._temporary is None

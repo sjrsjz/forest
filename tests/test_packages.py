@@ -1,6 +1,11 @@
+import io
 import json
 import os
 import shutil
+import stat
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -301,3 +306,189 @@ def test_local_schema_fragments_remain_supported(tmp_path):
     assert snapshot.schema("schemas/input.json")["properties"]["amount"]["$ref"] == (
         "#/$defs/counter"
     )
+
+
+def test_catalog_restart_archive_roundtrip_and_development_versions(tmp_path):
+    root = source(tmp_path)
+    original = (root / "module.toml").read_bytes()
+    catalog = PackageCatalog(tmp_path / "catalog")
+    released = catalog.build(root)
+    dev = catalog.build(root, development=True)
+    assert dev.manifest["version"].startswith("0.1.0+dev.")
+    assert catalog.build(root, development=True).digest == dev.digest
+    assert (root / "module.toml").read_bytes() == original
+    before = packages.source_fingerprint(root)
+    (root / "template.txt").write_text("new helper input", encoding="utf-8")
+    assert packages.source_fingerprint(root) != before
+    other_dev = catalog.build(root, development=True)
+    assert other_dev.digest != dev.digest
+    restarted = PackageCatalog(catalog.root)
+    assert {item.digest for item in restarted.list()} == {released.digest, dev.digest, other_dev.digest}
+    assert restarted.find("example.counter", "0.1.0").digest == released.digest
+    archive = restarted.export_archive(dev.digest)
+    assert archive == restarted.export_archive(dev.digest)
+    imported = PackageCatalog(tmp_path / "imported").import_archive(archive)
+    assert imported.digest == dev.digest
+    assert imported._verified_files() == dev._verified_files()
+
+
+@pytest.mark.parametrize("names,code", [
+    (["../escape"], "PACKAGE_FILE_REJECTED"),
+    (["/absolute"], "PACKAGE_FILE_REJECTED"),
+    (["C:/absolute"], "PACKAGE_FILE_REJECTED"),
+    (["folder\\escape"], "PACKAGE_FILE_REJECTED"),
+    (["a//b"], "PACKAGE_FILE_REJECTED"),
+    (["a/./b"], "PACKAGE_FILE_REJECTED"),
+    ([".env.production"], "PACKAGE_FILE_REJECTED"),
+    (["LPT1.txt"], "PACKAGE_FILE_REJECTED"),
+    (["same", "same"], "PACKAGE_PATH_COLLISION"),
+    (["same", "SAME"], "PACKAGE_PATH_COLLISION"),
+    (["A/one", "a/two"], "PACKAGE_PATH_COLLISION"),
+    (["a/b", "a"], "PACKAGE_PATH_COLLISION"),
+    (["a", "a/b"], "PACKAGE_PATH_COLLISION"),
+])
+def test_archive_path_attacks_rejected_before_publication(tmp_path, names, code):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name in names:
+            archive.writestr(name, b"data")
+    data = output.getvalue()
+    if names == ["folder\\escape"]:
+        # ZipInfo normalizes the Windows separator while writing; construct
+        # actual nonportable ZIP header bytes, as an upload from Unix could.
+        data = data.replace(b"folder/escape", b"folder\\escape")
+    catalog = PackageCatalog(tmp_path / "catalog")
+    with pytest.raises(ForestError) as caught:
+        catalog.import_archive(data)
+    assert caught.value.code == code
+    assert not (catalog.root / "catalog.sqlite3").exists()
+
+
+def test_archive_links_bombs_truncation_and_version_conflicts(tmp_path, monkeypatch):
+    catalog = PackageCatalog(tmp_path / "catalog")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        link = zipfile.ZipInfo("link")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "outside")
+    with pytest.raises(ForestError, match="links"):
+        catalog.import_archive(output.getvalue())
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("bomb.txt", b"0" * (packages.MAX_FILE_BYTES + 1))
+    with pytest.raises(ForestError) as caught:
+        catalog.import_archive(output.getvalue())
+    assert caught.value.code == "PACKAGE_TOO_LARGE"
+    with pytest.raises(ForestError) as caught:
+        catalog.import_archive(output.getvalue()[:-20])
+    assert caught.value.code == "INVALID_PACKAGE_ARCHIVE"
+    snapshot = catalog.build(source(tmp_path))
+    files = snapshot._verified_files() | {"new.txt": b"different release"}
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name, value in files.items():
+            archive.writestr(name, value)
+    with pytest.raises(ForestError) as caught:
+        catalog.import_archive(output.getvalue())
+    assert caught.value.code == "PACKAGE_VERSION_CONFLICT"
+    assert catalog.get(snapshot.digest).digest == snapshot.digest
+
+
+def test_state_migration_manifest_contract_is_static_and_explicit(tmp_path):
+    root = source(tmp_path)
+    path = root / "module.toml"
+    original = path.read_text()
+    path.write_text(original.replace("state_schema = 1", (
+        'state_schema = 2\nstate_value_schema = "schemas/state.json"\n'
+        'state_migrations = [{from_schema=1,to_schema=2}]'
+    )))
+    (root / "schemas/state.json").write_text('{"type":"object"}')
+    assert PackageCatalog(tmp_path / "catalog").build(root).component["state_schema"] == 2
+    path.write_text(path.read_text().replace("to_schema=2", "to_schema=1"))
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "bad").build(root)
+    assert caught.value.code == "INVALID_STATE_MIGRATION"
+
+
+def test_import_policy_rejection_does_not_poison_immutable_version_registry(tmp_path):
+    source_catalog = PackageCatalog(tmp_path / "source-catalog")
+    snapshot = source_catalog.build(source(tmp_path))
+    archive = source_catalog.export_archive(snapshot.digest)
+    destination = PackageCatalog(tmp_path / "destination")
+
+    def reject(manifest):
+        assert manifest["package_id"] == "example.counter"
+        raise ForestError("PACKAGE_RESERVED", "Reserved namespace", 403)
+
+    with pytest.raises(ForestError) as caught:
+        destination.import_archive(archive, check_manifest=reject)
+    assert caught.value.code == "PACKAGE_RESERVED"
+    assert destination.list() == []
+    assert not (destination.root / "catalog.sqlite3").exists()
+    assert destination.import_archive(archive).digest == snapshot.digest
+
+
+def test_unbound_web_artifacts_do_not_reserve_version_after_rejected_registration(tmp_path):
+    root = source(tmp_path)
+    source_catalog = PackageCatalog(tmp_path / "source-catalog")
+    first = source_catalog.build(root)
+    destination = PackageCatalog(tmp_path / "destination")
+    staged = destination.import_archive(source_catalog.export_archive(first.digest), bind_version=False)
+    assert destination.list() == []
+    assert PackageCatalog(destination.root).get(staged.digest).digest == staged.digest
+    (root / "new.txt").write_text("different content for same version")
+    # A rejected Web registration left bytes, but cannot reserve the release name.
+    accepted = destination.build(root)
+    assert accepted.digest != staged.digest
+    assert destination.find("example.counter", "0.1.0").digest == accepted.digest
+    # Content-addressed Web staging also does not collide with an existing CLI name.
+    assert destination.import_archive(source_catalog.export_archive(first.digest),
+                                      bind_version=False).digest == staged.digest
+    assert destination.get(accepted.digest).digest == accepted.digest
+    with pytest.raises(ForestError) as caught:
+        destination.import_archive(source_catalog.export_archive(first.digest))
+    assert caught.value.code == "PACKAGE_VERSION_CONFLICT"
+
+
+def test_competing_processes_cannot_publish_different_content_for_one_release(tmp_path):
+    first = source(tmp_path)
+    second = tmp_path / "second"
+    shutil.copytree(first, second)
+    (second / "different.txt").write_text("competing release content")
+    catalog_path = tmp_path / "catalog"
+    script = """
+import json,sys
+from pathlib import Path
+from forest.packages import PackageCatalog
+from forest.errors import ForestError
+try:
+    result=PackageCatalog(Path(sys.argv[2])).build(Path(sys.argv[1]))
+    print(json.dumps({'digest':result.digest}))
+except ForestError as exc:
+    print(json.dumps({'error':exc.code}))
+"""
+    processes = []
+    try:
+        for root in (first, second):
+            processes.append(subprocess.Popen(
+                [sys.executable, "-c", script, str(root), str(catalog_path)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            ))
+        results = []
+        for process in processes:
+            output, error = process.communicate(timeout=20)
+            assert process.returncode == 0, error
+            results.append(json.loads(output))
+        assert sum("digest" in result for result in results) == 1
+        assert [result["error"] for result in results if "error" in result] == [
+            "PACKAGE_VERSION_CONFLICT"]
+        accepted = PackageCatalog(catalog_path).find("example.counter", "0.1.0")
+        assert accepted.digest == next(result["digest"] for result in results if "digest" in result)
+        assert len(PackageCatalog(catalog_path).list()) == 1
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)

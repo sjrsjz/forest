@@ -80,6 +80,8 @@ class PythonWorker:
         self.service_handler = service_handler
         self.limits = limits or WorkerLimits()
         self.python_executable = python_executable
+        self.environment = None
+        self._environment_task: asyncio.Task | None = None
         self.state = "NEW"
         self.services: list[str] = []
         self.process: subprocess.Popen | None = None
@@ -126,6 +128,34 @@ class PythonWorker:
     async def launch(self, timeout: float = 10) -> None:
         if self.state != "NEW":
             raise ForestError("LIFECYCLE_INVALID", "Worker has already been launched")
+        from forest.environments import EnvironmentCatalog
+
+        if self.python_executable not in {sys.executable, getattr(sys, "_base_executable", "")}:
+            raise ForestError(
+                "DEPENDENCY_TARGET_MISMATCH", "Worker must use the verified deployment interpreter", 422
+            )
+        # Snapshot dependencies and the SDK never come from a mutable workspace
+        # or the host venv. Materialization only copies already validated bytes.
+        self.state = "MATERIALIZING"
+        materialization = asyncio.create_task(
+            asyncio.to_thread(
+                EnvironmentCatalog(self.package.root.parent / "environments").materialize,
+                self.package,
+            ), name=f"forest-environment-{self.identity.instance_id}",
+        )
+        self._environment_task = materialization
+        try:
+            self.environment = await asyncio.shield(materialization)
+        except BaseException:
+            self.state = "STOPPED"
+            # Cancelling to_thread only detaches the awaiting coroutine. Join
+            # the owned builder before declaring launch/cleanup complete.
+            await self._join_environment(materialization)
+            raise
+        finally:
+            self._environment_task = None
+        if self.state != "MATERIALIZING":
+            raise ForestError("LIFECYCLE_INVALID", "Worker stopped while preparing its environment")
         expected_services = self._expected_services()
         token = secrets.token_urlsafe(32)
         connected = asyncio.get_running_loop().create_future()
@@ -186,15 +216,13 @@ class PythonWorker:
                 PYTHONDONTWRITEBYTECODE="1",
                 PYTHONIOENCODING="utf-8",
             )
-            executable = self.python_executable
-            if os.name == "nt" and executable == sys.executable:
-                # CPython's Windows venv launcher creates a proxy process. Start
-                # its base interpreter directly while preserving the venv's
-                # startup identity, so our Popen handle owns the real Worker.
-                executable = getattr(sys, "_base_executable", executable)
-                environment["__PYVENV_LAUNCHER__"] = self.python_executable
+            executable = self.environment.python_executable
+            bootstrap_code = (
+                "import sys,runpy;sys.path[:0]=sys.argv[1:];"
+                "runpy.run_module('forest.drivers.worker',run_name='__main__')"
+            )
             self.process = subprocess.Popen(
-                [executable, "-I", "-m", "forest.drivers.worker"],
+                [executable, "-I", "-S", "-B", "-c", bootstrap_code, *self.environment.search_paths],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -240,6 +268,18 @@ class PythonWorker:
         except BaseException:
             await self.terminate()
             raise
+
+    @staticmethod
+    async def _join_environment(task: asyncio.Task) -> None:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()  # Retrieve a failed builder even when the caller was cancelled.
 
     async def _read_loop(self, reader: asyncio.StreamReader) -> None:
         try:
@@ -598,6 +638,14 @@ class PythonWorker:
     async def restore(self, state: Any, timeout: float = 10) -> Any:
         return await self._lifecycle("restore", {"state": state}, timeout=timeout)
 
+    async def migrate(
+        self, state: dict, *, from_schema: int, to_schema: int, timeout: float = 10
+    ) -> dict:
+        return await self._lifecycle(
+            "migrate", {"state": state, "from_schema": from_schema, "to_schema": to_schema},
+            timeout=timeout,
+        )
+
     async def resume(self, timeout: float = 10) -> Any:
         result = await self._lifecycle("resume", timeout=timeout)
         self.state = "ACTIVE"
@@ -618,6 +666,8 @@ class PythonWorker:
     async def terminate(self) -> None:
         async with self._terminating:
             self.state = "STOPPED"
+            if self._environment_task:
+                await self._join_environment(self._environment_task)
             if self._server:
                 self._server.close()
                 await self._server.wait_closed()

@@ -95,13 +95,29 @@ class ApplyBody(StrictBody):
 class BodyLimit:
     """Bound JSON intake before framework buffering, including chunked requests."""
 
-    def __init__(self, app: Any, limit: int = 65536) -> None:
-        self.app, self.limit = app, limit
+    def __init__(self, app: Any, limit: int = 65536, runtime: Any = None) -> None:
+        self.app, self.limit, self.runtime = app, limit, runtime
+        self.archive_slots = asyncio.Semaphore(2)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
             await self.app(scope, receive, send)
             return
+        if scope["path"] == "/management/v1/packages" and scope["method"] == "POST":
+            try:
+                await self.runtime.principal(Request(scope), write=True, content_type="application/zip")
+            except ForestError as error:
+                await JSONResponse({"code": error.code, "message": error.message}, error.status)(scope, receive, send)
+                return
+            if self.archive_slots.locked():
+                await JSONResponse({"code": "PACKAGE_IMPORT_BUSY"}, 429)(scope, receive, send)
+                return
+            async with self.archive_slots:
+                await self._bounded(scope, receive, send, 32 * 1024 * 1024)
+            return
+        await self._bounded(scope, receive, send, self.limit)
+
+    async def _bounded(self, scope, receive, send, limit):
         body = bytearray()
         try:
             async with asyncio.timeout(10):
@@ -110,7 +126,7 @@ class BodyLimit:
                     if event["type"] == "http.disconnect":
                         return
                     body.extend(event.get("body", b""))
-                    if len(body) > self.limit:
+                    if len(body) > limit:
                         await JSONResponse({"code": "REQUEST_TOO_LARGE"}, 413)(scope, receive, send)
                         return
                     if not event.get("more_body", False):
@@ -258,13 +274,14 @@ class ManagementRuntime:
             raise ForestError("DATABASE_UNAVAILABLE", "管理数据库尚未就绪。", 503)
         return self.store
 
-    def origin(self, request: Request) -> None:
+    def origin(self, request: Request, *, content_type: str = "application/json") -> None:
         if request.headers.get("origin") != self.settings.public_origin:
             raise ForestError("ORIGIN_REJECTED", "请求来源不受信任。", 403)
-        if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
-            raise ForestError("CONTENT_TYPE_REQUIRED", "此接口只接收 JSON。", 415)
+        if request.headers.get("content-type", "").split(";", 1)[0] != content_type:
+            raise ForestError("CONTENT_TYPE_REQUIRED", f"此接口只接收 {content_type}。", 415)
 
-    async def principal(self, request: Request, *, write: bool = False) -> dict[str, Any]:
+    async def principal(self, request: Request, *, write: bool = False,
+                        content_type: str = "application/json") -> dict[str, Any]:
         token = request.cookies.get("forest_session", "")
         if not token or len(token) > 512:
             raise ForestError("UNAUTHENTICATED", "请先登录。", 401)
@@ -274,7 +291,7 @@ class ManagementRuntime:
         if session["role"] != "admin":
             raise ForestError("PERMISSION_DENIED", "当前账号没有此管理权限。", 403)
         if write:
-            self.origin(request)
+            self.origin(request, content_type=content_type)
             csrf = request.headers.get("x-csrf-token", "")
             if (
                 not csrf
@@ -311,7 +328,7 @@ def create_app(settings: WebSettings) -> FastAPI:
 
     app = FastAPI(title="Forest Management", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.runtime = runtime
-    app.add_middleware(BodyLimit)
+    app.add_middleware(BodyLimit, runtime=runtime)
     host = urlsplit(settings.public_origin).hostname
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=list({host, "127.0.0.1", "localhost"} - {None})

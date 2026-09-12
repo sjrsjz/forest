@@ -1,6 +1,6 @@
 # Forest 实现状态与验证记录
 
-更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核及 P1 OneBot HTTP 接入切片；首版框架仍在实现中。**可以从页面管理账号、配置连接、观察群聊和发送记录；当前响应为模板组件，完整 Agent 与多模态记忆尚未完成。
+更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核、OneBot HTTP 与 P2 插件升级切片；首版框架仍在实现中。**可以从页面管理插件版本、组件配置、账号连接、群聊和发送记录，开发 CLI 支持自动重载，内核支持持久 KV 格式迁移。当前对话响应为模板组件，完整 Agent 与多模态记忆尚未完成。
 
 ## 1. 当前可以执行的流程
 
@@ -8,7 +8,7 @@
 
 可操作命令见[根 README](../README.md)。Docker Compose 提供应用、私网 PostgreSQL 和一次性卷初始化服务；原生 Python 模式允许在首次 Web 初始化时填写 PostgreSQL URI。
 
-新增的插件流程是：静态构建完整包 → 启动无生产权限的候选 Worker → 校验配置和服务 → 在专用 Bot 数据库接纳代际与调用 → 经宿主代理读写组件状态 → 记录结果并回收。`forest plugin build/check` 不需要数据库，`forest dev` 在 `FOREST_BOT_DSN` 指定的开发库中执行一次服务调用。程序接口还支持对已运行组件进行同 schema 的 drain 替换；CLI 尚无持续 watch。
+插件流程是：静态构建完整包 → 启动无生产权限的候选 Worker → 校验配置和服务 → 在专用 Bot 数据库接纳代际与调用 → 经宿主代理读写组件状态 → 记录结果并回收。`forest plugin build/check/lock/import/export` 提供开发工具，`forest dev --package` 执行一次服务调用，`forest dev --watch` 持续监听完整包。开发源变化固定新 desired；失效候选不能越过最新请求发布，重启恢复持久 last-good。见 [P2 包/环境说明](p2-plugin-packages.md)。
 
 Web 新流程为：创建 Bot → 供应器按冻结计划创建专用数据库和受限角色 → Fleet 启动该 Bot 宿主 → 预览并提交组件配置 → 候选准备与排空切换 → 生效修订推进 → 页面调用组件。双 Bot 计数器、热改倍率与完整重启恢复已有真实 HTTP/PostgreSQL/Worker 测试；后台暂只提供随发行版安装的内置组件。
 
@@ -30,7 +30,7 @@ P1 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置 �
 | 原生 Worker | 全新解释器、认证 loopback IPC、版本化且有界的 JSON 帧；prepare/start/health、业务 admission、调用并发/排队、取消与进程回收 | [Worker Driver](../src/forest/drivers/python_worker.py)、[Worker 运行时](../src/forest/drivers/worker.py)、[Worker 测试](../tests/test_worker.py) |
 | Bot 存储权威 | 一个数据库固定一个 Bot 身份，与部署库分离；事务迁移、宿主 lease/incarnation、组件 generation/route、调用 grant、状态 revision/步骤回执、审计/outbox | [BotStore](../src/forest/storage/bot.py)、[内核迁移](../src/forest/storage/bot_migrations/001_kernel.sql)、[BotStore 测试](../tests/test_bot_store.py) |
 | 最终提交守卫 | 在实际状态读写/调用完成事务核验当前 Bot、宿主、代际、调用、期限、取消、权限与维护修订；CAS 与幂等在同一目标事务裁决 | [BotStore](../src/forest/storage/bot.py)、[内核集成测试](../tests/test_kernel.py) |
-| 生命周期协调 | 候选预热与正式写入分离；freeze/drain 后按目标库发布路由；同 schema 的 snapshot/restore；失败撤权、回收、受限恢复与宿主租约接管 | [kernel.py](../src/forest/kernel.py)、[内核集成测试](../tests/test_kernel.py) |
+| 生命周期协调 | 候选预热与正式写入分离；freeze/drain 后捕获最终状态，纯迁移双次验证，状态/路由/effective 原子发布；失败回收、受限恢复与宿主接管 | [kernel.py](../src/forest/kernel.py)、[状态迁移说明](p2-state-migration.md) |
 | 开发 CLI | `plugin build` 静态构建，`plugin check` 候选运行检查，`dev` 在专用开发库执行一次指定服务；JSON 可经标准输入提供 | [cli.py](../src/forest/cli.py)、[README 用法](../README.md#原生插件开发切片) |
 | 依赖与服务 | required/optional、契约 major/range、安装前 DAG 校验、依赖先启动；精确 `service.call:<name>`、调用树深度和共享 deadline | [kernel.py](../src/forest/kernel.py)、[服务集成测试](../tests/test_services.py) |
 | 调用树排空 | 持久记录依赖闭包预留；禁止新树进入冻结目标，已接纳树可完成子调用；所有预留与自身调用排空后才 QUIESCENT/发布 | [调用树迁移](../src/forest/storage/bot_migrations/002_call_trees.sql)、[调用树测试](../tests/test_child_calls.py) |
@@ -57,7 +57,7 @@ Web 请求采用“服务器保存计划 → 页面显示差异 → 按 plan ID/
 
 资源字段包含 `max_frame_bytes`、`max_inflight`、`max_queue_items`、`max_state_inflight`、`max_owned_tasks`，生命周期字段包含 prepare/start/drain/stop 的 timeout。它们约束本切片的 IPC、调用与受监督任务，不能等同操作系统沙箱、CPU/内存硬配额或完整资源 SDK。普通 Python 插件仍要求可信来源。
 
-`check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。管理员可在 WebUI 创建 Bot、编辑内置计数器配置并查看 desired/effective，无需编辑插件文件。开发者仍显式维护包 manifest 与 schema；OneBot 平台配置已接入，Web 上传第三方包和模型配置尚未接入。
+`check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。管理员可在 WebUI 创建 Bot、导入第三方包、选择版本、编辑 schema 表单、查看 desired/effective 和配置历史，无需编辑服务器配置文件。开发者仍显式维护 manifest 与 schema；模型配置在 P3 接入。见 [Web 插件管理](p2-web-plugin-management.md)。
 
 ### 2.2 状态、调用与替换的实际语义
 
@@ -65,7 +65,7 @@ BotStore 首次迁移要求专用空库，已经初始化的库只接受其固�
 
 状态步骤以预期 revision 做 CAS，步骤回执、状态新修订、审计和 outbox 在同一事务保存。并发冲突明确拒绝，不声称 CAS 就证明业务合流。一次服务可以先提交状态，再返回结果；状态步骤与整次调用完成是两个提交边界，后续异常不回滚已接纳步骤。稳定 operation ID 防止重试悄悄重做，失效调用不能凭旧回执或缓存 Context 获得新的执行权。
 
-排空替换要求新旧包均满足当前 schema，路由在目标 Bot 库切换，旧代不能继续提交；候选失败保留或按守卫恢复可用旧代。过期宿主由新 incarnation 接管，旧宿主/旧 Worker 的最终写入被 fencing 拒绝。当前存在 JSON snapshot/restore 钩子和持久状态保留，但没有任意状态迁移、Python 栈迁移、完整 checkpoint 恢复器或后台自动恢复全部未完成操作。
+排空后捕获带 schema、聚合 revision 与 checksum 的不可变状态来源。显式 `Plugin.migrate` 在候选中执行两次，验证输出确定性与目标 schema；最终同一事务 CAS 来源、写状态/键修订/tombstone、切路由并推进 effective。旧代不能继续提交；候选失败保留或按守卫恢复旧入口，过期宿主由新 incarnation 接管。支持有界持久 KV 格式迁移，不迁移 Python 栈、任意外部数据库或完整 Agent checkpoint；详见 [迁移说明](p2-state-migration.md)。
 
 ### 2.3 已实现服务调用与 Web 控制边界
 
@@ -87,7 +87,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 |---|---|---|
 | P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树及 Web/Fleet 接线；仍缺通用事件/Job、自动声明生成、完整资源 SDK 和其余消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
-| P2 热重载与恢复 | 基础协议部分实现 | 已有不可变包、调用树排空、路由与配置原子发布；仍缺自动 watch、完整依赖环境锁定、任意状态迁移、checkpoint/操作自动恢复 |
+| P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 上下文基础已实现 | 持久 Session/Run、触发排队、最后触发切口、静默排空与零摘要裁剪已接入；仍缺模型/工具安全点 checkpoint、审批/取消/定时与子 Agent 完整执行 |
 | P4 多模态多主干记忆 | 未开始 | 每 Bot 全局图文记忆、每群主干、原生图文嵌入、图片/混合召回、模型输入投影、来源/删除屏障、合流 reducer |
 | P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、受限群聊 help/status；完整类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
@@ -96,11 +96,25 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 部署配置及已实现 Bot 状态/生命周期事实均保存相应审计/outbox，尚无通用后台消费者、投递重试或外部效果对账。配置页直接读取 PostgreSQL 当前生效值，因此这个管理闭环不依赖 outbox 消费来宣称生效。原生 Worker 的 state RPC 也不能被视为完整 Agent 工具或平台 Effect 系统。
 
-当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿、配置历史页面、回退操作或 Web 备份恢复。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、组件和 OneBot 账号连接管理，尚不能配置模型或管理记忆。
+当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿或 Web 备份恢复。已有组件配置历史页面，可将历史配置重新预览并作为新修订提交；恢复时仍使用当前持久状态。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、插件、组件和 OneBot 连接管理，尚不能配置模型或管理记忆。
 
 ## 4. 验证证据与适用范围
 
-本轮 P1 接入切片使用真实 PostgreSQL、原生 Worker、实际 TCP OneBot 测试服务及 Edge 浏览器验证。最终 Linux 镜像中 94 个源码/测试文件及实际安装包逐文件核对一致；没有接入真实 QQ、LLM 或 Embedding 服务。
+本轮 P2 使用独立 PostgreSQL 17.10、真实原生 Worker 与非 root Docker 测试；没有使用真实 QQ、LLM 或 Embedding 凭据。
+
+| P2 插件升级切片 | 结果 | 范围 |
+|---|---|---|
+| Windows 全量 | `540 passed, 4 skipped`，600.44 秒 | Python 3.11.13、真实 PostgreSQL；跳过 POSIX/大小写路径专项 |
+| 非 root Linux 全量 | `543 passed, 1 skipped`，478.19 秒 | 仅跳过 Windows DACL；包含持久 watch、迁移、Web 升级/重启与旧功能回归 |
+| Edge + 独立 Compose | 通过 | 双 Bot、OneBot、ZIP 导入、通用服务表单、版本升级、历史恢复、重启、注销；恢复配置后当前状态继续增长 |
+| Edge 组件并发专项 | 通过 | 包列表刷新时保留选择、读取/应用期间保留新草稿、旧调用结果隔离、历史载入与类型化 schema 字段 |
+| Edge Binding 专项 | 通过 | 既有响应乱序、秘密草稿、冻结核对请求与内容展示回归 |
+| 迁移与 watcher 故障矩阵 | 已包含于全量 | v1→v2→v3 及显式反向迁移、在途写排空、非确定输出拒绝、提交丢 ACK、宿主真实退出、锁等待过期、100 次实际重载资源回收 |
+| 最终静态/镜像核对 | 通过 | Ruff、JS 语法、补丁空白、文档链接；最终运行镜像与工作区 78 个运行源码文件 SHA-256 全部一致 |
+
+Windows 全量运行期间只调整了 `app.js` 的 Bot 切换表单竞态及 `test_watch.py` 的同名 fixture 导入写法；Python 业务代码保持不变，前端调整后重新通过上述真实浏览器流程。Linux 全量使用最终运行源码，测试中的同一 fixture 导入随后只改为显式别名以通过 Ruff；未修改测试行为。两个全量中的 ZIP 重名警告来自故意构造的非法归档测试。
+
+以下 P1 接入切片是上一提交 `d6e6589` 的历史记录，使用真实 PostgreSQL、原生 Worker、实际 TCP OneBot 测试服务及 Edge 浏览器验证。当时最终 Linux 镜像中 94 个源码/测试文件及实际安装包逐文件核对一致；没有接入真实 QQ、LLM 或 Embedding 服务。
 
 以下结果均已执行结束。Windows 基线运行之后，仅修正消息身份/空内容和发送提案冻结，并对相关模块重新验证；不把基线冒充最终快照完整重跑。
 
@@ -149,7 +163,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 [浏览器验收脚本](../scripts/smoke_browser.py)创建独立随机 `forest-e2e-*` Compose project 和临时端口，执行上表所列部署与双 Bot 流程。脚本 `finally` 清理自己的容器与卷，截图保存在 `.local/browser-artifacts/`。本轮实际使用 Windows 上安装的 Edge；`--browser` 可指定浏览器。
 
-P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最后触发切口、发送 UNKNOWN 对账、连接回收与 HTTP 重启测试，见 `test_messages`、`test_group_scheduler`、`test_delivery`、`test_platform`、`test_web_bindings`。通用 reducer、完整 ModelStep/工具安全点、多模态索引/删除竞争、依赖运行环境与 checkpoint 恢复，以及持续容量压力仍需后续实现和可执行证据。
+P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最后触发切口、发送 UNKNOWN 对账、连接回收与 HTTP 重启测试，见 `test_messages`、`test_group_scheduler`、`test_delivery`、`test_platform`、`test_web_bindings`。P2 增加离线运行环境、迁移、watch 与 Web 插件验证。通用 reducer、完整 ModelStep/工具安全点、多模态索引/删除竞争、Agent checkpoint 恢复，以及持续容量压力仍需后续实现和可执行证据。
 
 ## 5. 下一步
 

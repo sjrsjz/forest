@@ -1,6 +1,7 @@
 import base64
 
-from forest.adapters.onebot import parse_event, prepare_send
+from onebot_codec import parse_event, prepare_send
+
 from forest.sdk import Plugin, service
 
 

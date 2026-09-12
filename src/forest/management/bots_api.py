@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from forest.errors import ForestError
@@ -123,7 +125,35 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
     @app.get("/management/v1/packages")
     async def packages(request: Request):
         await principal(request)
-        return {"packages": services()[1].available_packages()}
+        fleet = services()[1]
+        return {"packages": fleet.available_packages(), "errors": fleet.package_errors}
+
+    @app.post("/management/v1/packages", status_code=201)
+    async def import_package(request: Request):
+        session = await runtime.principal(request, write=True, content_type="application/zip")
+        fleet = services()[1]
+        snapshot = await fleet.registry.import_archive(
+            await request.body(), subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            idempotency_key=key(request),
+        )
+        metadata = await asyncio.to_thread(fleet.describe_package, snapshot)
+        fleet.package_metadata[snapshot.digest] = metadata
+        fleet.packages[snapshot.digest] = snapshot
+        fleet.package_errors.pop(snapshot.digest, None)
+        return metadata
+
+    @app.get("/management/v1/packages/{package_digest}/archive")
+    async def export_package(package_digest: str, request: Request):
+        await principal(request)
+        fleet = services()[1]
+        if package_digest not in fleet.packages:
+            raise ForestError("PACKAGE_UNAVAILABLE", "Package is not registered", 404)
+        data = await asyncio.to_thread(fleet.artifacts.export_archive, package_digest)
+        return Response(data, media_type="application/zip", headers={
+            "Content-Disposition": 'attachment; filename="forest-plugin.zip"',
+            "Cache-Control": "no-store",
+        })
 
     @app.get("/management/v1/bots/{bot_id}/components/{component_id}/configuration")
     async def configuration(bot_id: str, component_id: str, request: Request):
@@ -131,6 +161,13 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
                                                {"component_id": component_id}, write=False)
         return {**await bot.control.read(signed, operation, component_id),
                 "runtime": services()[1].status(bot_id)}
+
+    @app.get("/management/v1/bots/{bot_id}/components/{component_id}/configuration/history")
+    async def configuration_history(bot_id: str, component_id: str, request: Request,
+                                    before: int = Query(default=2**63-1, ge=1, le=2**63-1)):
+        payload = {"component_id": component_id, "before": before}
+        bot, operation, signed = await ticket(request, bot_id, "config.history", payload, write=False)
+        return await bot.control.history(signed, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/components/{component_id}/change-plans")
     async def config_plan(bot_id: str, component_id: str, body: ConfigPlan, request: Request):

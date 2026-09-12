@@ -1,4 +1,5 @@
 import { bindingsPanel } from './bindings.js';
+import { schemaForm } from './schema-form.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -21,7 +22,7 @@ async function api(path, body, extraHeaders = {}) {
   const response = await fetch(`/management/v1${path}`, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf(), ...extraHeaders },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    ...(body === undefined ? {} : { body: body instanceof Blob ? body : JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => ({ code: 'INVALID_RESPONSE', message: '服务暂时无法响应，请稍后重试。' }));
   if (!response.ok || data.code === 'INVALID_RESPONSE') {
@@ -93,7 +94,7 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   bindingPanel.reset();
-  selectedBot = null; botRows = []; botConfig = null; packageRows = []; selectionEpoch++;
+  selectedBot = null; botRows = []; botConfig = null; packageRows = []; selectionEpoch++; packageReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
   $('bot-detail').classList.add('hidden'); $('create-bot-form').reset();
   $('config-form').reset(); $('diff').replaceChildren(); $('identity').classList.add('hidden');
@@ -126,11 +127,20 @@ $('apply').addEventListener('click', () => busy($('apply'), async () => {
 $('reload').addEventListener('click', () => busy($('reload'), readConfiguration));
 let botRows = [], selectedBot = null, botConfig = null, packageRows = [];
 let botPlan = null, botApplyKey = null, createKey = null, invokeKey = null, renameKey = null, retryKey = null;
-let selectionEpoch = 0, formEpoch = 0;
+let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0;
+let readConfigFields, readInvokeFields, historyBefore = null, importKey = null;
 const bindingPanel = bindingsPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
+function resetComponent() {
+  botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
+  $('bot-config-fields').replaceChildren(); $('bot-invoke-fields').replaceChildren();
+  $('bot-service').replaceChildren(); $('bot-history').replaceChildren();
+  $('bot-grants').disabled = true;
+  $('bot-config-form').querySelector('button[type="submit"]').disabled = true;
+  $('bot-invoke-form').querySelector('button[type="submit"]').disabled = true;
+}
 function botStatus(state) {
   return ({ PENDING: '等待创建存储', PROVISIONING: '正在创建存储', READY: '存储就绪', FAILED: '创建未完成' })[state] || state;
 }
@@ -150,14 +160,26 @@ async function readBots() {
   if (!data.managed_available) mode.value = 'external';
   $('bot-dsn-label').classList.toggle('hidden', mode.value !== 'external');
 }
-async function loadPackages() {
-  if (packageRows.length) return;
-  packageRows = (await api('/packages')).packages;
+async function loadPackages(force = false) {
+  if (packageRows.length && !force) return;
+  const seq = ++packageReadSeq;
+  const response = await api('/packages');
+  if (seq !== packageReadSeq) return;
+  const previous = $('bot-package').value;
+  packageRows = response.packages;
   $('bot-package').replaceChildren();
   for (const item of packageRows) {
     const option = document.createElement('option'); option.value = item.package_digest;
-    option.textContent = item.package_id === 'forest.counter' ? '计数器（内置演示组件）' : item.package_id;
+    option.textContent = `${item.package_id} · ${item.version}`;
     $('bot-package').append(option);
+  }
+  if (packageRows.some((p) => p.package_digest === previous)) $('bot-package').value = previous;
+  $('package-list').replaceChildren();
+  for (const pkg of packageRows) {
+    const row = document.createElement('p'); row.textContent = `${pkg.package_id} · ${pkg.version} `;
+    const link = document.createElement('a'); link.textContent = '下载插件包';
+    link.href = `/management/v1/packages/${encodeURIComponent(pkg.package_digest)}/archive`;
+    row.append(link); $('package-list').append(row);
   }
 }
 function updateBotState(state) {
@@ -168,29 +190,48 @@ function updateBotState(state) {
   $('bot-runtime-status').textContent = error ? `组件暂未就绪：${error}` :
     component?.worker_state === 'ACTIVE' && component.loaded_revision === state.desired_revision ? '组件已生效并运行中' :
     state.desired_revision ? '已保存，等待组件启动或切换…' : '保存组件配置后即可启动';
+  $('bot-operations').replaceChildren();
+  for (const op of state.operations || []) {
+    const row = document.createElement('li');
+    row.textContent = `${op.created_at} · ${op.phase}${op.error_code ? ` · ${op.error_code}` : ''}`;
+    $('bot-operations').append(row);
+  }
+}
+function renderComponent(config, grants = []) {
+  const pkg = selectedPackage();
+  readConfigFields = schemaForm($('bot-config-fields'), pkg.config_schema, config);
+  $('bot-grants').required = pkg.grants.length > 0;
+  $('bot-grants').disabled = false;
+  $('bot-config-form').querySelector('button[type="submit"]').disabled = false;
+  $('bot-grants').checked = pkg.grants.every((g) => grants.includes(g));
+  $('bot-grants-label').textContent = pkg.grants.length ? `允许组件使用：${pkg.grants.join('、')}` : '此组件未申请额外能力';
+  $('bot-service').replaceChildren();
+  for (const service of pkg.services) {
+    const option = document.createElement('option'); option.value = service.name; option.textContent = service.name;
+    $('bot-service').append(option);
+  }
+  renderService();
+}
+function renderService() {
+  const service = selectedPackage().services.find((s) => s.name === $('bot-service').value);
+  $('bot-invoke-form').classList.toggle('hidden', !service);
+  readInvokeFields = service ? schemaForm($('bot-invoke-fields'), service.input_schema) : null;
+  $('bot-invoke-form').querySelector('button[type="submit"]').disabled = !service;
+  invokeKey = null; $('bot-invoke-result').textContent = '';
 }
 async function readBotConfig() {
-  const epoch = selectionEpoch;
+  const epoch = selectionEpoch, edit = formEpoch, seq = ++configReadSeq;
   const state = await api(`${componentPath()}/configuration`);
-  if (epoch !== selectionEpoch) return;
+  if (epoch !== selectionEpoch || edit !== formEpoch || seq !== configReadSeq) return;
   botConfig = state; clearBotPlan(); updateBotState(state);
-  const values = state.desired_values?.config || { label: selectedBot.display_name, multiplier: 1 };
-  $('bot-config-fields').replaceChildren();
-  for (const [name, schema] of Object.entries(selectedPackage().config_schema.properties)) {
-    const label = document.createElement('label'); label.textContent = ({label: '结果显示名称', multiplier: '增加量倍率'})[name] || name;
-    const input = document.createElement('input'); input.name = name; input.required = true;
-    input.type = schema.type === 'integer' ? 'number' : 'text';
-    if (schema.minimum !== undefined) input.min = schema.minimum;
-    if (schema.maximum !== undefined) input.max = schema.maximum;
-    if (schema.maxLength !== undefined) input.maxLength = schema.maxLength;
-    input.value = values[name] ?? ''; label.append(input); $('bot-config-fields').append(label);
-  }
-  $('bot-grants').checked = !!state.desired_values;
+  renderComponent(state.desired_values?.config, state.desired_values?.grants);
+  $('bot-history').replaceChildren(); historyBefore = null;
 }
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
   bindingPanel.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
+  resetComponent();
   renameKey = null; retryKey = null;
   const row = await api(`/bots/${encodeURIComponent(id)}`);
   if (epoch !== selectionEpoch) return;
@@ -214,7 +255,7 @@ async function selectBot(id) {
   }
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));
-$('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); }));
+$('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
 $('refresh-bots').addEventListener('click', () => busy($('refresh-bots'), readBots));
 $('create-bot-form').addEventListener('input', () => {
   createKey = null;
@@ -245,44 +286,88 @@ $('retry-bot').addEventListener('click', () => busy($('retry-bot'), async () => 
   await api(`/bots/${selectedBot.bot_id}/retry`, {expected_revision: selectedBot.revision}, {'Idempotency-Key': retryKey});
   await readBots(); await selectBot(selectedBot.bot_id);
 }));
-$('bot-package').addEventListener('change', () => { selectionEpoch++; clearBotPlan(); busy($('reload-bot-config'), readBotConfig); });
+$('bot-package').addEventListener('change', () => {
+  selectionEpoch++; clearBotPlan(); resetComponent();
+  busy($('reload-bot-config'), readBotConfig);
+});
 $('reload-bot-config').addEventListener('click', () => busy($('reload-bot-config'), readBotConfig));
 $('bot-config-form').addEventListener('input', clearBotPlan);
 $('bot-config-form').addEventListener('submit', (event) => {
   event.preventDefault(); const form = event.currentTarget;
   busy(form.querySelector('button'), async () => {
-    const epoch = selectionEpoch, edit = formEpoch, pkg = selectedPackage(); const config = {};
-    for (const [name, schema] of Object.entries(pkg.config_schema.properties)) {
-      config[name] = schema.type === 'integer' ? Number(form.elements[name].value) : form.elements[name].value;
-    }
+    if (!botConfig || !readConfigFields) return;
+    const epoch = selectionEpoch, edit = formEpoch, pkg = selectedPackage(), config = readConfigFields();
     const plan = await api(`${componentPath()}/change-plans`, {expected_revision: botConfig.desired_revision,
       values: {package_digest: pkg.package_digest, config, grants: [...pkg.grants].sort()}}, {'Idempotency-Key': crypto.randomUUID()});
     if (epoch !== selectionEpoch || edit !== formEpoch) return;
     botPlan = plan; botApplyKey = crypto.randomUUID();
-    $('bot-config-diff').textContent = Object.entries(config).map(([name, value]) => `${({label:'结果显示名称',multiplier:'增加量倍率'})[name] || name}：${value}`).join('\n');
+    $('bot-config-diff').textContent = JSON.stringify({当前: botConfig.desired_values,
+      待应用: {插件: `${pkg.package_id} ${pkg.version}`, config, grants: pkg.grants},
+      状态格式: pkg.state_schema}, null, 2);
     $('bot-config-preview').classList.remove('hidden');
   });
 });
 $('bot-config-apply').addEventListener('click', () => busy($('bot-config-apply'), async () => {
   if (!botPlan) return;
-  const epoch = selectionEpoch;
+  const epoch = selectionEpoch, edit = formEpoch;
   await api(`${componentPath()}/management-requests`, {plan_id:botPlan.plan_id, plan_digest:botPlan.plan_digest,
     expected_revision:botPlan.expected_revision}, {'Idempotency-Key':botApplyKey});
-  if (epoch !== selectionEpoch) return;
+  if (epoch !== selectionEpoch || edit !== formEpoch) return;
   await readBotConfig(); notice('配置已保存，正在启动或切换组件。', true);
 }));
 $('bot-invoke-form').addEventListener('input', () => { invokeKey = null; });
+$('bot-service').addEventListener('change', renderService);
 $('bot-invoke-form').addEventListener('submit', (event) => {
   event.preventDefault(); const form = event.currentTarget;
   busy(form.querySelector('button'), async () => {
-    invokeKey ||= crypto.randomUUID(); const epoch = selectionEpoch;
-    const data = await api(`${componentPath()}/invoke`, {service:'counter.increment',
-      payload:{increment:Number(form.elements.increment.value)}}, {'Idempotency-Key':invokeKey});
-    if (epoch !== selectionEpoch) return;
+    invokeKey ||= crypto.randomUUID(); const epoch = selectionEpoch, sentKey = invokeKey;
+    const data = await api(`${componentPath()}/invoke`, {service: $('bot-service').value,
+      payload: readInvokeFields()}, {'Idempotency-Key':sentKey});
+    if (epoch !== selectionEpoch || invokeKey !== sentKey) return;
     invokeKey = null;
-    $('bot-invoke-result').textContent = `${data.result.label}：${data.result.value}（状态修订 ${data.result.revision}）`;
+    $('bot-invoke-result').textContent = data.result?.label !== undefined && data.result?.revision !== undefined ?
+      `${data.result.label}：${data.result.value}（状态修订 ${data.result.revision}）` : JSON.stringify(data.result, null, 2);
   });
 });
+$('package-import-form').addEventListener('input', () => { importKey = null; });
+$('package-import-form').addEventListener('submit', (event) => {
+  event.preventDefault(); const form = event.currentTarget;
+  busy(form.querySelector('button'), async () => {
+    const file = form.elements.archive.files[0];
+    if (!file || file.size > 32 * 1024 * 1024) throw new Error('请选择不超过 32 MiB 的插件 ZIP 包。');
+    importKey ||= crypto.randomUUID(); const sentKey = importKey;
+    const pkg = await api('/packages', file, {'Content-Type': 'application/zip', 'Idempotency-Key': sentKey});
+    if (importKey === sentKey) { importKey = null; form.reset(); }
+    await loadPackages(true);
+    notice(`已导入 ${pkg.package_id} ${pkg.version}。选择 Bot 和插件版本，预览配置后即可启用。`, true);
+  });
+});
+async function readHistory(append = false) {
+  if (!selectedBot || !botConfig) return;
+  const epoch = selectionEpoch, path = componentPath();
+  const data = await api(`${path}/configuration/history${append && historyBefore ? `?before=${historyBefore}` : ''}`);
+  if (epoch !== selectionEpoch) return;
+  if (!append) $('bot-history').replaceChildren();
+  historyBefore = data.next_before;
+  $('bot-history-more').classList.toggle('hidden', !historyBefore);
+  for (const revision of data.revisions) {
+    const row = document.createElement('div');
+    const pkg = packageRows.find((p) => p.package_digest === revision.values.package_digest);
+    const text = document.createElement('p');
+    text.textContent = `修订 ${revision.revision} · ${revision.created_at} · ${pkg?.version || '插件包不可用'}`;
+    const button = document.createElement('button'); button.className = 'subtle';
+    button.textContent = '载入此配置'; button.disabled = !pkg;
+    button.addEventListener('click', () => {
+      if (epoch !== selectionEpoch) return;
+      $('bot-package').value = pkg.package_digest;
+      clearBotPlan(); renderComponent(revision.values.config, revision.values.grants);
+      notice(`已载入修订 ${revision.revision}。预览并应用后会创建新的配置修订；持久状态按兼容性迁移。`, true);
+    });
+    row.append(text, button); $('bot-history').append(row);
+  }
+}
+$('read-bot-history').addEventListener('click', () => busy($('read-bot-history'), () => readHistory()));
+$('bot-history-more').addEventListener('click', () => busy($('bot-history-more'), () => readHistory(true)));
 let polling = false;
 setInterval(async () => {
   if (activeView !== 'bots' || polling) return;
@@ -292,7 +377,7 @@ setInterval(async () => {
     if (selectedBot) {
       const row = botRows.find((r) => r.bot_id === selectedBot.bot_id);
       if (row && row.stage !== selectedBot.stage) await selectBot(row.bot_id);
-      else if (selectedBot.stage === 'READY') {
+      else if (selectedBot.stage === 'READY' && selectedPackage()) {
         const epoch = selectionEpoch, state = await api(`${componentPath()}/configuration`);
         if (epoch === selectionEpoch) { updateBotState(state); await bindingPanel.refresh(); }
       }

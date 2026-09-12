@@ -356,7 +356,7 @@ class Kernel:
         grants: frozenset[str] = frozenset(),
         operation_id: str | None = None,
     ) -> dict:
-        """Prepare then drain/publish one component; incompatible migration is rejected."""
+        """Prepare, drain, migrate an immutable final source, then publish atomically."""
         # Capture caller-owned objects before awaiting I/O; later UI edits must not
         # change a registered generation or the payload associated with a digest.
         config = {} if config is None else config
@@ -406,6 +406,17 @@ class Kernel:
                 self.components.pop(component_id, None)
                 old = None
             old_route = await self.store.get_route(component_id)
+            source_schema = (
+                await self.store.state_schema(authority, component_id) if old_route else 1
+            )
+            schema_change = source_schema != spec["state_schema"]
+            if old_route and old_route["generation_id"] and schema_change and {
+                "from_schema": source_schema, "to_schema": spec["state_schema"]
+            } not in spec.get("state_migrations", []):
+                raise ForestError(
+                    "STATE_MIGRATION_MISSING",
+                    "The package does not declare migration from the current durable schema", 422,
+                )
             epoch = old_route["route_epoch"] if old_route else 0
             operation_id = operation_id or str(uuid4())
             previous = await self.store.read_operation(operation_id)
@@ -475,6 +486,12 @@ class Kernel:
                     config=config,
                     instance_id=identity.instance_id,
                     capability_grants=sorted(grants),
+                    state_schema=spec["state_schema"],
+                    state_migrations=spec.get("state_migrations", []),
+                    state_value_schema=(
+                        snapshot.schema(spec["state_value_schema"])
+                        if "state_value_schema" in spec else {}
+                    ),
                 )
                 operation = await self.store.begin_operation(
                     authority,
@@ -497,7 +514,7 @@ class Kernel:
                 state = await self.store.snapshot_state(self._authority(), component_id)
                 await worker.prepare(
                     config,
-                    restored_state={"durable_state": state},
+                    restored_state=None if schema_change else {"durable_state": state},
                     timeout=timeout.get("prepare_timeout_s", 10),
                 )
                 await worker.start(timeout=timeout.get("start_timeout_s", 10))
@@ -525,9 +542,35 @@ class Kernel:
                     await self.store.quiesce_operation(
                         self._authority(), operation_id, operation["op_epoch"]
                     )
-                    await worker.restore(await old.worker.snapshot())
-                    if (await worker.health()).get("healthy") is not True:
-                        raise ForestError("WORKER_UNHEALTHY", "Restored candidate failed readiness")
+                source = await self.store.capture_state_migration(
+                    self._authority(), operation_id, operation["op_epoch"]
+                )
+                values = self.store._state_values(source["source_rows"])
+                first = repeated = values
+                if schema_change and source["source_generation_id"] is not None:
+                    first = await worker.migrate(
+                        values, from_schema=source["source_schema"], to_schema=spec["state_schema"],
+                        timeout=timeout.get("prepare_timeout_s", 10),
+                    )
+                    repeated = await worker.migrate(
+                        values, from_schema=source["source_schema"], to_schema=spec["state_schema"],
+                        timeout=timeout.get("prepare_timeout_s", 10),
+                    )
+                staged = await self.store.stage_state_migration(
+                    self._authority(), operation_id, operation["op_epoch"],
+                    source_digest=source["source_digest"], first_values=first, repeated_values=repeated,
+                )
+                # A durable plugin's restore always receives the final DB snapshot.
+                # An old Plugin.snapshot cannot replace or reintroduce durable data.
+                restored = {"durable_state": {
+                    key: {"revision": source["source_rows"].get(key, {"revision": 0})["revision"]
+                        + (1 if schema_change else 0), "value": value}
+                    for key, value in staged["result_values"].items()
+                }}
+                self._validate(Draft202012Validator({}), restored, "STATE_MIGRATION_INVALID")
+                await worker.restore(restored)
+                if (await worker.health()).get("healthy") is not True:
+                    raise ForestError("WORKER_UNHEALTHY", "Restored candidate failed readiness")
                 # Driver completion follows owned children and their IPC; database also
                 # verifies no persistent admitted calls remain at the publication point.
                 route = await self.store.publish(

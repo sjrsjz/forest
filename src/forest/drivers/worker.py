@@ -181,6 +181,14 @@ class WorkerRuntime:
                 self.require("READY")
                 await self.plugin.restore(payload.get("state"))
                 return {"state": self.state}
+            if command == "migrate":
+                self.require("READY")
+                # There is no CallScope in lifecycle execution. Even a retained
+                # state/service handle cannot acquire a host production grant.
+                return await self.plugin.migrate(
+                    payload["state"], from_schema=payload["from_schema"],
+                    to_schema=payload["to_schema"],
+                )
             if command == "resume":
                 self.require("QUIESCENT")
                 await self.plugin.resume()

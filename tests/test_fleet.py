@@ -322,6 +322,10 @@ async def actual_fleet(tmp_path):
         tmp_path,
     )
     try:
+        async def no_registered_packages():
+            return []
+        # This fixture supplies only a private Bot database, without a deployment registry.
+        fleet.registry.registered = no_registered_packages
         await fleet.initialize()
         yield fleet
     finally:
