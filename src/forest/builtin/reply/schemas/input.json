@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["template","text","sender","group"],"properties":{"template":{"type":"string","minLength":1,"maxLength":2000},"text":{"type":"string","maxLength":8000},"sender":{"type":"string","maxLength":160},"group":{"type":"string","maxLength":160}}}

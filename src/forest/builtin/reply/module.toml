@@ -1,0 +1,19 @@
+manifest_version = 1
+package_id = "forest.reply"
+version = "0.1.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "reply:Reply"
+
+[[components]]
+id = "forest.reply"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[[components.provides]]
+name = "reply.respond"
+contract = "1.0"
+input_schema = "schemas/input.json"
+output_schema = "schemas/output.json"

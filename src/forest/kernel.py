@@ -123,11 +123,13 @@ class Kernel:
         lease_seconds: float = 30,
         max_workers: int = 16,
         max_calls: int = 256,
+        max_control_calls: int = 8,
     ) -> None:
         if (
             not 3 <= lease_seconds <= 120
             or not 1 <= max_workers <= 64
             or not 1 <= max_calls <= 4096
+            or not 1 <= max_control_calls <= 16
         ):
             raise ValueError("Invalid kernel resource limits")
         self.store = store
@@ -135,12 +137,14 @@ class Kernel:
         self.incarnation = str(uuid4())
         self.lease_seconds = lease_seconds
         self.max_workers, self.max_calls = max_workers, max_calls
+        self.max_control_calls = max_control_calls
         self.lease: HostLease | None = None
         self.components: dict[str, LoadedComponent] = {}
         self._workers: set[PythonWorker] = set()
         self._calls: dict[str, tuple[WorkerIdentity, CallGrant, frozenset[str]]] = {}
         self._call_bindings: dict[str, dict[str, tuple[str, str]]] = {}
         self._call_count = 0
+        self._control_call_count = 0
         self._calls_changed = asyncio.Condition()
         self._operations: dict[str, int] = {}
         self._deployment_lock = asyncio.Lock()
@@ -693,6 +697,58 @@ class Kernel:
         finally:
             self._call_count -= 1
 
+    async def invoke_control(
+        self,
+        component_id: str,
+        service: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        contract_major: int = 1,
+        timeout: float = 10,
+        expected_policy_revision: int | None = None,
+    ) -> Any:
+        """Host-only bounded codec lane, available during normal business pause.
+
+        No Worker RPC or plugin priority field selects this entry point. It has
+        separate host capacity, no state grants, and no component dependencies.
+        """
+        self._authority()
+        if component_id != "adapter.onebot" or service not in {
+            "onebot.normalize",
+            "onebot.prepare",
+        }:
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED", "Control invocation is restricted to the OneBot codec", 403
+            )
+        if type(timeout) not in {int, float} or not 0 < timeout <= 30:
+            raise ForestError(
+                "INVALID_CALL", "Control codec deadline must be zero to 30 seconds", 422
+            )
+        if expected_policy_revision is not None and (
+            type(expected_policy_revision) is not int or expected_policy_revision < 1
+        ):
+            raise ForestError("INVALID_CALL", "Policy revision must be a positive integer", 422)
+        self._validate(Draft202012Validator({}), payload, "INPUT_INVALID")
+        payload = json.loads(json.dumps(payload, allow_nan=False))
+        if self._control_call_count >= self.max_control_calls:
+            raise ForestError("BACKPRESSURE", "Control codec capacity is exhausted", 429)
+        self._control_call_count += 1
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._invoke(
+                    component_id,
+                    service,
+                    payload,
+                    operation_id=operation_id,
+                    contract_major=contract_major,
+                    timeout=timeout,
+                    expected_policy_revision=expected_policy_revision,
+                    admission_lane="CONTROL",
+                )
+        finally:
+            self._control_call_count -= 1
+
     async def _service_rpc(
         self, identity: WorkerIdentity, parent_call_id: str, request: dict
     ) -> Any:
@@ -701,6 +757,10 @@ class Kernel:
         if parent is None or parent[0] != identity:
             raise ForestError(
                 "INVALID_CALL_CONTEXT", "Service RPC has no authenticated parent invocation", 403
+            )
+        if parent[1].admission_lane != "DATA":
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED", "Control codec cannot call another component", 403
             )
         if not isinstance(request, dict) or set(request) != {
             "service",
@@ -804,6 +864,7 @@ class Kernel:
         timeout: float,
         parent_call_id: str | None = None,
         expected_policy_revision: int | None = None,
+        admission_lane: str = "DATA",
     ) -> Any:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
@@ -812,6 +873,20 @@ class Kernel:
         component = self.components.get(component_id)
         if component is None:
             raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
+        if admission_lane == "CONTROL" and (
+            component_id != "adapter.onebot"
+            or service not in {"onebot.normalize", "onebot.prepare"}
+            or parent is not None
+            or component.grants
+            or component.dependencies
+            or component.snapshot.component.get("requires")
+            or component.snapshot.component.get("capabilities", {}).get("requests")
+        ):
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED",
+                "Control codec must be pure and have no dependencies or capabilities",
+                403,
+            )
         policy_revision = (
             component.policy_revision
             if expected_policy_revision is None
@@ -836,12 +911,15 @@ class Kernel:
                 "service": service,
                 "contract_major": contract_major,
                 "payload": payload,
+                **({"admission_lane": "CONTROL"} if admission_lane == "CONTROL" else {}),
             }
         )
 
         async def existing_call():
             if parent is None:
-                return await self.store.authorized_call(authority, operation_id, policy_revision)
+                return await self.store.authorized_call(
+                    authority, operation_id, policy_revision, admission_lane=admission_lane
+                )
             return await self.store.authorized_child_call(parent[1], operation_id, policy_revision)
 
         previous = await existing_call()
@@ -871,7 +949,13 @@ class Kernel:
         dependencies = tuple(component.dependencies)
         bindings = dict(component.service_bindings)
         try:
-            admit = self.store.admit if parent is None else self.store.admit_child
+            admit = (
+                self.store.admit_control
+                if admission_lane == "CONTROL"
+                else self.store.admit
+                if parent is None
+                else self.store.admit_child
+            )
             grant = await admit(
                 authority if parent is None else parent[1],
                 component_id,
@@ -884,6 +968,7 @@ class Kernel:
                 expected_worker_incarnation=component.worker.identity.incarnation,
                 expected_route_epoch=component.route_epoch,
                 dependency_components=dependencies,
+                **({"service_name": service} if admission_lane == "CONTROL" else {}),
             )
         except ForestError as exc:
             if exc.code in {"CALL_COMPLETED", "OPERATION_PENDING"}:

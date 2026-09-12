@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前可运行的是 P0 的多 Bot 管理与原生组件切片，整个 P0 尚未完成。**后台支持初始化、登录、创建独立 Bot 存储、组件配置预览和热切换；内核支持依赖调度、跨 Worker 服务调用、受监督调用树和持久状态。QQ 接入、Agent、记忆和群聊 Shell 仍未实现。完整能力与验证边界见[实现状态](doc/implementation-status.md)。
+**当前可运行的是多 Bot 管理、原生组件和 OneBot HTTP 接入切片；首版框架仍在实现中。**后台可配置账号、观察群聊队列和核对发送结果；消息持久入库，同群串行、跨群并行，支持模板回复与受限群聊 `#forest help/status`。内核支持热切换、跨 Worker 服务调用和持久状态。完整 Agent、多模态长期记忆与通用管理 Shell 尚未完成，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -20,6 +20,10 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 进入配置页后，修改显示名称或会话时长，点击预览差异，再应用。显示名称在后台读取新配置时生效，会话时长影响后续登录；已有会话保留原到期时间。两个窗口基于同一旧版本提交时，后提交者收到 `REVISION_CONFLICT`，原草稿保留，需要读取新版本后重新预览。
 
 进入「Bot 与组件」，填写名称并创建 Bot。托管模式为每个 Bot 创建独立数据库与受限账号，页面展示创建进度；服务中断后按同一持久计划恢复。存储就绪后，配置内置计数器的显示名称和倍率，授权状态读写，预览并应用。期望修订先保存，组件成功启动或完成排空切换后才推进生效修订。「调用组件」可验证各 Bot 状态独立，修改倍率后计数继续保留。当前后台提供内置组件，任意第三方包上传与完整插件市场尚未接入。
+
+在 Bot 页面「QQ 账号连接」登记 OneBot 11 账号，填写 HTTP API 地址、访问令牌、上报签名密钥，预览并应用。将页面提供的上报地址和相同密钥填入所用 OneBot 实现。系统先调用 `get_login_info` 校验账号，再启用连接；密钥不回显。默认仅记录消息，选择「模板回复」后可通过 @、`/chat` 或私聊触发。群聊管理的管理员 QQ 号在同一表单配置，不自动信任平台群管理员身份。
+
+Docker 内连接宿主机 OneBot 时，API 地址可使用 `http://host.docker.internal:5700`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。OneBot 上报必须能访问 Forest 的 HTTP 入口。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)。
 
 查看状态或停止服务：
 
@@ -143,4 +147,4 @@ Windows 已有 Edge 时可直接指定浏览器：
 uv run --frozen python scripts/smoke_browser.py --browser 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 ```
 
-脚本验证首次初始化、登录、部署配置、双 Bot 创建与状态隔离、组件热切换、双窗口冲突、服务重启恢复和注销撤销；`finally` 清理本次随机 project 的容器及卷，保留 `.local/browser-artifacts/` 下的截图。它不会操作普通 `forest` Compose project。浏览器、Linux 与外部服务的实际验证结果以[实现状态](doc/implementation-status.md)为准，测试脚本存在不代表已经通过。
+脚本验证首次初始化、登录、部署配置、双 Bot 创建与状态隔离、组件热切换、双窗口冲突、OneBot 账号配置与真实 HTTP 收发、UNKNOWN 核对、服务重启恢复和注销撤销；`finally` 清理本次随机 project 的容器及卷，保留 `.local/browser-artifacts/` 下的截图。它不会操作普通 `forest` Compose project。浏览器、Linux 与外部服务的实际验证结果以[实现状态](doc/implementation-status.md)为准，测试脚本存在不代表已经通过。

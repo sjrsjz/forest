@@ -17,6 +17,7 @@ from psycopg import sql
 import forest.management.fleet as fleet_module
 from forest.errors import ForestError
 from forest.management.fleet import BotFleet, ManagedBot
+from forest.security import SecretVault
 
 
 class FakeStore:
@@ -68,6 +69,24 @@ class FakeControl:
         return []
 
 
+class FakeBindingRuntime:
+    def __init__(self, bot, vault, packages, **kwargs):
+        self.bot, self.vault, self.packages = bot, vault, packages
+        self._tasks = []
+        self.failure = None
+        self.started = self.closed = False
+
+    async def start(self):
+        self.started = True
+
+    async def close(self):
+        self.closed = True
+
+
+def fake_catalog(**kwargs):
+    return SimpleNamespace(vault=object(), **kwargs)
+
+
 @pytest.fixture
 def fake_runtime(monkeypatch):
     FakeStore.instances = []
@@ -75,6 +94,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(fleet_module, "BotStore", FakeStore)
     monkeypatch.setattr(fleet_module, "Kernel", FakeKernel)
     monkeypatch.setattr(fleet_module, "BotControl", FakeControl)
+    monkeypatch.setattr(fleet_module, "BindingRuntime", FakeBindingRuntime)
     return SimpleNamespace(issuer_id="test", key_revision=1, public_key="synthetic")
 
 
@@ -93,7 +113,7 @@ async def test_bad_bot_does_not_hold_global_attach_lock(tmp_path, fake_runtime):
             await release.wait()
         return "synthetic"
 
-    fleet = BotFleet(SimpleNamespace(resolve_dsn=resolve), fake_runtime, tmp_path)
+    fleet = BotFleet(fake_catalog(resolve_dsn=resolve), fake_runtime, tmp_path)
     slow = asyncio.create_task(fleet.attach("slow"))
     try:
         await entered.wait()
@@ -124,7 +144,7 @@ async def test_attach_concurrency_is_bounded_and_shutdown_joins_pending_owners(
             entered -= 1
 
     fleet = BotFleet(
-        SimpleNamespace(resolve_dsn=resolve), fake_runtime, tmp_path, max_concurrent_attaches=2
+        fake_catalog(resolve_dsn=resolve), fake_runtime, tmp_path, max_concurrent_attaches=2
     )
     tasks = [asyncio.create_task(fleet.attach(str(number))) for number in range(6)]
     await wait_for(lambda: entered == 2)
@@ -139,7 +159,7 @@ async def test_cleanup_failure_retains_old_owner_and_prevents_replacement(tmp_pa
     async def resolve(bot_id):
         return "synthetic"
 
-    fleet = BotFleet(SimpleNamespace(resolve_dsn=resolve), fake_runtime, tmp_path)
+    fleet = BotFleet(fake_catalog(resolve_dsn=resolve), fake_runtime, tmp_path)
     old = await fleet.attach("owned")
     original_close = old.kernel.close
     old.kernel.failure = "HOST_LEASE_EXPIRED"
@@ -176,9 +196,7 @@ async def test_attach_timeout_does_not_abandon_or_wait_indefinitely_for_cleanup(
     original_open, original_close = FakeStore.open, FakeKernel.close
     monkeypatch.setattr(FakeStore, "open", blocked_open)
     monkeypatch.setattr(FakeKernel, "close", blocked_close)
-    fleet = BotFleet(
-        SimpleNamespace(resolve_dsn=resolve), fake_runtime, tmp_path, attach_timeout=0.05
-    )
+    fleet = BotFleet(fake_catalog(resolve_dsn=resolve), fake_runtime, tmp_path, attach_timeout=0.05)
     try:
         with pytest.raises(ForestError) as expired:
             await asyncio.wait_for(fleet.attach("timed-out"), 0.5)
@@ -215,7 +233,7 @@ async def test_background_attach_recovers_without_directory_head_of_line_blockin
         return [{"bot_id": name} for name in ["bad", "good", "later"]]
 
     fleet = BotFleet(
-        SimpleNamespace(resolve_dsn=resolve, list_ready=ready),
+        fake_catalog(resolve_dsn=resolve, list_ready=ready),
         fake_runtime,
         tmp_path,
         max_concurrent_attaches=2,
@@ -242,7 +260,7 @@ async def test_background_attach_recovers_without_directory_head_of_line_blockin
 async def test_failed_configuration_backs_off_but_new_revision_retries_immediately(
     tmp_path, fake_runtime
 ):
-    fleet = BotFleet(SimpleNamespace(), fake_runtime, tmp_path, retry_base=10)
+    fleet = BotFleet(fake_catalog(), fake_runtime, tmp_path, retry_base=10)
     store = FakeStore("synthetic", "test")
     kernel = FakeKernel(store)
     calls = []
@@ -298,7 +316,11 @@ async def actual_fleet(tmp_path):
         key_revision=1,
         public_key=base64.b64encode(key.public_key().public_bytes_raw()).decode("ascii"),
     )
-    fleet = BotFleet(SimpleNamespace(resolve_dsn=resolve), authority, tmp_path)
+    fleet = BotFleet(
+        SimpleNamespace(resolve_dsn=resolve, vault=SecretVault(tmp_path / "vault")),
+        authority,
+        tmp_path,
+    )
     try:
         await fleet.initialize()
         yield fleet

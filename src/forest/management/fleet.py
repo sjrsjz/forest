@@ -16,6 +16,7 @@ from forest.kernel import Kernel
 from forest.management.authority import WebAuthority
 from forest.management.catalog import BotCatalog
 from forest.packages import PackageCatalog, PackageSnapshot
+from forest.platform import BindingRuntime
 from forest.storage.bot import BotStore
 from forest.storage.control import BotControl
 
@@ -31,6 +32,7 @@ class ManagedBot:
     cleanup_task: asyncio.Task | None = None
     ready: bool = False
     retries: dict[str, tuple[int, int, float]] = field(default_factory=dict)
+    platform: BindingRuntime | None = None
 
 
 class BotFleet:
@@ -59,6 +61,8 @@ class BotFleet:
         self.bots: dict[str, ManagedBot] = {}
         self.errors: dict[str, str] = {}
         self.packages: dict[str, PackageSnapshot] = {}
+        self.infrastructure_packages: dict[str, PackageSnapshot] = {}
+        self.group_slots = asyncio.Semaphore(32)
         self._closed = False
         self.max_concurrent_attaches, self.max_bots = max_concurrent_attaches, max_bots
         self.attach_timeout, self.reconcile_interval = attach_timeout, reconcile_interval
@@ -78,6 +82,10 @@ class BotFleet:
     def _usable(bot: ManagedBot) -> bool:
         if not bot.ready or bot.cleanup_task is not None:
             return False
+        if bot.platform is not None and (
+            getattr(bot.platform, "failure", None) or any(task.done() for task in bot.platform._tasks)
+        ):
+            return False
         try:
             lease = bot.kernel._authority()
             return lease.expires_at > datetime.now(timezone.utc)
@@ -92,6 +100,8 @@ class BotFleet:
         if bot.task and bot.task is not asyncio.current_task():
             bot.task.cancel()
             await asyncio.gather(bot.task, return_exceptions=True)
+        if bot.platform is not None:
+            await bot.platform.close()
         await bot.kernel.close()
         if bot.kernel._workers:
             raise ForestError("WORKER_CLEANUP_FAILED", "Old Worker resources remain owned", 503)
@@ -122,6 +132,12 @@ class BotFleet:
             )
         )
         self.packages[snapshot.digest] = snapshot
+        for name in ("onebot", "reply"):
+            package = await asyncio.to_thread(
+                PackageCatalog(self.data_dir / "artifacts").build,
+                Path(__file__).resolve().parents[1] / "builtin" / name,
+            )
+            self.infrastructure_packages[package.component["id"]] = package
 
     def available_packages(self) -> list[dict]:
         return [
@@ -203,6 +219,11 @@ class BotFleet:
                             key_revision=self.authority.key_revision,
                             public_key=self.authority.public_key,
                         )
+                        managed.platform = BindingRuntime(
+                            managed, self.catalog.vault, self.infrastructure_packages,
+                            global_slots=self.group_slots,
+                        )
+                        await managed.platform.start()
                         if self._closed:
                             raise ForestError("RUNTIME_STOPPING", "Bot supervisor is stopping", 503)
                     except BaseException:

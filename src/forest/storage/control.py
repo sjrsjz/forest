@@ -14,7 +14,9 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.bot import BotStore, HostLease
 
-ACTIONS = ("config.read", "config.plan", "config.apply", "service.invoke")
+ACTIONS = ("config.read", "config.plan", "config.apply", "service.invoke",
+           "binding.create", "binding.read", "binding.plan", "binding.apply",
+           "message.read", "message.cancel", "delivery.reconcile")
 _REVISION_CLAIMS = frozenset(
     {"key_revision", "account_revision", "session_revision", "policy_revision"}
 )

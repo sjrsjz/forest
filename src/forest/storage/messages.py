@@ -1,0 +1,1205 @@
+"""Durable, ordered group input and fenced conversation ownership.
+
+Inbox reception, classification and context consumption are separate facts. The
+host calls select_input only at a closed model/tool boundary. No method here
+calls a model or summarizes content: compaction retains immutable source refs.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+from uuid import uuid4
+
+from psycopg.types.json import Jsonb
+
+from forest.errors import ForestError
+from forest.packages import digest_json
+from forest.storage.bot import BotStore, HostLease
+
+
+@dataclass(frozen=True)
+class ActorLease:
+    host: HostLease
+    conversation_id: str
+    binding_id: str
+    binding_epoch: int
+    actor_id: str
+    actor_epoch: int
+    expires_at: datetime
+    policy_revision: int
+    maintenance_epoch: int
+    storage_generation: int
+
+
+def _text(value: Any, name: str, maximum: int = 256, *, empty: bool = False) -> str:
+    if not isinstance(value, str) or len(value) > maximum or (not value and not empty):
+        raise ForestError("INVALID_MESSAGE", f"Invalid {name}", 422)
+    return value
+
+
+def _json(value: Any, maximum: int = 262144) -> Any:
+    try:
+        text = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        if len(text.encode()) > maximum:
+            raise ValueError("size")
+        return json.loads(text)
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise ForestError("INVALID_MESSAGE", "Message exceeds bounded JSON limits", 422) from exc
+
+
+def _tokens(value: Any) -> int:
+    # Conservative local upper bound. CJK and image placeholders remain charged;
+    # the eventual Provider must use its own exact request tokenizer/budget.
+    return max(1, len(json.dumps(value, ensure_ascii=False).encode("utf-8")))
+
+
+def _shell_command(value: dict) -> str | None:
+    """Claim only direct leading text, after whitespace and one self mention.
+
+    Unknown or malformed commands remain CONTROL. The P1 gate retains no argv;
+    until typed argument sensitivity and a vault are available, it safely drops
+    raw arguments and records their digest plus a fixed context projection.
+    """
+    if value["author"]["is_self"]:
+        return None
+    parts = value["segments"]
+    index, mentioned = 0, False
+    while index < len(parts):
+        part = parts[index]
+        if part["type"] == "text" and not part["text"].strip():
+            index += 1
+            continue
+        if (not mentioned and part["type"] == "mention"
+                and part["external_user_id"] == value["self_id"]):
+            mentioned = True
+            index += 1
+            continue
+        break
+    text = ""
+    while index < len(parts) and parts[index]["type"] == "text":
+        text += parts[index]["text"]
+        index += 1
+    text = text.lstrip()
+    if not re.match(r"#forest(?:\s|$)", text):
+        return None
+    words = text[len("#forest"):].split()
+    known = {(): "help", ("help",): "help", ("status",): "status",
+             ("bot", "status"): "bot.status", ("core", "status"): "core.status"}
+    # Extra media or other segments cannot turn a malformed command into a
+    # successfully parsed command. Its namespace still remains reserved.
+    if index != len(parts):
+        return "unknown"
+    return known.get(tuple(words), "unknown")
+
+
+class MessageStore:
+    def __init__(self, store: BotStore, bindings=None, *, context_token_budget: int = 32768):
+        if bindings is None:
+            from forest.storage.bindings import BindingStore
+
+            bindings = BindingStore(store)
+        if type(context_token_budget) is not int or not 512 <= context_token_budget <= 1048576:
+            raise ValueError("Context budget must be between 512 and 1048576")
+        self.store = store
+        self.bindings = bindings
+        self.context_token_budget = context_token_budget
+
+    def _normalized(self, raw: dict) -> dict:
+        value = _json(raw)
+        if not isinstance(value, dict):
+            raise ForestError("INVALID_MESSAGE", "Message must be an object", 422)
+        if value.get("platform") != "onebot-v11" or value.get("channel_kind") not in {
+            "group", "private"
+        }:
+            raise ForestError("INVALID_MESSAGE", "Unsupported message identity", 422)
+        for key in ("self_id", "channel_id", "platform_message_id"):
+            _text(value.get(key), key)
+        value["thread_id"] = _text(value.get("thread_id", ""), "thread_id", empty=True)
+        try:
+            sent = datetime.fromisoformat(value["sent_at"].replace("Z", "+00:00"))
+            if sent.tzinfo is None:
+                raise ValueError("timezone required")
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            raise ForestError("INVALID_MESSAGE", "sent_at must be an aware ISO timestamp", 422) from exc
+        author = value.get("author")
+        if not isinstance(author, dict):
+            raise ForestError("INVALID_MESSAGE", "Message author is required", 422)
+        user_id = _text(author.get("external_user_id"), "external_user_id")
+        _text(author.get("display_name", ""), "display_name", 512, empty=True)
+        if type(author.get("is_self")) is not bool:
+            raise ForestError("INVALID_MESSAGE", "is_self must be a trusted Boolean", 422)
+        if author["is_self"] != (user_id == value["self_id"]):
+            raise ForestError("INVALID_MESSAGE", "Self identity does not match the binding", 422)
+        # The trusted host issues this identity, never a message's text/nickname.
+        anonymous = author.get("anonymous")
+        if anonymous is not None:
+            if not isinstance(anonymous, dict):
+                raise ForestError("INVALID_MESSAGE", "Malformed anonymous identity", 422)
+            # QQ's shared anonymous user ID is never a normal account principal.
+            # An absent pseudonym ID is scoped to this event, not merged by name.
+            author["principal_ref"] = "anonymous:" + digest_json([
+                self.store.bot_id, value["platform"], value["self_id"], value["channel_id"],
+                anonymous.get("id") or value["platform_message_id"],
+            ])
+            author["identity_origin"] = "adapter_anonymous"
+        else:
+            author["principal_ref"] = "principal:" + digest_json(
+                [self.store.bot_id, value["platform"], user_id]
+            )
+            author["identity_origin"] = "adapter_verified"
+        parts = value.get("segments")
+        if not isinstance(parts, list) or len(parts) > 256:
+            raise ForestError("INVALID_MESSAGE", "Message needs 0 to 256 content parts", 422)
+        if not parts:
+            # Empty platform messages still carry a real source, author and
+            # ingress position. Normalize representation, not trigger semantics.
+            parts = value["segments"] = [{"type": "text", "text": ""}]
+        for part in parts:
+            if not isinstance(part, dict):
+                raise ForestError("INVALID_MESSAGE", "Malformed content part", 422)
+            kind = part.get("type")
+            if kind == "text":
+                _text(part.get("text"), "text", 131072, empty=True)
+            elif kind == "image":
+                if not isinstance(part.get("media_ref"), dict):
+                    raise ForestError("INVALID_MESSAGE", "Image needs a typed source reference", 422)
+            elif kind == "mention":
+                _text(part.get("external_user_id"), "mention")
+            elif kind == "reply":
+                _text(part.get("platform_message_id"), "reply")
+            elif kind == "unsupported":
+                _text(part.get("platform_type"), "platform_type")
+            else:
+                raise ForestError("INVALID_MESSAGE", "Unsupported content part", 422)
+        return value
+
+    async def _conversation(self, conn, conversation_id: str) -> dict:
+        row = await (await conn.execute(
+            "SELECT * FROM public.bot_conversations WHERE bot_id=%s AND conversation_id=%s FOR UPDATE",
+            (self.store.bot_id, conversation_id),
+        )).fetchone()
+        if row is None:
+            raise ForestError("CONVERSATION_NOT_FOUND", "Conversation does not exist", 404)
+        return row
+
+    async def _locate(self, conn, conversation_id: str) -> dict:
+        row = await (await conn.execute(
+            "SELECT binding_id FROM public.bot_conversations WHERE bot_id=%s AND conversation_id=%s",
+            (self.store.bot_id, conversation_id),
+        )).fetchone()
+        if row is None:
+            raise ForestError("CONVERSATION_NOT_FOUND", "Conversation does not exist", 404)
+        return row
+
+    async def ingest(
+        self, lease: HostLease, binding_id: str, event: dict, *,
+        expected_binding_epoch: int | None = None,
+        decision: str | None = None, rule_revision: str = "ingress-v1", reason: str = "",
+    ) -> dict:
+        value = self._normalized(event)
+        if decision not in {None, "TRIGGER", "NO_TRIGGER", "CONTROL_COMMAND", "FAILED"}:
+            raise ForestError("INVALID_CLASSIFICATION", "Unknown classification", 422)
+        if value["author"]["is_self"] and decision == "TRIGGER":
+            raise ForestError("SELF_TRIGGER", "A binding cannot trigger its own response", 422)
+        shell_command = _shell_command(value)
+        if shell_command is not None:
+            decision, rule_revision, reason = "CONTROL_COMMAND", "shell-gate-v1", "reserved_namespace"
+        if decision is not None:
+            _text(rule_revision, "rule_revision")
+            _text(reason, "reason", 1024, empty=True)
+        conversation_id = "conversation:" + digest_json([
+            self.store.bot_id, binding_id, value["platform"], value["channel_kind"],
+            value["channel_id"], value["thread_id"],
+        ])
+        # OneBot QQ IDs use a globally scoped platform realm. Neither binding
+        # nor thread creates another memory trunk for the same actual group.
+        group_source_id = "source:" + digest_json([
+            self.store.bot_id, value["platform"], "qq-global", value["channel_kind"],
+            value["channel_id"], 1,
+        ])
+        source_event_id = "source-event:" + digest_json([
+            # OneBot message IDs are account-scoped opaque identities. Equal
+            # int32 values observed by different accounts do not prove that the
+            # underlying platform event is the same, even in a shared group.
+            group_source_id, value["self_id"], value["platform_message_id"],
+        ])
+        input_digest = digest_json(value)
+        event_id = "event:" + digest_json([conversation_id, value["platform_message_id"]])
+        command_id = "command:" + digest_json(event_id) if shell_command is not None else None
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding = await self.bindings._guard(
+                conn, lease, binding_id, expected_binding_epoch,
+                data=False, require_receive=True,
+            )
+            if binding["self_id"] != value["self_id"] or binding["platform"] != value["platform"]:
+                raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
+            await conn.execute(
+                "INSERT INTO public.bot_conversations(bot_id,conversation_id,binding_id,platform,"
+                "channel_kind,channel_id,thread_id,group_source_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT DO NOTHING",
+                (self.store.bot_id, conversation_id, binding_id, value["platform"],
+                 value["channel_kind"], value["channel_id"], value["thread_id"], group_source_id),
+            )
+            conversation = await self._conversation(conn, conversation_id)
+            existing = await (await conn.execute(
+                "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+                (self.store.bot_id, event_id),
+            )).fetchone()
+            if existing:
+                if existing["input_digest"] != input_digest:
+                    raise ForestError("INGEST_CONFLICT", "Platform message identity was reused", 409)
+                await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+                return {"conversation_id": conversation_id, "event_id": event_id,
+                        "ingress_seq": existing["ingress_seq"], "duplicate": True,
+                        "command_id": command_id, "trigger_decision": existing["trigger_decision"]}
+            if conversation["next_ingress_seq"] - conversation["context_applied_seq"] > 10000:
+                raise ForestError("INBOX_BACKPRESSURE", "Conversation input backlog is full", 429)
+            segments, media = [], []
+            input_parts = value["segments"] if shell_command is None else [{
+                "type": "text",
+                "text": ("用户提交了一条管理命令，参数未进入对话上下文。" if shell_command != "unknown"
+                         else "用户提交了一条未成功解析的管理命令。"),
+                "command_id": command_id,
+                "command_name": shell_command,
+            }]
+            for index, part in enumerate(input_parts):
+                if part["type"] == "image":
+                    media_ref = "media:" + digest_json([event_id, index])
+                    media.append((media_ref, index, part["media_ref"]))
+                    segments.append({"type": "image", "media_ref": media_ref,
+                                     "fetch_status": "PENDING_FETCH"})
+                elif part["type"] == "unsupported":
+                    segments.append({"type": "unsupported", "platform_type": part["platform_type"]})
+                else:
+                    segments.append(part)
+            seq = conversation["next_ingress_seq"]
+            await conn.execute(
+                "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
+                "platform_message_id,source_event_id,input_digest,author,segments,sent_at,estimated_tokens) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.store.bot_id, conversation_id, event_id, seq, value["platform_message_id"],
+                 source_event_id, input_digest, Jsonb(value["author"]), Jsonb(segments),
+                 value["sent_at"], _tokens({"author": value["author"], "segments": segments})),
+            )
+            for media_ref, index, source in media:
+                await conn.execute(
+                    "INSERT INTO public.bot_inbound_media_refs(bot_id,media_ref,event_id,part_index,source) "
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    (self.store.bot_id, media_ref, event_id, index, Jsonb(source)),
+                )
+            if command_id is not None:
+                await conn.execute(
+                    "INSERT INTO public.bot_shell_requests(bot_id,command_id,event_id,conversation_id,"
+                    "binding_id,command_name,raw_digest) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (self.store.bot_id, command_id, event_id, conversation_id, binding_id,
+                     shell_command, digest_json(value["segments"])),
+                )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
+                "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s",
+                (self.store.bot_id, conversation_id),
+            )
+            if decision is not None:
+                await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
+            await self.store._event(conn, "conversation.input", event_id,
+                                    {"conversation_id": conversation_id, "ingress_seq": seq})
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            return {"conversation_id": conversation_id, "event_id": event_id,
+                    "ingress_seq": seq, "duplicate": False, "command_id": command_id,
+                    "trigger_decision": decision or "PENDING"}
+
+    async def _classify_in(self, conn, conversation_id, event_id, decision, rule_revision, reason):
+        row = await (await conn.execute(
+            "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s FOR UPDATE",
+            (self.store.bot_id, event_id),
+        )).fetchone()
+        if row is None or row["conversation_id"] != conversation_id:
+            raise ForestError("EVENT_NOT_FOUND", "Message does not exist", 404)
+        value_digest = digest_json([decision, rule_revision, reason])
+        if row["trigger_decision"] != "PENDING":
+            if row["classification_digest"] != value_digest:
+                raise ForestError("CLASSIFICATION_CONFLICT", "Classification is already final", 409)
+            return row
+        if row["author"]["is_self"] and decision == "TRIGGER":
+            raise ForestError("SELF_TRIGGER", "Self messages do not create conversation triggers", 422)
+        await conn.execute(
+            "UPDATE public.bot_message_inbox SET trigger_decision=%s,classification_digest=%s,"
+            "rule_revision=%s,classification_reason=%s WHERE bot_id=%s AND event_id=%s",
+            (decision, value_digest, rule_revision, reason, self.store.bot_id, event_id),
+        )
+        if decision == "TRIGGER":
+            await conn.execute(
+                "INSERT INTO public.bot_conversation_triggers(bot_id,trigger_id,conversation_id,"
+                "event_id,ingress_seq,principal_ref) VALUES (%s,%s,%s,%s,%s,%s)",
+                (self.store.bot_id, "trigger:" + digest_json(event_id), conversation_id,
+                 event_id, row["ingress_seq"], row["author"]["principal_ref"]),
+            )
+        await conn.execute(
+            "UPDATE public.bot_conversations c SET classified_through_seq=COALESCE("
+            "(SELECT min(i.ingress_seq)-1 FROM public.bot_message_inbox i WHERE i.bot_id=c.bot_id "
+            "AND i.conversation_id=c.conversation_id AND i.trigger_decision='PENDING'),"
+            "c.next_ingress_seq-1),mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+            "WHERE c.bot_id=%s AND c.conversation_id=%s",
+            (self.store.bot_id, conversation_id),
+        )
+        return {**row, "trigger_decision": decision}
+
+    async def classify(self, lease, conversation_id, event_id, decision, *,
+                       expected_binding_epoch=None, rule_revision="classification-v1", reason=""):
+        if decision not in {"TRIGGER", "NO_TRIGGER", "CONTROL_COMMAND", "FAILED"}:
+            raise ForestError("INVALID_CLASSIFICATION", "Unknown classification", 422)
+        _text(rule_revision, "rule_revision")
+        _text(reason, "reason", 1024, empty=True)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            identity = await self._locate(conn, conversation_id)
+            binding = await self.bindings._guard(
+                conn, lease, identity["binding_id"], expected_binding_epoch, data=False,
+                require_receive=True,
+            )
+            await self._conversation(conn, conversation_id)
+            row = await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
+            await self.store._event(conn, "conversation.classified", event_id,
+                                    {"conversation_id": conversation_id})
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            return row
+
+    async def pending(self, lease: HostLease, *, limit: int = 128,
+                      after_conversation_id: str | None = None) -> list[dict]:
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ValueError("limit")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            rows = await (await conn.execute(
+                "SELECT c.* FROM public.bot_conversations c JOIN public.bot_bindings b "
+                "ON b.bot_id=c.bot_id AND b.binding_id=c.binding_id WHERE c.bot_id=%s "
+                "AND (%s::text IS NULL OR c.conversation_id>%s) "
+                "AND b.enabled AND (c.context_applied_seq<c.classified_through_seq OR "
+                "c.mailbox_revision>c.processed_mailbox_revision OR c.active_session_id IS NOT NULL "
+                "OR EXISTS (SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=c.bot_id "
+                "AND t.conversation_id=c.conversation_id AND t.status IN ('PENDING','CLAIMED'))) "
+                "ORDER BY c.conversation_id LIMIT %s",
+                (self.store.bot_id, after_conversation_id, after_conversation_id, limit),
+            )).fetchall()
+            await self.store._host(conn, lease)
+            return rows
+
+    async def expire_classifications(self, lease: HostLease, *, limit: int = 128) -> int:
+        """A dead preprocessing worker cannot leave a permanent ingress gap."""
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            rows = await (await conn.execute(
+                "SELECT i.conversation_id,i.event_id FROM public.bot_message_inbox i "
+                "JOIN public.bot_conversations c ON c.bot_id=i.bot_id AND c.conversation_id=i.conversation_id "
+                "JOIN public.bot_bindings b ON b.bot_id=c.bot_id AND b.binding_id=c.binding_id "
+                "WHERE i.bot_id=%s AND b.receive_enabled AND b.state IN ('ONLINE','DRAINING') "
+                "AND i.trigger_decision='PENDING' AND i.classification_deadline<=clock_timestamp() "
+                "ORDER BY i.classification_deadline LIMIT %s", (self.store.bot_id, limit),
+            )).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                await self.classify(lease, row["conversation_id"], row["event_id"], "FAILED",
+                                    rule_revision="classification-timeout-v1", reason="deadline_exceeded")
+                count += 1
+            except ForestError as exc:
+                if exc.code not in {"CLASSIFICATION_CONFLICT", "BINDING_OFFLINE", "RECEIVE_CLOSED", "STALE_BINDING"}:
+                    raise
+        return count
+
+    async def pending_controls(self, lease: HostLease, *, limit: int = 64,
+                               after_command_id: str | None = None) -> list[dict]:
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("limit")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            runtime = await self.store._runtime(conn)
+            await self.store._host(conn, lease, runtime)
+            if not runtime["control_admission"]:
+                raise ForestError("CONTROL_CLOSED", "Bot control admission is closed", 409)
+            rows = await (await conn.execute(
+                "SELECT s.command_id,s.binding_id,s.command_name,s.conversation_id,s.status "
+                "FROM public.bot_shell_requests s JOIN public.bot_bindings b "
+                "ON b.bot_id=s.bot_id AND b.binding_id=s.binding_id WHERE s.bot_id=%s "
+                "AND (%s::text IS NULL OR s.command_id>%s) "
+                "AND b.receive_enabled AND b.state IN ('ONLINE','DRAINING') "
+                "AND (s.status='PENDING' OR (s.status='CLAIMED' AND (s.expires_at<=clock_timestamp() "
+                "OR s.host_incarnation<>%s OR s.binding_epoch<>b.binding_epoch OR s.policy_revision<>%s))) "
+                "ORDER BY s.command_id LIMIT %s",
+                (self.store.bot_id, after_command_id, after_command_id, lease.incarnation,
+                 runtime["policy_revision"], limit),
+            )).fetchall()
+            await self.store._host(conn, lease, runtime)
+            return rows
+
+    async def reconcile_echoes(self, lease: HostLease, *, limit: int = 64) -> int:
+        """Recover exact late self-output aliases from durable SENT receipts.
+
+        The scan is independent of notification delivery. It records provenance,
+        not context layout; only an Actor's later safe point changes the view.
+        No text comparison or UNKNOWN-send guess is permitted.
+        """
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("limit")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            candidates = await (await conn.execute(
+                "SELECT DISTINCT i.event_id,i.conversation_id,c.binding_id "
+                "FROM public.bot_message_inbox i JOIN public.bot_conversations c "
+                "ON c.bot_id=i.bot_id AND c.conversation_id=i.conversation_id "
+                "JOIN public.bot_bindings b ON b.bot_id=c.bot_id AND b.binding_id=c.binding_id "
+                "JOIN public.bot_send_intents s ON s.bot_id=i.bot_id AND s.binding_id=c.binding_id "
+                "AND s.conversation_id=c.conversation_id "
+                "AND s.reply_route->>'channel_kind'=c.channel_kind AND s.reply_route->>'channel_id'=c.channel_id "
+                "AND COALESCE(s.reply_route->>'thread_id','')=c.thread_id "
+                "JOIN public.bot_send_attempts a ON a.bot_id=s.bot_id AND a.intent_id=s.intent_id "
+                "AND a.state='SENT' AND a.receipt->>'message_id'=i.platform_message_id "
+                "WHERE i.bot_id=%s AND i.author->>'is_self'='true' "
+                "AND i.author->>'external_user_id'=b.self_id AND i.origin='platform_input' "
+                "AND b.receive_enabled AND b.state IN ('ONLINE','DRAINING') "
+                "AND (EXISTS (SELECT 1 FROM public.bot_conversation_replies r WHERE r.bot_id=s.bot_id "
+                "AND r.delivery->>'intent_id'=s.intent_id) OR EXISTS "
+                "(SELECT 1 FROM public.bot_shell_requests q WHERE q.bot_id=s.bot_id "
+                "AND q.command_id=s.command_id AND q.delivery->>'intent_id'=s.intent_id AND q.status='COMPLETED')) "
+                "ORDER BY i.event_id LIMIT %s", (self.store.bot_id, limit),
+            )).fetchall()
+        count = 0
+        for candidate in candidates:
+            try:
+                if await self.reconcile_exact_echo(lease, candidate["event_id"]):
+                    count += 1
+            except ForestError as exc:
+                if exc.code not in {"BINDING_OFFLINE", "RECEIVE_CLOSED", "STALE_BINDING", "ECHO_IDENTITY_CONFLICT"}:
+                    raise
+        return count
+
+    async def reconcile_exact_echo(self, lease: HostLease, event_id: str) -> bool:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            identity = await (await conn.execute(
+                "SELECT c.binding_id,c.conversation_id FROM public.bot_message_inbox i "
+                "JOIN public.bot_conversations c ON c.bot_id=i.bot_id AND c.conversation_id=i.conversation_id "
+                "WHERE i.bot_id=%s AND i.event_id=%s", (self.store.bot_id, event_id),
+            )).fetchone()
+            if identity is None:
+                return False
+            binding = await self.bindings._guard(
+                conn, lease, identity["binding_id"], data=False, require_receive=True,
+            )
+            conversation = await self._conversation(conn, identity["conversation_id"])
+            inbox = await (await conn.execute(
+                "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s FOR UPDATE",
+                (self.store.bot_id, event_id),
+            )).fetchone()
+            if (not inbox["author"].get("is_self")
+                    or inbox["author"]["external_user_id"] != binding["self_id"]
+                    or inbox["origin"] != "platform_input"):
+                return False
+            matches = await (await conn.execute(
+                "SELECT DISTINCT ON (s.intent_id) s.intent_id,s.send_lane,s.command_id,a.attempt_id,"
+                "r.reply_id,q.command_id AS canonical_command_id "
+                "FROM public.bot_send_intents s JOIN public.bot_send_attempts a "
+                "ON a.bot_id=s.bot_id AND a.intent_id=s.intent_id "
+                "LEFT JOIN public.bot_conversation_replies r ON r.bot_id=s.bot_id AND r.delivery->>'intent_id'=s.intent_id "
+                "LEFT JOIN public.bot_shell_requests q ON q.bot_id=s.bot_id AND q.command_id=s.command_id "
+                "AND q.delivery->>'intent_id'=s.intent_id AND q.status='COMPLETED' "
+                "WHERE s.bot_id=%s AND s.binding_id=%s AND s.conversation_id=%s "
+                "AND s.reply_route->>'channel_kind'=%s AND s.reply_route->>'channel_id'=%s "
+                "AND COALESCE(s.reply_route->>'thread_id','')=%s "
+                "AND a.state='SENT' AND a.receipt->>'message_id'=%s ORDER BY s.intent_id,a.attempt_id LIMIT 2",
+                (self.store.bot_id, binding["binding_id"], conversation["conversation_id"],
+                 conversation["channel_kind"], conversation["channel_id"], conversation["thread_id"],
+                 inbox["platform_message_id"]),
+            )).fetchall()
+            if len(matches) > 1:
+                raise ForestError("ECHO_IDENTITY_CONFLICT", "Platform output identity maps to multiple intents", 409)
+            if not matches:
+                return False
+            match = matches[0]
+            origin = "chat_output" if match["send_lane"] == "CHAT" else "control_output"
+            if (origin == "chat_output" and not match["reply_id"]) or (
+                origin == "control_output" and not match["canonical_command_id"]
+            ):
+                return False
+            await conn.execute(
+                "INSERT INTO public.bot_message_echo_aliases(bot_id,event_id,intent_id,attempt_id,platform_message_id,"
+                "origin,reply_id,command_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.store.bot_id, event_id, match["intent_id"], match["attempt_id"],
+                 inbox["platform_message_id"], origin, match["reply_id"], match["canonical_command_id"]),
+            )
+            await conn.execute(
+                "UPDATE public.bot_message_inbox SET origin=%s WHERE bot_id=%s AND event_id=%s",
+                (origin, self.store.bot_id, event_id),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET mailbox_revision=mailbox_revision+1 "
+                "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, conversation["conversation_id"]),
+            )
+            await self.store._event(conn, "conversation.echo_resolved", event_id,
+                                    {"event_id": event_id, "intent_id": match["intent_id"], "origin": origin})
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            return True
+
+    async def claim_control(self, lease: HostLease, command_id: str, owner_id: str,
+                            *, ttl_seconds: float = 30) -> dict:
+        """Claim reserved control independently of an Actor or classification gap.
+
+        This claim permits processing; it grants no command capability. A host
+        command dispatcher must authorize the concrete action before executing it.
+        """
+        self.store._ttl(ttl_seconds)
+        _text(owner_id, "owner_id")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            identity = await (await conn.execute(
+                "SELECT binding_id FROM public.bot_shell_requests WHERE bot_id=%s AND command_id=%s",
+                (self.store.bot_id, command_id),
+            )).fetchone()
+            if identity is None:
+                raise ForestError("COMMAND_NOT_FOUND", "Control command does not exist", 404)
+            binding = await self.bindings._guard(conn, lease, identity["binding_id"], data=False)
+            current = await (await conn.execute(
+                "SELECT * FROM public.bot_shell_requests WHERE bot_id=%s AND command_id=%s FOR UPDATE",
+                (self.store.bot_id, command_id),
+            )).fetchone()
+            if current["status"] == "COMPLETED":
+                await self.bindings._final_guard(conn, lease, binding, data=False)
+                return current
+            live = (
+                current["status"] == "CLAIMED" and current["expires_at"] > await self.store._now(conn)
+                and current["host_incarnation"] == lease.incarnation
+                and current["binding_epoch"] == binding["binding_epoch"]
+                and current["policy_revision"] == binding["_runtime"]["policy_revision"]
+            )
+            if live and current["owner_id"] != owner_id:
+                raise ForestError("COMMAND_BUSY", "Control command has a current owner", 409)
+            epoch = current["claim_epoch"] if live else current["claim_epoch"] + 1
+            claimed = await (await conn.execute(
+                "UPDATE public.bot_shell_requests SET status='CLAIMED',owner_id=%s,claim_epoch=%s,"
+                "host_incarnation=%s,binding_epoch=%s,policy_revision=%s,"
+                "expires_at=clock_timestamp()+(%s*interval '1 second') "
+                "WHERE bot_id=%s AND command_id=%s RETURNING *",
+                (owner_id, epoch, lease.incarnation, binding["binding_epoch"],
+                 binding["_runtime"]["policy_revision"], ttl_seconds, self.store.bot_id, command_id),
+            )).fetchone()
+            source = await (await conn.execute(
+                "SELECT i.author,i.ingress_seq,i.sent_at,c.platform,c.channel_kind,c.channel_id,c.thread_id,"
+                "c.group_source_id FROM public.bot_message_inbox i JOIN public.bot_conversations c "
+                "ON c.bot_id=i.bot_id AND c.conversation_id=i.conversation_id WHERE i.bot_id=%s AND i.event_id=%s",
+                (self.store.bot_id, claimed["event_id"]),
+            )).fetchone()
+            await self.bindings._final_guard(conn, lease, binding, data=False)
+            return {**claimed, "source": source}
+
+    async def complete_control(self, lease: HostLease, claim: dict, operation_id: str, *,
+                               reply_parts: list[list[dict]], outcome: dict, delivery) -> dict:
+        """Commit a safe command receipt and CONTROL SendIntent together.
+
+        No conversation Actor is acquired and no active prompt is mutated. The
+        original command retains its ingress position for later input admission.
+        """
+        _text(operation_id, "operation_id")
+        parts, result = _json(reply_parts), _json(outcome, 65536)
+        if not isinstance(result, dict):
+            raise ForestError("INVALID_COMMAND_RESULT", "Control outcome must be an object", 422)
+        digest = digest_json([parts, result])
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding = await self.bindings._guard(
+                conn, lease, claim["binding_id"], claim["binding_epoch"], data=False,
+            )
+            current = await (await conn.execute(
+                "SELECT * FROM public.bot_shell_requests WHERE bot_id=%s AND command_id=%s FOR UPDATE",
+                (self.store.bot_id, claim["command_id"]),
+            )).fetchone()
+            if current is None or current["binding_id"] != binding["binding_id"]:
+                raise ForestError("COMMAND_NOT_FOUND", "Command does not belong to this binding", 404)
+            if current["status"] == "COMPLETED":
+                if current["operation_id"] != operation_id or current["result_digest"] != digest:
+                    raise ForestError("COMMAND_RESULT_CONFLICT", "Control result is already committed", 409)
+                await self.bindings._final_guard(conn, lease, binding, data=False)
+                return current
+            if (current["status"] != "CLAIMED" or current["owner_id"] != claim["owner_id"]
+                    or current["claim_epoch"] != claim["claim_epoch"]
+                    or current["host_incarnation"] != lease.incarnation
+                    or current["policy_revision"] != binding["_runtime"]["policy_revision"]
+                    or current["expires_at"] <= await self.store._now(conn)):
+                raise ForestError("STALE_COMMAND", "Control command claim expired or was replaced", 409)
+            source = await (await conn.execute(
+                "SELECT * FROM public.bot_conversations WHERE bot_id=%s AND conversation_id=%s",
+                (self.store.bot_id, current["conversation_id"]),
+            )).fetchone()
+            route = {"bot_id": self.store.bot_id, "binding_id": binding["binding_id"],
+                     "platform": binding["platform"], "self_id": binding["self_id"],
+                     "channel_kind": source["channel_kind"], "channel_id": source["channel_id"],
+                     "thread_id": source["thread_id"], "binding_epoch": binding["binding_epoch"],
+                     "visibility": source["channel_kind"]}
+            receipt = await delivery.enqueue_in(
+                conn, lease, operation_id="control:" + current["command_id"], route=route, parts=parts,
+                conversation_id=current["conversation_id"], lane="CONTROL", command_id=current["command_id"],
+                control_seq=1, root_operation_id=current["command_id"],
+                expected_policy_revision=current["policy_revision"],
+            )
+            if current["expires_at"] <= await self.store._now(conn):
+                raise ForestError("STALE_COMMAND", "Control claim expired before commit", 409)
+            updated = await (await conn.execute(
+                "UPDATE public.bot_shell_requests SET status='COMPLETED',operation_id=%s,result_digest=%s,"
+                "outcome=%s,delivery=%s,completed_at=clock_timestamp() WHERE bot_id=%s AND command_id=%s RETURNING *",
+                (operation_id, digest, Jsonb(result), Jsonb(receipt), self.store.bot_id, current["command_id"]),
+            )).fetchone()
+            await self.store._event(conn, "shell.completed", operation_id,
+                                    {"command_id": current["command_id"], "conversation_id": current["conversation_id"]})
+            await self.bindings._final_guard(conn, lease, binding, data=False)
+            return updated
+
+    async def acquire_actor(self, lease: HostLease, conversation_id: str, actor_id: str,
+                            *, ttl_seconds: float = 30) -> ActorLease:
+        _text(actor_id, "actor_id")
+        self.store._ttl(ttl_seconds)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            identity = await self._locate(conn, conversation_id)
+            binding = await self.bindings._guard(conn, lease, identity["binding_id"])
+            runtime = await self.store._runtime(conn)
+            row = await self._conversation(conn, conversation_id)
+            now = await self.store._now(conn)
+            if (row["actor_expires_at"] and row["actor_expires_at"] > now
+                    and row["actor_host_incarnation"] == lease.incarnation
+                    and row["actor_binding_epoch"] == binding["binding_epoch"]
+                    and all(row["actor_" + key] == runtime[key] for key in
+                            ("policy_revision", "maintenance_epoch", "storage_generation"))):
+                if row["actor_id"] != actor_id:
+                    raise ForestError("ACTOR_BUSY", "Conversation has an active owner", 409)
+                epoch = row["actor_epoch"]
+            else:
+                epoch = row["actor_epoch"] + 1
+            row = await (await conn.execute(
+                "UPDATE public.bot_conversations SET actor_id=%s,actor_epoch=%s,actor_host_incarnation=%s,"
+                "actor_expires_at=clock_timestamp()+(%s*interval '1 second'),actor_binding_epoch=%s,"
+                "actor_policy_revision=%s,actor_maintenance_epoch=%s,actor_storage_generation=%s "
+                "WHERE bot_id=%s AND conversation_id=%s RETURNING *",
+                (actor_id, epoch, lease.incarnation, ttl_seconds, binding["binding_epoch"],
+                 runtime["policy_revision"], runtime["maintenance_epoch"], runtime["storage_generation"],
+                 self.store.bot_id, conversation_id),
+            )).fetchone()
+            await self.bindings._final_guard(conn, lease, binding)
+            return ActorLease(lease, conversation_id, row["binding_id"], binding["binding_epoch"],
+                              actor_id, epoch, row["actor_expires_at"], runtime["policy_revision"],
+                              runtime["maintenance_epoch"], runtime["storage_generation"])
+
+    async def _actor(self, conn, actor: ActorLease) -> tuple[dict, dict]:
+        binding = await self.bindings._guard(
+            conn, actor.host, actor.binding_id, actor.binding_epoch,
+        )
+        runtime = await self.store._runtime(conn)
+        if any(runtime[key] != getattr(actor, key) for key in
+               ("policy_revision", "maintenance_epoch", "storage_generation")):
+            raise ForestError("STALE_ACTOR", "Conversation authority changed", 409)
+        row = await self._conversation(conn, actor.conversation_id)
+        if (row["binding_id"] != actor.binding_id or row["actor_id"] != actor.actor_id
+                or row["actor_epoch"] != actor.actor_epoch
+                or row["actor_host_incarnation"] != actor.host.incarnation
+                or not row["actor_expires_at"] or row["actor_expires_at"] <= await self.store._now(conn)):
+            raise ForestError("STALE_ACTOR", "Conversation ownership expired or was replaced", 409)
+        return binding, row
+
+    async def _actor_final(self, conn, actor, binding):
+        await self.bindings._final_guard(conn, actor.host, binding)
+        row = await self._conversation(conn, actor.conversation_id)
+        if not row["actor_expires_at"] or row["actor_expires_at"] <= await self.store._now(conn):
+            raise ForestError("STALE_ACTOR", "Conversation ownership expired before commit", 409)
+
+    async def renew_actor(self, actor: ActorLease, *, ttl_seconds: float = 30) -> ActorLease:
+        self.store._ttl(ttl_seconds)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, _ = await self._actor(conn, actor)
+            await self._actor_final(conn, actor, binding)
+            row = await (await conn.execute(
+                "UPDATE public.bot_conversations SET actor_expires_at=clock_timestamp()+(%s*interval '1 second') "
+                "WHERE bot_id=%s AND conversation_id=%s RETURNING actor_expires_at",
+                (ttl_seconds, self.store.bot_id, actor.conversation_id),
+            )).fetchone()
+            return ActorLease(**{**actor.__dict__, "expires_at": row["actor_expires_at"]})
+
+    async def release_actor(self, actor: ActorLease) -> None:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            # Resource cleanup remains possible after data pause/policy changes;
+            # it can only release this exact old owner, never another actor.
+            binding = await self.bindings._guard(conn, actor.host, actor.binding_id, data=False)
+            row = await self._conversation(conn, actor.conversation_id)
+            if (row["actor_id"] != actor.actor_id or row["actor_epoch"] != actor.actor_epoch
+                    or row["actor_host_incarnation"] != actor.host.incarnation):
+                raise ForestError("STALE_ACTOR", "Actor resource is owned by another execution", 409)
+            await self.bindings._final_guard(conn, actor.host, binding, data=False)
+            await conn.execute(
+                "UPDATE public.bot_conversations SET actor_expires_at=clock_timestamp(),actor_id=NULL "
+                "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, actor.conversation_id),
+            )
+
+    async def _session(self, conn, conversation: dict) -> dict | None:
+        if not conversation["active_session_id"]:
+            return None
+        return await (await conn.execute(
+            "SELECT * FROM public.bot_conversation_sessions WHERE bot_id=%s AND session_id=%s FOR UPDATE",
+            (self.store.bot_id, conversation["active_session_id"]),
+        )).fetchone()
+
+    async def _run(self, conn, session: dict | None) -> dict | None:
+        if not session or not session["active_run_id"]:
+            return None
+        return await (await conn.execute(
+            "SELECT * FROM public.bot_conversation_runs WHERE bot_id=%s AND run_id=%s FOR UPDATE",
+            (self.store.bot_id, session["active_run_id"]),
+        )).fetchone()
+
+    async def _new_run(self, conn, conversation, session):
+        if session is None:
+            session_id = str(uuid4())
+            session = await (await conn.execute(
+                "INSERT INTO public.bot_conversation_sessions(bot_id,session_id,conversation_id,status) "
+                "VALUES (%s,%s,%s,'RUNNING') RETURNING *",
+                (self.store.bot_id, session_id, conversation["conversation_id"]),
+            )).fetchone()
+            await conn.execute(
+                "UPDATE public.bot_conversations SET active_session_id=%s WHERE bot_id=%s AND conversation_id=%s",
+                (session_id, self.store.bot_id, conversation["conversation_id"]),
+            )
+        run_id = str(uuid4())
+        run = await (await conn.execute(
+            "INSERT INTO public.bot_conversation_runs(bot_id,run_id,session_id,conversation_id) "
+            "VALUES (%s,%s,%s,%s) RETURNING *",
+            (self.store.bot_id, run_id, session["session_id"], conversation["conversation_id"]),
+        )).fetchone()
+        await conn.execute(
+            "UPDATE public.bot_conversation_sessions SET status='RUNNING',active_run_id=%s "
+            "WHERE bot_id=%s AND session_id=%s", (run_id, self.store.bot_id, session["session_id"]),
+        )
+        return session, run
+
+    async def select_input(self, actor: ActorLease, operation_id: str, *, mode: str = "IDLE") -> dict:
+        """Select exactly one immutable cut at a host-owned closed execution boundary.
+
+        IDLE never changes an active Run's input. SAFE_POINT is exclusively for
+        the foreground scheduler after the previous call/tool group has closed.
+        A resumed run keeps its committed input; callers must inspect checkpoints
+        before choosing another safe point in the future Agent implementation.
+        """
+        _text(operation_id, "operation_id")
+        if mode not in {"IDLE", "SAFE_POINT"}:
+            raise ValueError("mode must be IDLE or SAFE_POINT")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (await conn.execute(
+                "SELECT * FROM public.bot_context_input_batches WHERE bot_id=%s AND conversation_id=%s "
+                "AND operation_id=%s", (self.store.bot_id, actor.conversation_id, operation_id),
+            )).fetchone()
+            if existing:
+                visible = await (await conn.execute(
+                    "SELECT COALESCE(sum(estimated_tokens),0) AS tokens FROM public.bot_context_units "
+                    "WHERE bot_id=%s AND conversation_id=%s AND visible",
+                    (self.store.bot_id, actor.conversation_id),
+                )).fetchone()
+                await self._actor_final(conn, actor, binding)
+                return {"status": "INPUT" if visible["tokens"] <= self.context_token_budget else "INPUT_BUDGET_EXCEEDED",
+                        **existing, "replayed": True}
+            session = await self._session(conn, conversation)
+            run = await self._run(conn, session)
+            if run and mode == "IDLE":
+                if await self._pending_echo_view(conn, actor.conversation_id):
+                    await self._compact(conn, actor.conversation_id)
+                await self._actor_final(conn, actor, binding)
+                return {**run, "status": "RESUME"}
+            pending = await (await conn.execute(
+                "SELECT * FROM public.bot_conversation_triggers WHERE bot_id=%s AND conversation_id=%s "
+                "AND status='PENDING' ORDER BY ingress_seq", (self.store.bot_id, actor.conversation_id),
+            )).fetchall()
+            selected = [t for t in pending if t["ingress_seq"] <= conversation["classified_through_seq"]]
+            if pending and not selected:
+                if session and not run:
+                    await conn.execute(
+                        "UPDATE public.bot_conversation_sessions SET status='WAIT_INPUT' "
+                        "WHERE bot_id=%s AND session_id=%s", (self.store.bot_id, session["session_id"]),
+                    )
+                await self._actor_final(conn, actor, binding)
+                return {"status": "WAIT_INPUT", "conversation_id": actor.conversation_id,
+                        "run_id": run["run_id"] if run else None}
+            if not selected and run:
+                if await self._pending_echo_view(conn, actor.conversation_id):
+                    await self._compact(conn, actor.conversation_id)
+                await self._actor_final(conn, actor, binding)
+                return {**run, "status": "CONTINUE"}
+            applied = conversation["context_applied_seq"]
+            if selected:
+                cut = selected[-1]["ingress_seq"]
+                end = max(applied, cut)
+                if run is None:
+                    session, run = await self._new_run(conn, conversation, session)
+                kind = "TRIGGER_INPUT" if end > applied else "RECOVERY_CLAIM"
+            else:
+                cut = None
+                # Bounded silent maintenance never drags a frozen cut forward.
+                end = min(conversation["classified_through_seq"], applied + 256)
+                kind = "SILENT_DRAIN"
+            if end == applied and not selected:
+                if await self._pending_echo_view(conn, actor.conversation_id):
+                    await self._compact(conn, actor.conversation_id)
+                await self._close_if_drained(conn, conversation, session)
+                await self._actor_final(conn, actor, binding)
+                return {"status": "IDLE", "conversation_id": actor.conversation_id}
+            batch_id = str(uuid4())
+            revision = conversation["context_revision"] + 1
+            input_revision = run["input_revision"] + 1 if run else None
+            trigger_ids = [item["trigger_id"] for item in selected]
+            batch = await (await conn.execute(
+                "INSERT INTO public.bot_context_input_batches(bot_id,input_batch_id,operation_id,conversation_id,"
+                "session_id,run_id,kind,start_seq,end_seq,trigger_cut_seq,selected_input_end_seq,trigger_ids,"
+                "context_revision,input_revision) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (self.store.bot_id, batch_id, operation_id, actor.conversation_id,
+                 session["session_id"] if session else None, run["run_id"] if run else None, kind,
+                 applied + 1 if end > applied else None, end if end > applied else None,
+                 cut, end, Jsonb(trigger_ids), revision, input_revision),
+            )).fetchone()
+            if end > applied:
+                await conn.execute(
+                    "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,context_revision,unit_index,"
+                    "kind,event_id,input_batch_id,estimated_tokens) SELECT bot_id,conversation_id,event_id,%s,"
+                    "ingress_seq,'INPUT',event_id,%s,estimated_tokens FROM public.bot_message_inbox "
+                    "WHERE bot_id=%s AND conversation_id=%s AND ingress_seq>%s AND ingress_seq<=%s "
+                    "ORDER BY ingress_seq",
+                    (revision, batch_id, self.store.bot_id, actor.conversation_id, applied, end),
+                )
+            if selected:
+                await conn.execute(
+                    "UPDATE public.bot_conversation_triggers SET status='CLAIMED',claimed_session_id=%s,"
+                    "claimed_run_id=%s,input_batch_id=%s WHERE bot_id=%s AND trigger_id=ANY(%s) AND status='PENDING'",
+                    (session["session_id"], run["run_id"], batch_id, self.store.bot_id, trigger_ids),
+                )
+                # Old recovered triggers may already be archived. Their source
+                # is pinned by identity, independently of the new input range.
+                await conn.execute(
+                    "UPDATE public.bot_context_units u SET visible=true FROM public.bot_conversation_triggers t "
+                    "WHERE t.bot_id=u.bot_id AND t.event_id=u.event_id AND t.bot_id=%s AND t.trigger_id=ANY(%s)",
+                    (self.store.bot_id, trigger_ids),
+                )
+                await conn.execute(
+                    "UPDATE public.bot_conversation_runs SET input_revision=%s,selected_input_end_seq=%s "
+                    "WHERE bot_id=%s AND run_id=%s",
+                    (input_revision, end, self.store.bot_id, run["run_id"]),
+                )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET context_applied_seq=%s,context_revision=%s,"
+                "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s",
+                (end, revision, self.store.bot_id, actor.conversation_id),
+            )
+            budget_ok = await self._compact(conn, actor.conversation_id)
+            await self.store._event(conn, "conversation.input_applied", operation_id,
+                                    {"conversation_id": actor.conversation_id, "input_batch_id": batch_id})
+            await self._actor_final(conn, actor, binding)
+            return {"status": "INPUT" if budget_ok else "INPUT_BUDGET_EXCEEDED", **batch,
+                    "replayed": False}
+
+    async def _close_if_drained(self, conn, conversation, session):
+        pending = await (await conn.execute(
+            "SELECT 1 FROM public.bot_conversation_triggers WHERE bot_id=%s AND conversation_id=%s "
+            "AND status IN ('PENDING','CLAIMED') LIMIT 1", (self.store.bot_id, conversation["conversation_id"]),
+        )).fetchone()
+        if pending or (session and session["active_run_id"]):
+            return
+        if conversation["context_applied_seq"] != conversation["classified_through_seq"]:
+            return
+        if session:
+            await conn.execute(
+                "UPDATE public.bot_conversation_sessions SET status='CLOSED',closed_at=clock_timestamp() "
+                "WHERE bot_id=%s AND session_id=%s", (self.store.bot_id, session["session_id"]),
+            )
+        await conn.execute(
+            "UPDATE public.bot_conversations SET active_session_id=NULL,processed_mailbox_revision=mailbox_revision "
+            "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, conversation["conversation_id"]),
+        )
+
+    async def _pending_echo_view(self, conn, conversation_id) -> bool:
+        return await (await conn.execute(
+            "SELECT 1 FROM public.bot_message_echo_aliases a JOIN public.bot_context_units u "
+            "ON u.bot_id=a.bot_id AND u.event_id=a.event_id WHERE a.bot_id=%s "
+            "AND u.conversation_id=%s AND a.applied_view_revision IS NULL LIMIT 1",
+            (self.store.bot_id, conversation_id),
+        )).fetchone() is not None
+
+    async def _apply_echo_view(self, conn, conversation_id) -> list[str]:
+        aliases = await (await conn.execute(
+            "SELECT a.*,u.unit_id FROM public.bot_message_echo_aliases a JOIN public.bot_context_units u "
+            "ON u.bot_id=a.bot_id AND u.event_id=a.event_id WHERE a.bot_id=%s "
+            "AND u.conversation_id=%s AND a.applied_view_revision IS NULL ORDER BY u.context_revision,u.unit_index",
+            (self.store.bot_id, conversation_id),
+        )).fetchall()
+        if not aliases:
+            return []
+        ids = [a["unit_id"] for a in aliases]
+        await conn.execute(
+            "UPDATE public.bot_context_units SET visible=false WHERE bot_id=%s AND unit_id=ANY(%s)",
+            (self.store.bot_id, ids),
+        )
+        conversation = await self._conversation(conn, conversation_id)
+        revision = conversation["context_revision"]
+        index = 0
+        # CONTROL outputs have no chat ModelTurn. Publish one safe audit/output
+        # unit at this Actor boundary instead of retaining a duplicate self INPUT.
+        for alias in aliases:
+            if alias["origin"] != "control_output":
+                continue
+            present = await (await conn.execute(
+                "SELECT 1 FROM public.bot_context_units WHERE bot_id=%s AND control_command_id=%s",
+                (self.store.bot_id, alias["command_id"]),
+            )).fetchone()
+            if present:
+                continue
+            parts = await (await conn.execute(
+                "SELECT payload FROM public.bot_send_parts WHERE bot_id=%s AND intent_id=%s ORDER BY part_index",
+                (self.store.bot_id, alias["intent_id"]),
+            )).fetchall()
+            payload = [part["payload"] for part in parts]
+            if index == 0:
+                revision += 1
+            index += 1
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,context_revision,unit_index,"
+                "kind,control_command_id,control_parts,estimated_tokens) VALUES (%s,%s,%s,%s,%s,'CONTROL',%s,%s,%s)",
+                (self.store.bot_id, conversation_id, "control-output:" + alias["command_id"], revision,
+                 index, alias["command_id"], Jsonb(payload), _tokens(payload)),
+            )
+        if index:
+            await conn.execute(
+                "UPDATE public.bot_conversations SET context_revision=%s WHERE bot_id=%s AND conversation_id=%s",
+                (revision, self.store.bot_id, conversation_id),
+            )
+        await conn.execute(
+            "UPDATE public.bot_message_echo_aliases SET applied_view_revision=%s WHERE bot_id=%s AND event_id=ANY(%s)",
+            (conversation["context_view_revision"] + 1, self.store.bot_id, [a["event_id"] for a in aliases]),
+        )
+        return ids
+
+    async def _compact(self, conn, conversation_id) -> bool:
+        echo_units = await self._apply_echo_view(conn, conversation_id)
+        conversation = await self._conversation(conn, conversation_id)
+        rows = await (await conn.execute(
+            "SELECT u.*, EXISTS(SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=u.bot_id "
+            "AND t.event_id=u.event_id AND t.status IN ('PENDING','CLAIMED')) AS pinned "
+            "FROM public.bot_context_units u WHERE u.bot_id=%s AND u.conversation_id=%s AND u.visible "
+            "ORDER BY u.context_revision DESC,u.unit_index DESC", (self.store.bot_id, conversation_id),
+        )).fetchall()
+        total = sum(row["estimated_tokens"] for row in rows if row["pinned"])
+        remove = list(echo_units)
+        for row in rows:
+            if row["pinned"]:
+                continue
+            if total + row["estimated_tokens"] <= self.context_token_budget:
+                total += row["estimated_tokens"]
+            else:
+                remove.append(row["unit_id"])
+        removed = set(remove)
+        if removed:
+            await conn.execute(
+                "UPDATE public.bot_context_units SET visible=false WHERE bot_id=%s AND unit_id=ANY(%s)",
+                (self.store.bot_id, remove),
+            )
+        view_revision = conversation["context_view_revision"] + 1
+        retained = sorted(row["unit_id"] for row in rows if row["unit_id"] not in removed)
+        await conn.execute(
+            "INSERT INTO public.bot_context_compactions(bot_id,conversation_id,view_revision,context_revision,"
+            "policy_revision,token_budget,archive_through_seq,source_manifest_digest,removed_unit_ids,"
+            "retained_unit_ids) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (self.store.bot_id, conversation_id, view_revision, conversation["context_revision"],
+             "byte-upper-bound-v1", self.context_token_budget, conversation["context_applied_seq"],
+             digest_json({"removed": sorted(remove), "retained": retained}), Jsonb(sorted(remove)), Jsonb(retained)),
+        )
+        await conn.execute(
+            "UPDATE public.bot_conversations SET context_view_revision=%s WHERE bot_id=%s AND conversation_id=%s",
+            (view_revision, self.store.bot_id, conversation_id),
+        )
+        return total <= self.context_token_budget
+
+    async def context(self, actor: ActorLease, *, run_id: str | None = None) -> dict:
+        """Read canonical visible history with explicit source and author boundaries."""
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            run = None
+            if run_id is not None:
+                run = await (await conn.execute(
+                    "SELECT * FROM public.bot_conversation_runs WHERE bot_id=%s AND run_id=%s "
+                    "AND conversation_id=%s", (self.store.bot_id, run_id, actor.conversation_id),
+                )).fetchone()
+                if run is None or run["status"] != "RUNNING":
+                    raise ForestError("RUN_NOT_ACTIVE", "Run is not active", 409)
+            units = await (await conn.execute(
+                "SELECT u.unit_id,u.kind,u.context_revision,u.unit_index,u.estimated_tokens,"
+                "u.control_command_id,"
+                "i.event_id,i.ingress_seq,i.platform_message_id,i.source_event_id,i.author,i.segments,"
+                "i.sent_at,i.received_at,i.trigger_decision,i.context_disposition,i.origin,r.reply_id,"
+                "COALESCE(r.parts,u.control_parts) AS reply_parts "
+                "FROM public.bot_context_units u LEFT JOIN public.bot_message_inbox i "
+                "ON i.bot_id=u.bot_id AND i.event_id=u.event_id LEFT JOIN public.bot_conversation_replies r "
+                "ON r.bot_id=u.bot_id AND r.reply_id=u.reply_id WHERE u.bot_id=%s AND u.conversation_id=%s "
+                "AND u.visible ORDER BY u.context_revision,u.unit_index", (self.store.bot_id, actor.conversation_id),
+            )).fetchall()
+            source = {key: conversation[key] for key in
+                      ("conversation_id", "group_source_id", "platform", "channel_kind", "channel_id", "thread_id")}
+            for unit in units:
+                unit["source"] = source.copy()
+                unit["context_role"] = (
+                    "assistant" if unit["kind"] == "REPLY" else
+                    "control_data" if unit["kind"] == "CONTROL" or unit["trigger_decision"] == "CONTROL_COMMAND" else "user"
+                )
+                if unit["kind"] == "CONTROL":
+                    unit["origin"] = "control_output"
+                    unit["author"] = {"external_user_id": binding["self_id"],
+                                      "display_name": binding["display_name"],
+                                      "identity_origin": "host_output", "is_self": True}
+                if unit["context_disposition"] in {"RESTRICTED", "INVALID"}:
+                    unit["segments"] = [{"type": "unavailable", "reason": unit["context_disposition"]}]
+            archive = await (await conn.execute(
+                "SELECT min(i.ingress_seq) AS first_seq,max(i.ingress_seq) AS last_seq,count(*) AS count "
+                "FROM public.bot_context_units u JOIN public.bot_message_inbox i ON i.bot_id=u.bot_id "
+                "AND i.event_id=u.event_id WHERE u.bot_id=%s AND u.conversation_id=%s AND NOT u.visible",
+                (self.store.bot_id, actor.conversation_id),
+            )).fetchone()
+            triggers = await (await conn.execute(
+                "SELECT trigger_id,event_id,ingress_seq,principal_ref FROM public.bot_conversation_triggers "
+                "WHERE bot_id=%s AND claimed_run_id=%s AND status='CLAIMED' ORDER BY ingress_seq",
+                (self.store.bot_id, run_id),
+            )).fetchall() if run else []
+            if run and any(u["ingress_seq"] is not None and u["ingress_seq"] > run["selected_input_end_seq"] for u in units):
+                raise ForestError("INPUT_CUT_VIOLATION", "Run cannot read queued input", 409)
+            await self._actor_final(conn, actor, binding)
+            return {"conversation": source, "context_revision": conversation["context_revision"],
+                    "context_view_revision": conversation["context_view_revision"],
+                    "context_applied_seq": conversation["context_applied_seq"], "units": units,
+                    "archive": archive, "run": run, "triggers": triggers,
+                    "budget_exceeded": sum(u["estimated_tokens"] for u in units) > self.context_token_budget}
+
+    async def finalize_reply(
+        self, actor: ActorLease, operation_id: str, *, run_id: str,
+        expected_input_revision: int, reply_parts: list[list[dict]], delivery,
+    ) -> dict:
+        """Commit canonical answer, claims and the actual SendIntent together."""
+        _text(operation_id, "operation_id")
+        parts = _json(reply_parts)
+        if not isinstance(parts, list) or not parts or any(not isinstance(p, list) or not p for p in parts):
+            raise ForestError("INVALID_REPLY", "Reply needs nonempty ordered delivery parts", 422)
+        value_digest = digest_json([run_id, expected_input_revision, parts])
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (await conn.execute(
+                "SELECT * FROM public.bot_conversation_replies WHERE bot_id=%s AND conversation_id=%s AND operation_id=%s",
+                (self.store.bot_id, actor.conversation_id, operation_id),
+            )).fetchone()
+            if existing:
+                if existing["input_digest"] != value_digest:
+                    raise ForestError("REPLY_CONFLICT", "Reply operation was already used", 409)
+                await self._actor_final(conn, actor, binding)
+                return existing
+            session = await self._session(conn, conversation)
+            run = await self._run(conn, session)
+            if not run or run["run_id"] != run_id or run["status"] != "RUNNING":
+                raise ForestError("RUN_NOT_ACTIVE", "Reply does not own the foreground run", 409)
+            if run["input_revision"] != expected_input_revision:
+                raise ForestError("INPUT_REVISION_CONFLICT", "Reply was generated from another input revision", 409)
+            reply_id = str(uuid4())
+            response_seq = conversation["next_response_seq"]
+            route = {"bot_id": self.store.bot_id, "binding_id": conversation["binding_id"],
+                     "platform": conversation["platform"], "self_id": binding["self_id"],
+                     "channel_kind": conversation["channel_kind"], "channel_id": conversation["channel_id"],
+                     "thread_id": conversation["thread_id"], "binding_epoch": binding["binding_epoch"],
+                     "visibility": conversation["channel_kind"]}
+            delivery_receipt = await delivery.enqueue_in(
+                conn, actor.host, operation_id="reply:" + reply_id, route=route, parts=parts,
+                conversation_id=actor.conversation_id, lane="CHAT", response_seq=response_seq,
+                root_operation_id=run_id, expected_policy_revision=actor.policy_revision,
+            )
+            reply = await (await conn.execute(
+                "INSERT INTO public.bot_conversation_replies(bot_id,reply_id,operation_id,conversation_id,run_id,"
+                "input_revision,response_seq,parts,input_digest,delivery) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (self.store.bot_id, reply_id, operation_id, actor.conversation_id, run_id,
+                 expected_input_revision, response_seq, Jsonb(parts), value_digest, Jsonb(delivery_receipt)),
+            )).fetchone()
+            revision = conversation["context_revision"] + 1
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,context_revision,unit_index,"
+                "kind,reply_id,estimated_tokens) VALUES (%s,%s,%s,%s,0,'REPLY',%s,%s)",
+                (self.store.bot_id, actor.conversation_id, reply_id, revision, reply_id, _tokens(parts)),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversation_triggers SET status='ANSWERED',answered_reply_id=%s "
+                "WHERE bot_id=%s AND claimed_run_id=%s AND status='CLAIMED'",
+                (reply_id, self.store.bot_id, run_id),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversation_runs SET status='COMPLETED',completed_at=clock_timestamp() "
+                "WHERE bot_id=%s AND run_id=%s", (self.store.bot_id, run_id),
+            )
+            await self._after_run(conn, conversation, session)
+            await conn.execute(
+                "UPDATE public.bot_conversations SET context_revision=%s,next_response_seq=next_response_seq+1,"
+                "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s",
+                (revision, self.store.bot_id, actor.conversation_id),
+            )
+            await self._compact(conn, actor.conversation_id)
+            await self.store._event(conn, "conversation.reply_committed", operation_id,
+                                    {"conversation_id": actor.conversation_id, "reply_id": reply_id,
+                                     "run_id": run_id, "response_seq": response_seq})
+            await self._actor_final(conn, actor, binding)
+            return reply
+
+    async def _after_run(self, conn, conversation, session):
+        pending = await (await conn.execute(
+            "SELECT min(ingress_seq) AS first_seq FROM public.bot_conversation_triggers "
+            "WHERE bot_id=%s AND conversation_id=%s AND status='PENDING'",
+            (self.store.bot_id, conversation["conversation_id"]),
+        )).fetchone()
+        first = pending["first_seq"]
+        state = ("DRAINING" if first is None else "READY_NEXT"
+                 if first <= conversation["classified_through_seq"] else "WAIT_INPUT")
+        await conn.execute(
+            "UPDATE public.bot_conversation_sessions SET status=%s,active_run_id=NULL "
+            "WHERE bot_id=%s AND session_id=%s", (state, self.store.bot_id, session["session_id"]),
+        )
+
+    async def end_run(self, actor: ActorLease, *, run_id: str, reason: str,
+                      status: str = "FAILED", delivery=None, requeue: bool = False) -> dict:
+        """Terminate only this run's claims; queued users remain independently pending.
+
+        Requeue is a host recovery operation after the previous execution is
+        definitely abandoned. Context ranges remain committed and are not replayed.
+        """
+        if status not in {"FAILED", "CANCELLED"}:
+            raise ValueError("status")
+        _text(reason, "reason", 1024)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            session = await self._session(conn, conversation)
+            run = await self._run(conn, session)
+            if not run or run["run_id"] != run_id or run["status"] != "RUNNING":
+                raise ForestError("RUN_NOT_ACTIVE", "Run is not active", 409)
+            if delivery is not None:
+                await delivery.cancel_root_in(conn, actor.host, run_id)
+            await conn.execute(
+                "UPDATE public.bot_conversation_runs SET status=%s,completed_at=clock_timestamp() "
+                "WHERE bot_id=%s AND run_id=%s", (status, self.store.bot_id, run_id),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversation_triggers SET status=%s,terminal_reason=%s,"
+                "claimed_run_id=CASE WHEN %s THEN NULL ELSE claimed_run_id END,"
+                "claimed_session_id=CASE WHEN %s THEN NULL ELSE claimed_session_id END "
+                "WHERE bot_id=%s AND claimed_run_id=%s AND status='CLAIMED'",
+                ("PENDING" if requeue else status, reason, requeue, requeue, self.store.bot_id, run_id),
+            )
+            await self._after_run(conn, conversation, session)
+            await conn.execute(
+                "UPDATE public.bot_conversations SET mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, actor.conversation_id),
+            )
+            await self._compact(conn, actor.conversation_id)
+            await self.store._event(conn, "conversation.run_ended", run_id,
+                                    {"run_id": run_id, "status": status, "requeued": requeue})
+            await self._actor_final(conn, actor, binding)
+            return {"run_id": run_id, "status": status, "requeued": requeue}

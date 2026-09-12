@@ -1,6 +1,6 @@
 # Forest 实现状态与验证记录
 
-更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**P0 已接通 Web 多 Bot 管理、组件配置与原生微内核；整个 P0 和首版框架仍在实现中。**可以从页面创建独立 Bot、配置和热切换内置组件；这些结果不代表 QQ、Agent 或记忆系统已经可用。
+更新日期：2026-09-13。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核及 P1 OneBot HTTP 接入切片；首版框架仍在实现中。**可以从页面管理账号、配置连接、观察群聊和发送记录；当前响应为模板组件，完整 Agent 与多模态记忆尚未完成。
 
 ## 1. 当前可以执行的流程
 
@@ -11,6 +11,8 @@
 新增的插件流程是：静态构建完整包 → 启动无生产权限的候选 Worker → 校验配置和服务 → 在专用 Bot 数据库接纳代际与调用 → 经宿主代理读写组件状态 → 记录结果并回收。`forest plugin build/check` 不需要数据库，`forest dev` 在 `FOREST_BOT_DSN` 指定的开发库中执行一次服务调用。程序接口还支持对已运行组件进行同 schema 的 drain 替换；CLI 尚无持续 watch。
 
 Web 新流程为：创建 Bot → 供应器按冻结计划创建专用数据库和受限角色 → Fleet 启动该 Bot 宿主 → 预览并提交组件配置 → 候选准备与排空切换 → 生效修订推进 → 页面调用组件。双 Bot 计数器、热改倍率与完整重启恢复已有真实 HTTP/PostgreSQL/Worker 测试；后台暂只提供随发行版安装的内置组件。
+
+P1 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置 → 实际 API 身份探测 → 持久发布 Binding/connection epoch → HMAC 验证消息后持久 ACK → 全量 Context/最后触发切口 → 公平群 Actor → 模板 Worker → 最终回复和发送意图原子提交 → 事务外 HTTP → SENT/NOT_SENT/UNKNOWN。受限 `#forest help/status` 独立处理并使用 CONTROL 发送通道，普通业务暂停不关闭接收。详细行为和未实现边界见 [P1 接入说明](p1-integration.md)。
 
 | 能力 | 当前实现及边界 | 主要证据 |
 |---|---|---|
@@ -55,7 +57,7 @@ Web 请求采用“服务器保存计划 → 页面显示差异 → 按 plan ID/
 
 资源字段包含 `max_frame_bytes`、`max_inflight`、`max_queue_items`、`max_state_inflight`、`max_owned_tasks`，生命周期字段包含 prepare/start/drain/stop 的 timeout。它们约束本切片的 IPC、调用与受监督任务，不能等同操作系统沙箱、CPU/内存硬配额或完整资源 SDK。普通 Python 插件仍要求可信来源。
 
-`check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。管理员可在 WebUI 创建 Bot、编辑内置计数器配置并查看 desired/effective，无需编辑插件文件。开发者仍显式维护包 manifest 与 schema；Web 上传第三方包、完整模型/平台配置表单尚未接入。
+`check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。管理员可在 WebUI 创建 Bot、编辑内置计数器配置并查看 desired/effective，无需编辑插件文件。开发者仍显式维护包 manifest 与 schema；OneBot 平台配置已接入，Web 上传第三方包和模型配置尚未接入。
 
 ### 2.2 状态、调用与替换的实际语义
 
@@ -84,25 +86,36 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
 | P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树及 Web/Fleet 接线；仍缺通用事件/Job、自动声明生成、完整资源 SDK 和其余消息契约 |
-| P1 群聊与多 Bot | 未完成 | 已有 Web 多 Bot 创建、独立运行/存储与恢复；尚无 OneBot/Binding、全量入站、作者来源、同群串行跨群并行、公平调度与可靠发送 |
+| P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 基础协议部分实现 | 已有不可变包、调用树排空、路由与配置原子发布；仍缺自动 watch、完整依赖环境锁定、任意状态迁移、checkpoint/操作自动恢复 |
-| P3 Agent 与上下文 | 未开始 | Session/Run、下一模型调用切口接入、触发排队、静默排空、零摘要裁剪、工具/审批/取消/定时与子 Agent |
+| P3 Agent 与上下文 | 上下文基础已实现 | 持久 Session/Run、触发排队、最后触发切口、静默排空与零摘要裁剪已接入；仍缺模型/工具安全点 checkpoint、审批/取消/定时与子 Agent 完整执行 |
 | P4 多模态多主干记忆 | 未开始 | 每 Bot 全局图文记忆、每群主干、原生图文嵌入、图片/混合召回、模型输入投影、来源/删除屏障、合流 reducer |
-| P5 完整管理与容量 | 未开始 | 完整 WebUI、群聊 Shell、共用类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理 |
+| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、受限群聊 help/status；完整类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 
 部署配置及已实现 Bot 状态/生命周期事实均保存相应审计/outbox，尚无通用后台消费者、投递重试或外部效果对账。配置页直接读取 PostgreSQL 当前生效值，因此这个管理闭环不依赖 outbox 消费来宣称生效。原生 Worker 的 state RPC 也不能被视为完整 Agent 工具或平台 Effect 系统。
 
-当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿、配置历史页面、回退操作或 Web 备份恢复。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot 创建与组件配置，尚不能连接 QQ、配置模型或管理记忆。
+当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿、配置历史页面、回退操作或 Web 备份恢复。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、组件和 OneBot 账号连接管理，尚不能配置模型或管理记忆。
 
 ## 4. 验证证据与适用范围
 
-本轮多 Bot/服务调用切片在 Windows、非 root Linux 容器与真实 Edge 浏览器中完成验证。Linux 镜像内的源码及全部测试与待提交工作区逐文件核对一致。没有接入真实 QQ、LLM 或 Embedding 服务。
+本轮 P1 接入切片使用真实 PostgreSQL、原生 Worker、实际 TCP OneBot 测试服务及 Edge 浏览器验证。最终 Linux 镜像中 94 个源码/测试文件及实际安装包逐文件核对一致；没有接入真实 QQ、LLM 或 Embedding 服务。
 
-两套全量测试均连接专用 PostgreSQL 17.10。以下结果均已执行结束：
+以下结果均已执行结束。Windows 基线运行之后，仅修正消息身份/空内容和发送提案冻结，并对相关模块重新验证；不把基线冒充最终快照完整重跑。
 
-| 当前多 Bot/服务切片 | 结果 | 范围 |
+| P1 接入切片 | 结果 | 范围 |
+|---|---|---|
+| Windows 全量基线 | `459 passed, 4 skipped`，324.54 秒 | 原生 Python 3.11、专用 PostgreSQL 17.10；随后修改的五个文件另做定向复验 |
+| 最终 Windows 定向 | `89 passed`，90.81 秒 | 消息、调度、Shell、Delivery 与 BindingRuntime 五个模块；94 个源码/测试文件在此次运行前后哈希一致 |
+| 最终非 root Linux 全量 | `469 passed, 1 skipped`，281.61 秒 | 最终源码/测试/已安装包核对一致；仅跳过 Windows DACL |
+| 最终 Edge + 独立 Compose | 通过 | 初始化、双 Bot/计数器、OneBot 配置、真实 HTTP 收发、静默 Context、UNKNOWN 核对、重启恢复及注销 |
+| Edge 表单并发专项 | 通过 | 响应乱序、刷新与提交竞态、跨 revision 的核对表单、配置应用期间保留新草稿/密钥输入 |
+| 静态检查与快照 | 通过 | Ruff、JavaScript 语法、暂存补丁空白；最终 Windows/Linux 94 个源码/测试文件差异为空 |
+
+以下为上一多 Bot/服务调用切片 `51291d2` 的已完成验证；两套全量测试均连接专用 PostgreSQL 17.10：
+
+| 上一多 Bot/服务切片 | 结果 | 范围 |
 |---|---|---|
 | Windows / Python 3.11 全量 | `259 passed, 4 skipped`，163.01 秒 | 当前全部测试；跳过 3 项 POSIX 专项及大小写路径碰撞 |
 | 非 root Linux Docker 全量 | `262 passed, 1 skipped`，132.63 秒 | 当前全部测试；仅跳过 Windows DACL |
@@ -136,8 +149,8 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 [浏览器验收脚本](../scripts/smoke_browser.py)创建独立随机 `forest-e2e-*` Compose project 和临时端口，执行上表所列部署与双 Bot 流程。脚本 `finally` 清理自己的容器与卷，截图保存在 `.local/browser-artifacts/`。本轮实际使用 Windows 上安装的 Edge；`--browser` 可指定浏览器。
 
-仍未覆盖的首版门槛包括通用 reducer 性质、Agent 输入切口竞态、发送 UNKNOWN 对账、多模态索引/删除竞争、完整依赖环境与 checkpoint 恢复，以及持续容量压力；这些依赖对应实现，后续必须提供可执行证据。
+P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最后触发切口、发送 UNKNOWN 对账、连接回收与 HTTP 重启测试，见 `test_messages`、`test_group_scheduler`、`test_delivery`、`test_platform`、`test_web_bindings`。通用 reducer、完整 ModelStep/工具安全点、多模态索引/删除竞争、依赖运行环境与 checkpoint 恢复，以及持续容量压力仍需后续实现和可执行证据。
 
 ## 5. 下一步
 
-继续补齐 P0 的通用事件/Job、声明工具链和资源契约，推进 P1 的 OneBot/Binding、持久全量消息、公平调度及可靠发送。已接通的 Web/Fleet、依赖解析与调用树作为后续基础；完整依赖运行环境、checkpoint/操作恢复、Agent、多模态记忆和群聊 Shell 仍按 01–12 实施。当前切片可运行，不代表整个 P0 或首版框架已经完成。
+继续补齐通用事件/Job、声明工具链和资源契约，推进 P2 热重载恢复、P3 完整 Agent 与 P4 多模态记忆。已接通的 Web/Fleet、OneBot/Binding、消息/发送与调用树作为后续基础；完整依赖运行环境、checkpoint/操作恢复与管理 Shell 仍按 01–12 实施。当前切片可运行，不代表整个 P0 或首版框架已经完成。

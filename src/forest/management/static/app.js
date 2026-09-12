@@ -1,3 +1,5 @@
+import { bindingsPanel } from './bindings.js';
+
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
 let configuration = null;
@@ -90,6 +92,7 @@ $('login-form').addEventListener('submit', (event) => {
 });
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
+  bindingPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; packageRows = []; selectionEpoch++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
   $('bot-detail').classList.add('hidden'); $('create-bot-form').reset();
@@ -124,6 +127,7 @@ $('reload').addEventListener('click', () => busy($('reload'), readConfiguration)
 let botRows = [], selectedBot = null, botConfig = null, packageRows = [];
 let botPlan = null, botApplyKey = null, createKey = null, invokeKey = null, renameKey = null, retryKey = null;
 let selectionEpoch = 0, formEpoch = 0;
+const bindingPanel = bindingsPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -185,6 +189,7 @@ async function readBotConfig() {
 }
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
+  bindingPanel.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   renameKey = null; retryKey = null;
   const row = await api(`/bots/${encodeURIComponent(id)}`);
@@ -202,7 +207,11 @@ async function selectBot(id) {
     const li = document.createElement('li'); li.textContent = `${entry.step} · ${entry.created_at}`;
     $('bot-job-events').append(li);
   }
-  if (row.stage === 'READY') { await loadPackages(); await readBotConfig(); }
+  if (row.stage === 'READY') {
+    await loadPackages(); if (epoch !== selectionEpoch) return;
+    await readBotConfig(); if (epoch !== selectionEpoch) return;
+    await bindingPanel.select(row);
+  }
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));
 $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); }));
@@ -285,7 +294,7 @@ setInterval(async () => {
       if (row && row.stage !== selectedBot.stage) await selectBot(row.bot_id);
       else if (selectedBot.stage === 'READY') {
         const epoch = selectionEpoch, state = await api(`${componentPath()}/configuration`);
-        if (epoch === selectionEpoch) updateBotState(state);
+        if (epoch === selectionEpoch) { updateBotState(state); await bindingPanel.refresh(); }
       }
     }
   } catch (error) { if (activeView === 'bots') notice(error.message); }

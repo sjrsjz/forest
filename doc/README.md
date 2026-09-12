@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：初版目标设计，实现进行中。更新日期：2026-09-13。当前 P0 已有独立 Web 初始化/登录/部署配置，以及不可变 Python 包、Worker/SDK、单 Bot PostgreSQL 提交守卫和同 schema 排空替换切片，整个 P0 尚未完成。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，实际启动与插件开发方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
+状态：初版目标设计，实现进行中。更新日期：2026-09-13。当前已接通独立 Web 管理、多 Bot 运行、原生 Python Worker 与 OneBot HTTP 消息/发送切片；完整 Agent 和多模态记忆仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 

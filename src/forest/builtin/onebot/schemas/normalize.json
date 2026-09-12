@@ -1,0 +1,1 @@
+{"type":"object","required":["body_b64","self_id"],"additionalProperties":false,"properties":{"body_b64":{"type":"string","maxLength":90000},"self_id":{"type":"string","maxLength":64}}}

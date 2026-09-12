@@ -1,0 +1,25 @@
+manifest_version = 1
+package_id = "forest.adapter.onebot"
+version = "0.1.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "onebot:OneBot"
+
+[[components]]
+id = "adapter.onebot"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[[components.provides]]
+name = "onebot.normalize"
+contract = "1.0"
+input_schema = "schemas/normalize.json"
+output_schema = "schemas/result.json"
+
+[[components.provides]]
+name = "onebot.prepare"
+contract = "1.0"
+input_schema = "schemas/prepare.json"
+output_schema = "schemas/result.json"

@@ -57,6 +57,8 @@ class CallGrant:
     root_call_id: str | None = None
     call_depth: int = 0
     dependency_components: tuple[str, ...] = ()
+    admission_lane: str = "DATA"
+    control_service: str | None = None
 
 
 def _digest(value: Any) -> str:
@@ -795,7 +797,7 @@ class BotStore:
             if route["route_epoch"] != operation["expected_route_epoch"]:
                 raise ForestError("ROUTE_CONFLICT", "Component route changed before freeze")
             await conn.execute(
-                "UPDATE public.bot_component_routes SET admission=false WHERE bot_id=%s AND component_id=%s",
+                "UPDATE public.bot_component_routes SET admission=false,control_admission=false WHERE bot_id=%s AND component_id=%s",
                 (self.bot_id, operation["component_id"]),
             )
             await conn.execute(
@@ -925,11 +927,16 @@ class BotStore:
             )
             result = await (
                 await conn.execute(
-                    "UPDATE public.bot_component_routes SET generation_id=%s,route_epoch=route_epoch+1,admission=%s "
+                    "UPDATE public.bot_component_routes SET generation_id=%s,route_epoch=route_epoch+1,admission=%s,control_admission=%s "
                     "WHERE bot_id=%s AND component_id=%s RETURNING *",
                     (
                         candidate["generation_id"],
                         runtime["data_admission"],
+                        bool(
+                            runtime["control_admission"]
+                            and operation["component_id"] == "adapter.onebot"
+                            and candidate["capability_grants"] == []
+                        ),
                         self.bot_id,
                         operation["component_id"],
                     ),
@@ -977,9 +984,15 @@ class BotStore:
                     and old["host_incarnation"] == lease.incarnation
                 )
                 await conn.execute(
-                    "UPDATE public.bot_component_routes SET admission=%s WHERE bot_id=%s AND component_id=%s",
+                    "UPDATE public.bot_component_routes SET admission=%s,control_admission=%s WHERE bot_id=%s AND component_id=%s",
                     (
                         bool(live and runtime["data_admission"]),
+                        bool(
+                            live
+                            and runtime["control_admission"]
+                            and operation["component_id"] == "adapter.onebot"
+                            and old["capability_grants"] == []
+                        ),
                         self.bot_id,
                         operation["component_id"],
                     ),
@@ -1032,7 +1045,7 @@ class BotStore:
                 "DISPOSED",
             }:
                 await conn.execute(
-                    "UPDATE public.bot_component_routes SET admission=false,route_epoch=route_epoch+1 "
+                    "UPDATE public.bot_component_routes SET admission=false,control_admission=false,route_epoch=route_epoch+1 "
                     "WHERE bot_id=%s AND component_id=%s",
                     (self.bot_id, generation["component_id"]),
                 )
@@ -1067,6 +1080,82 @@ class BotStore:
         expected_worker_incarnation: str | None = None,
         expected_route_epoch: int | None = None,
         dependency_components: tuple[str, ...] = (),
+    ) -> CallGrant:
+        return await self._admit(
+            lease,
+            component_id,
+            call_id,
+            operation_id,
+            input_digest,
+            timeout_seconds=timeout_seconds,
+            expected_policy_revision=expected_policy_revision,
+            expected_generation_id=expected_generation_id,
+            expected_worker_incarnation=expected_worker_incarnation,
+            expected_route_epoch=expected_route_epoch,
+            dependency_components=dependency_components,
+        )
+
+    async def admit_control(
+        self,
+        lease: HostLease,
+        component_id: str,
+        call_id: str,
+        operation_id: str,
+        input_digest: str,
+        timeout_seconds: float = 10,
+        *,
+        service_name: str,
+        expected_policy_revision: int | None = None,
+        expected_generation_id: str | None = None,
+        expected_worker_incarnation: str | None = None,
+        expected_route_epoch: int | None = None,
+        dependency_components: tuple[str, ...] = (),
+    ) -> CallGrant:
+        if type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 30:
+            raise ForestError(
+                "INVALID_CALL", "Control codec deadline must be zero to 30 seconds", 422
+            )
+        if (
+            component_id != "adapter.onebot"
+            or service_name not in {"onebot.normalize", "onebot.prepare"}
+            or dependency_components
+        ):
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED",
+                "Control calls are limited to the host's pure OneBot codec",
+                403,
+            )
+        return await self._admit(
+            lease,
+            component_id,
+            call_id,
+            operation_id,
+            input_digest,
+            timeout_seconds=timeout_seconds,
+            expected_policy_revision=expected_policy_revision,
+            expected_generation_id=expected_generation_id,
+            expected_worker_incarnation=expected_worker_incarnation,
+            expected_route_epoch=expected_route_epoch,
+            admission_lane="CONTROL",
+            control_service=service_name,
+        )
+
+    async def _admit(
+        self,
+        lease: HostLease,
+        component_id: str,
+        call_id: str,
+        operation_id: str,
+        input_digest: str,
+        timeout_seconds: float = 60,
+        *,
+        expected_policy_revision: int | None = None,
+        expected_generation_id: str | None = None,
+        expected_worker_incarnation: str | None = None,
+        expected_route_epoch: int | None = None,
+        dependency_components: tuple[str, ...] = (),
+        admission_lane: str = "DATA",
+        control_service: str | None = None,
     ) -> CallGrant:
         self._ttl(timeout_seconds)
         dependencies = self._dependencies(component_id, dependency_components)
@@ -1122,6 +1211,8 @@ class BotStore:
                     or old["component_id"] != component_id
                     or old["input_digest"] != input_digest
                     or old["parent_call_id"] is not None
+                    or old["admission_lane"] != admission_lane
+                    or old["control_service"] != control_service
                 ):
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "Call identity already binds different input"
@@ -1143,12 +1234,18 @@ class BotStore:
                     "Operation is already admitted; reconcile its existing call",
                 )
             if (
-                not runtime["data_admission"]
-                or not route["admission"]
+                not runtime[
+                    "control_admission" if admission_lane == "CONTROL" else "data_admission"
+                ]
+                or not route["control_admission" if admission_lane == "CONTROL" else "admission"]
                 or not route["generation_id"]
             ):
                 raise ForestError("ADMISSION_CLOSED", "Component is paused or reloading")
             assert generation is not None
+            if admission_lane == "CONTROL" and generation["capability_grants"] != []:
+                raise ForestError(
+                    "CONTROL_SCOPE_DENIED", "Control codec cannot hold business capabilities", 403
+                )
             if (
                 generation["status"] != "ACTIVE"
                 or generation["host_incarnation"] != lease.incarnation
@@ -1174,9 +1271,9 @@ class BotStore:
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components) "
+                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components,admission_lane,control_service) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s) RETURNING *",
+                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -1195,6 +1292,8 @@ class BotStore:
                         input_digest,
                         call_id,
                         list(dependencies),
+                        admission_lane,
+                        control_service,
                     ),
                 )
             ).fetchone()
@@ -1202,9 +1301,15 @@ class BotStore:
                 conn,
                 "call.admitted",
                 operation_id,
-                {"call_id": call_id, "component_id": component_id},
+                {
+                    "call_id": call_id,
+                    "component_id": component_id,
+                    "admission_lane": admission_lane,
+                },
             )
             assert row is not None
+            host = await self._host(conn, lease, runtime)
+            await self._guard_time(conn, host, self._grant_value(row))
             return self._grant_value(row)
 
     async def _chain(self, conn: AsyncConnection, call_id: str) -> list[dict]:
@@ -1254,6 +1359,10 @@ class BotStore:
         dependency_components: tuple[str, ...] = (),
     ) -> CallGrant:
         self._ttl(timeout_seconds)
+        if parent_grant.admission_lane != "DATA":
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED", "Control codec cannot call another component", 403
+            )
         dependencies = self._dependencies(target_component_id, dependency_components)
         if target_component_id == parent_grant.component_id:
             raise ForestError(
@@ -1504,7 +1613,12 @@ class BotStore:
                 raise ForestError(
                     "POLICY_REVOKED", "Call authorization revision is stale", status=403
                 )
-            if runtime["maintenance_epoch"] != current["maintenance_epoch"]:
+            if current["admission_lane"] == "CONTROL" and not runtime["control_admission"]:
+                raise ForestError("CONTROL_CLOSED", "Bot control admission was closed", 403)
+            if (
+                current["admission_lane"] == "DATA"
+                and runtime["maintenance_epoch"] != current["maintenance_epoch"]
+            ):
                 raise ForestError(
                     "STALE_MAINTENANCE", "Maintenance intent invalidated the call tree"
                 )
@@ -1524,6 +1638,10 @@ class BotStore:
             raise ForestError("CALL_EXPIRED", "Call deadline elapsed before commit")
 
     async def read_state(self, grant: CallGrant, key: str) -> dict:
+        if grant.admission_lane != "DATA":
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED", "Control codec cannot read business state", 403
+            )
         async with self.pool.connection() as conn, conn.transaction():
             await self._guard(conn, grant)
             row = await (
@@ -1543,6 +1661,10 @@ class BotStore:
         operation_id: str,
         input_digest: str,
     ) -> dict:
+        if grant.admission_lane != "DATA":
+            raise ForestError(
+                "CONTROL_SCOPE_DENIED", "Control codec cannot write business state", 403
+            )
         if not operation_id or len(operation_id) > 200 or not key or len(key) > 200:
             raise ForestError(
                 "INVALID_STATE_STEP",
@@ -1681,7 +1803,12 @@ class BotStore:
             ).fetchone()
 
     async def authorized_call(
-        self, lease: HostLease, operation_id: str, expected_policy_revision: int
+        self,
+        lease: HostLease,
+        operation_id: str,
+        expected_policy_revision: int,
+        *,
+        admission_lane="DATA",
     ) -> dict | None:
         """Receipt query under current host/policy, independent of old call leases."""
         async with self.pool.connection() as conn, conn.transaction():
@@ -1691,6 +1818,8 @@ class BotStore:
                 raise ForestError(
                     "POLICY_REVOKED", "Component receipt grant was revoked", status=403
                 )
+            if admission_lane == "CONTROL" and not runtime["control_admission"]:
+                raise ForestError("CONTROL_CLOSED", "Bot control admission is closed", 403)
             result = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s",
@@ -1703,6 +1832,11 @@ class BotStore:
                     "Child receipts require their live parent call authority",
                     status=403,
                 )
+            if result is not None and result["admission_lane"] != admission_lane:
+                raise ForestError(
+                    "IDEMPOTENCY_CONFLICT", "Call operation belongs to a different admission lane"
+                )
+            await self._host(conn, lease, runtime)
             return result
 
     async def _call_for_host(self, conn: AsyncConnection, lease: HostLease, call_id: str) -> dict:

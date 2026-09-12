@@ -1,0 +1,1 @@
+{"type":"object","required":["channel_kind","channel_id","segments"],"additionalProperties":false,"properties":{"channel_kind":{"enum":["group","private"]},"channel_id":{"type":"string","maxLength":128},"segments":{"type":"array","maxItems":128,"items":{"type":"object"}}}}
