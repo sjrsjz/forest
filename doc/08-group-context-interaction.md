@@ -1,0 +1,548 @@
+# 群聊上下文、触发排队与串行交互详细设计
+
+## 1. 交互契约与边界
+
+本章规定群聊前台 Agent 的消息接入语义，是[通信调度](03-communication-scheduling.md)、[Agent 与记忆](04-bot-agent-memory.md)、[存储事务](05-storage-security-operations.md)在该场景的具体协议。这里的“群”指完整 `ConversationKey`，包含 Bot、绑定、平台、频道及可选线程。同一 Bot 的不同群仍可并发工作，并读写同一个 Bot 全局长期记忆域。
+
+已确认的 `next_input_boundary = model_safe_point`：**新触发可在当前模型调用及其工具因果组闭合后的下一次模型调用前接入，不必等待整段 Agent 回答结束。** 流式输出未结束、工具结果尚未闭合时只排队，不修改已提交给 Provider 的输入。
+
+必须保持以下行为：
+
+1. 所有已接纳、允许读取的群消息都进入会话上下文管线，包括没有提及 Bot、没有触发 Agent、由其他用户发出的普通消息；它们同样参与 token 计数、归档和裁剪。
+2. 同一群最多存在一个未终结的 `ConversationSession`，其中最多一个前台 Run 在执行模型步骤。新触发入队，不启动第二个同群响应 Agent。
+3. 忙碌时每次安全点冻结最后一个待处理触发的序号，把尚未推入的连续消息前缀推到该条为止；其中的普通消息和更早触发都要保留。最后触发之后的普通尾部继续排队。
+4. 没有新触发时，正常工具循环不吸收普通尾部。Agent 完成本次回答后，若还有触发则继续串行处理；若没有，则静默推入剩余普通队列并排空。
+5. 空闲期间只有普通消息时，直接静默推入、可靠归档并按本地预算裁剪，不启动 Agent 或摘要模型，不生成群回复、工具行动或自动的新对话触发。裁剪路径的LLM API调用次数为零；可选向量索引在独立批量任务中维护，不是裁剪完成条件。
+6. 历史保存每条消息的可信发言者身份和当时展示名。不同用户、同名用户、引用作者和实际发送者均能区分。
+
+“全部进入上下文”不表示无限保留所有原文在每个 Prompt，也不表示把群消息复制到独立的群长期库。原始记录先可靠保存并建立连续来源覆盖，短期视图按确定性规则保留预算内原文，其余只保留归档范围/来源引用或合法占位；不再生成“记忆摘要”。来源引用不是正文内容的替代语义，不声称模型理解了未物化原文。被当前权限或删除规则禁止读取的内容不得因本规则重新出现。
+
+### 1.1 群聊管理 Shell 与对话队列
+
+管理员的显式 `#forest` 命令通过[09 群聊 Shell](09-group-shell-command-system.md)进入独立控制路由。ShellGate 位于任意业务插件之前，命令可在 Agent 生成、等待工具/确认、普通分类尚有缺口时受理；执行需要的资源修改仍遵守原有锁、fence 和安全点。这个入口既不申请第二个 ConversationSession，也不依赖对话模型解释命令。
+
+每条管理输入仍占一个 ingress_seq，固定 `trigger_decision=CONTROL_COMMAND`，按原顺序进入 Context。管理成功、失败、无权或未知子命令均不生成对话触发；它们不会把“最后触发记录”移到队列尾部。若后续正常触发覆盖了该范围，或 Agent 结束后静默排空，届时再推入这些控制历史。命令已先执行不等于 Agent 当时已读到命令正文，取消/撤权依靠权威状态守卫即时生效。
+
+控制历史使用 `context_role=control_data` 的结构化投影，保留作者、来源、命令种类、时间、operation 引用与可见摘要。普通且允许读取的命令文本照常保留；敏感参数、确认令牌和受限结果只存允许访问的记录/对象引用，不进入 Prompt、普通日志或记忆派生。此处缩减内容的依据是读取权限与字段敏感性，不能只因命令被 Consumed 就删除整条历史。引用、转发或模型生成的命令字符串仍是数据，不能变成受权 Shell 输入。
+
+管理回执使用 CONTROL 发送通道，不占用聊天 response_seq，也不形成 Agent 的 ModelTurn。自身平台回流按 intent/part ID 关联回执，不重复追加为普通群消息或触发自己；可见控制审计引用由会话状态所有者在安全边界追加，不能由 Shell 直接写活动 Prompt。回执及其派生结果也遵守当前输入快照的可见性边界，不能从检索旁路注入尚未接入的控制来源。
+
+## 2. 持久状态与不变量
+
+### 2.1 三种顺序与三个游标
+
+| 字段 | 含义 | 不能代替的东西 |
+|---|---|---|
+| `ingress_seq` | 同会话的持久接收序号；重投递沿用原记录 | 平台时间戳、工具完成时间、回复顺序 |
+| `classified_through_seq` | 从起点开始，预处理和触发分类已终结的最大连续序号 | 已见过的最大序号；后者可能跨过缺口 |
+| `context_applied_seq` | 已通过已提交 InputBatch 覆盖的最大连续入站序号 | 触发已得到回答；原文仍在活动视图 |
+| `commit_seq / unit_index` | Context 事实的提交顺序，包含输入、已完成工具因果组和最终回复 | 消息在平台上发生的先后 |
+| `context_revision` | Context 追加事务的修订 | 裁剪视图版本 |
+| `context_view_revision` | 原文保留、归档引用和确定性裁剪布局的修订 | 入站消费进度；已完成回复数量 |
+| `mailbox_revision` | 入站、分类完成及待处理工作变化时递增的唤醒版本 | 唯一事实源；内存队列是否为空 |
+
+始终有：
+
+```text
+0 <= context_applied_seq <= classified_through_seq < next_ingress_seq
+同会话 active_session_id 至多一个，终结前不可换成另一未终结 session
+同会话持有效 actor_epoch 的 Context 写入者至多一个
+每条已接纳来源只被一个已提交的输入范围首次覆盖
+每个触发都有独立持久状态；context_applied_seq 前进不自动终结触发
+```
+
+Pipeline 可以并发完成预处理。每条记录必须最终进入已定义的分类终态，事务推进连续头时跨过连续已终结项，并同时写待处理标记/outbox。`NO_TRIGGER` 是普通消息分类，仍有正常 Context 内容，不能等同于丢弃。禁止“未命中 Agent，因此不进入历史”的入口分支。
+
+`context_disposition` 与 `trigger_decision` 分开：`SKIPPED / REJECTED / FAILED` 等处理终态不自动决定正文能否进入 Context。只要正文已成功规范化、允许读取，就仍追加正文和作者信息；未命中 Agent、已被命令处理器消费、触发分类故障都不能把这条正常消息改成空占位。分类故障另有明确错误/终态，不能永久阻塞连续头。
+
+只有正文因权限、删除、格式损坏等原因确实不可物化时，才使用来源序号及允许保留的原因占位。不成功的媒体解析可保留原始媒体引用和失败状态。预处理重试必须有 deadline 和终态，不允许一个死亡 Worker 留下永久序号缺口。
+
+图片消息在规范化时即保留有序image part、可信来源和受管媒体获取引用；图片字节尚未到达不等于空消息或无触发。获取作业有独立deadline及PENDING_FETCH/READY/UNAVAILABLE等明确状态，完整枚举见[11](11-multimodal-memory-and-model-projection.md#4-图片接纳归档和可恢复性)。分类可在已知类型/身份和有界获取结果下终结，不能永久等待图片/OCR而阻塞连续水位。迟到媒体作为版本化materialization/enrichment记录保存，只能由下一次合法安全点请求选入；不能在已发请求中补图、修改原ingress_seq或触发第二个同群Agent。
+
+### 2.2 Session、Run、输入批次与触发记录
+
+逻辑表沿用[05 的接入与执行表](05-storage-security-operations.md#22-接入会话与执行)，关键字段如下：
+
+| 记录 | 关键字段与含义 |
+|---|---|
+| `conversation_sessions` | `session_id, conversation_id, status, active_run_id, session_epoch`；承载同群持续工作期间的逻辑独占 |
+| `conversation_triggers` | `trigger_id, event_id, ingress_seq, status, principal_ref, claimed_session_id, claimed_run_id, input_batch_id, answered_reply_id` |
+| `context_input_batches` | `input_batch_id, conversation_id, session_id?, run_id?, start_seq?, end_seq?, trigger_ids, kind, context_revision`；固定来源切口与输入语义 |
+| `run_inputs` | 追加关联 Run、InputBatch 与源事件；新增批次不覆盖早期输入 |
+| `run_steps / run_checkpoints` | 持久保存每个模型请求的输入版本、已闭合步骤、工具操作和 continuation |
+| `context_units` | 输入、已完成步骤和最终回复的不可变单元；保存来源、身份及所属批次 |
+| `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
+| `model_request_manifests` | 实际模型/能力快照、projection_version、固定输入切口、包含/省略parts、媒体修订、语义输入/投影digest与预算；不修改CanonicalContext |
+| `model_transport_attempts` | request_id、实际请求体payload_digest、serializer_revision、短效许可及预算预留引用；派发状态与回执沿用RunStep/checkpoint |
+
+一个模型调用固定`input_revision, context_revision, context_view_revision, selected_input_end_seq, trigger_ids, source_manifest_digest`及ModelRequestManifest。后者记录实际Provider/model、能力快照、included_part_refs/omitted_part_refs、媒体revision与projected_content_digest；精确载荷在事务外构建后，由最终许可事务另存ModelTransportAttempt的payload_digest，结合派发/回执状态说明该模型实际收到哪些内容。input_revision随同一Run新增InputBatch递增，媒体物化/模型投影另行版本化，不能冒充新增群输入；正在进行的调用不更改自己的版本。trigger_ids包含该Run为完整回复累计领取、尚未终结的触发，不只保存最近一批。
+
+InputBatch 的 `kind` 分为：
+
+- `TRIGGER_INPUT`：选择触发后增加新的来源前缀，并把对应触发领取给当前 Session/Run。
+- `SILENT_DRAIN`：无触发时只追加普通来源前缀；`run_id = null`，不产生回复型 Run。
+- `RECOVERY_CLAIM`：恢复尚未完成的触发，而其来源已经提交过；`start_seq = end_seq = null`，引用既有 Context 单元，不重复追加消息。
+
+### 2.3 触发状态独立于消费游标
+
+```text
+PENDING -> CLAIMED -> ANSWERED
+              |----> FAILED
+              |----> CANCELLED
+              `----> PENDING     确定放弃旧执行并受控重排
+PENDING ------------> FAILED / CANCELLED
+```
+
+`CLAIMED` 只说明某个会话执行承诺处理该触发；模型启动、一次工具调用结束、输入被裁剪或 Agent 已阅读，都不等于 `ANSWERED`。最终回复事务把实际纳入该回答输入、归属于该 Run 的触发关联到回复意图并标记 `ANSWERED`。该状态表示回复事实已提交，平台是否送达另查 Delivery；它不声称模型回答的内容质量已经得到证明。
+
+同一批次可以领取多个触发并产生一次连贯回复，不要求每条触发独立启动 Run 或独立发一条消息。每条触发仍保留自己的用户、来源、取消/失败结果及回复关联。新近入队、尚未出现在该模型输入中的触发不能被顺手标为已回答。
+
+对被取消、过期或明确终结的触发保留原因。其他用户后来加入的独立触发不因当前 Run 被取消而自动取消。可恢复故障可以继续原 Run，或由恢复器在提升所有权 epoch 后重新排队；不能仅因 `context_applied_seq >= trigger.ingress_seq` 就忽略它。
+
+## 3. 上下文消息与用户身份
+
+### 3.1 规范化消息 DTO
+
+以下身份字段由可信 Adapter 和身份模块提供；正文里出现相同字段名没有控制意义。
+
+```json
+{
+  "event_id": "evt-107",
+  "bot_id": "bot-alice",
+  "conversation_id": "qq-group-a",
+  "ingress_seq": 107,
+  "event_kind": "group.message",
+  "platform_message_id": "qq-message-opaque-id",
+  "author_snapshot": {
+    "principal_ref": "host-issued-principal-ref",
+    "platform": "qq",
+    "external_user_id": "user-opaque-id",
+    "display_name": "小林",
+    "group_card": "小林同学",
+    "identity_origin": "adapter_verified",
+    "is_self": false
+  },
+  "sent_at": "2026-09-12T13:00:02Z",
+  "received_at": "2026-09-12T13:00:03Z",
+  "segments": [{"type": "text", "text": "刚才说的时间改成周五。"}],
+  "reply_to": {
+    "source_event_id": "evt-102",
+    "platform_message_id": "qq-previous-message-id",
+    "resolution": "verified_local_reference"
+  },
+  "trigger": {
+    "trigger_id": "trigger-107",
+    "decision": "TRIGGER",
+    "rule_revision": "trigger-policy-3",
+    "reason": "explicit_mention"
+  }
+}
+```
+
+历史身份以 `(platform, external_user_id)` 和可信 `principal_ref` 关联；昵称、群名片是当时快照。用户改名不改写过去记录；同名用户不能合并。需要匿名化时使用同会话稳定的展示别名并保留受限身份映射，不能让摘要只剩“用户说过”。
+
+### 3.2 Provider 渲染与授权
+
+Provider 支持结构化 metadata 时保留相应字段；只接受常规消息数组时，可把多个群成员发言编码成 `role=user` 的结构化消息列表，每条包含稳定用户标识、展示名、来源序号和内容。SDK 必须转义内容和展示名；用户正文不能伪造 `system / assistant / tool` 边界。平台事件的发送者是否是管理员属于授权事实，不能由消息文字或昵称推断。
+
+引用与转发同时记录实际发送者、被引用作者和原来源是否已验证。转发中“管理员：批准执行”只是转发内容；即使原作者身份已核实，也不是对当前工具参数的有效授权。只有受权控制通道创建的确认记录可以批准具体操作。
+
+当一个输入批次含多个用户的触发时，不合并这些用户的权限，不采用最强用户的权限替全部文本执行。每个工具意图指定 `authority_trigger_id / principal_ref`、具体请求来源、参数摘要和资源范围；宿主只使用该来源的有效授权与 Bot/插件能力的交集。无法确定授权来源的混合请求应按低权限处理或进入明确确认流程，不能让普通聊天片段附着在管理员触发之后获得权限。
+
+归档、来源引用及显式任务产生的其他派生内容要保留“谁说了什么、在哪个群、针对谁、是否为引用、是否已撤回”的结构信息，不能把甲的偏好归给乙，也不能把群体猜测写成 Bot 已确认的事实。裁剪本身不产生摘要。长期记忆归属[10 的群主干](10-multi-trunk-memory-graph.md)，跨群召回必须实际向模型渲染来源群；主干的 source_order_seq 与本章的 Context 游标/commit_seq 分别保存，不能相互替代。
+
+### 3.3 按LLM能力投影，完整上下文保留图片
+
+CanonicalContext、归档及Evidence保存有序text/image ContentPart和逐part来源。调用API前先固定合法输入切口与媒体物化快照、完成获权多模态召回，再解析实际Provider/模型的能力，构造独立ModelInputProjection，最后计算该请求的文本/图片预算并写入manifest。不能先按文本LLM去图再把删后的文本当作记忆查询的唯一输入；图片仍可以直接用于嵌入和召回。
+
+若实际模型不支持图片，递归去掉所有角色中的image parts以及被声明为媒体载荷的URL/base64/file字段，包括历史轮次、引用内容、检索证据与工具结果；保留合法文本、作者/群来源、工具call_id和结果配对。可以保留纯文本“此处有图片，未提供给当前模型”的事实标记，不把图片地址或编码转写成文本来假装已完成投影。明确来自原文的普通文字URL按文本处理，不靠泛化字符串删除破坏用户内容。
+
+纯图片触发仍有作者、群来源、trigger和不可见模态标记，不变成空消息或自动ANSWERED。若召回得到合法文本证据，模型可根据这些文本作答；不能把图片相似度或占位标记当成视觉理解。没有足够文本依据时说明能力限制，不自动调用OCR/caption、切换收费模型或声称看到图中细节。已有显式生成且仍获权的OCR/描述文本可保留，但必须标明派生来源，不伪装为原图已传入。
+
+投影只作用于当次API请求。它既不删除Context中的image part/媒体引用，也不改变归档、嵌入索引、主干归属或触发水位。后续合法视觉请求可重新从原始媒体物化图片；文本/视觉fallback每次新建attempt与manifest，仍使用原输入切口，不能借切换模型吸入排队尾部。详细能力、媒体生命周期及恢复契约见[11](11-multimodal-memory-and-model-projection.md)。
+
+## 4. 触发切口选择与模型安全点
+
+### 4.1 一次选择只冻结一个切口
+
+在持有效 Actor 权限的短事务中锁定会话协调行，读取：
+
+```text
+A = context_applied_seq
+H = classified_through_seq
+P = 当前 PENDING 且 ingress_seq <= H 的触发集合
+若 P 非空：T = max(P.ingress_seq)
+trigger_cut_seq = T
+selected_input_end_seq = max(A, T)
+新来源区间 = (A, T]，当 T <= A 时为空
+本次领取 = P 中不晚于 T 的全部待处理触发
+```
+
+提交的切口、领取的触发 ID 和批次 ID 固定。事务之后再来的触发属于下一次选择，不把已经冻结的 `T` 持续向后拖动。若存在序号大于 H 的已分类触发，必须等待它前面的分类缺口终结，不能越过缺口推入乱序历史。
+
+`P` 的查询独立于 `A`，恢复时可能出现消息早已入上下文、触发仍待处理的情况。该触发使用既有上下文及恢复批次重新获得执行，不反向移动 A，也不重复追加原消息。正常新触发路径中的 T 大于 A。
+
+正常路径的模型输入上界就是最后触发 T；仅恢复旧触发且 T 小于 A 时，实际已有历史的可见上界仍为 A，不能用旧触发序号假装此前已入库的历史不存在。trigger_cut_seq 记录本次触发选择，selected_input_end_seq 记录实际输入前缀；此差异不允许读取 A 之后仍排队的普通尾部。精确恢复原模型步骤时优先复用原 checkpoint 的冻结快照，不重新选切口。
+
+新旧触发可以在同一次选择中混合出现。例如 A=10，同时有待恢复的触发 5 和新触发 12，则追加的来源范围只是 11..12，但本次 `run_inputs`、累计触发清单与原文保留引用必须同时包含触发 5 的既有来源。触发清单不等于新来源区间；不能只在“整个批次没有新消息”的分支恢复旧来源。待恢复触发若已移出活动视图，按当前授权从可靠归档取回并pin其必要原文；已删除的来源走明确取消/失败处理，不得复活。
+
+输入推入事务同时执行：校验 Actor/Session/Run 所有权及权限/删除屏障；幂等校验；发布尚未进入 Context 的已闭合步骤；追加输入批次和来源引用；关联 `run_inputs`；领取触发；推进 A 和 `input_revision`；更新 Context revision 和持久待处理标记。事务只处理本地事实和引用，不在其中等待 LLM、摘要或工具。
+
+### 4.2 模型与工具步骤的闭合
+
+```text
+固定输入视图 -> 一次 Provider 调用
+             -> 无工具的完整输出
+             -> 或：完整 tool-call 消息 + 每个调用的终态结果
+             -> 持久 checkpoint
+             -> 安全点：决定是否接入下一输入批次
+```
+
+模型请求进行中仅接收 Inbox 和分类结果。不能直接修改传给 Provider 的消息列表，不能在 assistant 的 tool-call 和对应 tool-result 之间插入新群聊输入。多个并行工具的结果按该模型步骤固定的调用顺序保存，不能按网络完成顺序拼接。
+
+未完成、等待批准或结果为 UNKNOWN 的工具组尚未闭合，只有在结果确定或按已定义失败语义形成终态记录后，才进入下一次模型调用。授权确认走控制通道，不排在普通聊天队列后等待自己解除阻塞。
+
+闭合步骤先记录到 `run_steps` 和 checkpoint，尚未发布部分按稳定步骤序号保存。若下一安全点接入新 InputBatch，必须在同一 Context 提交中先追加之前尚未发布的完整执行步骤，再追加该批输入。若不接入消息，可继续使用已持久的私有步骤构造下一调用；最终提交时再一次性追加尚未发布部分。通用步骤 flush 只发布非最终步骤，最终候选由专用的 `ModelTurn + SendIntent` 入口按其同一 `logical_step_id` 幂等提交，不能先作为步骤追加一次、再作为最终回答追加一次。用逻辑步骤唯一键和 checkpoint 的已发布位置避免恢复重复追加。
+
+中间工具交互是“已发生的执行事实”，不是已向群里发出的正常回复；失败或取消后的已完成工具记录保留执行状态与归属，不伪造一条成功回答。未完成模型流、半截文本和未经提交的最终候选只进入受限执行记录，不进入正式回复历史。这里持久化的是协议允许保存的输出与工具事实，不要求提取或保存 Provider 的隐藏推理过程。
+
+### 4.3 没有新触发的工具回合
+
+若当前 Run 仍需继续调用模型，而且根本没有 PENDING 触发，则保持现有输入版本，仅增加已闭合的执行步骤。若存在已分类触发，但全部位于连续分类头 H 之后，则转 WAIT_INPUT 等待缺口，保留当前 Run；不能把“没有可立即消费的触发”当作“没有新触发”继续调用模型。忙碌期间收到的普通尾部仍在 Inbox，不能因为“正好又要调用模型”就全部追加。
+
+不能通过旁路 observer、额外检索或摘要刷新把排队尾部重新塞入本轮 Prompt。基于本会话新消息的记忆抽取至少等待该消息进入已提交 InputBatch；召回物化也必须检查来源，当前会话尚未推入的入站记录及其派生物不得进入该冻结输入。其他群的获准共享事实仍按 Bot 全局记忆规则参与召回。
+
+## 5. 回复结束、静默排空与竞态
+
+### 5.1 最终回答的原子提交
+
+完整最终候选正常进入 `ModelTurn + SendIntent + outbox` 事务。仅有新触发排队不自动丢弃已生成的最终候选；这样持续来消息不会无限延迟当前回答。事务验证候选固定的输入版本，追加尚未发布的完整非最终步骤及最终 ModelTurn，并把本次实际纳入的触发关联到回复；确认该 Run 没有剩余 CLAIMED 触发后，才能终结 Run 并清空 Session 的 `active_run_id`。
+
+该事务同时锁定会话协调行并决定后续：
+
+- 有可用待处理触发：保留当前 `active_session_id`，转 `READY_NEXT`，由同一 Session 建立后继 Run，在其第一次模型调用前选择新的触发切口。
+- 有尚在连续分类头之外的已分类触发：保留 Session，转 `WAIT_INPUT`，等待缺口终结。
+- 没有待处理触发：转 `DRAINING`，只做静默输入维护；完成排空的事务再决定是否关闭 Session。
+
+最终提交后到达的消息由相同协调行的事务先后关系决定：若 Session 尚在 DRAINING，新触发将其唤醒到 READY_NEXT；若已经关闭，则由持久待处理工作创建下一个 Session。两条路径都不能创建并发的同群 Session。
+
+CHAT 回复分配同会话递增 `response_seq`，Delivery 依序领取，避免两个串行生成的回复在异步发送时倒序。较早 CHAT 回复 UNKNOWN 时保留未确定状态，并按明确的对账/超时终结策略处理后续 CHAT 发送；不能换一个 Agent 或新发送 ID 绕过顺序约束。独立 CONTROL 命令回执按 command_id/control_seq 排序，可先获得下一次允许的发送机会；两者仍共用平台限流、绑定所有权和实际网络容量，因此只保证各自排序域，不声称全部 Bot 输出共享一个严格总序。
+
+### 5.2 静默推入的两种入口
+
+空闲收到普通消息和 Agent 结束后的尾部排空使用同一个 `SILENT_DRAIN` 协议。每个有界维护批次都在协调行锁内先检查触发，再冻结 `silent_end_seq = classified_through_seq`，追加 `(context_applied_seq, silent_end_seq]`，推进游标并登记裁剪工作。
+
+如果检查时有待处理触发，立即改走触发选择，不能先把整条普通尾部静默推完。安全点之后新消息的序号大于已冻结边界，不影响已选择的输入批次；下一维护批次再次检查触发，不沿用上次“没有触发”的判断。
+
+静默操作只保存输入、归档和确定性裁剪事实，不创建回复 outbox，不触发前台 Agent、摘要模型或自动工具。Bot 保持静默，下一次被触发时具有预算内近期原文及更早记录的可检索来源引用。被移出的内容需按实际需要召回，不能因没有摘要就假定旧内容仍在模型视图中。
+
+### 5.3 空队列判断与丢失唤醒
+
+关闭 Session 的事务必须在同一个会话协调锁内重验：
+
+```text
+没有 PENDING 或仍需恢复的 CLAIMED 触发
+没有活跃/等待中的 Run 或未解决 continuation
+context_applied_seq == classified_through_seq
+没有本 Session 必须完成的输入准备/裁剪工作
+```
+
+然后才将 Session 终结并清空 `active_session_id`。不得使用“内存 queue.empty() 为真 -> await -> 把 Agent 标空闲”的流程。
+
+若仍有已接纳但未分类完成的消息，可以结束当前回复 Session，但必须保留分类 Job 和持久待处理标记；它们完成时即使没有新的网络消息也会重新唤醒会话。后台恢复器持续检查 `context_applied_seq < classified_through_seq`、PENDING 触发、未完成 Session 和超时 lease，不依赖一次性通知。
+
+入站事务、分类终结事务、Session 结束事务共享同一协调行的锁/CAS 规则，并更新 `mailbox_revision`。消费者只能清除自己已经确认处理完的版本，不能把处理期间出现的新版本标为已处理。通知与 outbox 重复或丢失只影响调度延迟，不改变输入覆盖或触发状态。
+
+## 6. 严格串行的 Session 状态机
+
+| 当前状态 | 事件与动作 | 后继状态 |
+|---|---|---|
+| `IDLE` | 仅普通消息；静默追加并运行裁剪维护 | `IDLE` |
+| `IDLE` | 存在可处理触发；原子创建唯一 Session 与 Run | `PREPARING` |
+| `PREPARING` | 提交选定输入，准备有界视图、完成必要裁剪 | `RUNNING` |
+| `RUNNING` | Provider/工具正在工作；入站只排队 | `RUNNING / WAIT_TOOL` |
+| `RUNNING` | 非最终安全点发现触发；同 Run 增加固定批次 | `PREPARING` |
+| `RUNNING` | 非最终安全点没有触发；保留排队尾部，继续模型步骤 | `RUNNING` |
+| `WAIT_TOOL / WAIT_APPROVAL` | checkpoint 后释放实际执行资源；保留逻辑 Session | 同状态，直到控制结果到达 |
+| `RELOAD_WAIT` | 保存输入/步骤/触发归属，交接执行权限 | `READY_RESUME` |
+| `READY_RESUME` | 同 Session 获取新 Actor/Run incarnation；复核 checkpoint | `PREPARING / RUNNING` |
+| `RUNNING` | 最终 ModelTurn 提交，有后续触发 | `READY_NEXT` |
+| `READY_NEXT` | 同 Session 创建后继 Run 并选择下个切口 | `PREPARING` |
+| `WAIT_INPUT` | 连续分类头推进到可用触发，仍有原活跃 Run | `READY_RESUME`，恢复原 Run |
+| `WAIT_INPUT` | 连续分类头推进到可用触发，上一 Run 已完成 | `READY_NEXT`，创建后继 Run |
+| `RUNNING` | 最终提交后没有待处理触发 | `DRAINING` |
+| `DRAINING` | 发现新触发 | `READY_NEXT / WAIT_INPUT` |
+| `DRAINING` | 无触发，有普通前缀；静默追加/裁剪 | `DRAINING` |
+| `DRAINING` | 重验无待处理工作，原子关闭 Session | `IDLE` |
+
+这里的 IDLE 是会话无活跃 Session 的状态；其余状态由持久 Session 协调。Actor 的内存实例可以淘汰，Worker 可以更换，逻辑 Session 身份仍连续。
+
+`holds_actor = false` 只表示不持有实际执行/提交租约，不能解释为同群可以启动另一 Agent。WAIT_APPROVAL、长 WAIT_TOOL、RELOAD_WAIT 和公平调度让出 Provider 槽时，`active_session_id` 仍被占用。新触发仍正常持久排队；取消/批准经控制通道推进当前 Session。等待有 deadline、显式取消和故障终结机制，不能永久占住同群对话。
+
+自主 Job 若要向正在工作的群发起交互，也必须提交该 Conversation 的受权触发并参加相同队列。后台记忆维护和私有子 Agent 分析可并行，但不拥有该群的 Context 或回复提交权。
+
+## 7. 伪代码与事务边界
+
+以下是协议伪代码；`transaction`、Repository 和调度方法为设计接口，不表示已有实现。所有事务执行[05 的统一锁序](05-storage-security-operations.md#3-事务与锁顺序)，所有模型、工具和摘要 I/O 均在事务外。
+
+```python
+async def select_at_safe_point(conversation_id, session_id, run_id, actor_fence):
+    async with store.transaction() as tx:
+        c = await tx.lock_conversation_with_guards(conversation_id, actor_fence)
+        await tx.require_session_and_run(c, session_id, run_id)
+        await tx.require_closed_model_tool_group(run_id)
+        pending = await tx.pending_triggers(c.id)
+        eligible = [t for t in pending if t.ingress_seq <= c.classified_through_seq]
+
+        if not eligible and pending:
+            await tx.checkpoint_wait_for_classification(run_id, c.classified_through_seq)
+            await tx.set_session_state(session_id, "WAIT_INPUT")
+            return {"action": "WAIT_INPUT"}
+
+        if not eligible:
+            # Existing CLAIMED triggers still belong to the current response.
+            # Ordinary messages after the previous cut do not enter this model step.
+            return {"action": "CONTINUE_EXISTING_INPUT"}
+
+        previous_applied = c.context_applied_seq
+        recovery_sources = [t for t in eligible if t.ingress_seq <= previous_applied]
+        cut = max(t.ingress_seq for t in eligible)
+        batch_id = await tx.stable_batch_id(session_id, run_id, eligible)
+        await tx.flush_complete_unpublished_steps(run_id, exclude_final_steps=True)
+        if cut > c.context_applied_seq:
+            await tx.append_input_range(
+                batch_id=batch_id,
+                start=c.context_applied_seq + 1,
+                end=cut,
+                kind="TRIGGER_INPUT",
+                preserve_authors=True,
+            )
+            c.context_applied_seq = cut
+        else:
+            await tx.append_recovery_claim(batch_id, existing_sources=eligible)
+        # A mixed batch can contain both new input and previously applied triggers.
+        # Link/pin old sources even when the new-range branch above was taken.
+        await tx.attach_existing_trigger_sources(
+            run_id, batch_id, recovery_sources, pin_required_originals=True
+        )
+        await tx.claim_exact_triggers(eligible, session_id, run_id, batch_id)
+        await tx.advance_input_revision_and_context(c, run_id, batch_id)
+        await tx.register_context_maintenance(c)
+        return {"action": "INPUT_APPLIED", "batch_id": batch_id,
+                "trigger_cut_seq": cut,
+                "selected_input_end_seq": max(previous_applied, cut)}
+
+
+async def run_model_step(session, run, actor_fence):
+    saved = await load_run_checkpoint(run.id)
+    if saved and saved.phase == "FINAL_READY":
+        # Commit the saved final snapshot before selecting any newer input.
+        return await commit_final_and_choose_next(session, run, saved.final, actor_fence)
+    selection = await select_at_safe_point(
+        session.conversation_id, session.id, run.id, actor_fence
+    )
+    if selection["action"] == "WAIT_INPUT":
+        await release_execution_resources_keep_session(session, run, reason="WAIT_INPUT")
+        return "WAIT_INPUT"
+    # Build/crop only the committed input plus the run's complete private steps.
+    # Publication validates source coverage, view revision and deletion fences.
+    snapshot = await prepare_bounded_context_view(run.id, actor_fence)
+    # Independent projection includes recall, capability filtering and budgeting.
+    # Prepare exact wire bytes outside transactions; persist guards before dispatch.
+    prepared = await prepare_model_projection_and_transport(run.id, snapshot)
+    step, permit = await commit_model_dispatch_permit(run.id, prepared, actor_fence)
+    result = await provider.dispatch(prepared, permit)
+    await verify_current_model_call(step, result, actor_fence)
+    closed = await close_tool_group_or_checkpoint_wait(step, result)
+    if closed.is_waiting:
+        return await release_execution_resources_keep_session(session, run, closed)
+    await persist_closed_step_checkpoint(run.id, closed)
+    if closed.is_final:
+        # Final candidates are not discarded merely because newer triggers exist.
+        return await commit_final_and_choose_next(session, run, closed, actor_fence)
+    return "SCHEDULE_SAME_RUN_NEXT_SAFE_POINT"
+
+
+async def commit_final_and_choose_next(session, run, final, actor_fence):
+    async with store.transaction() as tx:
+        c = await tx.lock_conversation_with_guards(session.conversation_id, actor_fence)
+        await tx.verify_final_snapshot_and_run(session, run, final)
+        await tx.flush_complete_unpublished_steps(run.id, exclude_final_steps=True)
+        reply = await tx.append_final_turn_and_send_intent(
+            final, c.next_response_seq, logical_step_id=final.logical_step_id
+        )
+        await tx.answer_only_snapshot_triggers(final.trigger_ids, run.id, reply.id)
+        await tx.require_no_remaining_claimed_triggers(run.id)
+        await tx.complete_run(run.id)
+        await tx.clear_active_run(session.id, expected_run_id=run.id)
+        pending = await tx.pending_triggers(c.id)
+        if any(t.ingress_seq <= c.classified_through_seq for t in pending):
+            await tx.set_session_state(session.id, "READY_NEXT")
+        elif pending:
+            await tx.set_session_state(session.id, "WAIT_INPUT")
+        else:
+            await tx.set_session_state(session.id, "DRAINING")
+        await tx.mark_mailbox_work_and_outbox(c)
+
+
+async def silent_drain_or_close(conversation_id, actor_fence):
+    async with store.transaction() as tx:
+        c = await tx.lock_conversation_with_guards(conversation_id, actor_fence)
+        await tx.require_idle_or_draining(c)
+        pending = await tx.pending_triggers(c.id)
+        if pending:
+            return await tx.schedule_trigger_work_preserving_session(c, pending)
+        await tx.require_no_unresolved_claim_or_continuation(c)
+        if c.context_applied_seq < c.classified_through_seq:
+            end = c.classified_through_seq
+            await tx.append_silent_input_range(c.context_applied_seq + 1, end)
+            c.context_applied_seq = end
+            await tx.register_context_maintenance(c)
+            return "CONTINUE_MAINTENANCE"
+        if await tx.has_required_context_maintenance(c):
+            return "WAIT_MAINTENANCE"
+        # Admission/classification use this same coordination row.
+        await tx.close_session_if_present(c)
+        await tx.ack_only_observed_mailbox_revision(c)
+        return "IDLE"
+```
+
+伪代码中的接入准备包含输入已提交、必要裁剪已完成、原始来源仍合法这三个条件；不得先发模型请求再补做这些检查。进程内 `asyncio.Lock` 可减少同进程竞争，但数据库 Session 唯一约束、lease 和 epoch 是恢复后的最终防线。
+
+## 8. 无模型摘要的裁剪与历史顺序
+
+### 8.1 每次输入追加都参与裁剪
+
+`TRIGGER_INPUT` 与 `SILENT_DRAIN` 使用同一 token 计数和裁剪入口。没有触发并不免除裁剪；也不能只有最初构造 Agent 时裁剪一次、后续模型步骤无限 `extend`。
+
+这里区分两类视图：持久ViewPlan按明确`context_view_profile_ref`管理完整多模态近期窗口、归档引用和本地资源预算，不随当前LLM是否支持图片而改变保存语义；每次Provider调用另对ModelInputProjection核算实际文本token、图片数量/分辨率/成本、来源标题及输出预留。模型或能力变化只重建当次请求投影和预算，不把去图结果写回context_compactions。正常持久裁剪仍可按既定保留策略整体移出已归档旧单元，但“不支持模态”不能成为删除原图或永久移出图片的理由。
+
+确定性选择先计固定开销与必留集合，再按Context提交顺序从近到远选择完整可选单元；同序号按稳定unit_id决胜，不按Worker读取完成先后选择。持久ViewPlan使用context_view_profile的预算；请求投影使用实际模型预算并优先预留系统约束/输出空间，二者保留/移出清单分别记录。触发裁剪后以各自配置低水位为目标，必要集合高于低水位但不超过硬预算时优先满足必要集合；第一个可选旧单元放不下时停止扩展旧窗口，整组移出，不切断call/result配对。预算估算在本地按固定版本完成，不调用远端模型。
+
+完整归档覆盖清单保存在事实库；Prompt只保留有界的归档提示及manifest引用，不随历史增长逐条累积占位。多个省略范围可引用同一不可变manifest，准确映射仍可按权限查询。证据来源头、近期原文和必要原文全部计入实际预算，不能因引用在数据库里而声称对应正文已进入模型。
+
+选定前缀可能超过模型窗口。允许用已持久 Inbox 的不可变范围引用和保留引用计数提交 InputBatch，随后有界流式读取、确定性分块和可靠归档；按固定tokenizer/策略计算必要保留集合，再选择预算内近期完整单元，移出旧的可淘汰单元并发布视图。裁剪不调用LLM，也不通过压缩、整合、摘要Job等别名间接调用模型。来源游标覆盖整段前缀，不能只持久化最后若干条；模型实际只看到了视图物化清单里的正文。
+
+正常推入/裁剪保留：
+
+- 当前仍待回答的触发及其稳定用户身份、原始请求引用、必要原文和图片引用，不能被普通滚动窗口直接淘汰；图片不被文本模型接收的事实只记在该请求omitted清单中。
+- 被归档普通消息的连续来源覆盖、参与者/来源群关系和可检索的原文引用；省略标记只表明范围已移出，不伪造自然语言概括。
+- 一个完整工具因果组，不能只保留 tool-result 却删去对应 tool-call，或相反。
+- 删除、撤回及不可读取内容的合法占位，不保留被禁止内容的残片。
+
+若仅待回答触发的最小必要原文就超过输入预算，不能偷偷遗漏早期触发或无限等待。记录明确的 `INPUT_BUDGET_EXCEEDED`，按有界恢复/失败策略处理并保留每个触发状态；切口不被悄悄改成最后一条消息。正文超过单消息限制时使用已声明的附件/内容引用策略，不能伪称模型已读完未提供的原文。
+
+### 8.2 确定性视图发布与合流
+
+先可靠写 Archive 及来源映射，再以 `context_compactions` 发布裁剪视图。裁剪器只计算确定性的 ViewPlan：保留单元、移出单元、归档引用、token计数和来源覆盖，不能输出自然语言摘要。Context 发布经Actor/会话协调事务；后台任务不能修改正在使用的共享消息数组。可靠归档已完成但Embedding/图邻接仍滞后时，裁剪可以完成，召回显式报告索引水位。
+
+ViewPlan固定有序源集、覆盖范围、基础context_view_revision、context_view_profile_ref、tokenizer/策略版本、预算、必留触发/因果组及deletion epoch。发布时核验所有依赖；老计划晚完成不得覆盖新输入或新视图。若只裁剪已声明前缀，必须证明保留当前完整后缀，且整体预算仍合法，否则重建计划；不能覆盖旧的整段Context快照。相同来源、策略、预算和必留集合得到相同保留/移出语义，不发生LLM工件选择。每请求的模态省略及预算选择另存ModelRequestManifest，不借此发布持久ViewPlan。来源/删除屏障仍遵守[06](06-concurrent-convergence.md)。
+
+高流量下合并同会话尚未执行的维护唤醒，维护desired/processed水位；合并只影响本地工作批量，不能遗漏任何来源。采用裁剪高/低水位避免每条消息反复重算，大对象使用缓存token计数与受监督本地计算。系统指令、作者/群来源标题、必留内容和输出预留先计费；超窗时减少普通原文/Evidence项，不能剥掉来源标题凑预算。待答触发必要原文仍放不下就走上述明确失败策略，不自动发摘要请求，也不自动调更昂贵模型。
+
+当前会话的 `context_applied_seq` 是串行前缀消费，不是可交换的消息集合归约；顺序由持久入站和已记录切口确定。不同物理到达时机可能产生不同批次和回复，这是交互调度语义。持久重放必须复用已记录批次、步骤和回复，不重新挑选切口或重新生成已完成回答来追求所谓合流。
+
+### 8.3 两条时间轴不能混淆
+
+模型历史按 Context 的 `commit_seq / unit_index` 物化；每条输入仍携带原 `ingress_seq` 和平台时间。例如用户消息 13 在模型工作期间已经到达，但只有普通尾部、当时未触发，则模型先基于截止 12 的输入产生回复 R，之后静默推入 13。Context 为 `输入至12 -> R -> 输入13`，同时保留 13 的真实接收时间；不能把 13 倒插到 R 前面，伪造模型已经看过它。
+
+在工具安全点接入时顺序则为 `旧输入 -> 完整tool-call/result组 -> 新输入前缀 -> 下一模型调用`。用户界面可以另按平台时间展示实际群历史，但必须区分群时间线与模型当时看到的上下文。
+
+### 8.4 自身消息回声
+
+Bot 已提交的最终回复通过 ModelTurn 入 Context；平台再次推送同一发送的 echo 时，用 SendIntent/平台消息关联去重，不追加第二份相同 Bot 发言，也不再次产生触发。echo 入站若已经分配序号，保留“关联既有回复”的来源占位，使连续游标仍能前进。
+
+由该账号其他合法路径发出的新消息可以按已声明策略记录为 `self_external`，不能未经验证冒充本 Agent 的成功 ModelTurn。来自其他 Bot 的消息保留实际作者身份，是否触发遵守独立策略、因果链和 hop 限制，避免双方自动回复形成无限循环。
+
+## 9. 时序示例
+
+### 9.1 忙碌时取到最后一个触发，保留普通尾部
+
+假设开始时 `context_applied_seq = 100`，用户甲在 101 触发。表中“*”表示触发消息。
+
+| 时刻 | 已发生的事件 | 提交与下一模型所见 | 仍排队 |
+|---|---|---|---|
+| t1 | 101* 用户甲：“查一下周末天气” | 输入批 B1 覆盖 101，领取 T101，M1 开始 | 空 |
+| t2 | M1 工作；102 乙普通聊天，103* 丙补问 | 当前 M1 的输入不变 | 102、103* |
+| t3 | 104 甲补充，105* 乙更改地点，106 丙普通聊天 | 当前模型/工具组尚未闭合 | 102、103*、104、105*、106 |
+| t4 | M1 的工具组闭合，进入安全点 | 先存完整工具组；B2 冻结 T=105，追加 102..105；T103/T105 被领取；M2 可见两位新触发者 | 106 |
+| t5 | M2 又调用一次工具，期间仅来 107 普通聊天 | 无 PENDING 触发，M3 沿用输入截止 105，不能把 106/107 带入 | 106、107 |
+| t6 | M3 产生最终回复，事务正常提交 | T101/T103/T105 关联该回复；Session 转 DRAINING | 106、107 |
+| t7 | 静默维护 | SILENT_DRAIN 追加 106..107，正常归档/裁剪，A=107；无新触发后关闭 Session | 空 |
+
+### 9.2 最终候选已完成时仍有触发
+
+| 时刻 | 事件 | 结果 |
+|---|---|---|
+| s1 | R1 的输入截止 201；模型生成完整最终候选 | 该候选只关联它实际看过的触发 |
+| s2 | 最终提交前，202 普通消息、203* 新触发、204 普通消息完成分类 | 不创建并发 Session，不自动废弃 R1 |
+| s3 | 最终事务提交 R1 | 产生 response_seq=k，旧触发 ANSWERED；203 仍 PENDING，Session 保留 |
+| s4 | 后继 Run 的下一输入选择 | B2 推入 202..203，204 留队；开始下一模型调用 |
+| s5 | 后继回复提交 | response_seq=k+1；Delivery 保持 k 在前 |
+
+若 203 在 s3 的事务之后才到达，仍由会话协调行的事务顺序唤醒同一尚未关闭 Session，或在关闭后创建下一个串行 Session；不会丢失该触发。
+
+## 10. 崩溃、取消与热重载
+
+| 故障位置 | 必须恢复的行为 |
+|---|---|
+| Inbox 已提交，通知之前崩溃 | 分类 Job/待处理扫描找回消息；不依赖网络重发 |
+| 后面的消息分类完成，前面 Worker 死亡 | 重新领取缺口 Job 或写明确失败终态，推进连续分类头并唤醒 |
+| InputBatch 提交前崩溃 | 事务整体回滚，来源和触发仍可选择 |
+| InputBatch 与 CLAIMED 已提交，模型尚未调用 | 恢复同批次、同输入版本和触发归属；消息不重复，触发仍待回答 |
+| 模型调用返回但 checkpoint 未提交 | 未承诺回复；可按模型调用恢复策略重新计算，已发生工具效果必须查原 operation |
+| 完整工具组 checkpoint 后，InputBatch flush 前崩溃 | 从 checkpoint 恢复并按固定步骤序号发布，再接入新消息 |
+| 最终候选的 FINAL_READY checkpoint 已提交，最终回复事务前崩溃 | 先按原候选/输入版本完成最终事务，不先选择新触发、不重调模型；新触发留给后继Run |
+| 最终 ModelTurn/outbox 事务中崩溃 | 全部未提交，或全部已提交；不出现有回答历史却无回复意图 |
+| 回复已提交，Session 尚未排空时崩溃 | 不重跑旧回答；继续 pending 触发或静默排空 |
+| 静默追加后裁剪候选未发布 | 消费游标保留，维护 Job 重试；不能因“已消费”而忘记完成视图维护 |
+| Actor/模块热替换，旧 Provider 迟到 | 旧 epoch 提交失败；新 Worker 按 checkpoint 和有效输入继续 |
+
+取消针对明确 Run/触发范围，并与最终提交在同一守卫边界竞争。取消赢得事务后不接受旧模型回答；**已经提交的 InputBatch 仍是群里实际发生过的消息，不能随 Run 回滚。** 已发生工具效果留在账本，外部 UNKNOWN 继续对账。剩余未取消触发继续串行执行；没有剩余触发时执行静默排空。
+
+热重载交接保存 Session 身份、触发领取关系、输入批次、输入/视图版本、步骤发布位置和工具 operation ID。新代接管只更换执行 incarnation 并提升 fencing，不新建第二个同群 Agent，不给已回答触发换 ID 重做。持久协调属于框架会话服务，不能只藏在可热重载插件的 Python 对象中。
+
+`persist_closed_step_checkpoint` 对完整最终候选记录 FINAL_READY。恢复调度先按 checkpoint phase 分发，再考虑新输入：最终候选完成原事务，等待工具继续查询原操作，只有尚需下一模型步骤的执行才进入 select_at_safe_point。候选若因当前取消/权限/删除校验失效，则显式终结或重新规划，不能把它绑定到新输入版本蒙混提交。
+
+## 11. 验收场景
+
+实现阶段使用假 Provider、假平台和真实数据库事务，以 barrier 控制交错；以下是设计验收要求，当前文档不声称已经执行这些测试。
+
+| 编号 | 场景 | 通过条件 |
+|---|---|---|
+| GI-01 | 空闲群连续发 100 条未触发消息并跨过裁剪阈值 | 全部来源被覆盖，正常归档/裁剪；所有LLM调用（含摘要）与发送次数均为0 |
+| GI-02 | 普通消息后出现一条触发 | 首次模型视图含预算内普通原文、明确归档范围引用及触发必要原文，作者/群来源可区分，无裁剪摘要调用 |
+| GI-03 | 忙时到达普通、触发、普通、触发、普通 | 下个安全点恰好推到第二个触发，最后普通尾部未进入该模型输入 |
+| GI-04 | 只有普通尾部，但 Agent 连续运行多个工具/模型步骤 | 每步保留原输入切口；工具循环、召回和摘要旁路都不能偷带尾部 |
+| GI-05 | 当前工具闭合后仍未最终回答，有新触发 | 同 Run 下一模型调用接入新批次，无须等待完整回答，无第二并发 Agent |
+| GI-06 | tool-call 未闭合时到达新触发 | 只排队；Context 中 tool-call/result 配对完整，之后才插入新输入 |
+| GI-07 | 多个工具乱序返回 | 重放和正常执行的步骤次序一致，不按网络完成顺序排列历史 |
+| GI-08 | 最终候选已完成，又有新触发 | 当前完整回答正常提交；新触发留给同 Session 后继 Run，不被错误标 ANSWERED |
+| GI-09 | 最终回答完成，仅有普通尾部 | 自动静默排空且裁剪，不额外生成回答；队列最终为空 |
+| GI-10 | 新触发分别在关闭事务前、事务后到达 | 前者保留/唤醒当前 Session，后者创建下一 Session；都只有一个逻辑所有者且无丢请求 |
+| GI-11 | 新触发在静默维护批次之间到达 | 下一批先选择触发切口，其后普通尾部不被一次旧的“无触发”判断排空 |
+| GI-12 | 第三条先分类为触发，第二条分类阻塞 | 不跳过第二条；缺口终结后即使没有新网络消息也能唤醒并正确消费 |
+| GI-13 | 提交 InputBatch 后立即杀 Worker | 新 Worker 复用输入批次；CLAIMED 仍被处理，不因消费游标越过它而丢触发 |
+| GI-14 | Run 被取消，随后旧 Provider 返回 | 原消息保留；旧回答不可提交；其他独立 pending 触发仍可串行处理 |
+| GI-15 | WAIT_APPROVAL、长工具等待或 RELOAD_WAIT 时收到触发 | 资源可让出，逻辑 Session 不让出；确认能经控制通道完成，同群无第二响应 Agent |
+| GI-16 | 两群和两个 Bot 同时处于慢调用与消息洪峰 | 各群独立排队且获公平配额；记忆按 Bot 隔离，同 Bot 全局事实仍按 06 合流 |
+| GI-17 | 昵称相同、用户改名、引用另一用户、伪造角色分隔符 | 历史/归档/召回主体正确；正文不能伪造Provider角色或授权主体 |
+| GI-18 | 管理员触发与普通用户危险请求进入同一批次 | 工具只使用真实来源的授权；不能通过混合输入获得权限并集 |
+| GI-19 | 选定长前缀远超窗口 | 有界分块归档与完整来源覆盖，活动视图按预算保留原文/引用；必要触发保留或明确超额失败，裁剪LLM调用为0 |
+| GI-20 | 新输入/遗忘提交后旧裁剪候选才返回 | 源集/视图/删除屏障拒绝旧覆盖；被删内容不通过旧ViewPlan或重放复活 |
+| GI-21 | Bot 自己的发送 echo 被重复接收，或另一 Bot 自动回复 | 自身回复不重复进历史、不自触发；其他 Bot 策略及因果上限有效 |
+| GI-22 | 静默追加后崩溃，或通知丢失/重复 | 维护和待触发工作由持久扫描找回；消息、批次和回复意图不重复 |
+| GI-23 | 先生成回复 R，之后才静默推入早已到达的普通消息 | 模型历史维持真实可见顺序，来源时间仍保留，不倒插伪造模型所见 |
+| GI-24 | 两个串行 CHAT 回复的网络发送有延迟或 UNKNOWN | response_seq 保持发送策略规定的顺序；不以并发发送或换 ID 消除不确定性；CONTROL 独立排序见09 |
+| GI-25 | A=10，待恢复触发 5 与新触发 12 同批选中 | 只新增 11..12 的 Context 来源，同时关联并保留 5 的原来源；两个触发都进入本次待回答清单 |
+| GI-26 | final checkpoint 已提交后，在最终回复事务前后分别重启 | 通用 flush 不追加 final；同 logical_step_id 至多一个正式最终 ModelTurn 及一份逻辑发送意图 |
+| GI-27 | Agent 忙时普通消息、管理命令、普通消息依次到达，无新聊天触发 | 管理按权限独立执行；三条来源仍留队直到静默排空，不额外调用模型 |
+| GI-28 | 控制先成功，但前面的普通消息分类仍未完成 | 控制回执可发送，Context 水位不跨缺口；后续接入保留命令作者和安全投影 |
+| GI-29 | 高流式普通消息反复跨裁剪阈值，关闭摘要Provider并让Embedding不可用 | 接纳/可靠归档/确定性裁剪仍进展，裁剪LLM调用为0，索引故障独立可恢复 |
+| GI-30 | 当前模型未接入的同群尾部，经另一群主干/共享实体形成可遍历路径 | Recall逐端点和lineage过滤，不能经跨主干联想把尾部带进冻结输入 |
+| GI-31 | 纯图片触发，LLM只支持文本 | 触发/来源/原图保留；可先以图召回，API只含合法文本和未见图标记，无媒体载荷/隐式OCR或caption |
+| GI-32 | 历史、跨群Evidence与tool-result同时含图，Provider降级为文本 | 各层投影去图且工具配对/群来源完整，新attempt固定原切口和所见manifest，不改完整Context |
+| GI-33 | 下载/图像索引在请求冻结后完成 | 旧请求不补图；后续合法安全点可选新媒体revision，同群不另开Agent |
+| GI-34 | 文本模型运行和多次裁剪后切回视觉模型 | 文本请求省略不造成持久删图；仍在合法窗口或获权召回的原媒体可被视觉请求物化 |
+
+除上述场景外，性质检查应持续验证输入范围恰好覆盖连续前缀、触发状态不由消费游标推导、单群唯一 Session/有效提交者、所有输出可追溯到固定输入批次。可交换的 Bot 全局记忆操作另按[06 的性质验收](06-concurrent-convergence.md#10-性质验证与并发时序验收)执行，不能把消息顺序、授权仲裁或模型文本误当作可交换更新。
