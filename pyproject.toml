@@ -12,6 +12,7 @@ dependencies = [
     "packaging>=24,<27",
     "Pillow>=11,<13",
     "psycopg[binary,pool]>=3.2,<4",
+    "tzdata>=2025.1",
     "uvicorn>=0.30,<1",
 ]
 

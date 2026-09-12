@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP 和持久 Agent 运行；首版框架仍在实现中。**后台可配置模型、人格、图文能力、工具授权与预算，并管理插件、账号、运行审批和发送结果。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。定时/子 Agent、多模态长期记忆和完整管理 Shell 仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
+**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP、持久 Agent、定时任务和私有子 Agent；首版框架仍在实现中。**后台可配置模型、人格、图文能力、工具授权与预算，并管理插件、账号、运行审批、任务和发送结果。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。多模态长期记忆和完整管理 Shell 仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -26,6 +26,8 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 在 Bot 页面「QQ 账号连接」登记 OneBot 11 账号，填写 HTTP API 地址、访问令牌、上报签名密钥，预览并应用。将页面提供的上报地址和相同密钥填入所用 OneBot 实现。系统先调用 `get_login_info` 校验账号，再启用连接；密钥不回显。默认仅记录消息，选择「模板回复」后可通过 @、`/chat` 或私聊触发。群聊管理的管理员 QQ 号在同一表单配置，不自动信任平台群管理员身份。
 
 使用模型对话时，在「Agent 与模型」设置 Chat Completions 兼容基础地址、模型和密钥，预览并启用，再将账号回复模式设为「Agent 对话」。工具审批、运行取消和未知工具结果核实也在此页面处理。图片来源需明确允许；文本模型调用时只投影文本，原始多模态记录保留。详细语义与能力边界见 [P3 Agent 说明](doc/p3-agent.md)。
+
+「计划任务」可配置 interval/cron、时区、补跑规则、并发限制和委托期限，预览后保存，也可以立即执行、停用或取消待处理任务。任务按同一群聊触发队列运行，不另开群响应链。Agent 页面可启用有界私有分析子任务，父方统一接纳结果和回复。群内管理员可用 `#forest run list`、`#forest jobs list` 查询，并按显示版本取消或审批；实际语法和授权边界见[群聊管理说明](doc/p3-control.md)。
 
 Docker 内连接宿主机 OneBot 时，API 地址可使用 `http://host.docker.internal:5700`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。OneBot 上报必须能访问 Forest 的 HTTP 入口。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)。
 
@@ -71,7 +73,7 @@ uv run --frozen forest plugin build examples/counter
 uv run --frozen forest plugin check examples/counter
 ```
 
-`build` 静态校验完整包并保存内容寻址快照，不执行插件代码。`check` 额外启动独立候选 Worker，验证导入、prepare/start/health 后回收；候选没有生产 state RPC 权限。`check/dev` 可通过 `--config-json` 提供经包 schema 校验的配置，默认 `{}`；`build` 不要求这份默认配置满足运行时必填字段。默认缓存目录为 `.forest/packages`，可通过 `--cache-dir` 修改。修改包内容后需提升 `module.toml` 的版本，同版本不同内容会被拒绝；当前不会自动生成开发版本。
+`build` 静态校验完整包并保存内容寻址快照，不执行插件代码。`check` 额外启动独立候选 Worker，验证导入、prepare/start/health 后回收；候选没有生产 state RPC 权限。`check/dev` 可通过 `--config-json` 提供经包 schema 校验的配置，默认 `{}`；`build` 不要求这份默认配置满足运行时必填字段。默认缓存目录为 `.forest/packages`，可通过 `--cache-dir` 修改。普通构建修改包内容后需提升 `module.toml` 的版本，同版本不同内容会被拒绝；开发 `--watch` 则按内容自动派生 `+dev.<digest>` 版本。
 
 `forest dev` 在一个**专用开发 Bot 数据库**中执行一次服务调用，随后关闭 Worker 和宿主租约。首次使用的数据库必须为空，不能复用后台部署库、其他 Bot 库或已有业务库；该库一旦初始化就固定绑定 `--bot`，后续可复用以检查状态持久化。
 

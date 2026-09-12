@@ -79,3 +79,48 @@ class WebAuthority:
             }
             signature = encode(self.key.sign(digest_json(claims).encode("ascii")))
             return {"claims": claims, "signature": signature}
+
+    async def issue_delegation(
+        self, *, subject_id: str, bot_id: str, operation_id: str, payload: dict,
+        policy_revision: int, delegation_id: str, expected_account_revision: int,
+        expected_key_revision: int,
+    ) -> dict:
+        """Renew one durable Job's dispatch authority without a browser session.
+
+        A live account and the exact accepted account/key revisions are required.
+        Logging out does not cancel a schedule. Revocation bounds match Web tickets:
+        an already issued proof can remain usable for at most thirty seconds.
+        The target repository also verifies the specific delegation and occurrence.
+        """
+        if self.key is None:
+            raise ForestError("AUTHORITY_UNAVAILABLE", "Web authority is unavailable", 503)
+        if (not isinstance(delegation_id, str) or not 1 <= len(delegation_id) <= 128
+                or type(expected_account_revision) is not int or expected_account_revision < 1
+                or type(expected_key_revision) is not int or expected_key_revision < 1):
+            raise ForestError("JOB_DELEGATION_INVALID", "Invalid durable authority", 403)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._active_account(conn, subject_id, require_admin=True)
+            account = await (await conn.execute(
+                "SELECT revision FROM web_accounts WHERE id=%s", (subject_id,),
+            )).fetchone()
+            key = await (await conn.execute(
+                "SELECT key_revision,public_key FROM web_authority_keys "
+                "WHERE issuer_id=%s FOR SHARE", (self.issuer_id,),
+            )).fetchone()
+            if (account["revision"] != expected_account_revision or key is None
+                    or key["key_revision"] != expected_key_revision
+                    or key["key_revision"] != self.key_revision
+                    or key["public_key"] != self.public_key):
+                raise ForestError("JOB_DELEGATION_REVOKED", "Account or authority changed", 403)
+            now = (await (await conn.execute("SELECT clock_timestamp() AS now")).fetchone())["now"]
+            claims = {
+                "ticket_id": str(uuid4()), "issuer_id": self.issuer_id,
+                "key_revision": self.key_revision, "subject_id": subject_id,
+                "account_revision": account["revision"], "session_ref": "delegation:" + delegation_id,
+                "session_revision": 1, "bot_id": bot_id,
+                "operation_id": operation_id, "action": "job.run",
+                "input_digest": digest_json(payload), "plan_digest": "",
+                "policy_revision": policy_revision, "issued_at": now.isoformat(),
+                "expires_at": (now + timedelta(seconds=30)).isoformat(),
+            }
+            return {"claims": claims, "signature": encode(self.key.sign(digest_json(claims).encode("ascii")))}

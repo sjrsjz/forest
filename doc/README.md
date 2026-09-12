@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：初版目标设计，实现进行中。更新日期：2026-09-13。当前已接通独立 Web 管理、多 Bot 运行、原生 Python Worker 与 OneBot HTTP 消息/发送切片；完整 Agent 和多模态记忆仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
+状态：初版目标设计，实现进行中。更新日期：2026-09-13。当前已接通独立 Web 管理、多 Bot 运行、原生 Python Worker、OneBot HTTP、持久 Agent、定时任务与私有子 Agent；多模态长期记忆和完整管理仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -14,6 +14,10 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P2 Web 插件管理](p2-web-plugin-management.md) | 导入与启用、通用表单、版本切换、历史配置与重启恢复 |
 | [P3 Agent 运行](p3-agent.md) | 模型/工具安全点、持久尝试、图文投影、Web 模型配置与审批 |
 | [P3 Agent 状态与并发](p3-agent-state.md) | 许可、预算、精确切口、工具观察、取消与最终提交恢复 |
+| [P3 定时任务](p3-jobs.md) | 持久计划、日历与补跑、受权入队、非重叠占用和管理取消 |
+| [P3 私有子 Agent](p3-children.md) | 固定输入子集、独立领取与候选、父方接纳和共享预算 |
+| [P3 群聊管理与监督](p3-control.md) | 实际 Shell 命令、共同管理协议、控制预留槽及定时授权边界 |
+| [P4 载荷迁移准备](p4-payload-migration-notes.md) | 尚未实现的正文分离、来源依赖、物理清理与晚到结果防复活方案 |
 | [01 架构设计](01-architecture.md) | 系统边界、技术方向、模块职责、部署方式、架构决策 |
 | [02 微内核与生命周期详细设计](02-kernel-lifecycle.md) | 包与组件契约、依赖解析、资源所有权、加载/卸载、热重载、故障恢复 |
 | [03 通信与调度详细设计](03-communication-scheduling.md) | 消息格式、服务调用、事件、流、顺序、背压、取消、幂等、发送回执 |

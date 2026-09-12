@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
 export function agentPanel(api, busy, notice) {
+  const childDefaults = {children_enabled:false, max_children:4, child_concurrency:2,
+    child_timeout:90, child_max_output_tokens:1024, run_token_budget:32768};
   let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0;
   let configuration = null, pending = null, planKey = null, applyKey = null;
   const form = $('agent-config');
@@ -18,6 +20,7 @@ export function agentPanel(api, busy, notice) {
     $('agent-config-status').textContent = '';
   }
   function showConfiguration(row) {
+    row = {...row, values:{...childDefaults, ...row.values}};
     configuration = row; clearPlan(); form.reset();
     for (const [name, value] of Object.entries(row.values)) {
       const field = form.elements[name]; if (!field) continue;
@@ -141,6 +144,39 @@ export function agentPanel(api, busy, notice) {
         })); item.append(button);
       }
       root.append(item);
+    }
+    if (data.children?.length) {
+      const section = document.createElement('section'), title = document.createElement('h3');
+      title.textContent = '私有子分析'; section.append(title);
+      const note = document.createElement('p'); note.className = 'hint';
+      note.textContent = '子分析结果只交回父运行，不直接发送到群。取消父运行会停止接纳其后续结果；已发出的模型请求可能仍产生费用。';
+      section.append(note);
+      const states = {PENDING:'待执行', PREPARED:'输入已固定', RUNNING:'分析中', DISPATCHING:'请求已发出',
+        RESPONDED:'模型已返回', SUCCEEDED:'已完成', COMPLETED:'已完成', FAILED:'失败', CANCELLED:'已取消', UNKNOWN:'结果待核实',
+        QUEUED:'排队中', RETRY:'等待重试', RESULT_READY:'等待父运行采纳', ACCEPTED:'父运行已采纳'};
+      for (const child of data.children) {
+        const item = document.createElement('details'), label = document.createElement('summary');
+        label.textContent = `${states[child.status] || child.status} · ${child.child_id}`;
+        const facts = document.createElement('dl');
+        for (const [name, value] of [['父运行',child.parent_run_id], ['委托主体',child.principal_ref],
+          ['来源触发',child.authority_trigger_id], ['选定上下文单元',child.source_unit_ids?.length ?? 0],
+          ['期限',child.deadline_at], ['错误',child.error_code || '—']]) {
+          const key = document.createElement('dt'), detail = document.createElement('dd');
+          key.textContent = name; detail.textContent = String(value ?? '—'); facts.append(key, detail);
+        }
+        item.append(label, facts); section.append(item);
+      }
+      root.append(section);
+    }
+    if (data.run_budgets?.length) {
+      const section = document.createElement('details'), title = document.createElement('summary');
+      title.textContent = '父运行与子分析共用预算'; section.append(title);
+      for (const budget of data.run_budgets) {
+        const row = document.createElement('p');
+        row.textContent = `${budget.run_id} · 已预留 ${budget.reserved_tokens ?? '—'} token · 已计入 ${budget.charged_tokens ?? '—'} token`;
+        section.append(row);
+      }
+      root.append(section);
     }
     if (data.budget?.length) {
       const budget = document.createElement('details'), title = document.createElement('summary');

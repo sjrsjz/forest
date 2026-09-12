@@ -251,6 +251,7 @@ dependencies = [
     { name = "packaging" },
     { name = "pillow" },
     { name = "psycopg", extra = ["binary", "pool"] },
+    { name = "tzdata" },
     { name = "uvicorn" },
 ]
 
@@ -272,6 +273,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=24,<27" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2,<4" },
+    { name = "tzdata", specifier = ">=2025.1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 

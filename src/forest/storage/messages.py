@@ -8,7 +8,6 @@ calls a model or summarizes content: compaction retains immutable source refs.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -18,6 +17,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
 
 
@@ -58,42 +58,9 @@ def _tokens(value: Any) -> int:
 
 
 def _shell_command(value: dict) -> str | None:
-    """Claim only direct leading text, after whitespace and one self mention.
-
-    Unknown or malformed commands remain CONTROL. The P1 gate retains no argv;
-    until typed argument sensitivity and a vault are available, it safely drops
-    raw arguments and records their digest plus a fixed context projection.
-    """
-    if value["author"]["is_self"]:
-        return None
-    parts = value["segments"]
-    index, mentioned = 0, False
-    while index < len(parts):
-        part = parts[index]
-        if part["type"] == "text" and not part["text"].strip():
-            index += 1
-            continue
-        if (not mentioned and part["type"] == "mention"
-                and part["external_user_id"] == value["self_id"]):
-            mentioned = True
-            index += 1
-            continue
-        break
-    text = ""
-    while index < len(parts) and parts[index]["type"] == "text":
-        text += parts[index]["text"]
-        index += 1
-    text = text.lstrip()
-    if not re.match(r"#forest(?:\s|$)", text):
-        return None
-    words = text[len("#forest"):].split()
-    known = {(): "help", ("help",): "help", ("status",): "status",
-             ("bot", "status"): "bot.status", ("core", "status"): "core.status"}
-    # Extra media or other segments cannot turn a malformed command into a
-    # successfully parsed command. Its namespace still remains reserved.
-    if index != len(parts):
-        return "unknown"
-    return known.get(tuple(words), "unknown")
+    """Compatibility entry point for the versioned typed control parser."""
+    parsed = parse_command(value)
+    return parsed.name if parsed else None
 
 
 class MessageStore:
@@ -205,9 +172,10 @@ class MessageStore:
             raise ForestError("INVALID_CLASSIFICATION", "Unknown classification", 422)
         if value["author"]["is_self"] and decision == "TRIGGER":
             raise ForestError("SELF_TRIGGER", "A binding cannot trigger its own response", 422)
-        shell_command = _shell_command(value)
+        parsed_command = parse_command(value)
+        shell_command = parsed_command.name if parsed_command else None
         if shell_command is not None:
-            decision, rule_revision, reason = "CONTROL_COMMAND", "shell-gate-v1", "reserved_namespace"
+            decision, rule_revision, reason = "CONTROL_COMMAND", "shell-gate-v2", "reserved_namespace"
         if decision is not None:
             _text(rule_revision, "rule_revision")
             _text(reason, "reason", 1024, empty=True)
@@ -294,9 +262,11 @@ class MessageStore:
             if command_id is not None:
                 await conn.execute(
                     "INSERT INTO public.bot_shell_requests(bot_id,command_id,event_id,conversation_id,"
-                    "binding_id,command_name,raw_digest) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    "binding_id,command_name,raw_digest,arguments,priority,gate_version) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'shell-gate-v2')",
                     (self.store.bot_id, command_id, event_id, conversation_id, binding_id,
-                     shell_command, digest_json(value["segments"])),
+                     shell_command, digest_json(value["segments"]),
+                     Jsonb(parsed_command.payload), parsed_command.priority),
                 )
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
@@ -312,6 +282,68 @@ class MessageStore:
             return {"conversation_id": conversation_id, "event_id": event_id,
                     "ingress_seq": seq, "duplicate": False, "command_id": command_id,
                     "trigger_decision": decision or "PENDING"}
+
+    async def enqueue_job_trigger_in(self, conn, lease, occurrence, binding, definition):
+        """Host-only, in the caller's authorized Job dispatch transaction.
+
+        Content and identity come from an immutable definition. The internal
+        event shares the conversation ordering, without claiming to be QQ input.
+        JobStore commits its receipt and final delegation/lease fence together.
+        """
+        values, grant = definition["values"], definition["delegation"]
+        conversation_id = values["conversation_id"]
+        conversation = await self._conversation(conn, conversation_id)
+        if (occurrence["bot_id"] != self.store.bot_id
+                or occurrence["status"] != "CLAIMED"
+                or occurrence["host_incarnation"] != lease.incarnation
+                or conversation["binding_id"] != binding["binding_id"]
+                or definition["job_id"] != occurrence["job_id"]
+                or definition["revision"] != occurrence["job_revision"]):
+            raise ForestError("STALE_JOB", "Internal trigger has no current Job claim", 409)
+        event_id = "event:job:" + digest_json([self.store.bot_id, occurrence["occurrence_id"]])
+        trigger_id = "trigger:" + digest_json(event_id)
+        author = {
+            "external_user_id": "job:" + occurrence["job_id"], "display_name": values["name"],
+            "is_self": False, "identity_origin": "host_job",
+            "principal_ref": "delegation:" + grant["delegation_id"],
+            "job_id": occurrence["job_id"], "occurrence_id": occurrence["occurrence_id"],
+            "delegation_id": grant["delegation_id"], "tool_capabilities": [],
+        }
+        segments = [{"type": "text", "text": values["prompt"]}]
+        digest = digest_json([occurrence["occurrence_id"], definition["definition_digest"], author])
+        existing = await (await conn.execute(
+            "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+            (self.store.bot_id, event_id),
+        )).fetchone()
+        if existing:
+            if existing["input_digest"] != digest or existing["origin"] != "job":
+                raise ForestError("INGEST_CONFLICT", "Internal Job identity was reused", 409)
+            return {"event_id": event_id, "trigger_id": trigger_id,
+                    "conversation_id": conversation_id, "ingress_seq": existing["ingress_seq"]}
+        if conversation["next_ingress_seq"] - conversation["context_applied_seq"] > 10000:
+            raise ForestError("INBOX_BACKPRESSURE", "Conversation input backlog is full", 429)
+        seq = conversation["next_ingress_seq"]
+        await conn.execute(
+            "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
+            "platform_message_id,source_event_id,input_digest,author,segments,sent_at,estimated_tokens,origin) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'job')",
+            (self.store.bot_id, conversation_id, event_id, seq,
+             "internal:" + occurrence["occurrence_id"], "source:" + occurrence["occurrence_id"],
+             digest, Jsonb(author), Jsonb(segments), occurrence["scheduled_for"],
+             _tokens({"author": author, "segments": segments})),
+        )
+        await conn.execute(
+            "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
+            "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+            "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, conversation_id),
+        )
+        await self._classify_in(conn, conversation_id, event_id, "TRIGGER", "job-trigger-v1",
+                                occurrence["occurrence_id"])
+        await self.store._event(conn, "job.trigger_enqueued", event_id,
+                                {"occurrence_id": occurrence["occurrence_id"],
+                                 "conversation_id": conversation_id, "ingress_seq": seq})
+        return {"event_id": event_id, "trigger_id": trigger_id,
+                "conversation_id": conversation_id, "ingress_seq": seq}
 
     async def _classify_in(self, conn, conversation_id, event_id, decision, rule_revision, reason):
         row = await (await conn.execute(
@@ -383,6 +415,10 @@ class MessageStore:
                 "AND (%s::text IS NULL OR c.conversation_id>%s) "
                 "AND (a.phase IS NULL OR (a.phase<>'BLOCKED_UNKNOWN' AND (a.deadline_at<=clock_timestamp() "
                 "OR (a.phase<>'WAIT_APPROVAL' AND (a.phase<>'WAIT_INPUT' OR c.classified_through_seq>a.wait_classified_seq))))) "
+                "AND (a.phase IS DISTINCT FROM 'WAIT_TOOL' OR a.deadline_at<=clock_timestamp() "
+                "OR NOT EXISTS(SELECT 1 FROM public.bot_agent_tools t WHERE t.bot_id=a.bot_id AND t.logical_step_id=a.current_step_id AND t.status='WAIT_CHILD') "
+                "OR EXISTS(SELECT 1 FROM public.bot_agent_tools t WHERE t.bot_id=a.bot_id AND t.logical_step_id=a.current_step_id AND t.status IN ('PROPOSED','NOT_SENT','DISPATCHING')) "
+                "OR EXISTS(SELECT 1 FROM public.bot_agent_children x WHERE x.bot_id=a.bot_id AND x.parent_step_id=a.current_step_id AND x.status IN ('RESULT_READY','FAILED','CANCELLED'))) "
                 "AND b.enabled AND (c.context_applied_seq<c.classified_through_seq OR "
                 "c.mailbox_revision>c.processed_mailbox_revision OR c.active_session_id IS NOT NULL "
                 "OR EXISTS (SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=c.bot_id "
@@ -426,7 +462,7 @@ class MessageStore:
             if not runtime["control_admission"]:
                 raise ForestError("CONTROL_CLOSED", "Bot control admission is closed", 409)
             rows = await (await conn.execute(
-                "SELECT s.command_id,s.binding_id,s.command_name,s.conversation_id,s.status "
+                "SELECT s.command_id,s.binding_id,s.command_name,s.conversation_id,s.status,s.priority "
                 "FROM public.bot_shell_requests s JOIN public.bot_bindings b "
                 "ON b.bot_id=s.bot_id AND b.binding_id=s.binding_id WHERE s.bot_id=%s "
                 "AND (%s::text IS NULL OR s.command_id>%s) "
@@ -811,6 +847,9 @@ class MessageStore:
 
     async def _select_input_in(self, conn, actor: ActorLease, operation_id: str, *, mode: str = "IDLE") -> dict:
         binding, conversation = await self._actor(conn, actor)
+        from forest.storage.jobs import JobStore
+
+        await JobStore.cancel_revoked_triggers_in(conn, self.store.bot_id, actor.conversation_id)
         existing = await (await conn.execute(
             "SELECT * FROM public.bot_context_input_batches WHERE bot_id=%s AND conversation_id=%s "
             "AND operation_id=%s", (self.store.bot_id, actor.conversation_id, operation_id),
@@ -934,6 +973,13 @@ class MessageStore:
         await self.store._event(conn, "conversation.input_applied", operation_id,
                                 {"conversation_id": actor.conversation_id, "input_batch_id": batch_id})
         await self._actor_final(conn, actor, binding)
+        expired_jobs = await (await conn.execute(
+            "SELECT 1 FROM public.bot_job_occurrences WHERE bot_id=%s AND trigger_id=ANY(%s) "
+            "AND NOT public.forest_job_trigger_authorized(bot_id,trigger_id) LIMIT 1",
+            (self.store.bot_id, trigger_ids),
+        )).fetchone()
+        if expired_jobs:
+            raise ForestError("JOB_DELEGATION_EXPIRED", "Job authority expired before input commit", 409)
         return {"status": "INPUT" if budget_ok else "INPUT_BUDGET_EXCEEDED", **batch,
                 "replayed": False}
 
@@ -1080,10 +1126,12 @@ class MessageStore:
             "u.control_command_id,u.logical_step_id,u.step_parts,s.run_id AS step_run_id,"
             "i.event_id,i.ingress_seq,i.platform_message_id,i.source_event_id,i.author,i.segments,"
             "i.sent_at,i.received_at,i.trigger_decision,i.context_disposition,i.origin,r.reply_id,"
+            "t.status AS source_trigger_status,"
             "COALESCE(r.parts,u.control_parts) AS reply_parts "
             "FROM public.bot_context_units u LEFT JOIN public.bot_message_inbox i "
             "ON i.bot_id=u.bot_id AND i.event_id=u.event_id LEFT JOIN public.bot_conversation_replies r "
-            "ON r.bot_id=u.bot_id AND r.reply_id=u.reply_id LEFT JOIN public.bot_agent_steps s "
+            "ON r.bot_id=u.bot_id AND r.reply_id=u.reply_id LEFT JOIN public.bot_conversation_triggers t "
+            "ON t.bot_id=i.bot_id AND t.event_id=i.event_id LEFT JOIN public.bot_agent_steps s "
             "ON s.bot_id=u.bot_id AND s.logical_step_id=u.logical_step_id WHERE u.bot_id=%s AND u.conversation_id=%s "
             "AND u.visible ORDER BY u.context_revision,u.unit_index", (self.store.bot_id, actor.conversation_id),
         )).fetchall()
@@ -1100,6 +1148,15 @@ class MessageStore:
                 unit["author"] = {"external_user_id": binding["self_id"],
                                   "display_name": binding["display_name"],
                                   "identity_origin": "host_output", "is_self": True}
+            if unit["origin"] == "job":
+                unit["source"] = {**source, "source_kind": "SYSTEM", "platform": "forest",
+                                  "target_platform": source["platform"],
+                                  "job_id": unit["author"]["job_id"],
+                                  "occurrence_id": unit["author"]["occurrence_id"],
+                                  "task_status": unit["source_trigger_status"]}
+                unit["context_role"] = "control_data"
+                if unit["source_trigger_status"] == "CANCELLED":
+                    unit["segments"] = [{"type": "text", "text": "该计划任务已取消；此处仅保留历史记录。"}]
             if unit["context_disposition"] in {"RESTRICTED", "INVALID"}:
                 unit["segments"] = [{"type": "unavailable", "reason": unit["context_disposition"]}]
         archive = await (await conn.execute(

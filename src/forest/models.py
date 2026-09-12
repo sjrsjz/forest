@@ -23,7 +23,7 @@ from jsonschema import Draft202012Validator
 from forest.errors import ForestError
 from forest.packages import digest_json
 
-PROJECTION_REVISION = "forest-model-view-v1"
+PROJECTION_REVISION = "forest-model-view-v2"
 SERIALIZER_REVISION = "chat-completions-json-v1"
 MAX_REQUEST_BYTES = 24 * 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -320,6 +320,7 @@ def _attribution(value: Any, *, author: bool = False) -> dict:
             "group_card", "identity_origin", "is_self") if author else (
         "conversation_id", "group_source_id", "platform", "channel_kind", "channel_id",
         "thread_id", "group_name", "group_name_at_event", "source_event_id", "source_kind",
+        "target_platform", "job_id", "occurrence_id", "task_status",
     )
     result = {key: value[key] for key in keys if key in value}
     for key, field_value in result.items():

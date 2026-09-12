@@ -163,8 +163,13 @@ class AgentStore:
                 "TOOL_AUTHORITY_INVALID", "Tool source trigger no longer belongs to this Run", 403
             )
         author = trigger["author"]
+        if author.get("identity_origin") not in {"adapter_verified", "adapter_anonymous"}:
+            raise ForestError(
+                "TOOL_AUTHORITY_DENIED", "System triggers do not delegate tool authority", 403
+            )
         if settings["authority"] == "binding_admin" and (
-            author.get("anonymous") is not None
+            author.get("identity_origin") != "adapter_verified"
+            or author.get("anonymous") is not None
             or author.get("is_self")
             or author["external_user_id"] not in binding["config"].get("admin_user_ids", [])
         ):
@@ -218,14 +223,15 @@ class AgentStore:
             raise ForestError("AGENT_CONTROL_INVALID", "Run inspection has no input fields", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "agent.read", operation_id, payload)
+            scope = claims.get("source_conversation_id")
             runs = await (
                 await conn.execute(
                     "SELECT a.run_id,a.conversation_id,a.session_id,a.phase,a.checkpoint_seq,a.input_revision,"
                     "a.selected_input_end_seq,a.next_step_seq,a.final_step_id,a.final_reply_id,a.error_code,a.deadline_at,a.created_at,"
                     "c.platform,c.channel_kind,c.channel_id,c.group_source_id FROM public.bot_agent_runs a "
                     "JOIN public.bot_conversations c ON c.bot_id=a.bot_id AND c.conversation_id=a.conversation_id "
-                    "WHERE a.bot_id=%s ORDER BY a.created_at DESC LIMIT 200",
-                    (self.store.bot_id,),
+                    "WHERE a.bot_id=%s AND (%s::text IS NULL OR a.conversation_id=%s) ORDER BY a.created_at DESC LIMIT 200",
+                    (self.store.bot_id, scope, scope),
                 )
             ).fetchall()
             approvals = await (
@@ -237,8 +243,8 @@ class AgentStore:
                     "JOIN public.bot_conversations c ON c.bot_id=r.bot_id AND c.conversation_id=r.conversation_id "
                     "JOIN public.bot_conversation_triggers g ON g.bot_id=t.bot_id AND g.trigger_id=t.authority_trigger_id "
                     "JOIN public.bot_message_inbox i ON i.bot_id=g.bot_id AND i.event_id=g.event_id "
-                    "WHERE a.bot_id=%s ORDER BY a.expires_at DESC LIMIT 200",
-                    (self.store.bot_id,),
+                    "WHERE a.bot_id=%s AND (%s::text IS NULL OR r.conversation_id=%s) ORDER BY a.expires_at DESC LIMIT 200",
+                    (self.store.bot_id, scope, scope),
                 )
             ).fetchall()
             unknown_tools = await (
@@ -249,8 +255,8 @@ class AgentStore:
                     "JOIN public.bot_conversations c ON c.bot_id=r.bot_id AND c.conversation_id=r.conversation_id "
                     "LEFT JOIN public.bot_conversation_triggers g ON g.bot_id=t.bot_id AND g.trigger_id=t.authority_trigger_id "
                     "LEFT JOIN public.bot_message_inbox i ON i.bot_id=g.bot_id AND i.event_id=g.event_id "
-                    "WHERE t.bot_id=%s AND t.status='UNKNOWN' ORDER BY t.created_at LIMIT 200",
-                    (self.store.bot_id,),
+                    "WHERE t.bot_id=%s AND t.status='UNKNOWN' AND (%s::text IS NULL OR r.conversation_id=%s) ORDER BY t.created_at LIMIT 200",
+                    (self.store.bot_id, scope, scope),
                 )
             ).fetchall()
             budget = await (
@@ -259,12 +265,32 @@ class AgentStore:
                     (self.store.bot_id,),
                 )
             ).fetchall()
+            children = await (
+                await conn.execute(
+                    "SELECT x.child_id,x.parent_run_id,x.parent_step_id,x.tool_call_id,x.status,x.source_unit_ids,"
+                    "x.authority_trigger_id,x.principal_ref,x.deadline_at,x.created_at,x.error_code,x.attempt_count,"
+                    "a.conversation_id,c.channel_id,c.platform FROM public.bot_agent_children x "
+                    "JOIN public.bot_agent_runs a ON a.bot_id=x.bot_id AND a.run_id=x.parent_run_id "
+                    "JOIN public.bot_conversations c ON c.bot_id=a.bot_id AND c.conversation_id=a.conversation_id "
+                    "WHERE x.bot_id=%s AND (%s::text IS NULL OR a.conversation_id=%s) ORDER BY x.created_at DESC LIMIT 200",
+                    (self.store.bot_id, scope, scope),
+                )
+            ).fetchall()
+            run_budgets = await (
+                await conn.execute(
+                    "SELECT b.* FROM public.bot_agent_tree_budgets b JOIN public.bot_agent_runs a USING(bot_id,run_id) "
+                    "WHERE b.bot_id=%s AND (%s::text IS NULL OR a.conversation_id=%s) ORDER BY a.created_at DESC LIMIT 200",
+                    (self.store.bot_id, scope, scope),
+                )
+            ).fetchall()
             await self.control._time(conn, claims)
             return {
                 "runs": runs,
                 "approvals": approvals,
                 "unknown_tools": unknown_tools,
                 "budget": budget,
+                "children": children,
+                "run_budgets": run_budgets,
             }
 
     async def decide_approval(self, ticket, operation_id, payload):
@@ -1132,6 +1158,18 @@ class AgentStore:
                     "Bot daily token capacity is reserved or consumed",
                     409,
                 )
+            from forest.storage.tree_budget import reserve_in
+
+            await reserve_in(
+                conn,
+                self.store.bot_id,
+                run_id,
+                prepared.reserved_tokens,
+                min(
+                    values.get("run_token_budget", 1000000),
+                    current.get("run_token_budget", 1000000),
+                ),
+            )
             metadata = {
                 "estimated_input_tokens": prepared.estimated_input_tokens,
                 "max_output_tokens": prepared.max_output_tokens,
@@ -1274,6 +1312,15 @@ class AgentStore:
                     "Provider usage must contain nonnegative integer tokens",
                     422,
                 )
+        from forest.storage.tree_budget import settle_in
+
+        owner = await (
+            await conn.execute(
+                "SELECT run_id FROM public.bot_model_transport_attempts WHERE bot_id=%s AND transport_attempt_id=%s",
+                (self.store.bot_id, attempt_id),
+            )
+        ).fetchone()
+        await settle_in(conn, self.store.bot_id, owner["run_id"], row["reserved_tokens"], charged)
         await conn.execute(
             "UPDATE public.bot_agent_budget_days SET reserved_tokens=reserved_tokens-%s,charged_tokens=charged_tokens+%s WHERE bot_id=%s AND budget_day=%s",
             (row["reserved_tokens"], charged, self.store.bot_id, row["budget_day"]),
@@ -1534,8 +1581,16 @@ class AgentStore:
                     "Tool must name one included trigger, not combined group authority",
                     403,
                 )
+            if trigger["author"].get("identity_origin") not in {
+                "adapter_verified",
+                "adapter_anonymous",
+            }:
+                raise ForestError(
+                    "TOOL_AUTHORITY_DENIED", "System triggers do not delegate tool authority", 403
+                )
             if settings["authority"] == "binding_admin" and (
-                trigger["author"].get("anonymous") is not None
+                trigger["author"].get("identity_origin") != "adapter_verified"
+                or trigger["author"].get("anonymous") is not None
                 or trigger["author"].get("is_self")
                 or trigger["author"]["external_user_id"]
                 not in binding["config"].get("admin_user_ids", [])
@@ -1861,9 +1916,12 @@ class AgentStore:
 
     async def _abandon(self, conn, head):
         run_id = head["run_id"]
+        from forest.storage.children import ChildStore
+
+        await ChildStore(self).cancel_in(conn, head)
         await conn.execute(
             "UPDATE public.bot_agent_tools SET status=CASE WHEN status='DISPATCHING' THEN 'UNKNOWN' ELSE 'CANCELLED' END "
-            "WHERE bot_id=%s AND run_id=%s AND status IN ('PROPOSED','WAIT_APPROVAL','DISPATCHING','NOT_SENT')",
+            "WHERE bot_id=%s AND run_id=%s AND status IN ('PROPOSED','WAIT_APPROVAL','WAIT_CHILD','DISPATCHING','NOT_SENT')",
             (self.store.bot_id, run_id),
         )
         attempts = await (

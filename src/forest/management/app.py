@@ -31,6 +31,7 @@ from forest.management.bindings_api import install_binding_routes
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
 from forest.management.fleet import BotFleet
+from forest.management.jobs_api import install_job_routes
 from forest.management.provision import BotProvisioner
 from forest.security import SecretVault, digest_token, hash_password, random_token, verify_password
 from forest.storage.postgres import PostgresStore
@@ -586,6 +587,7 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_bot_routes(app, runtime)
     install_binding_routes(app, runtime)
     install_agent_routes(app, runtime)
+    install_job_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")
 

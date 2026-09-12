@@ -21,7 +21,9 @@ function respond(path, options={}) {
   const bot=path.split('/')[2], row=fixture.rows[bot];
   if(path.endsWith('/configuration')) return structuredClone(row);
   if(path.endsWith('/runs')) return {runs:[{run_id:'run-a',conversation_id:'group-a',phase:'WAIT_APPROVAL',checkpoint_seq:3}],
-    approvals:[{approval_id:'approval-a',arguments_digest:'digest-a',tool_name:'counter',arguments:{amount:2}}]};
+    approvals:[{approval_id:'approval-a',arguments_digest:'digest-a',tool_name:'counter',arguments:{amount:2}}],
+    children:[{child_id:'child-a',parent_run_id:'run-a',status:'SUCCEEDED',source_unit_ids:['unit-a'],principal_ref:'principal-a',authority_trigger_id:'trigger-a',deadline_at:'2030-01-01T00:00:00Z'}],
+    run_budgets:[{run_id:'run-a',reserved_tokens:100,charged_tokens:30}]};
   if(path.endsWith('/change-plans')) return {plan_id:'plan-a',plan_digest:'plan-digest',
     expected_revision:row.revision,values:options.body.values,before_values:row.values,
     credentials_changed:options.body.api_key!==null||options.body.clear_api_key};
@@ -95,11 +97,20 @@ def main():
             model = page.locator('#agent-config [name="model"]')
             expect(model).to_have_value("model-a")
             model.fill("edited-model")
+            page.get_by_text('子分析与单次运行预算', exact=True).click()
+            page.locator('[name="children_enabled"]').check()
+            page.locator('[name="max_children"]').fill('3')
+            page.locator('[name="run_token_budget"]').fill('24000')
             page.get_by_role("button", name="预览 Agent 变更").click()
             expect(page.locator('#agent-preview')).to_be_visible()
+            planned = page.evaluate("fixture.calls.find(c=>c.path.endsWith('/change-plans')).body.values")
+            assert planned['children_enabled'] and planned['max_children'] == 3 and planned['run_token_budget'] == 24000
             page.locator('#agent-apply').click()
             expect(page.locator('#agent-config-status')).to_contain_text("配置修订 2")
             expect(model).to_have_value("edited-model")
+            expect(page.locator('#agent-runs')).to_contain_text('私有子分析')
+            expect(page.locator('#agent-runs')).to_contain_text('父运行与子分析共用预算')
+            expect(page.locator('#agent-runs')).to_contain_text('子分析结果只交回父运行')
             page.get_by_role("button", name="批准本次参数").click()
             page.wait_for_function("fixture.calls.some(c=>c.path.endsWith('/approvals'))")
             assert page.evaluate("fixture.calls.find(c=>c.path.endsWith('/approvals')).body") == {
@@ -127,7 +138,7 @@ def main():
             page.evaluate("fixture.pending.shift().resolve();fixture.hold=[]")
             expect(model).to_have_value("model-b")
             # Invalid tool JSON is reported as a form error, not an uncaught event.
-            page.locator('#agent-config details summary').click()
+            page.get_by_text('工具授权', exact=True).click()
             page.locator('[name="allowed_tools"]').fill('{broken')
             page.get_by_role("button", name="预览 Agent 变更").click()
             expect(page.locator('#notice')).to_contain_text("JSON")
@@ -141,7 +152,7 @@ def main():
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "mobile overflow"
             page.screenshot(path=str(artifacts / "agent-mobile.png"), full_page=True)
             browser.close()
-            print("PASS: Agent config, approval, read/apply drafts, Bot switching and mobile layout")
+            print("PASS: Agent and child config, private child status/budgets, approval, read/apply drafts, Bot switching and mobile layout")
     finally:
         server.shutdown()
         thread.join()

@@ -69,6 +69,8 @@ class BotFleet:
         self.package_errors: dict[str, str] = {}
         self.infrastructure_packages: dict[str, PackageSnapshot] = {}
         self.group_slots = asyncio.Semaphore(32)
+        self.model_slots = asyncio.Semaphore(32)
+        self.child_slots = asyncio.Semaphore(8)
         self._closed = False
         self.max_concurrent_attaches, self.max_bots = max_concurrent_attaches, max_bots
         self.attach_timeout, self.reconcile_interval = attach_timeout, reconcile_interval
@@ -239,6 +241,8 @@ class BotFleet:
                         managed.platform = BindingRuntime(
                             managed, self.catalog.vault, self.infrastructure_packages,
                             global_slots=self.group_slots,
+                            job_authority=self.authority,
+                            global_model_slots=self.model_slots, global_child_slots=self.child_slots,
                         )
                         await managed.platform.start()
                         if self._closed:

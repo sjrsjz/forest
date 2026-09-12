@@ -1,0 +1,132 @@
+"""Versioned, bounded control syntax; retained arguments never enter Context."""
+
+from __future__ import annotations
+
+import re
+import shlex
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class ShellCommand:
+    name: str
+    payload: dict = field(default_factory=dict)
+    priority: int = 1
+
+
+_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_ALIASES = {"jobs": "job", "runs": "run"}
+
+
+def _options(words, required):
+    if len(words) != len(required) * 2:
+        raise ValueError("options")
+    values = {}
+    for index in range(0, len(words), 2):
+        key, value = words[index:index + 2]
+        if key not in required or key in values:
+            raise ValueError("option")
+        values[key] = value
+    return values
+
+
+def _revision(value):
+    if not re.fullmatch(r"0|[1-9][0-9]{0,17}", value):
+        raise ValueError("revision")
+    return int(value)
+
+
+def _identity(value):
+    if not _ID.fullmatch(value):
+        raise ValueError("identity")
+    return value
+
+
+def _reason(value):
+    if not value.strip() or len(value) > 256 or any(ord(c) < 32 for c in value):
+        raise ValueError("reason")
+    return value
+
+
+def _parse(words):
+    aliases = {(): "help", ("help",): "help", ("status",): "status",
+               ("bot", "status"): "bot.status", ("core", "status"): "core.status"}
+    if tuple(words) in aliases:
+        return ShellCommand(aliases[tuple(words)])
+    if len(words) < 2:
+        raise ValueError("command")
+    domain, verb = _ALIASES.get(words[0], words[0]), words[1]
+    if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
+        return ShellCommand(domain + ".read")
+    if (domain, verb) == ("job", "status") and len(words) == 3:
+        return ShellCommand("job.read", {"job_id": _identity(words[2])})
+    if (domain, verb) == ("job", "run") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision"})
+        return ShellCommand("job.run", {
+            "job_id": _identity(words[2]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        }, 2)
+    if (domain, verb) == ("job", "cancel") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision", "--scope", "--reason"})
+        if options["--scope"] not in {"future", "pending", "all"}:
+            raise ValueError("scope")
+        return ShellCommand("job.cancel", {
+            "job_id": _identity(words[2]),
+            "expected_revision": _revision(options["--expect-revision"]),
+            "scope": options["--scope"], "reason": _reason(options["--reason"]),
+        }, 0)
+    if (domain, verb) == ("job", "replay") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision"})
+        return ShellCommand("job.replay", {
+            "occurrence_id": _identity(words[2]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        }, 2)
+    if (domain, verb) == ("run", "cancel") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-checkpoint", "--reason"})
+        return ShellCommand("run.cancel", {
+            "run_id": _identity(words[2]),
+            "expected_checkpoint_seq": _revision(options["--expect-checkpoint"]),
+            "reason": _reason(options["--reason"]),
+        }, 0)
+    if domain == "run" and verb in {"approve", "reject"} and len(words) >= 3:
+        options = _options(words[3:], {"--digest"})
+        return ShellCommand("run.approval", {
+            "approval_id": _identity(words[2]), "arguments_digest": _identity(options["--digest"]),
+            "decision": "APPROVE" if verb == "approve" else "REJECT",
+        }, 0)
+    raise ValueError("command")
+
+
+def parse_command(value: dict) -> ShellCommand | None:
+    """Only direct leading text can reserve the namespace, after one self mention.
+
+    Unknown/malformed commands stay reserved, but their raw arguments are discarded.
+    This grammar accepts identifiers, revision numbers and a bounded public reason;
+    credentials, process commands and configuration values have no grammar entry.
+    """
+    if value["author"]["is_self"]:
+        return None
+    parts, index, mentioned = value["segments"], 0, False
+    while index < len(parts):
+        part = parts[index]
+        if part["type"] == "text" and not part["text"].strip():
+            index += 1
+            continue
+        if (not mentioned and part["type"] == "mention"
+                and part["external_user_id"] == value["self_id"]):
+            mentioned, index = True, index + 1
+            continue
+        break
+    text = ""
+    while index < len(parts) and parts[index]["type"] == "text":
+        text += parts[index]["text"]
+        index += 1
+    text = text.lstrip()
+    if not re.match(r"#forest(?:\s|$)", text):
+        return None
+    if index != len(parts) or len(text.encode("utf-8")) > 4096:
+        return ShellCommand("unknown")
+    try:
+        return _parse(shlex.split(text[len("#forest"):], comments=False, posix=True))
+    except ValueError:
+        return ShellCommand("unknown")

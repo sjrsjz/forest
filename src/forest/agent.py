@@ -334,14 +334,26 @@ class AgentRunner:
                     },
                 }
             )
+        if spec.get("values", spec).get("children_enabled", False):
+            from forest.storage.children import declaration
+
+            tools.append(declaration(snapshot))
         return tools
 
     async def _tools(self, actor, head: dict) -> dict:
         run_id, spec = head["run_id"], head["spec"]
+        from forest.storage.children import TOOL_NAME, ChildStore
+
+        if any(p["tool_name"] == TOOL_NAME for p in head.get("tools", [])):
+            children = ChildStore(self.state)
+            head = await children.spawn(actor, run_id)
+            head = await children.adopt(actor, run_id)
         definitions = {tool["name"]: tool for tool in spec.get("tools", [])}
         # Rows are created together in the Provider's call_index order. Each
         # complete result is saved before another effect is attempted.
         for proposal in sorted(head.get("tools", []), key=lambda tool: tool["call_index"]):
+            if proposal["status"] == "WAIT_CHILD":
+                continue
             if proposal["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 continue
             if proposal["status"] == "UNKNOWN":
@@ -455,6 +467,9 @@ class AgentRunner:
                     return head
             else:
                 head = await self._observe_tool(actor, grant, status="SUCCEEDED", result=result)
+        latest = await self.state.load(actor, run_id)
+        if any(p["status"] == "WAIT_CHILD" for p in latest.get("tools", [])):
+            return latest
         return await self.state.close_tools(actor, run_id)
 
     async def finalize(self, actor, disposition: RunDisposition, delivery) -> dict:

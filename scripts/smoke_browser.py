@@ -17,6 +17,7 @@ import secrets
 import socket
 import subprocess
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 from uuid import uuid4
@@ -251,6 +252,10 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             page.locator('#agent-config [name="api_key"]').fill(model_key)
             page.locator('#agent-config [name="enabled"]').check()
             page.locator('#agent-config [name="stream"]').uncheck()
+            page.locator('#agent-config details').filter(has_text='私有子分析').locator('summary').click()
+            page.locator('#agent-config [name="children_enabled"]').check()
+            page.locator('#agent-config [name="max_children"]').fill('2')
+            page.locator('#agent-config [name="run_token_budget"]').fill('24000')
             page.locator('#agent-config button[type="submit"]').click()
             expect(page.locator('#agent-preview')).to_be_visible()
             assert model_key not in page.locator('#agent-config-diff').text_content()
@@ -265,6 +270,47 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#delivery-list')).to_contain_text('浏览器 Agent 已回复', timeout=20000)
             page.locator('#agent-refresh').click()
             expect(page.locator('#agent-runs')).to_contain_text('COMPLETED', timeout=15000)
+            # A newly discovered group becomes available without switching Bots.
+            # Every write below uses the actual shipped form and authenticated API.
+            page.locator('#job-refresh').click()
+            job_form = page.locator('#job-config')
+            expect(job_form.locator('[name="name"]')).to_be_enabled()
+            expect(job_form.locator('[name="conversation_id"]')).to_contain_text('30001')
+            job_form.locator('[name="name"]').fill('浏览器定时报告')
+            job_form.locator('[name="prompt"]').fill('整理本群的定时报告，并明确来源群。')
+            start = datetime.now(UTC) + timedelta(days=1)
+            job_form.locator('[name="start_at"]').fill(start.isoformat())
+            job_form.locator('[name="delegation_expires_at"]').fill((start + timedelta(days=7)).isoformat())
+            job_form.locator('button[type="submit"]').click()
+            expect(page.locator('#job-preview')).to_be_visible()
+            expect(page.locator('#job-diff')).to_contain_text('群 30001')
+            expect(page.locator('#job-diff')).to_contain_text('Asia/Shanghai')
+            page.locator('#job-apply').click()
+            expect(page.locator('#job-current')).to_contain_text('修订 1')
+            sent_before = int(compose('exec', '-T', 'forest', 'python', '-c',
+                "import json;from pathlib import Path;print(len(json.loads(Path('/tmp/onebot-sends.json').read_text())))").strip())
+            page.locator('#job-run').click()
+            jobs_path = '/management/v1/bots/' + alpha + '/jobs'
+            delivered = page.evaluate("async path => {for(let i=0;i<120;i++){const r=await fetch(path);"
+                                      "if(r.ok){const data=await r.json();if(data.occurrences.some(o=>o.reply_id&&o.delivery_state==='SENT'))return true;}"
+                                      "await new Promise(resolve=>setTimeout(resolve,250));}return false;}", jobs_path)
+            assert delivered, 'The scheduled Agent response did not reach the OneBot transport'
+            page.locator('#job-runs-refresh').click()
+            expect(page.locator('#job-runs')).to_contain_text('回复已提交到发送队列')
+            expect(page.locator('#job-runs')).to_contain_text('平台已确认送达')
+            sent_after = int(compose('exec', '-T', 'forest', 'python', '-c',
+                "import json;from pathlib import Path;r=json.loads(Path('/tmp/onebot-sends.json').read_text());"
+                "assert '浏览器 Agent 已回复' in json.dumps(r[-1],ensure_ascii=False);print(len(r))").strip())
+            assert sent_after == sent_before + 1
+            # The same button retries its fixed operation key; it creates no
+            # second occurrence or group input. A separate button starts another.
+            page.locator('#job-run').click()
+            expect(page.locator('#job-runs .job-occurrence')).to_have_count(1)
+            page.locator('#job-toggle').click()
+            expect(page.locator('#job-diff')).to_contain_text('启用 → 停用')
+            page.locator('#job-apply').click()
+            expect(page.locator('#job-current')).to_contain_text('修订 2')
+            expect(page.locator('#job-current')).to_contain_text('已停用')
             page.bring_to_front()
             page.screenshot(path=str(artifacts / "bots-desktop.png"), full_page=True)
             page.set_viewport_size({"width": 390, "height": 844})
@@ -286,8 +332,15 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#binding-state')).to_contain_text('在线', timeout=30000)
             expect(page.locator('#agent-config [name="model"]')).to_have_value('browser-model')
             expect(page.locator('#agent-config [name="api_key"]')).to_have_value('')
+            expect(page.locator('#agent-config [name="children_enabled"]')).to_be_checked()
+            expect(page.locator('#agent-config [name="max_children"]')).to_have_value('2')
+            expect(page.locator('#agent-config [name="run_token_budget"]')).to_have_value('24000')
+            page.locator('#job-list button').filter(has_text='浏览器定时报告').click()
+            expect(page.locator('#job-current')).to_contain_text('修订 2')
+            expect(page.locator('#job-current')).to_contain_text('已停用')
+            expect(page.locator('#job-runs')).to_contain_text('平台已确认送达')
             group_message(5, '/chat 重启后继续')
-            expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 5', timeout=20000)
+            expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 6', timeout=20000)
             select_bot(page, beta)
             invoke(1, "：4（状态修订 2）")
 
@@ -373,6 +426,8 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "OneBot Web configuration and credentials stay private",
                         "real HTTP ingress, silent context, template reply and delivery",
                         "Web model configuration, real Agent HTTP reply and credential recovery after restart",
+                        "Web Jobs source refresh, preview/apply, idempotent manual Agent reply, delivery, disable and restart persistence",
+                        "Private child controls saved and recovered after restart",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
                         "logout revocation",

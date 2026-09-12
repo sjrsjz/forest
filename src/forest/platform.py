@@ -82,8 +82,10 @@ class PendingActivation:
 
 
 class BindingRuntime:
-    def __init__(self, bot, vault, packages: dict, *, global_slots=None):
+    def __init__(self, bot, vault, packages: dict, *, global_slots=None, job_authority=None,
+                 global_model_slots=None, global_child_slots=None):
         self.bot, self.kernel, self.vault = bot, bot.kernel, vault
+        self.global_model_slots, self.global_child_slots = global_model_slots, global_child_slots
         self.packages = dict(packages)
         self.bindings = BindingStore(bot.store)
         self.messages = MessageStore(bot.store, self.bindings)
@@ -109,7 +111,9 @@ class BindingRuntime:
         )
         from forest.agent_runtime import AgentRuntime
         from forest.group_scheduler import GroupScheduler
+        from forest.job_scheduler import JobDispatcher
         from forest.shell import ShellDispatcher
+        from forest.storage.jobs import JobStore
 
         self.agent = AgentRuntime(self)
 
@@ -123,7 +127,31 @@ class BindingRuntime:
             execution_timeout=3600,
         )
         self.shell = ShellDispatcher(
-            self.messages, self.bindings, self.delivery, self.kernel._authority
+            self.messages, self.bindings, self.delivery, self.kernel._authority,
+            on_change=self._notify_work,
+        )
+        self.job_store = JobStore(self.messages)
+        self.job_authority = job_authority
+        self.jobs = JobDispatcher(
+            self.job_store, self.kernel._authority,
+            authorize=self._authorize_job if job_authority is not None else None,
+            on_change=self.scheduler.notify,
+        )
+
+    def _notify_work(self):
+        self.scheduler.notify()
+        self.jobs.notify()
+
+    async def _authorize_job(self, claim):
+        grant = claim.delegation
+        if grant["issuer_id"] != self.job_authority.issuer_id:
+            raise ForestError("JOB_DELEGATION_REVOKED", "Job authority issuer changed", 403)
+        request = self.job_store.authorization_request(claim)
+        return await self.job_authority.issue_delegation(
+            subject_id=grant["subject_id"], bot_id=self.bot.store.bot_id,
+            operation_id=request["operation_id"], payload=request["payload"],
+            policy_revision=grant["policy_revision"], delegation_id=grant["delegation_id"],
+            expected_account_revision=grant["account_revision"], expected_key_revision=grant["key_revision"],
         )
 
     @property
@@ -153,6 +181,8 @@ class BindingRuntime:
                 return
             await self.scheduler.start()
             await self.shell.start()
+            await self.agent.start()
+            await self.jobs.start()
             self._tasks = [
                 asyncio.create_task(self.run_forever(), name="binding-supervisor"),
                 asyncio.create_task(self.delivery_worker.run_forever(), name="binding-delivery"),
@@ -162,6 +192,10 @@ class BindingRuntime:
                 self._tasks.append(self.scheduler.task)
             if self.shell.task is not None:
                 self._tasks.append(self.shell.task)
+            if self.jobs.task is not None:
+                self._tasks.append(self.jobs.task)
+            if self.agent.children.task is not None:
+                self._tasks.append(self.agent.children.task)
             for task in self._tasks:
                 task.add_done_callback(self._critical_done)
             self._started = True
@@ -172,6 +206,8 @@ class BindingRuntime:
                 self.scheduler.failure is not None
                 or self.delivery_worker.failure is not None
                 or self.shell.failure is not None
+                or self.jobs.failure is not None
+                or self.agent.children.failure is not None
             ):
                 self._fatal("PLATFORM_CHILD_FAILED")
                 return
@@ -610,7 +646,8 @@ class BindingRuntime:
         for task in (*self._jobs.values(), *self._component_jobs.values(), *self._tasks):
             task.cancel()
         errors = []
-        for closer in (self.scheduler.close, self.shell.close, self.delivery_worker.close, self.agent.close):
+        for closer in (self.jobs.close, self.scheduler.close, self.shell.close,
+                       self.delivery_worker.close, self.agent.close):
             try:
                 await closer()
             except Exception as exc:
