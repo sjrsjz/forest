@@ -185,7 +185,8 @@ class PostgresStore:
         conn: AsyncConnection, subject_id: str, *, require_admin: bool = False
     ) -> dict[str, Any]:
         row = await (await conn.execute(
-            "SELECT id, disabled, role FROM web_accounts WHERE id = %s FOR UPDATE", (subject_id,),
+            "SELECT id, disabled, role, revision FROM web_accounts WHERE id = %s FOR UPDATE",
+            (subject_id,),
         )).fetchone()
         if row is None or row["disabled"] or (require_admin and row["role"] != "admin"):
             raise ForestError("FORBIDDEN", "Current account cannot perform this operation", status=403)

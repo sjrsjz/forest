@@ -41,7 +41,7 @@ docker compose logs --tail 100 forest
 docker compose down
 ```
 
-普通 `down` 保留命名卷。`forest_data` 包含本地初始化状态、加密主密钥和包快照，`forest_secrets` 包含数据库凭据，`postgres_data` 包含部署及托管 Bot 数据库；恢复部署需要保留三者。当前还没有 Web 备份、密码重置或存储迁移功能，不能通过删除初始化状态绕过恢复流程。
+普通 `down` 保留命名卷。`forest_data` 包含本地初始化状态、加密主密钥和包快照，`forest_secrets` 包含数据库凭据，`postgres_data` 包含部署及托管 Bot 数据库；恢复部署需要保留三者。当前还没有 Web 备份或存储迁移功能，不能通过删除初始化状态绕过恢复流程。管理员可在 WebUI 创建后台账号，并通过带预览、当前密码复核和会话撤销的账号计划重置密码、调整固定角色或停用账号。
 
 ## 使用 Python 开发
 
@@ -167,4 +167,4 @@ Windows 已有 Edge 时可直接指定浏览器：
 uv run --frozen python scripts/smoke_browser.py --browser 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 ```
 
-脚本验证首次初始化、登录、部署配置、双 Bot 创建与状态隔离、组件热切换、双窗口冲突、OneBot 账号配置与真实 HTTP 收发、UNKNOWN 核对、服务重启恢复和注销撤销；`finally` 清理本次随机 project 的容器及卷，保留 `.local/browser-artifacts/` 下的截图。它不会操作普通 `forest` Compose project。浏览器、Linux 与外部服务的实际验证结果以[实现状态](doc/implementation-status.md)为准，测试脚本存在不代表已经通过。
+脚本验证首次初始化、登录、后台账号创建与查看者读写边界、部署配置、双 Bot 创建与状态隔离、组件热切换、双窗口冲突、OneBot 账号配置与真实 HTTP 收发、UNKNOWN 核对、服务重启恢复和注销撤销；`finally` 清理本次随机 project 的容器及卷，保留 `.local/browser-artifacts/` 下的截图。它不会操作普通 `forest` Compose project。浏览器、Linux 与外部服务的实际验证结果以[实现状态](doc/implementation-status.md)为准，测试脚本存在不代表已经通过。

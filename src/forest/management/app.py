@@ -25,6 +25,7 @@ from starlette.staticfiles import StaticFiles
 
 from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
+from forest.management.accounts_api import install_account_routes
 from forest.management.agent_api import install_agent_routes
 from forest.management.authority import WebAuthority
 from forest.management.bindings_api import install_binding_routes
@@ -286,14 +287,15 @@ class ManagementRuntime:
             raise ForestError("CONTENT_TYPE_REQUIRED", f"此接口只接收 {content_type}。", 415)
 
     async def principal(self, request: Request, *, write: bool = False,
-                        content_type: str = "application/json") -> dict[str, Any]:
+                        content_type: str = "application/json",
+                        require_admin: bool | None = None) -> dict[str, Any]:
         token = request.cookies.get("forest_session", "")
         if not token or len(token) > 512:
             raise ForestError("UNAUTHENTICATED", "请先登录。", 401)
         session = await self.require_store().get_session(digest_token(token))
         if session is None:
             raise ForestError("UNAUTHENTICATED", "会话已失效，请重新登录。", 401)
-        if session["role"] != "admin":
+        if (write if require_admin is None else require_admin) and session["role"] != "admin":
             raise ForestError("PERMISSION_DENIED", "当前账号没有此管理权限。", 403)
         if write:
             self.origin(request, content_type=content_type)
@@ -488,11 +490,12 @@ def create_app(settings: WebSettings) -> FastAPI:
     @app.get("/management/v1/session")
     async def session(request: Request):
         value = await runtime.principal(request)
-        return {"username": value["username"], "role": value["role"]}
+        return {"account_id": value["account_id"], "username": value["username"],
+                "role": value["role"], "can_write": value["role"] == "admin"}
 
     @app.post("/management/v1/logout")
     async def logout(request: Request):
-        await runtime.principal(request, write=True)
+        await runtime.principal(request, write=True, require_admin=False)
         await runtime.require_store().revoke_session(
             digest_token(request.cookies["forest_session"])
         )
@@ -587,6 +590,7 @@ def create_app(settings: WebSettings) -> FastAPI:
             session_token_hash=digest_token(request.cookies["forest_session"]),
         )
 
+    install_account_routes(app, runtime)
     install_bot_routes(app, runtime)
     install_binding_routes(app, runtime)
     install_agent_routes(app, runtime)

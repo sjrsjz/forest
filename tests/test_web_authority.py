@@ -182,9 +182,12 @@ async def wait_for_lock(store, fragment):
 
 async def test_issuer_key_and_signed_receipts_survive_restart(environment):
     env = environment
+    secret_digest = env.authority.secret_digest("account.create.password", "sample-password")
     reopened = WebAuthority(env.deployment, env.vault, env.authority.issuer_id)
     await reopened.initialize()
     assert reopened.public_key == env.authority.public_key
+    assert reopened.secret_digest("account.create.password", "sample-password") == secret_digest
+    assert reopened.secret_digest("account.change.password", "sample-password") != secret_digest
     env.authority = reopened
     assert (await env.read())["desired_revision"] == 0
     plan = await env.plan()
@@ -243,6 +246,46 @@ async def test_session_revocation_stops_new_issue_with_bounded_existing_ticket_w
     claims["issued_at"] = (datetime.now(UTC) - timedelta(seconds=31)).isoformat()
     claims["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     await rejected("WEB_AUTHORITY_REJECTED", env.control.read(env.sign(claims), "read", COMPONENT))
+
+
+async def test_viewer_tickets_are_limited_to_target_read_actions(environment):
+    env = environment
+    viewer = str(uuid4())
+    async with env.deployment.pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO web_accounts(id,username,password_hash,role) "
+            "VALUES (%s,'viewer','opaque-hash','viewer')",
+            (viewer,),
+        )
+    await env.deployment.create_session(
+        "viewer-session",
+        "viewer-csrf",
+        viewer,
+        datetime.now(UTC) + timedelta(minutes=10),
+    )
+    payload = {"component_id": COMPONENT}
+    ticket = await env.authority.issue(
+        subject_id=viewer,
+        session_token_hash="viewer-session",
+        bot_id=env.store.bot_id,
+        action="config.read",
+        operation_id="viewer-read",
+        payload=payload,
+        policy_revision=(await env.store.runtime())["policy_revision"],
+    )
+    assert (await env.control.read(ticket, "viewer-read", COMPONENT))["desired_revision"] == 0
+    await rejected(
+        "FORBIDDEN",
+        env.authority.issue(
+            subject_id=viewer,
+            session_token_hash="viewer-session",
+            bot_id=env.store.bot_id,
+            action="config.plan",
+            operation_id="viewer-write",
+            payload={"component_id": COMPONENT, "expected_revision": 0, "values": VALUES},
+            policy_revision=(await env.store.runtime())["policy_revision"],
+        ),
+    )
 
 
 async def test_issue_checks_session_expiry_after_waiting_for_session_lock(environment):

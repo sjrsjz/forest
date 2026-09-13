@@ -70,6 +70,7 @@ def main() -> None:
                 raise RuntimeError("The selected host port does not serve this Forest deployment")
         token = compose("exec", "-T", "forest", "forest", "setup-token").strip()
         password = secrets.token_urlsafe(32)
+        viewer_password = secrets.token_urlsafe(32)
         api_token, webhook_secret = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
         model_key = secrets.token_urlsafe(24)
         memory_key = secrets.token_urlsafe(24)
@@ -145,6 +146,44 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             page.locator('#login-form [name="username"]').fill("browser-admin")
             page.locator('#login-form [name="password"]').fill(password)
             page.locator("#login-form button").click()
+            expect(page.locator("#configuration")).to_be_visible()
+
+            # Account administration is exercised against the packaged API and
+            # migrations, then a separate browser context proves the fixed viewer
+            # role can read deployment state but cannot submit a write directly.
+            page.locator("#nav-accounts").click()
+            account_form = page.locator("#account-create-form")
+            account_form.locator('[name="username"]').fill("browser-viewer")
+            account_form.locator('[name="role"]').select_option("viewer")
+            account_form.locator('[name="password"]').fill(viewer_password)
+            account_form.locator('[name="current_password"]').fill(password)
+            account_form.locator('button[type="submit"]').click()
+            expect(page.locator("#account-list")).to_contain_text("browser-viewer · 查看者")
+            viewer_context = browser.new_context(viewport={"width": 900, "height": 700})
+            viewer_page = viewer_context.new_page()
+            viewer_page.goto(origin)
+            expect(viewer_page.locator("#login")).to_be_visible()
+            viewer_page.locator('#login-form [name="username"]').fill("browser-viewer")
+            viewer_page.locator('#login-form [name="password"]').fill(viewer_password)
+            viewer_page.locator("#login-form button").click()
+            expect(viewer_page.locator("#configuration")).to_be_visible()
+            expect(viewer_page.locator("#role")).to_have_text("查看者")
+            expect(viewer_page.locator("#nav-accounts")).to_be_hidden()
+            expect(viewer_page.locator('#config-form button[type="submit"]')).to_be_hidden()
+            denied = viewer_page.evaluate("""async () => {
+              const csrf = document.cookie.split('; ').find(v => v.startsWith('forest_csrf='))?.split('=')[1] || '';
+              const response = await fetch('/management/v1/change-plans', {
+                method: 'POST', credentials: 'same-origin',
+                headers: {'Content-Type':'application/json', 'X-CSRF-Token':csrf},
+                body: JSON.stringify({expected_revision:0, values:{display_name:'denied', session_ttl_minutes:60}}),
+              });
+              return {status:response.status, body:await response.json()};
+            }""")
+            assert denied["status"] == 403 and denied["body"]["code"] == "PERMISSION_DENIED"
+            viewer_page.locator("#logout").click()
+            expect(viewer_page.locator("#login")).to_be_visible()
+            viewer_context.close()
+            page.locator("#nav-deployment").click()
             expect(page.locator("#configuration")).to_be_visible()
             rival = context.new_page()
             rival.goto(origin)
@@ -482,6 +521,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                     "checks": [
                         "setup",
                         "login",
+                        "Web account creation and fixed viewer read/write boundary",
                         "preview",
                         "apply",
                         "two-tab conflict",

@@ -55,8 +55,10 @@ class BotCatalog:
         self.vault = vault
         self.managed_dsn = managed_dsn
 
-    async def _authorize(self, conn: Any, subject_id: str, session_token_hash: str) -> None:
-        await self.store._active_account(conn, subject_id, require_admin=True)
+    async def _authorize(
+        self, conn: Any, subject_id: str, session_token_hash: str, *, require_admin: bool = True
+    ) -> None:
+        await self.store._active_account(conn, subject_id, require_admin=require_admin)
         await self.store._active_session(conn, session_token_hash, subject_id)
 
     @staticmethod
@@ -194,13 +196,13 @@ class BotCatalog:
 
     async def list(self, *, subject_id: str, session_token_hash: str) -> list[dict[str, Any]]:
         async with self.store.pool.connection() as conn, conn.transaction():
-            await self._authorize(conn, subject_id, session_token_hash)
+            await self._authorize(conn, subject_id, session_token_hash, require_admin=False)
             rows = await (await conn.execute("SELECT * FROM bot_catalog ORDER BY created_at,bot_id")).fetchall()
             return [_public(row, _BOT_KEYS) for row in rows]
 
     async def get(self, *, bot_id: str, subject_id: str, session_token_hash: str) -> dict[str, Any]:
         async with self.store.pool.connection() as conn, conn.transaction():
-            await self._authorize(conn, subject_id, session_token_hash)
+            await self._authorize(conn, subject_id, session_token_hash, require_admin=False)
             row = await (await conn.execute("SELECT * FROM bot_catalog WHERE bot_id=%s", (bot_id,))).fetchone()
             if row is None:
                 raise ForestError("BOT_NOT_FOUND", "Bot does not exist", 404)
@@ -209,7 +211,7 @@ class BotCatalog:
     async def read_job(self, *, job_id: str, subject_id: str,
                        session_token_hash: str) -> dict[str, Any]:
         async with self.store.pool.connection() as conn, conn.transaction():
-            await self._authorize(conn, subject_id, session_token_hash)
+            await self._authorize(conn, subject_id, session_token_hash, require_admin=False)
             return await self._job(conn, job_id)
 
     async def _job(self, conn: Any, job_id: str) -> dict[str, Any]:

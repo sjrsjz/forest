@@ -91,12 +91,16 @@ class BindingCatalog:
 
     async def list(self, *, bot_id: str, subject_id: str, session_token_hash: str) -> list[dict]:
         async with self.store.pool.connection() as conn, conn.transaction():
-            await self.catalog._authorize(conn, subject_id, session_token_hash)
+            await self.catalog._authorize(
+                conn, subject_id, session_token_hash, require_admin=False
+            )
             rows = await (await conn.execute(
                 "SELECT binding_id,self_id,stage,payload->>'display_name' AS display_name "
                 "FROM platform_bindings WHERE bot_id=%s ORDER BY created_at,binding_id", (bot_id,),
             )).fetchall()
-            await self.catalog._authorize(conn, subject_id, session_token_hash)
+            await self.catalog._authorize(
+                conn, subject_id, session_token_hash, require_admin=False
+            )
             return rows
 
     async def resolve(self, binding_id: str) -> str:

@@ -7,6 +7,7 @@ import { componentJobsPanel } from './component-jobs-panel.js';
 import { schemaForm } from './schema-form.js';
 import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
+import { accountsPanel } from './accounts-panel.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -14,6 +15,7 @@ let configuration = null;
 let pendingPlan = null;
 let applyKey = null;
 let activeView = 'loading';
+let currentUser = null;
 const readReceipt = controlReceipts(invalidateControl);
 
 function notice(text, success = false) {
@@ -23,13 +25,17 @@ function notice(text, success = false) {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
 }
 async function fetchApi(path, body, extraHeaders) {
+  if (currentUser?.role === 'viewer' && body !== undefined && path !== '/logout') {
+    const error = new Error('当前账号是查看者，不能提交管理变更。 (PERMISSION_DENIED)');
+    error.code = 'PERMISSION_DENIED'; throw error;
+  }
   const response = await fetch(`/management/v1${path}`, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf(), ...extraHeaders },
@@ -43,6 +49,14 @@ async function fetchApi(path, body, extraHeaders) {
     throw error;
   }
   return data;
+}
+function setIdentity(user) {
+  currentUser = user;
+  document.body.classList.toggle('viewer', user?.role === 'viewer');
+  $('username').textContent = user?.username || '';
+  $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
+  $('nav-accounts').classList.toggle('hidden', user?.role !== 'admin');
+  $('identity').classList.toggle('hidden', !user);
 }
 async function busy(button, work) {
   button.disabled = true;
@@ -77,7 +91,7 @@ async function start() {
     if (!status.database_ready) { show('loading'); notice('部署已初始化，但数据库未就绪。服务会自动重试，恢复数据库后请刷新页面。'); return; }
     try {
       const user = await api('/session');
-      $('username').textContent = user.username; $('identity').classList.remove('hidden');
+      setIdentity(user);
       await readConfiguration();
     } catch (error) {
       if (error.code === 'UNAUTHENTICATED') show('login'); else throw error;
@@ -99,8 +113,7 @@ $('login-form').addEventListener('submit', (event) => {
   const form = event.currentTarget;
   busy(form.querySelector('button'), async () => {
     const user = await api('/login', Object.fromEntries(new FormData(form)));
-    form.reset(); $('notice').classList.add('hidden'); $('username').textContent = user.username;
-    $('identity').classList.remove('hidden'); await readConfiguration();
+    form.reset(); $('notice').classList.add('hidden'); setIdentity(user); await readConfiguration();
   });
 });
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
@@ -111,11 +124,12 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
+  accountPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
   $('bot-detail').classList.add('hidden'); $('create-bot-form').reset();
-  $('config-form').reset(); $('diff').replaceChildren(); $('identity').classList.add('hidden');
+  $('config-form').reset(); $('diff').replaceChildren(); setIdentity(null);
   $('notice').classList.add('hidden'); show('login');
 }));
 $('config-form').addEventListener('input', () => { pendingPlan = null; applyKey = null; $('preview').classList.add('hidden'); });
@@ -163,6 +177,10 @@ const memoriesPanel = memoryPanel(api, busy, notice);
 const scheduledPanel = jobsPanel(api, busy, notice);
 const componentEventsPanel = eventsPanel(api, busy, notice);
 const durableJobsPanel = componentJobsPanel(api, busy, notice);
+const accountPanel = accountsPanel(api, busy, notice, (message) => {
+  accountPanel.reset(); configuration = null; pendingPlan = null;
+  setIdentity(null); show('login'); notice(message, true);
+});
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -353,6 +371,9 @@ async function selectBot(id) {
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));
 $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
+$('nav-accounts').addEventListener('click', () => busy($('nav-accounts'), async () => {
+  show('accounts'); await accountPanel.load(currentUser.account_id);
+}));
 $('refresh-bots').addEventListener('click', () => busy($('refresh-bots'), readBots));
 $('create-bot-form').addEventListener('input', () => {
   createKey = null;

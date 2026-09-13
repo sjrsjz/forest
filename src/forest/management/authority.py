@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
+import secrets
 from datetime import timedelta
 from uuid import uuid4
 
@@ -12,6 +15,13 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.security import SecretVault
 from forest.storage.postgres import PostgresStore
+
+READ_ACTIONS = frozenset({
+    "config.read", "config.history", "bot.runtime.read", "job.read",
+    "agent.config.read", "agent.read", "memory.config.read", "memory.read",
+    "memory.forget.read", "memory.association.read", "event.read", "component_job.read",
+    "binding.read", "message.read",
+})
 
 
 def encode(value: bytes) -> str:
@@ -24,6 +34,7 @@ class WebAuthority:
         self.key: Ed25519PrivateKey | None = None
         self.public_key: str | None = None
         self.key_revision = 1
+        self._secret_digest_key: bytes | None = None
 
     async def initialize(self) -> None:
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -49,6 +60,29 @@ class WebAuthority:
             if self.public_key != row["public_key"]:
                 raise ForestError("AUTHORITY_KEY_MISMATCH", "Web authority key does not match", 503)
             self.key_revision = row["key_revision"]
+            digest_key = await (await conn.execute(
+                "SELECT encrypted_key FROM web_secret_digest_keys WHERE issuer_id=%s",
+                (self.issuer_id,),
+            )).fetchone()
+            if digest_key is None:
+                encoded = encode(secrets.token_bytes(32))
+                await conn.execute(
+                    "INSERT INTO web_secret_digest_keys(issuer_id,encrypted_key) VALUES (%s,%s)",
+                    (self.issuer_id, self.vault.encrypt(encoded)),
+                )
+                self._secret_digest_key = base64.b64decode(encoded, validate=True)
+            else:
+                self._secret_digest_key = base64.b64decode(
+                    self.vault.decrypt(digest_key["encrypted_key"]), validate=True
+                )
+
+    def secret_digest(self, purpose: str, value: str) -> str:
+        """Create a stable, purpose-bound idempotency digest without a password oracle."""
+        if self._secret_digest_key is None or not purpose or not isinstance(value, str):
+            raise ForestError("AUTHORITY_UNAVAILABLE", "Web authority is unavailable", 503)
+        material = purpose.encode("utf-8") + b"\x00" + value.encode("utf-8")
+        digest = hmac.new(self._secret_digest_key, material, hashlib.sha256).hexdigest()
+        return "hmac-sha256:" + digest
 
     async def issue(self, *, subject_id: str, session_token_hash: str, bot_id: str,
                     action: str, operation_id: str, payload: dict, policy_revision: int,
@@ -56,10 +90,9 @@ class WebAuthority:
         if self.key is None:
             raise ForestError("AUTHORITY_UNAVAILABLE", "Web authority is unavailable", 503)
         async with self.store.pool.connection() as conn, conn.transaction():
-            await self.store._active_account(conn, subject_id, require_admin=True)
-            account = await (await conn.execute(
-                "SELECT revision FROM web_accounts WHERE id=%s", (subject_id,)
-            )).fetchone()
+            account = await self.store._active_account(conn, subject_id)
+            if account["role"] != "admin" and action not in READ_ACTIONS:
+                raise ForestError("FORBIDDEN", "Current account cannot perform this operation", 403)
             session = await (await conn.execute(
                 "SELECT * FROM web_sessions WHERE token_hash=%s AND account_id=%s FOR UPDATE",
                 (session_token_hash, subject_id),

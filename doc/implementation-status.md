@@ -12,6 +12,8 @@ Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 A
 
 群聊组件管理切片将当前接纳门推进为 `shell-gate-v5`，新增 `event` 与 `component-job` 两个分离域，旧 v2–v4 注册表保持可解析。冻结 registry/语法测试 `67 passed`，真实 PostgreSQL/Worker 组件管理纵向测试 `2 passed`，Shell、消息、平台、维护、撤权与旧 gate 交叉回归 `137 passed`。群回执只投影处理器、订阅、delivery/Job 状态和管理修订；组件 Job 测试同时断言产品 Agent 表为空。详细语义见[群聊 Shell 设计](09-group-shell-command-system.md)和[群管理协议](p3-control.md)。
 
+P5 账号管理切片使用迁移 058 增加不可变账号计划/请求和独立加密 HMAC 摘要密钥。WebUI 已可创建 `admin/viewer`、查看会话计数，并以 plan/apply 调整角色、停用状态或密码；目标变更同事务撤销全部会话，部署级锁保护最后管理员。查看者可读取部署与 Bot 元数据，签发器只允许读取 action。真实 PostgreSQL HTTP 与目标 Bot 授权定向测试合计 `33 passed`，部署事务、目录、任务授权与旧库升级交叉回归 `94 passed`；Edge 专项验证创建、脱敏预览、应用、晚到读取隔离和移动布局。最终镜像重新构建，并以独立 Compose 项目完整通过真实初始化、账号创建、查看者登录/读取/服务端写拒绝及既有双 Bot、Agent、记忆、热重载和重启恢复流程。详细语义见[账号管理协议](p5-account-management.md)。
+
 ## 1. 当前可以执行的流程
 
 从空部署启动独立管理服务，使用本机 CLI 交付的一次性配对码在浏览器创建首管理员，登录后读取配置、预览差异、基于预期版本提交，再读取实际生效修订。注销使服务端会话失效；重启后从原 PostgreSQL 和本地冻结计划恢复管理状态。此流程不依赖 Bot、插件、QQ、LLM 或 Embedding 凭据。
@@ -99,18 +101,18 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
-| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK、调用/代际资源监督和 Web/Fleet 接线；仍缺组件 Job 管理、自动声明生成、宿主级资源种类和其余消息契约 |
+| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK 与管理、调用/代际资源监督和 Web/Fleet 接线；仍缺自动声明生成、宿主级资源种类和其余消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
 | P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v4 只管理当前群主干，后台有界 scrub。自动语义联想、剩余自由文本族、部署库与备份/WAL 清理及大规模检索容量仍待完成 |
-| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、群聊运行/任务/维护/组件命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；完整类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
+| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、群聊运行/任务/维护/组件命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；Bot 级 scope 与完整角色模板、密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 
 部署配置及已实现 Bot 状态/生命周期事实仍写入只供审计的旧 outbox，该 outbox 没有后台消费者。组件通信使用独立的持久 EventStore，具有发布声明、逐订阅投递、租约、ACK、重试和死信语义；它不消费或重新解释旧审计 outbox。OneBot 发送已有持久投递、确定未发送时的重试及 UNKNOWN 人工对账；这不代表任意外部效果都有通用恢复协议。配置页直接读取 PostgreSQL 当前生效值，因此这个管理闭环不依赖 outbox 消费来宣称生效。原生 Worker 的 state RPC 也不能被视为完整 Agent 工具或平台 Effect 系统。
 
-当前只有首管理员创建和登录，没有账号管理、密码重置、浏览器持久草稿或 Web 备份恢复。已有组件配置历史页面，可将历史配置重新预览并作为新修订提交；恢复时仍使用当前持久状态。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、插件、组件、OneBot 连接、Agent 模型配置和审批、计划任务、记忆嵌入/媒体/查询配置，以及来源列表、审核后遗忘和人工联想管理；Agent 页面只读显示 CorePrompt 版本和摘要，并编辑独立 PresetContext，不再存在子 Agent 表单。自由上传检索、完整图浏览器、身份资料删除和备份/WAL 回收尚未接入。
+当前已有首管理员创建、账号增设、固定 `admin/viewer` 角色、停用、改密、会话撤销和最后管理员保护；尚无 Bot 级账号 scope、MFA、浏览器持久草稿或 Web 备份恢复。已有组件配置历史页面，可将历史配置重新预览并作为新修订提交；恢复时仍使用当前持久状态。初始化完成后不能用 `setup-token` 再次注册或删除标记重开注册。后台已有 Bot、插件、组件、OneBot 连接、Agent 模型配置和审批、计划任务、记忆嵌入/媒体/查询配置，以及来源列表、审核后遗忘和人工联想管理；Agent 页面只读显示 CorePrompt 版本和摘要，并编辑独立 PresetContext，不再存在子 Agent 表单。自由上传检索、完整图浏览器、身份资料删除和备份/WAL 回收尚未接入。
 
 ## 4. 验证证据与适用范围
 
