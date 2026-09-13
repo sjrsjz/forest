@@ -32,6 +32,10 @@ Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原�
 
 007 既有来源记录继续保留原 gate v1；020 追加 `arguments`、`priority` 不可变列。新 gate v2 把成功解析的类型化参数独立保存，未知/坏语法只保存空参数和原始内容摘要。原参数从首次接收起不进入 Context；群历史仍保留原作者、ingress 位置和固定控制消息投影。既有 v1 消息不会按新语法重新解释。
 
+`shell_registry.BUILTIN_GATE_V2` 现在统一固定的 11 个内置命令键：4 个帮助/状态入口及 7 个 Run/Job 动作。每个 `CommandSpec` 给出版本、参数 schema 与摘要、目标 action/方法、当前管理员要求、会话作用域、优先级、执行种类、群输出范围和 Host 期限策略引用；帮助从同一 schema 与命令形式生成。注册表不可修改，导出的 schema/manifest 是独立副本。期限仍由 Host 的 `command_timeout` 决定，默认 5 秒、允许 0.1–30 秒；这不是所有已领取命令的固定 deadline，领取记录及最终事务守卫保持原语义。
+
+这次接线没有改变 `shell-gate-v2` 的 `shlex.split(..., posix=True)` 词法、别名或参数边界；新的 Windows 路径词法、`--key=value` 和 `--` 扩展尚未实现。排队后直接使用已冻结的 `command_name/arguments/priority`，不重新解析原消息或套用新 schema。当前数据库只持久保存既有 gate 版本，导出的 command/schema 摘要还不是逐请求持久的动态 registry snapshot；插件命令注册、热替换命令所有者和多版本动态快照恢复仍属后续工作。
+
 `ShellControl` 使用宿主内部的不透明 admission，而非伪造 Web 登录或 QQ 用户。它在目标事务中锁定当前 Binding、Bot/Host 与原命令领取记录，复验所有权、期限、当前管理员、原参数、实际动作和目标会话，再复用 `AgentStore`、`JobStore` 的管理方法。共同的操作账本保持稳定 `shell-action:<command_id>`；提交后丢失本地确认可以读取原结果，不能再次取消或再次创建任务。Web 使用自己的主体与短效签名票据调用相同方法。
 
 ## 3. 控制优先级与资源归属
@@ -55,8 +59,10 @@ Web 创建定义时保存有明确期限的长期委托。后台 `WebAuthority.i
 ## 5. 验证入口与当前范围
 
 - `tests/test_shell_commands.py`：语法、边界、未知参数丢弃和来源识别。
+- `tests/test_shell_registry.py`：固定契约、不可变导出、帮助形式与 schema/别名一致、既有词法边界。
+- `tests/test_shell_registry_runtime.py`：真实持久帮助回执，以及 Dispatcher 重建后不重解析已接纳参数、不重复业务操作和发送意图。
 - `tests/test_shell_management.py`：忙时取消、费用 UNKNOWN 保留、同操作重放、当前撤权、跨群目标拒绝、安全输出及预留控制槽。
 - `tests/test_job_authority.py`：注销后的有效委托、停用/角色/修订撤销、目的绑定和签名检查。
 - `tests/test_job_scheduler.py`：两个扫描器的同 occurrence 接纳、真实群队列切口、账户撤权退避、任务与协程回收。
 
-完整命令注册、跨 Bot 授权、进程/runbook、日志订阅、配置与记忆 Shell 动作、部署账号管理及账户停用的可选批量取消尚属后续 P5。本文测试使用独立 PostgreSQL 和本地 Provider/Adapter 服务，未使用真实 QQ 或付费模型凭据。
+动态命令注册、跨 Bot 授权、进程/runbook、日志订阅、配置与记忆 Shell 动作、部署账号管理及账户停用的可选批量取消尚属后续 P5。本文测试使用独立 PostgreSQL 和本地 Provider/Adapter 服务，未使用真实 QQ 或付费模型凭据。

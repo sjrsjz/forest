@@ -7,6 +7,7 @@ from collections.abc import Callable
 from uuid import uuid4
 
 from forest.errors import ForestError
+from forest.shell_registry import CONTROL_DEADLINE, get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore
@@ -24,12 +25,13 @@ class ShellDispatcher:
         runtime: BotStore | None = None,
         max_concurrency: int = 4,
         poll_interval: float = 0.2,
-        command_timeout: float = 5,
+        command_timeout: float = CONTROL_DEADLINE.default_seconds,
         scan_page_size: int = 64,
         on_change: Callable[[], None] | None = None,
     ):
         if not (type(max_concurrency) is int and 1 <= max_concurrency <= 16
-                and 0.01 <= poll_interval <= 60 and 0.1 <= command_timeout <= 30
+                and 0.01 <= poll_interval <= 60
+                and CONTROL_DEADLINE.minimum_seconds <= command_timeout <= CONTROL_DEADLINE.maximum_seconds
                 and type(scan_page_size) is int and 1 <= scan_page_size <= 256):
             raise ValueError("Invalid Shell resource bounds")
         self.messages, self.bindings, self.delivery = messages, bindings, delivery
@@ -123,6 +125,8 @@ class ShellDispatcher:
                 )
                 if claim["status"] == "COMPLETED":
                     return
+                spec = get_command_spec(claim["command_name"])
+                builtin_method = spec.execution_method if spec and spec.execution_target == "builtin" else None
                 # Current effective Binding configuration supplies the only P1
                 # administrator allowlist. Platform role/nickname never grants it.
                 async with self.runtime.pool.connection() as conn, conn.transaction():
@@ -139,7 +143,7 @@ class ShellDispatcher:
                         and author.get("external_user_id") in admins
                     )
                     paused = not binding["_runtime"]["data_admission"]
-                    if authorized and claim["command_name"] in {"status", "core.status", "bot.status"}:
+                    if authorized and builtin_method == "status":
                         count = await (await conn.execute(
                             "SELECT COALESCE(sum(next_ingress_seq-1-context_applied_seq),0) AS pending "
                             "FROM public.bot_conversations WHERE bot_id=%s", (self.runtime.bot_id,),
@@ -149,19 +153,10 @@ class ShellDispatcher:
                     await self.bindings._final_guard(conn, lease, binding, data=False)
                 if not authorized:
                     text, outcome = "当前账号没有 Forest 管理权限。", {"code": "DENIED"}
-                elif claim["command_name"] == "help":
-                    text = (
-                        "Forest 本群管理：#forest status；#forest run list；#forest jobs list；"
-                        "#forest jobs status <job_id>；#forest jobs run <job_id> --expect-revision <修订>；"
-                        "#forest jobs cancel <job_id> --expect-revision <修订> --scope future|pending|all --reason \"原因\"；"
-                        "#forest jobs replay <occurrence_id> --expect-revision <执行修订>；"
-                        "#forest run cancel <run_id> --expect-checkpoint <检查点> --reason \"原因\"；"
-                        "#forest run approve|reject <approval_id> --digest <参数摘要>。"
-                        "计划配置在 Web 后台编辑。future 停止未来触发，pending 取消未领取任务，all 合并两者；"
-                        "已开始的回答需通过 run cancel 取消。命令参数不会进入 Agent 上下文；请勿在群中发送密钥。"
-                    )
+                elif builtin_method == "help":
+                    text = render_help()
                     outcome = {"code": "HELP"}
-                elif claim["command_name"] in {"status", "core.status", "bot.status"}:
+                elif builtin_method == "status":
                     text = f"Forest 状态：{'业务已暂停' if paused else '运行中'}；待处理会话消息：{count['pending']}。"
                     outcome = {"code": "STATUS", "paused": paused, "pending_messages": int(count["pending"])}
                 elif claim["command_name"].startswith(("job.", "run.")):
@@ -190,20 +185,21 @@ class ShellDispatcher:
         control = ShellControl(self.messages, lease, claim)
         admission, operation = control.admission, "shell-action:" + claim["command_id"]
         payload, name = claim["arguments"], claim["command_name"]
-        if name.startswith("run."):
+        # The immutable key and typed arguments came from durable admission.
+        # Do not parse the source text or validate it under a newer schema here.
+        spec = get_command_spec(name)
+        if spec is None or spec.action is None:
+            raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
+        if spec.execution_target == "agent":
             repository = AgentStore(self.messages)
             repository.control = control
-            handlers = {"run.read": repository.inspect, "run.cancel": repository.cancel,
-                        "run.approval": repository.decide_approval}
-        else:
+        elif spec.execution_target == "job":
             from forest.storage.jobs import JobStore
 
             repository = JobStore(self.messages, control=control)
-            handlers = {"job.read": repository.read, "job.run": repository.run_now,
-                        "job.cancel": repository.cancel, "job.replay": repository.replay}
-        if name not in handlers:
+        else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
-        result = await handlers[name](admission, operation, payload)
+        result = await getattr(repository, spec.execution_method)(admission, operation, payload)
         if name == "run.read":
             lines = [
                 f"{row['run_id']}：{row['phase']}；检查点 {row['checkpoint_seq']}"

@@ -6,6 +6,8 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
+from forest.shell_registry import DOMAIN_ALIASES_V2, SIMPLE_COMMANDS_V2, get_command_spec
+
 
 @dataclass(frozen=True)
 class ShellCommand:
@@ -15,7 +17,13 @@ class ShellCommand:
 
 
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
-_ALIASES = {"jobs": "job", "runs": "run"}
+
+
+def _command(name, payload=None):
+    spec = get_command_spec(name)
+    if spec is None:
+        raise ValueError("command")
+    return ShellCommand(name, {} if payload is None else payload, spec.priority)
 
 
 def _options(words, required):
@@ -49,51 +57,49 @@ def _reason(value):
 
 
 def _parse(words):
-    aliases = {(): "help", ("help",): "help", ("status",): "status",
-               ("bot", "status"): "bot.status", ("core", "status"): "core.status"}
-    if tuple(words) in aliases:
-        return ShellCommand(aliases[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V2:
+        return _command(SIMPLE_COMMANDS_V2[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = _ALIASES.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V2.get(words[0], words[0]), words[1]
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
-        return ShellCommand(domain + ".read")
+        return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:
-        return ShellCommand("job.read", {"job_id": _identity(words[2])})
+        return _command("job.read", {"job_id": _identity(words[2])})
     if (domain, verb) == ("job", "run") and len(words) >= 3:
         options = _options(words[3:], {"--expect-revision"})
-        return ShellCommand("job.run", {
+        return _command("job.run", {
             "job_id": _identity(words[2]),
             "expected_revision": _revision(options["--expect-revision"]),
-        }, 2)
+        })
     if (domain, verb) == ("job", "cancel") and len(words) >= 3:
         options = _options(words[3:], {"--expect-revision", "--scope", "--reason"})
         if options["--scope"] not in {"future", "pending", "all"}:
             raise ValueError("scope")
-        return ShellCommand("job.cancel", {
+        return _command("job.cancel", {
             "job_id": _identity(words[2]),
             "expected_revision": _revision(options["--expect-revision"]),
             "scope": options["--scope"], "reason": _reason(options["--reason"]),
-        }, 0)
+        })
     if (domain, verb) == ("job", "replay") and len(words) >= 3:
         options = _options(words[3:], {"--expect-revision"})
-        return ShellCommand("job.replay", {
+        return _command("job.replay", {
             "occurrence_id": _identity(words[2]),
             "expected_revision": _revision(options["--expect-revision"]),
-        }, 2)
+        })
     if (domain, verb) == ("run", "cancel") and len(words) >= 3:
         options = _options(words[3:], {"--expect-checkpoint", "--reason"})
-        return ShellCommand("run.cancel", {
+        return _command("run.cancel", {
             "run_id": _identity(words[2]),
             "expected_checkpoint_seq": _revision(options["--expect-checkpoint"]),
             "reason": _reason(options["--reason"]),
-        }, 0)
+        })
     if domain == "run" and verb in {"approve", "reject"} and len(words) >= 3:
         options = _options(words[3:], {"--digest"})
-        return ShellCommand("run.approval", {
+        return _command("run.approval", {
             "approval_id": _identity(words[2]), "arguments_digest": _identity(options["--digest"]),
             "decision": "APPROVE" if verb == "approve" else "REJECT",
-        }, 0)
+        })
     raise ValueError("command")
 
 

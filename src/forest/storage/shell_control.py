@@ -4,12 +4,8 @@ from __future__ import annotations
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.shell_registry import command_action
 from forest.storage.control import BotControl
-
-_ACTIONS = {
-    "run.read": "agent.read", "run.cancel": "agent.cancel", "run.approval": "agent.approval",
-    "job.read": "job.read", "job.run": "job.run", "job.cancel": "job.cancel", "job.replay": "job.replay",
-}
 
 
 class ShellControl(BotControl):
@@ -45,7 +41,7 @@ class ShellControl(BotControl):
                 or request["binding_id"] != self.binding_id
                 or request["binding_epoch"] != self.binding["binding_epoch"]
                 or request["policy_revision"] != self.binding["_runtime"]["policy_revision"]
-                or _ACTIONS.get(request["command_name"]) != action
+                or command_action(request["command_name"]) != action
                 or request["arguments"] != payload):
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Command claim changed or expired", 403)
         source = await (await conn.execute(
