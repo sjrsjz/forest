@@ -1,20 +1,21 @@
-"""Frozen contracts for the existing builtin shell-gate-v2 command language.
+"""Frozen contracts for the builtin v2 and v3 Shell command languages.
 
 This is a host-owned table, not a plugin registration or authorization API.
 Queued requests already contain typed arguments: executors select this fixed
-contract by command key and never parse or validate their original text again.
-The gate version is persisted today; per-command digests are exported metadata,
-not a claim that the database already stores a dynamic registry snapshot.
+contract by persisted gate and command key and never parse or validate their
+original text again. Per-command digests are exported metadata, not a claim
+that the database stores a dynamic registry snapshot.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 GATE_VERSION = "shell-gate-v2"
+CURRENT_GATE_VERSION = "shell-gate-v3"
 
 
 def _canonical(value) -> str:
@@ -52,6 +53,8 @@ class CommandForm:
     def usage(self, schema: dict) -> str:
         def argument(name):
             prop = schema["properties"][name]
+            if prop.get("type") == "array":
+                prop = prop["items"]
             if "enum" in prop:
                 return "|".join(prop["enum"])
             title = prop["title"]
@@ -117,6 +120,11 @@ def _id(title: str) -> dict:
 
 def _revision(title: str) -> dict:
     return {"type": "integer", "title": title, "minimum": 0, "maximum": 999999999999999999}
+
+
+def _ids(title: str) -> dict:
+    return {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True,
+            "items": _id(title)}
 
 
 def _reason() -> dict:
@@ -198,31 +206,104 @@ SIMPLE_COMMANDS_V2 = MappingProxyType({
 })
 
 
-def get_command_spec(command_key: str) -> CommandSpec | None:
-    """Resolve only the fixed builtin contract; unknown keys have no executor."""
-    return BUILTIN_GATE_V2.get(command_key)
+def _build_v3():
+    table = {
+        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        for key, spec in BUILTIN_GATE_V2.items()
+    }
+    additions = (
+        replace(
+            _spec("memory.read", forms=(CommandForm(("memory", "list")),),
+                  action="memory.forget.read", scope="group_memory_trunk",
+                  target="memory", method="read"),
+            gate_version=CURRENT_GATE_VERSION,
+        ),
+        replace(
+            _spec(
+                "memory.forget.plan",
+                forms=(CommandForm(("memory", "forget-plan"), ("source_unit_ids",),
+                                   (("--expect-deletion-epoch", "expected_deletion_epoch"),)),),
+                properties={"source_unit_ids": _ids("source_unit_id"),
+                            "expected_deletion_epoch": _revision("删除版本")},
+                required=("source_unit_ids", "expected_deletion_epoch"),
+                action="memory.forget.plan", scope="group_memory_trunk",
+                target="memory", method="plan",
+            ),
+            gate_version=CURRENT_GATE_VERSION,
+        ),
+        replace(
+            _spec(
+                "memory.forget.apply",
+                forms=(CommandForm(("memory", "forget-apply"), ("plan_id",), (
+                    ("--digest", "plan_digest"),
+                    ("--expect-deletion-epoch", "expected_deletion_epoch"),
+                )),),
+                properties={"plan_id": _id("plan_id"), "plan_digest": _id("计划摘要"),
+                            "expected_deletion_epoch": _revision("删除版本")},
+                required=("plan_id", "plan_digest", "expected_deletion_epoch"),
+                action="memory.forget.apply", scope="group_memory_trunk", priority=0,
+                kind="forget_apply", target="memory", method="apply",
+            ),
+            gate_version=CURRENT_GATE_VERSION,
+        ),
+    )
+    forms = {form.words for spec in table.values() for form in spec.forms}
+    for spec in additions:
+        if spec.command_key in table or any(form.words in forms for form in spec.forms):
+            raise ValueError("Duplicate builtin v3 command")
+        table[spec.command_key] = spec
+        forms.update(form.words for form in spec.forms)
+    return MappingProxyType(table)
 
 
-def command_action(command_key: str) -> str | None:
-    spec = get_command_spec(command_key)
+BUILTIN_GATE_V3 = _build_v3()
+DOMAIN_ALIASES_V3 = DOMAIN_ALIASES_V2
+SIMPLE_COMMANDS_V3 = MappingProxyType({
+    form.words: spec.command_key for spec in BUILTIN_GATE_V3.values()
+    if spec.execution_target == "builtin" for form in spec.forms
+})
+BUILTIN_GATES = MappingProxyType({
+    GATE_VERSION: BUILTIN_GATE_V2,
+    CURRENT_GATE_VERSION: BUILTIN_GATE_V3,
+})
+DOMAIN_ALIASES = MappingProxyType({
+    GATE_VERSION: DOMAIN_ALIASES_V2,
+    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V3,
+})
+
+
+def get_command_spec(command_key: str, gate_version: str = GATE_VERSION) -> CommandSpec | None:
+    """Resolve a durable command only under the gate that admitted it."""
+    gate = BUILTIN_GATES.get(gate_version)
+    return gate.get(command_key) if gate is not None else None
+
+
+def command_action(command_key: str, gate_version: str = GATE_VERSION) -> str | None:
+    spec = get_command_spec(command_key, gate_version)
     return spec.action if spec is not None else None
 
 
-def registry_manifest() -> dict:
+def registry_manifest(gate_version: str = GATE_VERSION) -> dict:
     """Detached metadata for inspection; this grants no execution capability."""
-    value = {"gate_version": GATE_VERSION, "commands": [spec.manifest() for spec in BUILTIN_GATE_V2.values()],
-             "domain_aliases": dict(DOMAIN_ALIASES_V2)}
+    gate = BUILTIN_GATES.get(gate_version)
+    if gate is None:
+        raise ValueError("Unknown shell gate")
+    value = {"gate_version": gate_version, "commands": [spec.manifest() for spec in gate.values()],
+             "domain_aliases": dict(DOMAIN_ALIASES[gate_version])}
     return {**value, "registry_digest": _digest(_canonical(value))}
 
 
-def render_help() -> str:
+def render_help(gate_version: str = GATE_VERSION) -> str:
+    gate = BUILTIN_GATES.get(gate_version)
+    if gate is None:
+        raise ValueError("Unknown shell gate")
     commands, notes = [], []
-    for spec in BUILTIN_GATE_V2.values():
+    for spec in gate.values():
         schema = spec.args_schema
         commands.extend(form.usage(schema) for form in spec.forms if form.show_in_help)
         if spec.note:
             notes.append(spec.note)
-    aliases = "；".join(f"{alias} 等同 {name}" for alias, name in DOMAIN_ALIASES_V2.items())
+    aliases = "；".join(f"{alias} 等同 {name}" for alias, name in DOMAIN_ALIASES[gate_version].items())
     return ("Forest 本群管理：" + "；".join(commands) + "。" + aliases + "。"
             + "".join(notes) + "计划配置在 Web 后台编辑。"
             "命令参数不会进入 Agent 上下文；请勿在群中发送密钥。")

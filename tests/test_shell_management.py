@@ -13,6 +13,7 @@ from forest.errors import ForestError
 from forest.storage.agent import AgentStore
 from forest.storage.delivery_payloads import DeliveryContentStore
 from forest.storage.input_payloads import InputContentStore
+from forest.storage.memory_administration import MemoryAdministration
 from forest.storage.shell_control import ShellControl
 
 pytestmark = pytest.mark.postgres
@@ -160,3 +161,52 @@ async def test_urgent_cancel_has_a_slot_while_normal_control_is_waiting(messages
     finally:
         release.set()
         await controls.close()
+
+
+async def test_shell_memory_forget_plan_is_bound_to_origin_group(messages):
+    repository, lease, _ = messages
+    await allow(repository, "user-1")
+    ours = await receive(repository, lease, "memory-one", group="group-1", text="erase this")
+    other = await receive(repository, lease, "memory-two", group="group-2", text="keep this")
+    for index, receipt in enumerate((ours, other)):
+        actor = await repository.acquire_actor(
+            lease, receipt["conversation_id"], f"memory-actor-{index}", ttl_seconds=30
+        )
+        await repository.select_input(actor, f"memory-admit-{index}")
+    admin = MemoryAdministration(repository)
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        view = await admin.sources.authorize_sources_in(conn, limit=10, include_payload=True)
+    source = next(
+        row for row in view["sources"] if row["source"]["channel_id"] == "group-1"
+    )
+
+    controls = dispatcher(repository, lease)
+    plan_claim = await claim_command(
+        repository,
+        lease,
+        f"#forest memory forget-plan {source['source_unit_id']} --expect-deletion-epoch 0",
+        number="memory-plan",
+        group="group-1",
+    )
+    assert plan_claim["gate_version"] == "shell-gate-v3"
+    _, proposal = await controls._typed(lease, plan_claim)
+    apply_text = (
+        f"#forest memory forget-apply {proposal['plan_id']} --digest {proposal['plan_digest']} "
+        f"--expect-deletion-epoch {proposal['deletion_epoch']}"
+    )
+    foreign_claim = await claim_command(
+        repository, lease, apply_text, number="memory-foreign", group="group-2"
+    )
+    with pytest.raises(ForestError) as denied:
+        await controls._typed(lease, foreign_claim)
+    assert denied.value.code == "SHELL_SCOPE_DENIED"
+
+    own_claim = await claim_command(
+        repository, lease, apply_text, number="memory-apply", group="group-1"
+    )
+    text, outcome = await controls._typed(lease, own_claim)
+    assert outcome["code"] == "ACCEPTED" and outcome["deletion_epoch"] == 1
+    assert "删除版本 1" in text
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        current = await admin.sources.authorize_sources_in(conn, limit=10, include_payload=True)
+    assert {row["source"]["channel_id"] for row in current["sources"]} == {"group-2"}

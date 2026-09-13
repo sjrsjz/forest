@@ -144,6 +144,7 @@ class BindingRuntime:
     def _notify_work(self):
         self.scheduler.notify()
         self.jobs.notify()
+        self.memory.notify()
 
     async def _authorize_job(self, claim):
         grant = claim.delegation

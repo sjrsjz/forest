@@ -24,6 +24,13 @@ def command(text, *, extras=(), self_message=False):
      {"job_id": "job:1", "expected_revision": 2, "scope": "future", "reason": "停止计划"}, 0),
     ("#forest run reject approval:1 --digest sha256:abc", "run.approval",
      {"approval_id": "approval:1", "arguments_digest": "sha256:abc", "decision": "REJECT"}, 0),
+    ("#forest memory list", "memory.read", {}, 1),
+    ("#forest memory forget-plan source-unit:abc --expect-deletion-epoch 4",
+     "memory.forget.plan",
+     {"source_unit_ids": ["source-unit:abc"], "expected_deletion_epoch": 4}, 1),
+    ("#forest memory forget-apply plan:1 --digest sha256:abc --expect-deletion-epoch 4",
+     "memory.forget.apply",
+     {"plan_id": "plan:1", "plan_digest": "sha256:abc", "expected_deletion_epoch": 4}, 0),
 ])
 def test_typed_commands(text, name, payload, priority):
     parsed = command(text)
@@ -58,3 +65,8 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value).name == "status"
     value["segments"].insert(0, {"type": "quote", "text": "#forest status"})
     assert parse_command(value) is None
+
+
+def test_new_admissions_are_explicitly_shell_gate_v3():
+    assert command("#forest status").gate_version == "shell-gate-v3"
+    assert command("#forest memory list").gate_version == "shell-gate-v3"

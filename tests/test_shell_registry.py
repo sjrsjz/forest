@@ -11,7 +11,9 @@ from test_shell_commands import command
 
 from forest.shell_registry import (
     BUILTIN_GATE_V2,
+    BUILTIN_GATE_V3,
     CONTROL_DEADLINE,
+    CURRENT_GATE_VERSION,
     DOMAIN_ALIASES_V2,
     command_action,
     get_command_spec,
@@ -126,3 +128,17 @@ def test_fixed_gate_v2_registry_digest():
     # A contract change needs an explicit compatibility decision, not silent drift
     # of a table that still resolves already-admitted shell-gate-v2 requests.
     assert registry_manifest()["registry_digest"] == "sha256:560d434e08393a4cf0ccf548ca427d469c55bae4fae6ead76052e0334cf027e9"
+
+
+def test_gate_v3_adds_only_group_memory_administration_and_keeps_v2_resolvable():
+    assert CURRENT_GATE_VERSION == "shell-gate-v3"
+    assert set(BUILTIN_GATE_V3) - set(BUILTIN_GATE_V2) == {
+        "memory.read", "memory.forget.plan", "memory.forget.apply"
+    }
+    assert get_command_spec("memory.read") is None
+    assert command_action("memory.read") is None
+    assert get_command_spec("memory.read", CURRENT_GATE_VERSION).action == "memory.forget.read"
+    assert command_action("memory.forget.apply", CURRENT_GATE_VERSION) == "memory.forget.apply"
+    assert all(spec.gate_version == CURRENT_GATE_VERSION for spec in BUILTIN_GATE_V3.values())
+    assert "#forest memory list" in render_help(CURRENT_GATE_VERSION)
+    assert registry_manifest(CURRENT_GATE_VERSION)["gate_version"] == CURRENT_GATE_VERSION

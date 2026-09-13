@@ -363,102 +363,159 @@ class PayloadStore:
             await self.store._host(conn, lease)
             return result
 
-    async def forget_sources(self, lease: HostLease, operation_id: str, targets,
-                              *, expected_deletion_epoch: int) -> dict:
-        """Internal storage primitive, not yet a public complete memory-forget API.
-
-        Revisions never escape a permanent suppression. This erases only bodies
-        governed by this repository; legacy copies remain until migrated.
-        """
-        _identifier(operation_id)
+    def _forget_input(self, targets, expected_deletion_epoch):
         refs = self._sources(targets)
         values = [{"source_unit_id": unit, "part_id": part}
                   for unit, part in sorted({(s.source_unit_id, s.part_id) for s in refs})]
         if not values:
             raise ForestError("INVALID_FORGET_TARGET", "At least one source is required", 422)
-        digest = digest_json([expected_deletion_epoch, values])
+        if type(expected_deletion_epoch) is not int or expected_deletion_epoch < 0:
+            raise ForestError("INVALID_DELETION_EPOCH", "Expected deletion epoch is required", 422)
+        return values, digest_json([expected_deletion_epoch, values])
+
+    async def preview_forget_in(self, conn, targets, *, expected_deletion_epoch: int) -> dict:
+        """Resolve the exact durable target set while holding the deletion clock."""
+        requested, digest = self._forget_input(targets, expected_deletion_epoch)
         from forest.storage.migration_v1 import legacy_source_ref
 
         legacy = legacy_source_ref(self.store.bot_id).source_unit_id
-        async with self.store.pool.connection() as conn, conn.transaction():
-            await self.store._host(conn, lease)
-            await self.lock_in(conn)
-            previous = await (await conn.execute(
-                "SELECT * FROM public.bot_payload_forget_requests WHERE bot_id=%s AND operation_id=%s",
-                (self.store.bot_id, operation_id),
-            )).fetchone()
-            if previous:
-                if previous["input_digest"] != digest:
-                    raise ForestError("FORGET_CONFLICT", "Forget operation has different targets", 409)
-                result = {"operation_id": operation_id, "deletion_epoch": previous["deletion_epoch"],
-                          "legacy_conservative": any(t["source_unit_id"] == legacy
-                                                     for t in previous["targets"])}
-            else:
-                clock = await self._epoch_in(conn, expected_deletion_epoch)
-                legacy_used = await (await conn.execute(
-                    "SELECT 1 FROM public.bot_payload_sources WHERE bot_id=%s AND source_unit_id=%s LIMIT 1",
-                    (self.store.bot_id, legacy),
-                )).fetchone()
-                # Older SourcePayloads already have immutable manifests, so an
-                # incomplete reply cannot have this marker appended in place.
-                # Name its own source explicitly in the durable deletion plan.
-                source_table = await (await conn.execute(
-                    "SELECT to_regclass('public.bot_memory_source_units') AS relation"
-                )).fetchone()
-                incomplete = []
-                if source_table["relation"]:
-                    incomplete = await (await conn.execute(
-                        "SELECT u.source_unit_id FROM public.bot_memory_source_units u "
-                        "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
-                        "WHERE u.bot_id=%s AND NOT u.lineage_complete AND h.state='ACTIVE' "
-                        "ORDER BY u.source_unit_id LIMIT %s",
-                        (self.store.bot_id, MAX_SOURCES + 1),
-                    )).fetchall()
-                conservative = bool(legacy_used or incomplete)
-                if conservative:
-                    values = sorted({(t["source_unit_id"], t["part_id"]) for t in values}
-                                    | {(legacy, "*")}
-                                    | {(r["source_unit_id"], "*") for r in incomplete})
-                    values = [{"source_unit_id": unit, "part_id": part} for unit, part in values]
-                    if len(values) > MAX_SOURCES:
-                        raise ForestError("FORGET_SCOPE_LIMIT", "Legacy deletion closure exceeds source limit", 422)
-                linked = await (await conn.execute(
-                    "SELECT * FROM public.forest_source_dependent_closure(%s,%s,%s)",
-                    (self.store.bot_id, Jsonb(values), MAX_SOURCES),
-                )).fetchall()
-                if len(linked) > MAX_SOURCES:
-                    raise ForestError("FORGET_SCOPE_LIMIT", "Exact alias deletion closure exceeds source limit", 422)
-                values = sorted(linked, key=lambda item: (item['source_unit_id'],item['part_id']))
-                epoch = clock["deletion_epoch"] + 1
-                await conn.execute(
-                    "INSERT INTO public.bot_payload_forget_requests(bot_id,operation_id,input_digest,targets,"
-                    "deletion_epoch) VALUES (%s,%s,%s,%s,%s)",
-                    (self.store.bot_id, operation_id, digest, Jsonb(values), epoch),
-                )
-                for target in values:
-                    await conn.execute(
-                        "INSERT INTO public.bot_payload_suppression(bot_id,source_unit_id,part_id,operation_id,"
-                        "deletion_epoch) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (self.store.bot_id, target["source_unit_id"], target["part_id"], operation_id, epoch),
-                    )
-                await conn.execute(
-                    "UPDATE public.bot_memory_clock SET deletion_epoch=%s,fact_revision=fact_revision+1 "
-                    "WHERE bot_id=%s", (epoch, self.store.bot_id),
-                )
-                source_relation = await self._effective_source_relation_in(conn)
-                await conn.execute(
-                    "UPDATE public.bot_payload_headers h SET state='REVOKED',forget_operation_id=%s "
-                    f"WHERE h.bot_id=%s AND h.state='ACTIVE' AND EXISTS(SELECT 1 FROM {source_relation} s,"
-                    "jsonb_array_elements(%s::jsonb) t WHERE s.bot_id=h.bot_id AND s.payload_id=h.payload_id "
-                    "AND s.source_unit_id=t->>'source_unit_id' "
-                    "AND (s.part_id='*' OR t->>'part_id'='*' OR s.part_id=t->>'part_id'))",
-                    (operation_id, self.store.bot_id, Jsonb(values)),
-                )
-                result = {"operation_id": operation_id, "deletion_epoch": epoch,
-                          "legacy_conservative": conservative}
-                await self.store._event(conn, "memory.payload_sources_revoked", operation_id, result)
+        clock = await self._epoch_in(conn, expected_deletion_epoch)
+        values = list(requested)
+        legacy_used = await (await conn.execute(
+            "SELECT 1 FROM public.bot_payload_sources WHERE bot_id=%s AND source_unit_id=%s LIMIT 1",
+            (self.store.bot_id, legacy),
+        )).fetchone()
+        # Older SourcePayloads already have immutable manifests, so an
+        # incomplete reply cannot have this marker appended in place.
+        # Name its own source explicitly in the durable deletion plan.
+        source_table = await (await conn.execute(
+            "SELECT to_regclass('public.bot_memory_source_units') AS relation"
+        )).fetchone()
+        incomplete = []
+        if source_table["relation"]:
+            incomplete = await (await conn.execute(
+                "SELECT u.source_unit_id FROM public.bot_memory_source_units u "
+                "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
+                "WHERE u.bot_id=%s AND NOT u.lineage_complete AND h.state='ACTIVE' "
+                "ORDER BY u.source_unit_id LIMIT %s",
+                (self.store.bot_id, MAX_SOURCES + 1),
+            )).fetchall()
+        conservative = bool(legacy_used or incomplete)
+        if conservative:
+            values = sorted({(t["source_unit_id"], t["part_id"]) for t in values}
+                            | {(legacy, "*")}
+                            | {(r["source_unit_id"], "*") for r in incomplete})
+            values = [{"source_unit_id": unit, "part_id": part} for unit, part in values]
+            if len(values) > MAX_SOURCES:
+                raise ForestError("FORGET_SCOPE_LIMIT", "Legacy deletion closure exceeds source limit", 422)
+        linked = await (await conn.execute(
+            "SELECT * FROM public.forest_source_dependent_closure(%s,%s,%s)",
+            (self.store.bot_id, Jsonb(values), MAX_SOURCES),
+        )).fetchall()
+        if len(linked) > MAX_SOURCES:
+            raise ForestError("FORGET_SCOPE_LIMIT", "Exact alias deletion closure exceeds source limit", 422)
+        values = sorted(
+            ({"source_unit_id": row["source_unit_id"], "part_id": row["part_id"]}
+             for row in linked),
+            key=lambda item: (item["source_unit_id"], item["part_id"]),
+        )
+        source_relation = await self._effective_source_relation_in(conn)
+        affected = await (await conn.execute(
+            "SELECT count(*) AS count FROM public.bot_payload_headers h WHERE h.bot_id=%s "
+            "AND h.state='ACTIVE' AND EXISTS(SELECT 1 FROM " + source_relation + " s,"
+            "jsonb_array_elements(%s::jsonb) t WHERE s.bot_id=h.bot_id AND s.payload_id=h.payload_id "
+            "AND s.source_unit_id=t->>'source_unit_id' "
+            "AND (s.part_id='*' OR t->>'part_id'='*' OR s.part_id=t->>'part_id'))",
+            (self.store.bot_id, Jsonb(values)),
+        )).fetchone()
+        return {
+            "expected_deletion_epoch": clock["deletion_epoch"],
+            "input_digest": digest,
+            "requested_targets": requested,
+            "resolved_targets": values,
+            "legacy_conservative": conservative,
+            "affected_payloads": affected["count"],
+        }
+
+    async def forget_sources_in(self, conn, lease: HostLease, operation_id: str, targets,
+                                *, expected_deletion_epoch: int,
+                                expected_resolved_targets=None,
+                                expected_affected_payloads=None) -> dict:
+        """Commit suppression in the caller's transaction with Host fencing."""
+        _identifier(operation_id)
+        requested, digest = self._forget_input(targets, expected_deletion_epoch)
+        from forest.storage.migration_v1 import legacy_source_ref
+
+        legacy = legacy_source_ref(self.store.bot_id).source_unit_id
+        await self.store._host(conn, lease)
+        await self.lock_in(conn)
+        previous = await (await conn.execute(
+            "SELECT * FROM public.bot_payload_forget_requests WHERE bot_id=%s AND operation_id=%s",
+            (self.store.bot_id, operation_id),
+        )).fetchone()
+        if previous:
+            if previous["input_digest"] != digest:
+                raise ForestError("FORGET_CONFLICT", "Forget operation has different targets", 409)
+            result = {"operation_id": operation_id, "deletion_epoch": previous["deletion_epoch"],
+                      "legacy_conservative": any(t["source_unit_id"] == legacy
+                                                 for t in previous["targets"])}
             await self.store._host(conn, lease)
             return result
+        preview = await self.preview_forget_in(
+            conn,
+            tuple(SourceRef(item["source_unit_id"], part_id=item["part_id"])
+                  for item in requested),
+            expected_deletion_epoch=expected_deletion_epoch,
+        )
+        values = preview["resolved_targets"]
+        if expected_resolved_targets is not None and values != list(expected_resolved_targets):
+            raise ForestError(
+                "FORGET_PLAN_CHANGED", "Forget target closure changed; preview it again", 409
+            )
+        if (expected_affected_payloads is not None
+                and preview["affected_payloads"] != expected_affected_payloads):
+            raise ForestError(
+                "FORGET_PLAN_CHANGED", "Forget impact changed; preview it again", 409
+            )
+        epoch = expected_deletion_epoch + 1
+        await conn.execute(
+            "INSERT INTO public.bot_payload_forget_requests(bot_id,operation_id,input_digest,targets,"
+            "deletion_epoch) VALUES (%s,%s,%s,%s,%s)",
+            (self.store.bot_id, operation_id, digest, Jsonb(values), epoch),
+        )
+        for target in values:
+            await conn.execute(
+                "INSERT INTO public.bot_payload_suppression(bot_id,source_unit_id,part_id,operation_id,"
+                "deletion_epoch) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (self.store.bot_id, target["source_unit_id"], target["part_id"], operation_id, epoch),
+            )
+        await conn.execute(
+            "UPDATE public.bot_memory_clock SET deletion_epoch=%s,fact_revision=fact_revision+1 "
+            "WHERE bot_id=%s", (epoch, self.store.bot_id),
+        )
+        source_relation = await self._effective_source_relation_in(conn)
+        await conn.execute(
+            "UPDATE public.bot_payload_headers h SET state='REVOKED',forget_operation_id=%s "
+            f"WHERE h.bot_id=%s AND h.state='ACTIVE' AND EXISTS(SELECT 1 FROM {source_relation} s,"
+            "jsonb_array_elements(%s::jsonb) t WHERE s.bot_id=h.bot_id AND s.payload_id=h.payload_id "
+            "AND s.source_unit_id=t->>'source_unit_id' "
+            "AND (s.part_id='*' OR t->>'part_id'='*' OR s.part_id=t->>'part_id'))",
+            (operation_id, self.store.bot_id, Jsonb(values)),
+        )
+        result = {"operation_id": operation_id, "deletion_epoch": epoch,
+                  "legacy_conservative": preview["legacy_conservative"]}
+        await self.store._event(conn, "memory.payload_sources_revoked", operation_id, result)
+        await self.store._host(conn, lease)
+        return result
+
+    async def forget_sources(self, lease: HostLease, operation_id: str, targets,
+                              *, expected_deletion_epoch: int) -> dict:
+        """Internal storage primitive; public callers use a reviewed plan/apply flow."""
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.forget_sources_in(
+                conn, lease, operation_id, targets,
+                expected_deletion_epoch=expected_deletion_epoch,
+            )
 
     async def scrub(self, lease: HostLease, *, limit: int = 64) -> dict:
         """One bounded propagation/erasure batch; ownership recovery needs no I/O.

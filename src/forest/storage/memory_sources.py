@@ -474,6 +474,7 @@ class MemorySourceStore:
         limit=256,
         include_payload=True,
         after_source_unit_id=None,
+        group_source_id=None,
     ):
         """Trusted host transaction: global index or frozen conversation candidates.
 
@@ -512,13 +513,20 @@ class MemorySourceStore:
             or len(after_source_unit_id) > 256
         ):
             raise ValueError("Source cursor")
+        if group_source_id is not None and (
+            conversation is not None
+            or not isinstance(group_source_id, str)
+            or not 1 <= len(group_source_id) <= 256
+        ):
+            raise ValueError("Global source group filter")
         clock = await self.payloads.lock_in(conn)
         rows = await (
             await conn.execute(
                 "SELECT u.*,s.source_kind,s.visibility,s.platform,s.realm_id,s.identity_schema,s.channel_kind,s.channel_id,s.target_group_source_id,s.owner_conversation_id,s.has_reconstructed_order "
                 "FROM public.bot_memory_source_units u JOIN public.bot_memory_sources s USING(bot_id,source_id) "
                 "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
-                "WHERE u.bot_id=%s AND (%s::text[] IS NULL OR u.source_unit_id=ANY(%s)) "
+                "WHERE u.bot_id=%s AND (%s::text IS NULL OR s.target_group_source_id=%s) "
+                "AND (%s::text[] IS NULL OR u.source_unit_id=ANY(%s)) "
                 "AND (%s::text IS NULL OR u.source_unit_id>%s) "
                 "AND h.state='ACTIVE' AND u.lineage_complete "
                 "AND EXISTS(SELECT 1 FROM public.bot_payload_bodies b WHERE b.bot_id=h.bot_id AND b.payload_id=h.payload_id) "
@@ -546,6 +554,8 @@ class MemorySourceStore:
                 ),
                 (
                     self.store.bot_id,
+                    group_source_id,
+                    group_source_id,
                     source_unit_ids,
                     source_unit_ids,
                     (after_source_unit_id or "") if paged else None,
@@ -594,7 +604,7 @@ class MemorySourceStore:
                     "target_group_source_id",
                 )
             }
-            source["group_source_id"] = row["source_id"]
+            source["group_source_id"] = row["target_group_source_id"]
             result.append(
                 {
                     **row,
@@ -611,6 +621,14 @@ class MemorySourceStore:
             "fact_revision": clock["fact_revision"],
             "input_cut": input_cut,
             "sources": result,
+            # Advance by the last row inspected, even when a concurrent
+            # suppression or unavailable dependency made that row unreadable.
+            # Otherwise a sparse page could hide later authorized sources.
+            "next_after": (
+                rows[-1]["source_unit_id"]
+                if paged and len(rows) == limit
+                else None
+            ),
         }
 
     async def read(

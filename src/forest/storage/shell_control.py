@@ -26,7 +26,7 @@ class ShellControl(BotControl):
         self.author = None
 
     async def _guard(self, conn, ticket, action, operation_id, payload, plan_digest=""):
-        if ticket is not self.admission or plan_digest or operation_id != "shell-action:" + self.command_id:
+        if ticket is not self.admission or operation_id != "shell-action:" + self.command_id:
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Invalid command admission", 403)
         self.binding = await self.messages.bindings._guard(
             conn, self.lease, self.binding_id, data=False,
@@ -42,8 +42,9 @@ class ShellControl(BotControl):
                 or request["binding_id"] != self.binding_id
                 or request["binding_epoch"] != self.binding["binding_epoch"]
                 or request["policy_revision"] != self.binding["_runtime"]["policy_revision"]
-                or command_action(request["command_name"]) != action
-                or request["arguments"] != payload):
+                or command_action(request["command_name"], request["gate_version"]) != action
+                or request["arguments"] != payload
+                or plan_digest != payload.get("plan_digest", "")):
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Command claim changed or expired", 403)
         source = await (await conn.execute(
             "SELECT author,payload_id FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
@@ -64,7 +65,7 @@ class ShellControl(BotControl):
         return BotControl.admission({
             "issuer_id": "shell:" + self.binding_id, "subject_id": author["principal_ref"],
             "operation_id": operation_id, "action": action, "input_digest": digest_json(payload),
-            "plan_digest": "", "policy_revision": request["policy_revision"],
+            "plan_digest": plan_digest, "policy_revision": request["policy_revision"],
             "issued_at": now.isoformat(), "expires_at": request["expires_at"].isoformat(),
             "origin_kind": "shell", "source_binding_id": self.binding_id,
             "source_principal": author["principal_ref"], "source_event_id": request["event_id"],

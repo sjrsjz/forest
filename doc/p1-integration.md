@@ -20,7 +20,7 @@ HMAC-SHA1 校验原始请求体，核对固定 `self_id`，规范化完成后才
 
 新的触发在当前响应期间排队。下一次安全输入选择只推进到已分类连续前缀中的最后一个触发，后续非触发消息暂不进入该轮。执行结束后若无新触发，普通尾部静默排空。最终回复、已覆盖触发的 ANSWERED、回复序号和 SendIntent 在同一事务提交。取消、预算不足或失效不会把未回答触发标记为成功。
 
-当前执行组件 `forest.reply` 仅做 `{sender}`、`{text}`、`{group}` 模板替换，用于验证完整接入，不消耗模型 API。MessageStore 提供安全点入口；P3 仍需实现模型流、工具因果组和 ModelStep 的持久 checkpoint，届时才具备“下一次模型调用接入排队触发”的完整 Agent 行为。
+当前回复链由每个 `(bot_id, conversation_id)` 唯一持久 Agent 执行。宿主在下一次模型调用安全点推进消息切口到当时最后一个触发记录，模型—工具链继续期间不创建第二条并发响应；Agent 结束后若只剩未触发尾部，则静默排入短期上下文。CorePrompt、PresetContext、原子 ModelTurn、工具因果组和 checkpoint 已接通；未配置模型时不会退回产品子 Agent。
 
 当前协议转换和模板计算都是纯计算，失败后可用新 attempt 重新执行。业务去重落在 Inbox、最终 Reply/SendIntent 与发送尝试账本，不宣称 Worker 代码只执行一次。模型计费、工具副作用和长期记忆写入不能直接沿用这种重试方式。
 
@@ -38,9 +38,9 @@ CHAT 按 Conversation/response_seq/part 排序，CONTROL 按独立 command/contr
 
 ## 群聊管理入口
 
-固定完整前缀 `#forest` 在 Inbox 接纳时进入独立 CONTROL 路径。识别直接文本及可信的开头 Bot mention，不把引用、转发或 self echo 当命令。未知命令、坏语法和无权限请求均不回落普通 Agent。当前支持 `#forest help` 与 `#forest status`（以及状态别名），管理员来自有效 Binding 配置的显式 QQ ID；群 owner/admin 角色不自动授予框架权限。
+固定完整前缀 `#forest` 在 Inbox 接纳时进入独立 CONTROL 路径。识别直接文本及可信的开头 Bot mention，不把引用、转发或 self echo 当命令。未知命令、坏语法和无权限请求均不回落普通 Agent。当前支持状态、Run/Job 管理和本群记忆来源遗忘；管理员来自有效 Binding 配置的显式 QQ ID，群 owner/admin 角色不自动授予框架权限。`shell-gate-v2` 的已接纳命令保持冻结，新消息使用增加记忆命令的 v3，Dispatcher 按持久 gate 版本恢复。
 
-当前不执行任意系统命令、不开放 OS shell。敏感原始参数不写入普通 Context 或日志，未知命令只保存摘要和固定说明；首版完整类型化指令、变更计划、scope/优先级/授权委托仍按 09 文档实现。管理回执不占普通群 Actor，也不改正在执行的提示上下文。
+当前不执行任意系统命令、不开放 OS shell。敏感原始参数不写入普通 Context 或日志，未知命令只保存摘要和固定说明；已接入命令使用类型化参数、会话 scope 和 P0–P2 优先级，动态注册、运维 runbook 与完整授权委托仍按 09 文档实现。管理回执不占普通群 Actor，也不改正在执行的提示上下文。
 
 ## 验证入口
 

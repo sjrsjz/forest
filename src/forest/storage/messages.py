@@ -232,7 +232,9 @@ class MessageStore:
         parsed_command = parse_command(value)
         shell_command = parsed_command.name if parsed_command else None
         if shell_command is not None:
-            decision, rule_revision, reason = "CONTROL_COMMAND", "shell-gate-v2", "reserved_namespace"
+            decision, rule_revision, reason = (
+                "CONTROL_COMMAND", parsed_command.gate_version, "reserved_namespace"
+            )
         if decision is not None:
             _text(rule_revision, "rule_revision")
             _text(reason, "reason", 1024, empty=True)
@@ -325,10 +327,11 @@ class MessageStore:
                 await conn.execute(
                     "INSERT INTO public.bot_shell_requests(bot_id,command_id,event_id,conversation_id,"
                     "binding_id,command_name,raw_digest,arguments,priority,gate_version) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'shell-gate-v2')",
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (self.store.bot_id, command_id, event_id, conversation_id, binding_id,
                      shell_command, digest_json(value["segments"]),
-                     Jsonb(parsed_command.payload), parsed_command.priority),
+                     Jsonb(parsed_command.payload), parsed_command.priority,
+                     parsed_command.gate_version),
                 )
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"

@@ -10,11 +10,13 @@ from forest.errors import ForestError
 from forest.memory_index import profile
 from forest.storage.agent_memory import AgentMemoryStore
 from forest.storage.control import BotControl
+from forest.storage.memory_administration import MemoryAdministration
 from forest.storage.memory_config import MemoryConfig
 from forest.storage.memory_graph import GraphStore
 from forest.storage.memory_index import MemoryIndexStore
 from forest.storage.memory_media import MemoryMediaStore
 from forest.storage.memory_queries import MemoryQueryStore
+from forest.storage.payloads import PayloadStore
 
 
 class MemoryRuntime:
@@ -25,6 +27,8 @@ class MemoryRuntime:
         self.index = MemoryIndexStore(platform.messages, self.media)
         self.queries = MemoryQueryStore(self.index)
         self.graph = GraphStore(platform.messages)
+        self.administration = MemoryAdministration(platform.messages)
+        self.payloads = PayloadStore(self.store)
         self.task = None
         self.workers, self.errors, self.clients = {}, {}, set()
         self.executions = set()
@@ -67,6 +71,8 @@ class MemoryRuntime:
             self._wake.clear()
             try:
                 lease = self.platform.kernel._authority()
+                if "scrub:payloads" not in self.workers:
+                    self._spawn("scrub:payloads", lambda: self._scrub(lease))
                 # Attempt identities carry enough accounting facts to recover
                 # without reopening a deleted/disabled configuration body.
                 await self.index.recover(lease)
@@ -141,6 +147,12 @@ class MemoryRuntime:
                 await asyncio.wait_for(self._wake.wait(), delay)
             except TimeoutError:
                 pass
+
+    async def _scrub(self, lease):
+        result = await self.payloads.scrub(lease, limit=64)
+        if result["remaining"]:
+            self.notify()
+        return result
 
     async def _graph(self, lease):
         page = await self.graph.discover(lease, **self._graph_cursor, limit=1)

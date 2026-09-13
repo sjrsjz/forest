@@ -4,7 +4,7 @@
 
 ## 1. 群聊中的实际操作
 
-Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原消息的 Adapter 可信账号重新校验当前名单；昵称、群主角色、匿名身份、引用消息、Bot 自己的消息不授予管理权。本轮命令只管理发令会话的任务或 Agent，Bot 全局配置在 Web 后台修改。
+Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原消息的 Adapter 可信账号重新校验当前名单；昵称、群主角色、匿名身份、引用消息、Bot 自己的消息不授予管理权。本轮命令管理发令会话的任务、Agent 和记忆主干；Bot 全局配置与跨群来源视图在 Web 后台修改。
 
 ```text
 #forest help
@@ -20,6 +20,9 @@ Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原�
 #forest jobs cancel <job_id> --expect-revision <job_revision> --scope pending --reason "取消尚未领取的任务"
 #forest jobs cancel <job_id> --expect-revision <job_revision> --scope all --reason "停止计划及待处理任务"
 #forest jobs replay <occurrence_id> --expect-revision <occurrence_revision>
+#forest memory list
+#forest memory forget-plan <source_unit_id> --expect-deletion-epoch <deletion_epoch>
+#forest memory forget-apply <plan_id> --digest <plan_digest> --expect-deletion-epoch <deletion_epoch>
 ```
 
 `job/jobs`、`run/runs` 是语法别名。取消必须提交列表显示的检查点或修订。`future` 不撤回已创建任务；`pending` 不停止未来计划；`all` 同时执行两者，但若有关联任务已经进入活动 Run，则整个请求拒绝，要求显式取消该 Run，因为它可能还覆盖其他用户的触发。`replay` 只允许从未入队、确定失败且委托仍有效的同一 occurrence，不通过新 ID 重发未知效果。
@@ -30,17 +33,17 @@ Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原�
 
 `shell_commands.parse_command` 是有界确定性解析器：只识别直接开头的 `#forest`，允许前置空白及一次对当前 Bot 的 mention。后续含图片、转发等其他内容则保留控制命名空间，但不执行成合法命令；引号按固定语法处理，不使用 `eval` 或系统 shell。命令长度、标识、数值和公开原因均有限制。
 
-007 既有来源记录继续保留原 gate v1；020 追加 `arguments`、`priority` 不可变列。新 gate v2 把成功解析的类型化参数独立保存，未知/坏语法只保存空参数和原始内容摘要。原参数从首次接收起不进入 Context；群历史仍保留原作者、ingress 位置和固定控制消息投影。既有 v1 消息不会按新语法重新解释。
+007 既有来源记录继续保留原 gate v1；020 追加 `arguments`、`priority` 不可变列。gate v2 把成功解析的类型化参数独立保存，未知/坏语法只保存空参数和原始内容摘要。`shell-gate-v3` 复制 v2 的全部冻结契约并增加三条记忆命令；新接纳命令持久保存 v3，既有 v2 请求仍由原表解析。原参数从首次接收起不进入 Context；群历史仍保留原作者、ingress 位置和固定控制消息投影。既有请求不会按新语法重新解释。
 
-`shell_registry.BUILTIN_GATE_V2` 现在统一固定的 11 个内置命令键：4 个帮助/状态入口及 7 个 Run/Job 动作。每个 `CommandSpec` 给出版本、参数 schema 与摘要、目标 action/方法、当前管理员要求、会话作用域、优先级、执行种类、群输出范围和 Host 期限策略引用；帮助从同一 schema 与命令形式生成。注册表不可修改，导出的 schema/manifest 是独立副本。期限仍由 Host 的 `command_timeout` 决定，默认 5 秒、允许 0.1–30 秒；这不是所有已领取命令的固定 deadline，领取记录及最终事务守卫保持原语义。
+`shell_registry.BUILTIN_GATE_V2` 固定 11 个旧命令键；`BUILTIN_GATE_V3` 在复制这些契约后增加 3 个记忆命令键。每个 `CommandSpec` 给出版本、参数 schema 与摘要、目标 action/方法、当前管理员要求、会话或群记忆主干作用域、优先级、执行种类、群输出范围和 Host 期限策略引用；帮助按请求 gate 从对应 schema 与命令形式生成。注册表不可修改，导出的 schema/manifest 是独立副本。期限仍由 Host 的 `command_timeout` 决定，默认 5 秒、允许 0.1–30 秒；这不是所有已领取命令的固定 deadline，领取记录及最终事务守卫保持原语义。
 
-这次接线没有改变 `shell-gate-v2` 的 `shlex.split(..., posix=True)` 词法、别名或参数边界；新的 Windows 路径词法、`--key=value` 和 `--` 扩展尚未实现。排队后直接使用已冻结的 `command_name/arguments/priority`，不重新解析原消息或套用新 schema。当前数据库只持久保存既有 gate 版本，导出的 command/schema 摘要还不是逐请求持久的动态 registry snapshot；插件命令注册、热替换命令所有者和多版本动态快照恢复仍属后续工作。
+这次接线没有改变 `shell-gate-v2` 的 `shlex.split(..., posix=True)` 词法、别名或参数边界；v3 继续使用相同词法，新的 Windows 路径词法、`--key=value` 和 `--` 扩展尚未实现。排队后直接使用已冻结的 `gate_version/command_name/arguments/priority`，不重新解析原消息或套用新 schema。数据库持久保存接纳 gate 版本；导出的 command/schema 摘要还不是逐请求持久的动态 registry snapshot，插件命令注册、热替换命令所有者和多版本动态快照恢复仍属后续工作。
 
-`ShellControl` 使用宿主内部的不透明 admission，而非伪造 Web 登录或 QQ 用户。它在目标事务中锁定当前 Binding、Bot/Host 与原命令领取记录，复验所有权、期限、当前管理员、原参数、实际动作和目标会话，再复用 `AgentStore`、`JobStore` 的管理方法。共同的操作账本保持稳定 `shell-action:<command_id>`；提交后丢失本地确认可以读取原结果，不能再次取消或再次创建任务。Web 使用自己的主体与短效签名票据调用相同方法。
+`ShellControl` 使用宿主内部的不透明 admission，而非伪造 Web 登录或 QQ 用户。它在目标事务中锁定当前 Binding、Bot/Host 与原命令领取记录，复验所有权、期限、当前管理员、冻结 gate、原参数、实际动作和目标会话，再复用 `AgentStore`、`JobStore`、`MemoryAdministration` 的管理方法。记忆计划按原群筛选来源，提交再次验证计划的主体、issuer、来源主干、删除 epoch、目标闭包和影响数。共同的操作账本保持稳定 `shell-action:<command_id>`；提交后丢失本地确认可以读取原结果，不能再次取消、删除或创建任务。Web 使用自己的主体与短效签名票据调用相同方法。
 
 ## 3. 控制优先级与资源归属
 
-Shell 不占群 Actor 或模型槽。默认最多 4 个控制操作，取消/审批 priority 0，查询 priority 1，手动执行/重放 priority 2。普通操作最多占 3 槽，为取消与审批预留 1 槽。持久扫描以 command ID 作稳定分页，页内按 priority 排序；页游标取原 ID 最大值，避免改变排序后漏掉命令。
+Shell 不占群 Actor 或模型槽。默认最多 4 个控制操作，取消/审批/遗忘提交 priority 0，查询与遗忘预览 priority 1，手动执行/重放 priority 2。普通操作最多占 3 槽，为 P0 操作预留 1 槽。持久扫描以 command ID 作稳定分页，页内按 priority 排序；页游标取原 ID 最大值，避免改变排序后漏掉命令。
 
 优先级只影响尚未开始的操作；在执行中的数据库事务和平台请求仍受自身期限约束。扫描页和并发数均有界；不能声称拥有整个待处理集合上的严格全序或操作系统抢占能力。CONTROL 回执独立于 CHAT 序号，不完成会话触发、不扩大模型切口，也不被早期 CHAT UNKNOWN 阻塞。
 
@@ -65,4 +68,4 @@ Web 创建定义时保存有明确期限的长期委托。后台 `WebAuthority.i
 - `tests/test_job_authority.py`：注销后的有效委托、停用/角色/修订撤销、目的绑定和签名检查。
 - `tests/test_job_scheduler.py`：两个扫描器的同 occurrence 接纳、真实群队列切口、账户撤权退避、任务与协程回收。
 
-动态命令注册、跨 Bot 授权、进程/runbook、日志订阅、配置与记忆 Shell 动作、部署账号管理及账户停用的可选批量取消尚属后续 P5。本文测试使用独立 PostgreSQL 和本地 Provider/Adapter 服务，未使用真实 QQ 或付费模型凭据。
+动态命令注册、跨 Bot 授权、进程/runbook、日志订阅、配置 Shell 动作、记忆图编辑、部署账号管理及账户停用的可选批量取消尚属后续 P5。本文测试使用独立 PostgreSQL 和本地 Provider/Adapter 服务，未使用真实 QQ 或付费模型凭据。
