@@ -4,7 +4,7 @@
 
 `BotStore.migrate()` 先检查数据库身份、未知迁移和全部历史 checksum，再按 runtime → host 的锁序阻止旧宿主提交。事务内使旧 owner epoch 失效，然后依次执行 SQL prepare、`storage.data_migrations.<family>_v1.migrate_in(conn, store)`、handler 内的最终约束和迁移回执。任何一步失败都会撤销本次全部 DDL、数据搬运、host 失效和回执。数据库锁等待上限为 3 秒；发生锁竞争时整次升级失败，可在停止占用连接后重试。
 
-001–028 保留原 SQL SHA-256。029–035 的 checksum 为 UTF-8 JSON 数组 `['forest.bot.migration.v1', SQL, handler 源码, migration_v1.py 源码]` 的 SHA-256，数组使用无额外空格的 JSON 编码。handler 和 `migration_v1.py` 发布后不得修改；后续算法使用新的版本文件。handler 应包含迁移所需的历史算法，不调用会随运行时变化的业务存储实现。
+001–028 保留原 SQL SHA-256。带数据 handler 的 029–035、037–038 使用 UTF-8 JSON 数组 `['forest.bot.migration.v1', SQL, handler 源码, migration_v1.py 源码]` 的 SHA-256，数组使用无额外空格的 JSON 编码；纯 SQL 的 036 仍使用 SQL SHA-256。handler 和 `migration_v1.py` 发布后不得修改；后续算法使用新的版本文件。handler 应包含迁移所需的历史算法，不调用会随运行时变化的业务存储实现。
 
 新连接通过 PostgreSQL 启动参数固定 `forest.writer_generation=1`。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少该版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
 
@@ -33,6 +33,9 @@
 | 033 | Delivery 发送内容、精确请求和回执正文 |
 | 034 | 升级前已发生遗忘，但旧不完整 SourcePayload 仍为 ACTIVE 的补偿删除决策 |
 | 035 | 为平台成功回执精确确认的自身回声登记不可变来源依赖，协调先回声、后确认或先遗忘的顺序 |
+| 036 | 固定 Worker 代际的暴露集合、不可变交付回执、容量与来源失效状态 |
+| 037 | Call 输入/结果、状态当前值/历史/步骤回执、迁移源与候选正文 |
+| 038 | generation 配置与状态 schema 正文，以及独立 Host 输入来源域 |
 
 034 仅在 Bot 已有 suppression 时执行。它每批选择最多 256 个仍 ACTIVE 且 `lineage_complete=false` 的 SourceUnit，通过新的 `migration:034:legacy-reconcile:<batch>` 删除操作撤销其自身及派生闭包，同时登记原删除操作引用、删除 epoch、来源和载荷数量。旧请求的 targets、摘要与回执保持原样；完整的独立输入不受影响。所有批次和其他迁移同属一个事务，可整体回滚。没有先前删除的旧库不产生任何补偿决策。正文立即不可读，可由正常 scrub 清除；重复 migrate 不重复作出决策。普通删除也只扩展尚未撤销的不完整 SourceUnit，避免已清除的旧历史持续消耗请求来源上限。
 

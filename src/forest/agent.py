@@ -320,9 +320,11 @@ class AgentRunner:
                 "AGENT_RECOVERY_REQUIRED", "Model observation needs reconciliation", 503
             ) from None
 
-    async def _observe_tool(self, actor, grant, *, status, result):
+    async def _observe_tool(self, actor, grant, *, status, result, result_parent_ids=()):
         try:
-            return await self.state.observe_tool(actor, grant, status=status, result=result)
+            return await self.state.observe_tool(
+                actor, grant, status=status, result=result, result_parent_ids=result_parent_ids
+            )
         except Exception:
             # A current-policy rejection can block result publication after the
             # effect started. Preserve ownership handoff and UNKNOWN recovery;
@@ -445,7 +447,7 @@ class AgentRunner:
                     "AGENT_TOOL_RECOVERY_REQUIRED", "Tool dispatch is not currently permitted", 503
                 )
             try:
-                result = await self.kernel.invoke(
+                receipt = await self.kernel.invoke_with_receipt(
                     definition["component_id"],
                     definition["service"],
                     wrapper["arguments"],
@@ -497,7 +499,10 @@ class AgentRunner:
                 if head["phase"] == "BLOCKED_UNKNOWN":
                     return head
             else:
-                head = await self._observe_tool(actor, grant, status="SUCCEEDED", result=result)
+                head = await self._observe_tool(
+                    actor, grant, status="SUCCEEDED", result=receipt.value,
+                    result_parent_ids=(receipt.result_payload_id,),
+                )
                 if head["phase"] in {"FAILED", "CANCELLED", "COMPLETED"}:
                     return head
         latest = await self.state.load(actor, run_id)

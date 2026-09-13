@@ -1,6 +1,7 @@
 """Real PostgreSQL arbitration and fault-injected external sends."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -108,6 +109,23 @@ async def expect(code, awaitable):
     with pytest.raises(ForestError) as exc:
         await awaitable
     assert exc.value.code == code
+
+
+async def codec_receipt(d, lease, claim):
+    prepared = prepare_send(claim.route["channel_kind"], claim.route["channel_id"], claim.payload)
+    grant = await d.store.admit_control(
+        lease, "adapter.onebot", "format-call", "format-operation", "format-input",
+        service_name="onebot.prepare",
+        input_value={"channel_kind": claim.route["channel_kind"], "channel_id": claim.route["channel_id"],
+                     "segments": claim.payload}, input_parent_ids=(claim.payload_id,),
+    )
+    call = await d.store.finish_call(grant, {
+        "action": prepared.action, "wire_body_b64": base64.b64encode(prepared.wire_body).decode(),
+        "wire_digest": prepared.wire_digest,
+    })
+    return {key: call[key] for key in ("call_id", "component_id", "generation_id", "route_epoch",
+                                     "worker_incarnation", "policy_revision", "admission_lane",
+                                     "result_payload_id", "result_digest")}
 
 
 async def test_intent_idempotency_contiguous_stream_and_immutable_attempt(delivery):
@@ -436,11 +454,12 @@ async def test_adapter_generation_is_checked_before_binding_permit(delivery):
         "worker_incarnation": "worker-inc",
         "policy_revision": 1,
     }
+    ref = await codec_receipt(d, lease, claim)
     async with d.store.pool.connection() as conn:
-        await conn.execute("UPDATE public.bot_component_routes SET admission=false")
+        await conn.execute("UPDATE public.bot_component_routes SET admission=false,control_admission=false")
     await expect("STALE_ADAPTER", permit(d, lease, claim, executor_ref=ref))
     async with d.store.pool.connection() as conn:
-        await conn.execute("UPDATE public.bot_component_routes SET admission=true")
+        await conn.execute("UPDATE public.bot_component_routes SET admission=true,control_admission=true")
     assert (await permit(d, lease, claim, executor_ref=ref)).intent_id == claim.intent_id
 
 
@@ -578,6 +597,7 @@ async def test_control_output_permit_survives_pause_but_respects_reload_freeze(d
         "policy_revision": 1,
         "admission_lane": "CONTROL",
     }
+    ref = await codec_receipt(d, lease, claim)
     async with d.store.pool.connection() as conn:
         route_row = await (
             await conn.execute(

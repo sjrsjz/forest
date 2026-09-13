@@ -530,9 +530,15 @@ class BindingRuntime:
         connection.tasks.add(task)
         try:
             await self.ensure_components(("adapter.onebot",))
+            event, origin_payload_id = await self.messages.stage_platform_input(
+                self.kernel._authority(), binding_id, body,
+                expected_binding_epoch=connection.row["binding_epoch"],
+            )
+            if event is None:
+                return {"accepted": True, "kind": "NON_MESSAGE"}
             # Retrying a failed pure codec call is safe. The durable Inbox, not
             # this disposable Worker call, owns platform-message deduplication.
-            normalized = await self.kernel.invoke_control(
+            normalized = await self.kernel.invoke_control_with_receipt(
                 "adapter.onebot",
                 "onebot.normalize",
                 {
@@ -541,10 +547,10 @@ class BindingRuntime:
                 },
                 operation_id="ingress:" + str(uuid4()),
                 timeout=10,
+                input_parent_ids=(origin_payload_id,),
             )
-            event = normalized["message"]
-            if event is None:
-                return {"accepted": True, "kind": "NON_MESSAGE"}
+            if self.messages._normalized(normalized.value["message"]) != event:
+                raise ForestError("ONEBOT_PROJECTION_CONFLICT", "Codec changed the authenticated platform projection", 409)
             if event["author"].get("is_self"):
                 echo = await self.delivery.find_echo(
                     self.kernel._authority(),
@@ -604,7 +610,7 @@ class BindingRuntime:
         unit = units[-1]
         text = "".join(s.get("text", "") for s in unit["segments"] if s["type"] == "text")
         # Explicit P1 template service; P3 owns durable model/provider attempts.
-        result = await self.kernel.invoke(
+        result = await self.kernel.invoke_with_receipt(
             "forest.reply",
             "reply.respond",
             {
@@ -617,8 +623,11 @@ class BindingRuntime:
             },
             operation_id="response:" + str(uuid4()),
             expected_policy_revision=actor.policy_revision,
+            input_parent_ids=tuple(context["payload_ids"]),
         )
-        return result["parts"]
+        from forest.group_scheduler import ComponentReply
+
+        return ComponentReply(result.value["parts"], (result.result_payload_id,))
 
     async def prepare(self, claim) -> PreparedDelivery:
         connection = self.connection(claim.route["binding_id"])
@@ -629,7 +638,7 @@ class BindingRuntime:
             raise ForestError("STALE_BINDING", "Delivery belongs to an old connection", 409)
         await self.ensure_components(("adapter.onebot",))
         operation = "format:" + str(uuid4())
-        value = await self.kernel.invoke_control(
+        receipt = await self.kernel.invoke_control_with_receipt(
             "adapter.onebot",
             "onebot.prepare",
             {
@@ -639,7 +648,9 @@ class BindingRuntime:
             },
             operation_id=operation,
             timeout=5,
+            input_parent_ids=(claim.payload_id,),
         )
+        value = receipt.value
         call = await self.bot.store.read_call(operation)
         if call is None or call["status"] != "COMPLETED":
             raise ForestError(
@@ -654,6 +665,10 @@ class BindingRuntime:
             prepared,
             connection.send,
             {
+                "call_id": call["call_id"],
+                "result_payload_id": receipt.result_payload_id,
+                "result_digest": receipt.result_digest,
+                **{
                 key: call[key]
                 for key in (
                     "component_id",
@@ -663,6 +678,7 @@ class BindingRuntime:
                     "policy_revision",
                     "admission_lane",
                 )
+                },
             },
         )
 

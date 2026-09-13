@@ -7,6 +7,7 @@ calls a model or summarizes content: compaction retains immutable source refs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -176,6 +177,48 @@ class MessageStore:
             raise ForestError("CONVERSATION_NOT_FOUND", "Conversation does not exist", 404)
         return row
 
+    def platform_source_event_id(self, value):
+        group_source = "source:" + digest_json([
+            self.store.bot_id, value["platform"], "qq-global", value["channel_kind"],
+            value["channel_id"], 1,
+        ])
+        return "source-event:" + digest_json([
+            group_source, value["self_id"], value["platform_message_id"],
+        ])
+
+    async def stage_platform_input(self, lease, binding_id, body, *, expected_binding_epoch):
+        """Bind authenticated platform bytes to their real source before Worker IPC.
+
+        The host's fixed OneBot parser owns identity and accepted message data.
+        A reloadable codec must reproduce that complete projection exactly.
+        """
+        from forest.adapters.onebot import parse_event
+        from forest.storage.input_payloads import InputContentStore
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding = await self.bindings._guard(
+                conn, lease, binding_id, expected_binding_epoch, data=False, require_receive=True,
+            )
+            parsed = parse_event(body, self_id=binding["self_id"])
+            if parsed is None:
+                await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+                return None, None
+            event = self._normalized(parsed.as_dict())
+            source_event = self.platform_source_event_id(event)
+            contents = InputContentStore(self.store)
+            clock = await contents.payloads.lock_in(conn)
+            ref = await contents.payloads.put_bytes_in(
+                conn, owner_kind="context.parts",
+                owner_id="ingress:" + digest_json([source_event, hashlib.sha256(body).hexdigest()]),
+                value=body, sources=(contents.source_ref(source_event),),
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            await contents.payloads.require_available_in(
+                conn, [ref.payload_id], expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            return event, ref.payload_id
+
     async def ingest(
         self, lease: HostLease, binding_id: str, event: dict, *,
         expected_binding_epoch: int | None = None,
@@ -203,12 +246,7 @@ class MessageStore:
             self.store.bot_id, value["platform"], "qq-global", value["channel_kind"],
             value["channel_id"], 1,
         ])
-        source_event_id = "source-event:" + digest_json([
-            # OneBot message IDs are account-scoped opaque identities. Equal
-            # int32 values observed by different accounts do not prove that the
-            # underlying platform event is the same, even in a shared group.
-            group_source_id, value["self_id"], value["platform_message_id"],
-        ])
+        source_event_id = self.platform_source_event_id(value)
         input_digest = digest_json(value)
         event_id = "event:" + digest_json([conversation_id, value["platform_message_id"]])
         command_id = "command:" + digest_json(event_id) if shell_command is not None else None
@@ -1320,7 +1358,7 @@ class MessageStore:
 
     async def finalize_reply(
         self, actor: ActorLease, operation_id: str, *, run_id: str,
-        expected_input_revision: int, reply_parts: list[list[dict]], delivery,
+        expected_input_revision: int, reply_parts: list[list[dict]], delivery, result_parent_ids=(),
     ) -> dict:
         """Commit canonical answer, claims and the actual SendIntent together."""
         _text(operation_id, "operation_id")
@@ -1329,14 +1367,16 @@ class MessageStore:
             raise ForestError("INVALID_REPLY", "Reply needs nonempty ordered delivery parts", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._require_legacy_run(conn, actor, run_id=run_id)
-            return await self._finalize_reply_in(conn, actor, operation_id, run_id=run_id, expected_input_revision=expected_input_revision, reply_parts=parts, delivery=delivery)
+            return await self._finalize_reply_in(conn, actor, operation_id, run_id=run_id, expected_input_revision=expected_input_revision, reply_parts=parts, delivery=delivery, result_parent_ids=result_parent_ids)
 
     async def _finalize_reply_in(
         self, conn, actor: ActorLease, operation_id: str, *, run_id: str,
-        expected_input_revision: int, reply_parts: list[list[dict]], delivery,
+        expected_input_revision: int, reply_parts: list[list[dict]], delivery, result_parent_ids=(),
     ) -> dict:
         parts = _json(reply_parts)
         value_digest = digest_json([run_id, expected_input_revision, parts])
+        if result_parent_ids:
+            value_digest = digest_json([run_id, expected_input_revision, parts, sorted(set(result_parent_ids))])
         binding, conversation = await self._actor(conn, actor)
         existing = await (await conn.execute(
             "SELECT * FROM public.bot_conversation_replies WHERE bot_id=%s AND conversation_id=%s AND operation_id=%s",
@@ -1352,6 +1392,20 @@ class MessageStore:
             existing = await content.read_reply_in(
                 conn, existing, expected_deletion_epoch=clock["deletion_epoch"],
             )
+            if result_parent_ids:
+                from forest.storage.payload_scope import guard_payload_scope_in
+
+                original_run = await (await conn.execute(
+                    "SELECT selected_input_end_seq FROM public.bot_conversation_runs "
+                    "WHERE bot_id=%s AND conversation_id=%s AND run_id=%s",
+                    (self.store.bot_id, actor.conversation_id, existing["run_id"]),
+                )).fetchone()
+                if original_run is None:
+                    raise ForestError("PAYLOAD_SCOPE_DENIED", "Reply sources are unavailable", 409)
+                await guard_payload_scope_in(
+                    conn, self.store, conversation, original_run["selected_input_end_seq"],
+                    result_parent_ids,
+                )
             if existing["payload_state"] == "ACTIVE":
                 await self._memory_sources().register_reply_in(conn, conversation, existing, reconstructed=True)
             await self._actor_final(conn, actor, binding)
@@ -1384,7 +1438,13 @@ class MessageStore:
         logical_step_id = agent["final_step_id"] if agent else None
         reply_id = str(uuid4())
         parents = ([agent["final_output_payload_id"]] if agent else
-                   (await self._context_in(conn, actor, run_id=run_id))["payload_ids"])
+                   (list(result_parent_ids) or (await self._context_in(conn, actor, run_id=run_id))["payload_ids"]))
+        if not agent and result_parent_ids:
+            from forest.storage.payload_scope import guard_payload_scope_in
+
+            await guard_payload_scope_in(
+                conn, self.store, conversation, run["selected_input_end_seq"], parents,
+            )
         body = await content.put_reply_in(
             conn, reply_id, parts, parents=parents, expected_deletion_epoch=clock["deletion_epoch"],
         )
@@ -1414,7 +1474,8 @@ class MessageStore:
         )
         reply = {**reply, "parts": parts, "payload_state": "ACTIVE"}
         await self._memory_sources().register_reply_in(
-            conn, conversation, reply, dependency_payload_ids=parents if agent else None,
+            conn, conversation, reply,
+            dependency_payload_ids=parents if agent or result_parent_ids else None,
         )
         await conn.execute(
             "UPDATE public.bot_conversation_triggers SET status='ANSWERED',answered_reply_id=%s "

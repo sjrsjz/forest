@@ -35,6 +35,15 @@ class LoadedComponent:
     degraded_dependencies: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class InvocationReceipt:
+    """Host-only content receipt; payload references are never Worker authority."""
+
+    value: Any
+    result_payload_id: str
+    result_digest: str
+
+
 @dataclass
 class DependencyPlan:
     order: list[str]
@@ -151,6 +160,10 @@ class Kernel:
         self._plan_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._heartbeat: asyncio.Task | None = None
+        self._exposure_monitor: asyncio.Task | None = None
+        self._exposure_retirements: dict[str, asyncio.Task] = {}
+        self._retire_revocations: dict[str, asyncio.Event] = {}
+        self._retiring: set[str] = set()
         self._closing = False
         self._close_task: asyncio.Task | None = None
         self.failure: str | None = None
@@ -170,6 +183,9 @@ class Kernel:
                     "KERNEL_CLOSING", "Kernel closed while acquiring execution authority"
                 )
             self._heartbeat = asyncio.create_task(self._renew(), name="kernel-lease-renewal")
+            self._exposure_monitor = asyncio.create_task(
+                self._supervise_exposures(), name="kernel-exposure-supervision",
+            )
 
     def _authority(self, *, allow_closing: bool = False) -> HostLease:
         if self.lease is None or (self._closing and not allow_closing) or self.failure is not None:
@@ -211,6 +227,118 @@ class Kernel:
                 self.cleanup_errors.append("WORKER_CLEANUP_FAILED")
             if not worker.alive:
                 self._workers.discard(worker)
+
+    async def _supervise_exposures(self) -> None:
+        """Recover each invalid Worker independently without delaying Host renewal."""
+        from forest.storage.exposures import ExposureStore
+
+        exposures, cursor = ExposureStore(self.store), None
+        try:
+            while not self._closing:
+                for generation_id, task in tuple(self._exposure_retirements.items()):
+                    if task.done():
+                        self._exposure_retirements.pop(generation_id)
+                        await task
+                page = await exposures.scan(self._authority(), limit=64, after=cursor)
+                cursor = page["next_cursor"]
+                for head in page["generations"]:
+                    component = self.components.get(head["component_id"])
+                    if component is None or component.worker.identity.generation_id != head["generation_id"]:
+                        # A candidate is still owned by _install_one; its next
+                        # lifecycle handoff and final publication are guarded.
+                        continue
+                    generation_id = head["generation_id"]
+                    if generation_id not in self._exposure_retirements:
+                        self._retiring.add(generation_id)
+                        self._retire_revocations[generation_id] = asyncio.Event()
+                        self._exposure_retirements[generation_id] = asyncio.create_task(
+                            self._retire_exposed(component, head["status"]),
+                            name="kernel-exposure-retire:" + generation_id,
+                        )
+                    if head["status"] == "REVOKED":
+                        signal = self._retire_revocations.get(generation_id)
+                        if signal is not None:
+                            signal.set()
+                await asyncio.sleep(0 if cursor is not None else min(1, self.lease_seconds / 3))
+        except asyncio.CancelledError:
+            if not self._closing:
+                self.failure = "EXPOSURE_SUPERVISOR_CANCELLED"
+                await self._terminate_remaining()
+            raise
+        except Exception as exc:
+            self.failure = exc.code if isinstance(exc, ForestError) else "EXPOSURE_SUPERVISION_FAILED"
+            await self._terminate_remaining()
+
+    async def _retire_exposed(self, component: LoadedComponent, status: str) -> None:
+        generation_id = component.worker.identity.generation_id
+        component_id = component.snapshot.component["id"]
+        try:
+            if status == "EXHAUSTED":
+                await self.store.close_generation_admission(self._authority(), generation_id)
+                stop_draining = asyncio.Event()
+
+                async def drained():
+                    while not stop_draining.is_set():
+                        # A committed admission can still be waiting for its ACK
+                        # before _invoke installs the local _calls entry. The
+                        # durable live-call/reservation set is authoritative too.
+                        lease = self._authority()
+                        async with self.store.pool.connection() as conn, conn.transaction():
+                            await self.store._route(conn, component_id)
+                            await self.store._host(conn, lease)
+                            pending = await (await conn.execute(
+                                "SELECT count(*) AS n FROM public.bot_live_calls WHERE bot_id=%s "
+                                "AND (component_id=%s OR %s=ANY(dependency_components))",
+                                (self.store.bot_id, component_id, component_id),
+                            )).fetchone()
+                            await self.store._host(conn, lease)
+                        if stop_draining.is_set():
+                            return
+                        local_pending = any(
+                            entry[1].generation_id == generation_id
+                            or component_id in entry[1].dependency_components
+                            for entry in self._calls.values()
+                        )
+                        if pending["n"] == 0 and not local_pending:
+                            return
+                        # Completion notifications are fast; bounded polling
+                        # also observes lost ACKs, lease expiry and durable-only
+                        # calls without requiring an in-memory notification.
+                        async with self._calls_changed:
+                            try:
+                                async with asyncio.timeout(0.1):
+                                    await self._calls_changed.wait()
+                            except TimeoutError:
+                                pass
+
+                waiting = (
+                    asyncio.create_task(drained()),
+                    asyncio.create_task(self._retire_revocations[generation_id].wait()),
+                )
+                try:
+                    async with asyncio.timeout(component.snapshot.component.get("lifecycle", {}).get("drain_timeout_s", 30)):
+                        done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                        if waiting[0] in done:
+                            # A failed authority check is not an empty Call set.
+                            await waiting[0]
+                except TimeoutError:
+                    pass
+                finally:
+                    stop_draining.set()
+                    for task in waiting:
+                        task.cancel()
+                    await asyncio.gather(*waiting, return_exceptions=True)
+            async with self._deployment_lock:
+                # A concurrent successful reload may already have reaped this
+                # generation. Never revoke the replacement's route by ID guess.
+                if self.components.get(component_id) is component:
+                    await self._retire(component, reason="exposure_" + status.lower(), revoke=True)
+                    if component.worker.alive:
+                        raise ForestError("WORKER_CLEANUP_FAILED", "Invalid Worker remains alive", 503)
+                    self.components.pop(component_id, None)
+        finally:
+            self._retiring.discard(generation_id)
+            self._retire_revocations.pop(generation_id, None)
 
     @staticmethod
     def _route_receipt(route: dict) -> dict:
@@ -397,6 +525,8 @@ class Kernel:
             }
             component_id = spec["id"]
             old = self.components.get(component_id)
+            if old is not None and old.worker.identity.generation_id in self._retiring:
+                raise ForestError("COMPONENT_RETIRING", "Previous Worker is still being reaped", 409)
             if old is not None and not old.worker.alive:
                 await self._retire(old, reason="worker_failed", revoke=True)
                 if old.worker in self._workers:
@@ -438,7 +568,7 @@ class Kernel:
                     )
                 # A replay is a read of a current committed route, never activation of
                 # an old disposed Worker or reconstruction from an obsolete snapshot.
-                await self.store.snapshot_state(authority, component_id)
+                await self.store.state_schema(authority, component_id)
                 if previous["phase"] == "COMMITTED":
                     current = await self.store.get_route(component_id)
                     if (
@@ -510,14 +640,20 @@ class Kernel:
                     ttl_seconds=120,
                 )
                 self._operations[operation_id] = operation["op_epoch"]
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.launch(timeout=timeout.get("prepare_timeout_s", 10))
-                state = await self.store.snapshot_state(self._authority(), component_id)
+                state = await self.store.snapshot_state(
+                    self._authority(), component_id, generation_id=identity.generation_id,
+                )
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.prepare(
                     config,
                     restored_state=None if schema_change else {"durable_state": state},
                     timeout=timeout.get("prepare_timeout_s", 10),
                 )
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.start(timeout=timeout.get("start_timeout_s", 10))
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 if (await worker.health()).get("healthy") is not True:
                     raise ForestError("WORKER_UNHEALTHY", "Candidate failed readiness")
                 await self.store.mark_ready(self._authority(), identity.generation_id)
@@ -548,10 +684,12 @@ class Kernel:
                 values = self.store._state_values(source["source_rows"])
                 first = repeated = values
                 if schema_change and source["source_generation_id"] is not None:
+                    await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                     first = await worker.migrate(
                         values, from_schema=source["source_schema"], to_schema=spec["state_schema"],
                         timeout=timeout.get("prepare_timeout_s", 10),
                     )
+                    await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                     repeated = await worker.migrate(
                         values, from_schema=source["source_schema"], to_schema=spec["state_schema"],
                         timeout=timeout.get("prepare_timeout_s", 10),
@@ -568,7 +706,9 @@ class Kernel:
                     for key, value in staged["result_values"].items()
                 }}
                 self._validate(Draft202012Validator({}), restored, "STATE_MIGRATION_INVALID")
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.restore(restored)
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 if (await worker.health()).get("healthy") is not True:
                     raise ForestError("WORKER_UNHEALTHY", "Restored candidate failed readiness")
                 # Driver completion follows owned children and their IPC; database also
@@ -580,6 +720,7 @@ class Kernel:
                 new.route_epoch = route["route_epoch"]
                 self.components[component_id] = new
                 self._apply_dependencies(dependency_plan)
+                await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.activate()  # transport admission only; no plugin activation hook
                 if old is not None:
                     await self._retire(old, reason="replaced", revoke=False)
@@ -611,6 +752,9 @@ class Kernel:
                         if old.worker.alive and not self._closing:
                             try:
                                 if old.worker.state == "QUIESCENT":
+                                    await self.store.authorize_generation_dispatch(
+                                        self._authority(), old.worker.identity.generation_id,
+                                    )
                                     await old.worker.resume()
                                 elif old.worker.state != "ACTIVE":
                                     raise ForestError(
@@ -708,8 +852,31 @@ class Kernel:
         timeout: float = 30,
         expected_policy_revision: int | None = None,
         agent_tool_id: str | None = None,
+        input_parent_ids: tuple[str, ...] = (),
     ) -> Any:
+        receipt = await self.invoke_with_receipt(
+            component_id, service, payload, operation_id=operation_id,
+            contract_major=contract_major, timeout=timeout,
+            expected_policy_revision=expected_policy_revision, agent_tool_id=agent_tool_id,
+            input_parent_ids=input_parent_ids,
+        )
+        return receipt.value
+
+    async def invoke_with_receipt(
+        self,
+        component_id: str,
+        service: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        contract_major: int = 1,
+        timeout: float = 30,
+        expected_policy_revision: int | None = None,
+        agent_tool_id: str | None = None,
+        input_parent_ids: tuple[str, ...] = (),
+    ) -> InvocationReceipt:
         self._authority()
+        input_parent_ids = self._input_parents(input_parent_ids)
         if agent_tool_id is not None and (
             not isinstance(agent_tool_id, str) or not 1 <= len(agent_tool_id) <= 128
         ):
@@ -742,6 +909,7 @@ class Kernel:
                     timeout=timeout,
                     expected_policy_revision=expected_policy_revision,
                     agent_tool_id=agent_tool_id,
+                    input_parent_ids=input_parent_ids,
                 )
         finally:
             self._call_count -= 1
@@ -756,13 +924,35 @@ class Kernel:
         contract_major: int = 1,
         timeout: float = 10,
         expected_policy_revision: int | None = None,
+        input_parent_ids: tuple[str, ...] = (),
     ) -> Any:
+        receipt = await self.invoke_control_with_receipt(
+            component_id, service, payload, operation_id=operation_id,
+            contract_major=contract_major, timeout=timeout,
+            expected_policy_revision=expected_policy_revision,
+            input_parent_ids=input_parent_ids,
+        )
+        return receipt.value
+
+    async def invoke_control_with_receipt(
+        self,
+        component_id: str,
+        service: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        contract_major: int = 1,
+        timeout: float = 10,
+        expected_policy_revision: int | None = None,
+        input_parent_ids: tuple[str, ...] = (),
+    ) -> InvocationReceipt:
         """Host-only bounded codec lane, available during normal business pause.
 
         No Worker RPC or plugin priority field selects this entry point. It has
         separate host capacity, no state grants, and no component dependencies.
         """
         self._authority()
+        input_parent_ids = self._input_parents(input_parent_ids)
         if component_id != "adapter.onebot" or service not in {
             "onebot.normalize",
             "onebot.prepare",
@@ -794,9 +984,28 @@ class Kernel:
                     timeout=timeout,
                     expected_policy_revision=expected_policy_revision,
                     admission_lane="CONTROL",
+                    input_parent_ids=input_parent_ids,
                 )
         finally:
             self._control_call_count -= 1
+
+    @staticmethod
+    def _input_parents(values) -> tuple[str, ...]:
+        if not isinstance(values, (list, tuple)) or len(values) > 256 or any(
+            not isinstance(value, str) or not 1 <= len(value.encode()) <= 256
+            or any(ord(char) < 32 for char in value)
+            for value in values
+        ):
+            raise ForestError("INVALID_CALL", "Host input parents must be bounded payload IDs", 422)
+        return tuple(sorted(set(values)))
+
+    @staticmethod
+    def _invocation_receipt(row) -> InvocationReceipt:
+        if not row or row.get("status") != "COMPLETED" or not row.get("result_payload_id") or not row.get("result_digest"):
+            raise ForestError("CALL_RECEIPT_INCOMPLETE", "Completed call has no content receipt", 409)
+        if row.get("payload_state") != "ACTIVE":
+            raise ForestError("KERNEL_CONTENT_REVOKED", "Completed call content is unavailable", 409)
+        return InvocationReceipt(row["result"], row["result_payload_id"], row["result_digest"])
 
     async def _service_rpc(
         self, identity: WorkerIdentity, parent_call_id: str, request: dict
@@ -885,7 +1094,7 @@ class Kernel:
         self._call_count += 1
         try:
             async with asyncio.timeout(timeout):
-                return await self._invoke(
+                receipt = await self._invoke(
                     target_id,
                     name,
                     payload,
@@ -895,6 +1104,7 @@ class Kernel:
                     parent_call_id=parent_call_id,
                     expected_policy_revision=parent[1].policy_revision,
                 )
+                return receipt.value
         except TimeoutError:
             raise ForestError(
                 "DEADLINE_EXCEEDED", "Component child invocation exceeded its deadline", 504
@@ -915,7 +1125,8 @@ class Kernel:
         expected_policy_revision: int | None = None,
         admission_lane: str = "DATA",
         agent_tool_id: str | None = None,
-    ) -> Any:
+        input_parent_ids: tuple[str, ...] = (),
+    ) -> InvocationReceipt:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
         if parent_call_id is not None and parent is None:
@@ -962,6 +1173,7 @@ class Kernel:
                 "contract_major": contract_major,
                 "payload": payload,
                 **({"admission_lane": "CONTROL"} if admission_lane == "CONTROL" else {}),
+                **({"input_parent_ids": input_parent_ids} if input_parent_ids else {}),
             }
         )
 
@@ -978,7 +1190,7 @@ class Kernel:
             if previous["input_digest"] != input_digest or previous["component_id"] != component_id:
                 raise ForestError("IDEMPOTENCY_CONFLICT", "Call operation has different input", 409)
             if previous["status"] == "COMPLETED":
-                return previous["result"]
+                return self._invocation_receipt(previous)
             raise ForestError(
                 "OPERATION_PENDING" if previous["status"] == "ADMITTED" else "CALL_FAILED",
                 "Existing call must be reconciled, not executed again",
@@ -986,6 +1198,8 @@ class Kernel:
             )
         if service not in component.validators:
             raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
+        if parent is None and component.worker.identity.generation_id in self._retiring:
+            raise ForestError("GENERATION_EXPOSURE_EXHAUSTED", "Worker is draining before replacement", 429)
         input_validator, output_validator, major = component.validators[service]
         if contract_major != major:
             raise ForestError(
@@ -1013,6 +1227,8 @@ class Kernel:
                 call_id,
                 operation_id,
                 input_digest,
+                input_value=payload,
+                input_parent_ids=input_parent_ids,
                 timeout_seconds=timeout,
                 expected_policy_revision=policy_revision,
                 expected_generation_id=component.worker.identity.generation_id,
@@ -1030,7 +1246,7 @@ class Kernel:
                     and saved["status"] == "COMPLETED"
                     and saved["input_digest"] == input_digest
                 ):
-                    return saved["result"]
+                    return self._invocation_receipt(saved)
             raise
         except BaseException:
             # Admission acknowledgement itself can be lost. The preallocated
@@ -1053,11 +1269,12 @@ class Kernel:
             if timeout <= 0:
                 raise ForestError("CALL_EXPIRED", "Call deadline elapsed during admission", 504)
             result = await component.worker.invoke(
-                service, payload, call_id=call_id, operation_id=operation_id, timeout=timeout
+                service, payload, call_id=call_id, operation_id=operation_id, timeout=timeout,
+                before_send=lambda: self.store.authorize_dispatch(grant),
             )
             self._validate(output_validator, result, "OUTPUT_INVALID")
-            await self.store.finish_call(grant, result)
-            return result
+            completed = await self.store.finish_call(grant, result)
+            return self._invocation_receipt(completed)
         except BaseException as exc:
             code = exc.code if isinstance(exc, ForestError) else type(exc).__name__
             with suppress(Exception):
@@ -1092,6 +1309,12 @@ class Kernel:
         self._closing = True
         async with self._start_lock:
             pass
+        owned = ([self._exposure_monitor] if self._exposure_monitor is not None else []) + list(self._exposure_retirements.values())
+        for task in owned:
+            task.cancel()
+        if owned:
+            await asyncio.gather(*owned, return_exceptions=True)
+        self._exposure_retirements.clear()
         async with self._deployment_lock:
             # Close caller components before their dependencies. The heartbeat
             # remains live while existing authorized trees finish their work.

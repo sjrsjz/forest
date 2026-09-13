@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, read_frame, validate_json
-from forest.drivers.python_worker import WorkerLimits
+from forest.drivers.python_worker import WorkerLimits, _error_details, _error_envelope
 from forest.errors import ForestError
 from forest.sdk import CallScope, Plugin, PluginContext, _current_call, declared_services
 
@@ -224,7 +224,7 @@ class WorkerRuntime:
                 },
             )
         except ForestError as error:
-            response.update(ok=False, error=error.as_dict() | {"status": error.status})
+            response.update(ok=False, error=_error_envelope(error))
         except Exception:
             response.update(
                 ok=False,
@@ -272,6 +272,7 @@ class WorkerRuntime:
                                 error.get("code", "HOST_STATE_FAILED"),
                                 error.get("message", "State request failed"),
                                 error.get("status", 500),
+                                details=_error_details(error),
                             )
                         )
                     continue

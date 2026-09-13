@@ -201,7 +201,7 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 
 ## 10. 029–035 之后的剩余族与下一实现切片
 
-本节根据 029–035 已接入的正文路径与回声依赖补充后续设计，不分配或实现新迁移编号。以下字段仍需迁移，不能因 Agent 请求已经可清理，就宣称这些副本也已清理。
+本节保留 029–035 完成时的后续设计依据。其中 Kernel、状态、迁移正文、代际配置及长期 Worker 暴露账本已由 036–038 接入，实际协议见 [Kernel 正文与代际来源](p4-kernel-payloads.md)；其余管理正文、Job 和备份路径仍不能视为完成。
 
 ### 10.1 Kernel 返回值、状态及迁移副本应一起处理
 
@@ -257,3 +257,18 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 2. **回执与物理副本**：同一状态操作生成 current/history/receipt、Kernel result、Agent tool result，控制预览另生成 Web/audit/outbox 副本。删除后核查原列 NULL 和实际 body 删除；同 operation 保留原完成状态及摘要，不重复执行；旧 UNKNOWN 保持明确不确定。
 3. **权限与接管**：在最终 Kernel Gateway 写入前、Child 已获 permit 后以及重新 claim 一个已擦除快照前交错撤销。完整权限复验阻止新发送/发布；已知费用仍结算，结束后按既有 silent drain 完成 Session，其他群及无 Agent 的 legacy Run 不受影响。
 4. **非空旧库升级**：真实旧状态、迁移候选、长 operation ID、已完成 Call、配置预览/历史与 Job/Shell 数据，从发布过的 SQL 起步迁移；中断/重启后固定摘要、状态和删除 marker 不变，执行期没有旧正文列 fallback。
+
+## 11. 036–038 之后的实施边界
+
+Kernel/状态/generation 副本已经接入正文协议；下一切片首先处理 Bot 控制回执，再接通配置定义与实际运行的父链。现存自由正文不能只按列名判断：管理员输入的取消 reason 会被复制到 `bot_conversation_triggers.terminal_reason`、`bot_agent_runs.error_code` 和不可变 checkpoint 的 `payload.error_code`，因此这些位置也属于待处理正文。
+
+| 剩余族 | 必须一起完成的读写路径 |
+| --- | --- |
+| 控制结果、审计与 outbox | `BotControl._record` 当前复制同一预览结果到三处；改为共享结果载荷和封闭 metadata。旧 operation 的完成状态、原摘要保留，正文不可用时不得重新执行 |
+| 取消及分类原因 | 自由 reason 与固定状态码分离。旧 checkpoint 的原 checksum 不改写，迁移原正文并保留其引用；终止和结算不能依赖已删原因正文 |
+| Bot 配置与冻结 spec | 组件/Agent/Memory/Binding/Watch 的 plan、revision、current 和 `AgentRun.spec`；真实配置父载荷须继续传到 generation、模型请求及子 Agent。SQL 发布、调度字段和表达式索引同时更新 |
+| Shell 与 Job | 已接受命令输入 → arguments → 管理结果/CONTROL；Job definition → occurrence 输入。最终写事务复验实际父载荷，不能换新 operation 或 occurrence 恢复旧 prompt |
+
+Web/CLI 的手工配置属于独立管理员输入域，不按文本相似猜测聊天来源。Shell 命令来自真实群消息，其派生内容须继承该消息；框架自动复制配置或记忆时同样继承实际父载荷。旧 generation/Reply 的不可变 manifest 不能原地补写；无法证明旧上游时采用明确的保守迁移策略。
+
+部署库的 Bot 名称、配置及请求回执使用独立管理域，不能引用私有 Bot 数据库的外键，也不能声称由 Bot 的聊天删除覆盖。密钥密文、WAL、备份及外部副本仍有独立生命周期。下一族验收须包括真实预览/历史/幂等回执的正文清理、Job 最终入队前撤销、重启后不复活，以及保留原 checksum 的非空旧库升级。

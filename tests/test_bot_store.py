@@ -231,7 +231,8 @@ async def test_call_and_step_idempotency_are_parent_scoped(store):
     result = await store.read_call(left.operation_id)
     assert result["input_digest"] == left.input_digest
     assert result["component_id"] == left.component_id
-    assert result["result"] == {"ok": True}
+    assert result["result"] is None and result["result_payload_id"]
+    assert (await store.authorized_call(lease, left.operation_id, left.policy_revision))["result"] == {"ok": True}
     await fails(
         "IDEMPOTENCY_CONFLICT",
         store.admit(

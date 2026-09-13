@@ -26,6 +26,33 @@ from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, encode_frame, 
 from forest.errors import ForestError
 
 
+def _error_details(error: dict) -> dict | None:
+    """Only typed state-repair metadata may cross the private IPC boundary."""
+    details = error.get("details")
+    if error.get("code") != "KERNEL_CONTENT_REVOKED" or not isinstance(details, dict):
+        return None
+    revision, digest, state = (details.get(key) for key in (
+        "current_revision", "value_digest", "payload_state"
+    ))
+    if (
+        set(details) != {"current_revision", "value_digest", "payload_state"}
+        or type(revision) is not int or not 1 <= revision <= 2**63 - 1
+        or not isinstance(digest, str) or not digest.startswith("sha256:")
+        or len(digest) != 71 or any(char not in "0123456789abcdef" for char in digest[7:])
+        or state != "UNAVAILABLE"
+    ):
+        return None
+    return {"current_revision": revision, "value_digest": digest, "payload_state": state}
+
+
+def _error_envelope(error: ForestError) -> dict:
+    value = {"code": error.code, "message": str(error), "status": error.status}
+    details = _error_details({**value, "details": error.details})
+    if details is not None:
+        value["details"] = details
+    return value
+
+
 @dataclass(frozen=True)
 class WorkerIdentity:
     instance_id: str
@@ -302,6 +329,7 @@ class PythonWorker:
                                 str(error.get("code", "WORKER_FAILED")),
                                 str(error.get("message", "Worker operation failed")),
                                 int(error.get("status", 500)),
+                                details=_error_details(error),
                             )
                         )
                 elif message.get("kind") in {"state", "service"}:
@@ -415,7 +443,7 @@ class PythonWorker:
                 value = await self.state_handler(self.identity, call_id, action, payload)
             result.update(ok=True, value=value)
         except ForestError as error:
-            result.update(ok=False, error=error.as_dict() | {"status": error.status})
+            result.update(ok=False, error=_error_envelope(error))
         except Exception:
             result.update(
                 ok=False,
@@ -525,6 +553,7 @@ class PythonWorker:
         call_id: str | None = None,
         operation_id: str | None = None,
         timeout: float = 30,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
         if self.state != "ACTIVE":
             raise ForestError(
@@ -567,6 +596,15 @@ class PythonWorker:
                             "WORKER_NOT_ACTIVE",
                             "Worker stopped business admission while queued",
                             409,
+                        )
+                    if before_send is not None:
+                        await before_send()
+                    # The callback may wait on a database fence while this
+                    # Worker is concurrently stopped. It never grants transport
+                    # admission after local retirement or deadline expiry.
+                    if self.state != "ACTIVE":
+                        raise ForestError(
+                            "WORKER_NOT_ACTIVE", "Worker stopped before invocation dispatch", 409
                         )
                     self._calls[call_id] = request_id
                     sent = True

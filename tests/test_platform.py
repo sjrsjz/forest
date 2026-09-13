@@ -178,7 +178,7 @@ async def test_failed_codec_attempt_and_lost_ingress_ack_do_not_poison_retries(
 ):
     p = platform
     await p.runtime._replace(p.desired)
-    invoke = p.kernel.invoke_control
+    invoke = p.kernel.invoke_control_with_receipt
     attempts = []
 
     async def fail_once(component, service, payload, **kwargs):
@@ -187,7 +187,7 @@ async def test_failed_codec_attempt_and_lost_ingress_ack_do_not_poison_retries(
             payload = {**payload, "body_b64": base64.b64encode(b"invalid-json").decode()}
         return await invoke(component, service, payload, **kwargs)
 
-    monkeypatch.setattr(p.kernel, "invoke_control", fail_once)
+    monkeypatch.setattr(p.kernel, "invoke_control_with_receipt", fail_once)
     with pytest.raises(ForestError):
         await receive(p)
     ingest = p.runtime.messages.ingest
@@ -218,7 +218,7 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
     p = platform
     await p.runtime._replace(p.desired)
     before = p.kernel.components["adapter.onebot"].worker.identity.generation_id
-    invoke = p.kernel.invoke_control
+    invoke = p.kernel.invoke_control_with_receipt
 
     async def reload_before_call(*args, **kwargs):
         await p.kernel.install(
@@ -226,14 +226,18 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
         )
         return await invoke(*args, **kwargs)
 
-    monkeypatch.setattr(p.kernel, "invoke_control", reload_before_call)
+    monkeypatch.setattr(p.kernel, "invoke_control_with_receipt", reload_before_call)
     row = p.runtime.connection(p.binding.binding_id).row
-    claim = SimpleNamespace(
-        route={"binding_id": p.binding.binding_id, "channel_kind": "group", "channel_id": "30001"},
-        binding_epoch=row["binding_epoch"],
-        connection_epoch=row["connection_epoch"],
-        payload=[{"type": "text", "text": "literal [CQ:at,qq=all]"}],
+    await p.runtime.delivery.enqueue(
+        p.kernel._authority(), operation_id="reload-format-source",
+        route={"bot_id": p.env.store.bot_id, "binding_id": p.binding.binding_id,
+               "platform": "onebot-v11", "self_id": row["self_id"],
+               "channel_kind": "group", "channel_id": "30001", "thread_id": "",
+               "binding_epoch": row["binding_epoch"], "visibility": "group"},
+        parts=[[{"type": "text", "text": "literal [CQ:at,qq=all]"}]],
+        conversation_id="format-conversation", response_seq=1,
     )
+    claim = await p.runtime.delivery.claim(p.kernel._authority(), "format-worker")
     prepared = await p.runtime.prepare(claim)
     current = p.kernel.components["adapter.onebot"].worker.identity.generation_id
     assert prepared.executor_ref["generation_id"] == current != before

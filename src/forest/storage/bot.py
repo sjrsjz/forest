@@ -26,6 +26,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from forest.errors import ForestError
+from forest.storage.kernel_content import KernelContentStore, capacity_boundary
 from forest.storage.migration_v1 import (
     WRITER_GENERATION,
     _migration_context,
@@ -40,6 +41,8 @@ MIGRATION_HANDLERS = {
     "033_delivery_payloads.sql": "delivery_payloads_v1",
     "034_legacy_suppression.sql": "legacy_suppression_v1",
     "035_source_links.sql": "source_links_v1",
+    "037_kernel_payloads.sql": "kernel_payloads_v1",
+    "038_generation_payloads.sql": "generation_payloads_v1",
 }
 
 
@@ -119,6 +122,7 @@ class BotStore:
         if not bot_id or len(bot_id) > 128:
             raise ValueError("bot_id must contain 1 to 128 characters")
         self._bot_id = bot_id
+        self.content = KernelContentStore(self)
         self.pool = AsyncConnectionPool(
             dsn,
             min_size=1,
@@ -533,6 +537,7 @@ class BotStore:
             )
         return row
 
+    @capacity_boundary
     async def register_generation(
         self,
         lease: HostLease,
@@ -614,13 +619,30 @@ class BotStore:
                 "state_migrations": state_migrations,
             }
             if existing:
+                await self.content.lock_in(conn, [generation_id], [component_id])
+                existing = await self.content.configuration_in(conn, existing)
                 if any(existing[key] != value for key, value in fixed.items()):
                     raise ForestError("GENERATION_CONFLICT", "Generation identity cannot be reused")
+                await self.content.guard_in(conn, [generation_id], phase="admission")
+                await self._host(conn, lease)
                 return existing
+            from forest.storage.source_domains import SourceDomainStore
+
+            await conn.execute(
+                "SELECT component_id FROM public.bot_component_state_heads "
+                "WHERE bot_id=%s AND component_id=%s FOR UPDATE", (self.bot_id, component_id),
+            )
+            epoch = await self.content.epoch_in(conn)
+            source = await SourceDomainStore(self).source_in(conn, "GENERATION_CONFIG", generation_id)
+            config_ref = await self.content.bodies.put_in(
+                conn, "control.config", "generation-config:sha256:" + _digest([self.bot_id, generation_id]),
+                {"config": config, "state_value_schema": state_value_schema}, sources=(source,), epoch=epoch,
+            )
             row = await (
                 await conn.execute(
                     "INSERT INTO public.bot_generations(bot_id,generation_id,component_id,package_digest,config_digest,"
-                    "config,instance_id,worker_incarnation,host_incarnation,host_owner_epoch,capability_grants,state_schema,state_value_schema,state_migrations,status) "
+                    "config_payload_id,config_payload_digest,instance_id,worker_incarnation,host_incarnation,host_owner_epoch,"
+                    "capability_grants,state_schema,state_migrations,status) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PREPARING') RETURNING *",
                     (
                         self.bot_id,
@@ -628,14 +650,14 @@ class BotStore:
                         component_id,
                         package_digest,
                         config_digest,
-                        Jsonb(config),
+                        config_ref.payload_id,
+                        config_ref.digest,
                         instance_id,
                         worker_incarnation,
                         lease.incarnation,
                         lease.owner_epoch,
                         Jsonb(grants),
                         state_schema,
-                        Jsonb(state_value_schema),
                         Jsonb(state_migrations),
                     ),
                 )
@@ -647,7 +669,11 @@ class BotStore:
                 {"generation_id": generation_id, "component_id": component_id},
             )
             assert row is not None
-            return row
+            # The new exposure head is transaction-private: locking it after
+            # creating its config body cannot reverse another transaction's order.
+            await self.content.expose_in(conn, generation_id, "CONFIG", generation_id, [config_ref.payload_id])
+            await self._host(conn, lease)
+            return {**row, "config": config, "state_value_schema": state_value_schema}
 
     async def _generation(self, conn: AsyncConnection, generation_id: str) -> dict:
         row = await (
@@ -675,6 +701,8 @@ class BotStore:
                 raise ForestError(
                     "INVALID_GENERATION_PHASE", "Only a preparing candidate can become ready"
                 )
+            await self.content.lock_in(conn, [generation_id], [generation["component_id"]])
+            await self.content.guard_in(conn, [generation_id], phase="admission")
             row = await (
                 await conn.execute(
                     "UPDATE public.bot_generations SET status='READY' WHERE bot_id=%s AND generation_id=%s RETURNING *",
@@ -684,19 +712,28 @@ class BotStore:
             assert row is not None
             return row
 
-    async def snapshot_state(self, lease: HostLease, component_id: str) -> dict:
+    @capacity_boundary
+    async def snapshot_state(self, lease: HostLease, component_id: str, *, generation_id: str | None = None) -> dict:
         async with self.pool.connection() as conn, conn.transaction():
             await self._route(conn, component_id)
             await self._host(conn, lease)
-            rows = await (
-                await conn.execute(
-                    "SELECT key,revision,value FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s AND NOT deleted ORDER BY key",
-                    (self.bot_id, component_id),
-                )
-            ).fetchall()
+            generations = [] if generation_id is None else [generation_id]
+            if generation_id is not None:
+                generation = await self._generation(conn, generation_id)
+                if generation["component_id"] != component_id:
+                    raise ForestError("GENERATION_CONFLICT", "State snapshot belongs to another component")
+            await self.content.lock_in(conn, generations, [component_id])
+            await self.content.guard_in(conn, generations, phase="admission")
+            rows = await self.content.state_rows_in(conn, component_id)
             result = {
-                row["key"]: {"revision": row["revision"], "value": row["value"]} for row in rows
+                row["key"]: {"revision": row["revision"], "value": row["value"]}
+                for row in rows if not row["deleted"] and row["payload_state"] == "ACTIVE"
             }
+            if generation_id is not None:
+                refs = await self.content.state_snapshot_parents_in(
+                    conn, generation_id, "prepare", rows,
+                )
+                await self.content.expose_in(conn, generation_id, "PREPARE_STATE", _digest(result), refs)
             await self._host(conn, lease)
             return result
 
@@ -718,15 +755,13 @@ class BotStore:
         )).fetchone()
         if head is None:
             raise ForestError("STATE_HEAD_MISSING", "Component has no durable state authority", 409)
-        rows = await (await conn.execute(
-            "SELECT key,revision,value,deleted FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s ORDER BY key",
-            (self.bot_id, component_id),
-        )).fetchall()
-        return head, {row["key"]: {key: value for key, value in row.items() if key != "key"} for row in rows}
+        rows = await self.content.state_rows_in(conn, component_id)
+        return head, self.content.source_rows(rows)
 
     @staticmethod
     def _state_values(rows: dict) -> dict:
-        return {key: row["value"] for key, row in rows.items() if not row["deleted"]}
+        return {key: row["value"] for key, row in rows.items()
+                if not row["deleted"] and not row.get("unavailable", False) and row["revision"] > 0}
 
     @staticmethod
     def _validate_state_values(values: dict, schema: dict) -> dict:
@@ -744,35 +779,52 @@ class BotStore:
             raise ForestError("STATE_MIGRATION_INVALID", "State violates its bounded durable contract", 422)
         return result
 
+    @capacity_boundary
     async def capture_state_migration(self, lease: HostLease, operation_id: str, op_epoch: int) -> dict:
         """Freeze an immutable final source after all admitted writes drained."""
         async with self.pool.connection() as conn, conn.transaction():
             operation, route, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
             operation = await self._quiesce_locked(conn, lease, operation, route, runtime)
+            candidate = await self._generation(conn, operation["candidate_generation_id"])
+            generation_id = candidate["generation_id"]
+            await self.content.lock_in(conn, [generation_id], [operation["component_id"]])
+            await self.content.guard_in(conn, [generation_id], phase="admission")
+            epoch = await self.content.epoch_in(conn)
             previous = await (await conn.execute(
                 "SELECT * FROM public.bot_state_migration_sources WHERE bot_id=%s AND operation_id=%s",
                 (self.bot_id, operation_id),
             )).fetchone()
             if previous:
+                previous = await self.content.bodies.hydrate_migration_source_in(conn, previous, epoch=epoch)
+                await self.content.expose_in(conn, generation_id, "MIGRATION_SOURCE",
+                                             previous["source_payload_id"], [previous["source_payload_id"]])
                 await self._host(conn, lease, runtime)
                 if operation["lease_until"] <= await self._now(conn):
                     raise ForestError("STALE_OPERATION", "Lifecycle lease expired during state capture replay")
                 return previous
-            candidate = await self._generation(conn, operation["candidate_generation_id"])
             head, rows = await self._state_source(conn, operation["component_id"])
             self._validate_state_values(self._state_values(rows), {})
+            state_rows = await self.content.state_rows_in(conn, operation["component_id"])
+            parents = await self.content.state_snapshot_parents_in(
+                conn, generation_id, "capture:" + _digest(operation_id), state_rows,
+            )
+            ref = await self.content.bodies.put_migration_source_in(
+                conn, operation_id, rows, parents=parents, epoch=epoch,
+            )
             source = await (await conn.execute(
                 "INSERT INTO public.bot_state_migration_sources(bot_id,operation_id,component_id,"
-                "source_generation_id,source_route_epoch,source_schema,source_revision,source_digest,source_rows,target_schema) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                "source_generation_id,source_route_epoch,source_schema,source_revision,source_digest,source_rows,target_schema,source_payload_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s) RETURNING *",
                 (self.bot_id, operation_id, operation["component_id"], route["generation_id"],
-                 route["route_epoch"], head["state_schema"], head["revision"], _digest(rows), Jsonb(rows), candidate["state_schema"]),
+                 route["route_epoch"], head["state_schema"], head["revision"], _digest(rows), candidate["state_schema"], ref.payload_id),
             )).fetchone()
+            await self.content.expose_in(conn, generation_id, "MIGRATION_SOURCE", ref.payload_id, [ref.payload_id])
             await self._host(conn, lease, runtime)
             if operation["lease_until"] <= await self._now(conn):
                 raise ForestError("STALE_OPERATION", "Lifecycle lease expired during state capture")
-            return source
+            return await self.content.bodies.hydrate_migration_source_in(conn, source, epoch=epoch)
 
+    @capacity_boundary
     async def stage_state_migration(
         self, lease: HostLease, operation_id: str, op_epoch: int, *, source_digest: str,
         first_values: dict, repeated_values: dict,
@@ -786,13 +838,19 @@ class BotStore:
             operation, _, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
             if operation["phase"] != "QUIESCENT":
                 raise ForestError("INVALID_OPERATION_PHASE", "State migration requires final quiescence")
+            candidate = await self._generation(conn, operation["candidate_generation_id"])
+            generation_id = candidate["generation_id"]
+            await self.content.lock_in(conn, [generation_id], [operation["component_id"]])
+            await self.content.guard_in(conn, [generation_id], phase="commit")
+            epoch = await self.content.epoch_in(conn)
+            candidate = await self.content.configuration_in(conn, candidate)
             source = await (await conn.execute(
                 "SELECT * FROM public.bot_state_migration_sources WHERE bot_id=%s AND operation_id=%s",
                 (self.bot_id, operation_id),
             )).fetchone()
             if source is None or source["source_digest"] != source_digest:
                 raise ForestError("STATE_SOURCE_CONFLICT", "Migration source receipt differs")
-            candidate = await self._generation(conn, operation["candidate_generation_id"])
+            source = await self.content.bodies.hydrate_migration_source_in(conn, source, epoch=epoch)
             self._validate_state_values(first_values, candidate["state_value_schema"])
             if source["source_generation_id"] is not None and source["source_schema"] != candidate["state_schema"] and {
                 "from_schema": source["source_schema"], "to_schema": candidate["state_schema"]
@@ -807,21 +865,34 @@ class BotStore:
             if previous:
                 if previous["result_digest"] != _digest(first_values):
                     raise ForestError("IDEMPOTENCY_CONFLICT", "Migration result is already immutable")
+                previous = await self.content.bodies.hydrate_migration_result_in(conn, previous, epoch=epoch)
+                await self.content.expose_in(conn, generation_id, "RESTORE_STATE", previous["result_payload_id"], [previous["result_payload_id"]])
                 await self._host(conn, lease, runtime)
                 if operation["lease_until"] <= await self._now(conn):
                     raise ForestError("STALE_OPERATION", "Lifecycle lease expired during migration replay")
                 return previous
+            parents = set(await self.content.parents_in(conn, generation_id))
+            parents.add(source["source_payload_id"])
+            ref = await self.content.bodies.put_migration_result_in(
+                conn, operation_id, first_values, parents=tuple(sorted(parents)), epoch=epoch,
+            )
             result = await (await conn.execute(
-                "INSERT INTO public.bot_state_migration_results(bot_id,operation_id,source_digest,result_digest,result_values) "
-                "VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                (self.bot_id, operation_id, source_digest, _digest(first_values), Jsonb(first_values)),
+                "INSERT INTO public.bot_state_migration_results(bot_id,operation_id,source_digest,result_digest,result_values,result_payload_id) "
+                "VALUES (%s,%s,%s,%s,NULL,%s) RETURNING *",
+                (self.bot_id, operation_id, source_digest, _digest(first_values), ref.payload_id),
             )).fetchone()
+            await self.content.expose_in(conn, generation_id, "RESTORE_STATE", ref.payload_id, [ref.payload_id])
             await self._host(conn, lease, runtime)
             if operation["lease_until"] <= await self._now(conn):
                 raise ForestError("STALE_OPERATION", "Lifecycle lease expired during migration staging")
-            return result
+            return await self.content.bodies.hydrate_migration_result_in(conn, result, epoch=epoch)
 
     async def _publish_state(self, conn: AsyncConnection, operation: dict, route: dict, candidate: dict) -> None:
+        generation_id = candidate["generation_id"]
+        await self.content.lock_in(conn, [generation_id], [operation["component_id"]])
+        await self.content.guard_in(conn, [generation_id], phase="commit")
+        epoch = await self.content.epoch_in(conn)
+        candidate = await self.content.configuration_in(conn, candidate)
         source = await (await conn.execute(
             "SELECT * FROM public.bot_state_migration_sources WHERE bot_id=%s AND operation_id=%s",
             (self.bot_id, operation["operation_id"]),
@@ -832,7 +903,13 @@ class BotStore:
             if head["state_schema"] != candidate["state_schema"]:
                 raise ForestError("STATE_MIGRATION_REQUIRED", "Schema transition has no staged state receipt")
             self._validate_state_values(self._state_values(rows), candidate["state_value_schema"])
+            state_rows = await self.content.state_rows_in(conn, operation["component_id"])
+            refs = await self.content.state_snapshot_parents_in(
+                conn, generation_id, "publish:" + _digest(operation["operation_id"]), state_rows,
+            )
+            await self.content.expose_in(conn, generation_id, "RESTORE_STATE", _digest(rows), refs)
             return
+        source = await self.content.bodies.hydrate_migration_source_in(conn, source, epoch=epoch)
         if (source["source_revision"] != head["revision"] or source["source_schema"] != head["state_schema"]
             or source["source_digest"] != _digest(rows) or source["source_generation_id"] != route["generation_id"]
             or source["source_route_epoch"] != route["route_epoch"]):
@@ -843,22 +920,28 @@ class BotStore:
         )).fetchone()
         if staged is None or staged["source_digest"] != source["source_digest"]:
             raise ForestError("STATE_MIGRATION_REQUIRED", "Candidate has no verified shadow state")
+        staged = await self.content.bodies.hydrate_migration_result_in(conn, staged, epoch=epoch)
         values = self._validate_state_values(staged["result_values"], candidate["state_value_schema"])
+        await self.content.expose_in(conn, generation_id, "RESTORE_STATE", staged["result_payload_id"], [staged["result_payload_id"]])
         if source["target_schema"] == head["state_schema"]:
             return
+        parents = tuple(sorted(set(await self.content.parents_in(conn, generation_id)) | {staged["result_payload_id"]}))
         for key in sorted(set(rows) | set(values)):
             previous = rows.get(key, {"revision": 0})["revision"]
             deleted, value = key not in values, values.get(key)
-            await conn.execute(
-                "INSERT INTO public.bot_state_revisions(bot_id,component_id,key,revision,previous_revision,value,operation_id,migration_operation_id,deleted) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (self.bot_id, operation["component_id"], key, previous+1, previous, Jsonb(value),
-                 operation["operation_id"], operation["operation_id"], deleted),
+            ref = None if deleted else await self.content.bodies.put_state_in(
+                conn, operation["component_id"], key, previous + 1, value, parents=parents, epoch=epoch,
             )
             await conn.execute(
-                "INSERT INTO public.bot_component_state(bot_id,component_id,key,revision,value,deleted) VALUES (%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT (bot_id,component_id,key) DO UPDATE SET revision=EXCLUDED.revision,value=EXCLUDED.value,deleted=EXCLUDED.deleted",
-                (self.bot_id, operation["component_id"], key, previous+1, Jsonb(value), deleted),
+                "INSERT INTO public.bot_state_revisions(bot_id,component_id,key,revision,previous_revision,value,operation_id,migration_operation_id,deleted,value_payload_id,value_digest) "
+                "VALUES (%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s)",
+                (self.bot_id, operation["component_id"], key, previous+1, previous,
+                 operation["operation_id"], operation["operation_id"], deleted, ref.payload_id if ref else None, ref.digest if ref else None),
+            )
+            await conn.execute(
+                "INSERT INTO public.bot_component_state(bot_id,component_id,key,revision,value,deleted,value_payload_id,value_digest) VALUES (%s,%s,%s,%s,NULL,%s,%s,%s) "
+                "ON CONFLICT (bot_id,component_id,key) DO UPDATE SET revision=EXCLUDED.revision,value=NULL,deleted=EXCLUDED.deleted,value_payload_id=EXCLUDED.value_payload_id,value_digest=EXCLUDED.value_digest",
+                (self.bot_id, operation["component_id"], key, previous+1, deleted, ref.payload_id if ref else None, ref.digest if ref else None),
             )
         await conn.execute(
             "UPDATE public.bot_component_state_heads SET state_schema=%s,revision=revision+1,migration_operation_id=%s "
@@ -1360,6 +1443,7 @@ class BotStore:
                 {"generation_id": generation_id, "reason": reason},
             )
 
+    @capacity_boundary
     async def admit(
         self,
         lease: HostLease,
@@ -1369,6 +1453,8 @@ class BotStore:
         input_digest: str,
         timeout_seconds: float = 60,
         *,
+        input_value: Any = None,
+        input_parent_ids: tuple[str, ...] = (),
         expected_policy_revision: int | None = None,
         expected_generation_id: str | None = None,
         expected_worker_incarnation: str | None = None,
@@ -1383,6 +1469,8 @@ class BotStore:
             operation_id,
             input_digest,
             timeout_seconds=timeout_seconds,
+            input_value=input_value,
+            input_parent_ids=input_parent_ids,
             expected_policy_revision=expected_policy_revision,
             expected_generation_id=expected_generation_id,
             expected_worker_incarnation=expected_worker_incarnation,
@@ -1391,6 +1479,7 @@ class BotStore:
             agent_tool_id=agent_tool_id,
         )
 
+    @capacity_boundary
     async def admit_control(
         self,
         lease: HostLease,
@@ -1401,6 +1490,8 @@ class BotStore:
         timeout_seconds: float = 10,
         *,
         service_name: str,
+        input_value: Any = None,
+        input_parent_ids: tuple[str, ...] = (),
         expected_policy_revision: int | None = None,
         expected_generation_id: str | None = None,
         expected_worker_incarnation: str | None = None,
@@ -1428,6 +1519,8 @@ class BotStore:
             operation_id,
             input_digest,
             timeout_seconds=timeout_seconds,
+            input_value=input_value,
+            input_parent_ids=input_parent_ids,
             expected_policy_revision=expected_policy_revision,
             expected_generation_id=expected_generation_id,
             expected_worker_incarnation=expected_worker_incarnation,
@@ -1445,6 +1538,8 @@ class BotStore:
         input_digest: str,
         timeout_seconds: float = 60,
         *,
+        input_value: Any = None,
+        input_parent_ids: tuple[str, ...] = (),
         expected_policy_revision: int | None = None,
         expected_generation_id: str | None = None,
         expected_worker_incarnation: str | None = None,
@@ -1461,13 +1556,6 @@ class BotStore:
             route = routes[component_id]
             runtime = await self._runtime(conn)
             await self._host(conn, lease, runtime)
-            agent_authority = None
-            if agent_tool_id is not None:
-                from forest.storage.agent import AgentStore
-
-                agent_authority = await AgentStore.guard_tool_call_in(
-                    conn, self.bot_id, agent_tool_id, input_digest=input_digest
-                )
             if (
                 expected_policy_revision is not None
                 and runtime["policy_revision"] != expected_policy_revision
@@ -1480,11 +1568,6 @@ class BotStore:
                 if route["generation_id"] is not None
                 else None
             )
-            if agent_authority is not None and (
-                generation is None or agent_authority["tool_def"].get("package_digest")
-                not in {None, generation["package_digest"]}
-            ):
-                raise ForestError("AGENT_TOOL_CONTRACT_CHANGED", "Frozen Agent tool package changed", 409)
             if (
                 (
                     expected_generation_id is not None
@@ -1531,7 +1614,7 @@ class BotStore:
                     raise ForestError(
                         "CALL_COMPLETED",
                         "Operation already completed",
-                        details={"result": old["result"]},
+                        details={"call_id": old["call_id"]},
                     )
                 if old["status"] in {"FAILED", "CANCELLED"}:
                     raise ForestError(
@@ -1577,13 +1660,30 @@ class BotStore:
                     raise ForestError(
                         "ADMISSION_CLOSED", "A reserved dependency has no current active Worker"
                     )
+            await self.content.lock_in(conn, [generation["generation_id"]], [component_id])
+            agent_authority = None
+            if agent_tool_id is not None:
+                from forest.storage.agent import AgentStore
+
+                agent_authority = await AgentStore.guard_tool_call_in(
+                    conn, self.bot_id, agent_tool_id, input_digest=input_digest
+                )
+            if agent_authority is not None and (
+                generation is None or agent_authority["tool_def"].get("package_digest")
+                not in {None, generation["package_digest"]}
+            ):
+                raise ForestError("AGENT_TOOL_CONTRACT_CHANGED", "Frozen Agent tool package changed", 409)
+            input_ref = await self.content.input_in(
+                conn, generation["generation_id"], call_id, input_value,
+                parents=input_parent_ids, agent_tool_id=agent_tool_id,
+            )
             row = await (
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components,admission_lane,control_service,agent_tool_id) "
+                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components,admission_lane,control_service,agent_tool_id,input_payload_id) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -1605,6 +1705,7 @@ class BotStore:
                         admission_lane,
                         control_service,
                         agent_tool_id,
+                        input_ref.payload_id,
                     ),
                 )
             ).fetchone()
@@ -1655,6 +1756,7 @@ class BotStore:
                 )
         return chain
 
+    @capacity_boundary
     async def admit_child(
         self,
         parent_grant: CallGrant,
@@ -1664,6 +1766,8 @@ class BotStore:
         input_digest: str,
         timeout_seconds: float = 60,
         *,
+        input_value: Any = None,
+        input_parent_ids: tuple[str, ...] = (),
         expected_policy_revision: int | None = None,
         expected_generation_id: str | None = None,
         expected_worker_incarnation: str | None = None,
@@ -1760,7 +1864,7 @@ class BotStore:
                     raise ForestError(
                         "CALL_COMPLETED",
                         "Child operation already completed",
-                        details={"result": old["result"]},
+                        details={"call_id": old["call_id"]},
                     )
                 if old["status"] in {"FAILED", "CANCELLED"}:
                     raise ForestError(
@@ -1791,13 +1895,18 @@ class BotStore:
                     status=429,
                 )
             await self._guard_time(conn, host, parent_grant)
+            input_ref = await self.content.input_in(
+                conn, generation["generation_id"], call_id, input_value,
+                parents=input_parent_ids, parent_generation=parent_grant.generation_id,
+                agent_tool_id=parent["agent_tool_id"],
+            )
             row = await (
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,parent_call_id,root_call_id,call_depth,dependency_components,agent_tool_id) "
+                    "policy_revision,deadline_at,input_digest,parent_call_id,root_call_id,call_depth,dependency_components,agent_tool_id,input_payload_id) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -1820,6 +1929,7 @@ class BotStore:
                         parent["call_depth"] + 1,
                         list(dependencies),
                         parent["agent_tool_id"],
+                        input_ref.payload_id,
                     ),
                 )
             ).fetchone()
@@ -1836,13 +1946,15 @@ class BotStore:
                 },
             )
             assert row is not None
+            await self._guard_time(conn, host, parent_grant)
             return self._grant_value(row)
 
+    @capacity_boundary
     async def authorized_child_call(
         self, parent_grant: CallGrant, operation_id: str, expected_policy_revision: int
     ) -> dict | None:
         async with self.pool.connection() as conn, conn.transaction():
-            await self._guard(conn, parent_grant)
+            _, host = await self._guard(conn, parent_grant)
             if parent_grant.policy_revision != expected_policy_revision:
                 raise ForestError("POLICY_REVOKED", "Child receipt grant was revoked", status=403)
             child = await (
@@ -1856,6 +1968,8 @@ class BotStore:
                 or child["root_call_id"] != parent_grant.root_call_id
             ):
                 raise ForestError("IDEMPOTENCY_CONFLICT", "Child receipt belongs to another parent")
+            child = await self.content.child_receipt_in(conn, parent_grant, child)
+            await self._guard_time(conn, host, parent_grant)
             return child
 
     async def _guard(
@@ -1939,12 +2053,19 @@ class BotStore:
                 raise ForestError("CALL_TERMINAL", "Call or ancestor has already terminated")
             if current["deadline_at"] <= await self._now(conn):
                 raise ForestError("CALL_EXPIRED", "A call or ancestor deadline has elapsed")
+        generations = {row["generation_id"] for row in chain}
+        generations.update(routes[name]["generation_id"] for name in extra_components
+                           if routes[name]["generation_id"] is not None)
+        await self.content.lock_in(conn, generations,
+                                   {row["component_id"] for row in chain} | set(extra_components))
         await self._guard_time(conn, host, grant)
         assert call is not None
         return call, host
 
     async def _guard_time(self, conn: AsyncConnection, host: dict, grant: CallGrant,
                           *, require_write=False) -> None:
+        chain = await self._chain(conn, grant.call_id)
+        await self.content.guard_in(conn, [row["generation_id"] for row in chain])
         if grant.agent_tool_id is not None:
             from forest.storage.agent import AgentStore
 
@@ -1957,6 +2078,37 @@ class BotStore:
         if grant.deadline_at <= now:
             raise ForestError("CALL_EXPIRED", "Call deadline elapsed before commit")
 
+    async def authorize_dispatch(self, grant: CallGrant) -> None:
+        """Last database fence after acquiring the actual Worker IPC slot."""
+        async with self.pool.connection() as conn, conn.transaction():
+            _, host = await self._guard(conn, grant)
+            await self._guard_time(conn, host, grant)
+
+    async def authorize_generation_dispatch(self, lease: HostLease, generation_id: str) -> None:
+        async with self.pool.connection() as conn, conn.transaction():
+            generation = await self._generation(conn, generation_id)
+            await self._route(conn, generation["component_id"])
+            await self._host(conn, lease)
+            await self.content.lock_in(conn, [generation_id], [generation["component_id"]])
+            await self.content.guard_in(conn, [generation_id], phase="admission")
+            await self._host(conn, lease)
+
+    async def close_generation_admission(self, lease: HostLease, generation_id: str) -> None:
+        """Drain a full Worker without invalidating already-admitted call trees."""
+        async with self.pool.connection() as conn, conn.transaction():
+            generation = await self._generation(conn, generation_id)
+            route = await self._route(conn, generation["component_id"])
+            await self._host(conn, lease)
+            await self.content.lock_in(conn, [generation_id], [generation["component_id"]])
+            if route["generation_id"] == generation_id:
+                await conn.execute(
+                    "UPDATE public.bot_component_routes SET admission=false,control_admission=false "
+                    "WHERE bot_id=%s AND component_id=%s AND generation_id=%s",
+                    (self.bot_id, generation["component_id"], generation_id),
+                )
+            await self._host(conn, lease)
+
+    @capacity_boundary
     async def read_state(self, grant: CallGrant, key: str) -> dict:
         if grant.admission_lane != "DATA":
             raise ForestError(
@@ -1966,13 +2118,33 @@ class BotStore:
             _, host = await self._guard(conn, grant)
             row = await (
                 await conn.execute(
-                    "SELECT revision,value FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s AND key=%s",
+                    "SELECT * FROM public.bot_component_state WHERE bot_id=%s AND component_id=%s AND key=%s",
                     (self.bot_id, grant.component_id, key),
                 )
             ).fetchone()
+            try:
+                row = await self.content.bodies.hydrate_state_in(
+                    conn, row, epoch=await self.content.epoch_in(conn),
+                )
+            except ForestError as exc:
+                if exc.code != "KERNEL_CONTENT_REVOKED" or row is None:
+                    raise
+                await self._guard_time(conn, host, grant)
+                raise ForestError(
+                    "KERNEL_CONTENT_REVOKED", "State content was removed; its revision remains authoritative", 409,
+                    details={"current_revision": row["revision"], "value_digest": row["value_digest"],
+                             "payload_state": "UNAVAILABLE"},
+                ) from None
+            if row is not None and row["payload_state"] == "ACTIVE":
+                await self.content.expose_in(
+                    conn, grant.generation_id, "STATE_READ",
+                    "state:" + _digest([grant.component_id, key, row["revision"]]),
+                    [row["value_payload_id"]],
+                )
             await self._guard_time(conn, host, grant)
-            return row or {"revision": 0, "value": None}
+            return {"revision": row["revision"], "value": row["value"]} if row else {"revision": 0, "value": None}
 
+    @capacity_boundary
     async def commit_state(
         self,
         grant: CallGrant,
@@ -2013,6 +2185,9 @@ class BotStore:
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "State step identity binds different input"
                     )
+                previous = await self.content.bodies.hydrate_step_in(
+                    conn, previous, epoch=await self.content.epoch_in(conn),
+                )
                 await self._guard_time(conn, host, grant)
                 return previous["receipt"]
             await conn.execute(
@@ -2033,6 +2208,7 @@ class BotStore:
                     details={"current_revision": state["revision"]},
                 )
             generation = await self._generation(conn, grant.generation_id)
+            generation = await self.content.configuration_in(conn, generation)
             _, rows = await self._state_source(conn, grant.component_id)
             values = self._state_values(rows)
             values[key] = value
@@ -2045,34 +2221,44 @@ class BotStore:
                 "revision": expected_revision + 1,
                 "value": value,
             }
+            value_ref = await self.content.bodies.put_state_in(
+                conn, grant.component_id, key, expected_revision + 1, value,
+                parents=await self.content.parents_in(conn, grant.generation_id),
+                epoch=await self.content.epoch_in(conn),
+            )
             await conn.execute(
-                "INSERT INTO public.bot_state_steps(bot_id,call_id,operation_id,input_digest,payload_digest,receipt) VALUES (%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_state_steps(bot_id,call_id,operation_id,input_digest,payload_digest,"
+                "receipt_metadata,value_payload_id,value_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     self.bot_id,
                     grant.call_id,
                     operation_id,
                     input_digest,
                     payload_digest,
-                    Jsonb(receipt),
+                    Jsonb({key: field for key, field in receipt.items() if key != "value"}),
+                    value_ref.payload_id,
+                    value_ref.digest,
                 ),
             )
             await conn.execute(
-                "INSERT INTO public.bot_state_revisions(bot_id,component_id,key,revision,previous_revision,value,call_id,operation_id) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_state_revisions(bot_id,component_id,key,revision,previous_revision,value_payload_id,value_digest,call_id,operation_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     self.bot_id,
                     grant.component_id,
                     key,
                     expected_revision + 1,
                     expected_revision,
-                    Jsonb(value),
+                    value_ref.payload_id,
+                    value_ref.digest,
                     grant.call_id,
                     operation_id,
                 ),
             )
             await conn.execute(
-                "UPDATE public.bot_component_state SET revision=%s,value=%s,deleted=false WHERE bot_id=%s AND component_id=%s AND key=%s",
-                (expected_revision + 1, Jsonb(value), self.bot_id, grant.component_id, key),
+                "UPDATE public.bot_component_state SET revision=%s,value_payload_id=%s,value_digest=%s,deleted=false "
+                "WHERE bot_id=%s AND component_id=%s AND key=%s",
+                (expected_revision + 1, value_ref.payload_id, value_ref.digest, self.bot_id, grant.component_id, key),
             )
             await conn.execute(
                 "UPDATE public.bot_component_state_heads SET revision=revision+1 WHERE bot_id=%s AND component_id=%s",
@@ -2093,14 +2279,20 @@ class BotStore:
             await self._guard_time(conn, host, grant)
             return receipt
 
+    @capacity_boundary
     async def finish_call(self, grant: CallGrant, result: Any) -> dict:
         async with self.pool.connection() as conn, conn.transaction():
             call, host = await self._guard(conn, grant, pending=False)
             if call["status"] == "COMPLETED":
+                call = await self.content.hydrate_call_in(conn, call)
                 if call["result"] != result:
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "Call already finished with another result"
                     )
+                if grant.parent_call_id is not None:
+                    parent = self._grant_value((await self._chain(conn, grant.call_id))[-2])
+                    call = await self.content.child_receipt_in(conn, parent, call)
+                await self._guard_time(conn, host, grant)
                 return call
             if call["status"] != "ADMITTED":
                 raise ForestError("CALL_TERMINAL", "Failed call cannot be completed")
@@ -2114,16 +2306,28 @@ class BotStore:
                     "A call cannot finish before all of its child calls terminate",
                 )
             await self._guard_time(conn, host, grant)
+            result_ref = await self.content.bodies.put_call_result_in(
+                conn, grant.call_id, result,
+                parents=await self.content.parents_in(conn, grant.generation_id),
+                epoch=await self.content.epoch_in(conn),
+            )
             row = await (
                 await conn.execute(
-                    "UPDATE public.bot_calls SET status='COMPLETED',result=%s WHERE bot_id=%s AND call_id=%s RETURNING *",
-                    (Jsonb(result), self.bot_id, grant.call_id),
+                    "UPDATE public.bot_calls SET status='COMPLETED',result_payload_id=%s,result_digest=%s "
+                    "WHERE bot_id=%s AND call_id=%s RETURNING *",
+                    (result_ref.payload_id, result_ref.digest, self.bot_id, grant.call_id),
                 )
             ).fetchone()
             await self._event(
                 conn, "call.completed", grant.operation_id, {"call_id": grant.call_id}
             )
             assert row is not None
+            if grant.parent_call_id is not None:
+                parent = self._grant_value((await self._chain(conn, grant.call_id))[-2])
+                row = await self.content.child_receipt_in(conn, parent, row)
+            else:
+                row = await self.content.hydrate_call_in(conn, row)
+            await self._guard_time(conn, host, grant)
             return row
 
     async def read_call(self, operation_id: str) -> dict | None:
@@ -2177,6 +2381,7 @@ class BotStore:
                 from forest.storage.agent import AgentStore
 
                 await AgentStore.guard_tool_call_in(conn, self.bot_id, agent_tool_id)
+            result = await self.content.hydrate_call_in(conn, result)
             await self._host(conn, lease, runtime)
             return result
 

@@ -88,6 +88,16 @@ async def test_helper_edit_reloads_full_snapshot_and_keeps_only_one_worker(watch
     assert head["good_request_id"] == head["desired_request_id"]
     assert head["last_good"]["source_digest"] == source_fingerprint(source)
     assert "+dev." in kernel.components["example.counter"].snapshot.manifest["version"]
+    async with kernel.store.pool.connection() as conn:
+        generation = await (await conn.execute(
+            "SELECT g.config,g.state_value_schema,g.config_payload_id,"
+            "public.forest_generation_configuration(g.bot_id,g.generation_id) AS actual_config "
+            "FROM public.bot_generations g JOIN public.bot_component_routes r "
+            "ON r.bot_id=g.bot_id AND r.generation_id=g.generation_id WHERE r.component_id=%s",
+            ("example.counter",),
+        )).fetchone()
+    assert generation["config"] is None and generation["state_value_schema"] is None
+    assert generation["config_payload_id"] and generation["actual_config"] == head["config"]
 
 
 @pytest.mark.postgres

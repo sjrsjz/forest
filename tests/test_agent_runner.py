@@ -363,7 +363,7 @@ async def test_completed_native_tool_receipt_recovers_lost_ack_without_second_ef
     await install_tool(agent_env, tmp_path)
     actor, selected, context = await begin(agent_env)
     client.responses = [proposed(selected["trigger_ids"][0], increment=7)]
-    invoke = kernel.invoke
+    invoke = kernel.invoke_with_receipt
     executions = []
 
     async def lose_return(*args, **kwargs):
@@ -371,7 +371,7 @@ async def test_completed_native_tool_receipt_recovers_lost_ack_without_second_ef
         await invoke(*args, **kwargs)
         raise OSError("lost local result acknowledgement")
 
-    monkeypatch.setattr(kernel, "invoke", lose_return)
+    monkeypatch.setattr(kernel, "invoke_with_receipt", lose_return)
     result = await runner.advance(actor, selected, context)
     assert result.status == "YIELD", await query(
         repository, "SELECT status,result FROM public.bot_agent_tools"
@@ -504,7 +504,7 @@ async def test_tool_backpressure_before_admission_retries_same_operation_once(
     await install_tool(agent_env, tmp_path)
     actor, selected, context = await begin(agent_env)
     client.responses = [proposed(selected["trigger_ids"][0], increment=4)]
-    invoke = kernel.invoke
+    invoke = kernel.invoke_with_receipt
     operations = []
 
     async def reject_first(*args, **kwargs):
@@ -513,7 +513,7 @@ async def test_tool_backpressure_before_admission_retries_same_operation_once(
             raise ForestError("BACKPRESSURE", "Real capacity is unavailable", 503)
         return await invoke(*args, **kwargs)
 
-    monkeypatch.setattr(kernel, "invoke", reject_first)
+    monkeypatch.setattr(kernel, "invoke_with_receipt", reject_first)
     assert (await runner.advance(actor, selected, context)).status == "WAIT_TOOL"
     actor, selected, context = await resume(agent_env, actor)
     assert (await runner.advance(actor, selected, context)).status == "YIELD"

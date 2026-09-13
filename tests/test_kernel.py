@@ -246,7 +246,19 @@ async def test_policy_revocation_also_fences_receipt_reads_and_new_admission(tmp
         await kernel.close()
 
 
-async def test_taken_over_host_cannot_replay_result_before_heartbeat(tmp_path, bot_database):
+async def test_taken_over_host_cannot_replay_result_before_heartbeat(tmp_path, bot_database, monkeypatch):
+    from forest.storage.exposures import ExposureStore
+
+    scans_allowed = asyncio.Event()
+    scan = ExposureStore.scan
+
+    async def delayed_scan(self, *args, **kwargs):
+        await scans_allowed.wait()
+        return await scan(self, *args, **kwargs)
+
+    # Deliberately hold the separate content supervisor too: replay itself must
+    # check ownership even when neither background observer has seen takeover.
+    monkeypatch.setattr(ExposureStore, "scan", delayed_scan)
     store, _ = bot_database
     kernel = Kernel(store, lease_seconds=120)
     await kernel.start()

@@ -7,6 +7,7 @@ Run lock after that root. An accepted permit cannot promise network revocation.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from contextlib import asynccontextmanager
@@ -754,6 +755,38 @@ class DeliveryStore:
             await self.contents.payloads.require_available_in(
                 conn, (part["payload_id"],), expected_deletion_epoch=claim.deletion_epoch
             )
+            wire_parents = [part["payload_id"]]
+            if "component_id" in executor_ref:
+                call = await (await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s",
+                    (self.store.bot_id, executor_ref.get("call_id")),
+                )).fetchone()
+                fields = ("component_id", "generation_id", "worker_incarnation", "route_epoch",
+                          "policy_revision", "admission_lane", "result_payload_id", "result_digest")
+                if (call is None or call["status"] != "COMPLETED"
+                        or call["control_service"] != "onebot.prepare"
+                        or any(call[key] != executor_ref.get(key) for key in fields)):
+                    raise ForestError("FORMAT_RECEIPT_MISSING", "Prepared wire has no matching Kernel receipt", 409)
+                call = await self.store.content.hydrate_call_in(conn, call)
+                expected_result = {
+                    "action": action, "wire_body_b64": base64.b64encode(wire_body).decode(),
+                    "wire_digest": wire_digest,
+                }
+                if call["result"] != expected_result:
+                    raise ForestError("INVALID_WIRE_PAYLOAD", "Prepared wire differs from the Kernel receipt", 422)
+                # The codec is a pure protocol projection. Recompute the full
+                # value from the authorized SendPart: a persistent codec may
+                # not substitute content retained from another conversation.
+                from forest.adapters.onebot import prepare_send
+
+                semantic = await self.contents.read_part_in(
+                    conn, part, expected_deletion_epoch=claim.deletion_epoch,
+                )
+                projection = prepare_send(route["channel_kind"], route["channel_id"], semantic)
+                if (projection.action != action or projection.wire_body != wire_body
+                        or projection.wire_digest != wire_digest):
+                    raise ForestError("INVALID_WIRE_PAYLOAD", "Codec changed the authorized message projection", 422)
+                wire_parents.append(call["result_payload_id"])
             await self._final_host(conn, lease)
             now = await self.store._now(conn)
             deadline = now + timedelta(seconds=timeout_seconds)
@@ -763,7 +796,7 @@ class DeliveryStore:
                 owner_kind="delivery.request",
                 owner_id=attempt_id,
                 value=wire_body,
-                parents=(part["payload_id"],),
+                parents=tuple(wire_parents),
                 expected_deletion_epoch=claim.deletion_epoch,
             )
             await conn.execute(

@@ -136,12 +136,27 @@ async def invoke(client, base, increment, key, *, status=200):
                       status=status)
 
 
+async def persisted_configuration(app, bot_id, expected):
+    """Real publication succeeds using payloads while legacy columns stay NULL."""
+    bot = app.state.runtime.fleet.bots[bot_id]
+    async with bot.store.pool.connection() as conn:
+        generation = await (await conn.execute(
+            "SELECT g.config,g.state_value_schema,g.config_payload_id,"
+            "public.forest_generation_configuration(g.bot_id,g.generation_id) AS actual_config "
+            "FROM public.bot_generations g JOIN public.bot_component_routes r "
+            "ON r.bot_id=g.bot_id AND r.generation_id=g.generation_id "
+            "WHERE r.bot_id=%s AND r.component_id='forest.counter'", (bot_id,),
+        )).fetchone()
+    assert generation["config"] is None and generation["state_value_schema"] is None
+    assert generation["config_payload_id"] and generation["actual_config"] == expected
+
+
 @pytest.mark.postgres
 async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web_bots_database):
     data = tmp_path / "state"
     token = BootstrapState(data).initialize()
     settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
-    async with running(settings) as (_, client):
+    async with running(settings) as (app, client):
         await setup(client, token)
         created = [await post(client, "/management/v1/bots", {"display_name": name}, key, status=202)
                    for name, key in (("Bot Alpha", "create-alpha"), ("Bot Beta", "create-beta"))]
@@ -177,6 +192,7 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
         assert conflict["code"] == "REVISION_CONFLICT"
         now = await effective(client, bases[0], 2)
         assert now["effective_values"]["config"] == {"label": "Alpha v2", "multiplier": 10}
+        await persisted_configuration(app, created[0]["bot_id"], now["effective_values"]["config"])
         changed = await invoke(client, bases[0], 1, "after-reload")
         assert changed["result"] == {"value": 16, "revision": 2, "label": "Alpha v2"}
         other = await invoke(client, bases[1], 1, "after-reload")
@@ -189,12 +205,13 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
 
     # New ASGI application, supervisor, host incarnations and Worker processes;
     # only the same encrypted deployment state and dedicated databases survive.
-    async with running(settings) as (_, client):
+    async with running(settings) as (app, client):
         await login(client)
         listed = (await client.get("/management/v1/bots")).json()["bots"]
         assert {row["bot_id"] for row in listed} == {bot["bot_id"] for bot in created}
         await asyncio.gather(*(effective(client, base, revision)
                                for base, revision in zip(bases, (2, 1), strict=True)))
+        await persisted_configuration(app, created[0]["bot_id"], {"label": "Alpha v2", "multiplier": 10})
         assert await invoke(client, bases[0], 1, "after-reload") == changed
         assert await apply(client, bases[0], next_plan, "tab-one-apply") == applied
         values = [await invoke(client, base, 1, "after-restart") for base in bases]

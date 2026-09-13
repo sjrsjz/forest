@@ -30,7 +30,7 @@ OWNER_KINDS = frozenset({
     "media.source", "media.capture", "media.variant", "model.snapshot", "model.manifest",
     "model.request", "model.result", "agent.tool", "agent.observation", "agent.child",
     "context.parts", "reply.parts", "delivery.payload", "delivery.request", "delivery.receipt",
-    "kernel.result", "state.value", "state.migration", "control.result", "control.config",
+    "kernel.input", "kernel.result", "state.value", "state.migration", "control.result", "control.config",
     "control.audit", "control.outbox", "job.definition", "shell.arguments",
 })
 
@@ -163,11 +163,17 @@ class PayloadStore:
         # are flattened once, so deleting a source finds the transitive closure
         # without graph traversal while holding database locks.
         await self.lock_in(conn)
-        parent_sources = []
+        # The caller's direct manifest is bounded above. Inherited manifests
+        # overlap heavily across long-lived Worker inputs, so budget their
+        # unique union while accumulating rather than an expanded duplicate list.
+        source_union = set(source_set)
         for parent in parent_set:
             row = await self._header_in(conn, parent)
-            parent_sources.extend(SourceRef(**s) for s in row["manifest"]["sources"])
-        source_set = self._sources((*source_set, *parent_sources))
+            for source in row["manifest"]["sources"]:
+                source_union.add(SourceRef(**source))
+                if len(source_union) > MAX_SOURCES:
+                    raise ForestError("SOURCE_LINK_SCOPE_LIMIT", "Source dependency union exceeds its limit", 422)
+        source_set = tuple(sorted(source_union))
         manifest = {"sources": [asdict(s) for s in source_set], "parents": list(parent_set)}
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         input_digest = digest_json([owner_kind, owner_id, encoding, digest, manifest])

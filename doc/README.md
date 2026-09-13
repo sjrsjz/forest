@@ -23,6 +23,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P4 正文迁移协议](p4-content-migration.md) | 事务内正文搬运、冻结迁移算法、旧宿主隔离与保守来源撤销 |
 | [P4 Agent 载荷](p4-agent-payloads.md) | 快照/精确请求/工具结果的来源传递、删除守卫与恢复结算 |
 | [P4 发送载荷](p4-delivery-payloads.md) | 排队发送的来源依赖、精确 wire、迟到回执与对账清理 |
+| [P4 Kernel 与 Worker 来源](p4-kernel-payloads.md) | 代际暴露合流、调用/状态正文、配置来源域及回收屏障 |
 | [P4 剩余载荷迁移](p4-payload-migration-notes.md) | Kernel、配置等剩余正文副本、来源依赖及完整物理清理边界 |
 | [P4 记忆配置](p4-memory-config.md) | 独立嵌入/媒体/查询配置、Web 表单、修订与预算边界 |
 | [P4 持久图存储](p4-graph-store.md) | 多主干分片、连续邻接、稳定事实、全局修订与 CAS 发布 |

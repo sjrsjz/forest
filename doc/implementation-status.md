@@ -53,7 +53,7 @@ Web 请求采用“服务器保存计划 → 页面显示差异 → 按 plan ID/
 
 ### 2.1 当前插件包与配置
 
-包格式限定 `runtime=python-worker`、一个 `scope=bot` 组件、`state_schema=1`、`reload_mode=drain`；服务声明输入/输出 JSON schema 和契约 major.minor。能力包括显式 `state.read/state.write` 与 `service.call:<name>`，跨组件依赖必须同时在 manifest 声明。服务重复、缺少必需依赖、契约不兼容和依赖环在执行插件前拒绝；缺少可选依赖时固定降级状态。不支持的约束或 manifest 字段会明确拒绝，不能把未执行的 `memory_mb` 等限制显示为受保护。
+包格式限定 `runtime=python-worker`、一个 `scope=bot` 组件和 `reload_mode=drain`；`state_schema` 是正整数版本，版本变更须声明并执行状态迁移。服务声明输入/输出 JSON schema 和契约 major.minor。能力包括显式 `state.read/state.write` 与 `service.call:<name>`，跨组件依赖必须同时在 manifest 声明。服务重复、缺少必需依赖、契约不兼容和依赖环在执行插件前拒绝；缺少可选依赖时固定降级状态。不支持的约束或 manifest 字段会明确拒绝，不能把未执行的 `memory_mb` 等限制显示为受保护。
 
 资源字段包含 `max_frame_bytes`、`max_inflight`、`max_queue_items`、`max_state_inflight`、`max_owned_tasks`，生命周期字段包含 prepare/start/drain/stop 的 timeout。它们约束本切片的 IPC、调用与受监督任务，不能等同操作系统沙箱、CPU/内存硬配额或完整资源 SDK。普通 Python 插件仍要求可信来源。
 
@@ -100,13 +100,28 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 ## 4. 验证证据与适用范围
 
-当前正文迁移新增 029–035：输入与图片、上下文与回复、Agent、子 Agent、发送正文使用永久事实头和可清理 body；原正文列禁止再次写入。内容接纳与遗忘通过 deletion epoch 串行裁决，旧模型请求仍保留精确 bytes、原摘要和费用事实。运行恢复会在读取已删除 checkpoint 失败时结束该 Run，保留静默排空步骤；子 Agent 在派发和接纳时同时复验载荷与当前记忆访问权限。工具的 JSON `null` 作为合法结果迁移，不与 SQL 空值混淆。详见[正文迁移协议](p4-content-migration.md)、[Agent 载荷](p4-agent-payloads.md)和[发送载荷](p4-delivery-payloads.md)。
+当前 036–038 将 Kernel 调用输入/结果、状态值/步骤回执、迁移源/候选及 generation 配置接入可清理载荷。Worker 实际暴露按代际累计，派生结果继承整个集合；真实 IPC 槽位后的交付、生命周期交付及最终提交均复验来源。来源失效回收进程，容量耗尽关闭新准入并排空已有调用，监督任务与 Host 续租独立。状态恢复支持 512 个键的确定分页；已删值保留 revision，通过明确的不可用错误及 CAS 重建，合法 JSON null 不受混淆。详见 [Kernel 正文与代际来源](p4-kernel-payloads.md)。
+
+OneBot 原始 bytes 在进入 codec 前绑定真实平台来源；完整 codec 投影须与 Host 解析一致。模板回复、Agent 工具接纳/恢复和发送许可均继承真实 Kernel result 引用；发送许可还核对完成回执及精确 wire 值。配置来源域只作为删除依赖，不成为可召回记忆项。Web/watch 发布和图资格 SQL 已接入实际配置载荷。此前构建的 `7138ac2` 候选镜像保持原状，主服务仍运行 `9fb8fac` 镜像；本切片使用独立测试数据库和镜像验证。
+
+全链路遗忘仍未完成：Agent 冻结配置、控制面与 Job 等正文族、公开遗忘管理、WAL/备份恢复约束和完整容量治理继续后续实施。已获得许可的外部效果保留原有对账语义；晚到同源新 occurrence 仍缺持久 metadata-only ACK。
+
+| Kernel 正文与代际来源切片 | 结果 | 范围 |
+|---|---|---|
+| 最终 Windows 集成 | `70 passed`，335.83 秒 | Kernel、调用树、实际 Worker 交付、代际回收和 Agent 来源撤销；包含延迟 admission 确认的完成、撤销及期限交错 |
+| 最终非 root Linux 集成 | `70 passed`，291.50 秒 | 相同七个模块，最终独立镜像与专用 PostgreSQL |
+| 最终 Edge + 独立 Compose | 通过 | 初始化、双 Bot、配置 CAS、热重载/升级、OneBot/Agent/Job 实际本地 HTTP、UNKNOWN 对账及重启恢复 |
+| 最终镜像与静态检查 | 通过 | 261 个源码/测试文件及两个镜像中各 160 个已安装运行文件均与工作区 SHA-256 一致；Ruff 和本地文档链接通过 |
+
+最终定向补入了排空复核：持久 admission 已提交而 Host 尚未收到确认时，必须等待该调用，不能只检查内存集合。两项旧 Agent 测试也已调整：拦截真实 `invoke_with_receipt` 边界，并接受实际最先生效的两种来源撤销码；零状态写、零回复及 Run 终态断言继续保留。浏览器验证使用最终修复后的运行镜像，对端为本地 HTTP 测试服务，不代表真实 QQ 或商业模型联调。
+
+以下是 `7138ac2` 的 029–035 历史证据：输入与图片、上下文与回复、Agent、子 Agent、发送正文使用永久事实头和可清理 body；原正文列禁止再次写入。内容接纳与遗忘通过 deletion epoch 串行裁决，旧模型请求仍保留精确 bytes、原摘要和费用事实。运行恢复会在读取已删除 checkpoint 失败时结束该 Run，保留静默排空步骤；子 Agent 在派发和接纳时同时复验载荷与当前记忆访问权限。工具的 JSON `null` 作为合法结果迁移，不与 SQL 空值混淆。详见[正文迁移协议](p4-content-migration.md)、[Agent 载荷](p4-agent-payloads.md)和[发送载荷](p4-delivery-payloads.md)。
 
 旧来源不能证明完整依赖时使用显式保守范围。升级前已经发生删除的旧库，导入未知派生物时不会写入正文；034 为遗留的不完整 SourcePayload 追加独立删除决策，原请求和回执不变。真实 022 非空旧库验证覆盖未删除的无操作升级、预先删除和 257 条来源跨批次清理。001–028 的原 SQL checksum 不改，029 起连同版本化 handler 和冻结 helper 一起校验；升级要求先停止宿主，失败回滚 DDL、搬运和所有权失效。
 
 035 处理自身回声早于成功回执进入上下文的情况：确认平台身份后，原输出、回声及确认前的派生副本建立删除依赖。原删除先发生时追加新的补偿决策，回执先发生时正常删除沿关联扩展；原事实均不改写。其他用户独立发送的相同文本保留。Web 发送记录按当前权限读取实际载荷；正文不可用时保留发送状态与平台消息 ID，页面显示内容已不可用。
 
-全链路遗忘尚未完成：Kernel/状态、Agent 冻结配置和其他控制面仍有待迁移正文，Worker 跨调用缓存也需要代际暴露来源记录与回收。已发送给外部服务的内容、WAL 和备份不属于在线 body 清理范围。晚到的同源新 occurrence 当前会被拒绝，尚无持久化 metadata-only ACK；不得把这一内部机制当作完整公开遗忘功能。
+该历史切片尚未覆盖 Kernel/状态和长期 Worker 缓存；这部分由上述 036–038 补齐。已发送给外部服务的内容、WAL 和备份不属于在线 body 清理范围；不得把内部机制当作完整公开遗忘功能。
 
 | 正文迁移与来源关联切片 | 结果 | 范围 |
 |---|---|---|

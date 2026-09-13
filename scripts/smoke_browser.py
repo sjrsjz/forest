@@ -29,6 +29,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--browser", type=Path)
+    parser.add_argument("--image", help="Runtime image for this disposable Compose project")
     args = parser.parse_args()
     if args.port == 0:
         with socket.socket() as reservation:
@@ -42,6 +43,10 @@ def main() -> None:
     command = ["docker", "compose", "-p", project]
     artifacts = root / ".local" / "browser-artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
+    override = root / ".local" / (project + "-compose.json")
+    if args.image:
+        override.write_text(json.dumps({"services": {"forest": {"image": args.image}}}), encoding="utf-8")
+        command += ["-f", str(root / "compose.yaml"), "-f", str(override)]
 
     def compose(*arguments: str) -> str:
         result = subprocess.run(
@@ -505,7 +510,10 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
     finally:
         # This project name was generated here, never supplied by another caller.
         assert project.startswith("forest-e2e-") and len(project) == 23
-        compose("down", "--volumes", "--remove-orphans")
+        try:
+            compose("down", "--volumes", "--remove-orphans")
+        finally:
+            override.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

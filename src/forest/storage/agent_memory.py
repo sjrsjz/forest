@@ -220,6 +220,35 @@ class AgentMemoryStore:
         from forest.storage.agent_payloads import guard_run_in
 
         await guard_run_in(conn, bot_id, run_id)
+        # Business Workers retain content across calls. Their newly accepted
+        # results may add sources that were never part of this Run's RAG query.
+        # Recheck every held step/tool body even when memory is disabled.
+        from forest.storage.payload_scope import guard_payload_scope_in
+
+        scope = SimpleNamespace(bot_id=bot_id)
+        head = await (await conn.execute(
+            "SELECT a.selected_input_end_seq,to_jsonb(c) AS conversation FROM public.bot_agent_runs a "
+            "JOIN public.bot_conversations c USING(bot_id,conversation_id) WHERE a.bot_id=%s AND a.run_id=%s",
+            (bot_id, run_id),
+        )).fetchone()
+        if head is not None:
+            refs = await (await conn.execute(
+                "SELECT snapshot_payload_id AS payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
+                "UNION SELECT output_payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
+                "UNION SELECT closed_parts_payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
+                "UNION SELECT arguments_payload_id FROM public.bot_agent_tools WHERE bot_id=%s AND run_id=%s "
+                "UNION SELECT result_payload_id FROM public.bot_agent_tools WHERE bot_id=%s AND run_id=%s",
+                (bot_id, run_id) * 5,
+            )).fetchall()
+            try:
+                await guard_payload_scope_in(
+                    conn, scope, head["conversation"], head["selected_input_end_seq"],
+                    [row["payload_id"] for row in refs if row["payload_id"] is not None],
+                )
+            except ForestError as exc:
+                if exc.code != "PAYLOAD_SCOPE_DENIED":
+                    raise
+                raise ForestError("AGENT_MEMORY_REVOKED", "Agent content is unavailable in this conversation", 409) from None
         rows = await (
             await conn.execute(
                 "SELECT DISTINCT q.query_id,q.config_revision,q.input_cut,q.conversation_id,q.source_unit_ids AS query_sources,"

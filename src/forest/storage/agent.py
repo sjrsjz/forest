@@ -19,6 +19,7 @@ from forest.packages import digest_json
 from forest.storage.agent_memory import AgentMemoryStore
 from forest.storage.agent_payloads import AgentPayloadStore
 from forest.storage.control import BotControl
+from forest.storage.kernel_payloads import KernelPayloadStore
 from forest.storage.messages import ActorLease, MessageStore, _json, _text, _tokens
 
 
@@ -58,7 +59,9 @@ class AgentStore:
         self.payloads = AgentPayloadStore(self.store)
 
     @staticmethod
-    async def guard_tool_call_in(conn, bot_id, agent_tool_id, *, input_digest=None):
+    async def guard_tool_call_in(
+        conn, bot_id, agent_tool_id, *, input_digest=None, recovery=False
+    ):
         """Recheck a tool under the caller's already-held Bot runtime lock.
 
         No Binding lock is acquired in reverse order. Every writer of these
@@ -95,15 +98,17 @@ class AgentStore:
             return value is not None and datetime.fromisoformat(value) > row["now"]
 
         if (
-            tool["status"] != "DISPATCHING"
-            or head["phase"] != "WAIT_TOOL"
+            tool["status"] != ("UNKNOWN" if recovery else "DISPATCHING")
+            or head["phase"] != ("BLOCKED_UNKNOWN" if recovery else "WAIT_TOOL")
             or tool["logical_step_id"] != head["current_step_id"]
-            or tool["owner_epoch"] != head["owner_epoch"]
-            or tool["actor_epoch"] != head["actor_epoch"]
-            or tool["actor_epoch"] != conversation["actor_epoch"]
-            or tool["host_incarnation"] != head["actor_host_incarnation"]
-            or tool["host_incarnation"] != conversation["actor_host_incarnation"]
-            or tool["host_incarnation"] != host["incarnation"]
+            or (not recovery and (
+                tool["owner_epoch"] != head["owner_epoch"]
+                or tool["actor_epoch"] != head["actor_epoch"]
+                or tool["host_incarnation"] != head["actor_host_incarnation"]
+            ))
+            or head["actor_epoch"] != conversation["actor_epoch"]
+            or head["actor_host_incarnation"] != conversation["actor_host_incarnation"]
+            or head["actor_host_incarnation"] != host["incarnation"]
             or binding["host_incarnation"] != host["incarnation"]
             or binding["host_owner_epoch"] != host["owner_epoch"]
             or not live_time(host["expires_at"])
@@ -1838,14 +1843,48 @@ class AgentStore:
                 )
             return ToolPermit(**{key: tool[key] for key in ToolPermit.__dataclass_fields__})
 
-    async def observe_tool(self, actor, permit: ToolPermit, *, status, result):
+    async def _kernel_tool_receipt_in(self, conn, tool):
+        receipt = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s AND status='COMPLETED'",
+                (self.store.bot_id, tool["operation_id"]),
+            )
+        ).fetchone()
+        if receipt is None:
+            return None
+        if receipt.get("agent_tool_id") != tool["operation_id"]:
+            raise ForestError("TOOL_RESULT_CONFLICT", "Kernel receipt belongs to another tool", 409)
+        return await KernelPayloadStore(self.store).hydrate_call_in(
+            conn, receipt, epoch=await self.payloads.epoch_in(conn)
+        )
+
+    async def _guard_result_scope_in(self, conn, conversation, head, payload_ids):
+        from forest.storage.payload_scope import guard_payload_scope_in
+
+        try:
+            await guard_payload_scope_in(
+                conn, self.store, conversation, head["selected_input_end_seq"], payload_ids
+            )
+        except ForestError as exc:
+            if exc.code != "PAYLOAD_SCOPE_DENIED":
+                raise
+            raise ForestError("AGENT_MEMORY_REVOKED", "Tool content is unavailable in this conversation", 409) from None
+
+    async def observe_tool(
+        self, actor, permit: ToolPermit, *, status, result, result_parent_ids=()
+    ):
         result = _json(result, maximum=4 * 1024 * 1024)
+        if not isinstance(result_parent_ids, (tuple, list)) or len(result_parent_ids) > 1:
+            raise ForestError("TOOL_RESULT_INVALID", "Tool result has one Kernel receipt", 422)
+        result_parent_ids = tuple(_text(value, "result payload ID") for value in result_parent_ids)
+        if result_parent_ids and status != "SUCCEEDED":
+            raise ForestError("TOOL_RESULT_INVALID", "Only completed results have a Kernel receipt", 422)
         if status not in {"SUCCEEDED", "FAILED", "NOT_SENT", "UNKNOWN"}:
             raise ForestError(
                 "TOOL_RESULT_INVALID", "Tool result must have a defined effect outcome", 422
             )
         async with self.store.pool.connection() as conn, conn.transaction():
-            binding, _, _, _, head = await self._guard(conn, actor, permit.run_id)
+            binding, conversation, _, _, head = await self._guard(conn, actor, permit.run_id)
             current = await self._configuration(conn, actor, head)
             tool = await self._tool(conn, permit.run_id, permit.tool_call_id)
             self._tool_settings(head, current, tool["tool_name"])
@@ -1857,6 +1896,16 @@ class AgentStore:
                     "AGENT_TOOL_STALE", "Tool result belongs to another execution owner", 409
                 )
             digest = digest_json([status, result])
+            if status == "SUCCEEDED":
+                receipt = await self._kernel_tool_receipt_in(conn, tool)
+                if (receipt is not None and (
+                    result_parent_ids != (receipt["result_payload_id"],)
+                    or digest_json(receipt["result"]) != digest_json(result)
+                )) or (receipt is None and result_parent_ids):
+                    raise ForestError(
+                        "TOOL_RESULT_CONFLICT", "Tool result differs from its Kernel receipt", 409
+                    )
+                await self._guard_result_scope_in(conn, conversation, head, result_parent_ids)
             if tool["status"] == status and tool["result_digest"] == digest:
                 await self.messages._actor_final(conn, actor, binding)
                 return await self._expanded(conn, head)
@@ -1867,7 +1916,9 @@ class AgentStore:
             revoked = False
             try:
                 await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, permit.run_id)
-                result_ref = await self.payloads.tool_result_in(conn, tool, result, status=status)
+                result_ref = await self.payloads.tool_result_in(
+                    conn, tool, result, status=status, parents=result_parent_ids
+                )
             except ForestError as exc:
                 if exc.code != "AGENT_MEMORY_REVOKED":
                     raise
@@ -1900,19 +1951,25 @@ class AgentStore:
 
     async def recover_tool(self, actor, run_id, tool_call_id):
         async with self.store.pool.connection() as conn, conn.transaction():
-            binding, _, _, _, head = await self._guard(conn, actor, run_id)
+            binding, conversation, _, _, head = await self._guard(conn, actor, run_id)
             tool = await self._tool(conn, run_id, tool_call_id)
             if tool["status"] == "UNKNOWN":
                 await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, run_id)
-                receipt = await (
-                    await conn.execute(
-                        "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s AND status='COMPLETED'",
-                        (self.store.bot_id, tool["operation_id"]),
+                receipt = await self._kernel_tool_receipt_in(conn, tool)
+                if receipt is not None:
+                    await self._guard_result_scope_in(
+                        conn, conversation, head, (receipt["result_payload_id"],)
                     )
-                ).fetchone()
-                if receipt and receipt.get("agent_tool_id") == tool["operation_id"]:
+                    # Recover an observation only. Original tool ownership may
+                    # precede this Actor, but current source authority, approval
+                    # and configuration must still permit accepting its result.
+                    await self.guard_tool_call_in(
+                        conn, self.store.bot_id, tool["operation_id"], recovery=True,
+                        input_digest=receipt["input_digest"],
+                    )
                     result_ref = await self.payloads.tool_result_in(
-                        conn, tool, receipt["result"], status="SUCCEEDED"
+                        conn, tool, receipt["result"], status="SUCCEEDED",
+                        parents=(receipt["result_payload_id"],),
                     )
                     await conn.execute(
                         "UPDATE public.bot_agent_tools SET status='SUCCEEDED',result_payload_id=%s,result_digest=%s WHERE bot_id=%s AND run_id=%s AND tool_call_id=%s",

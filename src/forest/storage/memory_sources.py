@@ -405,7 +405,12 @@ class MemorySourceStore:
             )
             incomplete = await (
                 await conn.execute(
-                    "SELECT 1 FROM public.bot_payload_sources p LEFT JOIN public.bot_memory_source_units u ON u.bot_id=p.bot_id AND u.source_unit_id=p.source_unit_id WHERE p.bot_id=%s AND p.payload_id=ANY(%s) AND (u.source_unit_id IS NULL OR NOT u.lineage_complete OR u.source_revision<>p.source_revision) LIMIT 1",
+                    "SELECT 1 FROM public.bot_payload_sources p "
+                    "LEFT JOIN public.bot_memory_source_units u ON u.bot_id=p.bot_id AND u.source_unit_id=p.source_unit_id "
+                    "LEFT JOIN public.bot_payload_domains pd ON pd.bot_id=p.bot_id AND pd.source_unit_id=p.source_unit_id "
+                    "WHERE p.bot_id=%s AND p.payload_id=ANY(%s) "
+                    "AND NOT (pd.source_unit_id IS NOT NULL AND p.source_revision=1 AND p.part_id='*') "
+                    "AND (u.source_unit_id IS NULL OR NOT u.lineage_complete OR u.source_revision<>p.source_revision) LIMIT 1",
                     (self.store.bot_id, list(parents)),
                 )
             ).fetchone()
@@ -467,6 +472,8 @@ class MemorySourceStore:
         authority/row locks. Global mode removes only local cut and visibility;
         it never waives eligibility, complete lineage or suppression checks.
         Metadata mode verifies headers and body existence without loading bytes.
+        Registered Host input domains may be dependencies. They are never
+        candidates, and do not relax any actual memory unit's eligibility/cut.
         """
         if type(limit) is not int or not 1 <= limit <= 256 or type(include_payload) is not bool:
             raise ValueError("Source read limits")
@@ -510,7 +517,9 @@ class MemorySourceStore:
                 "LEFT JOIN public.bot_memory_source_units d ON d.bot_id=p.bot_id AND d.source_unit_id=p.source_unit_id "
                 "LEFT JOIN public.bot_memory_sources ds ON ds.bot_id=d.bot_id AND ds.source_id=d.source_id "
                 "LEFT JOIN public.bot_payload_headers dh ON dh.bot_id=d.bot_id AND dh.payload_id=d.payload_id "
-                "WHERE p.bot_id=u.bot_id AND p.payload_id=u.payload_id AND ("
+                "LEFT JOIN public.bot_payload_domains pd ON pd.bot_id=p.bot_id AND pd.source_unit_id=p.source_unit_id "
+                "WHERE p.bot_id=u.bot_id AND p.payload_id=u.payload_id "
+                "AND NOT (pd.source_unit_id IS NOT NULL AND p.source_revision=1 AND p.part_id='*') AND ("
                 "d.source_unit_id IS NULL OR NOT d.lineage_complete OR d.source_revision<>p.source_revision OR dh.state<>'ACTIVE' "
                 "OR NOT EXISTS(SELECT 1 FROM public.bot_payload_bodies db WHERE db.bot_id=dh.bot_id AND db.payload_id=dh.payload_id) "
                 "OR (%s AND NOT (ds.visibility='bot_shared' OR (ds.source_kind='DIRECT' AND ds.source_id=%s) OR COALESCE(ds.owner_conversation_id=%s,false))) "

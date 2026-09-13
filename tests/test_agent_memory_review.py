@@ -108,7 +108,9 @@ async def test_real_kernel_state_gateway_rechecks_evidence_after_tool_admission(
                 expected_policy_revision=actor.policy_revision,
             )
         assert entered, "The actual native Worker must reach the host state-write Gateway"
-        assert rejected.value.code == "AGENT_MEMORY_REVOKED"
+        # Both the generation-wide exposure guard and the narrower Agent
+        # evidence guard reject this same revocation before any state write.
+        assert rejected.value.code in {"AGENT_MEMORY_REVOKED", "GENERATION_EXPOSURE_REVOKED"}
         assert not await rows(
             media,
             "SELECT * FROM public.bot_state_steps WHERE call_id IN (SELECT call_id FROM public.bot_calls WHERE agent_tool_id IS NOT NULL)",
@@ -128,16 +130,19 @@ async def test_revoke_before_kernel_call_exists_finishes_run_instead_of_unknown(
     media, tmp_path, monkeypatch
 ):
     kernel, state, actor, snapshot, _, bundle, _ = await tool_step(media, tmp_path, monkeypatch)
-    original = kernel.invoke
+    original = kernel.invoke_with_receipt
+    entered = False
 
     async def revoke_then_invoke(*args, **kwargs):
+        nonlocal entered
+        entered = True
         await forget(media, bundle)
         return await original(*args, **kwargs)
 
     async def unused(*args):
         return None
 
-    monkeypatch.setattr(kernel, "invoke", revoke_then_invoke)
+    monkeypatch.setattr(kernel, "invoke_with_receipt", revoke_then_invoke)
     runner = AgentRunner(
         state.messages,
         kernel,
@@ -150,6 +155,7 @@ async def test_revoke_before_kernel_call_exists_finishes_run_instead_of_unknown(
     try:
         context = await state.messages.context(actor, run_id=snapshot["run_id"])
         result = await runner.advance(actor, {"run_id": snapshot["run_id"]}, context)
+        assert entered, "The Runner must reach the actual Kernel receipt admission boundary"
         assert not await rows(
             media, "SELECT * FROM public.bot_calls WHERE agent_tool_id IS NOT NULL"
         )

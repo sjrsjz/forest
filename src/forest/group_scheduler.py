@@ -11,6 +11,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from uuid import uuid4
 
 from forest.agent import AgentExecutionError, RunDisposition
@@ -19,7 +20,14 @@ from forest.storage.bot import HostLease
 from forest.storage.delivery import DeliveryStore
 from forest.storage.messages import ActorLease, MessageStore
 
-Execute = Callable[[ActorLease, dict, dict], Awaitable[list[list[dict]] | RunDisposition]]
+
+@dataclass(frozen=True)
+class ComponentReply:
+    parts: list[list[dict]]
+    result_parent_ids: tuple[str, ...]
+
+
+Execute = Callable[[ActorLease, dict, dict], Awaitable[list[list[dict]] | ComponentReply | RunDisposition]]
 FinalizeAgent = Callable[[ActorLease, RunDisposition, DeliveryStore], Awaitable[dict]]
 
 
@@ -361,7 +369,8 @@ class GroupScheduler:
                     "group-reply:" + run_id,
                     run_id=run_id,
                     expected_input_revision=batch["input_revision"],
-                    reply_parts=parts,
+                    reply_parts=parts.parts if isinstance(parts, ComponentReply) else parts,
+                    result_parent_ids=parts.result_parent_ids if isinstance(parts, ComponentReply) else (),
                     delivery=self.delivery,
                 )
             except ForestError as exc:
