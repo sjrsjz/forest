@@ -16,6 +16,7 @@ from test_messages import messages as messages
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
 from forest.errors import ForestError
 from forest.models import ModelCapabilities, prepare_model_request
+from forest.storage.input_payloads import InputContentStore
 from forest.storage.media import MAX_MEDIA_BYTES, MediaStore, _url, _validate_image
 
 
@@ -178,16 +179,30 @@ async def test_capture_is_bot_bound_immutable_and_restart_reuses_original_bytes(
                                        request_id="request", transport_attempt_id="attempt", media=result)
         assert b"data:image/png;base64," in visual.body
         assert "platform=signed" not in visual.manifest_json and origin not in visual.manifest_json
-        async with repository.store.pool.connection() as conn:
+        async with repository.store.pool.connection() as conn, conn.transaction():
+            binding, _ = await repository._actor(conn, actor)
             saved = await (await conn.execute("SELECT * FROM public.bot_media_captures")).fetchone()
-            assert saved["source_manifest"]["author"]["external_user_id"] == "user-1"
-            assert saved["source_manifest"]["channel_id"] == "group-1"
+            assert saved["content"] is None and saved["source_manifest"] is None
+            assert saved["payload_id"] and saved["manifest_payload_id"]
+            contents = InputContentStore(repository.store)
+            clock = await contents.payloads.lock_in(conn)
+            capture = await contents.read_capture_in(conn, saved["media_ref"],
+                expected_deletion_epoch=clock["deletion_epoch"], required=True)
+            assert capture["content"] == content and capture["blob_digest"] == image.blob_digest
+            assert capture["source_manifest"]["author"]["external_user_id"] == "user-1"
+            assert capture["source_manifest"]["channel_id"] == "group-1"
+            assert capture["source_manifest"]["unit_id"] == image.source_unit_id
+            assert str(capture["source_manifest"]["part_index"]) == image.part_id
+            await repository._actor_final(conn, actor, binding)
             with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
                 async with conn.transaction():
                     await conn.execute("UPDATE public.bot_media_captures SET content='changed'")
-            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            with pytest.raises(psycopg.errors.CheckViolation):
                 async with conn.transaction():
                     await conn.execute("UPDATE public.bot_inbound_media_refs SET source='{}'")
+            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+                async with conn.transaction():
+                    await conn.execute("UPDATE public.bot_inbound_media_refs SET source_payload_id='changed'")
 
 
 @pytest.mark.postgres

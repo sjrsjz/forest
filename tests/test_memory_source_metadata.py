@@ -108,8 +108,11 @@ async def test_header_only_source_and_its_complete_child_are_excluded_before_lim
             return await self.connection.execute(statement, parameters)
 
     async def missing_body(self, conn, **kwargs):
-        assert kwargs["owner_kind"] == "memory.source"
-        return await original_put(self, HeaderOnlyConnection(conn), **kwargs)
+        return await original_put(
+            self,
+            HeaderOnlyConnection(conn) if kwargs["owner_kind"] == "memory.source" else conn,
+            **kwargs,
+        )
 
     with monkeypatch.context() as patch:
         patch.setattr(PayloadStore, "_put_in", missing_body)

@@ -21,6 +21,7 @@ from forest.packages import digest_json
 from forest.storage.agent_config import AgentConfig
 from forest.storage.bot import BotStore
 from forest.storage.control import BotControl
+from forest.storage.input_payloads import InputContentStore
 from forest.storage.messages import MessageStore
 
 pytestmark = pytest.mark.postgres
@@ -201,9 +202,18 @@ async def test_upgrade_preserves_old_call_trees_control_lane_and_pending_media_s
             row = await (await conn.execute("SELECT * FROM public.bot_inbound_media_refs WHERE media_ref='old-media'")).fetchone()
             assert row["status"] == "PENDING_FETCH" and row["capture_epoch"] == 0
             assert all(row[key] is None for key in ("capture_id", "capture_expires_at", "retry_after", "error_code"))
-            assert row["source"]["uri"].endswith("token=old-signed-token")
-            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            assert row["source"] is None and row["source_payload_id"]
+            content = InputContentStore(store)
+            clock = await content.payloads.lock_in(conn)
+            restored = await content.read_media_source_in(
+                conn, "old-media", expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            assert restored["source"]["uri"].endswith("token=old-signed-token")
+            with pytest.raises(psycopg.errors.CheckViolation) as erased_column:
                 await conn.execute("UPDATE public.bot_inbound_media_refs SET source='{}' WHERE media_ref='old-media'")
+            assert erased_column.value.diag.constraint_name == "bot_inbound_media_refs_source_check"
+            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+                await conn.execute("UPDATE public.bot_inbound_media_refs SET source_payload_id='replacement' WHERE media_ref='old-media'")
             await conn.execute("UPDATE public.bot_inbound_media_refs SET status='FETCH_FAILED',capture_epoch=1,error_code='TRANSPORT' WHERE media_ref='old-media'")
             assert (await (await conn.execute("SELECT count(*) AS n FROM public.bot_media_captures")).fetchone())["n"] == 0
             assert (await (await conn.execute("SELECT count(*) AS n FROM public.bot_agent_runs")).fetchone())["n"] == 0

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.delivery_payloads import UNAVAILABLE, DeliveryContentStore, receipt_metadata
 
 TERMINAL = ("SENT", "FAILED", "CANCELLED", "SKIPPED")
 ACTIVE = ("PENDING", "CLAIMED", "DISPATCHING", "UNKNOWN")
@@ -59,6 +60,8 @@ class DeliveryClaim:
     route: dict
     payload: list[dict]
     adapter_contract: str
+    payload_id: str = ""
+    deletion_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,8 @@ class DeliveryPermit:
     wire_digest: str
     binding_epoch: int
     connection_epoch: int
+    wire_payload_id: str = ""
+    deletion_epoch: int = 0
 
 
 class DeliveryStore:
@@ -86,6 +91,7 @@ class DeliveryStore:
             bindings = BindingStore(store)
         self.store = store
         self.bindings = bindings
+        self.contents = DeliveryContentStore(store)
 
     async def _binding_guard(self, conn, lease, route, *, data, expected_epoch=None):
         await self.bindings._guard(conn, lease, route["binding_id"], expected_epoch, data=data)
@@ -127,7 +133,13 @@ class DeliveryStore:
     async def enqueue(self, lease: HostLease, **kwargs) -> dict:
         route = self._route(kwargs["route"])
         parts, _ = _freeze(kwargs["parts"])
-        kwargs = {**kwargs, "route": route, "parts": parts}
+        kwargs = {
+            **kwargs,
+            "route": route,
+            "parts": parts,
+            "parents": tuple(kwargs.get("parents", ())),
+            "sources": self.contents.payloads._sources(kwargs.get("sources", ())),
+        }
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._binding_guard(
                 conn,
@@ -162,6 +174,8 @@ class DeliveryStore:
         root_operation_id: str | None = None,
         expected_policy_revision: int | None = None,
         adapter_contract: str = "onebot-v11:1",
+        parents=(),
+        sources=(),
     ) -> dict:
         """Join the caller's final transaction, after Binding/runtime/host/Run guards.
 
@@ -169,6 +183,9 @@ class DeliveryStore:
         Binding or obtains a component/Run lock behind an effect lock.
         """
         self.store._scope(lease)
+        parents = tuple(sorted(set(parents)))
+        sources = self.contents.payloads._sources(sources)
+        _, lineage_digest = _freeze([parents, [asdict(source) for source in sources]])
         route = self._route(route)
         _text(operation_id, "operation_id")
         _text(conversation_id, "conversation_id")
@@ -238,7 +255,9 @@ class DeliveryStore:
             )
         ).fetchone()
         if old:
-            if old["input_digest"] != input_digest:
+            if old["input_digest"] != input_digest or (
+                old["lineage_digest"] is not None and old["lineage_digest"] != lineage_digest
+            ):
                 raise ForestError("IDEMPOTENCY_CONFLICT", "Delivery operation input changed")
             await self._final_host(conn, lease)
             return self._public_intent(old)
@@ -263,8 +282,8 @@ class DeliveryStore:
         intent_id = str(uuid4())
         row = await (
             await conn.execute(
-                "INSERT INTO public.bot_send_intents(bot_id,intent_id,operation_id,input_digest,root_operation_id,binding_id,binding_epoch,policy_revision,storage_generation,stream_id,send_lane,conversation_id,response_seq,command_id,control_seq,sequence,reply_route,adapter_contract) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                "INSERT INTO public.bot_send_intents(bot_id,intent_id,operation_id,input_digest,root_operation_id,binding_id,binding_epoch,policy_revision,storage_generation,stream_id,send_lane,conversation_id,response_seq,command_id,control_seq,sequence,reply_route,adapter_contract,lineage_digest) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (
                     self.store.bot_id,
                     intent_id,
@@ -284,18 +303,32 @@ class DeliveryStore:
                     sequence,
                     Jsonb(route),
                     adapter_contract,
+                    lineage_digest,
                 ),
             )
         ).fetchone()
+        clock = await self.contents.payloads.lock_in(conn)
         for index, part in enumerate(parts):
+            part_operation_id = _freeze([operation_id, index])[1]
+            body = await self.contents.payloads.put_json_in(
+                conn,
+                owner_kind="delivery.payload",
+                owner_id=part_operation_id,
+                value=part,
+                parents=parents,
+                sources=sources,
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            if body.state != "ACTIVE":
+                raise ForestError("PAYLOAD_ERASED", "Delivery body was removed", 410)
             await conn.execute(
-                "INSERT INTO public.bot_send_parts(bot_id,intent_id,part_index,part_operation_id,payload,payload_digest) VALUES (%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_send_parts(bot_id,intent_id,part_index,part_operation_id,payload_id,payload_digest) VALUES (%s,%s,%s,%s,%s,%s)",
                 (
                     self.store.bot_id,
                     intent_id,
                     index,
-                    _freeze([operation_id, index])[1],
-                    Jsonb(part),
+                    part_operation_id,
+                    body.payload_id,
                     _freeze(part)[1],
                 ),
             )
@@ -467,6 +500,21 @@ class DeliveryStore:
                 ).fetchone()
                 if prior:
                     continue
+                clock = await self.contents.payloads.lock_in(conn)
+                try:
+                    body = await self.contents.read_part_in(
+                        conn, part, expected_deletion_epoch=clock["deletion_epoch"]
+                    )
+                except ForestError as exc:
+                    if exc.code not in UNAVAILABLE:
+                        raise
+                    await conn.execute(
+                        "UPDATE public.bot_send_parts SET state='CANCELLED',revision=revision+1,error_code='DELIVERY_CONTENT_REMOVED',"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND intent_id=%s AND part_index=%s",
+                        (self.store.bot_id, part["intent_id"], part["part_index"]),
+                    )
+                    await self._final_host(conn, lease)
+                    continue
                 claimed = await (
                     await conn.execute(
                         "UPDATE public.bot_send_parts SET state='CLAIMED',revision=revision+1,owner_epoch=owner_epoch+1,host_incarnation=%s,host_owner_epoch=%s,worker_id=%s,claim_until=%s,claim_binding_epoch=%s,claim_connection_epoch=%s,claim_binding_revision=%s,updated_at=clock_timestamp() WHERE bot_id=%s AND intent_id=%s AND part_index=%s RETURNING *",
@@ -516,8 +564,10 @@ class DeliveryStore:
                     binding["connection_epoch"],
                     binding["revision"],
                     intent["reply_route"],
-                    part["payload"],
+                    body,
                     intent["adapter_contract"],
+                    part["payload_id"],
+                    clock["deletion_epoch"],
                 )
         return None
 
@@ -694,12 +744,30 @@ class DeliveryStore:
                 )
             if part["claim_until"] <= now:
                 raise ForestError("STALE_DELIVERY_OWNER", "Delivery claim expired")
+            clock = await self.contents.payloads.lock_in(conn)
+            if clock["deletion_epoch"] != claim.deletion_epoch:
+                raise ForestError(
+                    "DELETION_CONFLICT", "Deletion epoch changed during output preparation", 409
+                )
+            if part["payload_id"] != claim.payload_id:
+                raise ForestError("DELIVERY_PAYLOAD_CONFLICT", "Claim body reference changed", 409)
+            await self.contents.payloads.require_available_in(
+                conn, (part["payload_id"],), expected_deletion_epoch=claim.deletion_epoch
+            )
             await self._final_host(conn, lease)
             now = await self.store._now(conn)
             deadline = now + timedelta(seconds=timeout_seconds)
             attempt_id = str(uuid4())
+            wire = await self.contents.payloads.put_bytes_in(
+                conn,
+                owner_kind="delivery.request",
+                owner_id=attempt_id,
+                value=wire_body,
+                parents=(part["payload_id"],),
+                expected_deletion_epoch=claim.deletion_epoch,
+            )
             await conn.execute(
-                "INSERT INTO public.bot_send_attempts(bot_id,attempt_id,intent_id,part_index,owner_epoch,host_incarnation,host_owner_epoch,policy_revision,binding_epoch,connection_epoch,binding_revision,cancel_epoch,action,wire_body,wire_digest,executor_ref,permitted_at,deadline_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_send_attempts(bot_id,attempt_id,intent_id,part_index,owner_epoch,host_incarnation,host_owner_epoch,policy_revision,binding_epoch,connection_epoch,binding_revision,cancel_epoch,action,wire_payload_id,wire_digest,executor_ref,permitted_at,deadline_at,deletion_epoch) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     self.store.bot_id,
                     attempt_id,
@@ -714,11 +782,12 @@ class DeliveryStore:
                     claim.binding_revision,
                     root["cancel_epoch"],
                     action,
-                    wire_body,
+                    wire.payload_id,
                     wire_digest,
                     Jsonb(executor_ref),
                     now,
                     deadline,
+                    claim.deletion_epoch,
                 ),
             )
             await conn.execute(
@@ -764,6 +833,8 @@ class DeliveryStore:
                 wire_digest,
                 claim.binding_epoch,
                 claim.connection_epoch,
+                wire.payload_id,
+                claim.deletion_epoch,
             )
 
     @staticmethod
@@ -871,6 +942,24 @@ class DeliveryStore:
                 raise ForestError(
                     "DELIVERY_PERMIT_EXPIRED", "Transport permit expired before handoff"
                 )
+            # The permit has not entered transport yet: a removed body can
+            # prevent this handoff, even if its original bytes remain in RAM.
+            await self.contents.payloads.require_available_in(
+                conn,
+                (attempt["wire_payload_id"],),
+                expected_deletion_epoch=attempt["deletion_epoch"],
+            )
+            body = await self.contents.read_attempt_in(
+                conn, attempt, expected_deletion_epoch=attempt["deletion_epoch"]
+            )
+            if body != permit.wire_body:
+                raise ForestError(
+                    "DELIVERY_PAYLOAD_CONFLICT", "Permit bytes differ from the frozen attempt", 409
+                )
+            if attempt["deadline_at"] <= await self.store._now(conn):
+                raise ForestError(
+                    "DELIVERY_PERMIT_EXPIRED", "Transport permit expired before handoff"
+                )
             await conn.execute(
                 "UPDATE public.bot_send_attempts SET started_at=clock_timestamp() WHERE bot_id=%s AND attempt_id=%s",
                 (self.store.bot_id, permit.attempt_id),
@@ -886,7 +975,8 @@ class DeliveryStore:
         """
         if permit.bot_id != self.store.bot_id or status not in ("SENT", "NOT_SENT", "UNKNOWN"):
             raise ForestError("INVALID_DELIVERY", "Invalid delivery observation", 422)
-        receipt, _ = _freeze(receipt or {}, 16384)
+        full_receipt, receipt_digest = _freeze(receipt or {}, 16384)
+        receipt = receipt_metadata(full_receipt)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._identity(conn)
             # Receipts lock part before attempt; permit/recovery/reconciliation
@@ -923,9 +1013,19 @@ class DeliveryStore:
                         "DELIVERY_RECEIPT_CONFLICT", "A settled attempt has conflicting evidence"
                     )
                 return self._public_part(part)
+            if attempt["state"] == "UNKNOWN" and status == "UNKNOWN":
+                return self._public_part(part)
+            clock = await self.contents.payloads.lock_in(conn)
+            receipt_payload_id = await self.contents.retain_observation_in(
+                conn,
+                owner_id="attempt:" + permit.attempt_id + ":" + status + ":" + receipt_digest,
+                value=full_receipt,
+                parent=attempt["wire_payload_id"],
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
             await conn.execute(
-                "UPDATE public.bot_send_attempts SET state=%s,receipt=%s,observed_at=clock_timestamp() WHERE bot_id=%s AND attempt_id=%s",
-                (status, Jsonb(receipt), self.store.bot_id, permit.attempt_id),
+                "UPDATE public.bot_send_attempts SET state=%s,receipt=%s,receipt_payload_id=%s,observed_at=clock_timestamp() WHERE bot_id=%s AND attempt_id=%s",
+                (status, Jsonb(receipt), receipt_payload_id, self.store.bot_id, permit.attempt_id),
             )
             if part["attempt_id"] == permit.attempt_id and part["state"] in (
                 "DISPATCHING",
@@ -937,10 +1037,11 @@ class DeliveryStore:
                 state = {"SENT": "SENT", "NOT_SENT": "FAILED", "UNKNOWN": "UNKNOWN"}[status]
                 part = await (
                     await conn.execute(
-                        "UPDATE public.bot_send_parts SET state=%s,receipt=%s,error_code=%s,revision=revision+1,updated_at=clock_timestamp() WHERE bot_id=%s AND intent_id=%s AND part_index=%s RETURNING *",
+                        "UPDATE public.bot_send_parts SET state=%s,receipt=%s,receipt_payload_id=%s,error_code=%s,revision=revision+1,updated_at=clock_timestamp() WHERE bot_id=%s AND intent_id=%s AND part_index=%s RETURNING *",
                         (
                             state,
                             Jsonb(receipt),
+                            receipt_payload_id,
                             receipt.get("error_code"),
                             self.store.bot_id,
                             permit.intent_id,
@@ -1125,7 +1226,7 @@ class DeliveryStore:
                         "IDEMPOTENCY_CONFLICT", "Reconciliation operation input changed"
                     )
                 await self._final_host(conn, lease)
-                return old["result"]
+                return old["result_metadata"]
             part = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_send_parts WHERE bot_id=%s AND intent_id=%s AND part_index=%s FOR UPDATE",
@@ -1140,6 +1241,11 @@ class DeliveryStore:
                 )
             if decision == "NOT_SENT" and root["effects_cancelled"]:
                 raise ForestError("CANCELLED", "Cancelled effects cannot be replayed")
+            clock = await self.contents.payloads.lock_in(conn)
+            if decision == "NOT_SENT":
+                await self.contents.payloads.require_available_in(
+                    conn, (part["payload_id"],), expected_deletion_epoch=clock["deletion_epoch"]
+                )
             state = {"SENT": "SENT", "NOT_SENT": "PENDING", "SKIP": "SKIPPED"}[decision]
             part = await (
                 await conn.execute(
@@ -1148,8 +1254,15 @@ class DeliveryStore:
                 )
             ).fetchone()
             result = self._public_part(part)
+            resolution_payload_id = await self.contents.retain_observation_in(
+                conn,
+                owner_id="resolution:" + _freeze(operation_id)[1],
+                value={"reason": reason, "result": result},
+                parent=part["payload_id"],
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
             await conn.execute(
-                "INSERT INTO public.bot_delivery_resolutions(bot_id,operation_id,intent_id,part_index,input_digest,decision,reason,result) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_delivery_resolutions(bot_id,operation_id,intent_id,part_index,input_digest,decision,payload_id,result_metadata) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     self.store.bot_id,
                     operation_id,
@@ -1157,7 +1270,7 @@ class DeliveryStore:
                     part_index,
                     digest,
                     decision,
-                    reason,
+                    resolution_payload_id,
                     Jsonb(result),
                 ),
             )

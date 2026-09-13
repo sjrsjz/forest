@@ -13,7 +13,8 @@ from test_web_bots import web_bots_database as web_bots_database
 from forest.bootstrap import BootstrapState
 from forest.errors import ForestError
 from forest.management.app import WebSettings
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
+from forest.storage.agent_payloads import AgentPayloadStore
 
 pytestmark = pytest.mark.postgres
 MODEL_KEY = "only-a-test-model-key"
@@ -500,6 +501,18 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
             await asyncio.wait_for(final_ready.wait(), 20)
             original = (await get(client, root + "/agent/runs"))["runs"][0]
             assert original["phase"] == "FINAL_READY"
+            payloads = AgentPayloadStore(managed.store)
+            async with managed.store.pool.connection() as conn, conn.transaction():
+                original_step = await (
+                    await conn.execute(
+                        "SELECT status,output,output_payload_id,output_digest FROM public.bot_agent_steps WHERE logical_step_id=%s",
+                        (original["final_step_id"],),
+                    )
+                ).fetchone()
+                original_output = await payloads.read_output_in(conn, original["final_step_id"])
+                assert original_step["status"] == "FINAL_READY" and original_step["output"] is None
+                assert original_output["text"] == "other-final"
+                assert original_step["output_digest"] == digest_json(original_output)
             saved = await get(client, root + "/agent/configuration")
             body = {"expected_revision": 1, "values": saved["values"]}
             if change == "disable":
@@ -525,14 +538,17 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
             assert final["final_reply_id"] is None
             assert commits == [original["run_id"]] and len(model["requests"]) == 1
             assert not onebot["sends"]
-            async with managed.store.pool.connection() as conn:
+            async with managed.store.pool.connection() as conn, conn.transaction():
                 step = await (
                     await conn.execute(
-                        "SELECT status,output FROM public.bot_agent_steps WHERE logical_step_id=%s",
+                        "SELECT status,output,output_payload_id,output_digest FROM public.bot_agent_steps WHERE logical_step_id=%s",
                         (final["final_step_id"],),
                     )
                 ).fetchone()
-                assert step["status"] == "FINAL_READY" and step["output"]["text"] == "other-final"
+                assert step == original_step and step["output"] is None
+                output = await payloads.read_output_in(conn, final["final_step_id"])
+                assert output == original_output and output["text"] == "other-final"
+                assert digest_json(output) == step["output_digest"]
                 run = await (
                     await conn.execute(
                         "SELECT status FROM public.bot_conversation_runs WHERE run_id=%s",

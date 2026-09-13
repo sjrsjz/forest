@@ -10,6 +10,7 @@ from test_messages import event, owner
 from test_web_authority import environment as environment
 
 from forest.errors import ForestError
+from forest.storage.input_payloads import InputContentStore
 from forest.storage.jobs import JobStore
 from forest.storage.messages import MessageStore
 
@@ -495,11 +496,22 @@ async def test_cancelled_job_context_preserves_source_but_removes_instruction(jo
     assert unit["source"]["occurrence_id"] == receipt["occurrence_id"]
     assert unit["author"]["identity_origin"] == "host_job"
     assert unit["segments"] == [{"type": "text", "text": "该计划任务已取消；此处仅保留历史记录。"}]
-    async with env.store.pool.connection() as conn:
+    async with env.store.pool.connection() as conn, conn.transaction():
+        binding, _ = await store.messages._actor(conn, actor)
         raw = await (
             await conn.execute(
-                "SELECT segments FROM public.bot_message_inbox WHERE event_id=%s",
+                "SELECT segments,author,payload_id FROM public.bot_message_inbox WHERE event_id=%s",
                 (receipt["event_id"],),
             )
         ).fetchone()
-    assert raw["segments"] == [{"type": "text", "text": "OLD CANCELLED TASK INSTRUCTION"}]
+        contents = InputContentStore(env.store)
+        clock = await contents.payloads.lock_in(conn)
+        original = await contents.read_input_in(
+            conn, receipt["event_id"], expected_deletion_epoch=clock["deletion_epoch"], required=True
+        )
+        await store.messages._actor_final(conn, actor, binding)
+    assert raw["segments"] is None and raw["payload_id"] == original["payload_id"]
+    assert original["payload_state"] == "ACTIVE"
+    assert original["segments"] == [{"type": "text", "text": "OLD CANCELLED TASK INSTRUCTION"}]
+    assert original["author"]["principal_ref"] == raw["author"]["principal_ref"] == unit["author"]["principal_ref"]
+    assert original["author"]["occurrence_id"] == receipt["occurrence_id"]

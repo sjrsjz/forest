@@ -99,6 +99,16 @@ class PayloadStore:
     async def _check_sources_in(self, conn, sources: tuple[SourceRef, ...]):
         if not sources:
             return
+        # Exact platform aliases discovered after body publication live in a
+        # separate immutable ledger. Reading or writing an old manifest must
+        # still consult their transitive prerequisites; the manifest is not edited.
+        linked = await (await conn.execute(
+            "SELECT * FROM public.forest_source_dependency_closure(%s,%s,%s)",
+            (self.store.bot_id, Jsonb([asdict(source) for source in sources]), MAX_SOURCES),
+        )).fetchall()
+        if len(linked) > MAX_SOURCES:
+            raise ForestError("SOURCE_LINK_SCOPE_LIMIT", "Source dependency closure exceeds its limit", 422)
+        sources = tuple(SourceRef(**row) for row in linked)
         rows = await (await conn.execute(
             "SELECT source_unit_id,part_id FROM public.bot_payload_suppression "
             "WHERE bot_id=%s AND source_unit_id=ANY(%s)",
@@ -206,6 +216,21 @@ class PayloadStore:
                                   encoding="json", sources=sources, parents=parents,
                                   expected_deletion_epoch=expected_deletion_epoch)
 
+    async def import_legacy_json_in(self, conn, *, owner_kind, owner_id, value,
+                                     sources=(), parents=()) -> PayloadRef:
+        """Migration-only admission, including permanently suppressed identities."""
+        from forest.storage.migration_v1 import import_payload_in
+
+        return await import_payload_in(conn, self.store, owner_kind=owner_kind, owner_id=owner_id,
+                                       value=value, encoding="json", sources=sources, parents=parents)
+
+    async def import_legacy_bytes_in(self, conn, *, owner_kind, owner_id, value: bytes,
+                                      sources=(), parents=()) -> PayloadRef:
+        from forest.storage.migration_v1 import import_payload_in
+
+        return await import_payload_in(conn, self.store, owner_kind=owner_kind, owner_id=owner_id,
+                                       value=value, encoding="bytes", sources=sources, parents=parents)
+
     async def put_bytes_in(self, conn, *, owner_kind, owner_id, value: bytes, sources=(), parents=(),
                            expected_deletion_epoch: int) -> PayloadRef:
         return await self._put_in(conn, owner_kind=owner_kind, owner_id=owner_id, content=value,
@@ -262,6 +287,9 @@ class PayloadStore:
         if not values:
             raise ForestError("INVALID_FORGET_TARGET", "At least one source is required", 422)
         digest = digest_json([expected_deletion_epoch, values])
+        from forest.storage.migration_v1 import legacy_source_ref
+
+        legacy = legacy_source_ref(self.store.bot_id).source_unit_id
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._host(conn, lease)
             await self.lock_in(conn)
@@ -272,9 +300,45 @@ class PayloadStore:
             if previous:
                 if previous["input_digest"] != digest:
                     raise ForestError("FORGET_CONFLICT", "Forget operation has different targets", 409)
-                result = {"operation_id": operation_id, "deletion_epoch": previous["deletion_epoch"]}
+                result = {"operation_id": operation_id, "deletion_epoch": previous["deletion_epoch"],
+                          "legacy_conservative": any(t["source_unit_id"] == legacy
+                                                     for t in previous["targets"])}
             else:
                 clock = await self._epoch_in(conn, expected_deletion_epoch)
+                legacy_used = await (await conn.execute(
+                    "SELECT 1 FROM public.bot_payload_sources WHERE bot_id=%s AND source_unit_id=%s LIMIT 1",
+                    (self.store.bot_id, legacy),
+                )).fetchone()
+                # Older SourcePayloads already have immutable manifests, so an
+                # incomplete reply cannot have this marker appended in place.
+                # Name its own source explicitly in the durable deletion plan.
+                source_table = await (await conn.execute(
+                    "SELECT to_regclass('public.bot_memory_source_units') AS relation"
+                )).fetchone()
+                incomplete = []
+                if source_table["relation"]:
+                    incomplete = await (await conn.execute(
+                        "SELECT u.source_unit_id FROM public.bot_memory_source_units u "
+                        "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
+                        "WHERE u.bot_id=%s AND NOT u.lineage_complete AND h.state='ACTIVE' "
+                        "ORDER BY u.source_unit_id LIMIT %s",
+                        (self.store.bot_id, MAX_SOURCES + 1),
+                    )).fetchall()
+                conservative = bool(legacy_used or incomplete)
+                if conservative:
+                    values = sorted({(t["source_unit_id"], t["part_id"]) for t in values}
+                                    | {(legacy, "*")}
+                                    | {(r["source_unit_id"], "*") for r in incomplete})
+                    values = [{"source_unit_id": unit, "part_id": part} for unit, part in values]
+                    if len(values) > MAX_SOURCES:
+                        raise ForestError("FORGET_SCOPE_LIMIT", "Legacy deletion closure exceeds source limit", 422)
+                linked = await (await conn.execute(
+                    "SELECT * FROM public.forest_source_dependent_closure(%s,%s,%s)",
+                    (self.store.bot_id, Jsonb(values), MAX_SOURCES),
+                )).fetchall()
+                if len(linked) > MAX_SOURCES:
+                    raise ForestError("FORGET_SCOPE_LIMIT", "Exact alias deletion closure exceeds source limit", 422)
+                values = sorted(linked, key=lambda item: (item['source_unit_id'],item['part_id']))
                 epoch = clock["deletion_epoch"] + 1
                 await conn.execute(
                     "INSERT INTO public.bot_payload_forget_requests(bot_id,operation_id,input_digest,targets,"
@@ -299,18 +363,28 @@ class PayloadStore:
                     "AND (s.part_id='*' OR t->>'part_id'='*' OR s.part_id=t->>'part_id'))",
                     (operation_id, self.store.bot_id, Jsonb(values)),
                 )
-                result = {"operation_id": operation_id, "deletion_epoch": epoch}
+                result = {"operation_id": operation_id, "deletion_epoch": epoch,
+                          "legacy_conservative": conservative}
                 await self.store._event(conn, "memory.payload_sources_revoked", operation_id, result)
             await self.store._host(conn, lease)
             return result
 
     async def scrub(self, lease: HostLease, *, limit: int = 64) -> dict:
-        """One bounded, atomic database-only batch; host takeover needs no I/O lease."""
+        """One bounded propagation/erasure batch; ownership recovery needs no I/O.
+
+        `remaining` includes proven source links whose parent was revoked, even
+        when this batch removed the last directly revoked body. A caller can
+        therefore drain until zero without stranding downstream echo copies.
+        """
         if type(limit) is not int or not 1 <= limit <= 256:
             raise ForestError("INVALID_SCRUB_LIMIT", "Scrub limit must be 1 to 256", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._host(conn, lease)
             await self.lock_in(conn)
+            propagated = await (await conn.execute(
+                "SELECT public.forest_reconcile_source_links(%s,%s) AS count",
+                (self.store.bot_id, limit),
+            )).fetchone()
             rows = await (await conn.execute(
                 "SELECT payload_id FROM public.bot_payload_headers WHERE bot_id=%s AND state='REVOKED' "
                 "ORDER BY payload_id LIMIT %s FOR UPDATE", (self.store.bot_id, limit),
@@ -325,6 +399,15 @@ class PayloadStore:
                 "SELECT count(*) AS count FROM public.bot_payload_headers WHERE bot_id=%s AND state='REVOKED'",
                 (self.store.bot_id,),
             )).fetchone()
+            pending = await (await conn.execute(
+                "SELECT count(*) AS count FROM public.bot_payload_source_links l "
+                "JOIN public.bot_payload_headers p ON p.bot_id=l.bot_id AND p.payload_id=l.parent_payload_id "
+                "WHERE l.bot_id=%s AND p.state IN ('REVOKED','SCRUBBED') AND NOT EXISTS("
+                "SELECT 1 FROM public.bot_payload_suppression x WHERE x.bot_id=l.bot_id "
+                "AND x.source_unit_id=l.dependent_source_unit_id AND x.part_id='*')",
+                (self.store.bot_id,),
+            )).fetchone()
             await self.store._host(conn, lease)
-            return {"removed": len(ids), "remaining": remaining["count"],
+            return {"removed": len(ids), "remaining": remaining["count"] + pending["count"],
+                    "reconciled_links": propagated["count"], "pending_links": pending["count"],
                     "scope": "managed_payload_bodies", "storage_reclaim_required": True}

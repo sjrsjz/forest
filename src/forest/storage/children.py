@@ -16,6 +16,8 @@ from forest.models import PreparedModelRequest
 from forest.packages import digest_json
 from forest.storage import tree_budget
 from forest.storage.agent_config import AgentConfig
+from forest.storage.agent_memory import AgentMemoryStore
+from forest.storage.child_payloads import ChildPayloadStore, result_metadata, spec_metadata
 from forest.storage.messages import _json
 
 TOOL_NAME = "forest_analyze"
@@ -69,6 +71,7 @@ class ChildLease:
 class ChildStore:
     def __init__(self, agent):
         self.agent, self.messages, self.store = agent, agent.messages, agent.store
+        self.payloads = ChildPayloadStore(self.store)
 
     async def _row(self, conn, child_id):
         row = await (
@@ -85,6 +88,7 @@ class ChildStore:
         """Reserve every private proposal in this causal group in one transaction."""
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, _, _, _, head = await self.agent._guard(conn, actor, run_id)
+            await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, run_id)
             current = await self.agent._configuration(conn, actor, head)
             values = self.agent._values(head)
             if head["phase"] != "WAIT_TOOL":
@@ -107,6 +111,8 @@ class ChildStore:
                     (self.store.bot_id, head["current_step_id"]),
                 )
             ).fetchone()
+            step = await self.agent.payloads.hydrate_step_in(conn, step)
+            proposals = [await self.agent.payloads.hydrate_tool_in(conn, p) for p in proposals]
             snapshot = step["snapshot"]
             count = (
                 await (
@@ -209,8 +215,16 @@ class ChildStore:
                     "depth": 1,
                     "delegation_policy_revision": actor.policy_revision,
                 }
+                snapshot_id, spec_id = await self.payloads.spawn_in(
+                    conn,
+                    child_id,
+                    step["logical_step_id"],
+                    proposal,
+                    _json(frozen, maximum=4 * 1024 * 1024),
+                    spec,
+                )
                 await conn.execute(
-                    "INSERT INTO public.bot_agent_children(bot_id,child_id,parent_run_id,parent_step_id,tool_call_id,parent_input_revision,parent_snapshot_digest,authority_trigger_id,principal_ref,source_unit_ids,snapshot,snapshot_digest,spec,deadline_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,LEAST(%s,clock_timestamp()+%s*interval '1 second'))",
+                    "INSERT INTO public.bot_agent_children(bot_id,child_id,parent_run_id,parent_step_id,tool_call_id,parent_input_revision,parent_snapshot_digest,authority_trigger_id,principal_ref,source_unit_ids,snapshot_payload_id,snapshot_digest,spec_payload_id,spec_metadata,deadline_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,LEAST(%s,clock_timestamp()+%s*interval '1 second'))",
                     (
                         self.store.bot_id,
                         child_id,
@@ -224,9 +238,10 @@ class ChildStore:
                         Jsonb(
                             [u["unit_id"] for u in snapshot["units"] if u["unit_id"] in selected]
                         ),
-                        Jsonb(_json(frozen, maximum=4 * 1024 * 1024)),
+                        snapshot_id,
                         digest_json(frozen),
-                        Jsonb(spec),
+                        spec_id,
+                        Jsonb(spec_metadata(spec)),
                         head["deadline_at"],
                         min(values.get("child_timeout", 90), current.get("child_timeout", 90)),
                     ),
@@ -266,19 +281,19 @@ class ChildStore:
             or head["current_step_id"] != row["parent_step_id"]
             or head["input_revision"] != row["parent_input_revision"]
             or head["phase"] not in {"WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN"}
-            or row["spec"]["delegation_policy_revision"] != runtime["policy_revision"]
+            or row["spec_metadata"]["delegation_policy_revision"] != runtime["policy_revision"]
         ):
             raise ForestError(
                 "CHILD_PARENT_REVOKED",
                 "Parent no longer owns this private analysis delegation",
                 409,
             )
-        current = row["spec"]["values"]
-        if row["spec"]["config_revision"]:
+        current = row["spec_metadata"]["values"]
+        if row["spec_metadata"]["config_revision"]:
             cfg = await AgentConfig.guard_in(
                 conn,
                 SimpleNamespace(host=host, policy_revision=runtime["policy_revision"]),
-                row["spec"]["config_revision"],
+                row["spec_metadata"]["config_revision"],
             )
             current = cfg["current_values"]
         if not current.get("children_enabled", False):
@@ -313,6 +328,9 @@ class ChildStore:
 
     async def _guard(self, conn, lease, *, terminal=False):
         binding, head, row, current = await self._scope(conn, lease.host, lease.child_id)
+        if not terminal:
+            await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, row["parent_run_id"])
+            await self.payloads.guard_in(conn, row)
         if (
             row["owner_id"] != lease.owner_id
             or row["lease_epoch"] != lease.lease_epoch
@@ -369,7 +387,7 @@ class ChildStore:
             if active >= min(
                 2,
                 current.get("child_concurrency", 2),
-                row["spec"]["values"].get("child_concurrency", 2),
+                row["spec_metadata"]["values"].get("child_concurrency", 2),
             ):
                 return None
             if row["attempt_id"]:
@@ -422,10 +440,15 @@ class ChildStore:
 
     async def load(self, lease):
         async with self.store.pool.connection() as conn, conn.transaction():
-            binding, _, row, current = await self._guard(conn, lease, terminal=True)
+            binding, _, row, current = await self._guard(conn, lease)
+            row = await self.payloads.hydrate_in(conn, row)
             row["current_values"] = current
             row["attempt"] = (
-                await self._attempt(conn, row["attempt_id"]) if row["attempt_id"] else None
+                await self.payloads.hydrate_attempt_in(
+                    conn, await self._attempt(conn, row["attempt_id"])
+                )
+                if row["attempt_id"]
+                else None
             )
             await self._final(conn, lease, binding)
             return row
@@ -469,6 +492,7 @@ class ChildStore:
             binding, _, row, current = await self._guard(conn, lease)
             previous = await self._attempt(conn, prepared.transport_attempt_id)
             if previous:
+                await self.payloads.guard_in(conn, row, previous)
                 if (
                     previous["child_id"] != row["child_id"]
                     or previous["wire_digest"] != prepared.payload_digest
@@ -493,7 +517,7 @@ class ChildStore:
                     "Child request changed its frozen evidence or attempted tools",
                     409,
                 )
-            values = row["spec"]["values"]
+            values = row["spec_metadata"]["values"]
             if prepared.max_output_tokens > min(
                 values.get("child_max_output_tokens", 1024), values.get("max_output_tokens", 1024)
             ):
@@ -502,6 +526,7 @@ class ChildStore:
                 )
             if row["attempt_id"]:
                 old = await self._attempt(conn, row["attempt_id"])
+                old = await self.payloads.hydrate_attempt_in(conn, old)
                 if (
                     old["status"] != "NOT_SENT"
                     or old["wire_digest"] != prepared.payload_digest
@@ -553,16 +578,17 @@ class ChildStore:
                 "stream": prepared.stream,
                 "serializer_revision": prepared.serializer_revision,
             }
+            request_id, manifest_id = await self.payloads.request_in(conn, row, prepared)
             await conn.execute(
-                "INSERT INTO public.bot_child_model_attempts(bot_id,attempt_id,child_id,request_id,request_body,wire_digest,manifest,metadata,owner_id,lease_epoch,host_incarnation,host_owner_epoch,status,budget_day,reserved_tokens,deadline_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PERMITTED',%s,%s,LEAST(%s,clock_timestamp()+%s*interval '1 second'))",
+                "INSERT INTO public.bot_child_model_attempts(bot_id,attempt_id,child_id,request_id,request_payload_id,wire_digest,manifest_payload_id,metadata,owner_id,lease_epoch,host_incarnation,host_owner_epoch,status,budget_day,reserved_tokens,deadline_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PERMITTED',%s,%s,LEAST(%s,clock_timestamp()+%s*interval '1 second'))",
                 (
                     self.store.bot_id,
                     prepared.transport_attempt_id,
                     row["child_id"],
                     prepared.request_id,
-                    prepared.body,
+                    request_id,
                     prepared.payload_digest,
-                    Jsonb(prepared.manifest),
+                    manifest_id,
                     Jsonb(metadata),
                     lease.owner_id,
                     lease.lease_epoch,
@@ -598,6 +624,7 @@ class ChildStore:
                 raise ForestError(
                     "CHILD_ATTEMPT_STALE", "Child transport no longer owns this exact request", 409
                 )
+            await self.payloads.guard_in(conn, row, attempt)
             await conn.execute(
                 "UPDATE public.bot_child_model_attempts SET status='DISPATCHING' WHERE bot_id=%s AND attempt_id=%s",
                 (self.store.bot_id, attempt_id),
@@ -683,9 +710,38 @@ class ChildStore:
                 raise ForestError(
                     "CHILD_ATTEMPT_STALE", "Child attempt cannot accept another result", 409
                 )
+            try:
+                await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, row["parent_run_id"])
+                await self.payloads.guard_in(conn, row, attempt)
+            except ForestError as exc:
+                if exc.code != "AGENT_MEMORY_REVOKED":
+                    raise
+                metadata = result_metadata(data, discarded_reason=exc.code)
+                await conn.execute(
+                    "UPDATE public.bot_child_model_attempts SET status=%s,result_metadata=%s,result_digest=%s WHERE bot_id=%s AND attempt_id=%s",
+                    (
+                        data["status"],
+                        Jsonb(metadata),
+                        digest_json(data),
+                        self.store.bot_id,
+                        attempt_id,
+                    ),
+                )
+                await self._settle(conn, row, attempt, data["status"], data.get("usage"))
+                await self._failed(conn, row, exc.code)
+                await self._final(conn, lease, binding)
+                return await self._row(conn, row["child_id"])
+            result_id = await self.payloads.observation_in(conn, attempt, data)
             await conn.execute(
-                "UPDATE public.bot_child_model_attempts SET status=%s,result=%s,result_digest=%s WHERE bot_id=%s AND attempt_id=%s",
-                (data["status"], Jsonb(data), digest_json(data), self.store.bot_id, attempt_id),
+                "UPDATE public.bot_child_model_attempts SET status=%s,result_payload_id=%s,result_metadata=%s,result_digest=%s WHERE bot_id=%s AND attempt_id=%s",
+                (
+                    data["status"],
+                    result_id,
+                    Jsonb(result_metadata(data)),
+                    digest_json(data),
+                    self.store.bot_id,
+                    attempt_id,
+                ),
             )
             await self._settle(conn, row, attempt, data["status"], data.get("usage"))
             if data["status"] == "UNKNOWN":
@@ -703,6 +759,7 @@ class ChildStore:
             elif min(row["deadline_at"], attempt["deadline_at"]) <= await self.store._now(conn):
                 await self._failed(conn, row, "CHILD_DEADLINE_EXCEEDED")
             else:
+                row = await self.payloads.hydrate_in(conn, row)
                 candidate = {
                     "child_id": row["child_id"],
                     "text": data["text"],
@@ -711,9 +768,10 @@ class ChildStore:
                     "authority_trigger_id": row["authority_trigger_id"],
                     "parent_input_revision": row["parent_input_revision"],
                 }
+                candidate_id = await self.payloads.candidate_in(conn, row, candidate, result_id)
                 await conn.execute(
-                    "UPDATE public.bot_agent_children SET status='RESULT_READY',result=%s,result_digest=%s WHERE bot_id=%s AND child_id=%s",
-                    (Jsonb(candidate), digest_json(candidate), self.store.bot_id, row["child_id"]),
+                    "UPDATE public.bot_agent_children SET status='RESULT_READY',result_payload_id=%s,result_digest=%s WHERE bot_id=%s AND child_id=%s",
+                    (candidate_id, digest_json(candidate), self.store.bot_id, row["child_id"]),
                 )
                 await self._wake(conn, row)
             await self._final(conn, lease, binding)
@@ -722,6 +780,7 @@ class ChildStore:
     async def adopt(self, actor, run_id):
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, _, _, _, head = await self.agent._guard(conn, actor, run_id)
+            await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, run_id)
             current = await self.agent._configuration(conn, actor, head)
             if not current.get("children_enabled", False):
                 raise ForestError("CHILD_DISABLED", "Private result adoption was revoked", 403)
@@ -739,6 +798,8 @@ class ChildStore:
                     )
                 if row["status"] not in {"RESULT_READY", "FAILED", "CANCELLED"}:
                     continue
+                await self.payloads.guard_in(conn, row)
+                row = await self.payloads.hydrate_in(conn, row)
                 result = (
                     row["result"]
                     if row["status"] == "RESULT_READY"
@@ -749,11 +810,19 @@ class ChildStore:
                     }
                 )
                 status = "SUCCEEDED" if row["status"] == "RESULT_READY" else "FAILED"
+                tool = await self.agent._tool(conn, run_id, row["tool_call_id"])
+                result_ref = await self.agent.payloads.tool_result_in(
+                    conn,
+                    tool,
+                    result,
+                    status=status,
+                    parents=(row["result_payload_id"],) if row.get("result_payload_id") else (),
+                )
                 await conn.execute(
-                    "UPDATE public.bot_agent_tools SET status=%s,result=%s,result_digest=%s WHERE bot_id=%s AND run_id=%s AND tool_call_id=%s",
+                    "UPDATE public.bot_agent_tools SET status=%s,result_payload_id=%s,result_digest=%s WHERE bot_id=%s AND run_id=%s AND tool_call_id=%s",
                     (
                         status,
-                        Jsonb(result),
+                        result_ref,
                         digest_json([status, result]),
                         self.store.bot_id,
                         run_id,
@@ -830,10 +899,12 @@ class ChildStore:
 
     async def media(self, lease):
         """Read only validated captures of selected parent evidence, never fetch URLs."""
+        from forest.storage.input_payloads import InputContentStore
         from forest.storage.media import MAX_CONTEXT_MEDIA_BYTES, MediaStore
 
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, _, row, _ = await self._guard(conn, lease)
+            row = await self.payloads.hydrate_in(conn, row)
             media, total = {}, 0
             for unit in row["snapshot"]["units"]:
                 if unit["unit_id"] not in row["source_unit_ids"] or unit["role"] != "user":
@@ -854,6 +925,14 @@ class ChildStore:
                         == row["snapshot"]["conversation"]["conversation_id"]
                         and capture["ingress_seq"] <= row["snapshot"]["selected_input_end_seq"]
                     ):
+                        body = await InputContentStore(self.store).read_capture_in(
+                            conn,
+                            part["media_ref"],
+                            expected_deletion_epoch=await self.agent.payloads.epoch_in(conn),
+                        )
+                        if body is None:
+                            continue
+                        capture = {**capture, **body}
                         total += len(capture["content"])
                         if total > MAX_CONTEXT_MEDIA_BYTES:
                             break

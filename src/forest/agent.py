@@ -183,6 +183,12 @@ class AgentRunner:
             raise
         except ForestError as exc:
             if head is None:
+                if exc.code == "AGENT_MEMORY_REVOKED":
+                    # Loading may fail before assignment when a predecessor's
+                    # persistent snapshot was erased. Its attempt still exists.
+                    ended = await self.state.fail_revoked(actor, run_id)
+                    if ended is not None:
+                        return self.disposition(ended)
                 # No Agent attempt exists yet. The legacy scheduler can record
                 # an explicit configuration/preparation failure for this Run.
                 raise
@@ -485,11 +491,15 @@ class AgentRunner:
                         "error_code": exc.code if isinstance(exc, ForestError) else "TOOL_FAILED"
                     },
                 )
+                if head["phase"] in {"FAILED", "CANCELLED", "COMPLETED"}:
+                    return head
                 head = await self.state.recover_tool(actor, run_id, proposal["tool_call_id"])
                 if head["phase"] == "BLOCKED_UNKNOWN":
                     return head
             else:
                 head = await self._observe_tool(actor, grant, status="SUCCEEDED", result=result)
+                if head["phase"] in {"FAILED", "CANCELLED", "COMPLETED"}:
+                    return head
         latest = await self.state.load(actor, run_id)
         if any(p["status"] == "WAIT_CHILD" for p in latest.get("tools", [])):
             return latest

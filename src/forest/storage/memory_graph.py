@@ -315,7 +315,10 @@ class GraphStore:
                     conn, (row["payload_id"],), expected_deletion_epoch=clock["deletion_epoch"]
                 )
             except ForestError as exc:
-                if exc.code not in {"PAYLOAD_ERASED", "SOURCE_SUPPRESSED", "PAYLOAD_INCOMPLETE"}:
+                if exc.code not in {
+                    "PAYLOAD_ERASED", "SOURCE_SUPPRESSED", "PAYLOAD_INCOMPLETE",
+                    "SOURCE_LINK_SCOPE_LIMIT",
+                }:
                     raise
             else:
                 media[(row["source_unit_id"], row["part_id"])] = row["blob_digest"]

@@ -1,0 +1,43 @@
+# 正文迁移的事务与版本边界
+
+029 起的正文迁移在原 Bot 专属数据库内执行。升级前先停止并排空宿主；仍持有有效 HostLease 时返回 `MIGRATION_HOST_ACTIVE`。升级不调用模型、嵌入服务或媒体下载，也不使用第二条数据库连接。
+
+`BotStore.migrate()` 先检查数据库身份、未知迁移和全部历史 checksum，再按 runtime → host 的锁序阻止旧宿主提交。事务内使旧 owner epoch 失效，然后依次执行 SQL prepare、`storage.data_migrations.<family>_v1.migrate_in(conn, store)`、handler 内的最终约束和迁移回执。任何一步失败都会撤销本次全部 DDL、数据搬运、host 失效和回执。数据库锁等待上限为 3 秒；发生锁竞争时整次升级失败，可在停止占用连接后重试。
+
+001–028 保留原 SQL SHA-256。029–035 的 checksum 为 UTF-8 JSON 数组 `['forest.bot.migration.v1', SQL, handler 源码, migration_v1.py 源码]` 的 SHA-256，数组使用无额外空格的 JSON 编码。handler 和 `migration_v1.py` 发布后不得修改；后续算法使用新的版本文件。handler 应包含迁移所需的历史算法，不调用会随运行时变化的业务存储实现。
+
+新连接通过 PostgreSQL 启动参数固定 `forest.writer_generation=1`。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少该版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
+
+`PayloadStore.import_legacy_json_in()` / `import_legacy_bytes_in()` 只在 dispatcher 绑定的同连接、同任务、同事务内有效，普通业务调用及继承 ContextVar 的子任务会被拒绝。参数为 `owner_kind`、`owner_id`、`value`、`sources`、`parents`，返回 `PayloadRef`。它与正常写入使用一致的稳定身份和摘要：
+
+- `payload_id = 'payload:' + digest_json([bot_id, owner_kind, owner_id])`。
+- JSON 使用现有 Python canonical JSON；原精确 HTTP 请求使用原 bytes，不从 PostgreSQL JSON 文本重建。
+- 父载荷的来源清单展开后参与不可变 input digest。
+- 相同身份和摘要返回已有回执；已有 `REVOKED` / `SCRUBBED` 回执永不恢复正文。
+- 新载荷命中既有来源抑制时，仅写摘要、来源、父引用和 `REVOKED` header，并引用真正的删除操作；不插入正文。
+
+旧派生物不能证明完整来源时，handler 显式包含 `legacy_source_ref(bot_id)`。首次删除决策若发现该标记，或发现不可变旧 SourcePayload 的 `lineage_complete=false`，会把保守标记及相应旧 source unit 明确写入持久删除 targets。原请求幂等摘要仍只基于用户请求的 targets 和期望 deletion epoch；重放使用已经固定的决策，不随之后新增数据扩展。结果的 `legacy_conservative` 表明是否扩大了这次旧数据清理范围。超过 4096 个来源明确拒绝，不截断。其他完整、独立输入不因此加入删除范围。
+
+若首次删除早于迁移、当时尚不存在保守标记，则未知来源的旧派生物在导入时额外继承最早的实际 suppressed source，直接按原删除回执登记为 `REVOKED`，不写正文。选择顺序固定为 deletion epoch、operation ID、source unit、part；原删除决策仍不可变。
+
+032 把 Child snapshot、冻结 spec、候选结果及模型 request/manifest/result 改为载荷指针，原正文列强制为空。Child 的 snapshot/spec 继承父 step 的 snapshot、output、BOUND EvidenceBundle 和工具参数；模型请求和结果继续传递这些父引用。父 Agent 接纳时还把 Child 结果载荷列为工具结果的直接父引用，后续 RUN_STEP 和回复继承完整关系。派发、重试、媒体读取及结果接纳都复验载荷可用性。删除后到达的真实模型响应只登记摘要、用量和固定错误码，用原预算账本结算；正文不发布，UNKNOWN 仍不自动重试或释放预留。spec 的永久 metadata 仅保存配置/策略 revision 和有限的布尔、数值限额，提示词与服务配置只存在于可删除 spec 载荷。
+
+子 Agent 还复验父 Run 已绑定记忆的当前配置、来源可见性、资格、切口和运行时权限。只检查载荷是否 ACTIVE 不足以授予执行许可：例如管理员禁用记忆后，尚未发出的 Child HTTP 被拒绝；已经收到的已知费用仍可结算，但候选正文不保存、不接纳。数据库 INSERT trigger 检查 Child snapshot 摘要和 request wire digest 与所引用载荷 header 一致，原字节完整性仍由 PayloadStore 的数据库 trigger 验证。
+
+| 迁移 | 搬运对象 |
+| --- | --- |
+| 029 | Inbox 作者/消息正文、旧媒体来源、capture bytes 和来源 manifest |
+| 030 | Context 非输入单元、回复正文和相应载荷指针 |
+| 031 | Agent snapshot/output、精确模型请求/manifest/result、工具参数/结果/观察 |
+| 032 | 私有 Child snapshot/spec/result、精确模型请求/manifest/result |
+| 033 | Delivery 发送内容、精确请求和回执正文 |
+| 034 | 升级前已发生遗忘，但旧不完整 SourcePayload 仍为 ACTIVE 的补偿删除决策 |
+| 035 | 为平台成功回执精确确认的自身回声登记不可变来源依赖，协调先回声、后确认或先遗忘的顺序 |
+
+034 仅在 Bot 已有 suppression 时执行。它每批选择最多 256 个仍 ACTIVE 且 `lineage_complete=false` 的 SourceUnit，通过新的 `migration:034:legacy-reconcile:<batch>` 删除操作撤销其自身及派生闭包，同时登记原删除操作引用、删除 epoch、来源和载荷数量。旧请求的 targets、摘要与回执保持原样；完整的独立输入不受影响。所有批次和其他迁移同属一个事务，可整体回滚。没有先前删除的旧库不产生任何补偿决策。正文立即不可读，可由正常 scrub 清除；重复 migrate 不重复作出决策。普通删除也只扩展尚未撤销的不完整 SourceUnit，避免已清除的旧历史持续消耗请求来源上限。
+
+035 从既有的精确回声 alias 迁入来源依赖。运行时也在确认 alias 的同一事务追加依赖，数据库复核 Bot、绑定账号、群/线程、平台消息 ID、正式回复或控制命令与 SENT 发送尝试。关联不依赖文本相似度；其他用户独立提交的相同文字不因此成为派生副本。原载荷 manifest、原输入摘要与既有删除 targets 保持不可变，读取与后续写入检查关联后的传递依赖。真实证明不会因为读取闭包超过 4096 项而丢弃；递归查询使用 UNION 去重，有限图中的环不导致无限展开。超限内容明确不可用，Agent 能终结该 Run，晚到结果只结算原费用与效果事实，不再保存正文。
+
+父载荷已经撤销时，关联接纳事务为当前回声追加单来源删除决策，撤销含该来源的平面副本，并登记原因、身份与计数。`scrub` 在清除 body 前每批最多推进 256 条此类关联；父 header 的撤销成为下游下一批的依据。其 remaining 包含待传播关联，调用方应迭代至零后才宣称受管正文已经清理完毕。升级 handler 在记录版本前也按批推进至无待处理关联。正常显式删除若一次目标闭包超过 4096 项，仍整体拒绝且不产生成功回执；这一限额不能被用于回滚并丢弃已经确认的回声来源。
+
+`tests/test_payload_migration_infrastructure.py` 使用真实 PostgreSQL 验证：有效/过期宿主、旧连接重新取权、DDL 等锁回滚、handler 失败回滚、稳定 JSON/bytes、已删除来源导入、作用域逃逸、旧 checksum、代码篡改检测、保守来源的固定删除决策，以及非空 022 旧库升级的补偿与无删除时不操作。另有 257 个旧不完整来源的跨批次验证，检查两个正式删除决策、独立完整来源保留、scrub 和后续请求范围不累积。`tests/test_child_payloads.py` 验证实际 Child 重试、晚到 HTTP 用量、父子闭包、下一 Run 不复活、旧 028 精确字节迁移，以及真实 BOUND query 在配置撤销后的派发/结果守卫。各正文族另行验证实际字段迁移与运行时读取。

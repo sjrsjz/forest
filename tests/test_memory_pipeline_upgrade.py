@@ -18,7 +18,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from legacy_022 import DeliveryStore as LegacyDeliveryStore
+from legacy_022 import MemorySourceStore as LegacyMemorySourceStore
+from legacy_022 import MessageStore as LegacyMessageStore
 from psycopg.types.json import Jsonb
+from retention_upgrade import assert_preserved, content
 from test_agent_config import apply as apply_agent
 from test_agent_config import plan as plan_agent
 from test_messages import event, owner
@@ -34,9 +38,8 @@ from forest.packages import digest_json
 from forest.platform import BindingRuntime
 from forest.security import SecretVault
 from forest.storage.agent_config import AgentConfig
-from forest.storage.bot import BotStore
+from forest.storage.bot import BotStore, _migration_checksum
 from forest.storage.control import BotControl
-from forest.storage.delivery import DeliveryStore
 from forest.storage.memory_config import MemoryConfig
 from forest.storage.memory_sources import MemorySourceStore
 from forest.storage.messages import MessageStore
@@ -180,7 +183,7 @@ async def seed_agent(env, actor, batch, *, completed=False):
             run_id=run_id,
             expected_input_revision=batch["input_revision"],
             reply_parts=[[{"type": "text", "text": "Already completed before upgrade"}]],
-            delivery=DeliveryStore(env.store),
+            delivery=LegacyDeliveryStore(env.store),
         )
     async with env.store.pool.connection() as conn, conn.transaction():
         session = await (
@@ -308,8 +311,8 @@ async def old_bot(dsn, path, *, endpoint="http://127.0.0.1:8000/v1"):
             "model_timeout": 15,
         }
         await apply_agent(env, await plan_agent(env, values=env.values, secret=API_KEY))
-        env.messages = MessageStore(store)
-        env.sources = MemorySourceStore(env.messages)
+        env.messages = LegacyMessageStore(store)
+        env.sources = LegacyMemorySourceStore(env.messages)
         original = event(
             1, group="source-group", user="photographer", text="old native picture caption"
         )
@@ -350,6 +353,19 @@ async def old_bot(dsn, path, *, endpoint="http://127.0.0.1:8000/v1"):
         await store.close()
 
 
+async def upgrade(env):
+    await env.store.release_host(env.lease)
+    await env.store.migrate()
+    env.lease = await env.store.acquire_host("upgraded-host", "upgraded-" + uuid4().hex, ttl_seconds=300)
+    async with env.store.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE public.bot_bindings SET host_incarnation=%s,host_owner_epoch=%s WHERE bot_id='bot-a'",
+            (env.lease.incarnation, env.lease.owner_epoch),
+        )
+    env.messages = MessageStore(env.store)
+    env.sources = MemorySourceStore(env.messages)
+
+
 async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_exact_requests(
     upgrade_database, tmp_path
 ):
@@ -364,10 +380,10 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
             assert env.before[name]
         async with env.store.pool.connection() as conn:
             issuer = (await snapshot(conn, ("bot_web_issuers",)))["bot_web_issuers"][0]
-        await env.store.migrate()
+        await upgrade(env)
         await env.store.migrate()
         async with env.store.pool.connection() as conn:
-            assert await snapshot(conn, OLD_TABLES) == env.before
+            await assert_preserved(conn, env.before, append_only=MEMORY_TABLES)
             all_ledger = (await snapshot(conn, ("forest_bot_schema_migrations",)))[
                 "forest_bot_schema_migrations"
             ]
@@ -384,7 +400,7 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
                     .joinpath("bot_migrations", row["version"])
                     .read_text(encoding="utf8")
                 )
-                assert row["checksum"] == hashlib.sha256(source.encode()).hexdigest()
+                assert row["checksum"] == _migration_checksum(row["version"], source)
             after_issuer = (await snapshot(conn, ("bot_web_issuers",)))["bot_web_issuers"][0]
             assert {k: v for k, v in after_issuer.items() if k != "actions"} == {
                 k: v for k, v in issuer.items() if k != "actions"
@@ -452,7 +468,7 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
                     (issuer, public, Jsonb(actions), enabled),
                 )
             before = await snapshot(conn, ("bot_web_issuers",))
-        await env.store.migrate()
+        await upgrade(env)
         control = BotControl(env.store)
         async with env.store.pool.connection() as conn:
             actual = {
@@ -508,7 +524,7 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
         server(handler) as (endpoint, requests),
         old_bot(upgrade_database, tmp_path, endpoint=endpoint) as env,
     ):
-        await env.store.migrate()
+        await upgrade(env)
         kernel = Kernel(env.store)
         kernel.lease = env.lease
         runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
@@ -537,7 +553,9 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
                     "NOT_SENT",
                     "RESPONDED",
                 ]
-                assert all(row["request_body"] == env.retry.prepared.body for row in attempts)
+                assert all(row["request_body"] is None for row in attempts)
+                for row in attempts:
+                    assert await content(conn, "bot-a", row["request_payload_id"]) == env.retry.prepared.body
                 assert all(
                     row["wire_digest"] == env.retry.prepared.payload_digest for row in attempts
                 )
@@ -616,6 +634,6 @@ async def test_old_checksum_mismatch_rejects_upgrade_before_any_new_memory_table
                 "UPDATE public.forest_bot_schema_migrations SET checksum=%s WHERE version='022_memory_sources.sql'",
                 (RELEASED["022_memory_sources.sql"],),
             )
-        await env.store.migrate()
+        await upgrade(env)
         async with env.store.pool.connection() as conn:
-            assert await snapshot(conn, OLD_TABLES) == env.before
+            await assert_preserved(conn, env.before, append_only=MEMORY_TABLES)

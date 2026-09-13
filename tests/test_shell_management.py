@@ -11,6 +11,8 @@ from test_shell import allow, completed, dispatcher
 
 from forest.errors import ForestError
 from forest.storage.agent import AgentStore
+from forest.storage.delivery_payloads import DeliveryContentStore
+from forest.storage.input_payloads import InputContentStore
 from forest.storage.shell_control import ShellControl
 
 pytestmark = pytest.mark.postgres
@@ -43,7 +45,13 @@ async def test_shell_cancel_inflight_model_keeps_cost_and_replays_same_operation
     assert (await row(repository, "SELECT count(*) AS n FROM public.bot_web_operations WHERE action='agent.cancel'"))["n"] == 1
     assert (await row(repository, "SELECT count(*) AS n FROM public.bot_conversation_replies"))["n"] == 0
     source = await row(repository, "SELECT segments FROM public.bot_message_inbox WHERE event_id=%s", (claim["event_id"],))
-    assert "停止回答" not in str(source)
+    assert source["segments"] is None
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        content = InputContentStore(repository.store)
+        clock = await content.payloads.lock_in(conn)
+        source = await content.read_input_in(conn, claim["event_id"],
+            expected_deletion_epoch=clock["deletion_epoch"], required=True)
+    assert "停止回答" not in str(source["segments"])
 
 
 async def test_shell_cannot_cancel_other_group_or_change_admitted_payload(messages):
@@ -92,8 +100,13 @@ async def test_typed_query_publishes_only_current_group_metadata_on_control_lane
         receipt = await row(repository, "SELECT outcome,delivery FROM public.bot_shell_requests")
         assert receipt["outcome"]["code"] == "RUN_STATUS"
         assert receipt["delivery"]["send_lane"] == "CONTROL"
-        async with repository.store.pool.connection() as conn:
-            text = str(await (await conn.execute("SELECT payload FROM public.bot_send_parts")).fetchall())
+        async with repository.store.pool.connection() as conn, conn.transaction():
+            parts = await (await conn.execute("SELECT * FROM public.bot_send_parts")).fetchall()
+            assert parts and all(part["payload"] is None and part["payload_id"] for part in parts)
+            content = DeliveryContentStore(repository.store)
+            clock = await content.payloads.lock_in(conn)
+            text = str([await content.read_part_in(conn, part,
+                expected_deletion_epoch=clock["deletion_epoch"]) for part in parts])
         assert ours["run_id"] in text and other["run_id"] not in text
         assert "secret-other-group" not in text
     finally:

@@ -21,6 +21,8 @@ from forest.bootstrap import BootstrapState
 from forest.errors import ForestError
 from forest.management.app import WebSettings
 from forest.management.binding_catalog import BindingCatalog
+from forest.memory_types import SourceRef
+from forest.storage.payloads import PayloadStore
 
 pytestmark = pytest.mark.postgres
 TOKEN = "only-a-test-access-token"
@@ -153,6 +155,8 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             first = await wait_for(lambda: get(client, root + "/delivery"),
                                   lambda value: value["parts"] and value["parts"][0]["state"] == "SENT")
             assert first["parts"][0]["reply_route"]["channel_id"] == "30001"
+            assert first["parts"][0]["payload_state"] == "ACTIVE"
+            assert first["parts"][0]["payload"] == [{"type": "text", "text": "群名片@30001:answer this"}]
             assert len(server["sends"]) == 1
             assert server["sends"][0]["message"][0]["data"]["text"] == "群名片@30001:answer this"
             assert (await receive(client, binding_id, 3, "answer this", mention=True)).status_code == 200
@@ -188,7 +192,7 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             await managed.store.set_maintenance(managed.kernel._authority(), state["maintenance_epoch"], True)
             await wait_for(lambda: get(client, root + "/conversations"),
                            lambda value: all(c["context_applied_seq"] == c["next_ingress_seq"] - 1 for c in value["conversations"]))
-        async with running(settings) as (_, client):
+        async with running(settings) as (app, client):
             await login(client)
             await online(client, base)
             assert len((await get(client, root + "/bindings"))["bindings"]) == 1
@@ -196,6 +200,26 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             await wait_for(lambda: get(client, root + "/delivery"),
                            lambda value: sum(p["state"] == "SENT" for p in value["parts"]) == 3)
             assert len(server["sends"]) == 4
+            managed = await app.state.runtime.fleet.attach(bot["bot_id"])
+            async with managed.store.pool.connection() as conn:
+                source = await (await conn.execute(
+                    "SELECT o.source_unit_id FROM public.bot_memory_source_occurrences o "
+                    "JOIN public.bot_message_inbox i USING(bot_id,event_id) "
+                    "WHERE i.bot_id=%s AND o.binding_id=%s AND i.platform_message_id='3'",
+                    (bot["bot_id"], binding_id),
+                )).fetchone()
+            payloads = PayloadStore(managed.store)
+            lease = managed.kernel._authority()
+            await payloads.forget_sources(lease, "remove-first-web-message", (SourceRef(source["source_unit_id"]),),
+                expected_deletion_epoch=await payloads.epoch(lease))
+            for _ in range(2):
+                status = await get(client, root + "/delivery")
+                original = next(part for part in status["parts"] if part["intent_id"] == first["parts"][0]["intent_id"])
+                assert original["state"] == "SENT" and original["receipt"]["message_id"] == "8001"
+                assert original["payload"] is None and original["payload_state"] == "UNAVAILABLE"
+                assert "answer this" not in json.dumps(status) and len(server["sends"]) == 4
+                while (await payloads.scrub(lease))["remaining"]:
+                    pass
 
 
 async def test_binding_registration_recovers_cross_database_ack_and_account_isolation(

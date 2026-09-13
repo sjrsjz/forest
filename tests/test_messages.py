@@ -19,6 +19,7 @@ from forest.errors import ForestError
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore
 from forest.storage.delivery import DeliveryStore
+from forest.storage.input_payloads import InputContentStore
 from forest.storage.messages import MessageStore
 
 pytestmark = pytest.mark.postgres
@@ -308,9 +309,14 @@ async def test_image_source_is_retained_without_uri_leaking_into_context(message
     view = await repository.context(actor, run_id=batch["run_id"])
     assert view["units"][0]["segments"][0]["type"] == "image"
     assert "secret" not in str(view) and "private.invalid" not in str(view)
-    async with repository.store.pool.connection() as conn:
-        row = await (await conn.execute("SELECT source FROM public.bot_inbound_media_refs")).fetchone()
-    assert row["source"]["uri"].endswith("token=secret")
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        await repository.store._host(conn, lease)
+        row = await (await conn.execute("SELECT source,source_payload_id,media_ref FROM public.bot_inbound_media_refs")).fetchone()
+        assert row["source"] is None and row["source_payload_id"]
+        hydrated = await InputContentStore(repository.store).read_media_source_in(
+            conn, row["media_ref"], expected_deletion_epoch=0,
+        )
+    assert hydrated["source"]["uri"].endswith("token=secret")
 
 
 async def test_wrong_bot_host_binding_and_self_trigger_are_rejected(messages):
@@ -617,7 +623,13 @@ async def test_late_chat_receipt_creates_precise_alias_and_changes_context_only_
     assert view["units"][1]["reply_id"] == reply["reply_id"]
     assert view["context_applied_seq"] == 2
     current = await row_for_event(repository, echo["event_id"])
-    assert current["origin"] == "chat_output" and current["segments"][0]["text"] == "exact output"
+    assert current["origin"] == "chat_output" and current["segments"] is None
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        await repository.store._host(conn, lease)
+        hydrated = await InputContentStore(repository.store).read_input_in(
+            conn, echo["event_id"], expected_deletion_epoch=0, required=True,
+        )
+    assert hydrated["segments"][0]["text"] == "exact output"
     assert await repository.reconcile_echoes(lease) == 0
     # Same text under another platform identity remains a distinct self message.
     await receive(repository, lease, 778, group="42", user="1000", text="exact output")

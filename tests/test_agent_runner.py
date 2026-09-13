@@ -20,6 +20,7 @@ from forest.group_scheduler import GroupScheduler
 from forest.kernel import Kernel
 from forest.models import ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog, digest_json
+from forest.storage.agent_payloads import AgentPayloadStore
 from forest.storage.delivery import DeliveryStore
 
 pytestmark = pytest.mark.postgres
@@ -376,7 +377,10 @@ async def test_completed_native_tool_receipt_recovers_lost_ack_without_second_ef
         repository, "SELECT status,result FROM public.bot_agent_tools"
     )
     assert len(executions) == 1
-    tool = await query(repository, "SELECT status,result FROM public.bot_agent_tools")
+    tool = await query(repository, "SELECT * FROM public.bot_agent_tools")
+    assert tool["result"] is None
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        tool = await AgentPayloadStore(repository.store).hydrate_tool_in(conn, tool)
     assert tool["status"] == "SUCCEEDED" and tool["result"]["value"] == 7
     assert (await kernel.store.snapshot_state(kernel.lease, "example.counter"))["counter"][
         "value"
@@ -444,7 +448,10 @@ async def test_materializer_cannot_mutate_input_author_or_append_queued_content(
     result = await runner.advance(actor, selected, context)
     assert result.status == "FAILED" and result.error_code == "MODEL_INPUT_CUT_CHANGED"
     assert not client.prepared
-    saved = await query(repository, "SELECT snapshot FROM public.bot_agent_steps")
+    saved = await query(repository, "SELECT * FROM public.bot_agent_steps")
+    assert saved["snapshot"] is None
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        saved = await AgentPayloadStore(repository.store).hydrate_step_in(conn, saved)
     assert saved["snapshot"]["units"][0]["parts"][0]["text"] == "message 1"
 
 
@@ -456,7 +463,10 @@ async def test_read_only_tool_cannot_write_through_native_component_capability(a
     client.responses = [proposed(selected["trigger_ids"][0], increment=9)]
     result = await runner.advance(actor, selected, context)
     assert result.status == "BLOCKED_UNKNOWN"
-    tool = await query(repository, "SELECT status,result FROM public.bot_agent_tools")
+    tool = await query(repository, "SELECT * FROM public.bot_agent_tools")
+    assert tool["result"] is None
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        tool = await AgentPayloadStore(repository.store).hydrate_tool_in(conn, tool)
     assert tool["status"] == "UNKNOWN" and tool["result"]["error_code"] == "AGENT_TOOL_READ_ONLY"
     assert "counter" not in await kernel.store.snapshot_state(kernel.lease, "example.counter")
 

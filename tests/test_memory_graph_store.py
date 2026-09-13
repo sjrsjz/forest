@@ -397,20 +397,33 @@ async def test_restore_active_does_not_revalidate_old_runtime_epoch(messages, fi
     assert caught.value.code == "GRAPH_SOURCE_CHANGED"
 
 
-async def test_real_late_echo_receipt_invalidates_candidate_without_memory_clock_bump(messages):
+async def test_real_late_echo_receipt_advances_facts_and_invalidates_candidate(messages):
     repository, lease, _ = messages
     actor, delivery, permit, _ = await outgoing_chat(repository, lease)
-    await receive(repository, lease, 777, group="42", user="1000", text="exact output")
+    echo = await receive(repository, lease, 777, group="42", user="1000", text="exact output")
     await repository.select_input(actor, "drain-before-receipt")
     graph, scope = GraphStore(repository), await scope_for(repository)
     candidate = build(await graph.capture(lease, scope))
+    echo_source = (await rows(repository,
+        "SELECT source_unit_id FROM public.bot_memory_source_occurrences WHERE event_id=%s",
+        (echo["event_id"],),
+    ))[0]["source_unit_id"]
+    before_sources = {item["source_unit_id"] for item in candidate.snapshot.metadata["sources"]}
+    assert echo_source in before_sources
     old_clock = await rows(repository, "SELECT * FROM public.bot_memory_clock")
     await delivery.complete(permit, "SENT", {"message_id": "777"})
     assert await repository.reconcile_echoes(lease) == 1
-    assert await rows(repository, "SELECT * FROM public.bot_memory_clock") == old_clock
+    # 035 records the real alias as a new source dependency. This advances the
+    # fact revision once, without pretending that confirmation is a deletion.
+    expected_clock = [{**old_clock[0], "fact_revision": old_clock[0]["fact_revision"] + 1}]
+    assert await rows(repository, "SELECT * FROM public.bot_memory_clock") == expected_clock
+    assert await repository.reconcile_echoes(lease) == 0
+    assert await rows(repository, "SELECT * FROM public.bot_memory_clock") == expected_clock
     with pytest.raises(ForestError) as caught:
         await graph.publish(lease, candidate, "echo-invalid")
     assert caught.value.code == "GRAPH_SOURCE_CHANGED"
+    current, _ = await publish(graph, lease, scope, "echo-current")
+    assert {item["source_unit_id"] for item in current.snapshot.metadata["sources"]} == before_sources - {echo_source}
 
 
 async def test_real_job_run_cancellation_rechecks_original_source_state(jobs):

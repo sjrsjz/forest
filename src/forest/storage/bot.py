@@ -14,6 +14,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from importlib import import_module
 from importlib.resources import files
 from typing import Any
 from uuid import uuid4
@@ -25,6 +26,42 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from forest.errors import ForestError
+from forest.storage.migration_v1 import (
+    WRITER_GENERATION,
+    _migration_context,
+    install_writer_gate_in,
+)
+
+MIGRATION_HANDLERS = {
+    "029_input_payloads.sql": "input_payloads_v1",
+    "030_context_payloads.sql": "context_payloads_v1",
+    "031_agent_payloads.sql": "agent_payloads_v1",
+    "032_child_payloads.sql": "child_payloads_v1",
+    "033_delivery_payloads.sql": "delivery_payloads_v1",
+    "034_legacy_suppression.sql": "legacy_suppression_v1",
+    "035_source_links.sql": "source_links_v1",
+}
+
+
+def _migration_checksum(version: str, source: str) -> str:
+    handler = MIGRATION_HANDLERS.get(version)
+    if handler is None:
+        # Released 001--028 retain their original SQL-only checksums.
+        return hashlib.sha256(source.encode()).hexdigest()
+    root = files("forest.storage")
+    try:
+        body = root.joinpath("data_migrations", handler + ".py").read_text(encoding="utf-8")
+        helpers = root.joinpath("migration_v1.py").read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ForestError(
+            "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
+        ) from exc
+    envelope = json.dumps(
+        ["forest.bot.migration.v1", source, body, helpers],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(envelope).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -88,7 +125,11 @@ class BotStore:
             max_size=8,
             open=False,
             timeout=10,
-            kwargs={"autocommit": True, "row_factory": dict_row, "options": "-csearch_path=public"},
+            kwargs={
+                "autocommit": True,
+                "row_factory": dict_row,
+                "options": f"-csearch_path=public -cforest.writer_generation={WRITER_GENERATION}",
+            },
         )
 
     @property
@@ -107,6 +148,9 @@ class BotStore:
             files("forest.storage").joinpath("bot_migrations").iterdir(), key=lambda p: p.name
         )
         async with self.pool.connection() as conn, conn.transaction():
+            # DDL cannot wait indefinitely behind a retiring process that has
+            # touched a legacy table before obtaining its ordinary host lock.
+            await conn.execute("SET LOCAL lock_timeout='3s'")
             # Same database-level lock as deployment migration: identity selection
             # cannot race a different Forest authority's initialization.
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (679330170781,))
@@ -147,19 +191,52 @@ class BotStore:
             known = {path.name for path in migrations if path.name.endswith(".sql")}
             if set(applied) - known:
                 raise ForestError("SCHEMA_TOO_NEW", "Bot database requires a newer Forest version")
+            plan = []
             for path in migrations:
                 if not path.name.endswith(".sql"):
                     continue
                 source = path.read_text(encoding="utf-8")
-                checksum = hashlib.sha256(source.encode()).hexdigest()
+                checksum = _migration_checksum(path.name, source)
                 if path.name in applied:
                     if applied[path.name] != checksum:
                         raise ForestError("MIGRATION_CHANGED", "Bot migration checksum changed")
                     continue
+                plan.append((path.name, source, checksum))
+            # Validate the *entire* ledger before any pending migration, host
+            # invalidation, or data handler. A no-op migrate never retires a host.
+            if plan and identities:
+                await self._runtime(conn)
+                host = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_host_lease WHERE bot_id=%s FOR UPDATE",
+                        (self.bot_id,),
+                    )
+                ).fetchone()
+                if host is not None and host["expires_at"] > await self._now(conn):
+                    raise ForestError(
+                        "MIGRATION_HOST_ACTIVE",
+                        "Stop the Bot host before upgrading its database",
+                        409,
+                    )
+                await conn.execute(
+                    "UPDATE public.bot_host_lease SET owner_epoch=owner_epoch+1,expires_at=clock_timestamp() "
+                    "WHERE bot_id=%s",
+                    (self.bot_id,),
+                )
+            gated = False
+            for version, source, checksum in plan:
+                handler = MIGRATION_HANDLERS.get(version)
+                if handler and not gated:
+                    await install_writer_gate_in(conn)
+                    gated = True
                 await conn.execute(source)
+                if handler:
+                    module = import_module("forest.storage.data_migrations." + handler)
+                    with _migration_context(conn, self, version):
+                        await module.migrate_in(conn, self)
                 await conn.execute(
                     "INSERT INTO public.forest_bot_schema_migrations(version,checksum) VALUES (%s,%s)",
-                    (path.name, checksum),
+                    (version, checksum),
                 )
             if not identities:
                 await conn.execute(

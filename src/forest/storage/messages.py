@@ -19,6 +19,7 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.input_payloads import InputContentStore, identity
 
 
 @dataclass(frozen=True)
@@ -80,12 +81,13 @@ class MessageStore:
 
         return MemorySourceStore(self)
 
-    async def _register_memory_input(self, conn, conversation, event_id, *, reconstructed=False):
+    async def _register_memory_input(self, conn, conversation, event_id, *, reconstructed=False, body=None):
         inbox = await (await conn.execute(
             "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
             (self.store.bot_id, event_id),
         )).fetchone()
-        return await self._memory_sources().register_input_in(conn, conversation, inbox, reconstructed=reconstructed)
+        return await self._memory_sources().register_input_in(conn, conversation, inbox,
+            reconstructed=reconstructed, body=body)
 
     def _normalized(self, raw: dict) -> dict:
         value = _json(raw)
@@ -233,6 +235,8 @@ class MessageStore:
                 if existing["input_digest"] != input_digest:
                     raise ForestError("INGEST_CONFLICT", "Platform message identity was reused", 409)
                 await self._register_memory_input(conn, conversation, event_id, reconstructed=True)
+                if value["author"].get("is_self"):
+                    await self._reconcile_exact_echo_in(conn, lease, binding, conversation, event_id)
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
                 return {"conversation_id": conversation_id, "event_id": event_id,
                         "ingress_seq": existing["ingress_seq"], "duplicate": True,
@@ -258,19 +262,26 @@ class MessageStore:
                 else:
                     segments.append(part)
             seq = conversation["next_ingress_seq"]
+            contents = InputContentStore(self.store)
+            clock = await contents.payloads.lock_in(conn)
+            payload = await contents.put_input_in(conn, event_id=event_id, source_event_id=source_event_id,
+                author=value["author"], segments=segments, expected_deletion_epoch=clock["deletion_epoch"])
             await conn.execute(
                 "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
-                "platform_message_id,source_event_id,input_digest,author,segments,sent_at,estimated_tokens) "
+                "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (self.store.bot_id, conversation_id, event_id, seq, value["platform_message_id"],
-                 source_event_id, input_digest, Jsonb(value["author"]), Jsonb(segments),
+                 source_event_id, input_digest, Jsonb(identity(value["author"])), payload.payload_id,
                  value["sent_at"], _tokens({"author": value["author"], "segments": segments})),
             )
             for media_ref, index, source in media:
+                source_payload = await contents.put_media_source_in(conn, media_ref=media_ref,
+                    source_event_id=source_event_id, part_index=index, source=source,
+                    expected_deletion_epoch=clock["deletion_epoch"])
                 await conn.execute(
-                    "INSERT INTO public.bot_inbound_media_refs(bot_id,media_ref,event_id,part_index,source) "
+                    "INSERT INTO public.bot_inbound_media_refs(bot_id,media_ref,event_id,part_index,source_payload_id) "
                     "VALUES (%s,%s,%s,%s,%s)",
-                    (self.store.bot_id, media_ref, event_id, index, Jsonb(source)),
+                    (self.store.bot_id, media_ref, event_id, index, source_payload.payload_id),
                 )
             if command_id is not None:
                 await conn.execute(
@@ -289,7 +300,10 @@ class MessageStore:
             )
             if decision is not None:
                 await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
-            await self._register_memory_input(conn, conversation, event_id)
+            await self._register_memory_input(conn, conversation, event_id,
+                body={"author": value["author"], "segments": segments})
+            if value["author"].get("is_self"):
+                await self._reconcile_exact_echo_in(conn, lease, binding, conversation, event_id)
             await self.store._event(conn, "conversation.input", event_id,
                                     {"conversation_id": conversation_id, "ingress_seq": seq})
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
@@ -338,13 +352,18 @@ class MessageStore:
         if conversation["next_ingress_seq"] - conversation["context_applied_seq"] > 10000:
             raise ForestError("INBOX_BACKPRESSURE", "Conversation input backlog is full", 429)
         seq = conversation["next_ingress_seq"]
+        contents = InputContentStore(self.store)
+        clock = await contents.payloads.lock_in(conn)
+        payload = await contents.put_input_in(conn, event_id=event_id,
+            source_event_id="source:" + occurrence["occurrence_id"], author=author, segments=segments,
+            expected_deletion_epoch=clock["deletion_epoch"])
         await conn.execute(
             "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
-            "platform_message_id,source_event_id,input_digest,author,segments,sent_at,estimated_tokens,origin) "
+            "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,origin) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'job')",
             (self.store.bot_id, conversation_id, event_id, seq,
              "internal:" + occurrence["occurrence_id"], "source:" + occurrence["occurrence_id"],
-             digest, Jsonb(author), Jsonb(segments), occurrence["scheduled_for"],
+             digest, Jsonb(identity(author)), payload.payload_id, occurrence["scheduled_for"],
              _tokens({"author": author, "segments": segments})),
         )
         await conn.execute(
@@ -354,7 +373,8 @@ class MessageStore:
         )
         await self._classify_in(conn, conversation_id, event_id, "TRIGGER", "job-trigger-v1",
                                 occurrence["occurrence_id"])
-        await self._register_memory_input(conn, conversation, event_id)
+        await self._register_memory_input(conn, conversation, event_id,
+            body={"author": author, "segments": segments})
         await self.store._event(conn, "job.trigger_enqueued", event_id,
                                 {"occurrence_id": occurrence["occurrence_id"],
                                  "conversation_id": conversation_id, "ingress_seq": seq})
@@ -546,58 +566,76 @@ class MessageStore:
                 conn, lease, identity["binding_id"], data=False, require_receive=True,
             )
             conversation = await self._conversation(conn, identity["conversation_id"])
-            inbox = await (await conn.execute(
-                "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s FOR UPDATE",
-                (self.store.bot_id, event_id),
-            )).fetchone()
-            if (not inbox["author"].get("is_self")
-                    or inbox["author"]["external_user_id"] != binding["self_id"]
-                    or inbox["origin"] != "platform_input"):
-                return False
-            matches = await (await conn.execute(
-                "SELECT DISTINCT ON (s.intent_id) s.intent_id,s.send_lane,s.command_id,a.attempt_id,"
-                "r.reply_id,q.command_id AS canonical_command_id "
-                "FROM public.bot_send_intents s JOIN public.bot_send_attempts a "
-                "ON a.bot_id=s.bot_id AND a.intent_id=s.intent_id "
-                "LEFT JOIN public.bot_conversation_replies r ON r.bot_id=s.bot_id AND r.delivery->>'intent_id'=s.intent_id "
-                "LEFT JOIN public.bot_shell_requests q ON q.bot_id=s.bot_id AND q.command_id=s.command_id "
-                "AND q.delivery->>'intent_id'=s.intent_id AND q.status='COMPLETED' "
-                "WHERE s.bot_id=%s AND s.binding_id=%s AND s.conversation_id=%s "
-                "AND s.reply_route->>'channel_kind'=%s AND s.reply_route->>'channel_id'=%s "
-                "AND COALESCE(s.reply_route->>'thread_id','')=%s "
-                "AND a.state='SENT' AND a.receipt->>'message_id'=%s ORDER BY s.intent_id,a.attempt_id LIMIT 2",
-                (self.store.bot_id, binding["binding_id"], conversation["conversation_id"],
-                 conversation["channel_kind"], conversation["channel_id"], conversation["thread_id"],
-                 inbox["platform_message_id"]),
-            )).fetchall()
-            if len(matches) > 1:
-                raise ForestError("ECHO_IDENTITY_CONFLICT", "Platform output identity maps to multiple intents", 409)
-            if not matches:
-                return False
-            match = matches[0]
-            origin = "chat_output" if match["send_lane"] == "CHAT" else "control_output"
-            if (origin == "chat_output" and not match["reply_id"]) or (
-                origin == "control_output" and not match["canonical_command_id"]
-            ):
-                return False
-            await conn.execute(
-                "INSERT INTO public.bot_message_echo_aliases(bot_id,event_id,intent_id,attempt_id,platform_message_id,"
-                "origin,reply_id,command_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                (self.store.bot_id, event_id, match["intent_id"], match["attempt_id"],
-                 inbox["platform_message_id"], origin, match["reply_id"], match["canonical_command_id"]),
-            )
-            await conn.execute(
-                "UPDATE public.bot_message_inbox SET origin=%s WHERE bot_id=%s AND event_id=%s",
-                (origin, self.store.bot_id, event_id),
-            )
-            await conn.execute(
-                "UPDATE public.bot_conversations SET mailbox_revision=mailbox_revision+1 "
-                "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, conversation["conversation_id"]),
-            )
-            await self.store._event(conn, "conversation.echo_resolved", event_id,
-                                    {"event_id": event_id, "intent_id": match["intent_id"], "origin": origin})
+            result = await self._reconcile_exact_echo_in(conn, lease, binding, conversation, event_id)
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
-            return True
+            return result
+
+    async def _reconcile_exact_echo_in(self, conn, lease, binding, conversation, event_id):
+        """Caller owns Binding/Host/Conversation; exact proof and source link commit together."""
+        inbox = await (await conn.execute(
+            "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s FOR UPDATE",
+            (self.store.bot_id, event_id),
+        )).fetchone()
+        if inbox["origin"] in {"chat_output", "control_output"}:
+            from forest.storage.source_links import SourceLinkStore
+
+            links = SourceLinkStore(self.store)
+            clock = await links.payloads.lock_in(conn)
+            await links.link_exact_echo_in(conn, event_id, expected_deletion_epoch=clock["deletion_epoch"])
+            return False
+        if (not inbox["author"].get("is_self")
+                or inbox["author"]["external_user_id"] != binding["self_id"]
+                or inbox["origin"] != "platform_input"):
+            return False
+        matches = await (await conn.execute(
+            "SELECT DISTINCT ON (s.intent_id) s.intent_id,s.send_lane,s.command_id,a.attempt_id,"
+            "r.reply_id,q.command_id AS canonical_command_id "
+            "FROM public.bot_send_intents s JOIN public.bot_send_attempts a "
+            "ON a.bot_id=s.bot_id AND a.intent_id=s.intent_id "
+            "LEFT JOIN public.bot_conversation_replies r ON r.bot_id=s.bot_id AND r.delivery->>'intent_id'=s.intent_id "
+            "LEFT JOIN public.bot_shell_requests q ON q.bot_id=s.bot_id AND q.command_id=s.command_id "
+            "AND q.delivery->>'intent_id'=s.intent_id AND q.status='COMPLETED' "
+            "WHERE s.bot_id=%s AND s.binding_id=%s AND s.conversation_id=%s "
+            "AND s.reply_route->>'channel_kind'=%s AND s.reply_route->>'channel_id'=%s "
+            "AND COALESCE(s.reply_route->>'thread_id','')=%s "
+            "AND a.state='SENT' AND a.receipt->>'message_id'=%s ORDER BY s.intent_id,a.attempt_id LIMIT 2",
+            (self.store.bot_id, binding["binding_id"], conversation["conversation_id"],
+             conversation["channel_kind"], conversation["channel_id"], conversation["thread_id"],
+             inbox["platform_message_id"]),
+        )).fetchall()
+        if len(matches) > 1:
+            raise ForestError("ECHO_IDENTITY_CONFLICT", "Platform output identity maps to multiple intents", 409)
+        if not matches:
+            return False
+        match = matches[0]
+        origin = "chat_output" if match["send_lane"] == "CHAT" else "control_output"
+        if (origin == "chat_output" and not match["reply_id"]) or (
+            origin == "control_output" and not match["canonical_command_id"]
+        ):
+            return False
+        await conn.execute(
+            "INSERT INTO public.bot_message_echo_aliases(bot_id,event_id,intent_id,attempt_id,platform_message_id,"
+            "origin,reply_id,command_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (self.store.bot_id, event_id, match["intent_id"], match["attempt_id"],
+             inbox["platform_message_id"], origin, match["reply_id"], match["canonical_command_id"]),
+        )
+        from forest.storage.source_links import SourceLinkStore
+
+        links = SourceLinkStore(self.store)
+        clock = await links.payloads.lock_in(conn)
+        await links.link_exact_echo_in(conn, event_id, expected_deletion_epoch=clock["deletion_epoch"])
+        await conn.execute(
+            "UPDATE public.bot_message_inbox SET origin=%s WHERE bot_id=%s AND event_id=%s",
+            (origin, self.store.bot_id, event_id),
+        )
+        await conn.execute(
+            "UPDATE public.bot_conversations SET mailbox_revision=mailbox_revision+1 "
+            "WHERE bot_id=%s AND conversation_id=%s", (self.store.bot_id, conversation["conversation_id"]),
+        )
+        await self.store._event(conn, "conversation.echo_resolved", event_id,
+                                {"event_id": event_id, "intent_id": match["intent_id"], "origin": origin})
+        await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+        return True
 
     async def claim_control(self, lease: HostLease, command_id: str, owner_id: str,
                             *, ttl_seconds: float = 30) -> dict:
@@ -691,11 +729,18 @@ class MessageStore:
                      "channel_kind": source["channel_kind"], "channel_id": source["channel_id"],
                      "thread_id": source["thread_id"], "binding_epoch": binding["binding_epoch"],
                      "visibility": source["channel_kind"]}
+            command_input = await (await conn.execute(
+                "SELECT payload_id FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+                (self.store.bot_id, current["event_id"]),
+            )).fetchone()
+            if not command_input or not command_input["payload_id"]:
+                raise ForestError("INPUT_PAYLOAD_MIGRATION_REQUIRED", "Control origin has no payload", 409)
             receipt = await delivery.enqueue_in(
                 conn, lease, operation_id="control:" + current["command_id"], route=route, parts=parts,
                 conversation_id=current["conversation_id"], lane="CONTROL", command_id=current["command_id"],
                 control_seq=1, root_operation_id=current["command_id"],
                 expected_policy_revision=current["policy_revision"],
+                parents=(command_input["payload_id"],),
             )
             if current["expires_at"] <= await self.store._now(conn):
                 raise ForestError("STALE_COMMAND", "Control claim expired before commit", 409)
@@ -1044,6 +1089,11 @@ class MessageStore:
         conversation = await self._conversation(conn, conversation_id)
         revision = conversation["context_revision"]
         index = 0
+        from forest.storage.context_payloads import UNAVAILABLE_CODES, ContextPayloadStore
+        from forest.storage.delivery_payloads import DeliveryContentStore
+
+        content = ContextPayloadStore(self.store)
+        clock = await content.payloads.lock_in(conn)
         # CONTROL outputs have no chat ModelTurn. Publish one safe audit/output
         # unit at this Actor boundary instead of retaining a duplicate self INPUT.
         for alias in aliases:
@@ -1055,19 +1105,53 @@ class MessageStore:
             )).fetchone()
             if present:
                 continue
+            origins = await (await conn.execute(
+                "SELECT i.payload_id FROM public.bot_message_inbox i WHERE i.bot_id=%s AND "
+                "(i.event_id=%s OR i.event_id=(SELECT event_id FROM public.bot_shell_requests "
+                "WHERE bot_id=%s AND command_id=%s)) ORDER BY i.event_id",
+                (self.store.bot_id, alias["event_id"], self.store.bot_id, alias["command_id"]),
+            )).fetchall()
+            parents = [row["payload_id"] for row in origins]
             parts = await (await conn.execute(
-                "SELECT payload FROM public.bot_send_parts WHERE bot_id=%s AND intent_id=%s ORDER BY part_index",
+                "SELECT * FROM public.bot_send_parts WHERE bot_id=%s AND intent_id=%s ORDER BY part_index",
                 (self.store.bot_id, alias["intent_id"]),
             )).fetchall()
-            payload = [part["payload"] for part in parts]
+            parents.extend(part["payload_id"] for part in parts)
+            if not parents or any(parent is None for parent in parents):
+                raise ForestError("CONTEXT_PAYLOAD_MIGRATION_REQUIRED", "Control origin has no payload", 409)
+            unavailable = None
+            for parent in parents:
+                try:
+                    await content.payloads.require_available_in(
+                        conn, (parent,), expected_deletion_epoch=clock["deletion_epoch"],
+                    )
+                except ForestError as exc:
+                    if exc.code not in UNAVAILABLE_CODES:
+                        raise
+                    unavailable = parent
+                    break
+            if unavailable:
+                # Preserve the control position using an already revoked head.
+                # A late echo cannot copy the old delivery body into new context.
+                payload_id, tokens = unavailable, 32
+            else:
+                delivery_content = DeliveryContentStore(self.store)
+                payload = [await delivery_content.read_part_in(
+                    conn, part, expected_deletion_epoch=clock["deletion_epoch"],
+                ) for part in parts]
+                body = await content.put_control_in(
+                    conn, "control-output:" + alias["command_id"], payload, parents=parents,
+                    expected_deletion_epoch=clock["deletion_epoch"],
+                )
+                payload_id, tokens = body.payload_id, _tokens(payload)
             if index == 0:
                 revision += 1
             index += 1
             await conn.execute(
                 "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,context_revision,unit_index,"
-                "kind,control_command_id,control_parts,estimated_tokens) VALUES (%s,%s,%s,%s,%s,'CONTROL',%s,%s,%s)",
+                "kind,control_command_id,payload_id,estimated_tokens) VALUES (%s,%s,%s,%s,%s,'CONTROL',%s,%s,%s)",
                 (self.store.bot_id, conversation_id, "control-output:" + alias["command_id"], revision,
-                 index, alias["command_id"], Jsonb(payload), _tokens(payload)),
+                 index, alias["command_id"], payload_id, tokens),
             )
         if index:
             await conn.execute(
@@ -1140,11 +1224,10 @@ class MessageStore:
                 raise ForestError("RUN_NOT_ACTIVE", "Run is not active", 409)
         units = await (await conn.execute(
             "SELECT u.unit_id,u.kind,u.context_revision,u.unit_index,u.estimated_tokens,"
-            "u.control_command_id,u.logical_step_id,u.step_parts,s.run_id AS step_run_id,"
+            "u.control_command_id,u.logical_step_id,u.payload_id,s.run_id AS step_run_id,"
             "i.event_id,i.ingress_seq,i.platform_message_id,i.source_event_id,i.author,i.segments,"
             "i.sent_at,i.received_at,i.trigger_decision,i.context_disposition,i.origin,r.reply_id,"
-            "t.status AS source_trigger_status,"
-            "COALESCE(r.parts,u.control_parts) AS reply_parts "
+            "t.status AS source_trigger_status "
             "FROM public.bot_context_units u LEFT JOIN public.bot_message_inbox i "
             "ON i.bot_id=u.bot_id AND i.event_id=u.event_id LEFT JOIN public.bot_conversation_replies r "
             "ON r.bot_id=u.bot_id AND r.reply_id=u.reply_id LEFT JOIN public.bot_conversation_triggers t "
@@ -1154,7 +1237,36 @@ class MessageStore:
         )).fetchall()
         source = {key: conversation[key] for key in
                   ("conversation_id", "group_source_id", "platform", "channel_kind", "channel_id", "thread_id")}
+        from forest.storage.context_payloads import ContextPayloadStore
+        from forest.storage.input_payloads import InputContentStore
+
+        content = ContextPayloadStore(self.store)
+        inputs = InputContentStore(self.store)
+        clock = await content.payloads.lock_in(conn)
+        payload_ids = set()
         for unit in units:
+            unit["step_parts"] = unit["reply_parts"] = None
+            if unit["kind"] == "INPUT":
+                hydrated = await inputs.read_input_in(
+                    conn, unit["event_id"], expected_deletion_epoch=clock["deletion_epoch"],
+                )
+                unit.update({key: hydrated[key] for key in ("author", "segments", "payload_id", "payload_state")})
+            else:
+                hydrated = await content.read_parts_in(
+                    conn, unit["payload_id"], expected_deletion_epoch=clock["deletion_epoch"],
+                )
+                unit["payload_state"] = hydrated["payload_state"]
+                parts = hydrated["value"]
+                if parts is None:
+                    unavailable = {"type": "unavailable", "reason": unit["payload_state"]}
+                    parts = ([{"unit_id": unit["unit_id"] + ":unavailable", "role": "assistant",
+                               "parts": [unavailable]}] if unit["kind"] == "RUN_STEP" else [[unavailable]])
+                    unit["estimated_tokens"] = _tokens(parts)
+                unit["step_parts" if unit["kind"] == "RUN_STEP" else "reply_parts"] = parts
+            if unit["payload_state"] == "ACTIVE":
+                payload_ids.add(unit["payload_id"])
+            elif unit["kind"] == "INPUT":
+                unit["estimated_tokens"] = _tokens(unit["segments"])
             unit["source"] = source.copy()
             unit["context_role"] = (
                 "assistant" if unit["kind"] in {"REPLY", "RUN_STEP"} else
@@ -1203,6 +1315,7 @@ class MessageStore:
                 "context_view_revision": conversation["context_view_revision"],
                 "context_applied_seq": conversation["context_applied_seq"], "units": units,
                 "archive": archive, "run": run, "triggers": triggers,
+                "payload_ids": sorted(payload_ids), "deletion_epoch": clock["deletion_epoch"],
                 "budget_exceeded": sum(u["estimated_tokens"] for u in units) > self.context_token_budget}
 
     async def finalize_reply(
@@ -1232,7 +1345,15 @@ class MessageStore:
         if existing:
             if existing["input_digest"] != value_digest:
                 raise ForestError("REPLY_CONFLICT", "Reply operation was already used", 409)
-            await self._memory_sources().register_reply_in(conn, conversation, existing, reconstructed=True)
+            from forest.storage.context_payloads import ContextPayloadStore
+
+            content = ContextPayloadStore(self.store)
+            clock = await content.payloads.lock_in(conn)
+            existing = await content.read_reply_in(
+                conn, existing, expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            if existing["payload_state"] == "ACTIVE":
+                await self._memory_sources().register_reply_in(conn, conversation, existing, reconstructed=True)
             await self._actor_final(conn, actor, binding)
             return existing
         session = await self._session(conn, conversation)
@@ -1242,10 +1363,18 @@ class MessageStore:
         if run["input_revision"] != expected_input_revision:
             raise ForestError("INPUT_REVISION_CONFLICT", "Reply was generated from another input revision", 409)
         agent = await (await conn.execute(
-            "SELECT a.*,s.status AS final_status,s.output AS final_output FROM public.bot_agent_runs a "
+            "SELECT a.*,s.status AS final_status,s.output_payload_id AS final_output_payload_id FROM public.bot_agent_runs a "
             "LEFT JOIN public.bot_agent_steps s ON s.bot_id=a.bot_id AND s.logical_step_id=a.final_step_id "
             "WHERE a.bot_id=%s AND a.run_id=%s", (self.store.bot_id, run_id),
         )).fetchone()
+        from forest.storage.context_payloads import ContextPayloadStore
+
+        content = ContextPayloadStore(self.store)
+        clock = await content.payloads.lock_in(conn)
+        if agent and agent["phase"] == "FINAL_READY" and agent["final_status"] == "FINAL_READY":
+            from forest.storage.agent_payloads import AgentPayloadStore
+
+            agent["final_output"] = await AgentPayloadStore(self.store).read_output_in(conn, agent["final_step_id"])
         if agent and (agent["phase"] != "FINAL_READY" or agent["final_status"] != "FINAL_READY"
                       or agent["final_input_revision"] != expected_input_revision
                       or agent["actor_epoch"] != actor.actor_epoch
@@ -1254,6 +1383,11 @@ class MessageStore:
             raise ForestError("AGENT_FINAL_NOT_READY", "Only the persisted Agent final candidate can publish", 409)
         logical_step_id = agent["final_step_id"] if agent else None
         reply_id = str(uuid4())
+        parents = ([agent["final_output_payload_id"]] if agent else
+                   (await self._context_in(conn, actor, run_id=run_id))["payload_ids"])
+        body = await content.put_reply_in(
+            conn, reply_id, parts, parents=parents, expected_deletion_epoch=clock["deletion_epoch"],
+        )
         response_seq = conversation["next_response_seq"]
         route = {"bot_id": self.store.bot_id, "binding_id": conversation["binding_id"],
                  "platform": conversation["platform"], "self_id": binding["self_id"],
@@ -1264,20 +1398,24 @@ class MessageStore:
             conn, actor.host, operation_id="reply:" + reply_id, route=route, parts=parts,
             conversation_id=actor.conversation_id, lane="CHAT", response_seq=response_seq,
             root_operation_id=run_id, expected_policy_revision=actor.policy_revision,
+            parents=(body.payload_id,),
         )
         reply = await (await conn.execute(
             "INSERT INTO public.bot_conversation_replies(bot_id,reply_id,operation_id,conversation_id,run_id,"
-            "input_revision,response_seq,parts,input_digest,delivery,logical_step_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+            "input_revision,response_seq,payload_id,input_digest,delivery,logical_step_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
             (self.store.bot_id, reply_id, operation_id, actor.conversation_id, run_id,
-             expected_input_revision, response_seq, Jsonb(parts), value_digest, Jsonb(delivery_receipt), logical_step_id),
+             expected_input_revision, response_seq, body.payload_id, value_digest, Jsonb(delivery_receipt), logical_step_id),
         )).fetchone()
         revision = conversation["context_revision"] + 1
         await conn.execute(
             "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,context_revision,unit_index,"
-            "kind,reply_id,estimated_tokens) VALUES (%s,%s,%s,%s,0,'REPLY',%s,%s)",
-            (self.store.bot_id, actor.conversation_id, reply_id, revision, reply_id, _tokens(parts)),
+            "kind,reply_id,payload_id,estimated_tokens) VALUES (%s,%s,%s,%s,0,'REPLY',%s,%s,%s)",
+            (self.store.bot_id, actor.conversation_id, reply_id, revision, reply_id, body.payload_id, _tokens(parts)),
         )
-        await self._memory_sources().register_reply_in(conn, conversation, reply)
+        reply = {**reply, "parts": parts, "payload_state": "ACTIVE"}
+        await self._memory_sources().register_reply_in(
+            conn, conversation, reply, dependency_payload_ids=parents if agent else None,
+        )
         await conn.execute(
             "UPDATE public.bot_conversation_triggers SET status='ANSWERED',answered_reply_id=%s "
             "WHERE bot_id=%s AND claimed_run_id=%s AND status='CLAIMED'",

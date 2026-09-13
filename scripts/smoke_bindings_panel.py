@@ -127,6 +127,21 @@ def main():
             expect(page.locator("#delivery-list")).to_contain_text("SENT")
             assert page.locator("#delivery-list form").count() == 0
 
+            # A response captured before removal cannot restore the old body.
+            page.evaluate(
+                "() => {fixture.hold.push('/bots/bot-a/delivery'); window.oldContent=panel.refresh();}"
+            )
+            page.wait_for_function("fixture.pending.length===1")
+            page.evaluate(
+                "async () => {fixture.parts[0].payload=null; fixture.parts[0].payload_state='UNAVAILABLE'; await panel.refresh();}"
+            )
+            page.evaluate(
+                "async () => {const old=fixture.pending.shift(); old.resolve(old.result); await window.oldContent;}"
+            )
+            expect(page.locator("#delivery-list pre")).to_contain_text("发送内容已不可用")
+            expect(page.locator("#delivery-list pre")).not_to_contain_text("Precise original")
+            expect(page.locator("#delivery-list")).to_contain_text("SENT")
+
             page.locator('[data-binding-id="binding-a"]').click()
             template = page.locator('#binding-config [name="response_template"]')
             expect(template).to_have_value("original")

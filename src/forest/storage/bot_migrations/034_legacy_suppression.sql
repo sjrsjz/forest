@@ -1,0 +1,2 @@
+-- The transactional data handler records explicit, auditable legacy deletion
+-- decisions. Existing source manifests and deletion targets remain immutable.

@@ -1,8 +1,8 @@
 # P4 准备：正文分离、物理清理与不可复活的删除闭包
 
-状态：**旧正文副本的迁移提案，全链路遗忘尚未完成。** 初始调查覆盖 Bot migrations `001_kernel.sql` 至 `020_shell_commands.sql`，以及 MessageStore、MediaStore、AgentStore、ChildStore、DeliveryStore、BotStore 和模型序列化器。当前 021–028 已实现新 PayloadStore、来源资格、原图捕获、图/向量、EvidenceBundle 及当前 Run 的召回撤权检查；下表所列旧副本仍需迁移。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
+状态：**迁移依据与剩余族设计，全链路遗忘尚未完成。** 第 1–9 节保留最初针对 `001_kernel.sql` 至 `020_shell_commands.sql` 的副本调查、约束和验收要求；其中的旧字段用于说明迁移来源，不表示它们现在仍全部保存明文。021–028 接通载荷存储和图文召回，029–034 已迁移输入、上下文、Agent、子 Agent 和发送正文，并协调旧来源撤销，实际行为见[迁移协议](p4-content-migration.md)。第 10 节记录仍待实施的 Kernel、状态、配置和控制面范围。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
 
-“永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆数据。下一切片应把原生输入和上下文读取切换到受抑制规则约束的载荷读取器，同时给模型步骤固定完整来源清单。已有模型请求、工具观察、Kernel 回执等独立明文副本必须继续逐族迁移。当前 Reply 仍保持 `lineage_complete=false`，不能直接改为 true；新完整 Reply 必须从最终步骤的显式依赖登记，覆盖跨群证据、工具与子 Agent。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
+“永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆和上述正文族。新 Agent Reply 从最终步骤的显式父载荷登记；旧回复和不能证明来源闭包的内容继续保持 `lineage_complete=false`。Kernel 状态读取和 Worker 跨调用缓存仍需要补齐真实依赖，不能把局部来源传递称为全链路保证。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
 
 ## 1. 已确认的载荷清单
 
@@ -197,4 +197,63 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 6. 老 Inbox、Kernel result、状态迁移候选、Job prompt 和旧备份带“新 epoch”重放，仍被稳定 suppressed source 拦截。
 7. 有明确证据的在线载荷删除与备份未到期状态分别显示；从旧备份恢复的 Bot 在 suppression 重放前拒绝所有读/写/外发。
 
-上述是可实现迁移与测试边界，当前 `001–020` 尚未提供这些表、scrub 权限、载荷分离或删除屏障。
+上述是完整迁移的验收边界；最初 `001–020` 版本未提供这些表、scrub 权限、载荷分离或删除屏障，当前完成范围以正文迁移协议和第 10 节为准。
+
+## 10. 029–035 之后的剩余族与下一实现切片
+
+本节根据 029–035 已接入的正文路径与回声依赖补充后续设计，不分配或实现新迁移编号。以下字段仍需迁移，不能因 Agent 请求已经可清理，就宣称这些副本也已清理。
+
+### 10.1 Kernel 返回值、状态及迁移副本应一起处理
+
+| 仍含正文的位置 | 实际写入/读取路径 | 最小迁移契约 |
+| --- | --- | --- |
+| `bot_calls.result` | `Kernel._invoke` 读取 `authorized_call/authorized_child_call` 的旧回执；Worker 返回后 `BotStore.finish_call` 缓存结果。`AgentStore.recover_tool` 也直接读该表 | 增加并冻结独立 `result_digest`、`result_payload_id`；原列严格 NULL。COMPLETED 回执不会因 body 消失变成 NOT_FOUND，不再调用 Worker |
+| `bot_component_state.value`、`bot_state_revisions.value` | `Kernel._state_rpc` → `BotStore.read_state/commit_state`；`snapshot_state/_state_source` 又读全量状态 | 值按固定 `(component,key,revision)` 引用载荷；当前头保留 revision/deleted，历史行保留原值摘要。删除正文不能回退 revision，也不能用业务值 `None` 冒充已擦除值 |
+| `bot_state_steps.receipt` | `commit_state` 的回执实际含完整 `value`，相同步骤重放直接返回旧 receipt | 回执 metadata 保留 operation/revision/原 input 和 payload digest；值只通过同一状态载荷 hydrate。结果内容不可用仍证明该写入已经执行 |
+| `bot_state_migration_sources.source_rows`、`bot_state_migration_results.result_values` | `capture_state_migration` → 两次 Worker `migrate` → `stage_state_migration` → `_publish_state` | 源和候选分离载荷，候选继承全部实际迁移源；最终发布同时复验 route、state revision、runtime fence 与载荷依赖，禁止旧候选恢复被删状态 |
+
+代码入口以当前函数为准：`kernel.py` 的 `_state_rpc/_service_rpc/_invoke/_install_one`；`storage/bot.py` 的 `admit/admit_child/_guard_time/read_state/commit_state/finish_call/authorized_call/authorized_child_call/capture_state_migration/stage_state_migration/_publish_state`。状态、Kernel 回执和 Agent 工具结果之间必须传递宿主掌握的载荷引用；仅迁列、不连接读取依赖，仍会把旧值重新写进新回复。
+
+建议新增内部 `CallDependencyStore`，固定 Call 的输入依赖 manifest 和摘要，并持久记录返回给 Worker 的状态/子调用结果载荷。`read_state` 必须在同一事务内完成授权、hydrate、登记实际 `(key,revision,payload_id)`，然后才能把值返回 Worker；不能等 Worker 自报“使用了哪些 source”。子服务返回、包括命中已有 COMPLETED 回执的路径，也要在返回父 Worker 前登记其结果依赖。`commit_state`、`finish_call` 以这些真实依赖创建结果载荷，重放只比较原摘要与固定依赖身份。
+
+非 Agent 的入口也必须由 Host 绑定来源。OneBot normalize 的返回值含消息原文，prepare 的返回值含 `wire_body_b64`；前者需要在调用 codec 前建立稳定入口来源，后者应继承已经存在的 Delivery 请求载荷。不能从 operation ID 的字符串格式猜来源，也不能接纳 Worker 或模型提供的任意父载荷 ID。Agent 接收 Kernel 结果时，由 Host 将实际 Kernel `result_payload_id` 传入 `AgentPayloadStore.tool_result_in(..., parents=...)`。
+
+### 10.2 单次 Call 的读取集合不足以覆盖长期 Worker
+
+当前 Python Worker 长期复用 Plugin 对象。`Kernel._install_one` 把配置和恢复状态交给 Worker，后续 Call 还可将读取值缓存到对象属性。即使某次 `state.read` 已正确登记在 Call A，Call B 仍可能从缓存返回同一内容。因此不能把单次 Call 读取闭包称为完整跨调用防复活。
+
+下一切片采用保守的 **generation exposure 依赖头**：
+
+1. 初始配置、restore 状态及随后交付给该 Worker 的每次输入、状态读取和子服务返回，都先在数据库中登记对应载荷与 exposure revision，再交付正文。
+2. 后续结果和状态写入继承该 generation 当前已暴露的依赖集合；并发 Call 共享该头，按数据库顺序合并集合，不按模型完成时刻覆盖。实现可采用不可变分块 manifest 加 CAS head；超过容量明确拒绝并轮换 Worker，不能丢弃历史暴露记录后继续使用同一进程。
+3. 遗忘后该 generation 的新业务 admission、结果/状态提交均因来源屏障被拒绝；监督器回收实际 Worker，再从仍可读的配置和状态重建。已经在途的外部效果只允许原 metadata 对账，不能假称撤回。
+
+这是对框架控制的 Worker 输入、状态和回执的保守追踪。可信 Python 插件仍不是 OS 沙箱：其自行访问的文件、网络或外部持久副本必须另列边界，不能承诺宿主能够擦除任意第三方程序保存的内容。
+
+锁序保持组件资源/路由 → Bot runtime/Host → Call 树和状态头 → exposure head → memory clock → payload；跨 Call 的共享 exposure 更新在返回数据前完成。遗忘后的监督回收不在数据库事务中等待进程退出。提交与关闭仍需当前 generation/Host/maintenance/storage fence，来源摘要相同不替代执行授权。
+
+### 10.3 配置与控制面回执不能遗漏
+
+| 待迁移正文 | 来源与行为要求 |
+| --- | --- |
+| `bot_agent_runs.spec` | `AgentRuntime.resolve_spec` 同时把 values 展开在顶层并保留 values 子对象，`AgentStore.ensure_run` 冻结整个 spec；system_prompt 实际存在重复。整体迁为 spec 载荷，另保留白名单的配置/权限/预算 metadata，使正文失效后仍能终止和结算 |
+| `bot_config_plans/revisions.values`、`bot_agent_config_plans/revisions.values`、Binding plans/revisions/current config、`bot_generations.config`、`bot_dev_watch_heads.config` | 配置预览、发布、热重载与重启都应 hydrate 同一配置载荷链。schema/template/自由 JSON 也可能含正文，不能只处理名为 system_prompt 的键。凭据 ciphertext 保持独立生命周期 |
+| `bot_web_operations.result`、`bot_audit_records.details`、`bot_outbox_events.payload` | `BotControl._record` 将预览 result 写 Web 回执，又经 `BotStore._event` 复制到 audit/outbox；result 含 values/before_values 时形成至少三份正文。改为白名单 metadata 与同一结果载荷引用；`_replay`、history、inspect 均经授权 hydrate |
+| `bot_job_plans/revisions.values`、`bot_shell_requests.arguments/outcome` | Job prompt 会生成新 Inbox 输入；Shell 参数/诊断结果进入控制回复和回执。定义/请求载荷必须传到生成内容，删除后旧计划/命令不能凭新 operation 或当前 epoch 重建正文 |
+
+配置是独立的管理员输入，不应凭文本相似就擅自推断其来自某条聊天。新的自动复制路径必须显式继承来源；手工输入以配置/命令自身的可管理删除域登记。旧无法证明上游的派生体继续使用明确的 legacy conservative 策略；管理计划应展示影响范围，不能悄悄把保守清理包装成精确单条遗忘。
+
+### 10.4 031/032 的当前闭包与局部守卫要求
+
+031 的 snapshot 继承实际 Context 和私有 closed_parts；manifest 继承 snapshot 与 BOUND evidence；request → model result → tool arguments/results → closed_parts → Reply 继续传递父载荷。032 的 child snapshot 还继承父工具参数和父模型输出，child candidate → 父工具结果也传递实际结果载荷；因此 child task 中转述的跨群证据不会只因未列入显式选中 unit IDs 而丢失删除依赖。
+
+**可读载荷与当前执行授权必须同时复验。** Child 的发送许可、结果发布和父采纳需要使用完整 `AgentMemoryStore.guard_run_in`，不能只调用检查 payload 的内部 guard，否则父 BOUND evidence 的当前 MemoryConfig/来源资格撤销可能被漏过。结算入口保留 metadata 分支，不能把来源 guard 放在费用结算前的无条件身份入口。
+
+另外，旧快照在 Actor 接管时可能已被擦除：`AgentStore.load` 的 hydrate 会在 `AgentRunner.advance` 获得 head 之前抛错。恢复必须先凭当前 Actor、准确 Conversation/active Session 和 Run metadata，在同一事务重新核实真实撤销，再终止该已存在 Agent；不能误走“没有 Agent checkpoint”的 legacy 分支，也不能为了取得新 owner 而恢复旧正文。来源未撤销、其他群、旧 Actor 和无 Agent 的 legacy Run 均不得被这一分支结束。
+
+### 10.5 下一族必须具备的真实验收
+
+1. **跨调用缓存与重启**：真实 Worker 的 Call A 读取带 canary 的状态并缓存，Call B 不再调用 state.read；遗忘 A 后，B 不得写状态/返回可发布结果。已暴露 generation 被回收；新 Worker 只能读取合法剩余状态，旧状态迁移候选也不能恢复该 canary。
+2. **回执与物理副本**：同一状态操作生成 current/history/receipt、Kernel result、Agent tool result，控制预览另生成 Web/audit/outbox 副本。删除后核查原列 NULL 和实际 body 删除；同 operation 保留原完成状态及摘要，不重复执行；旧 UNKNOWN 保持明确不确定。
+3. **权限与接管**：在最终 Kernel Gateway 写入前、Child 已获 permit 后以及重新 claim 一个已擦除快照前交错撤销。完整权限复验阻止新发送/发布；已知费用仍结算，结束后按既有 silent drain 完成 Session，其他群及无 Agent 的 legacy Run 不受影响。
+4. **非空旧库升级**：真实旧状态、迁移候选、长 operation ID、已完成 Call、配置预览/历史与 Job/Shell 数据，从发布过的 SQL 起步迁移；中断/重启后固定摘要、状态和删除 marker 不变，执行期没有旧正文列 fallback。

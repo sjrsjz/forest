@@ -18,6 +18,7 @@ from forest.errors import ForestError
 from forest.memory_types import SourceRef
 from forest.models import MediaSnapshot
 from forest.packages import digest_json
+from forest.storage.input_payloads import InputContentStore
 from forest.storage.media import _url, _validate_owned
 from forest.storage.memory_config import MemoryConfig
 from forest.storage.payloads import PayloadStore
@@ -42,6 +43,7 @@ class MemoryMediaStore:
         self.messages, self.store = messages, messages.store
         self.config = config or MemoryConfig(self.store)
         self.payloads = PayloadStore(self.store)
+        self.contents = InputContentStore(self.store)
 
     @staticmethod
     def capture_id(bot_id, source_unit_id, part_id):
@@ -254,7 +256,7 @@ class MemoryMediaStore:
             raise ForestError("MEDIA_SOURCE_REVOKED", "Source is no longer admissible", 403)
         observations = await (
             await conn.execute(
-                "SELECT m.media_ref,m.source,m.part_index,o.occurrence_id,o.event_id,o.conversation_id,i.segments "
+                "SELECT m.media_ref,m.part_index,o.occurrence_id,o.event_id,o.conversation_id "
                 "FROM public.bot_memory_source_media sm JOIN public.bot_memory_source_occurrences o USING(bot_id,occurrence_id) "
                 "JOIN public.bot_inbound_media_refs m ON m.bot_id=sm.bot_id AND m.media_ref=sm.media_ref AND m.event_id=o.event_id "
                 "JOIN public.bot_message_inbox i ON i.bot_id=o.bot_id AND i.event_id=o.event_id "
@@ -269,13 +271,16 @@ class MemoryMediaStore:
                 ),
             )
         ).fetchall()
-        valid = [
-            row
-            for row in observations
-            if str(row["part_index"]) == head["part_id"]
-            and row["part_index"] < len(row["segments"])
-            and row["segments"][row["part_index"]].get("media_ref") == row["media_ref"]
-        ]
+        valid = []
+        for row in observations:
+            inbox = await self.contents.read_input_in(conn, row["event_id"],
+                expected_deletion_epoch=epoch, required=True)
+            if (str(row["part_index"]) == head["part_id"]
+                    and row["part_index"] < len(inbox["segments"])
+                    and inbox["segments"][row["part_index"]].get("media_ref") == row["media_ref"]):
+                media = await self.contents.read_media_source_in(conn, row["media_ref"],
+                    expected_deletion_epoch=epoch)
+                valid.append({**row, "source": media["source"]})
         if not valid:
             raise ForestError("MEDIA_SOURCE_MISMATCH", "Image has no matching observation", 409)
         return valid
@@ -342,7 +347,10 @@ class MemoryMediaStore:
                     conn,
                     head,
                     status="REVOKED"
-                    if exc.code in {"PAYLOAD_ERASED", "SOURCE_SUPPRESSED", "MEDIA_SOURCE_REVOKED"}
+                    if exc.code in {
+                        "PAYLOAD_ERASED", "SOURCE_SUPPRESSED", "MEDIA_SOURCE_REVOKED",
+                        "SOURCE_LINK_SCOPE_LIMIT",
+                    }
                     else "REJECTED",
                     code=exc.code,
                     revision=saved["revision"],
@@ -657,6 +665,7 @@ class MemoryMediaStore:
             elif error in {
                 "DELETION_CONFLICT",
                 "SOURCE_SUPPRESSED",
+                "SOURCE_LINK_SCOPE_LIMIT",
                 "PAYLOAD_ERASED",
                 "MEDIA_SOURCE_REVOKED",
                 "MEDIA_STORAGE_REVOKED",

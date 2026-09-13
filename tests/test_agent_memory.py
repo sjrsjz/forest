@@ -180,9 +180,14 @@ async def test_forget_after_http_settles_known_cost_without_storing_returned_con
     )
     ended = await state.complete_model(actor, grant, result)
     assert ended["phase"] == "FAILED" and ended["error_code"] == "AGENT_MEMORY_REVOKED"
-    saved = (await rows(media, "SELECT result FROM public.bot_model_transport_attempts"))[0][
-        "result"
-    ]
+    attempt = (
+        await rows(
+            media,
+            "SELECT result,result_payload_id,result_metadata FROM public.bot_model_transport_attempts",
+        )
+    )[0]
+    assert attempt["result"] is None and attempt["result_payload_id"] is None
+    saved = attempt["result_metadata"]
     assert "text" not in saved and "tool_calls" not in saved
     assert saved["usage"]["total_tokens"] == 15
     assert (

@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.storage.agent_payloads import CONTENT_UNAVAILABLE_CODES
 from forest.storage.memory_config import MemoryConfig
 from forest.storage.memory_sources import MemorySourceStore
 from forest.storage.payloads import PayloadStore
@@ -139,9 +140,19 @@ class AgentMemoryStore:
             bundle = None
             if row["status"] in {"PENDING", "BOUND"}:
                 if error_code is None or row["status"] == "BOUND":
-                    bundle = await self.queries.read_in(
-                        conn, row["query_id"], conversation=conversation, input_cut=row["input_cut"]
-                    )
+                    try:
+                        bundle = await self.queries.read_in(
+                            conn,
+                            row["query_id"],
+                            conversation=conversation,
+                            input_cut=row["input_cut"],
+                        )
+                    except ForestError as exc:
+                        if exc.code not in CONTENT_UNAVAILABLE_CODES:
+                            raise
+                        raise ForestError(
+                            "AGENT_MEMORY_REVOKED", "Frozen evidence content is unavailable", 409
+                        ) from None
                     if bundle["config_revision"] != row["config_revision"]:
                         raise ForestError(
                             "AGENT_MEMORY_INPUT_CHANGED",
@@ -183,12 +194,19 @@ class AgentMemoryStore:
                     if part["type"] == "image" and part.get("availability") == "AVAILABLE"
                 ]
                 if refs:
-                    media = await self.queries.media.materialize_in(
-                        conn,
-                        sorted({unit for unit, _ in refs}),
-                        part_refs=refs,
-                        expected_deletion_epoch=bundle["deletion_epoch"],
-                    )
+                    try:
+                        media = await self.queries.media.materialize_in(
+                            conn,
+                            sorted({unit for unit, _ in refs}),
+                            part_refs=refs,
+                            expected_deletion_epoch=bundle["deletion_epoch"],
+                        )
+                    except ForestError as exc:
+                        if exc.code not in CONTENT_UNAVAILABLE_CODES:
+                            raise
+                        raise ForestError(
+                            "AGENT_MEMORY_REVOKED", "Frozen evidence media is unavailable", 409
+                        ) from None
             await self.messages._actor_final(conn, actor, binding)
             return bundle, media
 
@@ -199,6 +217,9 @@ class AgentMemoryStore:
         Source helpers need only a Bot identifier for this in-transaction read.
         This scope intentionally has no pool, Host acquisition or mutation API.
         """
+        from forest.storage.agent_payloads import guard_run_in
+
+        await guard_run_in(conn, bot_id, run_id)
         rows = await (
             await conn.execute(
                 "SELECT DISTINCT q.query_id,q.config_revision,q.input_cut,q.conversation_id,q.source_unit_ids AS query_sources,"

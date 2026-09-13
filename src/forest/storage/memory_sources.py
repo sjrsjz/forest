@@ -124,6 +124,8 @@ class MemorySourceStore:
         reconstructed=False,
         dependencies=(),
         lineage_complete=True,
+        dependency_payload_ids=(),
+        legacy_import=False,
     ):
         clock = await self.payloads.lock_in(conn)
         source = await self._source_in(conn, self._source(conversation, system=system))
@@ -160,14 +162,19 @@ class MemorySourceStore:
             ).fetchall()
             source_refs = {SourceRef(unit_id), *dependencies}
             source_refs.update(SourceRef(**row) for row in inherited)
-            payload = await self.payloads.put_json_in(
-                conn,
+            kwargs = dict(
                 owner_kind="memory.source",
                 owner_id=unit_id,
                 value=value,
                 sources=tuple(sorted(source_refs)),
-                expected_deletion_epoch=clock["deletion_epoch"],
+                parents=tuple(dependency_payload_ids),
             )
+            if legacy_import:
+                payload = await self.payloads.import_legacy_json_in(conn, **kwargs)
+            else:
+                payload = await self.payloads.put_json_in(
+                    conn, **kwargs, expected_deletion_epoch=clock["deletion_epoch"]
+                )
             unit = await (
                 await conn.execute(
                     "INSERT INTO public.bot_memory_source_units(bot_id,source_unit_id,source_id,source_event_id,source_order_seq,order_origin,kind,principal_ref,identity_origin,payload_id,content_digest,occurred_at,lineage_complete) "
@@ -230,25 +237,47 @@ class MemorySourceStore:
             "fact_revision": clock["fact_revision"],
         }
 
-    async def register_input_in(self, conn, conversation, inbox, *, reconstructed=False):
+    async def register_input_in(
+        self, conn, conversation, inbox, *, reconstructed=False, body=None, legacy_import=False
+    ):
         if (
             inbox["conversation_id"] != conversation["conversation_id"]
             or inbox["bot_id"] != self.store.bot_id
         ):
             raise ForestError("MEMORY_SOURCE_SCOPE", "Inbox belongs to another source", 403)
-        result = await self._register_in(
-            conn,
-            conversation,
-            source_event_id=inbox["source_event_id"],
-            author=inbox["author"],
-            parts=inbox["segments"],
-            occurred_at=inbox["sent_at"],
-            kind="INPUT",
-            event_id=inbox["event_id"],
-            ingress_seq=inbox["ingress_seq"],
-            system=inbox["origin"] == "job",
-            reconstructed=reconstructed,
-        )
+        existing = await (
+            await conn.execute(
+                "SELECT u.*,o.occurrence_id FROM public.bot_memory_source_units u JOIN public.bot_memory_source_occurrences o USING(bot_id,source_unit_id) WHERE o.bot_id=%s AND o.event_id=%s",
+                (self.store.bot_id, inbox["event_id"]),
+            )
+        ).fetchone()
+        if existing and body is None:
+            result = existing
+        else:
+            if body is None:
+                from forest.storage.input_payloads import InputContentStore
+
+                clock = await self.payloads.lock_in(conn)
+                body = await InputContentStore(self.store).read_input_in(
+                    conn,
+                    inbox["event_id"],
+                    expected_deletion_epoch=clock["deletion_epoch"],
+                    required=True,
+                )
+            result = await self._register_in(
+                conn,
+                conversation,
+                source_event_id=inbox["source_event_id"],
+                author=body["author"],
+                parts=body["segments"],
+                occurred_at=inbox["sent_at"],
+                kind="INPUT",
+                event_id=inbox["event_id"],
+                ingress_seq=inbox["ingress_seq"],
+                system=inbox["origin"] == "job",
+                reconstructed=reconstructed,
+                legacy_import=legacy_import,
+            )
         # Existing/legacy input may already have been drained before its source
         # was registered. Only the actual immutable batch proves eligibility.
         eligible = await (
@@ -301,7 +330,9 @@ class MemorySourceStore:
             await self._advance_in(conn)
         return len(rows)
 
-    async def register_reply_in(self, conn, conversation, reply, *, reconstructed=False):
+    async def register_reply_in(
+        self, conn, conversation, reply, *, reconstructed=False, dependency_payload_ids=None
+    ):
         if (
             reply["conversation_id"] != conversation["conversation_id"]
             or reply["bot_id"] != self.store.bot_id
@@ -336,22 +367,26 @@ class MemorySourceStore:
         ).fetchone()
         # Context bodies are never copied into metadata. For legacy executions,
         # this is a conservative dependency set for their visible input view.
-        inputs = await (
-            await conn.execute(
-                "SELECT i.source_event_id,u.reply_id FROM public.bot_context_units u "
-                "LEFT JOIN public.bot_message_inbox i ON i.bot_id=u.bot_id AND i.event_id=u.event_id "
-                "WHERE u.bot_id=%s AND u.conversation_id=%s AND u.kind IN ('INPUT','REPLY') "
-                "AND u.reply_id IS DISTINCT FROM %s AND u.context_revision<%s "
-                "AND (u.visible OR %s) ORDER BY u.context_revision,u.unit_index LIMIT 2049",
-                (
-                    self.store.bot_id,
-                    conversation["conversation_id"],
-                    reply["reply_id"],
-                    context["context_revision"],
-                    reconstructed,
-                ),
-            )
-        ).fetchall()
+        inputs = (
+            await (
+                await conn.execute(
+                    "SELECT i.source_event_id,u.reply_id FROM public.bot_context_units u "
+                    "LEFT JOIN public.bot_message_inbox i ON i.bot_id=u.bot_id AND i.event_id=u.event_id "
+                    "WHERE u.bot_id=%s AND u.conversation_id=%s AND u.kind IN ('INPUT','REPLY') "
+                    "AND u.reply_id IS DISTINCT FROM %s AND u.context_revision<%s "
+                    "AND (u.visible OR %s) ORDER BY u.context_revision,u.unit_index LIMIT 2049",
+                    (
+                        self.store.bot_id,
+                        conversation["conversation_id"],
+                        reply["reply_id"],
+                        context["context_revision"],
+                        reconstructed,
+                    ),
+                )
+            ).fetchall()
+            if dependency_payload_ids is None
+            else []
+        )
         # A reconstructed reply can cover an arbitrarily long legacy history.
         # Its original wire/source manifests require the separate full migration;
         # never claim complete deletion lineage from a truncated source scan.
@@ -361,6 +396,25 @@ class MemorySourceStore:
             SourceRef(self.unit_id(row["source_event_id"] or self.reply_event_id(row["reply_id"])))
             for row in inputs
         )
+        complete = False
+        if dependency_payload_ids is not None:
+            parents = tuple(dependency_payload_ids)
+            clock = await self.payloads.lock_in(conn)
+            await self.payloads.require_available_in(
+                conn, parents, expected_deletion_epoch=clock["deletion_epoch"]
+            )
+            incomplete = await (
+                await conn.execute(
+                    "SELECT 1 FROM public.bot_payload_sources p LEFT JOIN public.bot_memory_source_units u ON u.bot_id=p.bot_id AND u.source_unit_id=p.source_unit_id WHERE p.bot_id=%s AND p.payload_id=ANY(%s) AND (u.source_unit_id IS NULL OR NOT u.lineage_complete OR u.source_revision<>p.source_revision) LIMIT 1",
+                    (self.store.bot_id, list(parents)),
+                )
+            ).fetchone()
+            complete = incomplete is None
+        else:
+            # The bounded legacy scan is not a complete provenance proof. A
+            # migrated formal reply may additionally carry the conservative
+            # legacy scope: every new copy must inherit that deletion barrier.
+            parents = (reply["payload_id"],) if reply.get("payload_id") else ()
         author = {
             "external_user_id": binding["self_id"],
             "display_name": binding["display_name"],
@@ -381,7 +435,8 @@ class MemorySourceStore:
             ingress_seq=run["selected_input_end_seq"],
             reconstructed=reconstructed,
             dependencies=dependencies,
-            lineage_complete=False,
+            lineage_complete=complete,
+            dependency_payload_ids=parents,
         )
         eligible = await (
             await conn.execute(
@@ -502,6 +557,7 @@ class MemorySourceStore:
                     "PAYLOAD_ERASED",
                     "PAYLOAD_SUPPRESSED",
                     "SOURCE_SUPPRESSED",
+                    "SOURCE_LINK_SCOPE_LIMIT",
                     "PAYLOAD_UNAVAILABLE",
                     "PAYLOAD_INCOMPLETE",
                 }:
@@ -642,13 +698,28 @@ class MemorySourceStore:
                             (self.store.bot_id, candidate["identity"]),
                         )
                     ).fetchone()
-                    await self.register_reply_in(conn, conversation, reply, reconstructed=True)
+                    if old is None:
+                        from forest.storage.context_payloads import ContextPayloadStore
+
+                        clock = await self.payloads.lock_in(conn)
+                        reply = await ContextPayloadStore(self.store).read_reply_in(
+                            conn,
+                            reply,
+                            expected_deletion_epoch=clock["deletion_epoch"],
+                            required=False,
+                        )
+                        if reply["payload_state"] == "ACTIVE":
+                            await self.register_reply_in(
+                                conn, conversation, reply, reconstructed=True
+                            )
                 await conn.execute(
                     "UPDATE public.bot_memory_backfill_heads SET cursor_id=GREATEST(cursor_id,%s) WHERE bot_id=%s AND kind=%s",
                     (candidate["identity"], self.store.bot_id, candidate["kind"]),
                 )
                 await self.store._host(conn, lease)
-                completed += old is None
+                completed += old is None and (
+                    candidate["kind"] == "INPUT" or reply["payload_state"] == "ACTIVE"
+                )
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._host(conn, lease)
             if finished:

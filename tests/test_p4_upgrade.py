@@ -16,6 +16,7 @@ import pytest
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from retention_upgrade import assert_preserved
 from test_p3_jobs_upgrade import RELEASED, old_authority
 from test_upgrade import upgrade_database as upgrade_database
 
@@ -311,7 +312,7 @@ async def test_actual_p3_upgrade_preserves_nonempty_history_and_exact_wire(upgra
         await store.migrate()
         await store.migrate()
         async with store.pool.connection() as conn:
-            assert await snapshot(conn, OLD_TABLES) == expected_after_memory_permissions(before)
+            await assert_preserved(conn, expected_after_memory_permissions(before))
             ledger = await (
                 await conn.execute(
                     "SELECT version,checksum FROM public.forest_bot_schema_migrations ORDER BY version"
@@ -324,7 +325,8 @@ async def test_actual_p3_upgrade_preserves_nonempty_history_and_exact_wire(upgra
                 "021_payloads.sql",
                 "022_memory_sources.sql",
             }
-            assert not (await snapshot(conn, MEMORY_TABLES))["bot_memory_source_units"]
+            migrated = (await snapshot(conn, MEMORY_TABLES))["bot_memory_source_units"]
+            assert len(migrated) == 6 and all(row["kind"] == "INPUT" for row in migrated)
         assert [u["unit_id"] for u in before["bot_context_units"] if not u["visible"]] == [
             "event-1"
         ]
@@ -352,7 +354,8 @@ async def test_old_sources_backfill_restart_qualification_and_original_provenanc
     store, lease, sources = await connect_sources(upgrade_database)
     try:
         first = await sources.backfill(lease, limit=batch_limit)
-        assert first["processed"] == first["scanned"] == batch_limit
+        assert first["scanned"] == batch_limit
+        assert first["processed"] == (1 if batch_limit == 2 else 0)
         assert first["more_possible"]
         async with store.pool.connection() as conn:
             partial = await snapshot(conn, MEMORY_TABLES)
@@ -371,10 +374,12 @@ async def test_old_sources_backfill_restart_qualification_and_original_provenanc
                 break
         else:
             pytest.fail("Bounded backfill did not finish its persistent cursor")
-        assert processed == scanned == 7
+        # 029 registered all six original inputs before retiring their old
+        # bodies. The resumable cursor only adds the remaining legacy reply.
+        assert processed == 1 and scanned == 7
         async with store.pool.connection() as conn:
             final = await snapshot(conn, MEMORY_TABLES)
-            assert await snapshot(conn, OLD_TABLES) == expected_after_memory_permissions(before)
+            await assert_preserved(conn, expected_after_memory_permissions(before))
         units = {r["source_event_id"]: r for r in final["bot_memory_source_units"]}
         assert set(units) == {
             "source-event-1",
@@ -462,6 +467,6 @@ async def test_old_sources_backfill_restart_qualification_and_original_provenanc
         }
         async with store.pool.connection() as conn:
             assert await snapshot(conn, MEMORY_TABLES) == final
-            assert await snapshot(conn, OLD_TABLES) == expected_after_memory_permissions(before)
+            await assert_preserved(conn, expected_after_memory_permissions(before))
     finally:
         await store.close()

@@ -319,7 +319,10 @@ async def test_real_http_child_scheduler_closes_resources_and_parent_alone_sends
                 await asyncio.sleep(0.03)
         assert len(bodies) == 1 and "tools" not in json.loads(bodies[0])
         attempt = (await query(children.agent, "SELECT * FROM public.bot_child_model_attempts"))[0]
-        assert bytes(attempt["request_body"]) == bodies[0]
+        assert attempt["request_body"] is None and attempt["request_payload_id"]
+        async with children.store.pool.connection() as conn, conn.transaction():
+            restored = await children.payloads.hydrate_attempt_in(conn, attempt)
+            assert restored["request_body"] == bodies[0]
         assert await query(children.agent, "SELECT * FROM public.bot_send_intents") == []
         await children.adopt(actor, head["run_id"])
         await children.agent.close_tools(actor, head["run_id"])

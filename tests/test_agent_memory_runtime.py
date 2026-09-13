@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from retention_upgrade import content
 from test_agent_config import apply as apply_agent
 from test_agent_config import plan as plan_agent
 from test_embeddings import send, server
@@ -217,14 +218,17 @@ async def test_agent_recalls_cross_group_pixels_and_reuses_fixed_query_across_to
             assert [base64.b64decode(item["image"], validate=True) for item in inputs if "image" in item] == [query_pixels]
 
             steps = await rows(p, "SELECT * FROM public.bot_agent_steps ORDER BY step_seq")
-            model_attempts = await rows(p, "SELECT m.manifest FROM public.bot_model_transport_attempts a "
+            model_attempts = await rows(p, "SELECT m.manifest,m.manifest_payload_id FROM public.bot_model_transport_attempts a "
                 "JOIN public.bot_model_request_manifests m USING(bot_id,model_request_id) ORDER BY a.created_at")
             assert len(steps) == len(model_attempts) == 2
-            for step, attempt in zip(steps, model_attempts, strict=True):
-                manifest = attempt["manifest"]
-                assert manifest["input_digest"] == digest_json(step["snapshot"])
-                assert manifest["memory_evidence"]["query_id"] == query["query_id"]
-                assert "QUEUED_NON_TRIGGER" not in json.dumps(step["snapshot"])
+            async with p.env.store.pool.connection() as conn:
+                for step, attempt in zip(steps, model_attempts, strict=True):
+                    assert attempt["manifest"] is None and step["snapshot"] is None
+                    manifest = await content(conn, p.env.store.bot_id, attempt["manifest_payload_id"])
+                    snapshot = await content(conn, p.env.store.bot_id, step["snapshot_payload_id"])
+                    assert manifest["input_digest"] == digest_json(snapshot)
+                    assert manifest["memory_evidence"]["query_id"] == query["query_id"]
+                    assert "QUEUED_NON_TRIGGER" not in json.dumps(snapshot)
             tool = (await rows(p, "SELECT * FROM public.bot_agent_tools"))[0]
             assert tool["status"] == "SUCCEEDED"
             call = await p.env.store.read_call(tool["operation_id"])

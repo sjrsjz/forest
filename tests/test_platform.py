@@ -18,6 +18,7 @@ from forest.kernel import Kernel
 from forest.management.fleet import BotFleet
 from forest.packages import PackageCatalog
 from forest.platform import BindingRuntime
+from forest.storage.input_payloads import InputContentStore
 
 pytestmark = pytest.mark.postgres
 WEBHOOK = "webhook-test-secret"
@@ -115,11 +116,19 @@ async def test_signed_all_message_ingress_keeps_authors_and_pending_image_refere
             },
         ],
     )
-    async with p.env.store.pool.connection() as conn:
-        rows = await (
+    async with p.env.store.pool.connection() as conn, conn.transaction():
+        stored = await (
             await conn.execute("SELECT * FROM public.bot_message_inbox ORDER BY ingress_seq")
         ).fetchall()
-        media = await (await conn.execute("SELECT * FROM public.bot_inbound_media_refs")).fetchone()
+        content = InputContentStore(p.env.store)
+        clock = await content.payloads.lock_in(conn)
+        assert all(row["segments"] is None and row["payload_id"] for row in stored)
+        rows = [await content.read_input_in(conn, row["event_id"],
+            expected_deletion_epoch=clock["deletion_epoch"], required=True) for row in stored]
+        raw_media = await (await conn.execute("SELECT * FROM public.bot_inbound_media_refs")).fetchone()
+        assert raw_media["source"] is None and raw_media["source_payload_id"]
+        media = await content.read_media_source_in(conn, raw_media["media_ref"],
+            expected_deletion_epoch=clock["deletion_epoch"])
     assert len(rows) == 2 and [r["ingress_seq"] for r in rows] == [1, 2]
     assert [r["author"]["external_user_id"] for r in rows] == ["20001", "20002"]
     assert rows[0]["author"]["principal_ref"] != rows[1]["author"]["principal_ref"]
@@ -144,10 +153,15 @@ async def test_empty_protocol_message_is_durably_retained_with_author(platform, 
     await p.runtime._replace(p.desired)
     accepted = await receive(p, 1, message=empty_message)
     assert accepted["accepted"] and await receive(p, 1, message=empty_message) == accepted
-    async with p.env.store.pool.connection() as conn:
+    async with p.env.store.pool.connection() as conn, conn.transaction():
         rows = await (await conn.execute("SELECT * FROM public.bot_message_inbox")).fetchall()
+        assert len(rows) == 1 and rows[0]["segments"] is None and rows[0]["payload_id"]
+        content = InputContentStore(p.env.store)
+        clock = await content.payloads.lock_in(conn)
+        restored = await content.read_input_in(conn, rows[0]["event_id"],
+            expected_deletion_epoch=clock["deletion_epoch"], required=True)
     assert len(rows) == 1 and rows[0]["ingress_seq"] == 1
-    assert rows[0]["segments"] == [{"type": "text", "text": ""}]
+    assert restored["segments"] == [{"type": "text", "text": ""}]
     assert rows[0]["author"]["external_user_id"] == "20001"
     actor = await p.runtime.messages.acquire_actor(
         p.kernel._authority(), rows[0]["conversation_id"], "empty-message-reader"

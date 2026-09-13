@@ -125,6 +125,11 @@ class DeliveryWorker:
                 "CONTRACT_INCOMPATIBLE",
                 "POLICY_CHANGED",
                 "CANCELLED",
+                "PAYLOAD_ERASED",
+                "PAYLOAD_INCOMPLETE",
+                "SOURCE_SUPPRESSED",
+                "SOURCE_LINK_SCOPE_LIMIT",
+                "DELIVERY_PAYLOAD_CONFLICT",
             }
             await self._release(
                 lease,
@@ -141,7 +146,24 @@ class DeliveryWorker:
         try:
             # A permit is already a durable may-have-sent record. No transport
             # exception or local timeout can establish definite non-delivery.
-            await self.store.mark_started(permit)
+            try:
+                await self.store.mark_started(permit)
+            except ForestError as exc:
+                if exc.code not in {
+                    "PAYLOAD_ERASED",
+                    "PAYLOAD_INCOMPLETE",
+                    "SOURCE_SUPPRESSED",
+                    "SOURCE_LINK_SCOPE_LIMIT",
+                    "DELETION_CONFLICT",
+                    "DELIVERY_PAYLOAD_CONFLICT",
+                }:
+                    raise
+                # These failures happen while the unconsumed attempt is locked,
+                # before any transport handoff. They establish definite no-send.
+                await self.store.complete(
+                    permit, "NOT_SENT", {"error_code": "DELIVERY_CONTENT_REMOVED"}
+                )
+                return True
             remaining = min(
                 self.send_timeout, (permit.deadline_at - datetime.now(timezone.utc)).total_seconds()
             )

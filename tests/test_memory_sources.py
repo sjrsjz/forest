@@ -348,10 +348,20 @@ async def test_scrubbed_source_replay_keeps_metadata_without_restoring_new_paylo
     assert repeated["duplicate"]
     assert len(await rows(repository, "SELECT * FROM public.bot_memory_source_units")) == 1
     assert not await rows(repository, "SELECT * FROM public.bot_payload_bodies")
-    # This slice deliberately does not claim that legacy plaintext was migrated.
-    assert "source-canary" in str(
-        await rows(repository, "SELECT segments FROM public.bot_message_inbox")
-    )
+    # Input content now shares the source suppression barrier; immutable identity
+    # remains, with neither the old column nor a payload body restoring its text.
+    assert await rows(repository, "SELECT segments FROM public.bot_message_inbox") == [
+        {"segments": None}
+    ]
+    from forest.storage.input_payloads import InputContentStore
+
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        unavailable = await InputContentStore(repository.store).read_input_in(
+            conn, first["event_id"], expected_deletion_epoch=1
+        )
+        assert unavailable["payload_state"] == "UNAVAILABLE"
+        assert unavailable["author"]["principal_ref"]
+        assert "source-canary" not in str(unavailable)
     async with repository.store.pool.connection() as conn:
         for query in (
             "UPDATE public.bot_memory_source_units SET source_order_seq=100",

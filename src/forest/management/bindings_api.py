@@ -15,6 +15,7 @@ from forest.errors import ForestError
 from forest.management.binding_catalog import BindingCatalog
 from forest.packages import digest_json
 from forest.security import digest_token
+from forest.storage.delivery_payloads import UNAVAILABLE, DeliveryContentStore
 
 
 class Body(BaseModel):
@@ -245,7 +246,7 @@ def install_binding_routes(app: FastAPI, runtime: Any):
             claims = await bot.control._guard(conn, signed, "message.read", op, payload)
             rows = await (await conn.execute(
                 "SELECT i.intent_id,i.binding_id,i.send_lane,i.reply_route,i.operation_id,i.root_operation_id,"
-                "i.created_at,p.part_index,p.part_operation_id,p.payload,p.payload_digest,p.state,p.revision,"
+                "i.created_at,p.part_index,p.part_operation_id,p.payload_id,p.payload_digest,p.state,p.revision,"
                 "p.attempt_id,p.attempt_count,p.error_code,p.receipt,p.updated_at,"
                 "a.permitted_at,a.started_at,a.deadline_at,a.observed_at,a.wire_digest FROM public.bot_send_intents i "
                 "JOIN public.bot_send_parts p USING(bot_id,intent_id) "
@@ -253,6 +254,19 @@ def install_binding_routes(app: FastAPI, runtime: Any):
                 "WHERE i.bot_id=%s "
                 "ORDER BY i.created_at DESC,p.part_index LIMIT 100", (bot_id,),
             )).fetchall()
+            content = DeliveryContentStore(bot.store)
+            clock = await content.payloads.lock_in(conn)
+            for row in rows:
+                try:
+                    row["payload"] = await content.read_part_in(
+                        conn, row, expected_deletion_epoch=clock["deletion_epoch"],
+                    )
+                    row["payload_state"] = "ACTIVE"
+                except ForestError as exc:
+                    if exc.code not in UNAVAILABLE:
+                        raise
+                    row["payload"], row["payload_state"] = None, "UNAVAILABLE"
+                row.pop("payload_id")
             await bot.control._time(conn, claims)
             return {"parts": rows}
 

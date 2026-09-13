@@ -85,7 +85,7 @@ export function bindingsPanel(api, busy, notice) {
         $('delivery-list').append(item);
       }
       node.label.textContent = `账号 ${row.reply_route.self_id} · ${row.reply_route.channel_kind === 'group' ? '群' : '私聊'} ${row.reply_route.channel_id} · ${row.send_lane} · ${row.state} · 分片 ${row.part_index + 1} · 尝试 ${row.attempt_count}${row.error_code ? ` · ${row.error_code}` : ''}`;
-      const text = (row.payload || []).map(segment => {
+      const text = row.payload_state === 'UNAVAILABLE' ? '发送内容已不可用，发送记录仍保留。' : (row.payload || []).map(segment => {
         if (segment.type === 'text') return segment.text;
         if (segment.type === 'mention') return `[提及 ${segment.external_user_id}]`;
         if (segment.type === 'reply') return `[引用消息 ${segment.platform_message_id}]`;
