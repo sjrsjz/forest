@@ -14,6 +14,8 @@ Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 A
 
 P5 账号管理切片使用迁移 058 增加不可变账号计划/请求和独立加密 HMAC 摘要密钥。WebUI 已可创建 `admin/viewer`、查看会话计数，并以 plan/apply 调整角色、停用状态或密码；目标变更同事务撤销全部会话，部署级锁保护最后管理员。查看者可读取部署与 Bot 元数据，签发器只允许读取 action。真实 PostgreSQL HTTP 与目标 Bot 授权定向测试合计 `33 passed`，部署事务、目录、任务授权与旧库升级交叉回归 `94 passed`；Edge 专项验证创建、脱敏预览、应用、晚到读取隔离和移动布局。最终镜像重新构建，并以独立 Compose 项目完整通过真实初始化、账号创建、查看者登录/读取/服务端写拒绝及既有双 Bot、Agent、记忆、热重载和重启恢复流程。详细语义见[账号管理协议](p5-account-management.md)。
 
+部署审计切片使用迁移 059 为不可变部署事实增加有界查询索引。管理员页面支持动作、资源前缀和操作者筛选，以 `(created_at,audit_id)` 稳定游标分页；服务端按 action 白名单返回标量详情，未知或额外字段不透传。部署管理与旧库升级组合回归 `11 passed`，Ruff、管理 JavaScript 语法和补丁空白检查通过；重新构建的镜像已在独立 Compose/Edge 流程中核对真实 `account.create` 记录及操作者，并继续通过完整多 Bot 流程。它不合并多个 Bot 数据库的局部审计顺序，查看者当前无权读取。详细语义见[部署审计查询](p5-deployment-audit.md)。
+
 ## 1. 当前可以执行的流程
 
 从空部署启动独立管理服务，使用本机 CLI 交付的一次性配对码在浏览器创建首管理员，登录后读取配置、预览差异、基于预期版本提交，再读取实际生效修订。注销使服务端会话失效；重启后从原 PostgreSQL 和本地冻结计划恢复管理状态。此流程不依赖 Bot、插件、QQ、LLM 或 Embedding 凭据。
@@ -106,7 +108,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
 | P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v4 只管理当前群主干，后台有界 scrub。自动语义联想、剩余自由文本族、部署库与备份/WAL 清理及大规模检索容量仍待完成 |
-| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、群聊运行/任务/维护/组件命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；Bot 级 scope 与完整角色模板、密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
+| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、群聊运行/任务/维护/组件命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；Bot 级 scope 与完整角色模板、统一 Bot 任务日志、备份迁移恢复及容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 

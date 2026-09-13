@@ -10,6 +10,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from forest.bootstrap import BootstrapState
 from forest.management.app import WebSettings, create_app
@@ -345,7 +346,72 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
             )
             assert denied.status_code == 403 and denied.json()["code"] == "PERMISSION_DENIED"
             assert (await viewer.get("/management/v1/accounts")).status_code == 403
+            assert (await viewer.get("/management/v1/audit")).status_code == 403
             assert (await viewer.post("/management/v1/logout", json={})).status_code == 200
+
+
+@pytest.mark.postgres
+async def test_deployment_audit_is_redacted_and_keyset_paginated(tmp_path, web_database):
+    state = tmp_path / "state"
+    token = BootstrapState(state).initialize()
+    app = create_app(WebSettings(state, ORIGIN))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=ORIGIN,
+            headers={"origin": ORIGIN},
+        ) as client,
+    ):
+        await initialize(client, token, web_database)
+        await login(client)
+        account_id = (await client.get("/management/v1/session")).json()["account_id"]
+        async with app.state.runtime.store.pool.connection() as conn, conn.transaction():
+            for audit_id in ("audit-a", "audit-b", "audit-c"):
+                await conn.execute(
+                    "INSERT INTO audit_records(audit_id,subject_id,action,resource_key,"
+                    "request_id,details,created_at) VALUES (%s,%s,'account.apply',%s,%s,%s,"
+                    "'2035-01-02T03:04:05Z')",
+                    (
+                        audit_id,
+                        account_id,
+                        "audit:test:" + audit_id,
+                        "request-" + audit_id,
+                        Jsonb({
+                            "revision": 9,
+                            "role": "viewer",
+                            "password": "must-never-leave-storage",
+                            "nested": {"token": "also-private"},
+                        }),
+                    ),
+                )
+        first = await client.get(
+            "/management/v1/audit",
+            params={"action": "account.apply", "resource_prefix": "audit:test:", "limit": 2},
+        )
+        assert first.status_code == 200, first.text
+        body = first.json()
+        assert [row["audit_id"] for row in body["records"]] == ["audit-c", "audit-b"]
+        assert body["next_before"]
+        assert all(row["details"] == {"revision": 9, "role": "viewer"} for row in body["records"])
+        assert all(row["details_redacted"] for row in body["records"])
+        assert "must-never-leave-storage" not in first.text and "also-private" not in first.text
+        second = await client.get(
+            "/management/v1/audit",
+            params={
+                "action": "account.apply",
+                "resource_prefix": "audit:test:",
+                "actor_id": account_id,
+                "limit": 2,
+                "before": body["next_before"],
+            },
+        )
+        assert second.status_code == 200, second.text
+        assert [row["audit_id"] for row in second.json()["records"]] == ["audit-a"]
+        assert second.json()["next_before"] is None
+        invalid = await client.get("/management/v1/audit", params={"before": "not-a-cursor"})
+        assert invalid.status_code == 422 and invalid.json()["code"] == "AUDIT_CURSOR_INVALID"
+        unknown = await client.get("/management/v1/audit", params={"surprise": "value"})
+        assert unknown.status_code == 422 and unknown.json()["code"] == "AUDIT_QUERY_INVALID"
 
 
 @pytest.mark.postgres

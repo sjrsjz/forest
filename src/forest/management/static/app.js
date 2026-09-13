@@ -8,6 +8,7 @@ import { schemaForm } from './schema-form.js';
 import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
 import { accountsPanel } from './accounts-panel.js';
+import { auditPanel } from './audit-panel.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -25,8 +26,8 @@ function notice(text, success = false) {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'audit', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'audit', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
@@ -56,6 +57,7 @@ function setIdentity(user) {
   $('username').textContent = user?.username || '';
   $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
   $('nav-accounts').classList.toggle('hidden', user?.role !== 'admin');
+  $('nav-audit').classList.toggle('hidden', user?.role !== 'admin');
   $('identity').classList.toggle('hidden', !user);
 }
 async function busy(button, work) {
@@ -125,6 +127,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   componentEventsPanel.reset();
   durableJobsPanel.reset();
   accountPanel.reset();
+  deploymentAudit.reset();
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
@@ -181,6 +184,7 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
   accountPanel.reset(); configuration = null; pendingPlan = null;
   setIdentity(null); show('login'); notice(message, true);
 });
+const deploymentAudit = auditPanel(api, busy);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -373,6 +377,9 @@ $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), re
 $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
 $('nav-accounts').addEventListener('click', () => busy($('nav-accounts'), async () => {
   show('accounts'); await accountPanel.load(currentUser.account_id);
+}));
+$('nav-audit').addEventListener('click', () => busy($('nav-audit'), async () => {
+  show('audit'); await deploymentAudit.load();
 }));
 $('refresh-bots').addEventListener('click', () => busy($('refresh-bots'), readBots));
 $('create-bot-form').addEventListener('input', () => {

@@ -27,6 +27,7 @@ from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
 from forest.management.accounts_api import install_account_routes
 from forest.management.agent_api import install_agent_routes
+from forest.management.audit_api import install_audit_routes
 from forest.management.authority import WebAuthority
 from forest.management.bindings_api import install_binding_routes
 from forest.management.bots_api import install_bot_routes
@@ -591,6 +592,7 @@ def create_app(settings: WebSettings) -> FastAPI:
         )
 
     install_account_routes(app, runtime)
+    install_audit_routes(app, runtime)
     install_bot_routes(app, runtime)
     install_binding_routes(app, runtime)
     install_agent_routes(app, runtime)

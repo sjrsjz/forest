@@ -169,6 +169,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(viewer_page.locator("#configuration")).to_be_visible()
             expect(viewer_page.locator("#role")).to_have_text("查看者")
             expect(viewer_page.locator("#nav-accounts")).to_be_hidden()
+            expect(viewer_page.locator("#nav-audit")).to_be_hidden()
             expect(viewer_page.locator('#config-form button[type="submit"]')).to_be_hidden()
             denied = viewer_page.evaluate("""async () => {
               const csrf = document.cookie.split('; ').find(v => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -183,6 +184,9 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             viewer_page.locator("#logout").click()
             expect(viewer_page.locator("#login")).to_be_visible()
             viewer_context.close()
+            page.locator("#nav-audit").click()
+            expect(page.locator("#audit-list")).to_contain_text("account.create")
+            expect(page.locator("#audit-list")).to_contain_text("browser-admin")
             page.locator("#nav-deployment").click()
             expect(page.locator("#configuration")).to_be_visible()
             rival = context.new_page()
@@ -521,7 +525,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                     "checks": [
                         "setup",
                         "login",
-                        "Web account creation and fixed viewer read/write boundary",
+                        "Web account creation, fixed viewer boundary and redacted deployment audit",
                         "preview",
                         "apply",
                         "two-tab conflict",
@@ -534,7 +538,6 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "real HTTP ingress, silent context, template reply and delivery",
                         "Web model configuration, real Agent HTTP reply and credential recovery after restart",
                         "Web Jobs source refresh, preview/apply, idempotent manual Agent reply, delivery, disable and restart persistence",
-                        "Private child controls saved and recovered after restart",
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",

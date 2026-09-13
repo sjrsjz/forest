@@ -9,7 +9,7 @@
   <main>
     <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><span id="role" class="role-badge"></span><button id="logout" class="subtle">退出登录</button></div></header>
     <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署设置</button><button id="nav-bots" class="subtle">Bot 与组件</button><button id="nav-accounts" class="subtle">账号与权限</button></nav>
+    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署设置</button><button id="nav-bots" class="subtle">Bot 与组件</button><button id="nav-accounts" class="subtle">账号与权限</button><button id="nav-audit" class="subtle">部署审计</button></nav>
     <section id="loading"><p>正在连接管理服务…</p></section>
     <section id="setup" class="hidden card narrow">
       <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库，然后创建各自独立的 Bot。</p>
@@ -57,6 +57,13 @@
           <form id="account-apply-form"><label>再次输入你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label><button type="submit">应用账号变更</button></form>
         </div>
       </div>
+    </section>
+    <section id="audit" class="hidden">
+      <div class="card"><h2>部署审计</h2><p class="muted">按不可变部署事实核对账号、配置、Bot 目录、Binding 预留和插件导入。页面只显示服务端白名单内的脱敏元数据。</p>
+        <form id="audit-filter-form" class="audit-filters"><label>动作<input name="action" maxlength="256" placeholder="例如 account.apply"></label><label>资源前缀<input name="resource_prefix" maxlength="256" placeholder="例如 bot:"></label><label>操作者 ID<input name="actor_id" maxlength="256"></label><button type="submit">查询</button></form>
+        <div class="actions"><button id="audit-refresh" class="subtle" type="button">刷新最新记录</button><button id="audit-more" class="subtle hidden" type="button">更早记录</button></div>
+      </div>
+      <p id="audit-empty" class="hint hidden">当前筛选条件下没有审计记录。</p><div id="audit-list" aria-live="polite"></div>
     </section>
     <section id="bots" class="hidden">
       <details class="card"><summary>插件包管理</summary><p class="hint">导入可信来源的 Python 插件 ZIP 包。导入后为 Bot 选择版本并预览配置；启用时才启动插件。</p><form id="package-import-form"><label>插件包<input name="archive" type="file" accept=".zip,application/zip" required></label><button type="submit">导入插件包</button></form><div id="package-list"></div></details>
