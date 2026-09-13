@@ -194,7 +194,7 @@ async def test_apply_rejects_a_new_affected_derivation_after_preview(messages):
     assert current["deletion_epoch"] == 0 and len(current["sources"]) == 1
 
 
-async def test_051_upgrade_adds_only_implied_forget_rights_and_keeps_disabled_issuer(
+async def test_051_and_052_upgrades_add_only_implied_memory_rights_and_keep_disabled_issuer(
     upgrade_database, tmp_path, monkeypatch
 ):
     current_files = bot_module.files
@@ -226,22 +226,31 @@ async def test_051_upgrade_adds_only_implied_forget_rights_and_keeps_disabled_is
                 "SELECT issuer_id,enabled,actions FROM public.bot_web_issuers ORDER BY issuer_id"
             )).fetchall()
             relation = await (await conn.execute(
-                "SELECT to_regclass('public.bot_memory_forget_plans') AS relation"
+                "SELECT to_regclass('public.bot_memory_forget_plans') AS forget_relation,"
+                "to_regclass('public.bot_memory_association_heads') AS association_relation"
             )).fetchone()
         upgraded = {row["issuer_id"]: set(row["actions"]) for row in rows}
-        assert upgraded["reader"] == {"memory.read", "memory.forget.read"}
+        assert upgraded["reader"] == {
+            "memory.read", "memory.forget.read", "memory.association.read"
+        }
         assert upgraded["planner"] == {
-            "memory.read", "memory.config.plan", "memory.forget.read", "memory.forget.plan"
+            "memory.read", "memory.config.plan", "memory.forget.read", "memory.forget.plan",
+            "memory.association.read", "memory.association.plan",
         }
         assert upgraded["applier"] == {
-            "memory.read", "memory.config.apply", "memory.forget.read", "memory.forget.apply"
+            "memory.read", "memory.config.apply", "memory.forget.read", "memory.forget.apply",
+            "memory.association.read", "memory.association.apply",
         }
         assert upgraded["config-only"] == {"memory.config.plan", "memory.config.apply"}
         assert not next(row for row in rows if row["issuer_id"] == "disabled")["enabled"]
         assert upgraded["disabled"] == {
             "memory.read", "memory.config.plan", "memory.config.apply", "memory.forget.read",
-            "memory.forget.plan", "memory.forget.apply",
+            "memory.forget.plan", "memory.forget.apply", "memory.association.read",
+            "memory.association.plan", "memory.association.apply",
         }
-        assert relation["relation"] == "bot_memory_forget_plans"
+        assert relation == {
+            "forget_relation": "bot_memory_forget_plans",
+            "association_relation": "bot_memory_association_heads",
+        }
     finally:
         await store.close()

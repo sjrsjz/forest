@@ -369,7 +369,7 @@ class MemoryQueryStore:
                     body["reason_code"],
                     clock["deletion_epoch"],
                     clock["fact_revision"],
-                    Jsonb([item["source_unit_id"] for item in body["evidence"]]),
+                    Jsonb(sorted({ref.source_unit_id for ref in refs})),
                     Jsonb(body["completeness"]),
                 ),
             )
@@ -541,6 +541,20 @@ class MemoryQueryStore:
 
     async def _select_in(self, conn, query, conversation, cfg, clock, ranked):
         merged = fuse(ranked, limit=256)
+        graph_detail = {
+            "graph": "UNAVAILABLE",
+            "graph_revision": None,
+            "association_edges_considered": 0,
+            "association_sources_added": 0,
+        }
+        if merged:
+            try:
+                async with conn.transaction():
+                    merged, graph_detail = await self._expand_associations_in(
+                        conn, query, conversation, merged
+                    )
+            except (ForestError, psycopg.Error):
+                pass
         candidate_ids = [row["source_unit_id"] for row in merged]
         authorized = await self.sources.authorize_sources_in(
             conn,
@@ -569,7 +583,7 @@ class MemoryQueryStore:
             )
         ).fetchall()
         media = {(row["source_unit_id"], row["part_id"]): row for row in captures}
-        result, parents, refs, skipped = [], set(), set(), []
+        result, parents, refs, skipped, delivered = [], set(), set(), [], set()
         bytes_left, images_left, tokens_left = (
             cfg["values"][key]
             for key in ("max_result_bytes", "max_result_images", "max_result_tokens")
@@ -577,6 +591,13 @@ class MemoryQueryStore:
         for match in merged:
             source = sources.get(match["source_unit_id"])
             if source is None:
+                continue
+            association = match.get("association")
+            if (
+                association
+                and association["seed_source_unit_id"] not in delivered
+            ):
+                skipped.append(source["source_unit_id"])
                 continue
             if sizes[source["payload_id"]] > min(bytes_left, tokens_left):
                 skipped.append(source["source_unit_id"])
@@ -600,6 +621,8 @@ class MemoryQueryStore:
             current_parents.update(
                 vector_rows[facet_id]["payload_id"] for _, facet_id in match["matches"]
             )
+            if association:
+                current_parents.update(match["association_parent_ids"])
             item = {
                 "unit_id": "evidence:" + source["source_unit_id"],
                 "source_unit_id": source["source_unit_id"],
@@ -612,6 +635,8 @@ class MemoryQueryStore:
                     {"query_facet_id": q, "facet_id": d} for q, d in match["matches"]
                 ],
             }
+            if association:
+                item["retrieval"] = association
             size = len(json.dumps(item, ensure_ascii=False, allow_nan=False).encode())
             if (
                 images > images_left
@@ -625,8 +650,10 @@ class MemoryQueryStore:
                 conn, current_parents, expected_deletion_epoch=clock["deletion_epoch"]
             )
             result.append(item)
+            delivered.add(source["source_unit_id"])
             parents.update(current_parents)
             refs.add(SourceRef(source["source_unit_id"], source["source_revision"]))
+            refs.update(match.get("association_source_refs", ()))
             bytes_left -= size + image_bytes
             images_left -= images
             tokens_left -= size
@@ -641,5 +668,132 @@ class MemoryQueryStore:
                 "authorized_candidates": len(sources),
                 "result_budget_exclusions": skipped,
                 "returned_sources": len(result),
+                **graph_detail,
             },
         )
+
+    async def _expand_associations_in(self, conn, query, conversation, merged):
+        seeds = merged[:16]
+        seed_ids = [row["source_unit_id"] for row in seeds]
+        seed_order = {identity: index for index, identity in enumerate(seed_ids)}
+        graph_clock = await (await conn.execute(
+            "SELECT graph_revision FROM public.bot_memory_graph_clock WHERE bot_id=%s FOR SHARE",
+            (self.store.bot_id,),
+        )).fetchone()
+        if graph_clock is None:
+            return merged, {
+                "graph": "UNAVAILABLE", "graph_revision": None,
+                "association_edges_considered": 0, "association_sources_added": 0,
+            }
+        rows = await (await conn.execute(
+            "SELECT h.*,s.operation_revision,latest.graph_revision AS published_graph_revision,"
+            "latest.published_operation_revision,edge.metadata AS edge "
+            "FROM public.bot_memory_association_heads h "
+            "JOIN public.bot_memory_graph_scopes s USING(bot_id,scope_id) "
+            "LEFT JOIN LATERAL (SELECT p.revision,p.graph_revision,"
+            "(p.snapshot->>'operation_revision')::bigint AS published_operation_revision "
+            "FROM public.bot_memory_graph_publications p WHERE p.bot_id=h.bot_id "
+            "AND p.scope_id=h.scope_id AND p.graph_revision<=%s "
+            "ORDER BY p.graph_revision DESC LIMIT 1) latest ON true "
+            "LEFT JOIN public.bot_memory_graph_edges edge ON edge.bot_id=h.bot_id "
+            "AND edge.scope_id=h.scope_id AND edge.revision=latest.revision "
+            "AND edge.metadata->>'kind'='ASSOCIATES_WITH' "
+            "AND edge.metadata->'contribution_ids' ? h.current_contribution_id "
+            "WHERE h.bot_id=%s AND h.active AND (h.left_source_unit_id=ANY(%s) "
+            "OR h.right_source_unit_id=ANY(%s)) ORDER BY h.association_id LIMIT 65",
+            (graph_clock["graph_revision"], self.store.bot_id, seed_ids, seed_ids),
+        )).fetchall()
+        limited = len(rows) > 64
+        rows = rows[:64]
+        required_ids = {
+            identity for row in rows
+            for identity in (row["left_source_unit_id"], row["right_source_unit_id"])
+        }
+        for row in rows:
+            if row["edge"]:
+                required_ids.update(
+                    ref["source_unit_id"] for ref in row["edge"].get("source_refs", [])
+                )
+        if len(required_ids) > 256:
+            raise ForestError("MEMORY_GRAPH_EXPANSION_LIMIT", "Association evidence exceeds limit", 413)
+        authorized = await self.sources.authorize_sources_in(
+            conn,
+            conversation,
+            input_cut=query["input_cut"],
+            source_unit_ids=sorted(required_ids),
+            limit=256,
+            include_payload=False,
+        )
+        visible = {row["source_unit_id"]: row for row in authorized["sources"]}
+        additions, seen = [], {row["source_unit_id"] for row in merged}
+        pending = considered = 0
+        for row in rows:
+            endpoints = {row["left_source_unit_id"], row["right_source_unit_id"]}
+            if not endpoints <= set(visible):
+                continue
+            edge = row["edge"]
+            if (
+                edge is None
+                or row["published_operation_revision"] != row["operation_revision"]
+            ):
+                pending += 1
+                continue
+            refs = tuple(SourceRef(**ref) for ref in edge.get("source_refs", []))
+            if not refs or any(ref.source_unit_id not in visible for ref in refs):
+                continue
+            candidates = endpoints & set(seed_ids)
+            if not candidates:
+                continue
+            seed_id = min(candidates, key=lambda identity: seed_order[identity])
+            neighbor = (
+                row["right_source_unit_id"]
+                if seed_id == row["left_source_unit_id"]
+                else row["left_source_unit_id"]
+            )
+            considered += 1
+            if neighbor in seen or neighbor in query["source_unit_ids"]:
+                continue
+            additions.append((seed_order[seed_id], row["association_id"], neighbor, row, refs))
+        additions.sort(key=lambda item: (item[0], item[1], item[2]))
+        expanded = list(merged)
+        slots = min(32, max(0, 256 - len(merged)))
+        for _, association_id, neighbor, row, refs in additions[:slots]:
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            seed_id = (
+                row["left_source_unit_id"]
+                if row["left_source_unit_id"] in seed_order
+                else row["right_source_unit_id"]
+            )
+            expanded.append({
+                "source_unit_id": neighbor,
+                "rank_score": merged[seed_order[seed_id]]["rank_score"],
+                "matches": [],
+                "association": {
+                    "kind": "graph_association",
+                    "association_id": association_id,
+                    "edge_id": row["edge"]["edge_id"],
+                    "seed_source_unit_id": seed_id,
+                    "graph_revision": row["published_graph_revision"],
+                },
+                "association_source_refs": refs,
+                "association_parent_ids": tuple(
+                    visible[ref.source_unit_id]["payload_id"] for ref in refs
+                ),
+            })
+        graph_state = (
+            "PARTIAL"
+            if limited or (pending and considered)
+            else "PENDING"
+            if pending
+            else "CURRENT"
+        )
+        return expanded, {
+            "graph": graph_state,
+            "graph_revision": graph_clock["graph_revision"],
+            "association_edges_considered": considered,
+            "association_sources_added": len(expanded) - len(merged),
+            "association_pending_publications": pending,
+            "association_limit_reached": limited or len(additions) > slots,
+        }
