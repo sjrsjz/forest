@@ -117,7 +117,8 @@ def install_agent_routes(app, runtime):
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.config.apply", payload)
         result = await bot.platform.agent.config.apply(ticket, op, payload)
-        bot.platform.scheduler.notify()
+        if result is not None and not bot.control.is_unavailable(result):
+            bot.platform.scheduler.notify()
         return result
 
     @app.get("/management/v1/bots/{bot_id}/agent/runs")
@@ -133,7 +134,8 @@ def install_agent_routes(app, runtime):
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.approval", payload)
         result = await bot.platform.agent.runner.state.decide_approval(ticket, op, payload)
-        bot.platform.scheduler.notify()
+        if result is not None and not bot.control.is_unavailable(result):
+            bot.platform.scheduler.notify()
         return result
 
     @app.post("/management/v1/bots/{bot_id}/agent/cancellations")
@@ -142,7 +144,8 @@ def install_agent_routes(app, runtime):
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.cancel", payload)
         result = await bot.platform.agent.runner.state.cancel(ticket, op, payload)
-        bot.platform.scheduler.notify()
+        if result is not None and not bot.control.is_unavailable(result):
+            bot.platform.scheduler.notify()
         return result
 
     @app.post("/management/v1/bots/{bot_id}/agent/resolutions")
@@ -151,5 +154,6 @@ def install_agent_routes(app, runtime):
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.resolve", payload)
         result = await bot.platform.agent.runner.state.resolve(ticket, op, payload)
-        bot.platform.scheduler.notify()
+        if result is not None and not bot.control.is_unavailable(result):
+            bot.platform.scheduler.notify()
         return result

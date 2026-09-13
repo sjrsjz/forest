@@ -272,6 +272,9 @@ export function jobsPanel(api, busy, notice) {
       let result;
       try { result = await post(prefix + '/cancellations', {job_id:row.job_id, expected_revision:row.revision, scope, reason}, key); }
       catch (error) {
+        // Invalidation has already advanced this panel's epoch and cleared its
+        // selection. Surface the receipt for this Bot, but never on another Bot.
+        if (error.code === 'CONTROL_CONTENT_REVOKED' && bot && base() === prefix) throw error;
         if (!valid(own) || selected?.job_id !== row.job_id) return;
         if (error.code === 'JOB_RUN_ALREADY_ACTIVE') { activeRuns(error.details?.runs, true); notice('存在活跃 Agent 运行，本次取消未应用。请核对下方运行记录。'); return; }
         throw error;
@@ -285,5 +288,14 @@ export function jobsPanel(api, busy, notice) {
       }
     });
   });
-  return {select, reset, refresh};
+  function invalidateContent(scope) {
+    if (!bot || scope !== base()) return;
+    epoch++; readSeq++; detailSeq++; selected = null; rows = []; invalidate();
+    form.reset(); form.querySelector('fieldset').disabled = true;
+    for (const id of ['job-list','job-runs','job-cancel-result','job-diff']) $(id).replaceChildren();
+    $('job-form-title').textContent = '相关内容已不可用'; $('job-current').replaceChildren();
+    $('job-cancel-reason').value = '';
+    $('job-existing-actions').classList.add('hidden');
+  }
+  return {select, reset, refresh, invalidateContent};
 }

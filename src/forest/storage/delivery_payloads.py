@@ -69,23 +69,23 @@ class DeliveryContentStore:
         )
 
     async def retain_observation_in(
-        self, conn, *, owner_id, value, parent, expected_deletion_epoch
+        self, conn, *, owner_id, value, parent, expected_deletion_epoch, parents=()
     ):
         """Late old-owner evidence never needs permission to recreate a body."""
         try:
             await self.payloads.require_available_in(
-                conn, (parent,), expected_deletion_epoch=expected_deletion_epoch
+                conn, (parent, *parents), expected_deletion_epoch=expected_deletion_epoch
+            )
+            payload = await self.payloads.put_json_in(
+                conn,
+                owner_kind="delivery.receipt",
+                owner_id=owner_id,
+                value=value,
+                parents=(parent, *parents),
+                expected_deletion_epoch=expected_deletion_epoch,
             )
         except ForestError as exc:
             if exc.code in UNAVAILABLE:
                 return None
             raise
-        payload = await self.payloads.put_json_in(
-            conn,
-            owner_kind="delivery.receipt",
-            owner_id=owner_id,
-            value=value,
-            parents=(parent,),
-            expected_deletion_epoch=expected_deletion_epoch,
-        )
         return payload.payload_id if payload.state == "ACTIVE" else None

@@ -200,6 +200,13 @@ class ShellDispatcher:
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         result = await getattr(repository, spec.execution_method)(admission, operation, payload)
+        if control.is_unavailable(result):
+            return ("这条管理请求已有记录，回执内容已不可用；没有再次执行。",
+                    {"code": "RECORDED_UNAVAILABLE", "operation_id": operation,
+                     "operation_status": "RECORDED", "result_payload_state": "UNAVAILABLE"})
+        if result is None:
+            return ("这条管理请求已有空回执记录；没有再次执行，实际状态请另行查询。",
+                    {"code": "RECORDED_NULL", "operation_id": operation, "operation_status": "RECORDED"})
         if name == "run.read":
             lines = [
                 f"{row['run_id']}：{row['phase']}；检查点 {row['checkpoint_seq']}"

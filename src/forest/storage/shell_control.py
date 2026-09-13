@@ -45,7 +45,7 @@ class ShellControl(BotControl):
                 or request["arguments"] != payload):
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Command claim changed or expired", 403)
         source = await (await conn.execute(
-            "SELECT author FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+            "SELECT author,payload_id FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
             (self.store.bot_id, request["event_id"]),
         )).fetchone()
         author = source["author"] if source else {}
@@ -54,7 +54,7 @@ class ShellControl(BotControl):
                 or author.get("external_user_id") not in self.binding["config"].get("admin_user_ids", [])):
             raise ForestError("SHELL_FORBIDDEN", "Command author is not a current Bot administrator", 403)
         await self._scope(conn, request["conversation_id"], action, payload)
-        return {
+        return BotControl.admission({
             "issuer_id": "shell:" + self.binding_id, "subject_id": author["principal_ref"],
             "operation_id": operation_id, "action": action, "input_digest": digest_json(payload),
             "plan_digest": "", "policy_revision": request["policy_revision"],
@@ -62,7 +62,7 @@ class ShellControl(BotControl):
             "origin_kind": "shell", "source_binding_id": self.binding_id,
             "source_principal": author["principal_ref"], "source_event_id": request["event_id"],
             "source_conversation_id": request["conversation_id"], "command_id": self.command_id,
-        }
+        }, payload, parents=(source["payload_id"],))
 
     async def _scope(self, conn, conversation_id, action, payload):
         target = None

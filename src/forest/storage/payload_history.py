@@ -2,6 +2,7 @@
 
 A legacy deletion marker is never a visibility grant. Each branch carrying it
 must reach an exact migrated Run owner or an already published local body.
+Frozen, proven component-configuration leaves retain their prior Host scope.
 The caller still checks every ordinary source and the current deletion clock.
 """
 
@@ -252,8 +253,9 @@ async def _local_reply_sources(conn, store, conversation, cut, ids, extra, budge
 async def authorize_legacy_history_in(conn, store, conversation, cut, payload_ids, *, run_id=None):
     """Return additional frozen-input parents and exact local Reply source IDs.
 
-    Every legacy-carrying edge must terminate at a real local publication or
-    an exact 031 row. A cycle, unknown leaf or mixed unpublished cache denies.
+    Every legacy-carrying edge must terminate at a real local publication, an
+    exact 031 row, or a proven frozen 040/041 component-configuration leaf.
+    A cycle, unknown leaf or mixed unpublished cache denies.
     """
     marker = legacy_marker(store.bot_id)
     pending, checked, anchors, extra = set(payload_ids), {}, set(), set()
@@ -286,6 +288,9 @@ async def authorize_legacy_history_in(conn, store, conversation, cut, payload_id
         for row in published:
             anchors.add(row["payload_id"])
         remaining = active - anchors
+        from forest.storage.payload_control_history import old_config_leaves_in
+
+        anchors.update(await old_config_leaves_in(conn, store.bot_id, remaining))
         old = await _old_run_roots(conn, store.bot_id, conversation, cut, list(remaining), run_id)
         for row in old:
             key = row["snapshot_payload_id"]

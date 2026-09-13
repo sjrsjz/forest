@@ -180,5 +180,16 @@ export function bindingsPanel(api, busy, notice) {
   }));
   $('reload-binding').addEventListener('click', () => busy($('reload-binding'), readSelected));
   $('refresh-bindings').addEventListener('click', () => busy($('refresh-bindings'), refresh));
-  return {reset, refresh, async select(row) {reset(); if (row.stage !== 'READY') return; bot = row; $('bot-bindings').classList.remove('hidden'); await refresh();}};
+  function invalidateContent(scope) {
+    if (!bot || ![`${base()}/bindings`, `${base()}/delivery`].includes(scope)) return;
+    refreshSequence++;
+    if (scope === `${base()}/bindings`) {
+      epoch++; configSequence++; clearPlan(); selected = null;
+      $('binding-config').reset(); $('binding-diff').replaceChildren();
+      $('binding-detail').classList.add('hidden'); $('binding-list').replaceChildren();
+    } else {
+      $('delivery-list').replaceChildren(); deliveryNodes.clear(); resolutionRequests.clear();
+    }
+  }
+  return {reset, refresh, invalidateContent, async select(row) {reset(); if (row.stage !== 'READY') return; bot = row; $('bot-bindings').classList.remove('hidden'); await refresh();}};
 }

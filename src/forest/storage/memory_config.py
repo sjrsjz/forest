@@ -58,6 +58,7 @@ class MemoryConfig:
             claims = await self.control._guard(conn, ticket, "memory.config.read", operation_id, {})
             head = await self._head(conn)
             saved = await self._revision(conn, head["revision"])
+            await self.control.revision_parents(conn, "memory.config", saved)
             await self.control._time(conn, claims)
             return {
                 "revision": head["revision"],
@@ -96,7 +97,7 @@ class MemoryConfig:
             )
             head = await self._head(conn)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if head["revision"] != payload["expected_revision"]:
@@ -142,7 +143,8 @@ class MemoryConfig:
                 "before_values": saved["values"] if saved else DEFAULT_MEMORY_SETTINGS,
                 "credentials_changed": payload["credentials_changed"],
             }
-            await self.control._record(conn, claims, result)
+            parents = await self.control.revision_parents(conn, "memory.config", saved)
+            await self.control._record(conn, claims, result, parents=parents)
             await self.control._time(conn, claims)
             return result
 
@@ -157,7 +159,7 @@ class MemoryConfig:
             )
             head = await self._head(conn)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             plan = await (
@@ -182,7 +184,8 @@ class MemoryConfig:
                 plan["credentials_changed"] or head["revision"] == 0
             )
             result = {"revision": revision, "status": "APPLIED", "secret_revision": secret_revision}
-            await self.control._record(conn, claims, result)
+            parent = await self.control.plan_parent(conn, "memory.config", plan)
+            await self.control._record(conn, claims, result, parents=(parent,))
             await conn.execute(
                 "INSERT INTO public.bot_memory_config_revisions(bot_id,revision,previous_revision,values,secret_revision,secret_ciphertext,policy_revision,plan_id,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (

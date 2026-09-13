@@ -1228,6 +1228,7 @@ class DeliveryStore:
         decision: str,
         expected_revision: int,
         reason: str,
+        input_parent_ids: tuple[str, ...] = (),
         _conn=None,
     ) -> dict:
         """Trusted management path, after its current principal authorization.
@@ -1240,6 +1241,7 @@ class DeliveryStore:
             raise ForestError("INVALID_DELIVERY", "Invalid reconciliation decision", 422)
         _text(operation_id, "operation_id")
         _text(reason, "reason", 2000)
+        input_parent_ids = tuple(input_parent_ids)
         _, digest = _freeze([intent_id, part_index, decision, expected_revision, reason])
         async with self._transaction(_conn) as conn:
             intent = await self._intent(conn, intent_id)
@@ -1292,6 +1294,7 @@ class DeliveryStore:
                 owner_id="resolution:" + _freeze(operation_id)[1],
                 value={"reason": reason, "result": result},
                 parent=part["payload_id"],
+                parents=input_parent_ids,
                 expected_deletion_epoch=clock["deletion_epoch"],
             )
             await conn.execute(

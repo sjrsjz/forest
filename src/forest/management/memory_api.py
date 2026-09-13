@@ -112,7 +112,8 @@ def install_memory_routes(app, runtime):
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "memory.config.apply", payload)
         result = await bot.platform.memory.config.apply(ticket, op, payload)
-        bot.platform.memory.notify()
+        if result is not None and not bot.control.is_unavailable(result):
+            bot.platform.memory.notify()
         return result
 
     @app.get("/management/v1/bots/{bot_id}/memory/status")

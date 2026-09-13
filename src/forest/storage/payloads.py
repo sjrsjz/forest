@@ -30,7 +30,7 @@ OWNER_KINDS = frozenset({
     "media.source", "media.capture", "media.variant", "model.snapshot", "model.manifest",
     "model.request", "model.result", "agent.tool", "agent.observation", "agent.child",
     "context.parts", "reply.parts", "delivery.payload", "delivery.request", "delivery.receipt",
-    "kernel.input", "kernel.result", "state.value", "state.migration", "control.result", "control.config",
+    "kernel.input", "kernel.result", "state.value", "state.migration", "control.input", "control.result", "control.config",
     "control.audit", "control.outbox", "job.definition", "shell.arguments",
 })
 

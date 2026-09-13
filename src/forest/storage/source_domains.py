@@ -10,7 +10,7 @@ from forest.errors import ForestError
 from forest.memory_types import SourceRef
 from forest.packages import digest_json
 
-KINDS = frozenset({"SERVICE_INPUT", "GENERATION_CONFIG", "STATE_CONTRACT"})
+KINDS = frozenset({"SERVICE_INPUT", "GENERATION_CONFIG", "STATE_CONTRACT", "CONTROL_INPUT"})
 
 
 class SourceDomainStore:

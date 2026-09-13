@@ -81,6 +81,18 @@ the monotonic memory clock, whose independently allocated fact counter may grow.
                 assert row["reason"] is None and row["result"] is None
                 body = await content(conn, row["bot_id"], row["payload_id"])
                 value.update({"reason": body["reason"], "result": body["result"]})
+            if table == "bot_web_operations" and "result_payload_id" in row:
+                assert row["result"] is None and row["result_payload_id"]
+                body = await content(conn, row["bot_id"], row["result_payload_id"])
+                assert set(body) == {"action", "operation_id", "value"}
+                assert body["action"] == row["action"]
+                assert body["operation_id"] == row["operation_id"]
+                header = await (await conn.execute(
+                    "SELECT digest FROM public.bot_payload_headers WHERE bot_id=%s AND payload_id=%s",
+                    (row["bot_id"], row["result_payload_id"]),
+                )).fetchone()
+                assert header["digest"] == row["result_payload_digest"]
+                value["result"] = body["value"]
             restored.append({key: value[key] for key in keys})
         if table == "bot_memory_clock":
             assert len(restored) == len(originals) == 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -13,6 +14,37 @@ from psycopg.types.json import Jsonb
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.control_payloads import ControlPayloadStore
+
+_NO_REPLAY = object()
+
+
+class _Admission(dict):
+    """Private transaction-local normalized input; attributes never enter JSON."""
+
+    def __init__(self, claims, payload, *, parents=()):
+        super().__init__(claims)
+        self.input_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                      ensure_ascii=False, allow_nan=False).encode()
+        self.parents = tuple(parents)
+
+
+def _normalized_input(payload):
+    # HTTP credential handlers already replace secrets with a digest before
+    # signing. A raw transport credential must never become a stored request.
+    if not isinstance(payload, dict) or any(key in payload for key in (
+        "api_key", "access_token", "webhook_secret", "password", "authorization",
+        "token", "secret", "secret_ciphertext", "ciphertext", "private_key",
+    )):
+        raise ForestError("CONTROL_INPUT_NOT_NORMALIZED", "Management input must exclude raw credentials", 422)
+    return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+
+
+def _ticket_snapshot(ticket):
+    try:
+        return json.loads(json.dumps(ticket, allow_nan=False))
+    except (TypeError, ValueError):
+        raise ForestError("WEB_AUTHORITY_REJECTED", "Target Web authority is invalid", 403) from None
 
 ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "service.invoke",
            "job.read", "job.plan", "job.apply", "job.run", "job.cancel", "job.replay",
@@ -45,6 +77,29 @@ _CLAIMS = _REVISION_CLAIMS | _TEXT_CLAIMS
 class BotControl:
     def __init__(self, store: BotStore):
         self.store = store
+        self.content = ControlPayloadStore(store)
+
+    @staticmethod
+    def is_replay(value):
+        return value is not _NO_REPLAY
+
+    @staticmethod
+    def is_unavailable(value):
+        return (isinstance(value, dict) and value.get("result_payload_state") == "UNAVAILABLE"
+                and value.get("operation_status") == "RECORDED")
+
+    @staticmethod
+    def admission(claims, payload, *, parents=()):
+        return _Admission(claims, _normalized_input(payload), parents=parents)
+
+    async def plan_parent(self, conn, family, plan):
+        from forest.storage.control_receipts import ControlReceiptStore
+        return await ControlReceiptStore(self.store).plan_parent_in(conn, family, plan)
+
+    async def revision_parents(self, conn, family, revision, *, resource=""):
+        from forest.storage.control_receipts import ControlReceiptStore
+        parent = await ControlReceiptStore(self.store).revision_parent_in(conn, family, revision, resource=resource)
+        return (parent,) if parent is not None else ()
 
     async def trust(
         self, lease: HostLease, *, issuer_id: str, key_revision: int, public_key: str
@@ -85,6 +140,7 @@ class BotControl:
         plan_digest: str = "",
     ) -> dict:
         # Runtime lock serializes policy revocation with target acceptance.
+        ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
         runtime = await self.store._runtime(conn)
         try:
             if not isinstance(ticket, dict) or set(ticket) != {"claims", "signature"}:
@@ -147,7 +203,7 @@ class BotControl:
             ) from None
         if runtime["status"] != "ACTIVE" or not runtime["control_admission"]:
             raise ForestError("CONTROL_CLOSED", "Bot control admission is closed", 409)
-        return claims
+        return self.admission(claims, payload)
 
     async def _time(self, conn, claims: dict) -> None:
         # Called again after business locks; a ticket may expire while waiting.
@@ -180,13 +236,43 @@ class BotControl:
                 raise ForestError(
                     "IDEMPOTENCY_CONFLICT", "Management operation has different input", 409
                 )
-            return row["result"]
-        return None
+            epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+            saved = await self.content.hydrate_result_in(conn, row, epoch=epoch, required=False)
+            await self._time(conn, claims)
+            if saved["result_payload_state"] == "UNAVAILABLE":
+                return {"operation_id": row["operation_id"], "action": row["action"],
+                        "result_payload_state": "UNAVAILABLE", "operation_status": "RECORDED"}
+            return saved["result"]
+        return _NO_REPLAY
 
-    async def _record(self, conn, claims: dict, result: dict) -> None:
+    async def admitted_input_in(self, conn, claims):
+        """Actual frozen Host input for same-transaction downstream content writes."""
+        if not isinstance(claims, _Admission):
+            raise ForestError("CONTROL_INPUT_NOT_ADMITTED", "Control result has no normalized input admission", 409)
+        if digest_json(json.loads(claims.input_bytes)) != claims["input_digest"]:
+            raise ForestError("CONTROL_INPUT_NOT_ADMITTED", "Control input differs from its authorization", 409)
+        epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+        original = await self.content.put_input_in(
+            conn, claims["operation_id"], json.loads(claims.input_bytes), action=claims["action"],
+            parents=claims.parents, epoch=epoch,
+        )
+        await self._time(conn, claims)
+        return original
+
+    async def _record(self, conn, claims: dict, result: dict, *, parents=()) -> None:
+        from forest.storage.control_receipts import ControlReceiptStore
+
+        receipts = ControlReceiptStore(self.store)
+        original = await self.admitted_input_in(conn, claims)
+        epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+        recorded = await self.content.put_result_in(
+            conn, claims["operation_id"], result, action=claims["action"], input_payload_id=original.payload_id,
+            parents=parents, epoch=epoch,
+        )
         await conn.execute(
             "INSERT INTO public.bot_web_operations(bot_id,operation_id,action,input_digest,subject_id,"
-            "issuer_id,ticket_basis,result) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            "issuer_id,ticket_basis,result,input_payload_id,input_payload_digest,result_payload_id,result_payload_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s)",
             (
                 self.store.bot_id,
                 claims["operation_id"],
@@ -195,15 +281,17 @@ class BotControl:
                 claims["subject_id"],
                 claims["issuer_id"],
                 Jsonb(claims),
-                Jsonb(result),
+                original.payload_id, original.digest, recorded.payload_id, recorded.digest,
             ),
         )
         await self.store._event(
             conn,
             claims["action"],
             claims["operation_id"],
-            {"subject_id": claims["subject_id"], **result},
+            None, control_result=recorded, control_subject=claims["subject_id"],
         )
+        await receipts.register_plan_in(conn, claims, result, recorded)
+        await self._time(conn, claims)
 
     async def read(self, ticket: dict, operation_id: str, component_id: str) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -229,6 +317,12 @@ class BotControl:
                 "desired_values": None,
                 "effective_values": None,
             }
+            revisions = await (await conn.execute(
+                "SELECT * FROM public.bot_config_revisions WHERE bot_id=%s AND component_id=%s AND revision=ANY(%s)",
+                (self.store.bot_id, component_id, [result["desired_revision"], result["effective_revision"]]),
+            )).fetchall()
+            for revision in revisions:
+                await self.revision_parents(conn, "config", revision, resource=component_id)
             operations = await (await conn.execute(
                 "SELECT operation_id,phase,error_code,created_at,op_epoch,candidate_generation_id "
                 "FROM public.bot_lifecycle_operations WHERE bot_id=%s AND component_id=%s "
@@ -242,6 +336,7 @@ class BotControl:
             return result
 
     async def history(self, ticket: dict, operation_id: str, payload: dict) -> dict:
+        ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self._guard(conn, ticket, "config.history", operation_id, payload)
             rows = await (await conn.execute(
@@ -252,16 +347,20 @@ class BotControl:
                 (self.store.bot_id, payload["component_id"], payload["before"]),
             )).fetchall()
             await self._time(conn, claims)
+            for revision in rows[:50]:
+                await self.revision_parents(conn, "config", revision, resource=payload["component_id"])
+            await self._time(conn, claims)
             return {"revisions": [{**r, "created_at": r["created_at"].isoformat()} for r in rows[:50]],
                     "next_before": rows[49]["revision"] if len(rows) > 50 else None}
 
     async def plan(self, ticket: dict, operation_id: str, payload: dict) -> dict:
+        ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self._guard(conn, ticket, "config.plan", operation_id, payload)
             head = await self._head(conn, payload["component_id"])
             await self._time(conn, claims)
             replay = await self._replay(conn, claims)
-            if replay is not None:
+            if self.is_replay(replay):
                 return replay
             if head["desired_revision"] != payload["expected_revision"]:
                 raise ForestError(
@@ -301,6 +400,7 @@ class BotControl:
             return result
 
     async def apply(self, ticket: dict, operation_id: str, payload: dict) -> dict:
+        ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self._guard(
                 conn, ticket, "config.apply", operation_id, payload, payload["plan_digest"]
@@ -308,7 +408,7 @@ class BotControl:
             head = await self._head(conn, payload["component_id"])
             await self._time(conn, claims)
             replay = await self._replay(conn, claims)
-            if replay is not None:
+            if self.is_replay(replay):
                 return replay
             saved = await (
                 await conn.execute(
@@ -331,13 +431,14 @@ class BotControl:
                     "REVISION_CONFLICT", "Bot configuration was changed in another request", 409
                 )
             revision = head["desired_revision"] + 1
+            source = await self.plan_parent(conn, "config", saved)
             result = {
                 "operation_id": operation_id,
                 "desired_revision": revision,
                 "effective_revision": head["effective_revision"],
                 "status": "ACCEPTED",
             }
-            await self._record(conn, claims, result)
+            await self._record(conn, claims, result, parents=(source,))
             await conn.execute(
                 "INSERT INTO public.bot_config_revisions(bot_id,component_id,revision,previous_revision,"
                 "values,policy_revision,plan_id,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -356,6 +457,7 @@ class BotControl:
                 "UPDATE public.bot_config_heads SET desired_revision=%s WHERE bot_id=%s AND component_id=%s",
                 (revision, self.store.bot_id, payload["component_id"]),
             )
+            await self._time(conn, claims)
             return result
 
     async def desired(self, lease: HostLease) -> list[dict]:
@@ -407,13 +509,27 @@ class BotControl:
             )
             await self.store._host(conn, lease, runtime)
 
-    async def admit_invocation(self, ticket: dict, operation_id: str, payload: dict) -> dict:
+    async def admit_invocation(self, ticket: dict, operation_id: str, payload: dict, *, return_parents=False):
+        ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self._guard(conn, ticket, "service.invoke", operation_id, payload)
             replay = await self._replay(conn, claims)
-            if replay is not None:
-                return replay
-            result = {"operation_id": operation_id, "status": "ACCEPTED"}
+            if self.is_replay(replay):
+                result = replay
+            else:
+                result = {"operation_id": operation_id, "status": "ACCEPTED"}
+                await self._time(conn, claims)
+                await self._record(conn, claims, result)
+            if not return_parents:
+                return result
+            # Host-only receipt plumbing: no payload IDs enter the Web response.
+            # The result already inherits the exact normalized management input.
+            parents = ()
+            if result is not None and not self.is_unavailable(result):
+                row = await (await conn.execute(
+                    "SELECT result_payload_id FROM public.bot_web_operations WHERE bot_id=%s AND operation_id=%s",
+                    (self.store.bot_id, operation_id),
+                )).fetchone()
+                parents = (row["result_payload_id"],)
             await self._time(conn, claims)
-            await self._record(conn, claims, result)
-            return result
+            return result, parents

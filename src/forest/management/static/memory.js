@@ -156,5 +156,12 @@ export function memoryPanel(api, busy, notice) {
     await read();
     if (valid(own)) await refresh();
   }
-  return {reset, select};
+  function invalidateContent(scope) {
+    if (!bot || scope !== path()) return;
+    epoch++; readSeq++; statusSeq++; configuration = null; clearPlan();
+    form.reset(); $('memory-edit').disabled = true;
+    $('memory-diff').replaceChildren(); $('memory-state').replaceChildren();
+    $('memory-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';
+  }
+  return {reset, select, invalidateContent};
 }

@@ -30,6 +30,7 @@ class AgentConfig:
             claims = await self.control._guard(conn, ticket, "agent.config.read", operation_id, {})
             head = await self._head(conn)
             saved = await self._revision(conn, head["revision"])
+            await self.control.revision_parents(conn, "agent.config", saved)
             await self.control._time(conn, claims)
             return {"revision": head["revision"], "values": saved["values"] if saved else DEFAULT_AGENT_SETTINGS,
                     "has_api_key": bool(saved and self.vault.decrypt(saved["secret_ciphertext"])),
@@ -55,7 +56,7 @@ class AgentConfig:
             claims = await self.control._guard(conn, ticket, "agent.config.plan", operation_id, payload)
             head = await self._head(conn)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if head["revision"] != payload["expected_revision"]:
@@ -72,7 +73,8 @@ class AgentConfig:
             result = {"plan_id": plan_id, "plan_digest": digest, "expected_revision": head["revision"],
                       "values": values, "before_values": saved["values"] if saved else DEFAULT_AGENT_SETTINGS,
                       "credentials_changed": payload["credentials_changed"]}
-            await self.control._record(conn, claims, result)
+            parents = await self.control.revision_parents(conn, "agent.config", saved)
+            await self.control._record(conn, claims, result, parents=parents)
             await self.control._time(conn, claims)
             return result
 
@@ -85,7 +87,7 @@ class AgentConfig:
             claims = await self.control._guard(conn, ticket, "agent.config.apply", operation_id, payload, payload["plan_digest"])
             head = await self._head(conn)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             plan = await (await conn.execute("SELECT * FROM public.bot_agent_config_plans WHERE bot_id=%s AND plan_id=%s", (self.store.bot_id, payload["plan_id"]))).fetchone()
@@ -100,7 +102,8 @@ class AgentConfig:
             revision = head["revision"] + 1
             secret_revision = head["secret_revision"] + int(plan["credentials_changed"] or head["revision"] == 0)
             result = {"revision": revision, "status": "APPLIED", "secret_revision": secret_revision}
-            await self.control._record(conn, claims, result)
+            parent = await self.control.plan_parent(conn, "agent.config", plan)
+            await self.control._record(conn, claims, result, parents=(parent,))
             await conn.execute(
                 "INSERT INTO public.bot_agent_config_revisions(bot_id,revision,previous_revision,values,secret_revision,secret_ciphertext,policy_revision,plan_id,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (self.store.bot_id, revision, head["revision"], Jsonb(plan["values"]), secret_revision, plan["secret_ciphertext"], claims["policy_revision"], plan["plan_id"], operation_id),

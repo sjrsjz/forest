@@ -189,7 +189,10 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
     async def invoke(bot_id: str, component_id: str, body: Invoke, request: Request):
         payload = {"component_id": component_id, **body.model_dump()}
         bot, operation, signed = await ticket(request, bot_id, "service.invoke", payload)
-        await bot.control.admit_invocation(signed, operation, payload)
+        accepted, parents = await bot.control.admit_invocation(signed, operation, payload, return_parents=True)
+        if accepted is None or bot.control.is_unavailable(accepted):
+            return accepted
         result = await bot.kernel.invoke(component_id, body.service, body.payload, operation_id=operation,
+                                          input_parent_ids=parents,
                                           expected_policy_revision=signed["claims"]["policy_revision"])
         return {"operation_id": operation, "result": result}

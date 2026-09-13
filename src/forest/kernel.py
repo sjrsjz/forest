@@ -614,6 +614,7 @@ class Kernel:
                     digest_json(config),
                     identity.incarnation,
                     config=config,
+                    configuration_operation_id=operation_id,
                     instance_id=identity.instance_id,
                     capability_grants=sorted(grants),
                     state_schema=spec["state_schema"],

@@ -140,7 +140,7 @@ class BindingStore:
                 conn, ticket, "binding.create", operation_id, payload
             )
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             inserted = await (
@@ -178,7 +178,18 @@ class BindingStore:
                 )
             ).fetchall()
             await self.control._time(conn, claims)
+            for row in rows:
+                await self._configuration_sources_in(conn, row)
+            await self.control._time(conn, claims)
             return [self.public(row) for row in rows]
+
+    async def _configuration_sources_in(self, conn, row):
+        revisions = await (await conn.execute(
+            "SELECT * FROM public.bot_binding_revisions WHERE bot_id=%s AND binding_id=%s AND revision=ANY(%s)",
+            (self.store.bot_id, row["binding_id"], [row["revision"], row["effective_revision"]]),
+        )).fetchall()
+        for revision in revisions:
+            await self.control.revision_parents(conn, "binding", revision, resource=row["binding_id"])
 
     @staticmethod
     def public(row: dict) -> dict:
@@ -215,6 +226,8 @@ class BindingStore:
                     (self.store.bot_id, binding_id, row["revision"]),
                 )
             ).fetchone()
+            await self.control._time(conn, claims)
+            await self._configuration_sources_in(conn, row)
             await self.control._time(conn, claims)
             return {**self.public(row), "desired_values": desired["values"] if desired else None}
 
@@ -256,7 +269,7 @@ class BindingStore:
             claims = await self.control._guard(conn, ticket, "binding.plan", operation_id, payload)
             await self.control._time(conn, claims)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if row["revision"] != payload["expected_revision"]:
@@ -311,7 +324,7 @@ class BindingStore:
                 conn, ticket, "binding.apply", operation_id, payload, payload["plan_digest"]
             )
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             plan = await (
@@ -358,7 +371,8 @@ class BindingStore:
                 "effective_revision": row["effective_revision"],
                 "status": "ACCEPTED",
             }
-            await self.control._record(conn, claims, result)
+            parent = await self.control.plan_parent(conn, "binding", plan)
+            await self.control._record(conn, claims, result, parents=(parent,))
             await self.control._time(conn, claims)
             return result
 

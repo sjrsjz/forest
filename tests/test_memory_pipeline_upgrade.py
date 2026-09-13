@@ -21,10 +21,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from legacy_022 import DeliveryStore as LegacyDeliveryStore
 from legacy_022 import MemorySourceStore as LegacyMemorySourceStore
 from legacy_022 import MessageStore as LegacyMessageStore
+from legacy_control import configure_agent_before_cutover
 from psycopg.types.json import Jsonb
 from retention_upgrade import assert_preserved, content
-from test_agent_config import apply as apply_agent
-from test_agent_config import plan as plan_agent
 from test_messages import event, owner
 from test_models import completion, respond, server
 from test_p4_upgrade import MEMORY_TABLES, P3_RELEASED, snapshot
@@ -310,7 +309,7 @@ async def old_bot(dsn, path, *, endpoint="http://127.0.0.1:8000/v1"):
             "max_output_tokens": 128,
             "model_timeout": 15,
         }
-        await apply_agent(env, await plan_agent(env, values=env.values, secret=API_KEY))
+        await configure_agent_before_cutover(env, values=env.values, secret=API_KEY)
         env.messages = LegacyMessageStore(store)
         env.sources = LegacyMemorySourceStore(env.messages)
         original = event(

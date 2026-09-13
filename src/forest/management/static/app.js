@@ -3,6 +3,7 @@ import { agentPanel } from './agent-panel.js';
 import { memoryPanel } from './memory.js';
 import { jobsPanel } from './jobs-panel.js';
 import { schemaForm } from './schema-form.js';
+import { controlReceipts } from './control-receipts.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -10,6 +11,7 @@ let configuration = null;
 let pendingPlan = null;
 let applyKey = null;
 let activeView = 'loading';
+const readReceipt = controlReceipts(invalidateControl);
 
 function notice(text, success = false) {
   $('notice').textContent = text;
@@ -22,16 +24,19 @@ function show(id) {
   $('main-nav').classList.toggle('hidden', !['configuration', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
+  return readReceipt(path, () => fetchApi(path, body, extraHeaders));
+}
+async function fetchApi(path, body, extraHeaders) {
   const response = await fetch(`/management/v1${path}`, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf(), ...extraHeaders },
     ...(body === undefined ? {} : { body: body instanceof Blob ? body : JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => ({ code: 'INVALID_RESPONSE', message: '服务暂时无法响应，请稍后重试。' }));
-  if (!response.ok || data.code === 'INVALID_RESPONSE') {
-    const error = new Error(`${data.message || '操作未完成'} (${data.code || response.status})`);
-    error.code = data.code;
-    error.details = data.details;
+  if (!response.ok || data?.code === 'INVALID_RESPONSE') {
+    const error = new Error(`${data?.message || '操作未完成'} (${data?.code || response.status})`);
+    error.code = data?.code;
+    error.details = data?.details;
     throw error;
   }
   return data;
@@ -99,6 +104,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   bindingPanel.reset();
   modelPanel.reset();
+  memoriesPanel.reset();
   scheduledPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; packageRows = []; selectionEpoch++; packageReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
@@ -142,6 +148,14 @@ const scheduledPanel = jobsPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
+function invalidateControl(scope) {
+  if (selectedBot && selectedPackage() && scope === componentPath()) {
+    selectionEpoch++; configReadSeq++; clearBotPlan(); resetComponent();
+    $('bot-config-diff').replaceChildren(); $('bot-invoke-result').replaceChildren();
+    $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
+  }
+  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel]) panel.invalidateContent(scope);
+}
 function resetComponent() {
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
   $('bot-config-fields').replaceChildren(); $('bot-invoke-fields').replaceChildren();

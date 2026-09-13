@@ -43,6 +43,8 @@ MIGRATION_HANDLERS = {
     "035_source_links.sql": "source_links_v1",
     "037_kernel_payloads.sql": "kernel_payloads_v1",
     "038_generation_payloads.sql": "generation_payloads_v1",
+    "040_control_results.sql": "control_results_v1",
+    "041_control_receipts.sql": "control_receipts_v1",
 }
 
 
@@ -553,6 +555,7 @@ class BotStore:
         state_schema: int = 1,
         state_value_schema: dict | None = None,
         state_migrations: list[dict] | None = None,
+        configuration_operation_id: str | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -620,7 +623,15 @@ class BotStore:
             }
             if existing:
                 await self.content.lock_in(conn, [generation_id], [component_id])
+                from forest.storage.control_receipts import ControlReceiptStore
+                parents = await ControlReceiptStore(self).generation_parents_in(
+                    conn, component_id, configuration_operation_id,
+                    config=config, package_digest=package_digest, grants=grants,
+                )
                 existing = await self.content.configuration_in(conn, existing)
+                header = await self.content.payloads._header_in(conn, existing["config_payload_id"])
+                if header["manifest"]["parents"] != sorted(parents):
+                    raise ForestError("GENERATION_CONFLICT", "Generation configuration provenance changed", 409)
                 if any(existing[key] != value for key, value in fixed.items()):
                     raise ForestError("GENERATION_CONFLICT", "Generation identity cannot be reused")
                 await self.content.guard_in(conn, [generation_id], phase="admission")
@@ -632,11 +643,16 @@ class BotStore:
                 "SELECT component_id FROM public.bot_component_state_heads "
                 "WHERE bot_id=%s AND component_id=%s FOR UPDATE", (self.bot_id, component_id),
             )
+            from forest.storage.control_receipts import ControlReceiptStore
+            parents = await ControlReceiptStore(self).generation_parents_in(
+                conn, component_id, configuration_operation_id,
+                config=config, package_digest=package_digest, grants=grants,
+            )
             epoch = await self.content.epoch_in(conn)
             source = await SourceDomainStore(self).source_in(conn, "GENERATION_CONFIG", generation_id)
             config_ref = await self.content.bodies.put_in(
                 conn, "control.config", "generation-config:sha256:" + _digest([self.bot_id, generation_id]),
-                {"config": config, "state_value_schema": state_value_schema}, sources=(source,), epoch=epoch,
+                {"config": config, "state_value_schema": state_value_schema}, sources=(source,), parents=parents, epoch=epoch,
             )
             row = await (
                 await conn.execute(
@@ -2485,8 +2501,16 @@ class BotStore:
             return row
 
     async def _event(
-        self, conn: AsyncConnection, topic: str, operation_id: str | None, payload: dict
+        self, conn: AsyncConnection, topic: str, operation_id: str | None, payload: dict | None,
+        *, control_result=None, control_subject=None,
     ) -> None:
+        if control_result is not None:
+            from forest.storage.control_receipts import ControlReceiptStore
+
+            await ControlReceiptStore(self).record_events_in(
+                conn, topic, operation_id, control_subject, control_result,
+            )
+            return
         await conn.execute(
             "INSERT INTO public.bot_audit_records(bot_id,audit_id,action,operation_id,details) VALUES (%s,%s,%s,%s,%s)",
             (self.bot_id, str(uuid4()), topic, operation_id, Jsonb(payload)),

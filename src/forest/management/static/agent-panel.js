@@ -191,5 +191,12 @@ export function agentPanel(api, busy, notice) {
     reset(); bot = row; $('bot-agent').classList.remove('hidden');
     await read(); await refresh();
   }
-  return {reset, select, refresh};
+  function invalidateContent(scope) {
+    if (!bot || scope !== base()) return;
+    epoch++; readSeq++; statusSeq++; configuration = null; clearPlan();
+    form.reset(); form.querySelector('fieldset').disabled = true;
+    $('agent-config-diff').replaceChildren(); $('agent-runs').replaceChildren();
+    $('agent-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';
+  }
+  return {reset, select, refresh, invalidateContent};
 }

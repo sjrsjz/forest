@@ -325,7 +325,7 @@ class AgentStore:
                 conn, ticket, "agent.approval", operation_id, payload
             )
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             approval = await (
@@ -400,7 +400,7 @@ class AgentStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "agent.resolve", operation_id, payload)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             head = await self._head(conn, payload["run_id"])
@@ -416,8 +416,9 @@ class AgentStore:
                 )
             result_digest = digest_json([payload["status"], payload["result"]])
             await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, head["run_id"])
+            original = await self.control.admitted_input_in(conn, claims)
             result_ref = await self.payloads.tool_result_in(
-                conn, tool, payload["result"], status=payload["status"]
+                conn, tool, payload["result"], status=payload["status"], parents=(original.payload_id,)
             )
             await conn.execute(
                 "UPDATE public.bot_agent_tools SET status=%s,result_payload_id=%s,result_digest=%s WHERE bot_id=%s AND run_id=%s AND tool_call_id=%s",
@@ -451,7 +452,7 @@ class AgentStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "agent.cancel", operation_id, payload)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             head = await self._head(conn, payload["run_id"])
