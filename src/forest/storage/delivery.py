@@ -745,6 +745,9 @@ class DeliveryStore:
                 )
             if part["claim_until"] <= now:
                 raise ForestError("STALE_DELIVERY_OWNER", "Delivery claim expired")
+            settings = await self.bindings.current_config_in(
+                conn, self.store.bot_id, intent["binding_id"], expected_binding_epoch=claim.binding_epoch,
+            )
             clock = await self.contents.payloads.lock_in(conn)
             if clock["deletion_epoch"] != claim.deletion_epoch:
                 raise ForestError(
@@ -755,7 +758,7 @@ class DeliveryStore:
             await self.contents.payloads.require_available_in(
                 conn, (part["payload_id"],), expected_deletion_epoch=claim.deletion_epoch
             )
-            wire_parents = [part["payload_id"]]
+            wire_parents = [part["payload_id"], settings["config_payload_id"]]
             if "component_id" in executor_ref:
                 call = await (await conn.execute(
                     "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s",
@@ -1228,6 +1231,7 @@ class DeliveryStore:
         decision: str,
         expected_revision: int,
         reason: str,
+        input_parent_ids: tuple[str, ...] = (),
         _conn=None,
     ) -> dict:
         """Trusted management path, after its current principal authorization.
@@ -1240,6 +1244,7 @@ class DeliveryStore:
             raise ForestError("INVALID_DELIVERY", "Invalid reconciliation decision", 422)
         _text(operation_id, "operation_id")
         _text(reason, "reason", 2000)
+        input_parent_ids = tuple(input_parent_ids)
         _, digest = _freeze([intent_id, part_index, decision, expected_revision, reason])
         async with self._transaction(_conn) as conn:
             intent = await self._intent(conn, intent_id)
@@ -1292,6 +1297,7 @@ class DeliveryStore:
                 owner_id="resolution:" + _freeze(operation_id)[1],
                 value={"reason": reason, "result": result},
                 parent=part["payload_id"],
+                parents=input_parent_ids,
                 expected_deletion_epoch=clock["deletion_epoch"],
             )
             await conn.execute(

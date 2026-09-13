@@ -20,16 +20,16 @@
 
 若首次删除早于迁移、当时尚不存在保守标记，则未知来源的旧派生物在导入时额外继承最早的实际 suppressed source，直接按原删除回执登记为 `REVOKED`，不写正文。选择顺序固定为 deletion epoch、operation ID、source unit、part；原删除决策仍不可变。
 
-032 把 Child snapshot、冻结 spec、候选结果及模型 request/manifest/result 改为载荷指针，原正文列强制为空。Child 的 snapshot/spec 继承父 step 的 snapshot、output、BOUND EvidenceBundle 和工具参数；模型请求和结果继续传递这些父引用。父 Agent 接纳时还把 Child 结果载荷列为工具结果的直接父引用，后续 RUN_STEP 和回复继承完整关系。派发、重试、媒体读取及结果接纳都复验载荷可用性。删除后到达的真实模型响应只登记摘要、用量和固定错误码，用原预算账本结算；正文不发布，UNKNOWN 仍不自动重试或释放预留。spec 的永久 metadata 仅保存配置/策略 revision 和有限的布尔、数值限额，提示词与服务配置只存在于可删除 spec 载荷。
+032 是升级前产品 Child 实现的历史正文迁移：它把 Child snapshot、冻结 spec、候选结果及模型 request/manifest/result 改为载荷指针，原正文列强制为空。该版本中，Child 的 snapshot/spec 继承父 step 的 snapshot、output、BOUND EvidenceBundle 和工具参数；模型请求和结果继续传递这些父引用。050 已禁止创建或调度新 Child，032 只继续承担旧数据审计、遗忘和费用结算，详见[产品子 Agent 退役](p3-children.md)。
 
-子 Agent 还复验父 Run 已绑定记忆的当前配置、来源可见性、资格、切口和运行时权限。只检查载荷是否 ACTIVE 不足以授予执行许可：例如管理员禁用记忆后，尚未发出的 Child HTTP 被拒绝；已经收到的已知费用仍可结算，但候选正文不保存、不接纳。数据库 INSERT trigger 检查 Child snapshot 摘要和 request wire digest 与所引用载荷 header 一致，原字节完整性仍由 PayloadStore 的数据库 trigger 验证。
+在退役迁移前，子 Agent 还复验父 Run 已绑定记忆的当前配置、来源可见性、资格、切口和运行时权限。退役后这些校验仅保护遗留记录的终结与结算；任何新 Child HTTP、候选正文或父 Agent 接纳都被禁止。数据库原有完整性约束继续保护历史 snapshot、request wire digest 和载荷 header，不能因产品入口删除而削弱遗忘闭包。
 
 | 迁移 | 搬运对象 |
 | --- | --- |
 | 029 | Inbox 作者/消息正文、旧媒体来源、capture bytes 和来源 manifest |
 | 030 | Context 非输入单元、回复正文和相应载荷指针 |
 | 031 | Agent snapshot/output、精确模型请求/manifest/result、工具参数/结果/观察 |
-| 032 | 私有 Child snapshot/spec/result、精确模型请求/manifest/result |
+| 032 | 升级前遗留 Child snapshot/spec/result、精确模型请求/manifest/result；仅作清理与审计 |
 | 033 | Delivery 发送内容、精确请求和回执正文 |
 | 034 | 升级前已发生遗忘，但旧不完整 SourcePayload 仍为 ACTIVE 的补偿删除决策 |
 | 035 | 为平台成功回执精确确认的自身回声登记不可变来源依赖，协调先回声、后确认或先遗忘的顺序 |

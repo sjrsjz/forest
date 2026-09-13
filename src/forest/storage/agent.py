@@ -6,6 +6,7 @@ conversation; persistent Session/Run identity survives releasing that Actor.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,11 +14,20 @@ from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 
+from forest.agent_protocol import (
+    AssistantBlock,
+    FunctionCallBlock,
+    ModelTurn,
+    ThinkingBlock,
+    parse_model_turn,
+    serialize_model_turn,
+)
 from forest.errors import ForestError
 from forest.models import PreparedModelRequest
 from forest.packages import digest_json
 from forest.storage.agent_memory import AgentMemoryStore
 from forest.storage.agent_payloads import AgentPayloadStore
+from forest.storage.agent_specs import AgentSpecStore, spec_metadata, usage_metadata
 from forest.storage.control import BotControl
 from forest.storage.kernel_payloads import KernelPayloadStore
 from forest.storage.messages import ActorLease, MessageStore, _json, _text, _tokens
@@ -57,6 +67,7 @@ class AgentStore:
         self.messages, self.store = messages, messages.store
         self.control = BotControl(self.store)
         self.payloads = AgentPayloadStore(self.store)
+        self.specs = AgentSpecStore(self.store)
 
     @staticmethod
     async def guard_tool_call_in(
@@ -92,7 +103,6 @@ class AgentStore:
         from types import SimpleNamespace
 
         payloads = AgentPayloadStore(SimpleNamespace(bot_id=bot_id))
-        tool = await payloads.hydrate_tool_in(conn, tool)
 
         def live_time(value):
             return value is not None and datetime.fromisoformat(value) > row["now"]
@@ -132,30 +142,25 @@ class AgentStore:
             raise ForestError(
                 "AGENT_TOOL_REVOKED", "Agent tool execution lost its current authority", 403
             )
-        current = AgentStore._values(head)
-        await AgentMemoryStore.guard_run_in(conn, bot_id, head["run_id"])
-        revision = head["spec"].get("config_revision", 0)
+        revision = head["spec_metadata"]["config_revision"]
+        current = None
         if revision:
-            cfg = await (
-                await conn.execute(
-                    "SELECT f.values AS frozen,c.values AS current,f.secret_revision,c.secret_revision AS current_secret,"
-                    "f.policy_revision FROM public.bot_agent_config_heads h JOIN public.bot_agent_config_revisions c "
-                    "ON c.bot_id=h.bot_id AND c.revision=h.revision JOIN public.bot_agent_config_revisions f "
-                    "ON f.bot_id=h.bot_id AND f.revision=%s WHERE h.bot_id=%s",
-                    (revision, bot_id),
-                )
-            ).fetchone()
-            if (
-                not cfg
-                or not cfg["frozen"]["enabled"]
-                or not cfg["current"]["enabled"]
-                or cfg["secret_revision"] != cfg["current_secret"]
-                or cfg["policy_revision"] != runtime["policy_revision"]
-            ):
-                raise ForestError(
-                    "AGENT_CONFIGURATION_REVOKED", "Agent configuration authority changed", 403
-                )
-            current = cfg["current"]
+            from forest.storage.agent_config import AgentConfig
+
+            cfg = await AgentConfig.guard_in(conn, SimpleNamespace(
+                host=SimpleNamespace(bot_id=bot_id), policy_revision=runtime["policy_revision"]
+            ), revision)
+            current = cfg["current_values"]
+        head = await AgentSpecStore(SimpleNamespace(bot_id=bot_id)).hydrate_in(conn, head)
+        tool = await payloads.hydrate_tool_in(conn, tool)
+        current = current if current is not None else AgentStore._values(head)
+        from forest.storage.bindings import BindingStore
+
+        effective = await BindingStore.current_config_in(
+            conn, bot_id, binding["binding_id"], expected_binding_epoch=binding["binding_epoch"]
+        )
+        binding["config"] = effective["config"]
+        await AgentMemoryStore.guard_run_in(conn, bot_id, head["run_id"])
         settings = AgentStore._tool_settings(head, current, tool["tool_name"])
         trigger = await (
             await conn.execute(
@@ -282,17 +287,6 @@ class AgentStore:
                     (self.store.bot_id,),
                 )
             ).fetchall()
-            children = await (
-                await conn.execute(
-                    "SELECT x.child_id,x.parent_run_id,x.parent_step_id,x.tool_call_id,x.status,x.source_unit_ids,"
-                    "x.authority_trigger_id,x.principal_ref,x.deadline_at,x.created_at,x.error_code,x.attempt_count,"
-                    "a.conversation_id,c.channel_id,c.platform FROM public.bot_agent_children x "
-                    "JOIN public.bot_agent_runs a ON a.bot_id=x.bot_id AND a.run_id=x.parent_run_id "
-                    "JOIN public.bot_conversations c ON c.bot_id=a.bot_id AND c.conversation_id=a.conversation_id "
-                    "WHERE x.bot_id=%s AND (%s::text IS NULL OR a.conversation_id=%s) ORDER BY x.created_at DESC LIMIT 200",
-                    (self.store.bot_id, scope, scope),
-                )
-            ).fetchall()
             run_budgets = await (
                 await conn.execute(
                     "SELECT b.* FROM public.bot_agent_tree_budgets b JOIN public.bot_agent_runs a USING(bot_id,run_id) "
@@ -306,7 +300,6 @@ class AgentStore:
                 "approvals": approvals,
                 "unknown_tools": unknown_tools,
                 "budget": budget,
-                "children": children,
                 "run_budgets": run_budgets,
             }
 
@@ -325,7 +318,7 @@ class AgentStore:
                 conn, ticket, "agent.approval", operation_id, payload
             )
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             approval = await (
@@ -400,7 +393,7 @@ class AgentStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "agent.resolve", operation_id, payload)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             head = await self._head(conn, payload["run_id"])
@@ -416,8 +409,9 @@ class AgentStore:
                 )
             result_digest = digest_json([payload["status"], payload["result"]])
             await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, head["run_id"])
+            original = await self.control.admitted_input_in(conn, claims)
             result_ref = await self.payloads.tool_result_in(
-                conn, tool, payload["result"], status=payload["status"]
+                conn, tool, payload["result"], status=payload["status"], parents=(original.payload_id,)
             )
             await conn.execute(
                 "UPDATE public.bot_agent_tools SET status=%s,result_payload_id=%s,result_digest=%s WHERE bot_id=%s AND run_id=%s AND tool_call_id=%s",
@@ -451,7 +445,7 @@ class AgentStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "agent.cancel", operation_id, payload)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             head = await self._head(conn, payload["run_id"])
@@ -549,19 +543,38 @@ class AgentStore:
         return binding, conversation, session, run, head
 
     async def _configuration(self, conn, actor, head):
-        if head["spec"].get("config_revision", 0) > 0:
+        revision = head["spec_metadata"]["config_revision"]
+        current = None
+        if revision > 0:
             from forest.storage.agent_config import AgentConfig
 
-            current = await AgentConfig.guard_in(conn, actor, head["spec"]["config_revision"])
-            return {
-                **current["current_values"],
-                "daily_token_budget": current["daily_token_budget"],
+            saved = await AgentConfig.guard_in(conn, actor, revision)
+            current = {
+                **saved["current_values"],
+                "daily_token_budget": saved["daily_token_budget"],
             }
-        return head["spec"].get("values", head["spec"])
+        head.update(await self.specs.hydrate_in(conn, head))
+        from forest.storage.bindings import BindingStore
+
+        try:
+            effective = await BindingStore.current_config_in(
+                conn, self.store.bot_id, actor.binding_id, expected_binding_epoch=actor.binding_epoch
+            )
+        except ForestError as exc:
+            if exc.code == "CONTROL_CONTENT_REVOKED":
+                raise ForestError("AGENT_CONFIGURATION_REVOKED", "Binding configuration is unavailable", 409) from None
+            raise
+        head["_binding_config"] = effective["config"]
+        return current if current is not None else self._values(head)
 
     @staticmethod
     def _values(head):
-        return head["spec"].get("values", head["spec"])
+        from forest.agent_settings import project_stored_agent_values
+
+        # Revision-zero specs predate the Web schema and intentionally admit
+        # fractional test/provider deadlines. SQL receipts and ensure_run bound
+        # their execution-critical values; this projection only retires fields.
+        return project_stored_agent_values(head["spec"].get("values", head["spec"]))
 
     async def _checkpoint(self, conn, head, *, phase=None, error_code=None):
         head = await (
@@ -590,6 +603,9 @@ class AgentStore:
                 "final_reply_id",
                 "error_code",
                 "spec_digest",
+                "tool_iteration_count",
+                "thinking_iteration_count",
+                "protocol_repair_count",
             )
         }
         await conn.execute(
@@ -605,15 +621,15 @@ class AgentStore:
         )
         return head
 
-    async def ensure_run(self, actor: ActorLease, run_id: str, spec: dict) -> dict:
-        spec = _json(spec)
-        if not isinstance(spec, dict) or any(
+    async def ensure_run(self, actor: ActorLease, run_id: str, spec: dict | None) -> dict:
+        spec = _json(spec) if spec is not None else None
+        if spec is not None and (not isinstance(spec, dict) or any(
             key in spec for key in ("api_key", "secret", "ciphertext")
-        ):
+        )):
             raise ForestError(
                 "AGENT_SPEC_INVALID", "Run specification cannot contain provider secrets", 422
             )
-        values = spec.get("values", spec)
+        values = spec.get("values", spec) if spec is not None else {}
         if not isinstance(values, dict) or any(
             key in values for key in ("api_key", "secret", "ciphertext", "secret_ciphertext")
         ):
@@ -642,24 +658,48 @@ class AgentStore:
                 )
             ).fetchone()
             if head is None:
+                if spec is None:
+                    raise ForestError("AGENT_SPEC_INVALID", "New Run requires its actual specification", 422)
+                metadata = spec_metadata(spec)
+                parents, sources = (), ()
+                if metadata["config_revision"] > 0:
+                    from forest.storage.agent_config import AgentConfig
+
+                    actual = await AgentConfig.guard_in(conn, actor, metadata["config_revision"])
+                    if (
+                        values != actual["stored_values"]
+                        or metadata["secret_revision"] != actual["secret_revision"]
+                    ):
+                        raise ForestError("AGENT_SPEC_INVALID", "Specification differs from its configured revision", 409)
+                    parents = (actual["values_payload_id"],)
+                else:
+                    from forest.storage.source_domains import SourceDomainStore
+
+                    await self.payloads.epoch_in(conn)
+                    sources = (await SourceDomainStore(self.store).source_in(
+                        conn, "AGENT_SPEC", "agent-spec:" + digest_json([self.store.bot_id, run_id])
+                    ),)
+                ref = await self.specs.put_in(conn, run_id, spec, parents=parents, sources=sources)
                 head = await (
                     await conn.execute(
                         "INSERT INTO public.bot_agent_runs(bot_id,run_id,conversation_id,session_id,session_epoch,spec,spec_digest,"
-                        "actor_epoch,actor_host_incarnation,input_revision,selected_input_end_seq,deadline_at) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+%s*interval '1 second') RETURNING *",
+                        "actor_epoch,actor_host_incarnation,input_revision,selected_input_end_seq,deadline_at,spec_payload_id,spec_payload_digest,spec_metadata) "
+                        "VALUES (%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,clock_timestamp()+%s*interval '1 second',%s,%s,%s) RETURNING *",
                         (
                             self.store.bot_id,
                             run_id,
                             actor.conversation_id,
                             session["session_id"],
                             session["session_epoch"],
-                            Jsonb(spec),
                             digest_json(spec),
                             actor.actor_epoch,
                             actor.host.incarnation,
                             run["input_revision"],
                             run["selected_input_end_seq"],
                             values.get("run_timeout", 600),
+                            ref.payload_id,
+                            ref.digest,
+                            Jsonb(metadata),
                         ),
                     )
                 ).fetchone()
@@ -687,13 +727,7 @@ class AgentStore:
             }:
                 # A deadline may close only a known continuation. Uncertain
                 # effects retain the Session until explicit reconciliation.
-                pending = await (
-                    await conn.execute(
-                        "SELECT 1 FROM public.bot_model_transport_attempts WHERE bot_id=%s AND run_id=%s AND status='DISPATCHING' "
-                        "UNION ALL SELECT 1 FROM public.bot_agent_tools WHERE bot_id=%s AND run_id=%s AND status='DISPATCHING' LIMIT 1",
-                        (self.store.bot_id, run_id, self.store.bot_id, run_id),
-                    )
-                ).fetchone()
+                pending = await self._has_unknown_in(conn, run_id)
                 await self._abandon(conn, head)
                 if pending:
                     head = await self._checkpoint(
@@ -711,8 +745,8 @@ class AgentStore:
             return await self._expanded(conn, head)
 
     async def _expanded(self, conn, head):
-        result = dict(head)
         required = head["phase"] not in {"FAILED", "CANCELLED", "COMPLETED", "BLOCKED_UNKNOWN"}
+        result = await self.specs.hydrate_in(conn, head, required=required)
         result["current_step"] = await (
             await conn.execute(
                 "SELECT * FROM public.bot_agent_steps WHERE bot_id=%s AND logical_step_id=%s",
@@ -917,6 +951,7 @@ class AgentStore:
     async def snapshot(self, actor, run_id):
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, _, _, _, head = await self._guard(conn, actor, run_id)
+            await self._configuration(conn, actor, head)
             if head["phase"] == "WAIT_INPUT":
                 raise ForestError(
                     "AGENT_INPUT_NOT_READY",
@@ -1007,7 +1042,7 @@ class AgentStore:
                 "model.snapshot",
                 step_id,
                 snapshot,
-                parents=(*context["payload_ids"], *[r["closed_parts_payload_id"] for r in private]),
+                parents=(head["spec_payload_id"], *context["payload_ids"], *[r["closed_parts_payload_id"] for r in private]),
             )
             await conn.execute(
                 "INSERT INTO public.bot_agent_steps(bot_id,run_id,logical_step_id,step_seq,input_revision,selected_input_end_seq,snapshot_payload_id,snapshot_digest) "
@@ -1404,11 +1439,11 @@ class AgentStore:
         data = _json(
             result.as_dict() if hasattr(result, "as_dict") else result, maximum=4 * 1024 * 1024
         )
+        observation_digest = digest_json(data)
         if data.get("status") not in {"RESPONDED", "NOT_SENT", "UNKNOWN"}:
             raise ForestError("MODEL_RESULT_INVALID", "Unknown provider result status", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, head, step, attempt = await self._current_attempt(conn, actor, permit)
-            await self._configuration(conn, actor, head)
             if any(
                 data.get(key) != expected
                 for key, expected in (
@@ -1421,7 +1456,7 @@ class AgentStore:
                     "MODEL_ATTEMPT_STALE", "Provider result names different request bytes", 409
                 )
             if attempt["result_digest"] is not None:
-                if attempt["result_digest"] != digest_json(data):
+                if attempt["result_digest"] != observation_digest:
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT",
                         "Model observation already has a different result",
@@ -1429,17 +1464,23 @@ class AgentStore:
                     )
                 await self.messages._actor_final(conn, actor, binding)
                 return await self._expanded(conn, head)
-            if (
-                attempt["status"] != "DISPATCHING"
-                and not (attempt["status"] == "PERMITTED" and data["status"] == "NOT_SENT")
-            ) or head["phase"] != "MODEL_PENDING":
+            late_revoked = (attempt["status"] == "UNKNOWN" and head["phase"] == "BLOCKED_UNKNOWN"
+                            and data["status"] == "RESPONDED")
+            if not late_revoked and (
+                (attempt["status"] != "DISPATCHING"
+                 and not (attempt["status"] == "PERMITTED" and data["status"] == "NOT_SENT"))
+                or head["phase"] != "MODEL_PENDING"
+            ):
                 raise ForestError(
                     "MODEL_ATTEMPT_STALE", "This model call cannot publish another result", 409
                 )
             try:
+                await self._configuration(conn, actor, head)
                 await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, head["run_id"])
+                if late_revoked:
+                    raise ForestError("MODEL_ATTEMPT_STALE", "Known late usage requires a revoked original input", 409)
             except ForestError as exc:
-                if exc.code != "AGENT_MEMORY_REVOKED":
+                if exc.code not in {"AGENT_MEMORY_REVOKED", "AGENT_CONFIGURATION_REVOKED", "CONTROL_CONTENT_REVOKED"}:
                     raise
                 # A known bill remains known after source revocation. Retain
                 # only identity, cost and digest; no returned text/tool body.
@@ -1453,19 +1494,10 @@ class AgentStore:
                         "usage",
                     )
                 }
-                observation["discarded_reason"] = exc.code
-                usage = data.get("usage")
-                observation["usage"] = (
-                    {
-                        key: value
-                        for key, value in usage.items()
-                        if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
-                        and type(value) is int
-                        and 0 <= value <= 1000000000
-                    }
-                    if isinstance(usage, dict)
-                    else None
-                )
+                # The frozen 031 observation shape names content revocation;
+                # the Run checkpoint separately retains the precise policy code.
+                observation["discarded_reason"] = "AGENT_MEMORY_REVOKED"
+                observation["usage"] = usage_metadata(data.get("usage"))
                 await conn.execute(
                     "UPDATE public.bot_model_transport_attempts SET status=%s,result_metadata=%s,result_digest=%s WHERE bot_id=%s AND transport_attempt_id=%s",
                     (
@@ -1487,10 +1519,123 @@ class AgentStore:
                     "UPDATE public.bot_agent_steps SET status='FAILED' WHERE bot_id=%s AND logical_step_id=%s",
                     (self.store.bot_id, step["logical_step_id"]),
                 )
-                await self.messages._end_run_in(conn, actor, run_id=head["run_id"], reason=exc.code)
-                head = await self._checkpoint(conn, head, phase="FAILED", error_code=exc.code)
+                unknown = await self._has_unknown_in(conn, head["run_id"])
+                if not unknown:
+                    await self.messages._end_run_in(conn, actor, run_id=head["run_id"], reason=exc.code)
+                head = await self._checkpoint(conn, head, phase="BLOCKED_UNKNOWN" if unknown else "FAILED", error_code=exc.code)
                 await self.messages._actor_final(conn, actor, binding)
                 return await self._expanded(conn, head)
+            step = await self.payloads.hydrate_step_in(conn, step)
+            turn = None
+            protocol_error = None
+            if data["status"] == "RESPONDED":
+                raw_candidate = data.get("text")
+                legacy_wire = (
+                    attempt["prepared_metadata"].get("serializer_revision")
+                    == "chat-completions-json-v1"
+                )
+                if legacy_wire:
+                    calls = data.get("tool_calls") or []
+                    allowed = frozenset(
+                        tool.get("name", "") for tool in head["spec"].get("tools", [])
+                    )
+                    if (
+                        not isinstance(raw_candidate, str)
+                        or not isinstance(calls, list)
+                        or len(calls) > 1
+                        or any(not isinstance(call, dict) for call in calls)
+                    ):
+                        protocol_error = ForestError(
+                            "AGENT_PROTOCOL_LEGACY_RESULT",
+                            "Legacy in-flight result cannot be projected into one ModelTurn",
+                            422,
+                        )
+                    elif calls:
+                        call = calls[0]
+                        try:
+                            name = call["name"]
+                            arguments = call["arguments"]
+                            arguments_json = json.dumps(
+                                arguments,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            )
+                        except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+                            protocol_error = ForestError(
+                                "AGENT_PROTOCOL_LEGACY_RESULT",
+                                "Legacy in-flight tool result is malformed",
+                                422,
+                            )
+                        else:
+                            if name not in allowed or name == "forest_analyze":
+                                protocol_error = ForestError(
+                                    "AGENT_PROTOCOL_LEGACY_RESULT",
+                                    "Legacy in-flight tool is unavailable after protocol cutover",
+                                    422,
+                                )
+                            else:
+                                blocks = (
+                                    *((ThinkingBlock(raw_candidate),) if raw_candidate.strip() else ()),
+                                    FunctionCallBlock(name, arguments_json),
+                                )
+                                turn = ModelTurn(
+                                    blocks,
+                                    "sha256:"
+                                    + hashlib.sha256(raw_candidate.encode("utf-8")).hexdigest(),
+                                )
+                    elif raw_candidate.strip():
+                        turn = ModelTurn(
+                            (AssistantBlock(raw_candidate),),
+                            "sha256:"
+                            + hashlib.sha256(raw_candidate.encode("utf-8")).hexdigest(),
+                        )
+                    else:
+                        protocol_error = ForestError(
+                            "AGENT_PROTOCOL_LEGACY_RESULT",
+                            "Legacy in-flight result contains no terminal text",
+                            422,
+                        )
+                elif data.get("tool_calls"):
+                    protocol_error = ForestError(
+                        "AGENT_PROTOCOL_NATIVE_TOOL_CALL",
+                        "Provider-native tool calls are not valid Forest Agent output",
+                        422,
+                    )
+                if not legacy_wire and protocol_error is None:
+                    values = self._values(head)
+                    try:
+                        turn = parse_model_turn(
+                            raw_candidate,
+                            allowed_tools=frozenset(
+                                tool.get("name", "")
+                                for tool in head["spec"].get("tools", [])
+                            ),
+                            candidate_byte_limit=values.get(
+                                "protocol_candidate_byte_limit", 1024 * 1024
+                            ),
+                        )
+                    except ForestError as exc:
+                        protocol_error = exc
+                if turn is not None:
+                    call = turn.function_call
+                    data = {
+                        **data,
+                        "raw_candidate": raw_candidate,
+                        "canonical_model_turn": serialize_model_turn(turn),
+                        "model_turn": turn.as_dict(),
+                        "text": turn.assistant_text,
+                        "tool_calls": []
+                        if call is None
+                        else [
+                            {
+                                "id": "call-" + str(step["step_seq"] - 1),
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                        ],
+                    }
             result_ref = await self.payloads.put_in(
                 conn,
                 "model.result",
@@ -1503,7 +1648,7 @@ class AgentStore:
                 (
                     data["status"],
                     result_ref,
-                    digest_json(data),
+                    observation_digest,
                     self.store.bot_id,
                     permit.transport_attempt_id,
                 ),
@@ -1511,6 +1656,81 @@ class AgentStore:
             await self._settle(
                 conn, permit.transport_attempt_id, status=data["status"], usage=data.get("usage")
             )
+            if data["status"] == "RESPONDED" and attempt["deadline_at"] <= await self.store._now(
+                conn
+            ):
+                # A late observation is still a known bill and auditable body,
+                # but its syntax is irrelevant: it cannot repair, publish text,
+                # or create an executable tool proposal after the frozen call
+                # deadline.
+                await self._abandon(conn, head)
+                await self._flush(conn, head)
+                await conn.execute(
+                    "UPDATE public.bot_agent_steps SET status='FAILED',output_payload_id=%s,"
+                    "output_digest=%s WHERE bot_id=%s AND logical_step_id=%s",
+                    (
+                        result_ref,
+                        digest_json(data),
+                        self.store.bot_id,
+                        step["logical_step_id"],
+                    ),
+                )
+                await conn.execute(
+                    "UPDATE public.bot_agent_runs SET final_step_id=NULL,final_input_revision=NULL "
+                    "WHERE bot_id=%s AND run_id=%s",
+                    (self.store.bot_id, head["run_id"]),
+                )
+                await self.messages._end_run_in(
+                    conn, actor, run_id=head["run_id"], reason="MODEL_DEADLINE_EXCEEDED"
+                )
+                head = await self._checkpoint(
+                    conn, head, phase="FAILED", error_code="MODEL_DEADLINE_EXCEEDED"
+                )
+                await self.messages._actor_final(conn, actor, binding)
+                return await self._expanded(conn, head)
+            if protocol_error is not None:
+                head = await self._protocol_failure_in(
+                    conn,
+                    actor,
+                    head,
+                    step,
+                    result_ref,
+                    data,
+                    protocol_error,
+                )
+                await self.messages._actor_final(conn, actor, binding)
+                return await self._expanded(conn, head)
+            if data["status"] == "RESPONDED" and turn is not None:
+                values = self._values(head)
+                if turn.function_call is not None:
+                    if head["tool_iteration_count"] >= values.get("max_tool_iterations", 8):
+                        head = await self._known_model_failure_in(
+                            conn, actor, head, step, result_ref, data,
+                            "AGENT_TOOL_ITERATION_LIMIT",
+                        )
+                        await self.messages._actor_final(conn, actor, binding)
+                        return await self._expanded(conn, head)
+                    await conn.execute(
+                        "UPDATE public.bot_agent_runs SET tool_iteration_count=tool_iteration_count+1 "
+                        "WHERE bot_id=%s AND run_id=%s",
+                        (self.store.bot_id, head["run_id"]),
+                    )
+                elif turn.thinking_only:
+                    if head["thinking_iteration_count"] >= values.get(
+                        "max_thinking_iterations", 4
+                    ):
+                        head = await self._known_model_failure_in(
+                            conn, actor, head, step, result_ref, data,
+                            "AGENT_THINKING_ITERATION_LIMIT",
+                        )
+                        await self.messages._actor_final(conn, actor, binding)
+                        return await self._expanded(conn, head)
+                    await conn.execute(
+                        "UPDATE public.bot_agent_runs "
+                        "SET thinking_iteration_count=thinking_iteration_count+1 "
+                        "WHERE bot_id=%s AND run_id=%s",
+                        (self.store.bot_id, head["run_id"]),
+                    )
             if data["status"] != "RESPONDED":
                 phase = "BLOCKED_UNKNOWN" if data["status"] == "UNKNOWN" else "RETRY_MODEL"
                 if phase == "RETRY_MODEL":
@@ -1561,7 +1781,56 @@ class AgentStore:
                         ),
                     )
                 phase = "WAIT_TOOL" if calls else "FINAL_READY"
-                if not calls and (
+                if not calls and turn is not None and not turn.terminal:
+                    initial = await self.messages.bindings.initial_in(
+                        conn, binding, required=False
+                    )
+                    initial_parents = (
+                        (initial["initial_payload_id"],)
+                        if initial["display_name_payload_state"] == "ACTIVE"
+                        else ()
+                    )
+                    source = step["snapshot"]["conversation"]
+                    author = {
+                        "external_user_id": binding["self_id"],
+                        "display_name": initial["display_name"]
+                        if initial_parents
+                        else binding["self_id"],
+                        "is_self": True,
+                        "identity_origin": "agent_output",
+                    }
+                    closed_parts = [
+                        {
+                            "unit_id": step["logical_step_id"] + ":model-turn",
+                            "role": "assistant",
+                            "source": source,
+                            "author": author,
+                            "parts": [
+                                {"type": "text", "text": data["canonical_model_turn"]}
+                            ],
+                            "model_turn": data["model_turn"],
+                        }
+                    ]
+                    closed_ref = await self.payloads.put_in(
+                        conn,
+                        "context.parts",
+                        step["logical_step_id"],
+                        closed_parts,
+                        parents=(
+                            *initial_parents,
+                            result_ref,
+                            *await self.payloads.step_parents_in(
+                                conn, step["logical_step_id"], include_output=False
+                            ),
+                        ),
+                    )
+                    phase = "READY_MODEL"
+                    await conn.execute(
+                        "UPDATE public.bot_agent_steps SET status='CLOSED',closed_parts_payload_id=%s "
+                        "WHERE bot_id=%s AND logical_step_id=%s",
+                        (closed_ref, self.store.bot_id, step["logical_step_id"]),
+                    )
+                elif not calls and (
                     not isinstance(data.get("text"), str) or not data["text"].strip()
                 ):
                     raise ForestError(
@@ -1570,16 +1839,11 @@ class AgentStore:
                         422,
                     )
                 await conn.execute(
-                    "UPDATE public.bot_agent_steps SET status=%s,output_payload_id=%s,output_digest=%s WHERE bot_id=%s AND logical_step_id=%s",
-                    (
-                        phase,
-                        result_ref,
-                        digest_json(data),
-                        self.store.bot_id,
-                        step["logical_step_id"],
-                    ),
+                    "UPDATE public.bot_agent_steps SET status=CASE WHEN status='CLOSED' THEN status ELSE %s END,"
+                    "output_payload_id=%s,output_digest=%s WHERE bot_id=%s AND logical_step_id=%s",
+                    (phase, result_ref, digest_json(data), self.store.bot_id, step["logical_step_id"]),
                 )
-                if not calls:
+                if not calls and turn is not None and turn.terminal:
                     await conn.execute(
                         "UPDATE public.bot_agent_runs SET final_step_id=%s,final_input_revision=%s WHERE bot_id=%s AND run_id=%s",
                         (
@@ -1591,28 +1855,104 @@ class AgentStore:
                     )
             head = await self._checkpoint(conn, head, phase=phase)
             await self.messages._actor_final(conn, actor, binding)
-            if data["status"] == "RESPONDED" and attempt["deadline_at"] <= await self.store._now(
-                conn
-            ):
-                # Preserve the real provider observation and its cost, but no
-                # late final text or proposed tool may become executable.
-                await self._abandon(conn, head)
-                await self._flush(conn, head)
-                await conn.execute(
-                    "UPDATE public.bot_agent_steps SET status='FAILED' WHERE bot_id=%s AND logical_step_id=%s",
-                    (self.store.bot_id, step["logical_step_id"]),
-                )
-                await conn.execute(
-                    "UPDATE public.bot_agent_runs SET final_step_id=NULL,final_input_revision=NULL WHERE bot_id=%s AND run_id=%s",
-                    (self.store.bot_id, head["run_id"]),
-                )
-                await self.messages._end_run_in(
-                    conn, actor, run_id=head["run_id"], reason="MODEL_DEADLINE_EXCEEDED"
-                )
-                head = await self._checkpoint(
-                    conn, head, phase="FAILED", error_code="MODEL_DEADLINE_EXCEEDED"
-                )
             return await self._expanded(conn, head)
+
+    async def _known_model_failure_in(self, conn, actor, head, step, result_ref, data, code):
+        await conn.execute(
+            "UPDATE public.bot_agent_steps SET status='FAILED',output_payload_id=%s,output_digest=%s "
+            "WHERE bot_id=%s AND logical_step_id=%s",
+            (result_ref, digest_json(data), self.store.bot_id, step["logical_step_id"]),
+        )
+        await self._flush(conn, head)
+        await self.messages._end_run_in(conn, actor, run_id=head["run_id"], reason=code)
+        return await self._checkpoint(conn, head, phase="FAILED", error_code=code)
+
+    async def _protocol_failure_in(
+        self, conn, actor, head, step, result_ref, data, error: ForestError
+    ):
+        """Persist an invalid candidate, then create at most one repair step."""
+        values = self._values(head)
+        snapshot = step["snapshot"]
+        prior_repairs = snapshot.get("protocol_repair", {}).get("repair_count", 0)
+        await conn.execute(
+            "UPDATE public.bot_agent_steps SET status='FAILED',output_payload_id=%s,output_digest=%s "
+            "WHERE bot_id=%s AND logical_step_id=%s",
+            (result_ref, digest_json(data), self.store.bot_id, step["logical_step_id"]),
+        )
+        can_repair = (
+            prior_repairs < values.get("max_protocol_repairs", 1)
+            and head["next_step_seq"] <= values.get("max_steps", 16)
+            and head["deadline_at"] > await self.store._now(conn)
+        )
+        if not can_repair:
+            await self._flush(conn, head)
+            await self.messages._end_run_in(
+                conn, actor, run_id=head["run_id"], reason="AGENT_PROTOCOL_FAILED"
+            )
+            return await self._checkpoint(
+                conn, head, phase="FAILED", error_code="AGENT_PROTOCOL_FAILED"
+            )
+
+        await conn.execute(
+            "UPDATE public.bot_agent_runs SET protocol_repair_count=protocol_repair_count+1 "
+            "WHERE bot_id=%s AND run_id=%s",
+            (self.store.bot_id, head["run_id"]),
+        )
+
+        raw = data.get("text") if isinstance(data.get("text"), str) else ""
+        limit = values.get("protocol_repair_feedback_byte_limit", 8192)
+        raw_bytes = raw.encode("utf-8")
+        if len(raw_bytes) > limit:
+            half = max(1, limit // 2)
+            prefix = raw_bytes[:half].decode("utf-8", errors="ignore")
+            suffix = raw_bytes[-half:].decode("utf-8", errors="ignore")
+            feedback = prefix + "\n...[candidate truncated by host]...\n" + suffix
+            while len(feedback.encode("utf-8")) > limit:
+                feedback = feedback[:-1]
+        else:
+            feedback = raw
+        step_id = "model-step:" + digest_json(
+            [self.store.bot_id, head["run_id"], head["next_step_seq"]]
+        )
+        repair_snapshot = {
+            **snapshot,
+            "logical_step_id": step_id,
+            "protocol_repair": {
+                "repair_count": prior_repairs + 1,
+                "error_code": error.code,
+                "candidate_digest": "sha256:" + hashlib.sha256(raw_bytes).hexdigest(),
+                "feedback": feedback,
+            },
+        }
+        repair_snapshot = _json(repair_snapshot, maximum=4 * 1024 * 1024)
+        snapshot_ref = await self.payloads.put_in(
+            conn,
+            "model.snapshot",
+            step_id,
+            repair_snapshot,
+            parents=(head["spec_payload_id"], step["snapshot_payload_id"], result_ref),
+        )
+        await conn.execute(
+            "INSERT INTO public.bot_agent_steps(bot_id,run_id,logical_step_id,step_seq,input_revision,"
+            "selected_input_end_seq,snapshot_payload_id,snapshot_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                self.store.bot_id,
+                head["run_id"],
+                step_id,
+                head["next_step_seq"],
+                head["input_revision"],
+                head["selected_input_end_seq"],
+                snapshot_ref,
+                digest_json(repair_snapshot),
+            ),
+        )
+        await conn.execute(
+            "UPDATE public.bot_agent_runs SET current_step_id=%s,next_step_seq=next_step_seq+1 "
+            "WHERE bot_id=%s AND run_id=%s",
+            (step_id, self.store.bot_id, head["run_id"]),
+        )
+        return await self._checkpoint(conn, head, phase="PREPARING_MODEL")
 
     @staticmethod
     def _tool_settings(head, current, name):
@@ -1689,6 +2029,7 @@ class AgentStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, _, _, _, head = await self._guard(conn, actor, run_id)
             current = await self._configuration(conn, actor, head)
+            binding["config"] = head["_binding_config"]
             tool = await self._tool(conn, run_id, tool_call_id)
             await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, run_id)
             settings = self._tool_settings(head, current, tool["tool_name"])
@@ -1886,9 +2227,7 @@ class AgentStore:
             )
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, conversation, _, _, head = await self._guard(conn, actor, permit.run_id)
-            current = await self._configuration(conn, actor, head)
             tool = await self._tool(conn, permit.run_id, permit.tool_call_id)
-            self._tool_settings(head, current, tool["tool_name"])
             if (
                 any(tool[key] != getattr(permit, key) for key in ToolPermit.__dataclass_fields__)
                 or head["owner_epoch"] != permit.owner_epoch
@@ -1897,6 +2236,25 @@ class AgentStore:
                     "AGENT_TOOL_STALE", "Tool result belongs to another execution owner", 409
                 )
             digest = digest_json([status, result])
+            if tool["status"] == status and tool["result_digest"] == digest:
+                await self.messages._actor_final(conn, actor, binding)
+                return await self._expanded(conn, head)
+            if tool["status"] != "DISPATCHING":
+                raise ForestError(
+                    "AGENT_TOOL_STALE", "Tool result was already settled or blocked", 409
+                )
+            revoked_code = None
+            try:
+                current = await self._configuration(conn, actor, head)
+                self._tool_settings(head, current, tool["tool_name"])
+            except ForestError as exc:
+                if exc.code not in {
+                    "AGENT_MEMORY_REVOKED",
+                    "AGENT_CONFIGURATION_REVOKED",
+                    "CONTROL_CONTENT_REVOKED",
+                }:
+                    raise
+                revoked_code = exc.code
             if status == "SUCCEEDED":
                 receipt = await self._kernel_tool_receipt_in(conn, tool)
                 if (receipt is not None and (
@@ -1906,43 +2264,50 @@ class AgentStore:
                     raise ForestError(
                         "TOOL_RESULT_CONFLICT", "Tool result differs from its Kernel receipt", 409
                     )
-                await self._guard_result_scope_in(conn, conversation, head, result_parent_ids)
-            if tool["status"] == status and tool["result_digest"] == digest:
-                await self.messages._actor_final(conn, actor, binding)
-                return await self._expanded(conn, head)
-            if tool["status"] != "DISPATCHING":
-                raise ForestError(
-                    "AGENT_TOOL_STALE", "Tool result was already settled or blocked", 409
+                # A completed but out-of-scope effect must remain an unknown
+                # observation.  Let the runner enter reconciliation instead of
+                # converting this publication failure into a clean Run failure.
+                await self._guard_result_scope_in(
+                    conn, conversation, head, result_parent_ids
                 )
-            revoked = False
             try:
+                if revoked_code is not None:
+                    raise ForestError(revoked_code, "Tool authority content is unavailable", 409)
                 await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, permit.run_id)
                 result_ref = await self.payloads.tool_result_in(
                     conn, tool, result, status=status, parents=result_parent_ids
                 )
             except ForestError as exc:
-                if exc.code != "AGENT_MEMORY_REVOKED":
+                if exc.code not in {
+                    "AGENT_MEMORY_REVOKED",
+                    "AGENT_CONFIGURATION_REVOKED",
+                    "CONTROL_CONTENT_REVOKED",
+                }:
                     raise
-                revoked, result_ref = True, None
+                revoked_code, result_ref = exc.code, None
             await conn.execute(
                 "UPDATE public.bot_agent_tools SET status=%s,result_payload_id=%s,result_digest=%s,result_metadata=%s WHERE bot_id=%s AND run_id=%s AND tool_call_id=%s",
                 (
                     status,
                     result_ref,
                     digest,
-                    Jsonb({"discarded_reason": "AGENT_MEMORY_REVOKED"} if revoked else {}),
+                    Jsonb(
+                        {"discarded_reason": "AGENT_MEMORY_REVOKED"}
+                        if revoked_code is not None
+                        else {}
+                    ),
                     self.store.bot_id,
                     permit.run_id,
                     permit.tool_call_id,
                 ),
             )
-            if revoked:
+            if revoked_code is not None:
                 await self._abandon(conn, head)
                 await self.messages._end_run_in(
-                    conn, actor, run_id=permit.run_id, reason="AGENT_MEMORY_REVOKED"
+                    conn, actor, run_id=permit.run_id, reason=revoked_code
                 )
                 head = await self._checkpoint(
-                    conn, head, phase="FAILED", error_code="AGENT_MEMORY_REVOKED"
+                    conn, head, phase="FAILED", error_code=revoked_code
                 )
                 await self.messages._actor_final(conn, actor, binding)
                 return await self._expanded(conn, head)
@@ -2015,6 +2380,8 @@ class AgentStore:
                 await self.messages._actor_final(conn, actor, binding)
                 return await self._expanded(conn, head)
             step = await self.payloads.hydrate_step_in(conn, step)
+            initial = await self.messages.bindings.initial_in(conn, binding, required=False)
+            initial_parents = (initial["initial_payload_id"],) if initial["display_name_payload_state"] == "ACTIVE" else ()
             source = {
                 key: conversation[key]
                 for key in (
@@ -2028,7 +2395,7 @@ class AgentStore:
             }
             author = {
                 "external_user_id": binding["self_id"],
-                "display_name": binding["display_name"],
+                "display_name": initial["display_name"] if initial_parents else binding["self_id"],
                 "is_self": True,
                 "identity_origin": "agent_output",
             }
@@ -2038,8 +2405,12 @@ class AgentStore:
                     "role": "assistant",
                     "source": source,
                     "author": author,
-                    "parts": [{"type": "text", "text": step["output"].get("text", "")}],
+                    "parts": [{"type": "text", "text": step["output"].get(
+                        "canonical_model_turn", step["output"].get("text", "")
+                    )}],
                     "tool_calls": step["output"]["tool_calls"],
+                    **({"model_turn": step["output"]["model_turn"]}
+                       if "model_turn" in step["output"] else {}),
                 }
             ]
             for tool in tools:
@@ -2068,6 +2439,7 @@ class AgentStore:
                 step["logical_step_id"],
                 parts,
                 parents=(
+                    *initial_parents,
                     *await self.payloads.step_parents_in(
                         conn, step["logical_step_id"], include_output=True
                     ),
@@ -2156,12 +2528,9 @@ class AgentStore:
 
     async def _abandon(self, conn, head):
         run_id = head["run_id"]
-        from forest.storage.children import ChildStore
-
-        await ChildStore(self).cancel_in(conn, head)
         await conn.execute(
             "UPDATE public.bot_agent_tools SET status=CASE WHEN status='DISPATCHING' THEN 'UNKNOWN' ELSE 'CANCELLED' END "
-            "WHERE bot_id=%s AND run_id=%s AND status IN ('PROPOSED','WAIT_APPROVAL','WAIT_CHILD','DISPATCHING','NOT_SENT')",
+            "WHERE bot_id=%s AND run_id=%s AND status IN ('PROPOSED','WAIT_APPROVAL','DISPATCHING','NOT_SENT')",
             (self.store.bot_id, run_id),
         )
         attempts = await (
@@ -2177,6 +2546,15 @@ class AgentStore:
                 (outcome, self.store.bot_id, attempt["transport_attempt_id"]),
             )
             await self._settle(conn, attempt["transport_attempt_id"], status=outcome, usage=None)
+
+    async def _has_unknown_in(self, conn, run_id):
+        return bool(await (await conn.execute(
+            "SELECT 1 FROM public.bot_model_transport_attempts WHERE bot_id=%s AND run_id=%s "
+            "AND status IN ('DISPATCHING','UNKNOWN') UNION ALL "
+            "SELECT 1 FROM public.bot_agent_tools WHERE bot_id=%s AND run_id=%s "
+            "AND status IN ('DISPATCHING','UNKNOWN') LIMIT 1",
+            (self.store.bot_id, run_id, self.store.bot_id, run_id),
+        )).fetchone())
 
     async def fail_revoked(self, actor, run_id):
         """End a removed-content checkpoint before its old owner can hydrate it.
@@ -2217,11 +2595,13 @@ class AgentStore:
                 )
             # Never flush a removed private group just to terminate its Run.
             await self._abandon(conn, head)
-            await self.messages._end_run_in(
-                conn, actor, run_id=run_id, reason="AGENT_MEMORY_REVOKED"
-            )
+            unknown = await self._has_unknown_in(conn, run_id)
+            if not unknown:
+                await self.messages._end_run_in(
+                    conn, actor, run_id=run_id, reason="AGENT_MEMORY_REVOKED"
+                )
             head = await self._checkpoint(
-                conn, head, phase="FAILED", error_code="AGENT_MEMORY_REVOKED"
+                conn, head, phase="BLOCKED_UNKNOWN" if unknown else "FAILED", error_code="AGENT_MEMORY_REVOKED"
             )
             await self.messages._actor_final(conn, actor, binding)
             return head
@@ -2244,6 +2624,10 @@ class AgentStore:
                 # unflushed derived context cannot be admitted by this path.
                 error_code = exc.code
             await self._abandon(conn, head)
+            if status == "FAILED" and await self._has_unknown_in(conn, run_id):
+                head = await self._checkpoint(conn, head, phase="BLOCKED_UNKNOWN", error_code=error_code)
+                await self.messages._actor_final(conn, actor, binding)
+                return head
             await self.messages._end_run_in(
                 conn, actor, run_id=run_id, reason=error_code, status=status, delivery=delivery
             )

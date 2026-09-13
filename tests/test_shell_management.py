@@ -83,8 +83,11 @@ async def test_revocation_after_claim_prevents_the_business_effect(messages):
     await allow(repository, "another-user")
     with pytest.raises(ForestError) as denied:
         await dispatcher(repository, lease)._typed(lease, claim)
-    assert denied.value.code == "SHELL_FORBIDDEN"
-    assert (await state.load(actor, head["run_id"]))["phase"] == head["phase"]
+    # A real allowlist publication replaces the Binding epoch. The old Shell
+    # claim and Actor both lose ownership before a new business effect starts.
+    assert denied.value.code == "SHELL_AUTHORITY_REJECTED"
+    persisted = await row(repository, "SELECT phase,checkpoint_seq FROM public.bot_agent_runs WHERE run_id=%s", (head["run_id"],))
+    assert persisted == {"phase": head["phase"], "checkpoint_seq": head["checkpoint_seq"]}
 
 
 async def test_typed_query_publishes_only_current_group_metadata_on_control_lane(messages):

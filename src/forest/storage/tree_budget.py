@@ -1,4 +1,4 @@
-"""One Run account shared by its foreground model and private children."""
+"""One durable token account shared by every model call in a Run."""
 
 from forest.errors import ForestError
 
@@ -26,7 +26,7 @@ async def reserve_in(conn, bot_id, run_id, amount, limit):
     if row["reserved_tokens"] + row["charged_tokens"] + amount > limit:
         raise ForestError(
             "RUN_TOKEN_BUDGET_EXCEEDED",
-            "Parent and child models exhausted this Run's token capacity",
+            "Model calls exhausted this Run's token capacity",
             409,
         )
     await conn.execute(

@@ -423,9 +423,28 @@ async def test_full_size_parent_proof_survives_and_late_revocation_propagates(
     class BroadHostDelivery(DeliveryStore):
         async def enqueue_in(self, conn, lease, **kwargs):
             # Synthetic trusted-host provenance exercises actual PostgreSQL
-            # capacity, not semantic quality or end-user authorization. The
-            # formal Agent output contributes its two real input/reply refs.
-            kwargs["sources"] = tuple(SourceRef("prior-host-source:" + str(i)) for i in range(4094))
+            # capacity, not semantic quality or end-user authorization. Fill
+            # the remaining budget after all formal Agent/config sources.
+            required = set()
+            for parent in kwargs.get("parents", ()):
+                required.update(await self.contents.payloads.effective_sources_in(conn, parent))
+            binding = await (
+                await conn.execute(
+                    "SELECT config_payload_id FROM public.bot_bindings "
+                    "WHERE bot_id=%s AND binding_id=%s",
+                    (self.store.bot_id, kwargs["route"]["binding_id"]),
+                )
+            ).fetchone()
+            required.update(
+                await self.contents.payloads.effective_sources_in(
+                    conn, binding["config_payload_id"]
+                )
+            )
+            remaining = payloads_module.MAX_SOURCES - len(required)
+            assert remaining > 0
+            kwargs["sources"] = tuple(
+                SourceRef("prior-host-source:" + str(i)) for i in range(remaining)
+            )
             return await super().enqueue_in(conn, lease, **kwargs)
 
     broad = BroadHostDelivery(repository.store)

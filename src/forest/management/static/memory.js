@@ -1,3 +1,5 @@
+import {clearConfiguration, replacementButton} from './configuration-forms.js';
+
 const $ = id => document.getElementById(id);
 
 // All fields are ordinary controls; users never edit configuration JSON.
@@ -44,6 +46,10 @@ export function memoryPanel(api, busy, notice) {
   const form = $('memory-config');
   let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0;
   let configuration = null, pending = null, planKey = null, applyKey = null;
+  const replace = replacementButton($('memory-config-status'), 'memory-replace-configuration', () => {
+    if (!configuration?.defaults) return;
+    show({...configuration, values:structuredClone(configuration.defaults), values_payload_state:'DRAFT'});
+  });
   for (const [title, fields] of groups) {
     const section = document.createElement('section'), heading = document.createElement('h3');
     heading.textContent = title; section.append(heading);
@@ -81,16 +87,25 @@ export function memoryPanel(api, busy, notice) {
     clearPlan(); form.reset(); $('memory-edit').disabled = true;
     $('bot-memory').classList.add('hidden'); $('memory-state').textContent = '';
     $('memory-config-status').textContent = '';
+    replace.classList.add('hidden');
   }
   function show(row) {
     configuration = row; clearPlan(); form.reset();
+    replace.classList.add('hidden');
+    if (row.values_payload_state === 'UNAVAILABLE' || row.values === null) {
+      clearConfiguration(form); $('memory-edit').disabled = true;
+      $('memory-config-status').textContent = `配置版本 ${row.revision} 的正文已清理。原修订和密钥记录仍保留；填写完整新配置后可保存替换。`;
+      replace.disabled = !row.defaults; replace.classList.remove('hidden'); return;
+    }
     for (const [name, value] of Object.entries(row.values)) {
       const field = form.elements[name]; if (!field) continue;
       if (field.type === 'checkbox') field.checked = value;
       else field.value = Array.isArray(value) ? value.join('\n') : value;
     }
     $('memory-edit').disabled = false;
-    $('memory-config-status').textContent = `配置版本 ${row.revision} · ${row.has_api_key ? '已保存密钥' : '无密钥'} · ${row.values.enabled ? '已启用（服务状态见下方）' : '未启用'}`;
+    $('memory-config-status').textContent = row.values_payload_state === 'DRAFT'
+      ? `新配置草稿 · 保存后替换版本 ${row.revision}。当前显示的是新模板。`
+      : `配置版本 ${row.revision} · ${row.has_api_key ? '已保存密钥' : '无密钥'} · ${row.values.enabled ? '已启用（服务状态见下方）' : '未启用'}`;
   }
   async function read() {
     if (!bot) return;
@@ -110,7 +125,7 @@ export function memoryPanel(api, busy, notice) {
   form.addEventListener('input', clearPlan);
   form.addEventListener('change', clearPlan);
   form.addEventListener('submit', event => {
-    event.preventDefault(); if (!configuration || !form.reportValidity()) return;
+    event.preventDefault(); if (!configuration?.values || configuration.values_payload_state === 'UNAVAILABLE' || !form.reportValidity()) return;
     const own = epoch, edited = edit, values = structuredClone(configuration.values), prefix = path();
     for (const [name, old] of Object.entries(values)) {
       const field = form.elements[name];
@@ -156,5 +171,13 @@ export function memoryPanel(api, busy, notice) {
     await read();
     if (valid(own)) await refresh();
   }
-  return {reset, select};
+  function invalidateContent(scope) {
+    if (!bot || scope !== path()) return;
+    epoch++; readSeq++; statusSeq++; configuration = null; clearPlan();
+    clearConfiguration(form); $('memory-edit').disabled = true;
+    $('memory-diff').replaceChildren(); $('memory-state').replaceChildren();
+    $('memory-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';
+    replace.classList.add('hidden');
+  }
+  return {reset, select, invalidateContent};
 }

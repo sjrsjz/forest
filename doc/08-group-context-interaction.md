@@ -279,7 +279,7 @@ context_applied_seq == classified_through_seq
 
 `holds_actor = false` 只表示不持有实际执行/提交租约，不能解释为同群可以启动另一 Agent。WAIT_APPROVAL、长 WAIT_TOOL、RELOAD_WAIT 和公平调度让出 Provider 槽时，`active_session_id` 仍被占用。新触发仍正常持久排队；取消/批准经控制通道推进当前 Session。等待有 deadline、显式取消和故障终结机制，不能永久占住同群对话。
 
-自主 Job 若要向正在工作的群发起交互，也必须提交该 Conversation 的受权触发并参加相同队列。后台记忆维护和私有子 Agent 分析可并行，但不拥有该群的 Context 或回复提交权。
+自主 Job 若要向正在工作的群发起交互，也必须提交该 Conversation 的受权触发并参加相同队列。后台记忆维护、索引和组件 RPC 可并行，但它们不是 Agent，不拥有该群的 Context 或回复提交权。
 
 ## 7. 伪代码与事务边界
 

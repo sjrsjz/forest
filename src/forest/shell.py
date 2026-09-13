@@ -134,7 +134,11 @@ class ShellDispatcher:
                         conn, lease, claim["binding_id"], claim["binding_epoch"], data=False,
                     )
                     author = claim["source"]["author"]
-                    admins = binding["config"].get("admin_user_ids", [])
+                    settings = await self.bindings.current_config_in(
+                        conn, self.runtime.bot_id, claim["binding_id"],
+                        expected_binding_epoch=claim["binding_epoch"],
+                    )
+                    admins = settings["config"].get("admin_user_ids", [])
                     authorized = (
                         not author.get("is_self") and author.get("anonymous") is None
                         and author.get("identity_origin") == "adapter_verified"
@@ -150,7 +154,7 @@ class ShellDispatcher:
                         )).fetchone()
                     else:
                         count = None
-                    await self.bindings._final_guard(conn, lease, binding, data=False)
+                    await self.bindings._final_guard(conn, lease, binding, data=False, require_config=True)
                 if not authorized:
                     text, outcome = "当前账号没有 Forest 管理权限。", {"code": "DENIED"}
                 elif builtin_method == "help":
@@ -200,6 +204,13 @@ class ShellDispatcher:
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         result = await getattr(repository, spec.execution_method)(admission, operation, payload)
+        if control.is_unavailable(result):
+            return ("这条管理请求已有记录，回执内容已不可用；没有再次执行。",
+                    {"code": "RECORDED_UNAVAILABLE", "operation_id": operation,
+                     "operation_status": "RECORDED", "result_payload_state": "UNAVAILABLE"})
+        if result is None:
+            return ("这条管理请求已有空回执记录；没有再次执行，实际状态请另行查询。",
+                    {"code": "RECORDED_NULL", "operation_id": operation, "operation_status": "RECORDED"})
         if name == "run.read":
             lines = [
                 f"{row['run_id']}：{row['phase']}；检查点 {row['checkpoint_seq']}"

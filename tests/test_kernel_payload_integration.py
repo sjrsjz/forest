@@ -152,8 +152,14 @@ async def test_exhausted_worker_closes_admission_then_drains_without_epoch_chang
     kernel = Kernel(store)
     await kernel.start()
     task = None
+    release_file = tmp_path / "release-draining-worker"
     try:
-        code = 'import asyncio\n' + ECHO.replace('return {', 'await asyncio.sleep(2)\n        return {')
+        wait = (
+            f"while not Path({json.dumps(str(release_file))}).exists():\n"
+            "            await asyncio.sleep(0.01)\n"
+            "        return {"
+        )
+        code = "import asyncio\nfrom pathlib import Path\n" + ECHO.replace("return {", wait)
         await kernel.install(package(tmp_path, code=code), grants=GRANTS)
         worker = kernel.components["example.counter"].worker
         generation = worker.identity.generation_id
@@ -186,11 +192,13 @@ async def test_exhausted_worker_closes_admission_then_drains_without_epoch_chang
         closed = await store.get_route("example.counter")
         assert closed["route_epoch"] == before["route_epoch"]
         assert worker.alive and not task.done()
+        release_file.write_text("release")
         assert (await task).value == {"value": 5, "revision": 1}
         await wait_for(lambda: not worker.alive and not kernel.components)
         assert kernel.failure is None and not kernel._heartbeat.done()
         assert await store.read_call("overflow") is None
     finally:
+        release_file.touch()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
         await kernel.close()

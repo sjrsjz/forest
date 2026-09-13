@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 
 from psycopg.errors import UniqueViolation
-from psycopg.types.json import Jsonb
 
 from forest.drivers.protocol import validate_json
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.config_payloads import ConfigPayloadStore
+from forest.storage.control_payloads import ControlPayloadStore
 
 
 def _freeze(value: dict) -> dict:
@@ -44,6 +45,22 @@ def _text(value: str, maximum: int = 256) -> str:
 class WatchStore:
     def __init__(self, store: BotStore):
         self.store = store
+
+    async def hydrate_in(self, conn, head, *, required=True):
+        content = ConfigPayloadStore(self.store)
+        hydrated = await content.hydrate_values_in(
+            conn, {"values_payload_id": head["spec_payload_id"], "values_payload_digest": head["spec_payload_digest"]},
+            family="watch", kind="INITIAL", resource=head["watch_id"], identity=head["watch_id"],
+            epoch=(await content.payloads.lock_in(conn))["deletion_epoch"], required=required,
+        )
+        result = {**head, "spec_payload_state": hydrated["values_payload_state"]}
+        if hydrated["values_payload_state"] == "ACTIVE":
+            spec = hydrated["values"]
+            if (not isinstance(spec, dict) or set(spec) != {"source_identity", "config", "grants"}
+                    or digest_json({"source": spec["source_identity"]}) != head["watch_id"]):
+                raise ForestError("WATCH_AUTHORIZATION_CONFLICT", "Watch source identity differs", 409)
+            result.update(spec)
+        return result
 
     async def _guard(self, conn, lease: HostLease, watch_id: str) -> tuple[dict, dict]:
         runtime = await self.store._runtime(conn)
@@ -78,19 +95,30 @@ class WatchStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             runtime = await self.store._runtime(conn)
             await self.store._host(conn, lease, runtime)
-            await conn.execute(
-                "INSERT INTO public.bot_dev_watch_heads(bot_id,watch_id,source_identity,config,grants,policy_revision) "
-                "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                (
-                    self.store.bot_id,
-                    watch_id,
-                    source_identity,
-                    Jsonb(frozen["config"]),
-                    Jsonb(frozen["grants"]),
-                    runtime["policy_revision"],
-                ),
-            )
+            head = await (await conn.execute(
+                "SELECT * FROM public.bot_dev_watch_heads WHERE bot_id=%s AND watch_id=%s FOR UPDATE",
+                (self.store.bot_id, watch_id),
+            )).fetchone()
+            if head is None:
+                # The Host runtime lock serializes first registration; an old
+                # erased identity is never treated as a new initial input.
+                content = ConfigPayloadStore(self.store)
+                epoch = (await content.payloads.lock_in(conn))["deletion_epoch"]
+                spec = {"source_identity": source_identity, **frozen}
+                original = await ControlPayloadStore(self.store).put_input_in(
+                    conn, "watch-initialize:" + watch_id, spec, action="watch.initialize", epoch=epoch,
+                )
+                ref = await content.put_values_in(
+                    conn, family="watch", kind="INITIAL", resource=watch_id, identity=watch_id,
+                    values=spec, parents=(original.payload_id,), epoch=epoch,
+                )
+                await conn.execute(
+                    "INSERT INTO public.bot_dev_watch_heads(bot_id,watch_id,source_identity,config,grants,policy_revision,spec_payload_id,spec_payload_digest) "
+                    "VALUES(%s,%s,NULL,NULL,NULL,%s,%s,%s)",
+                    (self.store.bot_id, watch_id, runtime["policy_revision"], ref.payload_id, ref.digest),
+                )
             head, runtime = await self._guard(conn, lease, watch_id)
+            head = await self.hydrate_in(conn, head)
             if (
                 head["source_identity"] != source_identity
                 or head["config"] != frozen["config"]
@@ -118,6 +146,7 @@ class WatchStore:
                 ).fetchone()
             else:
                 head["last_good"] = None
+            head = await self.hydrate_in(conn, head)
             await self.store._host(conn, lease, runtime)
             return head
 
@@ -128,6 +157,7 @@ class WatchStore:
         _text(source_digest)
         async with self.store.pool.connection() as conn, conn.transaction():
             head, runtime = await self._guard(conn, lease, watch_id)
+            await self.hydrate_in(conn, head)
             previous = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_dev_watch_requests WHERE bot_id=%s AND request_id=%s",
@@ -197,6 +227,7 @@ class WatchStore:
         try:
             async with self.store.pool.connection() as conn, conn.transaction():
                 head, runtime = await self._guard(conn, lease, watch_id)
+                await self.hydrate_in(conn, head)
                 request = await (
                     await conn.execute(
                         "SELECT * FROM public.bot_dev_watch_requests WHERE bot_id=%s AND request_id=%s",
@@ -261,6 +292,7 @@ class WatchStore:
         _text(operation_id)
         async with self.store.pool.connection() as conn, conn.transaction():
             head, runtime = await self._guard(conn, lease, watch_id)
+            await self.hydrate_in(conn, head)
             expected = head["good_request_id"] if recovering else head["desired_request_id"]
             if expected != request_id:
                 raise ForestError(

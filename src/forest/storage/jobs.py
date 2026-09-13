@@ -182,6 +182,8 @@ class JobStore:
             now = await self.store._now(conn)
             jobs, previews = [], {}
             for row in rows:
+                definition = await self._definition(conn, row["job_id"], row["definition_revision"])
+                await self.control.revision_parents(conn, "job", definition, resource=row["job_id"])
                 conversation = {
                     key: row[key]
                     for key in (
@@ -239,7 +241,7 @@ class JobStore:
             claims = await self.control._guard(conn, ticket, "job.plan", operation_id, payload)
             head = await self._head(conn, payload["job_id"], create=True)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if head["revision"] != payload["expected_revision"]:
@@ -296,7 +298,8 @@ class JobStore:
                 "next_occurrences": preview(values["schedule"], now),
                 "conversation": conversation,
             }
-            await self.control._record(conn, claims, result)
+            parents = await self.control.revision_parents(conn, "job", before, resource=head["job_id"])
+            await self.control._record(conn, claims, result, parents=parents)
             await self.control._time(conn, claims)
             return result
 
@@ -309,7 +312,7 @@ class JobStore:
             )
             head = await self._head(conn, payload["job_id"])
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             plan = await (
@@ -399,7 +402,8 @@ class JobStore:
                 "delegation": delegation,
                 "next_due_at": due.isoformat() if due else None,
             }
-            await self.control._record(conn, claims, result)
+            parent = await self.control.plan_parent(conn, "job", plan)
+            await self.control._record(conn, claims, result, parents=(parent,))
             await self.control._time(conn, claims)
             if min(plan["expires_at"], aware(delegation["expires_at"])) <= await self.store._now(
                 conn
@@ -480,7 +484,7 @@ class JobStore:
             claims = await self.control._guard(conn, ticket, "job.run", operation_id, payload)
             head = await self._head(conn, payload["job_id"])
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if head["revision"] != payload["expected_revision"]:
@@ -859,7 +863,7 @@ class JobStore:
             claims = await self.control._guard(conn, ticket, "job.cancel", operation_id, payload)
             head = await self._head(conn, payload["job_id"])
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if head["revision"] != payload["expected_revision"]:
@@ -922,7 +926,7 @@ class JobStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "job.replay", operation_id, payload)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             row = await (

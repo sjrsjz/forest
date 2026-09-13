@@ -1,5 +1,6 @@
 """Public, bounded per-Bot Agent configuration; credentials are stored separately."""
 
+from copy import deepcopy
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,8 +23,9 @@ class AgentSettings(BaseModel):
     enabled: bool = False
     endpoint: str = Field(default="http://127.0.0.1:8000/v1", max_length=2048)
     model: str = Field(default="", max_length=200)
-    system_prompt: str = Field(
-        default="你是群聊中的助手。根据可靠的作者与群来源理解对话。", max_length=16000
+    preset_context: list[str] = Field(
+        default_factory=lambda: ["你是群聊中的助手。根据可靠的作者与群来源理解对话。"],
+        max_length=32,
     )
     vision: bool = False
     tool_calls: bool = True
@@ -40,11 +42,15 @@ class AgentSettings(BaseModel):
     model_timeout: int = Field(default=90, ge=1, le=300, strict=True)
     daily_token_budget: int = Field(default=200000, ge=1024, le=100000000, strict=True)
     run_token_budget: int = Field(default=32768, ge=1024, le=1000000, strict=True)
-    children_enabled: bool = False
-    max_children: int = Field(default=4, ge=1, le=8, strict=True)
-    child_concurrency: int = Field(default=2, ge=1, le=2, strict=True)
-    child_timeout: int = Field(default=90, ge=1, le=300, strict=True)
-    child_max_output_tokens: int = Field(default=1024, ge=64, le=8192, strict=True)
+    max_tool_iterations: int = Field(default=8, ge=0, le=32, strict=True)
+    max_thinking_iterations: int = Field(default=4, ge=0, le=16, strict=True)
+    max_protocol_repairs: int = Field(default=1, ge=0, le=1, strict=True)
+    protocol_candidate_byte_limit: int = Field(
+        default=1024 * 1024, ge=4096, le=4 * 1024 * 1024, strict=True
+    )
+    protocol_repair_feedback_byte_limit: int = Field(
+        default=8192, ge=1024, le=32768, strict=True
+    )
     allowed_tools: list[ToolSettings] = Field(default_factory=list, max_length=16)
     media_allowed_origins: list[str] = Field(default_factory=list, max_length=32)
 
@@ -78,11 +84,13 @@ class AgentSettings(BaseModel):
             raise ValueError("Model names cannot contain control characters")
         return value
 
-    @field_validator("system_prompt")
+    @field_validator("preset_context")
     @classmethod
     def prompt_bytes(cls, value):
-        if len(value.encode("utf-8")) > 32768:
-            raise ValueError("System prompt must fit the 32768-byte model input limit")
+        if any(not item.strip() for item in value):
+            raise ValueError("PresetContext messages cannot be empty")
+        if sum(len(item.encode("utf-8")) for item in value) > 32768:
+            raise ValueError("PresetContext must fit the 32768-byte model input limit")
         return value
 
     @field_validator("media_allowed_origins")
@@ -106,15 +114,47 @@ class AgentSettings(BaseModel):
             raise ValueError("Model timeout cannot exceed the whole Run deadline")
         if self.allowed_tools and not self.tool_calls:
             raise ValueError("Enable model tool calls before configuring tools")
-        if self.children_enabled and not self.tool_calls:
-            raise ValueError("Private analysis requires parent model tool calls")
-        if self.children_enabled and len(self.allowed_tools) > 15:
-            raise ValueError("Private analysis reserves one of the sixteen model tool definitions")
         if any(tool.name == "forest_analyze" for tool in self.allowed_tools):
-            raise ValueError("forest_analyze is a reserved host tool")
+            raise ValueError("forest_analyze is a retired product tool name")
         if len({tool.name for tool in self.allowed_tools}) != len(self.allowed_tools):
             raise ValueError("Tool names must be unique")
         return self
 
 
 DEFAULT_AGENT_SETTINGS = AgentSettings().model_dump()
+
+_RETIRED_FIELDS = {
+    "children_enabled",
+    "max_children",
+    "child_concurrency",
+    "child_timeout",
+    "child_max_output_tokens",
+}
+
+
+def project_stored_agent_values(values: dict) -> dict:
+    """Project legacy field names/defaults without changing its receipt body."""
+    if not isinstance(values, dict):
+        raise ValueError("Stored Agent settings must be an object")
+    result = deepcopy(values)
+    legacy_prompt = result.pop("system_prompt", None)
+    for field in _RETIRED_FIELDS:
+        result.pop(field, None)
+    if "preset_context" not in result:
+        result["preset_context"] = [legacy_prompt] if legacy_prompt else []
+    for key, value in DEFAULT_AGENT_SETTINGS.items():
+        result.setdefault(key, deepcopy(value))
+    return result
+
+
+def normalize_stored_agent_values(values: dict) -> dict:
+    """Validate an immutable legacy config body against the public runtime schema.
+
+    The payload itself is never rewritten.  A subsequent administrator apply
+    persists the normalized schema as a new revision.
+    """
+    result = project_stored_agent_values(values)
+    try:
+        return AgentSettings.model_validate(result).model_dump()
+    except ValueError as exc:
+        raise ValueError("Stored Agent settings cannot be normalized") from exc

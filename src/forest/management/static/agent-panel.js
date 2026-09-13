@@ -1,11 +1,15 @@
+import {clearConfiguration, replacementButton} from './configuration-forms.js';
+
 const $ = (id) => document.getElementById(id);
 
 export function agentPanel(api, busy, notice) {
-  const childDefaults = {children_enabled:false, max_children:4, child_concurrency:2,
-    child_timeout:90, child_max_output_tokens:1024, run_token_budget:32768};
   let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0;
   let configuration = null, pending = null, planKey = null, applyKey = null;
   const form = $('agent-config');
+  const replace = replacementButton($('agent-config-status'), 'agent-replace-configuration', () => {
+    if (!configuration?.defaults) return;
+    showConfiguration({...configuration, values:structuredClone(configuration.defaults), values_payload_state:'DRAFT'});
+  });
   const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/agent`;
   const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
   const valid = (own) => bot !== null && own === epoch;
@@ -18,18 +22,35 @@ export function agentPanel(api, busy, notice) {
     clearPlan(); form.reset(); form.querySelector('fieldset').disabled = true;
     $('bot-agent').classList.add('hidden'); $('agent-runs').replaceChildren();
     $('agent-config-status').textContent = '';
+    $('agent-protocol-version').textContent = '—';
+    $('agent-protocol-digest').textContent = '—';
+    $('agent-core-prompt').textContent = '';
+    replace.classList.add('hidden');
   }
   function showConfiguration(row) {
-    row = {...row, values:{...childDefaults, ...row.values}};
     configuration = row; clearPlan(); form.reset();
+    $('agent-protocol-version').textContent = row.protocol
+      ? `${row.protocol.protocol_id} v${row.protocol.protocol_version} · ${row.protocol.parser_revision}` : '—';
+    $('agent-protocol-digest').textContent = row.protocol?.core_prompt_digest || '—';
+    $('agent-core-prompt').textContent = row.protocol?.core_prompt || '';
+    replace.classList.add('hidden');
+    if (row.values_payload_state === 'UNAVAILABLE' || row.values === null) {
+      clearConfiguration(form); form.querySelector('fieldset').disabled = true;
+      $('agent-config-status').textContent = `配置修订 ${row.revision} 的正文已清理。原修订和密钥记录仍保留；填写完整新配置后可保存替换。`;
+      replace.disabled = !row.defaults; replace.classList.remove('hidden'); return;
+    }
+    configuration = row;
     for (const [name, value] of Object.entries(row.values)) {
       const field = form.elements[name]; if (!field) continue;
       if (field.type === 'checkbox') field.checked = value;
       else if (name === 'allowed_tools') field.value = JSON.stringify(value, null, 2);
+      else if (name === 'preset_context') field.value = value.join('\n\n');
       else field.value = Array.isArray(value) ? value.join('\n') : value;
     }
     form.querySelector('fieldset').disabled = false;
-    $('agent-config-status').textContent = `配置修订 ${row.revision} · ${row.has_api_key ? '已保存 API 密钥' : '无 API 密钥'} · ${row.values.enabled ? 'Agent 已启用' : 'Agent 未启用'}`;
+    $('agent-config-status').textContent = row.values_payload_state === 'DRAFT'
+      ? `新配置草稿 · 保存后替换修订 ${row.revision}。当前显示的是新模板。`
+      : `配置修订 ${row.revision} · ${row.has_api_key ? '已保存 API 密钥' : '无 API 密钥'} · ${row.values.enabled ? 'Agent 已启用' : 'Agent 未启用'}`;
   }
   async function read() {
     if (!bot) return;
@@ -46,6 +67,7 @@ export function agentPanel(api, busy, notice) {
       if (typeof old === 'boolean') result[name] = field.checked;
       else if (typeof old === 'number') result[name] = Number(field.value);
       else if (name === 'allowed_tools') result[name] = JSON.parse(field.value || '[]');
+      else if (name === 'preset_context') result[name] = field.value.trim() ? [field.value] : [];
       else if (Array.isArray(old)) result[name] = field.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
       else result[name] = field.value;
     }
@@ -55,7 +77,7 @@ export function agentPanel(api, busy, notice) {
   form.addEventListener('change', clearPlan);
   form.addEventListener('submit', event => {
     event.preventDefault(); const own = epoch, edited = edit;
-    if (!configuration) return;
+    if (!configuration?.values || configuration.values_payload_state === 'UNAVAILABLE') return;
     let normalized;
     try { normalized = values(); } catch { notice('工具授权需要合法的 JSON 数组。'); return; }
     const payload = {expected_revision: configuration.revision, values: normalized,
@@ -79,6 +101,7 @@ export function agentPanel(api, busy, notice) {
       if (!valid(own)) return;
       if (edited === edit && pending === plan) {
         showConfiguration({revision:result.revision, values:plan.values,
+          protocol:configuration.protocol,
           secret_revision:result.secret_revision,
           has_api_key:plan.credentials_changed ? !payloadCleared() : configuration.has_api_key});
       }
@@ -145,32 +168,9 @@ export function agentPanel(api, busy, notice) {
       }
       root.append(item);
     }
-    if (data.children?.length) {
-      const section = document.createElement('section'), title = document.createElement('h3');
-      title.textContent = '私有子分析'; section.append(title);
-      const note = document.createElement('p'); note.className = 'hint';
-      note.textContent = '子分析结果只交回父运行，不直接发送到群。取消父运行会停止接纳其后续结果；已发出的模型请求可能仍产生费用。';
-      section.append(note);
-      const states = {PENDING:'待执行', PREPARED:'输入已固定', RUNNING:'分析中', DISPATCHING:'请求已发出',
-        RESPONDED:'模型已返回', SUCCEEDED:'已完成', COMPLETED:'已完成', FAILED:'失败', CANCELLED:'已取消', UNKNOWN:'结果待核实',
-        QUEUED:'排队中', RETRY:'等待重试', RESULT_READY:'等待父运行采纳', ACCEPTED:'父运行已采纳'};
-      for (const child of data.children) {
-        const item = document.createElement('details'), label = document.createElement('summary');
-        label.textContent = `${states[child.status] || child.status} · ${child.child_id}`;
-        const facts = document.createElement('dl');
-        for (const [name, value] of [['父运行',child.parent_run_id], ['委托主体',child.principal_ref],
-          ['来源触发',child.authority_trigger_id], ['选定上下文单元',child.source_unit_ids?.length ?? 0],
-          ['期限',child.deadline_at], ['错误',child.error_code || '—']]) {
-          const key = document.createElement('dt'), detail = document.createElement('dd');
-          key.textContent = name; detail.textContent = String(value ?? '—'); facts.append(key, detail);
-        }
-        item.append(label, facts); section.append(item);
-      }
-      root.append(section);
-    }
     if (data.run_budgets?.length) {
       const section = document.createElement('details'), title = document.createElement('summary');
-      title.textContent = '父运行与子分析共用预算'; section.append(title);
+      title.textContent = '每次运行预算'; section.append(title);
       for (const budget of data.run_budgets) {
         const row = document.createElement('p');
         row.textContent = `${budget.run_id} · 已预留 ${budget.reserved_tokens ?? '—'} token · 已计入 ${budget.charged_tokens ?? '—'} token`;
@@ -191,5 +191,13 @@ export function agentPanel(api, busy, notice) {
     reset(); bot = row; $('bot-agent').classList.remove('hidden');
     await read(); await refresh();
   }
-  return {reset, select, refresh};
+  function invalidateContent(scope) {
+    if (!bot || scope !== base()) return;
+    epoch++; readSeq++; statusSeq++; configuration = null; clearPlan();
+    clearConfiguration(form); form.querySelector('fieldset').disabled = true;
+    $('agent-config-diff').replaceChildren(); $('agent-runs').replaceChildren();
+    $('agent-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';
+    replace.classList.add('hidden');
+  }
+  return {reset, select, refresh, invalidateContent};
 }

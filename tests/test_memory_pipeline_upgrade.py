@@ -17,14 +17,15 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from binding_seed import VALUES as BINDING_VALUES
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from legacy_022 import DeliveryStore as LegacyDeliveryStore
 from legacy_022 import MemorySourceStore as LegacyMemorySourceStore
 from legacy_022 import MessageStore as LegacyMessageStore
+from legacy_control import configure_agent_before_cutover
 from psycopg.types.json import Jsonb
 from retention_upgrade import assert_preserved, content
-from test_agent_config import apply as apply_agent
-from test_agent_config import plan as plan_agent
+from test_agent_store import agent_turn
 from test_messages import event, owner
 from test_models import completion, respond, server
 from test_p4_upgrade import MEMORY_TABLES, P3_RELEASED, snapshot
@@ -38,6 +39,7 @@ from forest.packages import digest_json
 from forest.platform import BindingRuntime
 from forest.security import SecretVault
 from forest.storage.agent_config import AgentConfig
+from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, _migration_checksum
 from forest.storage.control import BotControl
 from forest.storage.memory_config import MemoryConfig
@@ -310,7 +312,7 @@ async def old_bot(dsn, path, *, endpoint="http://127.0.0.1:8000/v1"):
             "max_output_tokens": 128,
             "model_timeout": 15,
         }
-        await apply_agent(env, await plan_agent(env, values=env.values, secret=API_KEY))
+        await configure_agent_before_cutover(env, values=env.values, secret=API_KEY)
         env.messages = LegacyMessageStore(store)
         env.sources = LegacyMemorySourceStore(env.messages)
         original = event(
@@ -353,17 +355,58 @@ async def old_bot(dsn, path, *, endpoint="http://127.0.0.1:8000/v1"):
         await store.close()
 
 
-async def upgrade(env):
+async def upgrade(env, *, reconnect=True):
     await env.store.release_host(env.lease)
     await env.store.migrate()
     env.lease = await env.store.acquire_host("upgraded-host", "upgraded-" + uuid4().hex, ttl_seconds=300)
-    async with env.store.pool.connection() as conn:
-        await conn.execute(
-            "UPDATE public.bot_bindings SET host_incarnation=%s,host_owner_epoch=%s WHERE bot_id='bot-a'",
-            (env.lease.incarnation, env.lease.owner_epoch),
-        )
+    if reconnect:
+        await reconnect_binding_after_upgrade(env)
     env.messages = MessageStore(env.store)
     env.sources = MemorySourceStore(env.messages)
+
+
+async def reconnect_binding_after_upgrade(env):
+    # Register a distinct fixture key under the Host transaction. Production
+    # trust() intentionally cannot add another authority over an existing one.
+    # All Binding writes still require genuine signed, scoped management input.
+    issuer = "upgrade-binding:" + uuid4().hex
+    signer = OldEnvironment(private=Ed25519PrivateKey.generate())
+    async with env.store.pool.connection() as conn, conn.transaction():
+        await env.store._host(conn, env.lease)
+        before = (await snapshot(conn, ("bot_web_issuers",)))["bot_web_issuers"]
+        await conn.execute(
+            "INSERT INTO public.bot_web_issuers(bot_id,issuer_id,key_revision,public_key,actions) "
+            "VALUES (%s,%s,1,%s,%s)",
+            (env.store.bot_id, issuer, base64.b64encode(signer.private.public_key().public_bytes_raw()).decode(),
+             Jsonb(["binding.plan", "binding.apply"])),
+        )
+        await env.store._host(conn, env.lease)
+        after = (await snapshot(conn, ("bot_web_issuers",)))["bot_web_issuers"]
+        assert [row for row in after if row["issuer_id"] != issuer] == before
+        binding = await (await conn.execute(
+            "SELECT revision,binding_epoch FROM public.bot_bindings "
+            "WHERE bot_id=%s AND binding_id='binding-a'", (env.store.bot_id,),
+        )).fetchone()
+
+    async def ticket(action, operation, payload, **changes):
+        return await signer.ticket(action, operation, payload, issuer=issuer, **changes)
+
+    bindings = BindingStore(env.store)
+    secret = env.vault.encrypt("current-test-binding-token")
+    operation = "upgrade-binding-plan:" + uuid4().hex
+    payload = {"binding_id": "binding-a", "expected_revision": binding["revision"],
+               "values": {**BINDING_VALUES, "response_mode": "agent"},
+               "credentials_changed": True, "secret_digest": hashlib.sha256(secret.encode()).hexdigest()}
+    plan = await bindings.plan(await ticket("binding.plan", operation, payload), operation, payload, secret)
+    operation = "upgrade-binding-apply:" + uuid4().hex
+    payload = {"binding_id": "binding-a", **{key: plan[key] for key in
+               ("expected_revision", "plan_id", "plan_digest")}}
+    applied = await bindings.apply(await ticket("binding.apply", operation, payload,
+        plan_digest=payload["plan_digest"]), operation, payload)
+    await bindings.activate(env.lease, "binding-a", applied["revision"], enabled=True,
+        client_incarnation="upgrade-client:" + uuid4().hex,
+        expected_binding_epoch=binding["binding_epoch"],
+    )
 
 
 async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_exact_requests(
@@ -380,7 +423,7 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
             assert env.before[name]
         async with env.store.pool.connection() as conn:
             issuer = (await snapshot(conn, ("bot_web_issuers",)))["bot_web_issuers"][0]
-        await upgrade(env)
+        await upgrade(env, reconnect=False)
         await env.store.migrate()
         async with env.store.pool.connection() as conn:
             await assert_preserved(conn, env.before, append_only=MEMORY_TABLES)
@@ -428,6 +471,9 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
         assert API_KEY not in json.dumps(public) and saved["secret_ciphertext"] not in json.dumps(
             public
         )
+        # The complete migration/issuer comparison above precedes this new
+        # management action. Provenance reads require a real current connection.
+        await reconnect_binding_after_upgrade(env)
         view = await env.sources.read(env.lease, env.source["conversation_id"], input_cut=1)
         source = next(
             item for item in view["sources"] if item["source"]["channel_id"] == "source-group"
@@ -468,7 +514,7 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
                     (issuer, public, Jsonb(actions), enabled),
                 )
             before = await snapshot(conn, ("bot_web_issuers",))
-        await upgrade(env)
+        await upgrade(env, reconnect=False)
         control = BotControl(env.store)
         async with env.store.pool.connection() as conn:
             actual = {
@@ -518,7 +564,10 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
 ):
     async def handler(writer, request):
         assert request["headers"]["Authorization"] == "Bearer " + API_KEY
-        await respond(writer, json.dumps(completion("Completed after upgrade")).encode())
+        await respond(
+            writer,
+            json.dumps(completion(agent_turn("Completed after upgrade"))).encode(),
+        )
 
     async with (
         server(handler) as (endpoint, requests),
@@ -634,6 +683,6 @@ async def test_old_checksum_mismatch_rejects_upgrade_before_any_new_memory_table
                 "UPDATE public.forest_bot_schema_migrations SET checksum=%s WHERE version='022_memory_sources.sql'",
                 (RELEASED["022_memory_sources.sql"],),
             )
-        await upgrade(env)
+        await upgrade(env, reconnect=False)
         async with env.store.pool.connection() as conn:
             await assert_preserved(conn, env.before, append_only=MEMORY_TABLES)

@@ -1,9 +1,11 @@
 """Independent group control, current allowlist checks and output fencing."""
 
 import asyncio
+import hashlib
+from uuid import uuid4
 
 import pytest
-from psycopg.types.json import Jsonb
+from binding_seed import _ticket_factory
 from test_group_scheduler import row, until
 from test_messages import event, receive
 from test_messages import messages as messages
@@ -17,8 +19,23 @@ pytestmark = pytest.mark.postgres
 
 async def allow(repository, *users, binding_id="binding-a"):
     async with repository.store.pool.connection() as conn:
-        await conn.execute("UPDATE public.bot_bindings SET config=%s WHERE binding_id=%s",
-                           (Jsonb({"admin_user_ids": list(users)}), binding_id))
+        owner = await (await conn.execute("SELECT * FROM public.bot_host_lease WHERE bot_id=%s",
+            (repository.store.bot_id,))).fetchone()
+    lease = repository.store._host_value(owner)
+    ticket = await _ticket_factory(repository.store, lease)
+    bindings = repository.bindings
+    current = await bindings.current(lease, binding_id)
+    secret = await bindings.credentials(lease, binding_id)
+    operation = "allow-plan-" + uuid4().hex
+    payload = {"binding_id": binding_id, "expected_revision": current["revision"],
+               "values": {**current["config"], "admin_user_ids": list(users)},
+               "credentials_changed": False, "secret_digest": hashlib.sha256(secret.encode()).hexdigest()}
+    plan = await bindings.plan(await ticket("binding.plan", operation, payload), operation, payload, secret)
+    operation = "allow-apply-" + uuid4().hex
+    payload = {"binding_id": binding_id, **{key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")}}
+    await bindings.apply(await ticket("binding.apply", operation, payload, plan_digest=payload["plan_digest"]), operation, payload)
+    await bindings.activate(lease, binding_id, current["revision"] + 1, enabled=True,
+        client_incarnation="allow-client-" + uuid4().hex, expected_binding_epoch=current["binding_epoch"])
 
 
 def dispatcher(repository, lease):
@@ -117,8 +134,7 @@ async def test_allowlist_replacement_before_complete_prevents_stale_status_recei
     try:
         await instance.start()
         await asyncio.wait_for(before_complete.wait(), 5)
-        async with repository.store.pool.connection() as conn:
-            await conn.execute("UPDATE public.bot_bindings SET binding_epoch=binding_epoch+1,config='{}'::jsonb WHERE binding_id='binding-a'")
+        await allow(repository)
         resume.set()
         await until(lambda: completed(repository, 1))
         result = await row(repository, "SELECT outcome FROM public.bot_shell_requests WHERE command_id=%s", (command["command_id"],))

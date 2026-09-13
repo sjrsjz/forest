@@ -3,6 +3,8 @@ import { agentPanel } from './agent-panel.js';
 import { memoryPanel } from './memory.js';
 import { jobsPanel } from './jobs-panel.js';
 import { schemaForm } from './schema-form.js';
+import { controlReceipts } from './control-receipts.js';
+import { replacementButton } from './configuration-forms.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -10,6 +12,7 @@ let configuration = null;
 let pendingPlan = null;
 let applyKey = null;
 let activeView = 'loading';
+const readReceipt = controlReceipts(invalidateControl);
 
 function notice(text, success = false) {
   $('notice').textContent = text;
@@ -22,16 +25,19 @@ function show(id) {
   $('main-nav').classList.toggle('hidden', !['configuration', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
+  return readReceipt(path, () => fetchApi(path, body, extraHeaders));
+}
+async function fetchApi(path, body, extraHeaders) {
   const response = await fetch(`/management/v1${path}`, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf(), ...extraHeaders },
     ...(body === undefined ? {} : { body: body instanceof Blob ? body : JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => ({ code: 'INVALID_RESPONSE', message: '服务暂时无法响应，请稍后重试。' }));
-  if (!response.ok || data.code === 'INVALID_RESPONSE') {
-    const error = new Error(`${data.message || '操作未完成'} (${data.code || response.status})`);
-    error.code = data.code;
-    error.details = data.details;
+  if (!response.ok || data?.code === 'INVALID_RESPONSE') {
+    const error = new Error(`${data?.message || '操作未完成'} (${data?.code || response.status})`);
+    error.code = data?.code;
+    error.details = data?.details;
     throw error;
   }
   return data;
@@ -99,6 +105,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   bindingPanel.reset();
   modelPanel.reset();
+  memoriesPanel.reset();
   scheduledPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; packageRows = []; selectionEpoch++; packageReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
@@ -135,6 +142,14 @@ let botRows = [], selectedBot = null, botConfig = null, packageRows = [];
 let botPlan = null, botApplyKey = null, createKey = null, invokeKey = null, renameKey = null, retryKey = null;
 let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0;
 let readConfigFields, readInvokeFields, historyBefore = null, importKey = null;
+let componentReplacementRequired = false, componentReplacementDraft = false;
+let componentSourceRevision = null;
+const replaceComponent = replacementButton($('bot-runtime-status'), 'component-replace-configuration', () => {
+  if (!botConfig?.defaults || !selectedPackage()) return;
+  clearBotPlan(); componentReplacementRequired = false; componentReplacementDraft = true;
+  componentSourceRevision = null;
+  replaceComponent.classList.add('hidden'); renderComponent(undefined, []); updateBotState(botConfig);
+});
 const bindingPanel = bindingsPanel(api, busy, notice);
 const modelPanel = agentPanel(api, busy, notice);
 const memoriesPanel = memoryPanel(api, busy, notice);
@@ -142,8 +157,19 @@ const scheduledPanel = jobsPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
+function invalidateControl(scope) {
+  if (selectedBot && selectedPackage() && scope === componentPath()) {
+    selectionEpoch++; configReadSeq++; clearBotPlan(); resetComponent();
+    $('bot-config-diff').replaceChildren(); $('bot-invoke-result').replaceChildren();
+    $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
+  }
+  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel]) panel.invalidateContent(scope);
+}
 function resetComponent() {
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
+  componentReplacementRequired = false; componentReplacementDraft = false;
+  componentSourceRevision = null;
+  replaceComponent.classList.add('hidden'); $('bot-grants').checked = false;
   $('bot-config-fields').replaceChildren(); $('bot-invoke-fields').replaceChildren();
   $('bot-service').replaceChildren(); $('bot-history').replaceChildren();
   $('bot-grants').disabled = true;
@@ -192,6 +218,8 @@ async function loadPackages(force = false) {
   }
 }
 function updateBotState(state) {
+  if (botConfig && (state.desired_revision < botConfig.desired_revision ||
+      state.effective_revision < botConfig.effective_revision)) return;
   $('bot-desired').textContent = state.desired_revision;
   $('bot-effective').textContent = state.effective_revision;
   const component = state.runtime.components.find((c) => c.component_id === selectedPackage().component_id);
@@ -199,6 +227,11 @@ function updateBotState(state) {
   $('bot-runtime-status').textContent = error ? `组件暂未就绪：${error}` :
     component?.worker_state === 'ACTIVE' && component.loaded_revision === state.desired_revision ? '组件已生效并运行中' :
     state.desired_revision ? '已保存，等待组件启动或切换…' : '保存组件配置后即可启动';
+  const unavailable = [];
+  if (state.desired_values_payload_state === 'UNAVAILABLE') unavailable.push('已保存配置正文已清理');
+  if (state.effective_values_payload_state === 'UNAVAILABLE') unavailable.push('已生效配置正文已清理');
+  if (componentReplacementDraft) unavailable.push('正在填写独立新配置草稿');
+  if (unavailable.length) $('bot-runtime-status').textContent += ` · ${unavailable.join(' · ')}`;
   $('bot-operations').replaceChildren();
   for (const op of state.operations || []) {
     const row = document.createElement('li');
@@ -231,9 +264,24 @@ function renderService() {
 async function readBotConfig() {
   const epoch = selectionEpoch, edit = formEpoch, seq = ++configReadSeq;
   const state = await api(`${componentPath()}/configuration`);
-  if (epoch !== selectionEpoch || edit !== formEpoch || seq !== configReadSeq) return;
-  botConfig = state; clearBotPlan(); updateBotState(state);
-  renderComponent(state.desired_values?.config, state.desired_values?.grants);
+  if (epoch !== selectionEpoch || seq !== configReadSeq) return;
+  if (edit !== formEpoch) {
+    updateBotState(state); notice('读取期间有新的配置输入，已保留。需要丢弃草稿时可再次重新加载。'); return;
+  }
+  botConfig = state; clearBotPlan(); componentReplacementDraft = false;
+  componentSourceRevision = state.desired_values_payload_state === 'ACTIVE' && state.desired_values !== null
+    ? state.desired_revision : null;
+  componentReplacementRequired = state.desired_values_payload_state === 'UNAVAILABLE' ||
+    (state.desired_revision > 0 && state.desired_values === null);
+  replaceComponent.classList.toggle('hidden', !componentReplacementRequired);
+  replaceComponent.disabled = !state.defaults;
+  updateBotState(state);
+  if (componentReplacementRequired) {
+    readConfigFields = null; $('bot-config-fields').replaceChildren(); $('bot-grants').checked = false;
+    $('bot-grants').disabled = true; $('bot-config-form').querySelector('button[type="submit"]').disabled = true;
+  } else {
+    renderComponent(state.desired_values?.config, state.desired_values?.grants);
+  }
   $('bot-history').replaceChildren(); historyBefore = null;
 }
 async function selectBot(id) {
@@ -312,10 +360,11 @@ $('reload-bot-config').addEventListener('click', () => busy($('reload-bot-config
 $('bot-config-form').addEventListener('input', clearBotPlan);
 $('bot-config-form').addEventListener('submit', (event) => {
   event.preventDefault(); const form = event.currentTarget;
+  if (!botConfig || componentReplacementRequired || !readConfigFields || !form.reportValidity()) return;
   busy(form.querySelector('button'), async () => {
-    if (!botConfig || !readConfigFields) return;
     const epoch = selectionEpoch, edit = formEpoch, pkg = selectedPackage(), config = readConfigFields();
     const plan = await api(`${componentPath()}/change-plans`, {expected_revision: botConfig.desired_revision,
+      ...(componentSourceRevision === null ? {} : {source_revision: componentSourceRevision}),
       values: {package_digest: pkg.package_digest, config, grants: [...pkg.grants].sort()}}, {'Idempotency-Key': crypto.randomUUID()});
     if (epoch !== selectionEpoch || edit !== formEpoch) return;
     botPlan = plan; botApplyKey = crypto.randomUUID();
@@ -370,15 +419,20 @@ async function readHistory(append = false) {
   $('bot-history-more').classList.toggle('hidden', !historyBefore);
   for (const revision of data.revisions) {
     const row = document.createElement('div');
-    const pkg = packageRows.find((p) => p.package_digest === revision.values.package_digest);
+    const unavailable = revision.values_payload_state === 'UNAVAILABLE' || !revision.values;
+    const pkg = !unavailable && packageRows.find((p) => p.package_digest === revision.values.package_digest);
     const text = document.createElement('p');
-    text.textContent = `修订 ${revision.revision} · ${revision.created_at} · ${pkg?.version || '插件包不可用'}`;
+    text.textContent = `修订 ${revision.revision} · ${revision.created_at} · ${unavailable ? '配置正文已清理' : pkg?.version || '插件包不可用'}`;
     const button = document.createElement('button'); button.className = 'subtle';
     button.textContent = '载入此配置'; button.disabled = !pkg;
     button.addEventListener('click', () => {
       if (epoch !== selectionEpoch) return;
       $('bot-package').value = pkg.package_digest;
-      clearBotPlan(); renderComponent(revision.values.config, revision.values.grants);
+      clearBotPlan(); componentReplacementRequired = false; componentReplacementDraft = true;
+      componentSourceRevision = revision.revision;
+      replaceComponent.classList.remove('hidden'); replaceComponent.disabled = !botConfig.defaults;
+      renderComponent(revision.values.config, revision.values.grants);
+      updateBotState(botConfig);
       notice(`已载入修订 ${revision.revision}。预览并应用后会创建新的配置修订；持久状态按兼容性迁移。`, true);
     });
     row.append(text, button); $('bot-history').append(row);

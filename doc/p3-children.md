@@ -1,79 +1,25 @@
-# P3 私有子 Agent：已实现边界
+# P3 产品子 Agent 退役与兼容迁移
 
-本切片提供可运行、可恢复的私有分析子 Agent。父模型通过内置 `forest_analyze` 提出任务；后台执行器进行一次无工具模型调用，结果先成为候选，再由当前父 Actor 接纳。子 Agent 不占据新的群聊前台、不生成 SendIntent、不调整父 Run 已冻结的消息切口，也不能再创建子 Agent。
+状态：**旧设计已撤销。此文只记录升级兼容，不再定义可用能力。**新的 Agent 语义见[单 Agent 协议与持久运行](p3-agent.md)。
 
-## 调用协议与权限来源
+Forest 曾实现 `forest_analyze`、`ChildScheduler`、`bot_agent_children` 和 `bot_child_model_attempts`，让群 Agent 再发起独立模型请求。该实现误解了 QiYu Agentlib：Agentlib 的“下一轮”是同一个 Agent 在工具或 Provider 安全边界后的下一次模型调用，pending branch 也是同一条对话执行链；它没有群聊子 Agent。
 
-Agent 配置开启 `children_enabled` 后，父模型的工具声明增加：
+产品子 Agent 会额外引入第二份 Prompt、模型预算、恢复分支、候选接纳和来源授权，却没有解决本项目的群聊排队、原子 ModelTurn 或 Agent 核心提示词问题。因此该能力退役：
 
-```json
-{
-  "name": "forest_analyze",
-  "arguments": {
-    "authority_trigger_id": "本次快照中一个已认领的用户触发记录",
-    "arguments": {
-      "task": "私有分析任务",
-      "source_unit_ids": ["本次父快照中的精确单元 ID"]
-    }
-  }
-}
-```
+- 删除内置工具 `forest_analyze`；
+- 不启动 `ChildScheduler`，不创建 Child 模型请求；
+- Agent 配置和 WebUI 删除全部 `children_*` 字段；
+- 后台不再提供 Child 状态、派发、接纳或恢复入口；
+- 计划任务需要对话时向目标 Conversation 写入 trigger，进入唯一 Agent Session；
+- 组件内部的嵌套 Kernel RPC 继续存在，但称为 component call tree，不称为 Agent。
 
-声明中的枚举来自该次不可变模型快照。实际创建事务重新验证当前父 Run、工具调用组、触发记录、来源主体、配置和运行时权限版本；不存在把多个触发者权限合并授予子任务的路径。内置名称被配置校验保留，业务插件不能覆盖。当前仅用户入站触发可委托分析；`host_job` 定时触发仅拥有 `conversation.trigger`，没有分析或外部工具委托。外部工具的预许可和最终数据库守卫也拒绝系统触发来源，不能根据显示名称推导管理员权限。
+已经发布的数据库迁移文件保持不可变。`050_single_agent_protocol.sql` 已执行以下收敛：
 
-一次调用组内的所有子任务按模型返回的 `call_index` 创建，稳定 `child_id` 由 Bot 和原工具 operation ID 派生。同一父 Run 的累计任务数受 `max_children` 限制，包括失败或已完成任务，不能通过多轮调用绕过配额。
+1. 锁定旧 Child 表并把非终态记录转为 `CANCELLED` 或明确的遗留失败状态；
+2. 结算已知模型用量，`UNKNOWN` 费用事实继续保留，不推断为未发送；
+3. 对旧 request/result payload 保持既有来源、删除屏障和保留期规则；
+4. 安装拒绝 INSERT/业务状态推进的数据库 fence，防止旧 Worker 重新创建任务；
+5. 不删除历史事实表，便于审计和旧备份恢复；
+6. 新运行时不 hydrate 或调度任何遗留 Child 记录。
 
-## 冻结输入与多模态
-
-创建时复制父模型快照的指定单元子集，保留原始顺序、来源群聊、作者、输入 revision、选中序号切口和 input-batch 引用，并追加有明确来源的任务单元。请求不能引用另一个快照或另一个 Bot 中的单元。父工具因果记录在子输入中作为带类型的证据呈现，不能冒充子模型的可执行工具协议。所有选中单元均列入 required units；超出上下文容量时明确失败，不静默移除任务证据。
-
-子执行器只读取父上下文已经验证并持久捕获的图片。读取关联 Bot、原入站事件、单元、part index、所在会话与父切口，并在请求许可及父接纳时重验来源仍可读。它不会按模型生成的 URL 下载图片，也不会为读图伪造父 Actor。视觉模型请求使用已验证的不可变图片字节；文本模型使用现有 Provider 投影移除图片内容并注明不可见媒体。两种投影均保留数据库中的原始多模态单元，供后续记忆流程使用。当前工具 JSON 内的媒体不获得新的像素读取权限。
-
-## 持久状态与租约
-
-新增迁移 `019_children.sql`，既有迁移不改写：
-
-| 表 | 保存的事实 |
-| --- | --- |
-| `bot_agent_children` | 父 Run/step/cut、委托触发和主体、固定单元子集与快照摘要、冻结配置、截止时间、独立 owner/lease epoch、候选结果与接纳 checkpoint |
-| `bot_child_model_attempts` | 精确请求 bytea、wire digest、manifest、请求与传输尝试 ID、owner 和 host fence、许可/派发/响应状态、实际观察、预算预留与结算 |
-| `bot_agent_tree_budgets` | 父模型和全部子模型共用的 Run 树预留/已花费账本 |
-
-身份字段和快照由数据库触发器保护；已写入的模型观察和候选摘要不能被另一结果覆盖。请求字节的 SHA-256 由数据库 CHECK 再次验证。
-
-子状态：`QUEUED → RUNNING → RESULT_READY → ACCEPTED`。明确未发送时进入 `RETRY`；确定失败进入 `FAILED`；派发后无法确认结果时进入 `UNKNOWN`；父取消进入 `CANCELLED`。每个子 Agent 只允许一次逻辑模型请求，明确未发送最多三次传输尝试，重试保留同一 request ID、manifest、原字节和父输入，使用新的 attempt ID。
-
-子租约独立于父 Actor。父 Actor 释放与重新获取不会令子调用失效；子权限绑定父持久 Session/Run、当前工具组、固定 input revision、原触发和当前配置。许可、观察和续租检查独立 owner epoch、host incarnation、权限/维护/存储版本和数据库时钟。旧子 owner 无法修改接管者的状态。崩溃恢复发现 `PERMITTED` 可证明尚未通过发送守卫，按 NOT_SENT 处理；发现 `DISPATCHING` 则转 UNKNOWN 并阻塞父 Run，禁止自动重试。
-
-父取消在同一事务中取消未接纳子任务并递增其 lease epoch；未发送预留可释放，已派发尝试记 UNKNOWN 并保留成本预留。迟到响应不能恢复父 Run、写入父上下文或群发。管理员可以通过原父 Run 控制流程取消或处理未知工具状态；未知模型成本没有权威结算事实时仍保留预算，人工处理父工具结果不会冒充模型用量凭证。
-
-## 合流与排队
-
-父工具状态使用 `WAIT_CHILD`，父 head 保持 `WAIT_TOOL`。持久 Session 仍占据该群唯一前台 Run，但调度器释放实际 Actor 和模型执行槽。普通消息和新触发继续入队，不会因等待子结果而另起群聊前台。只有子候选就绪、确定失败、父期限到达或同组其他工具可推进时，该会话才重新进入 ready 集合，避免热轮询。
-
-完成子分析只保存私有候选并增加父会话 mailbox revision。父 Actor 接纳时再次验证配置、来源和精确父切口，按 `call_index` 将候选写入原工具结果槽。部分结果可先持久接纳，整个工具因果组全部闭合后才由既有 `close_tools` 生成一个完整 RUN_STEP。接纳回执重放不会重复插入结果。下一次父模型调用通过原 SAFE_POINT 机制接入新触发；子任务自身从不调用 SAFE_POINT。
-
-最终回复仍经父 Run 的 `FINAL_READY → commit_final` 事务，只有父 Run 创建一次 SendIntent。子返回的文本、错误及来源均是父模型的工具证据，不会直接成为平台回复。
-
-## 成本、调度与关闭
-
-Bot 日预算复用 `bot_agent_budget_days`，父子调用在相同运行时锁下检查并预留；Run 树预算同时限制当前 Run 的所有模型调用。运行时执行 `min(冻结额度, 当前额度)`，降低配置不能被旧 Run 绕过。历史活动 Run 首次建立树账本时导入已有父模型预留和结算，迁移不会重置成本。可确认未发送释放预留；有效用量以实际用量结算；已响应但无用量按预留额结算；UNKNOWN 不自动释放预留。
-
-| 配置 | 默认与范围 |
-| --- | --- |
-| `children_enabled` | false；开启需要模型工具调用能力 |
-| `max_children` | 4，范围 1–8，按父 Run 累计 |
-| `child_concurrency` | 2，范围 1–2，按 Bot |
-| `child_timeout` | 90 秒，范围 1–300；不超过父 Run 期限 |
-| `child_max_output_tokens` | 1024，范围 64–8192；实际不超过父模型输出上限 |
-| `run_token_budget` | 32768，范围 1024–1000000，父子共享 |
-
-`AgentRuntime.start()` 启动持久子队列监督器，`close()` 取消并等待扫描、执行和续租任务，然后关闭模型客户端。重启扫描不依赖内存通知。单 Bot 子执行硬上限为 2，模型传输上限为 4；Fleet 提供全局模型 32 和全局子模型 8 的容量池。子调用依次获取全局子容量、全局模型容量、Bot 容量；父调用只获取后两者。排队时间计入调用 timeout，后台等待不会占尽前台模型池。平台健康检查监督扫描任务退出。
-
-Web 配置使用现有 Agent 配置版本/CAS 流程。`AgentStore.inspect` 返回子来源、父 Run、状态、尝试次数和树预算，不返回私有模型请求正文或密钥。Shell 管理按原群聊范围在 SQL LIMIT 前过滤这些记录。
-
-## 实际验证
-
-`tests/test_children.py` 使用独立真实 PostgreSQL 数据库，验证逆序完成按原调用顺序合流、父 Actor 交接、固定输入切口、等待期间新触发排队、父取消撤销子租约、UNKNOWN 保留预算、明确未发送精确字节重试、旧 owner 无权终结新 owner、重复响应/接纳回执、Run 树及跨群 Bot 日预算竞态、非法来源单元、图片实取与文本投影、来源撤销后禁止发送，以及全局子容量不占用前台模型槽。
-
-另有真实 TCP Chat Completions 服务测试：数据库记录的请求字节与服务端收到的字节完全一致，无子工具声明，无子 SendIntent；父接纳并完成最终模型后才产生唯一 SendIntent。Runner 集成测试覆盖模型自主提出内置分析、释放等待、接纳后继续模型调用。测试清理关闭服务端连接任务、后台扫描、续租与模型客户端，避免把测试服务遗留连接误判为生产任务资源。
+升级测试需要覆盖旧 019/032 数据库、活动/等待/未知/终态 Child 记录、载荷已清理记录以及旧 Worker 持有连接的情形。迁移完成后，只有显式的只读历史诊断可以看见遗留记录。

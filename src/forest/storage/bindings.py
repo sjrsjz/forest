@@ -9,14 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from types import SimpleNamespace
 from uuid import uuid4
-
-from psycopg.types.json import Jsonb
 
 from forest.drivers.protocol import validate_json
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.config_payloads import ConfigPayloadStore
 from forest.storage.control import BotControl
 
 
@@ -53,6 +53,135 @@ class BindingStore:
     def __init__(self, store: BotStore):
         self.store = store
         self.control = BotControl(store)
+        self.content = ConfigPayloadStore(store)
+
+    @staticmethod
+    async def current_config_in(
+        conn,
+        bot_id,
+        binding_id,
+        *,
+        expected_binding_epoch=None,
+        required=True,
+    ):
+        """Read the actual effective value after the caller's business locks.
+
+        No Binding/Host lock is acquired here. Metadata/observation cleanup uses
+        the ordinary authority guards without requiring this content reader.
+        """
+        row = await (
+            await conn.execute(
+                "SELECT b.binding_id,b.binding_epoch,b.connection_epoch,b.effective_revision,"
+                "b.config_payload_id,b.config_payload_digest,r.values_payload_id,r.values_payload_digest "
+                "FROM public.bot_bindings b LEFT JOIN public.bot_binding_revisions r ON "
+                "(r.bot_id,r.binding_id,r.revision)=(b.bot_id,b.binding_id,b.effective_revision) "
+                "WHERE b.bot_id=%s AND b.binding_id=%s",
+                (bot_id, binding_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError("BINDING_NOT_FOUND", "Binding does not belong to this Bot", 404)
+        if expected_binding_epoch is not None and row["binding_epoch"] != expected_binding_epoch:
+            raise ForestError("STALE_BINDING", "Binding configuration was replaced", 409)
+        result = {
+            key: row[key]
+            for key in (
+                "binding_id",
+                "binding_epoch",
+                "connection_epoch",
+                "effective_revision",
+                "config_payload_id",
+                "config_payload_digest",
+            )
+        }
+        if row["effective_revision"] == 0:
+            if row["config_payload_id"] is not None or row["config_payload_digest"] is not None:
+                raise ForestError(
+                    "CONFIG_PAYLOAD_IDENTITY_CONFLICT",
+                    "Initial Binding has an effective value",
+                    409,
+                )
+            if required:
+                raise ForestError(
+                    "CONTROL_CONTENT_REVOKED", "Binding has no effective configuration", 409
+                )
+            return {**result, "config": None, "config_payload_state": "NOT_CONFIGURED"}
+        if (row["config_payload_id"], row["config_payload_digest"]) != (
+            row["values_payload_id"],
+            row["values_payload_digest"],
+        ) or row["values_payload_id"] is None:
+            raise ForestError(
+                "CONFIG_PAYLOAD_IDENTITY_CONFLICT", "Effective Binding reference differs", 409
+            )
+        content = ConfigPayloadStore(SimpleNamespace(bot_id=bot_id))
+        epoch = (await content.payloads.lock_in(conn))["deletion_epoch"]
+        saved = await content.hydrate_values_in(
+            conn,
+            row,
+            family="binding",
+            kind="REVISION",
+            resource=binding_id,
+            identity=str(row["effective_revision"]),
+            epoch=epoch,
+            required=required,
+        )
+        return {
+            **result,
+            "config": saved["values"],
+            "config_payload_state": saved["values_payload_state"],
+        }
+
+    async def initial_in(self, conn, row, *, required=False):
+        epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+        saved = await self.content.hydrate_values_in(
+            conn,
+            {
+                "values_payload_id": row["initial_payload_id"],
+                "values_payload_digest": row["initial_payload_digest"],
+            },
+            family="binding",
+            kind="INITIAL",
+            resource=row["binding_id"],
+            identity=row["registry_operation_id"],
+            epoch=epoch,
+            required=required,
+        )
+        value = saved["values"]
+        if saved["values_payload_state"] == "ACTIVE" and (
+            not isinstance(value, dict)
+            or set(value) != {"display_name"}
+            or not isinstance(value["display_name"], str)
+        ):
+            raise ForestError(
+                "CONFIG_PAYLOAD_IDENTITY_CONFLICT", "Binding initial value differs", 409
+            )
+        return {
+            "display_name": value["display_name"] if value is not None else None,
+            "initial_payload_id": row["initial_payload_id"],
+            "initial_payload_digest": row["initial_payload_digest"],
+            "display_name_payload_state": saved["values_payload_state"],
+        }
+
+    async def _values_in(self, conn, row, *, kind="REVISION", required=True):
+        epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+        saved = await self.content.hydrate_values_in(
+            conn,
+            row,
+            family="binding",
+            kind=kind,
+            resource=row["binding_id"],
+            identity=row["plan_id"] if kind == "PLAN" else str(row["revision"]),
+            epoch=epoch,
+            required=required,
+        )
+        return {**row, **saved}
+
+    async def _hydrate_in(self, conn, row):
+        initial = await self.initial_in(conn, row)
+        current = await self.current_config_in(
+            conn, self.store.bot_id, row["binding_id"], required=False
+        )
+        return {**row, **initial, **current}
 
     async def _row(self, conn, binding_id: str) -> dict:
         row = await (
@@ -108,6 +237,7 @@ class BindingStore:
         *,
         data: bool = True,
         require_receive: bool = False,
+        require_config: bool = False,
     ) -> None:
         runtime = binding["_runtime"]
         # All structural rows are still locked; only time can change under us.
@@ -116,6 +246,14 @@ class BindingStore:
             raise ForestError("DATA_ADMISSION_CLOSED", "Bot data admission is closed", 409)
         if require_receive and not binding["receive_enabled"]:
             raise ForestError("RECEIVE_CLOSED", "Binding is not accepting events", 503)
+        if require_config:
+            await self.current_config_in(
+                conn,
+                self.store.bot_id,
+                binding["binding_id"],
+                expected_binding_epoch=binding["binding_epoch"],
+            )
+            await self.store._host(conn, lease, runtime)
 
     async def create(self, ticket: dict, operation_id: str, payload: dict) -> dict:
         """Register an inactive binding after the deployment reserved its account."""
@@ -140,19 +278,33 @@ class BindingStore:
                 conn, ticket, "binding.create", operation_id, payload
             )
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
+            original = await self.control.admitted_input_in(conn, claims)
+            epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+            initial = await self.content.put_values_in(
+                conn,
+                family="binding",
+                kind="INITIAL",
+                resource=payload["binding_id"],
+                identity=operation_id,
+                values={"display_name": payload["display_name"]},
+                parents=(original.payload_id,),
+                epoch=epoch,
+            )
             inserted = await (
                 await conn.execute(
-                    "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id) "
-                    "VALUES (%s,%s,'onebot-v11',%s,%s,%s) ON CONFLICT DO NOTHING RETURNING binding_id",
+                    "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,"
+                    "initial_payload_id,initial_payload_digest) "
+                    "VALUES (%s,%s,'onebot-v11',%s,NULL,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING binding_id",
                     (
                         self.store.bot_id,
                         payload["binding_id"],
                         payload["self_id"],
-                        payload["display_name"],
                         operation_id,
+                        initial.payload_id,
+                        initial.digest,
                     ),
                 )
             ).fetchone()
@@ -163,7 +315,7 @@ class BindingStore:
                     409,
                 )
             result = {"binding_id": payload["binding_id"], "revision": 0, "state": "DISABLED"}
-            await self.control._record(conn, claims, result)
+            await self.control._record(conn, claims, result, parents=(initial.payload_id,))
             await self.control._time(conn, claims)
             return result
 
@@ -177,6 +329,8 @@ class BindingStore:
                     (self.store.bot_id,),
                 )
             ).fetchall()
+            await self.control._time(conn, claims)
+            rows = [await self._hydrate_in(conn, row) for row in rows]
             await self.control._time(conn, claims)
             return [self.public(row) for row in rows]
 
@@ -198,6 +352,8 @@ class BindingStore:
                 "config",
                 "state",
                 "error_code",
+                "display_name_payload_state",
+                "config_payload_state",
             )
         }
 
@@ -211,12 +367,21 @@ class BindingStore:
             )
             desired = await (
                 await conn.execute(
-                    "SELECT values FROM public.bot_binding_revisions WHERE bot_id=%s AND binding_id=%s AND revision=%s",
+                    "SELECT * FROM public.bot_binding_revisions WHERE bot_id=%s AND binding_id=%s AND revision=%s",
                     (self.store.bot_id, binding_id, row["revision"]),
                 )
             ).fetchone()
             await self.control._time(conn, claims)
-            return {**self.public(row), "desired_values": desired["values"] if desired else None}
+            row = await self._hydrate_in(conn, row)
+            desired = await self._values_in(conn, desired, required=False) if desired else None
+            await self.control._time(conn, claims)
+            return {
+                **self.public(row),
+                "desired_values": desired["values"] if desired else None,
+                "desired_values_payload_state": desired["values_payload_state"]
+                if desired
+                else "NOT_CONFIGURED",
+            }
 
     async def plan(
         self, ticket: dict, operation_id: str, payload: dict, secret_ciphertext: str
@@ -256,7 +421,7 @@ class BindingStore:
             claims = await self.control._guard(conn, ticket, "binding.plan", operation_id, payload)
             await self.control._time(conn, claims)
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             if row["revision"] != payload["expected_revision"]:
@@ -270,10 +435,22 @@ class BindingStore:
                     "bot_id": self.store.bot_id,
                 }
             )
+            original = await self.control.admitted_input_in(conn, claims)
+            epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+            values_ref = await self.content.put_values_in(
+                conn,
+                family="binding",
+                kind="PLAN",
+                resource=row["binding_id"],
+                identity=plan_id,
+                values=payload["values"],
+                parents=(original.payload_id,),
+                epoch=epoch,
+            )
             await conn.execute(
                 "INSERT INTO public.bot_binding_plans(bot_id,binding_id,plan_id,subject_id,issuer_id,expected_revision,"
-                "values,secret_ciphertext,plan_digest,expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                "clock_timestamp()+interval '10 minutes')",
+                "values,secret_ciphertext,plan_digest,expires_at,values_payload_id,values_payload_digest,settings_enabled) "
+                "VALUES (%s,%s,%s,%s,%s,%s,NULL,%s,%s,clock_timestamp()+interval '10 minutes',%s,%s,%s)",
                 (
                     self.store.bot_id,
                     payload["binding_id"],
@@ -281,9 +458,11 @@ class BindingStore:
                     claims["subject_id"],
                     claims["issuer_id"],
                     row["revision"],
-                    Jsonb(payload["values"]),
                     secret_ciphertext,
                     plan_digest,
+                    values_ref.payload_id,
+                    values_ref.digest,
+                    payload["values"]["enabled"],
                 ),
             )
             result = {
@@ -293,7 +472,7 @@ class BindingStore:
                 "expected_revision": row["revision"],
                 "credentials_changed": payload["credentials_changed"],
             }
-            await self.control._record(conn, claims, result)
+            await self.control._record(conn, claims, result, parents=(values_ref.payload_id,))
             await self.control._time(conn, claims)
             return result
 
@@ -311,7 +490,7 @@ class BindingStore:
                 conn, ticket, "binding.apply", operation_id, payload, payload["plan_digest"]
             )
             replay = await self.control._replay(conn, claims)
-            if replay is not None:
+            if self.control.is_replay(replay):
                 await self.control._time(conn, claims)
                 return replay
             plan = await (
@@ -333,24 +512,19 @@ class BindingStore:
             if plan["expires_at"] <= await self.store._now(conn):
                 raise ForestError("PLAN_EXPIRED", "Preview the binding settings again", 409)
             revision = row["revision"] + 1
-            await conn.execute(
-                "INSERT INTO public.bot_binding_revisions(bot_id,binding_id,revision,previous_revision,plan_id,"
-                "values,secret_ciphertext,policy_revision,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    self.store.bot_id,
-                    row["binding_id"],
-                    revision,
-                    row["revision"],
-                    plan["plan_id"],
-                    Jsonb(plan["values"]),
-                    plan["secret_ciphertext"],
-                    claims["policy_revision"],
-                    operation_id,
-                ),
-            )
-            await conn.execute(
-                "UPDATE public.bot_bindings SET revision=%s,error_code=NULL WHERE bot_id=%s AND binding_id=%s",
-                (revision, self.store.bot_id, row["binding_id"]),
+            parent = await self.control.plan_parent(conn, "binding", plan)
+            plan = await self._values_in(conn, plan, kind="PLAN")
+            original = await self.control.admitted_input_in(conn, claims)
+            epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+            values_ref = await self.content.put_values_in(
+                conn,
+                family="binding",
+                kind="REVISION",
+                resource=row["binding_id"],
+                identity=str(revision),
+                values=plan["values"],
+                parents=(original.payload_id, parent),
+                epoch=epoch,
             )
             result = {
                 "binding_id": row["binding_id"],
@@ -358,7 +532,31 @@ class BindingStore:
                 "effective_revision": row["effective_revision"],
                 "status": "ACCEPTED",
             }
-            await self.control._record(conn, claims, result)
+            await self.control._record(conn, claims, result, parents=(values_ref.payload_id,))
+            await conn.execute(
+                "INSERT INTO public.bot_binding_revisions(bot_id,binding_id,revision,previous_revision,plan_id,"
+                "values,secret_ciphertext,policy_revision,operation_id,values_payload_id,values_payload_digest,settings_enabled) "
+                "VALUES (%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s)",
+                (
+                    self.store.bot_id,
+                    row["binding_id"],
+                    revision,
+                    row["revision"],
+                    plan["plan_id"],
+                    plan["secret_ciphertext"],
+                    claims["policy_revision"],
+                    operation_id,
+                    values_ref.payload_id,
+                    values_ref.digest,
+                    plan["values"]["enabled"],
+                ),
+            )
+            await conn.execute(
+                "UPDATE public.bot_bindings SET revision=%s,error_code=NULL WHERE bot_id=%s AND binding_id=%s",
+                (revision, self.store.bot_id, row["binding_id"]),
+            )
+            if plan["expires_at"] <= await self.store._now(conn):
+                raise ForestError("PLAN_EXPIRED", "Binding plan expired before publication", 409)
             await self.control._time(conn, claims)
             return result
 
@@ -367,14 +565,89 @@ class BindingStore:
             await self.store._host(conn, lease)
             rows = await (
                 await conn.execute(
-                    "SELECT b.*,r.values AS desired_values,r.secret_ciphertext,r.policy_revision AS desired_policy_revision "
+                    "SELECT b.* "
                     "FROM public.bot_bindings b JOIN public.bot_binding_revisions r ON "
                     "(r.bot_id,r.binding_id,r.revision)=(b.bot_id,b.binding_id,b.revision) WHERE b.bot_id=%s ORDER BY b.binding_id",
                     (self.store.bot_id,),
                 )
             ).fetchall()
+            results = []
+            for row in rows:
+                revisions = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_binding_revisions WHERE bot_id=%s AND binding_id=%s AND revision=ANY(%s)",
+                        (
+                            self.store.bot_id,
+                            row["binding_id"],
+                            [row["revision"], row["effective_revision"]],
+                        ),
+                    )
+                ).fetchall()
+                saved = {
+                    r["revision"]: await self._values_in(conn, r, required=False) for r in revisions
+                }
+                desired = saved[row["revision"]]
+                effective = saved.get(row["effective_revision"])
+                results.append(
+                    {
+                        **await self._hydrate_in(conn, row),
+                        "desired_values": desired["values"],
+                        "desired_values_payload_state": desired["values_payload_state"],
+                        "desired_policy_revision": desired["policy_revision"],
+                        "secret_ciphertext": desired["secret_ciphertext"],
+                        "effective_values": effective["values"] if effective else None,
+                        "effective_values_payload_state": effective["values_payload_state"]
+                        if effective
+                        else "NOT_CONFIGURED",
+                        "effective_secret_ciphertext": effective["secret_ciphertext"]
+                        if effective
+                        else None,
+                    }
+                )
             await self.store._host(conn, lease)
-            return rows
+            return results
+
+    async def execution_config(self, lease, binding_id, *, expected_binding_epoch, data=False):
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding = await self._guard(conn, lease, binding_id, expected_binding_epoch, data=data)
+            value = await self.current_config_in(
+                conn,
+                self.store.bot_id,
+                binding_id,
+                expected_binding_epoch=expected_binding_epoch,
+            )
+            await self._final_guard(conn, lease, binding, data=data)
+            return value
+
+    async def candidate_config(
+        self, lease, binding_id, revision, *, expected_desired_revision, recover_effective=False
+    ):
+        """Fresh value and ciphertext before a candidate performs any HTTP I/O."""
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding = await self._row(conn, binding_id)
+            runtime = await self.store._runtime(conn)
+            await self.store._host(conn, lease, runtime)
+            if binding["revision"] != expected_desired_revision or revision != (
+                binding["effective_revision"] if recover_effective else binding["revision"]
+            ):
+                raise ForestError("CONFIGURATION_SUPERSEDED", "Binding candidate was replaced", 409)
+            saved = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_binding_revisions WHERE bot_id=%s AND binding_id=%s AND revision=%s",
+                    (self.store.bot_id, binding_id, revision),
+                )
+            ).fetchone()
+            if (
+                saved is None
+                or saved["policy_revision"] != runtime["policy_revision"]
+                or not runtime["control_admission"]
+            ):
+                raise ForestError(
+                    "POLICY_REVOKED", "Binding candidate requires current authorization", 403
+                )
+            saved = await self._values_in(conn, saved)
+            await self.store._host(conn, lease, runtime)
+            return saved
 
     async def credentials(self, lease: HostLease, binding_id: str) -> str | None:
         """Host only; returns ciphertext for current desired revision, never a public DTO."""
@@ -395,6 +668,7 @@ class BindingStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             row = await self._row(conn, binding_id)
             await self.store._host(conn, lease)
+            row = await self._hydrate_in(conn, row)
             await self.store._host(conn, lease)
             return row
 
@@ -523,16 +797,20 @@ class BindingStore:
         enabled: bool,
         client_incarnation: str,
         expected_binding_epoch: int,
+        recover_effective: bool = False,
+        expected_desired_revision: int | None = None,
     ) -> dict:
         """Publish after candidate identity probe and old HTTP client termination."""
         _text(binding_id)
         _text(client_incarnation)
         _revision(revision, minimum=1)
         _revision(expected_binding_epoch, minimum=1)
-        if type(enabled) is not bool:
+        if type(enabled) is not bool or type(recover_effective) is not bool:
             raise ForestError(
                 "BINDING_INVALID", "Binding activation requires an enable decision", 422
             )
+        if recover_effective:
+            _revision(expected_desired_revision, minimum=1)
         async with self.store.pool.connection() as conn, conn.transaction():
             row = await self._row(conn, binding_id)
             runtime = await self.store._runtime(conn)
@@ -543,7 +821,13 @@ class BindingStore:
                     (self.store.bot_id, binding_id, revision),
                 )
             ).fetchone()
-            if saved is None or row["revision"] != revision:
+            valid_revision = (
+                row["effective_revision"] == revision
+                and row["revision"] == expected_desired_revision
+                if recover_effective
+                else row["revision"] == revision
+            )
+            if saved is None or not valid_revision:
                 raise ForestError(
                     "CONFIGURATION_SUPERSEDED", "A newer binding configuration is pending", 409
                 )
@@ -554,6 +838,7 @@ class BindingStore:
                 raise ForestError(
                     "POLICY_REVOKED", "Binding settings require current authorization", 403
                 )
+            saved = await self._values_in(conn, saved)
             if saved["values"]["enabled"] is not enabled:
                 raise ForestError(
                     "CONFIGURATION_CONFLICT",
@@ -570,6 +855,7 @@ class BindingStore:
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "Connection activation has different ownership", 409
                     )
+                row = await self._hydrate_in(conn, row)
                 await self.store._host(conn, lease, runtime)
                 return row
             if row["binding_epoch"] != expected_binding_epoch:
@@ -602,14 +888,16 @@ class BindingStore:
                 await conn.execute(
                     "UPDATE public.bot_bindings SET effective_revision=%s,binding_epoch=binding_epoch+1,"
                     "connection_epoch=connection_epoch+1,host_incarnation=%s,host_owner_epoch=%s,enabled=%s,"
-                    "receive_enabled=%s,config=%s,state=%s,client_incarnation=%s,error_code=NULL WHERE bot_id=%s AND binding_id=%s RETURNING *",
+                    "receive_enabled=%s,config=NULL,config_payload_id=%s,config_payload_digest=%s,"
+                    "state=%s,client_incarnation=%s,error_code=NULL WHERE bot_id=%s AND binding_id=%s RETURNING *",
                     (
                         revision,
                         lease.incarnation,
                         lease.owner_epoch,
                         enabled,
                         enabled,
-                        Jsonb(saved["values"]),
+                        saved["values_payload_id"],
+                        saved["values_payload_digest"],
                         "ONLINE" if enabled else "DISABLED",
                         client_incarnation,
                         self.store.bot_id,
@@ -627,6 +915,7 @@ class BindingStore:
                     "connection_epoch": result["connection_epoch"],
                 },
             )
+            result = await self._hydrate_in(conn, result)
             await self.store._host(conn, lease, runtime)
             return result
 

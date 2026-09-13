@@ -29,11 +29,15 @@ const packages = [pkg('pkg-a','fixture.alpha','1.0.0'),pkg('pkg-b','fixture.beta
 const values = label => ({label,enabled:true,mode:'fast',tags:['original']});
 const state = (component, label, digest) => ({desired_revision:1,effective_revision:1,
   desired_values:{package_digest:digest,config:values(label),grants:[]},effective_values:{package_digest:digest,config:values(label),grants:[]},
+  desired_values_payload_state:'ACTIVE',effective_values_payload_state:'ACTIVE',
+  defaults:{package_digest:'',config:{},grants:[]},
   operations:[],runtime:{components:[{component_id:component,worker_state:'ACTIVE',loaded_revision:1}],error_code:null}});
 window.fixture = {packages,states:{'fixture.alpha':state('fixture.alpha','Alpha','pkg-a'),
-  'fixture.beta':state('fixture.beta','Beta','pkg-b')},hold:[],pending:[],calls:[],plans:{},poll:null};
+  'fixture.beta':state('fixture.beta','Beta','pkg-b')},hold:[],pending:[],calls:[],plans:{},unavailable:[],poll:null};
 fixture.bot = {bot_id:'bot-a',display_name:'Browser fixture',stage:'READY',revision:1,job_id:'job-a'};
 function reply(path, method, body) {
+  if (fixture.unavailable.includes(path)) return {operation_id:'recorded-operation',action:'config.apply',
+    operation_status:'RECORDED',result_payload_state:'UNAVAILABLE'};
   if (path==='/setup') return {setup_required:false,database_ready:true};
   if (path==='/session') return {username:'fixture-admin'};
   if (path==='/configuration') return {head_revision:1,defaults:{display_name:'Forest fixture',session_ttl_minutes:60}};
@@ -52,7 +56,8 @@ function reply(path, method, body) {
   const component = path.match(/\/components\/([^/]+)/)?.[1], current=fixture.states[component];
   if (path.endsWith('/configuration')) return current;
   if (path.includes('/configuration/history')) return {next_before:null,revisions:[{revision:1,
-    created_at:'2026-09-13T00:00:00Z',values:{package_digest:'pkg-a-old',config:values('Historical draft'),grants:[]}}]};
+    created_at:'2026-09-13T00:00:00Z',values_payload_state:'ACTIVE',
+    values:{package_digest:'pkg-a-old',config:values('Historical draft'),grants:[]}}]};
   if (path.endsWith('/change-plans')) {
     const plan={plan_id:'plan-'+fixture.calls.length,plan_digest:'digest-'+fixture.calls.length,
       expected_revision:body.expected_revision,values:body.values};
@@ -100,7 +105,7 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for name in ("app.js", "schema-form.js", "bindings.js", "agent-panel.js", "jobs-panel.js", "memory.js", "style.css"):
+            for name in ("app.js", "schema-form.js", "configuration-forms.js", "control-receipts.js", "bindings.js", "agent-panel.js", "jobs-panel.js", "memory.js", "style.css"):
                 resources["/static/" + name] = ((static / name).read_bytes(),
                     "text/css" if name.endswith(".css") else "text/javascript")
             if self.path not in resources:
@@ -174,6 +179,7 @@ def main():
             expect(label).to_have_value("Edited during read")
             page.locator('#bot-config-form button[type="submit"]').click()
             expect(page.locator("#bot-config-preview")).to_be_visible()
+            assert page.evaluate("fixture.calls.filter(call=>call.path.endsWith('/change-plans')).at(-1).body.source_revision") == 1
             hold("POST " + alpha + "/management-requests")
             page.locator("#bot-config-apply").click()
             page.wait_for_function("fixture.pending.length===1")
@@ -239,9 +245,41 @@ def main():
             expect(invoke).to_be_enabled()
             expect(result).to_have_text("")
             assert page.evaluate("fixture.pending.length") == 0
+
+            # An erased replay is still the recorded operation. Clear the old
+            # preview/body, discard both earlier reads, and never auto-reapply.
+            page.locator('#bot-config-form button[type="submit"]').click()
+            expect(page.locator('#bot-config-preview')).to_be_visible()
+            hold('GET ' + alpha + '/configuration')
+            page.locator('#reload-bot-config').click()
+            hold('GET ' + alpha + '/configuration/history')
+            page.locator('#read-bot-history').click()
+            page.wait_for_function('fixture.pending.length===2')
+            page.evaluate('path => fixture.unavailable.push(path)', alpha + '/management-requests')
+            posts = page.evaluate("fixture.calls.filter(c=>c.method==='POST').length")
+            page.locator('#bot-config-apply').click()
+            expect(page.locator('#notice')).to_contain_text('原操作已记录')
+            expect(page.locator('#notice')).to_contain_text('recorded-operation')
+            expect(page.locator('#bot-config-preview')).to_be_hidden()
+            expect(page.locator('#bot-config-diff')).to_have_text('')
+            expect(page.locator('#bot-config-fields')).to_be_empty()
+            release('GET ' + alpha + '/configuration')
+            release('GET ' + alpha + '/configuration/history')
+            expect(page.locator('#reload-bot-config')).to_be_enabled()
+            expect(page.locator('#read-bot-history')).to_be_enabled()
+            expect(page.locator('#bot-config-fields')).to_be_empty()
+            expect(page.locator('#bot-history')).to_be_empty()
+            assert page.evaluate("fixture.calls.filter(c=>c.method==='POST').length") == posts + 1
+            # A fresh explicit read is permitted and another component remains
+            # independent of the old operation's unavailable receipt.
+            page.evaluate('fixture.unavailable=[]')
+            page.locator('#reload-bot-config').click()
+            expect(label).to_have_value('Edited during read')
+            page.locator('#bot-package').select_option('pkg-b')
+            expect(label).to_have_value('Beta')
             assert errors == [], errors
             browser.close()
-        print("Component panel browser checks passed: package refresh races, preserved read/apply drafts, stale invocation fencing, history drafts, and typed schema forms.")
+        print("Component panel browser checks passed: package refresh races, preserved drafts, stale invocation/history fencing, typed forms, and unavailable recorded receipts without re-execution.")
     finally:
         server.shutdown()
         server.server_close()

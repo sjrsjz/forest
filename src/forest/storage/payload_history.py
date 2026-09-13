@@ -2,6 +2,7 @@
 
 A legacy deletion marker is never a visibility grant. Each branch carrying it
 must reach an exact migrated Run owner or an already published local body.
+Frozen, proven component-configuration leaves retain their prior Host scope.
 The caller still checks every ordinary source and the current deletion clock.
 """
 
@@ -54,9 +55,13 @@ async def _published(conn, bot_id, conversation, cut, ids):
     return rows
 
 
-async def _old_run_roots(conn, bot_id, conversation, cut, ids, run_id):
-    if run_id is None:
+async def _old_run_roots(conn, bot_id, conversation, cut, ids, run_id, *, scoped=True):
+    if scoped and run_id is None:
         return []
+    # Identity-only mode finds actual imported unknown roots in this batch;
+    # it grants nothing. A root still needs the scoped current-Run/cut proof.
+    scope_sql = "AND s.run_id=%s AND a.conversation_id=%s AND s.selected_input_end_seq<=%s " if scoped else ""
+    scope_args = (run_id, conversation["conversation_id"], cut) if scoped else ()
     # All table/field names below are fixed Host code, never request arguments.
     families = (
         ("bot_agent_steps", "s", "logical_step_id", "", (("snapshot", "model.snapshot"),
@@ -80,9 +85,8 @@ async def _old_run_roots(conn, bot_id, conversation, cut, ids, run_id):
             f"CROSS JOIN LATERAL (VALUES {values}) v(field,kind,payload_id) "
             "JOIN public.bot_agent_runs a ON a.bot_id=s.bot_id AND a.run_id=s.run_id "
             "JOIN public.bot_payload_headers h ON h.bot_id=s.bot_id AND h.payload_id=v.payload_id "
-            "WHERE s.bot_id=%s AND s.run_id=%s AND a.conversation_id=%s "
-            "AND s.selected_input_end_seq<=%s AND v.payload_id=ANY(%s) LIMIT %s",
-            (bot_id, run_id, conversation["conversation_id"], cut, ids, BATCH + 1),
+            "WHERE s.bot_id=%s " + scope_sql + "AND v.payload_id=ANY(%s) LIMIT %s",
+            (bot_id, *scope_args, ids, BATCH + 1),
         )).fetchall()
         if len(rows) > BATCH:
             _deny()
@@ -252,8 +256,9 @@ async def _local_reply_sources(conn, store, conversation, cut, ids, extra, budge
 async def authorize_legacy_history_in(conn, store, conversation, cut, payload_ids, *, run_id=None):
     """Return additional frozen-input parents and exact local Reply source IDs.
 
-    Every legacy-carrying edge must terminate at a real local publication or
-    an exact 031 row. A cycle, unknown leaf or mixed unpublished cache denies.
+    Every legacy-carrying edge must terminate at a real local publication, an
+    exact 031 row, or a proven frozen 040/041 component-configuration leaf.
+    A cycle, unknown leaf or mixed unpublished cache denies.
     """
     marker = legacy_marker(store.bot_id)
     pending, checked, anchors, extra = set(payload_ids), {}, set(), set()
@@ -271,7 +276,7 @@ async def authorize_legacy_history_in(conn, store, conversation, cut, payload_id
             "SELECT h.payload_id,h.state,EXISTS(SELECT 1 FROM public.bot_payload_bodies b "
             "WHERE b.bot_id=h.bot_id AND b.payload_id=h.payload_id) AS has_body "
             "FROM public.bot_payload_headers h WHERE h.bot_id=%s AND h.payload_id=ANY(%s) "
-            "AND EXISTS(SELECT 1 FROM public.bot_payload_sources s WHERE s.bot_id=h.bot_id "
+            "AND EXISTS(SELECT 1 FROM public.forest_payload_effective_sources s WHERE s.bot_id=h.bot_id "
             "AND s.payload_id=h.payload_id AND s.source_unit_id=%s)",
             (store.bot_id, batch, marker),
         )).fetchall()
@@ -286,6 +291,16 @@ async def authorize_legacy_history_in(conn, store, conversation, cut, payload_id
         for row in published:
             anchors.add(row["payload_id"])
         remaining = active - anchors
+        from forest.storage.payload_control_history import old_config_leaves_in
+
+        anchors.update(await old_config_leaves_in(conn, store.bot_id, remaining))
+        from forest.storage.payload_agent_history import imported_specs_in, old_agent_leaves_in
+
+        anchors.update(await old_agent_leaves_in(conn, store, conversation, cut, remaining, run_id))
+        # Imported specs introduce their own unknown body, independent of any
+        # shared configuration ancestor. Only their exact current-Run proof
+        # can authorize that body; all-safe parents must not launder it.
+        requires_own_proof = await imported_specs_in(conn, store.bot_id, remaining)
         old = await _old_run_roots(conn, store.bot_id, conversation, cut, list(remaining), run_id)
         for row in old:
             key = row["snapshot_payload_id"]
@@ -297,9 +312,19 @@ async def authorize_legacy_history_in(conn, store, conversation, cut, payload_id
                 _deny()
             checked[row["payload_id"]].update(parents)
             anchors.add(row["payload_id"])
+        # 044 can add a spec prerequisite to a 031 root without proving the
+        # root's own earlier snapshot/output/request. Failed cut or Run checks
+        # must not be bypassed by the newly attached, independently safe parent.
+        requires_own_proof.update(row["payload_id"] for row in await _old_run_roots(
+            conn, store.bot_id, conversation, cut, list(remaining), run_id, scoped=False,
+        ))
+        if requires_own_proof - anchors:
+            _deny()
         edges = await (await conn.execute(
-            "SELECT d.payload_id,d.parent_payload_id FROM public.bot_payload_derivations d "
-            "JOIN public.bot_payload_sources s ON s.bot_id=d.bot_id AND s.payload_id=d.parent_payload_id "
+            "SELECT DISTINCT d.payload_id,d.parent_payload_id FROM ("
+            "SELECT bot_id,payload_id,parent_payload_id FROM public.bot_payload_derivations UNION "
+            "SELECT bot_id,payload_id,parent_payload_id FROM public.bot_payload_legacy_closure) d "
+            "JOIN public.forest_payload_effective_sources s ON s.bot_id=d.bot_id AND s.payload_id=d.parent_payload_id "
             "AND s.source_unit_id=%s WHERE d.bot_id=%s AND d.payload_id=ANY(%s) LIMIT %s",
             (marker, store.bot_id, list(remaining), MAX_EDGES - len(budget["edges"]) + 1),
         )).fetchall()

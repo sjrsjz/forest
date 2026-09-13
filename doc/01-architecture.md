@@ -228,6 +228,8 @@ Bot 逻辑隔离是最低要求。默认部署为每 Bot 独立事实数据库/�
 | ADR-020 | 模型能力投影仅作用于单次API输入 | 文本LLM不接收图片，完整记忆仍可供后续视觉模型使用；每次请求保存包含/省略清单，详见[11](11-multimodal-memory-and-model-projection.md) |
 | ADR-021 | WebUI为首版必需后台，复用统一控制协议 | 首启和日常配置无需手改文件；UI保持内核外的受监督管理组件，详见[12](12-webui-administration.md) |
 | ADR-022 | 配置使用不可变修订、显式生效与乐观并发控制 | 区分保存和生效，WebUI/Shell并发不盲写；复杂变更复用生命周期/迁移工作流，多目标状态分别呈现 |
+| ADR-023 | Agent 使用宿主固定 CorePrompt、独立 PresetContext 和原子 ModelTurn | 保持协议、人设与历史边界，工具结果前不接受伪造后续；代价是结构化输出 token 与一次有界修复成本，详见[P3](p3-agent.md) |
+| ADR-024 | 不提供产品级子 Agent | 同群只有一个 Agent 状态机；自主任务通过 trigger 入队，组件并发使用 Kernel RPC/Job，避免第二套 Prompt、上下文和提交语义 |
 
 ## 10. 实施出口
 

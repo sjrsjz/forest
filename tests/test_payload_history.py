@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from test_agent_store import agent_turn
 from test_memory_pipeline_upgrade import LegacyDeliveryStore, old_bot, seed_agent, upgrade
 from test_messages import event, owner
 from test_models import completion, respond, server
@@ -108,10 +109,15 @@ async def test_old_run_requires_exact_migrated_owner_current_cut_and_unknown_lea
         actor = await owner(env.messages, env.lease, env.retry.actor.conversation_id, "old-proof")
         saved = await row(env, "SELECT snapshot_payload_id FROM public.bot_agent_steps WHERE run_id=%s", (env.retry.run_id,))
         await check(env, actor, [saved["snapshot_payload_id"]], run_id=env.retry.run_id)
+        accepted = []
         for run_id, cut in ((None, 1), (env.completed.run_id, 1), (env.retry.run_id, 0)):
-            with pytest.raises(ForestError) as rejected:
+            try:
                 await check(env, actor, [saved["snapshot_payload_id"]], run_id=run_id, cut=cut)
-            assert rejected.value.code == "PAYLOAD_SCOPE_DENIED"
+            except ForestError as rejected:
+                assert rejected.code == "PAYLOAD_SCOPE_DENIED"
+            else:
+                accepted.append({"run_id": run_id, "input_cut": cut})
+        assert not accepted, "Unproved legacy snapshot scope was admitted: " + json.dumps(accepted)
         payloads = PayloadStore(env.store)
         forged = await payloads.put_json(
             env.lease, owner_kind="model.snapshot", owner_id="legacy-agent:" + "0" * 64,
@@ -216,7 +222,10 @@ async def test_old_snapshot_rechecks_actual_input_readability_after_admission(up
 
 async def test_two_published_legacy_replies_continue_after_the_first_view_is_clipped(upgrade_database, tmp_path):
     async def handler(writer, request):
-        await respond(writer, json.dumps(completion("new answer with old local history")).encode())
+        await respond(
+            writer,
+            json.dumps(completion(agent_turn("new answer with old local history"))).encode(),
+        )
 
     async with server(handler) as (endpoint, requests), old_bot(upgrade_database, tmp_path, endpoint=endpoint) as env:
         second = await env.messages.ingest(env.lease, "binding-a",

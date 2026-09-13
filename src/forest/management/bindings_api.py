@@ -139,6 +139,8 @@ def install_binding_routes(app: FastAPI, runtime: Any):
     async def finish_registration(who, bot, registry, authority, reserved):
         signed = await ticket(who, bot, authority, reserved["operation_id"], "binding.create", reserved["payload"])
         result = await bot.platform.bindings.create(signed, reserved["operation_id"], reserved["payload"])
+        if result is None or bot.control.is_unavailable(result):
+            return result
         await registry.registered(bot_id=bot.store.bot_id, binding_id=reserved["binding_id"], **who)
         return {**result, "registration_stage": "REGISTERED"}
 
@@ -279,11 +281,12 @@ def install_binding_routes(app: FastAPI, runtime: Any):
         async with bot.store.pool.connection() as conn, conn.transaction():
             claims = await bot.control._guard(conn, signed, "delivery.reconcile", op, payload)
             previous = await bot.control._replay(conn, claims)
-            if previous is not None:
+            if bot.control.is_replay(previous):
                 await bot.control._time(conn, claims)
                 return previous
+            original = await bot.control.admitted_input_in(conn, claims)
             result = await bot.platform.delivery.reconcile_in(conn, bot.kernel._authority(), intent_id, part_index,
-                operation_id=op, **body.model_dump())
+                operation_id=op, input_parent_ids=(original.payload_id,), **body.model_dump())
             await bot.control._record(conn, claims, result)
             await bot.control._time(conn, claims)
             return result

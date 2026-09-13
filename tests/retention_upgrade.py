@@ -7,6 +7,7 @@ from psycopg import sql
 
 _FIELDS = {
     "bot_calls": {"result": "result_payload_id"},
+    "bot_agent_runs": {"spec": "spec_payload_id"},
     "bot_agent_steps": {"snapshot": "snapshot_payload_id", "output": "output_payload_id", "closed_parts": "closed_parts_payload_id"},
     "bot_model_request_manifests": {"manifest": "manifest_payload_id"},
     "bot_model_transport_attempts": {"request_body": "request_payload_id", "result": "result_payload_id"},
@@ -20,6 +21,34 @@ _FIELDS = {
     "bot_send_parts": {"payload": "payload_id"},
     "bot_send_attempts": {"wire_body": "wire_payload_id"},
 }
+
+
+_CONFIG_FAMILIES = {
+    "bot_config_plans": ("config", "PLAN", "component_id"),
+    "bot_config_revisions": ("config", "REVISION", "component_id"),
+    "bot_agent_config_plans": ("agent.config", "PLAN", None),
+    "bot_agent_config_revisions": ("agent.config", "REVISION", None),
+    "bot_memory_config_plans": ("memory.config", "PLAN", None),
+    "bot_memory_config_revisions": ("memory.config", "REVISION", None),
+    "bot_binding_plans": ("binding", "PLAN", "binding_id"),
+    "bot_binding_revisions": ("binding", "REVISION", "binding_id"),
+}
+
+
+def digest(value):
+    body = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+async def configuration_identity(conn, row, reference, expected_digest, owner):
+    """Independent SQL identity check, without the production values reader."""
+    header = await (await conn.execute(
+        "SELECT owner_kind,owner_id,encoding,digest FROM public.bot_payload_headers "
+        "WHERE bot_id=%s AND payload_id=%s", (row["bot_id"], reference),
+    )).fetchone()
+    assert header == {"owner_kind": "control.config", "owner_id": owner,
+                      "encoding": "json", "digest": expected_digest}
+    assert reference == "payload:" + digest([row["bot_id"], "control.config", owner])
 
 
 async def content(conn, bot_id, payload_id):
@@ -63,6 +92,23 @@ the monotonic memory clock, whose independently allocated fact counter may grow.
                 if reference in row:
                     assert row[field] is None, (table, field)
                     value[field] = await content(conn, row["bot_id"], row[reference]) if row[reference] else None
+            if table == "bot_agent_runs" and "spec_payload_id" in row:
+                assert row["spec_payload_id"] and row["spec_payload_digest"] == row["spec_digest"] == digest(value["spec"])
+                await configuration_identity(conn, row, row["spec_payload_id"], row["spec_payload_digest"],
+                    "agent-run-spec-v1:" + digest([row["run_id"]]))
+            if table in _CONFIG_FAMILIES and "values_payload_id" in row:
+                assert row["values"] is None and row["values_payload_id"]
+                family, kind, resource_key = _CONFIG_FAMILIES[table]
+                resource = row[resource_key] if resource_key else ""
+                identity = str(row["plan_id"] if kind == "PLAN" else row["revision"])
+                body = await content(conn, row["bot_id"], row["values_payload_id"])
+                assert set(body) == {"family", "kind", "resource", "identity", "values"}
+                assert {key: body[key] for key in ("family", "kind", "resource", "identity")} == {
+                    "family": family, "kind": kind, "resource": resource, "identity": identity}
+                assert row["values_payload_digest"] == digest(body)
+                await configuration_identity(conn, row, row["values_payload_id"], row["values_payload_digest"],
+                    "config-values-v1:" + digest([family, kind, resource, identity]))
+                value["values"] = body["values"]
             if table == "bot_message_inbox" and "payload_id" in row:
                 assert row["segments"] is None
                 body = await content(conn, row["bot_id"], row["payload_id"])
@@ -81,6 +127,18 @@ the monotonic memory clock, whose independently allocated fact counter may grow.
                 assert row["reason"] is None and row["result"] is None
                 body = await content(conn, row["bot_id"], row["payload_id"])
                 value.update({"reason": body["reason"], "result": body["result"]})
+            if table == "bot_web_operations" and "result_payload_id" in row:
+                assert row["result"] is None and row["result_payload_id"]
+                body = await content(conn, row["bot_id"], row["result_payload_id"])
+                assert set(body) == {"action", "operation_id", "value"}
+                assert body["action"] == row["action"]
+                assert body["operation_id"] == row["operation_id"]
+                header = await (await conn.execute(
+                    "SELECT digest FROM public.bot_payload_headers WHERE bot_id=%s AND payload_id=%s",
+                    (row["bot_id"], row["result_payload_id"]),
+                )).fetchone()
+                assert header["digest"] == row["result_payload_digest"]
+                value["result"] = body["value"]
             restored.append({key: value[key] for key in keys})
         if table == "bot_memory_clock":
             assert len(restored) == len(originals) == 1

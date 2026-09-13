@@ -92,7 +92,8 @@ def install_job_routes(app, runtime):
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "job.apply", payload)
         result = await store.apply(ticket, operation, payload)
-        notify(bot)
+        if result is not None and not bot.control.is_unavailable(result):
+            notify(bot)
         return result
 
     @app.post("/management/v1/bots/{bot_id}/jobs/run-requests")
@@ -101,7 +102,8 @@ def install_job_routes(app, runtime):
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "job.run", payload)
         result = await store.run_now(ticket, operation, payload)
-        notify(bot)
+        if result is not None and not bot.control.is_unavailable(result):
+            notify(bot)
         return result
 
     @app.post("/management/v1/bots/{bot_id}/jobs/cancellations")
@@ -110,7 +112,8 @@ def install_job_routes(app, runtime):
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "job.cancel", payload)
         result = await store.cancel(ticket, operation, payload)
-        notify(bot)
+        if result is not None and not bot.control.is_unavailable(result):
+            notify(bot)
         return result
 
     @app.post("/management/v1/bots/{bot_id}/jobs/replays")
@@ -119,5 +122,6 @@ def install_job_routes(app, runtime):
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "job.replay", payload)
         result = await store.replay(ticket, operation, payload)
-        notify(bot)
+        if result is not None and not bot.control.is_unavailable(result):
+            notify(bot)
         return result

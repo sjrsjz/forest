@@ -264,11 +264,11 @@ class MemoryQueryStore:
         ):
             return None, "MEMORY_QUERY_EMBEDDING_INCOMPLETE"
         for vector in result["vectors"]:
-            checked_vector(vector["values"], request["profile"]["dimensions"])
+            checked_vector(vector["values"], request["profile_metadata"]["dimensions"])
         return {
             "vectors": result["vectors"],
             "result_payload_id": attempt["result_payload_id"],
-            "dimensions": request["profile"]["dimensions"],
+            "dimensions": request["profile_metadata"]["dimensions"],
         }, None
 
     async def _search(self, query, embedding, timeout):

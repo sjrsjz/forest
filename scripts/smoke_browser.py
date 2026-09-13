@@ -88,7 +88,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(422); return
         raw = json.dumps({'id':'browser-completion','model':'browser-model',
             'choices':[{'index':0,'finish_reason':'stop','message':{
-                'role':'assistant','content':'浏览器 Agent 已回复'}}],
+                'role':'assistant','content':'<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks><block block_type="Assistant"><content><text>浏览器 Agent 已回复</text></content></block></blocks></payload></valid_agent_protocol_content_block>'}}],
             'usage':{'prompt_tokens':10,'completion_tokens':10,'total_tokens':20}}).encode()
         self.send_response(200); self.send_header('Content-Type','application/json')
         self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
@@ -319,10 +319,9 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             page.locator('#agent-config [name="api_key"]').fill(model_key)
             page.locator('#agent-config [name="enabled"]').check()
             page.locator('#agent-config [name="stream"]').uncheck()
-            page.locator('#agent-config details').filter(has_text='私有子分析').locator('summary').click()
-            page.locator('#agent-config [name="children_enabled"]').check()
-            page.locator('#agent-config [name="max_children"]').fill('2')
+            page.locator('#agent-config details').filter(has_text='协议与单次运行预算').locator('summary').click()
             page.locator('#agent-config [name="run_token_budget"]').fill('24000')
+            page.locator('#agent-config [name="preset_context"]').fill('浏览器 Agent 人格')
             page.locator('#agent-config button[type="submit"]').click()
             expect(page.locator('#agent-preview')).to_be_visible()
             assert model_key not in page.locator('#agent-config-diff').text_content()
@@ -400,8 +399,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#binding-state')).to_contain_text('在线', timeout=30000)
             expect(page.locator('#agent-config [name="model"]')).to_have_value('browser-model')
             expect(page.locator('#agent-config [name="api_key"]')).to_have_value('')
-            expect(page.locator('#agent-config [name="children_enabled"]')).to_be_checked()
-            expect(page.locator('#agent-config [name="max_children"]')).to_have_value('2')
+            expect(page.locator('#agent-config [name="preset_context"]')).to_have_value('浏览器 Agent 人格')
             expect(page.locator('#agent-config [name="run_token_budget"]')).to_have_value('24000')
             page.locator('#job-list button').filter(has_text='浏览器定时报告').click()
             expect(page.locator('#job-current')).to_contain_text('修订 2')

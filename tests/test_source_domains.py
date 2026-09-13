@@ -42,13 +42,16 @@ async def domain_payload(repository, lease, *, owner="service-one", kind="SERVIC
 async def test_domain_registration_is_stable_immutable_and_never_a_recall_candidate(messages):
     repository, lease, _ = messages
     sources = MemorySourceStore(repository)
+    baseline = await rows(repository, "SELECT * FROM public.bot_payload_domains")
     source, payload = await domain_payload(repository, lease)
     assert await domain_payload(repository, lease) == (source, payload)
     chat = await receive(repository, lease, 1)
     await drain(repository, lease, chat)
     assert await source_read(sources, lease, chat, 1, source_unit_ids=[source.source_unit_id]) == []
     assert len(await source_read(sources, lease, chat, 1)) == 1
-    assert len(await rows(repository, "SELECT * FROM public.bot_payload_domains")) == 1
+    domains = await rows(repository, "SELECT * FROM public.bot_payload_domains")
+    assert len(domains) == len(baseline) + 1
+    assert sum(row["source_unit_id"] == source.source_unit_id for row in domains) == 1
     for sql in (
         "UPDATE public.bot_payload_domains SET owner_id='other'",
         "DELETE FROM public.bot_payload_domains",

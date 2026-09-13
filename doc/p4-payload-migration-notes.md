@@ -1,6 +1,6 @@
 # P4 准备：正文分离、物理清理与不可复活的删除闭包
 
-状态：**迁移依据与剩余族设计，全链路遗忘尚未完成。** 第 1–9 节保留最初针对 `001_kernel.sql` 至 `020_shell_commands.sql` 的副本调查、约束和验收要求；其中的旧字段用于说明迁移来源，不表示它们现在仍全部保存明文。021–028 接通载荷存储和图文召回，029–034 已迁移输入、上下文、Agent、子 Agent 和发送正文，并协调旧来源撤销，实际行为见[迁移协议](p4-content-migration.md)。第 10 节记录仍待实施的 Kernel、状态、配置和控制面范围。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
+状态：**迁移依据与剩余族设计，全链路遗忘尚未完成。** 第 1–9 节保留最初针对 `001_kernel.sql` 至 `020_shell_commands.sql` 的副本调查、约束和验收要求；其中的旧字段用于说明迁移来源，不表示它们现在仍全部保存明文。021–035 接通载荷、图文召回及消息/Agent/发送正文，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文。实际协议分别见[迁移协议](p4-content-migration.md)、[Kernel 正文](p4-kernel-payloads.md)、[控制回执](p4-control-payloads.md)和[配置正文](p5-configuration-payloads.md)。产品子 Agent 已从目标架构退役；下文所有 Child 入口、表和测试仅描述历史实现、迁移来源与遗忘/结算兼容，不构成现行运行许可，详见[退役设计](p3-children.md)。第 10–11 节保留各阶段设计演进，当前剩余范围以本页开头和实现状态为准。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
 
 “永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆和上述正文族。新 Agent Reply 从最终步骤的显式父载荷登记；旧回复和不能证明来源闭包的内容继续保持 `lineage_complete=false`。Kernel 状态读取和 Worker 跨调用缓存仍需要补齐真实依赖，不能把局部来源传递称为全链路保证。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
 
@@ -258,9 +258,9 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 3. **权限与接管**：在最终 Kernel Gateway 写入前、Child 已获 permit 后以及重新 claim 一个已擦除快照前交错撤销。完整权限复验阻止新发送/发布；已知费用仍结算，结束后按既有 silent drain 完成 Session，其他群及无 Agent 的 legacy Run 不受影响。
 4. **非空旧库升级**：真实旧状态、迁移候选、长 operation ID、已完成 Call、配置预览/历史与 Job/Shell 数据，从发布过的 SQL 起步迁移；中断/重启后固定摘要、状态和删除 marker 不变，执行期没有旧正文列 fallback。
 
-## 11. 036–038 之后的实施边界
+## 11. 036–038 完成时记录的后续实施边界
 
-Kernel/状态/generation 副本已经接入正文协议；下一切片首先处理 Bot 控制回执，再接通配置定义与实际运行的父链。现存自由正文不能只按列名判断：管理员输入的取消 reason 会被复制到 `bot_conversation_triggers.terminal_reason`、`bot_agent_runs.error_code` 和不可变 checkpoint 的 `payload.error_code`，因此这些位置也属于待处理正文。
+本节是 036–038 完成时固定的后续清单。039–041 随后完成 Bot 控制回执，042–049 完成配置定义与实际运行父链；对应行保留用于说明依赖为何必须一起迁移。现存自由正文不能只按列名判断：管理员输入的取消 reason 会被复制到 `bot_conversation_triggers.terminal_reason`、`bot_agent_runs.error_code` 和不可变 checkpoint 的 `payload.error_code`，这些位置仍属于待处理正文。
 
 | 剩余族 | 必须一起完成的读写路径 |
 | --- | --- |

@@ -12,6 +12,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 import pytest_asyncio
+from binding_seed import create_online_binding
 from psycopg import sql
 from test_delivery import permit as delivery_permit
 
@@ -40,15 +41,8 @@ async def messages():
     try:
         await store.migrate()
         lease = await store.acquire_host("host-a", "incarnation-a", ttl_seconds=300)
-        async with store.pool.connection() as conn:
-            for binding_id, self_id in (("binding-a", "1000"), ("binding-b", "2000")):
-                await conn.execute(
-                    "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,"
-                    "registry_operation_id,host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-                    "VALUES (%s,%s,'onebot-v11',%s,%s,%s,%s,%s,true,true,'ONLINE')",
-                    (store.bot_id, binding_id, self_id, binding_id, "register-" + binding_id,
-                     lease.incarnation, lease.owner_epoch),
-                )
+        for binding_id, self_id in (("binding-a", "1000"), ("binding-b", "2000")):
+            await create_online_binding(store, lease, binding_id, self_id, name=binding_id)
         yield MessageStore(store, BindingStore(store)), lease, uri
     finally:
         await store.close()

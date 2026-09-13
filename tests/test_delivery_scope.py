@@ -13,17 +13,33 @@ from forest.storage import payloads as payloads_module
 pytestmark = pytest.mark.postgres
 
 
+async def configuration_source_limit(delivery):
+    async with delivery.store.pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                "SELECT count(*) AS n FROM public.bot_bindings b "
+                "JOIN public.forest_payload_effective_sources s "
+                "ON s.bot_id=b.bot_id AND s.payload_id=b.config_payload_id "
+                "WHERE b.bot_id=%s AND b.binding_id='binding-a'",
+                (delivery.store.bot_id,),
+            )
+        ).fetchone()
+    assert row["n"] > 0
+    return row["n"]
+
+
 @pytest.mark.parametrize("boundary", ["before_permit", "before_mark_started"])
 async def test_lineage_overflow_is_definitely_unsent_and_does_not_block_following_delivery(
     delivery, monkeypatch, boundary
 ):
     d, lease = delivery
+    source_limit = await configuration_source_limit(d)
     body = await d.contents.payloads.put_json(
         lease,
         owner_kind="context.parts",
-        owner_id="two-source-input",
+        owner_id="overflow-source-input",
         value={"text": "SOURCE-CANARY"},
-        sources=(SourceRef("first-source"), SourceRef("second-source")),
+        sources=tuple(SourceRef(f"overflow-source-{index}") for index in range(source_limit + 1)),
         expected_deletion_epoch=0,
     )
     first = await d.enqueue(
@@ -48,7 +64,7 @@ async def test_lineage_overflow_is_definitely_unsent_and_does_not_block_followin
 
     async def lower_limit_before_start(permit):
         if permit.intent_id == first["intent_id"]:
-            monkeypatch.setattr(payloads_module, "MAX_SOURCES", 1)
+            monkeypatch.setattr(payloads_module, "MAX_SOURCES", source_limit)
         await started(permit)
 
     async def reply(writer):
@@ -63,7 +79,7 @@ async def test_lineage_overflow_is_definitely_unsent_and_does_not_block_followin
             if boundary == "before_permit" and claim.intent_id == first["intent_id"]:
                 # Exercise the actual SQL source expansion with a smaller read
                 # budget; neither repository method nor error is fabricated.
-                monkeypatch.setattr(payloads_module, "MAX_SOURCES", 1)
+                monkeypatch.setattr(payloads_module, "MAX_SOURCES", source_limit)
             return PreparedDelivery(prepared, client.send, {"driver": "onebot-v11:1"})
 
         if boundary == "before_mark_started":

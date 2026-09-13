@@ -1,4 +1,4 @@
-"""Real Agent checkpoints with deterministic Provider results and native tools."""
+"""Real Agent checkpoints with deterministic provider ModelTurn results."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from jsonschema import Draft202012Validator
+from test_agent_store import agent_turn
 from test_messages import messages as messages
 from test_messages import owner, receive
 
@@ -108,13 +109,15 @@ class ScriptedClient:
         response = self.responses.pop(0) if self.responses else {"text": "final response"}
         if callable(response):
             response = await response(prepared)
+        text = response.get("text", "")
+        if response.get("status", "RESPONDED") == "RESPONDED" and not response.get("raw"):
+            text = agent_turn(text, response.get("tool_calls", []))
         return ModelResult(
             response.get("status", "RESPONDED"),
             prepared.request_id,
             prepared.transport_attempt_id,
             prepared.payload_digest,
-            text=response.get("text", ""),
-            tool_calls_json=json.dumps(response.get("tool_calls", [])),
+            text=text,
             usage_json=json.dumps(
                 {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
             ),

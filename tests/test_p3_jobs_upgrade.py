@@ -64,8 +64,13 @@ async def old_authority(dsn):
                 await conn.execute(
                     "INSERT INTO public.bot_agent_runs(bot_id,run_id,conversation_id,session_id,session_epoch,spec,spec_digest,"
                     "actor_epoch,actor_host_incarnation,phase,input_revision,selected_input_end_seq,deadline_at) "
-                    "VALUES ('bot-a',%s,'conversation',%s,1,'{}','old-spec',1,'old-host',%s,1,3,clock_timestamp()+interval '1 hour')",
-                    (run_id, run_id.replace("run", "session"), "COMPLETED" if run_id == "old-run" else "MODEL_PENDING"),
+                    "VALUES ('bot-a',%s,'conversation',%s,1,'{}',%s,1,'old-host',%s,1,3,clock_timestamp()+interval '1 hour')",
+                    (
+                        run_id,
+                        run_id.replace("run", "session"),
+                        digest_json({}),
+                        "COMPLETED" if run_id == "old-run" else "MODEL_PENDING",
+                    ),
                 )
             today = datetime.now(UTC).date()
             yesterday = today - timedelta(days=1)

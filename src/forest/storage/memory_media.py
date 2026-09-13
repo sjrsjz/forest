@@ -155,6 +155,16 @@ class MemoryMediaStore:
         """
         return await self.scan(lease, limit=256, source_unit_ids=source_unit_ids)
 
+    async def recover(self, lease, *, limit=32):
+        """Finish only stale accounting/deletion work, even without readable config."""
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("Capture recovery limit")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            await self.payloads.lock_in(conn)
+            await self._reap_in(conn, lease, limit)
+            await self.store._host(conn, lease)
+
     async def scan(self, lease, *, limit=32, source_unit_ids=None):
         if type(limit) is not int or not 1 <= limit <= 256:
             raise ValueError("Capture scan limit")
@@ -683,6 +693,9 @@ class MemoryMediaStore:
                     else "UNAVAILABLE"
                 )
             else:
+                # A revoked configuration rejects this attempt, while a new
+                # independently supplied configuration can admit these still
+                # available original pixels again via the existing scan rule.
                 status = "REJECTED"
             await self._settle_in(
                 conn,

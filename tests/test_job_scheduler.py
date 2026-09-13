@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from binding_seed import create_online_binding
 from test_group_scheduler import replies, row, scheduler, until
 from test_messages import receive
 from test_web_authority import environment as environment
@@ -17,13 +18,7 @@ pytestmark = pytest.mark.postgres
 
 
 async def configured(env):
-    async with env.store.pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,"
-            "registry_operation_id,host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-            "VALUES (%s,'binding-a','onebot-v11','1000','test','test',%s,%s,true,true,'ONLINE')",
-            (env.store.bot_id, env.lease.incarnation, env.lease.owner_epoch),
-        )
+    await create_online_binding(env.store, env.lease, "binding-a", "1000", ticket=env.ticket)
     messages = MessageStore(env.store)
     incoming = await receive(messages, env.lease, "first", trigger=True)
     now = datetime.now(UTC)

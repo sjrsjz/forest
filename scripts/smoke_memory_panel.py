@@ -65,6 +65,7 @@ def main():
                 "/": (html.encode(), "text/html; charset=utf-8"),
                 "/fixture.js": (bootstrap.encode(), "text/javascript"),
                 "/static/memory.js": ((static / "memory.js").read_bytes(), "text/javascript"),
+                "/static/configuration-forms.js": ((static / "configuration-forms.js").read_bytes(), "text/javascript"),
                 "/static/style.css": ((static / "style.css").read_bytes(), "text/css"),
             }
             if self.path not in resources:

@@ -17,10 +17,6 @@ No SDK, Worker RPC or public management API may expose that internal operation.
 
 from __future__ import annotations
 
-from dataclasses import asdict
-
-from psycopg.types.json import Jsonb
-
 from forest.errors import ForestError
 from forest.memory_types import SourceRef
 from forest.packages import digest_json
@@ -185,7 +181,7 @@ class ExposureStore:
         rows = await (
             await conn.execute(
                 "SELECT DISTINCT source_unit_id,source_revision,part_id "
-                "FROM public.bot_payload_sources WHERE bot_id=%s AND payload_id=ANY(%s) "
+                "FROM public.forest_payload_effective_sources WHERE bot_id=%s AND payload_id=ANY(%s) "
                 "ORDER BY source_unit_id,source_revision,part_id LIMIT %s",
                 (self.store.bot_id, list(refs), MAX_SOURCES + 1),
             )
@@ -193,13 +189,9 @@ class ExposureStore:
         sources = tuple(sorted({SourceRef(**row) for row in rows} | set(candidate_sources)))
         if len(sources) > MAX_SOURCES:
             return sources[: MAX_SOURCES + 1]
-        linked = await (
-            await conn.execute(
-                "SELECT * FROM public.forest_source_dependency_closure(%s,%s,%s)",
-                (self.store.bot_id, Jsonb([asdict(source) for source in sources]), MAX_SOURCES),
-            )
-        ).fetchall()
-        return tuple(sorted(SourceRef(**row) for row in linked))
+        return await self.payloads.source_dependency_closure_in(
+            conn, sources, maximum=MAX_SOURCES, fail_on_limit=False
+        )
 
     async def _availability_in(self, conn, refs):
         clock = await self.payloads.lock_in(conn)

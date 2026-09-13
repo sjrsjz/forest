@@ -28,10 +28,11 @@ from psycopg_pool import AsyncConnectionPool
 from forest.errors import ForestError
 from forest.storage.kernel_content import KernelContentStore, capacity_boundary
 from forest.storage.migration_v1 import (
-    WRITER_GENERATION,
     _migration_context,
     install_writer_gate_in,
 )
+from forest.storage.migration_v2 import WRITER_GENERATION
+from forest.storage.migration_v2 import install_writer_gate_in as install_writer_gate_v2_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -43,11 +44,50 @@ MIGRATION_HANDLERS = {
     "035_source_links.sql": "source_links_v1",
     "037_kernel_payloads.sql": "kernel_payloads_v1",
     "038_generation_payloads.sql": "generation_payloads_v1",
+    "040_control_results.sql": "control_results_v1",
+    "041_control_receipts.sql": "control_receipts_v1",
+    "044_config_dependencies.sql": "config_dependencies_v2",
+    "045_agent_config_payloads.sql": "agent_config_payloads_v2",
+    "046_memory_config_payloads.sql": "memory_config_payloads_v2",
+    "047_binding_config_payloads.sql": "binding_config_payloads_v2",
+    "048_component_config_payloads.sql": "component_config_payloads_v2",
+    "049_binding_template_dependencies.sql": "binding_template_dependencies_v2",
 }
+
+# Explicitly version the helper dependency envelope. Released SQL-only and v1
+# checksums must never start depending on the current writer's helper source.
+MIGRATION_V2 = frozenset({
+    "042_schema_writer_v2.sql", "043_config_payload_reader.sql", "044_config_dependencies.sql",
+    "045_agent_config_payloads.sql", "046_memory_config_payloads.sql",
+    "047_binding_config_payloads.sql",
+    "048_component_config_payloads.sql",
+    "049_binding_template_dependencies.sql",
+})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
+    if version in MIGRATION_V2:
+        root = files("forest.storage")
+        try:
+            body = (root.joinpath("data_migrations", handler + ".py").read_text(encoding="utf-8")
+                    if handler is not None else None)
+            helpers = [[name, root.joinpath(name).read_text(encoding="utf-8")]
+                       for name in ("migration_v1.py", "migration_v2.py")]
+            if version in {"045_agent_config_payloads.sql", "046_memory_config_payloads.sql",
+                           "047_binding_config_payloads.sql", "048_component_config_payloads.sql",
+                           "049_binding_template_dependencies.sql"}:
+                name = "data_migrations/config_dependencies_v2.py"
+                helpers.append([name, root.joinpath(*name.split("/")).read_text(encoding="utf-8")])
+        except FileNotFoundError as exc:
+            raise ForestError(
+                "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
+            ) from exc
+        envelope = json.dumps(
+            ["forest.bot.migration.v2", source, body, helpers],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(envelope).hexdigest()
     if handler is None:
         # Released 001--028 retain their original SQL-only checksums.
         return hashlib.sha256(source.encode()).hexdigest()
@@ -228,11 +268,15 @@ class BotStore:
                     (self.bot_id,),
                 )
             gated = False
+            gated_v2 = False
             for version, source, checksum in plan:
                 handler = MIGRATION_HANDLERS.get(version)
                 if handler and not gated:
                     await install_writer_gate_in(conn)
                     gated = True
+                if version in MIGRATION_V2 and not gated_v2:
+                    await install_writer_gate_v2_in(conn)
+                    gated_v2 = True
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)
@@ -553,6 +597,7 @@ class BotStore:
         state_schema: int = 1,
         state_value_schema: dict | None = None,
         state_migrations: list[dict] | None = None,
+        configuration_operation_id: str | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -620,7 +665,15 @@ class BotStore:
             }
             if existing:
                 await self.content.lock_in(conn, [generation_id], [component_id])
+                from forest.storage.control_receipts import ControlReceiptStore
+                parents = await ControlReceiptStore(self).generation_parents_in(
+                    conn, component_id, configuration_operation_id,
+                    config=config, package_digest=package_digest, grants=grants,
+                )
                 existing = await self.content.configuration_in(conn, existing)
+                header = await self.content.payloads._header_in(conn, existing["config_payload_id"])
+                if header["manifest"]["parents"] != sorted(parents):
+                    raise ForestError("GENERATION_CONFLICT", "Generation configuration provenance changed", 409)
                 if any(existing[key] != value for key, value in fixed.items()):
                     raise ForestError("GENERATION_CONFLICT", "Generation identity cannot be reused")
                 await self.content.guard_in(conn, [generation_id], phase="admission")
@@ -632,11 +685,16 @@ class BotStore:
                 "SELECT component_id FROM public.bot_component_state_heads "
                 "WHERE bot_id=%s AND component_id=%s FOR UPDATE", (self.bot_id, component_id),
             )
+            from forest.storage.control_receipts import ControlReceiptStore
+            parents = await ControlReceiptStore(self).generation_parents_in(
+                conn, component_id, configuration_operation_id,
+                config=config, package_digest=package_digest, grants=grants,
+            )
             epoch = await self.content.epoch_in(conn)
             source = await SourceDomainStore(self).source_in(conn, "GENERATION_CONFIG", generation_id)
             config_ref = await self.content.bodies.put_in(
                 conn, "control.config", "generation-config:sha256:" + _digest([self.bot_id, generation_id]),
-                {"config": config, "state_value_schema": state_value_schema}, sources=(source,), epoch=epoch,
+                {"config": config, "state_value_schema": state_value_schema}, sources=(source,), parents=parents, epoch=epoch,
             )
             row = await (
                 await conn.execute(
@@ -888,6 +946,10 @@ class BotStore:
             return await self.content.bodies.hydrate_migration_result_in(conn, result, epoch=epoch)
 
     async def _publish_state(self, conn: AsyncConnection, operation: dict, route: dict, candidate: dict) -> None:
+        from forest.storage.control_receipts import ControlReceiptStore
+        await ControlReceiptStore(self).activation_heads_in(
+            conn, operation["component_id"], operation["operation_id"],
+        )
         generation_id = candidate["generation_id"]
         await self.content.lock_in(conn, [generation_id], [operation["component_id"]])
         await self.content.guard_in(conn, [generation_id], phase="commit")
@@ -2485,8 +2547,16 @@ class BotStore:
             return row
 
     async def _event(
-        self, conn: AsyncConnection, topic: str, operation_id: str | None, payload: dict
+        self, conn: AsyncConnection, topic: str, operation_id: str | None, payload: dict | None,
+        *, control_result=None, control_subject=None,
     ) -> None:
+        if control_result is not None:
+            from forest.storage.control_receipts import ControlReceiptStore
+
+            await ControlReceiptStore(self).record_events_in(
+                conn, topic, operation_id, control_subject, control_result,
+            )
+            return
         await conn.execute(
             "INSERT INTO public.bot_audit_records(bot_id,audit_id,action,operation_id,details) VALUES (%s,%s,%s,%s,%s)",
             (self.bot_id, str(uuid4()), topic, operation_id, Jsonb(payload)),
