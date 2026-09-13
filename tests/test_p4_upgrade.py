@@ -90,7 +90,7 @@ async def snapshot(conn, tables):
 
 
 def expected_after_memory_permissions(before):
-    """023 adds only grants derived from each old capability; all facts stay exact."""
+    """Memory migrations add only grants implied by each old capability."""
     issuers = []
     for issuer in before["bot_web_issuers"]:
         actions = set(issuer["actions"])
@@ -98,7 +98,17 @@ def expected_after_memory_permissions(before):
             ("memory.config.read", "config.read"), ("memory.config.plan", "config.plan"),
             ("memory.config.apply", "config.apply"), ("memory.read", "message.read"),
         ) if required in actions}
-        issuers.append({**issuer, "actions": sorted(actions | mapped)})
+        actions |= mapped
+        forget = {
+            permission
+            for permission, required in (
+                ("memory.forget.read", {"memory.read"}),
+                ("memory.forget.plan", {"memory.read", "memory.config.plan"}),
+                ("memory.forget.apply", {"memory.read", "memory.config.apply"}),
+            )
+            if required <= actions
+        }
+        issuers.append({**issuer, "actions": sorted(actions | forget)})
     return {**before, "bot_web_issuers": issuers}
 
 

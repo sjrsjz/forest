@@ -1,6 +1,6 @@
 # P4 来源与载荷存储切片
 
-本文描述来源账本与载荷存储的实际实现。图/向量发布、Agent 图文召回和 Web 记忆配置已接通，见[记忆运行链路](p4-memory-runtime.md)。029–035 将输入、上下文、Agent、升级前遗留子 Agent 和发送正文迁入可删除载荷，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文。旧子 Agent 数据继续参与遗忘闭包，但不再构成可调度产品能力，详见[退役设计](p3-children.md)。Job、Shell、部署库、备份/WAL 及公开遗忘流程仍需完成；内部 `forget_sources` 尚不是完整聊天删除 API。
+本文描述来源账本与载荷存储的实际实现。图/向量发布、Agent 图文召回、Web 记忆配置和公开来源遗忘已接通，见[记忆运行链路](p4-memory-runtime.md)与[记忆来源管理](p4-memory-administration.md)。029–035 将输入、上下文、Agent、升级前遗留子 Agent 和发送正文迁入可删除载荷，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文。旧子 Agent 数据继续参与遗忘闭包，但不再构成可调度产品能力，详见[退役设计](p3-children.md)。Job 定义到 occurrence、Shell 自由文本参数/结果、部署库和备份/WAL 仍需完成；公开流程只能对已经具备完整来源闭包的来源承诺立即抑制和托管 body 清理。
 
 ## 来源进入实际消息流水
 
@@ -53,9 +53,9 @@
 
 同图在两个群中独立投稿时，甲的来源被抑制不会删除乙的独立载荷。这里没有实现跨来源物理 blob 去重；未来共享 blob 必须继续保持来源授权与物理回收分离。
 
-本切片**只清理已纳入 PayloadStore 的 body**。029–033 已将 Inbox 名称/内容、媒体定位与捕获、Context/Reply、Agent 快照/请求/工具、升级前遗留子 Agent 和 Delivery 正文改为载荷引用，原正文列禁止再次写入。已迁移内容的身份、摘要、费用及外部效果状态保留。遗留子 Agent 表仅保留审计、结算和遗忘用途。034 对升级前已发生删除、却仍留有不完整来源旧副本的数据库追加独立保守删除决策，不改写原删除回执。事务、升级和兼容约束见[正文迁移协议](p4-content-migration.md)。Kernel 回执、状态历史、Agent 冻结配置及其他控制面正文仍待迁移，不能据此宣称完整遗忘。
+本切片**只清理已纳入 PayloadStore 的 body**。029–049 已将 Inbox 名称/内容、媒体定位与捕获、Context/Reply、Agent 快照/请求/工具、升级前遗留子 Agent、Delivery、Kernel/状态、管理回执和主要配置正文改为载荷引用，原正文列禁止再次写入。已迁移内容的身份、摘要、费用及外部效果状态保留。遗留子 Agent 表仅保留审计、结算和遗忘用途。034 对升级前已发生删除、却仍留有不完整来源旧副本的数据库追加独立保守删除决策，不改写原删除回执。事务、升级和兼容约束见[正文迁移协议](p4-content-migration.md)。剩余自由文本族、部署库、数据库旧页、WAL、备份和已发送外部内容不在在线 body scrub 的能力边界内。
 
-删除新式 body 行也不代表历史数据库页、WAL、备份或已许可外发的内容已经清除。`scrub` 回执明确限定 `scope=managed_payload_bodies`，并保留 `storage_reclaim_required=true`。后续公开遗忘页必须按完整设计区分立即撤销、在线正文删除与存储/备份回收。
+删除新式 body 行也不代表历史数据库页、WAL、备份或已许可外发的内容已经清除。`scrub` 回执明确限定 `scope=managed_payload_bodies`，并保留 `storage_reclaim_required=true`。当前公开遗忘页区分立即撤销与后台在线正文删除，并明确提示外部内容不能撤回；存储页和备份回收仍由独立运维流程负责。
 
 ## 当前验证
 

@@ -92,6 +92,11 @@
           <div id="memory-preview" class="hidden"><h3>待应用记忆配置</h3><pre id="memory-diff"></pre><button id="memory-apply" type="button">应用记忆变更</button></div>
           <h3>记忆服务状态</h3><p class="hint">下方显示运行时观测。费用不确定的请求不会自动重试；尚未完成索引的配置可能还没有可召回记录。</p>
           <button id="memory-refresh" class="subtle" type="button">刷新记忆状态</button><pre id="memory-state" aria-live="polite"></pre>
+          <h3>来源与遗忘</h3>
+          <p class="hint">这里管理当前 Bot 的全局记忆来源。每项保留原群和作者；首版遗忘整个来源单元。先预览影响，再提交删除。提交会立即禁止召回，正文由后台分批物理清理；已发送到外部的内容无法撤回。</p>
+          <div class="actions"><button id="memory-sources-refresh" class="subtle" type="button">刷新来源</button><button id="memory-sources-more" class="subtle" type="button" disabled>加载更多来源</button><button id="memory-forget-plan" type="button" disabled>预览遗忘所选来源</button></div>
+          <p id="memory-sources-status" role="status"></p><div id="memory-sources" aria-live="polite"></div>
+          <div id="memory-forget-preview" class="hidden"><h3>待提交遗忘计划</h3><pre id="memory-forget-diff"></pre><button id="memory-forget-apply" type="button">提交遗忘</button></div>
         </section>
         <section id="bot-agent" class="card hidden">
           <h2>Agent 与模型</h2><p id="agent-config-status" role="status"></p>

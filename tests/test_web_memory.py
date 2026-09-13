@@ -5,6 +5,7 @@ import json
 
 import httpx
 import pytest
+from test_web_bindings import configure, get, onebot_server, receive, wait_for
 from test_web_bots import ORIGIN, login, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -144,3 +145,74 @@ async def test_memory_http_requires_session_csrf_exact_schema_and_idempotency(
             assert rejected.status_code == 422, rejected.text
             assert "plaintext-invalid" not in rejected.text
         assert (await read(client, root))["revision"] == 0
+
+
+async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
+    tmp_path, web_bots_database
+):
+    data = tmp_path / "state"
+    token = BootstrapState(data).initialize()
+    settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
+    async with onebot_server() as server:
+        async with running(settings) as (_, client):
+            await setup(client, token)
+            bot = await post(
+                client, "/management/v1/bots", {"display_name": "Memory forget"},
+                "forget-bot", status=202,
+            )
+            await ready(client, bot)
+            root = "/management/v1/bots/" + bot["bot_id"]
+            binding = await post(
+                client, root + "/bindings",
+                {"self_id": "10001", "display_name": "Memory QQ"},
+                "forget-binding", status=201,
+            )
+            await configure(
+                client, root + "/bindings/" + binding["binding_id"], server["origin"],
+                response_mode="disabled",
+            )
+            assert (await receive(
+                client, binding["binding_id"], 41, "remember image description", group_id=31001
+            )).status_code == 200
+            assert (await receive(
+                client, binding["binding_id"], 42, "other group stays", group_id=31002
+            )).status_code == 200
+            await wait_for(
+                lambda: get(client, root + "/conversations"),
+                lambda value: value["conversations"]
+                and len(value["conversations"]) == 2
+                and all(row["context_applied_seq"] == 1 for row in value["conversations"]),
+            )
+            listed = await get(client, root + "/memory/sources?limit=50")
+            assert listed["deletion_epoch"] == 0 and len(listed["sources"]) == 2
+            source = next(
+                row for row in listed["sources"] if row["source"]["channel_id"] == "31001"
+            )
+            assert source["source"]["channel_id"] == "31001"
+            assert source["author"]["external_user_id"] == "20001"
+            proposal = await post(
+                client,
+                root + "/memory/forget-plans",
+                {"expected_deletion_epoch": 0, "source_unit_ids": [source["source_unit_id"]]},
+                "forget-plan",
+            )
+            request = {key: proposal[key] for key in (
+                "expected_deletion_epoch", "plan_id", "plan_digest"
+            )}
+            applied = await post(
+                client, root + "/memory/forget-requests", request, "forget-apply"
+            )
+            assert await post(
+                client, root + "/memory/forget-requests", request, "forget-apply"
+            ) == applied
+            assert applied["deletion_epoch"] == 1
+            current = await get(client, root + "/memory/sources?limit=50")
+            assert current["deletion_epoch"] == 1
+            assert {row["source"]["channel_id"] for row in current["sources"]} == {"31002"}
+            drained = await wait_for(
+                lambda: get(client, root + "/memory/sources?limit=50"),
+                lambda value: value["scrub"] == {"revoked_payloads": 0, "pending_links": 0},
+            )
+            assert drained["deletion_epoch"] == 1
+            bad = await client.get(root + "/memory/sources?unexpected=true")
+            assert bad.status_code == 422

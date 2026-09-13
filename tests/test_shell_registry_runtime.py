@@ -1,5 +1,7 @@
 """Actual durable Shell processing uses frozen typed arguments and safe help."""
 
+from dataclasses import replace
+
 import pytest
 from test_agent_store import start
 from test_group_scheduler import row
@@ -8,7 +10,7 @@ from test_messages import receive
 from test_shell import allow, dispatcher
 
 from forest import shell_commands
-from forest.shell_registry import registry_manifest, render_help
+from forest.shell_registry import CURRENT_GATE_VERSION, registry_manifest, render_help
 from forest.storage import messages as message_module
 from forest.storage.delivery_payloads import DeliveryContentStore
 
@@ -37,9 +39,9 @@ async def test_durable_help_is_generated_from_unchangeable_contract_and_sent_on_
         await controls._process(incoming["command_id"])
         assert not controls.errors
         record = await row(repository, "SELECT * FROM public.bot_shell_requests")
-        assert record["gate_version"] == "shell-gate-v2" and record["arguments"] == {}
+        assert record["gate_version"] == CURRENT_GATE_VERSION and record["arguments"] == {}
         assert record["outcome"]["code"] == "HELP" and record["delivery"]["send_lane"] == "CONTROL"
-        assert await delivered_text(repository) == render_help()
+        assert await delivered_text(repository) == render_help(CURRENT_GATE_VERSION)
     finally:
         await controls.close()
 
@@ -48,8 +50,16 @@ async def test_accepted_cancel_survives_dispatcher_restart_without_reparsing(mes
     repository, lease, _ = messages
     await allow(repository, "user-1")
     _, _, head = await start(messages)
+    current_parser = message_module.parse_command
+
+    def v2_parser(value):
+        parsed = current_parser(value)
+        return replace(parsed, gate_version="shell-gate-v2") if parsed is not None else None
+
+    monkeypatch.setattr(message_module, "parse_command", v2_parser)
     incoming = await receive(repository, lease, "cancel", text=
         f'#forest runs cancel {head["run_id"]} --reason "原参数" --expect-checkpoint {head["checkpoint_seq"]}')
+    monkeypatch.setattr(message_module, "parse_command", current_parser)
     accepted = await row(repository, "SELECT * FROM public.bot_shell_requests")
     assert accepted["status"] == "PENDING" and accepted["gate_version"] == "shell-gate-v2"
     assert accepted["priority"] == 0 and accepted["arguments"]["reason"] == "原参数"

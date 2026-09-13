@@ -6,7 +6,12 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry import DOMAIN_ALIASES_V2, SIMPLE_COMMANDS_V2, get_command_spec
+from forest.shell_registry import (
+    CURRENT_GATE_VERSION,
+    DOMAIN_ALIASES_V3,
+    SIMPLE_COMMANDS_V3,
+    get_command_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -14,13 +19,14 @@ class ShellCommand:
     name: str
     payload: dict = field(default_factory=dict)
     priority: int = 1
+    gate_version: str = CURRENT_GATE_VERSION
 
 
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
 def _command(name, payload=None):
-    spec = get_command_spec(name)
+    spec = get_command_spec(name, CURRENT_GATE_VERSION)
     if spec is None:
         raise ValueError("command")
     return ShellCommand(name, {} if payload is None else payload, spec.priority)
@@ -57,11 +63,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V2:
-        return _command(SIMPLE_COMMANDS_V2[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V3:
+        return _command(SIMPLE_COMMANDS_V3[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V2.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V3.get(words[0], words[0]), words[1]
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:
@@ -99,6 +105,21 @@ def _parse(words):
         return _command("run.approval", {
             "approval_id": _identity(words[2]), "arguments_digest": _identity(options["--digest"]),
             "decision": "APPROVE" if verb == "approve" else "REJECT",
+        })
+    if (domain, verb) == ("memory", "list") and len(words) == 2:
+        return _command("memory.read")
+    if (domain, verb) == ("memory", "forget-plan") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-deletion-epoch"})
+        return _command("memory.forget.plan", {
+            "source_unit_ids": [_identity(words[2])],
+            "expected_deletion_epoch": _revision(options["--expect-deletion-epoch"]),
+        })
+    if (domain, verb) == ("memory", "forget-apply") and len(words) >= 3:
+        options = _options(words[3:], {"--digest", "--expect-deletion-epoch"})
+        return _command("memory.forget.apply", {
+            "plan_id": _identity(words[2]),
+            "plan_digest": _identity(options["--digest"]),
+            "expected_deletion_epoch": _revision(options["--expect-deletion-epoch"]),
         })
     raise ValueError("command")
 

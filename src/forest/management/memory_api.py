@@ -43,6 +43,29 @@ class Apply(Body):
     plan_digest: str = Field(min_length=1, max_length=128)
 
 
+class ForgetPlan(Body):
+    expected_deletion_epoch: int = Field(ge=0, strict=True)
+    source_unit_ids: list[str] = Field(min_length=1, max_length=32)
+
+    @field_validator("source_unit_ids")
+    @classmethod
+    def sources(cls, value):
+        if len(set(value)) != len(value) or any(
+            not isinstance(item, str)
+            or not 1 <= len(item) <= 256
+            or any(ord(char) < 32 for char in item)
+            for item in value
+        ):
+            raise ValueError("Select distinct bounded source identifiers")
+        return value
+
+
+class ForgetApply(Body):
+    expected_deletion_epoch: int = Field(ge=0, strict=True)
+    plan_id: str = Field(min_length=1, max_length=128)
+    plan_digest: str = Field(min_length=1, max_length=128)
+
+
 def install_memory_routes(app, runtime):
     async def target(request, bot_id, *, write=False):
         session = await runtime.principal(request, write=write)
@@ -121,3 +144,39 @@ def install_memory_routes(app, runtime):
         who, bot = await target(request, bot_id)
         ticket, operation = await signed(request, bot, who, "memory.read", {}, write=False)
         return await bot.platform.memory.inspect(ticket, operation, {})
+
+    @app.get("/management/v1/bots/{bot_id}/memory/sources")
+    async def sources(bot_id: str, request: Request):
+        if set(request.query_params) - {"after", "limit", "group_source_id"}:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Unknown source selector", 422)
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+        except ValueError:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Source limit is invalid", 422) from None
+        payload = {"limit": limit}
+        for key in ("after", "group_source_id"):
+            if key in request.query_params:
+                payload[key] = request.query_params[key]
+        who, bot = await target(request, bot_id)
+        ticket, operation = await signed(
+            request, bot, who, "memory.forget.read", payload, write=False
+        )
+        return await bot.platform.memory.administration.read(ticket, operation, payload)
+
+    @app.post("/management/v1/bots/{bot_id}/memory/forget-plans")
+    async def forget_plan(bot_id: str, body: ForgetPlan, request: Request):
+        who, bot = await target(request, bot_id, write=True)
+        payload = body.model_dump()
+        ticket, operation = await signed(request, bot, who, "memory.forget.plan", payload)
+        return await bot.platform.memory.administration.plan(ticket, operation, payload)
+
+    @app.post("/management/v1/bots/{bot_id}/memory/forget-requests")
+    async def forget_apply(bot_id: str, body: ForgetApply, request: Request):
+        who, bot = await target(request, bot_id, write=True)
+        payload = body.model_dump()
+        ticket, operation = await signed(request, bot, who, "memory.forget.apply", payload)
+        result = await bot.platform.memory.administration.apply(
+            ticket, operation, payload, lease=bot.kernel._authority()
+        )
+        bot.platform.memory.notify()
+        return result

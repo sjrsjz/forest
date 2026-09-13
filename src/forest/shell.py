@@ -125,7 +125,7 @@ class ShellDispatcher:
                 )
                 if claim["status"] == "COMPLETED":
                     return
-                spec = get_command_spec(claim["command_name"])
+                spec = get_command_spec(claim["command_name"], claim["gate_version"])
                 builtin_method = spec.execution_method if spec and spec.execution_target == "builtin" else None
                 # Current effective Binding configuration supplies the only P1
                 # administrator allowlist. Platform role/nickname never grants it.
@@ -158,12 +158,12 @@ class ShellDispatcher:
                 if not authorized:
                     text, outcome = "当前账号没有 Forest 管理权限。", {"code": "DENIED"}
                 elif builtin_method == "help":
-                    text = render_help()
+                    text = render_help(claim["gate_version"])
                     outcome = {"code": "HELP"}
                 elif builtin_method == "status":
                     text = f"Forest 状态：{'业务已暂停' if paused else '运行中'}；待处理会话消息：{count['pending']}。"
                     outcome = {"code": "STATUS", "paused": paused, "pending_messages": int(count["pending"])}
-                elif claim["command_name"].startswith(("job.", "run.")):
+                elif spec is not None and spec.action is not None:
                     try:
                         text, outcome = await self._typed(lease, claim)
                     except ForestError as exc:
@@ -191,7 +191,7 @@ class ShellDispatcher:
         payload, name = claim["arguments"], claim["command_name"]
         # The immutable key and typed arguments came from durable admission.
         # Do not parse the source text or validate it under a newer schema here.
-        spec = get_command_spec(name)
+        spec = get_command_spec(name, claim["gate_version"])
         if spec is None or spec.action is None:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         if spec.execution_target == "agent":
@@ -201,9 +201,18 @@ class ShellDispatcher:
             from forest.storage.jobs import JobStore
 
             repository = JobStore(self.messages, control=control)
+        elif spec.execution_target == "memory":
+            from forest.storage.memory_administration import MemoryAdministration
+
+            repository = MemoryAdministration(self.messages, control=control)
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
-        result = await getattr(repository, spec.execution_method)(admission, operation, payload)
+        kwargs = {"lease": lease} if (spec.execution_target, spec.execution_method) == (
+            "memory", "apply"
+        ) else {}
+        result = await getattr(repository, spec.execution_method)(
+            admission, operation, payload, **kwargs
+        )
         if control.is_unavailable(result):
             return ("这条管理请求已有记录，回执内容已不可用；没有再次执行。",
                     {"code": "RECORDED_UNAVAILABLE", "operation_id": operation,
@@ -225,6 +234,47 @@ class ShellDispatcher:
             outcome = {"code": "RUN_STATUS", "run_count": len(lines), "approval_count": len(approvals)}
         elif name == "job.read":
             text, outcome = self._job_status(result, claim["conversation_id"])
+        elif name == "memory.read":
+            lines = []
+            for row in result["sources"][:20]:
+                author = row.get("author", {})
+                parts = row.get("parts", [])
+                preview = " ".join(
+                    part.get("text", "") for part in parts if part.get("type") == "text"
+                ).strip().replace("\n", " ")[:80]
+                images = sum(part.get("type") == "image" for part in parts)
+                detail = preview or (f"{images} 张图片" if images else "无文本预览")
+                who = author.get("display_name") or author.get("external_user_id") or "未知用户"
+                lines.append(f"{row['source_unit_id']}；{who}；{detail}")
+            text = (
+                f"本群记忆来源；删除版本 {result['deletion_epoch']}：\n"
+                + "\n".join(lines or ["暂无可见来源。"])
+            )
+            outcome = {"code": "MEMORY_SOURCES", "count": len(lines),
+                       "deletion_epoch": result["deletion_epoch"]}
+        elif name == "memory.forget.plan":
+            text = (
+                f"遗忘预览：来源 {result['source_count']}，展开目标 {result['resolved_target_count']}，"
+                f"受影响正文 {result['affected_payloads']}。提交命令：#forest memory forget-apply "
+                f"{result['plan_id']} --digest {result['plan_digest']} --expect-deletion-epoch "
+                f"{result['expected_deletion_epoch']}"
+            )
+            outcome = {"code": "MEMORY_FORGET_PLAN", "plan_id": result["plan_id"],
+                       "plan_digest": result["plan_digest"],
+                       "deletion_epoch": result["expected_deletion_epoch"],
+                       "source_count": result["source_count"],
+                       "affected_payloads": result["affected_payloads"]}
+        elif name == "memory.forget.apply":
+            text = (
+                f"遗忘已提交：删除版本 {result['deletion_epoch']}，来源 {result['source_count']}，"
+                f"展开目标 {result['target_count']}；后台正在物理清理正文。"
+            )
+            outcome = {"code": "ACCEPTED", "operation_id": operation,
+                       "deletion_epoch": result["deletion_epoch"],
+                       "source_count": result["source_count"],
+                       "target_count": result["target_count"]}
+            if self.on_change is not None:
+                self.on_change()
         else:
             # Only metadata is safe to publish to every member of the source group.
             visible = {key: result[key] for key in (

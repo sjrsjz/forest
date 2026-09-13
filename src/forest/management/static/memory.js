@@ -44,8 +44,9 @@ const groups = [
 
 export function memoryPanel(api, busy, notice) {
   const form = $('memory-config');
-  let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0;
+  let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0, sourceSeq = 0;
   let configuration = null, pending = null, planKey = null, applyKey = null;
+  let sourceView = null, forgetPlan = null, forgetPlanKey = null, forgetApplyKey = null;
   const replace = replacementButton($('memory-config-status'), 'memory-replace-configuration', () => {
     if (!configuration?.defaults) return;
     show({...configuration, values:structuredClone(configuration.defaults), values_payload_state:'DRAFT'});
@@ -83,11 +84,60 @@ export function memoryPanel(api, busy, notice) {
     $('memory-preview').classList.add('hidden');
   }
   function reset() {
-    epoch++; readSeq++; statusSeq++; bot = null; configuration = null;
+    epoch++; readSeq++; statusSeq++; sourceSeq++; bot = null; configuration = null;
     clearPlan(); form.reset(); $('memory-edit').disabled = true;
     $('bot-memory').classList.add('hidden'); $('memory-state').textContent = '';
     $('memory-config-status').textContent = '';
+    clearForget(); $('memory-sources').replaceChildren(); $('memory-sources-status').textContent = '';
+    $('memory-sources-more').disabled = true;
     replace.classList.add('hidden');
+  }
+  function clearForget() {
+    forgetPlan = null; forgetPlanKey = null; forgetApplyKey = null;
+    $('memory-forget-plan').disabled = true;
+    $('memory-forget-preview').classList.add('hidden');
+    $('memory-forget-diff').textContent = '';
+  }
+  function sourceLabel(row) {
+    const origin = row.source || {}, author = row.author || {};
+    const group = origin.channel_id || origin.group_source_id || origin.source_id || '未知来源';
+    const who = author.display_name || author.external_user_id || author.principal_ref || '未知作者';
+    const text = (row.parts || []).filter(part => part.type === 'text').map(part => part.text).join(' ').trim();
+    const images = (row.parts || []).filter(part => part.type === 'image').length;
+    return `${group} · ${who} · ${row.kind} · ${text.slice(0, 180) || (images ? `${images} 张图片` : '无文本预览')}`;
+  }
+  function renderSources(result, append = false) {
+    const root = $('memory-sources');
+    if (append && sourceView && sourceView.deletion_epoch === result.deletion_epoch) {
+      sourceView = {...result, sources:[...sourceView.sources, ...result.sources]};
+      forgetPlan = null; forgetPlanKey = null; forgetApplyKey = null;
+      $('memory-forget-preview').classList.add('hidden');
+    } else {
+      sourceView = result; clearForget(); root.replaceChildren();
+    }
+    for (const row of result.sources) {
+      const label = document.createElement('label'); label.className = 'check';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.value = row.source_unit_id;
+      const body = document.createElement('span'), title = document.createElement('span'), id = document.createElement('code');
+      title.textContent = sourceLabel(row); id.textContent = row.source_unit_id;
+      body.append(title, document.createElement('br'), id); label.append(input, body); root.append(label);
+      input.addEventListener('change', () => {
+        forgetPlan = null; forgetPlanKey = null; forgetApplyKey = null;
+        $('memory-forget-preview').classList.add('hidden');
+        $('memory-forget-plan').disabled = !root.querySelector('input:checked');
+      });
+    }
+    const scrub = result.scrub || {};
+    $('memory-sources-more').disabled = !sourceView.next_after;
+    $('memory-sources-status').textContent = `删除版本 ${sourceView.deletion_epoch} · 已加载来源 ${sourceView.sources.length} · 待物理清理 ${scrub.revoked_payloads || 0} · 待传播 ${scrub.pending_links || 0}`;
+  }
+  async function refreshSources(after = null, append = false) {
+    if (!bot) return;
+    const own = epoch, seq = ++sourceSeq, prefix = path();
+    const cursor = after ? `&after=${encodeURIComponent(after)}` : '';
+    const result = await api(`${prefix}/sources?limit=50${cursor}`);
+    if (!valid(own) || seq !== sourceSeq) return;
+    renderSources(result, append);
   }
   function show(row) {
     configuration = row; clearPlan(); form.reset();
@@ -165,17 +215,60 @@ export function memoryPanel(api, busy, notice) {
   });
   $('memory-reload').addEventListener('click', event => busy(event.currentTarget, read));
   $('memory-refresh').addEventListener('click', event => busy(event.currentTarget, refresh));
+  $('memory-sources-refresh').addEventListener('click', event => busy(event.currentTarget, refreshSources));
+  $('memory-sources-more').addEventListener('click', event => {
+    const after = sourceView?.next_after;
+    if (after) busy(event.currentTarget, () => refreshSources(after, true));
+  });
+  $('memory-forget-plan').addEventListener('click', event => {
+    if (!sourceView) return;
+    const ids = [...$('memory-sources').querySelectorAll('input:checked')].map(item => item.value);
+    if (!ids.length) return;
+    const own = epoch, seq = sourceSeq, deletionEpoch = sourceView.deletion_epoch, prefix = path();
+    forgetPlanKey ||= crypto.randomUUID(); const key = forgetPlanKey;
+    busy(event.currentTarget, async () => {
+      const result = await api(`${prefix}/forget-plans`, {
+        expected_deletion_epoch:deletionEpoch, source_unit_ids:ids,
+      }, {'Idempotency-Key':key});
+      if (!valid(own) || seq !== sourceSeq || key !== forgetPlanKey) return;
+      forgetPlan = result; forgetApplyKey = crypto.randomUUID();
+      $('memory-forget-diff').textContent = JSON.stringify({
+        sources:result.sources.map(sourceLabel), source_count:result.source_count,
+        resolved_target_count:result.resolved_target_count,
+        affected_payloads:result.affected_payloads,
+        legacy_conservative:result.legacy_conservative,
+        deletion_epoch:result.expected_deletion_epoch, expires_at:result.expires_at,
+      }, null, 2);
+      $('memory-forget-preview').classList.remove('hidden');
+    });
+  });
+  $('memory-forget-apply').addEventListener('click', event => {
+    if (!forgetPlan) return;
+    const own = epoch, plan = forgetPlan, key = forgetApplyKey, prefix = path();
+    busy(event.currentTarget, async () => {
+      const result = await api(`${prefix}/forget-requests`, {
+        expected_deletion_epoch:plan.expected_deletion_epoch,
+        plan_id:plan.plan_id, plan_digest:plan.plan_digest,
+      }, {'Idempotency-Key':key});
+      if (!valid(own) || plan !== forgetPlan) return;
+      notice(`遗忘已提交：删除版本 ${result.deletion_epoch}，后台正在清理正文。`, true);
+      await refreshSources(); await refresh();
+    });
+  });
   async function select(row) {
     reset(); bot = row; $('bot-memory').classList.remove('hidden');
     const own = epoch;
     await read();
     if (valid(own)) await refresh();
+    if (valid(own)) await refreshSources();
   }
   function invalidateContent(scope) {
     if (!bot || scope !== path()) return;
-    epoch++; readSeq++; statusSeq++; configuration = null; clearPlan();
+    epoch++; readSeq++; statusSeq++; sourceSeq++; configuration = null; clearPlan();
     clearConfiguration(form); $('memory-edit').disabled = true;
     $('memory-diff').replaceChildren(); $('memory-state').replaceChildren();
+    clearForget(); $('memory-sources').replaceChildren(); $('memory-sources-status').textContent = '';
+    $('memory-sources-more').disabled = true;
     $('memory-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';
     replace.classList.add('hidden');
   }
