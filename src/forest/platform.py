@@ -146,6 +146,10 @@ class BindingRuntime:
         self.jobs.notify()
         self.memory.notify()
 
+    def notify(self):
+        """Wake durable business workers after an out-of-band control change."""
+        self._notify_work()
+
     async def _authorize_job(self, claim):
         grant = claim.delegation
         if grant["issuer_id"] != self.job_authority.issuer_id:

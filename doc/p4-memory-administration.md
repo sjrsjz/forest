@@ -1,6 +1,6 @@
 # P4 记忆来源管理与公开遗忘协议
 
-状态：首版纵向切片已实现。底层来源抑制、删除 epoch、派生闭包和物理 scrub 已接入 Web 来源页、审核 plan/apply 与 `shell-gate-v3` 当前群命令；本文同时记录恢复和未覆盖的外部存储边界。
+状态：首版纵向切片已实现。底层来源抑制、删除 epoch、派生闭包和物理 scrub 已接入 Web 来源页、审核 plan/apply 与当前 `shell-gate-v4` 群命令；本文同时记录恢复和未覆盖的外部存储边界。
 
 ## 1. 管理对象和首版范围
 
@@ -36,7 +36,7 @@ Web 票据增加 `memory.forget.read/plan/apply`。已有受限 issuer 只按原
 
 WebUI 可以管理该 Bot 全局范围。群聊 Shell 只能列出和操作当前群主干的来源，不能凭另一个群的 `source_unit_id` 删除跨群内容。Shell 的 plan 和 apply 必须由同一当前 Binding 管理员执行，apply 携带页面等价的 `plan_id + plan_digest + expected_deletion_epoch`。
 
-当前 v3 命令为：
+当前 v4 继承的记忆命令为：
 
 ```text
 #forest memory list
@@ -44,7 +44,7 @@ WebUI 可以管理该 Bot 全局范围。群聊 Shell 只能列出和操作当�
 #forest memory forget-apply <plan_id> --digest <plan_digest> --expect-deletion-epoch <deletion_epoch>
 ```
 
-`shell-gate-v2` 的命令表和摘要保持不变。新增记忆命令发布为 `shell-gate-v3`；Dispatcher 按持久 `gate_version` 选择冻结 registry，使升级前已排队的 v2 命令继续使用原 schema 和动作映射。
+`shell-gate-v2` 的命令表和摘要保持不变。记忆命令首次发布于冻结的 `shell-gate-v3`，当前 `shell-gate-v4` 完整继承 v3 契约并增加 Bot 维护命令；Dispatcher 按持久 `gate_version` 选择冻结 registry，使升级前已排队的 v2/v3 命令继续使用原 schema 和动作映射。
 
 ## 4. 持久结构和恢复
 

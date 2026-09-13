@@ -1,8 +1,8 @@
 # Forest 实现状态与验证记录
 
-更新日期：2026-09-14。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核、OneBot HTTP、P2 插件升级、P3 持久 Agent/定时任务，以及 P4 跨群图文记忆链路、来源遗忘和审核式跨主干联想召回；首版框架仍在实现中。**页面支持模型、人格、图文能力、工具权限、嵌入及媒体/查询预算、审批、任务配置与运行取消，也能按群和作者核对记忆来源后预览遗忘、建立/解除/恢复来源联想。模型/工具步骤以数据库安全点接入群消息，输入投影保留作者及群来源，裁剪不调用摘要 API。
+更新日期：2026-09-14。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核、OneBot HTTP、P2 插件升级、P3 持久 Agent/定时任务，以及 P4 跨群图文记忆链路、来源遗忘和审核式跨主干联想召回；首版框架仍在实现中。**页面支持模型、人格、图文能力、工具权限、嵌入及媒体/查询预算、审批、任务配置与运行取消，也能按群和作者核对记忆来源后预览遗忘、建立/解除/恢复来源联想，并通过维护版本暂停或恢复 Bot 业务。模型/工具步骤以数据库安全点接入群消息，输入投影保留作者及群来源，裁剪不调用摘要 API。
 
-Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 Agent 详细设计](p3-agent.md)改为每个 `(bot_id, conversation_id)` 一条模型—工具执行链。宿主固定不可覆盖的 CorePrompt v1 及摘要，Bot 人格进入独立 PresetContext；Provider 输出按原子 XML ModelTurn 解析，一轮至多一个 FunctionCall，非法输出仅允许一次有界修复。`forest_analyze`、ChildScheduler、Child 配置和页面入口已删除，迁移 050 终结并封存旧记录。旧验证章节只证明被撤销代码当时可运行。公开来源遗忘已经通过 Web 和 `shell-gate-v3` 接通；Shell v2 继续解析既有排队命令。审核式来源联想通过 Web 接入既有纯图归约器和 Agent 召回，群 Shell 暂不提供跨群联想命令。部署库与备份/WAL 清理、剩余自由文本族、通用事件/Job 扩展和完整管理 Shell 仍待完成。
+Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 Agent 详细设计](p3-agent.md)改为每个 `(bot_id, conversation_id)` 一条模型—工具执行链。宿主固定不可覆盖的 CorePrompt v1 及摘要，Bot 人格进入独立 PresetContext；Provider 输出按原子 XML ModelTurn 解析，一轮至多一个 FunctionCall，非法输出仅允许一次有界修复。`forest_analyze`、ChildScheduler、Child 配置和页面入口已删除，迁移 050 终结并封存旧记录。旧验证章节只证明被撤销代码当时可运行。公开来源遗忘已经通过 Web 和 Shell 接通；`shell-gate-v4` 新增 P0 Bot 暂停和 P1 恢复，v2/v3 继续解析既有排队命令。审核式来源联想通过 Web 接入既有纯图归约器和 Agent 召回，群 Shell 暂不提供跨群联想命令。部署库与备份/WAL 清理、剩余自由文本族、通用事件/Job 扩展和完整管理 Shell 仍待完成。
 
 ## 1. 当前可以执行的流程
 
@@ -14,7 +14,7 @@ Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 A
 
 Web 新流程为：创建 Bot → 供应器按冻结计划创建专用数据库和受限角色 → Fleet 启动该 Bot 宿主 → 预览并提交组件配置 → 候选准备与排空切换 → 生效修订推进 → 页面调用组件。双 Bot 计数器、热改倍率与完整重启恢复已有真实 HTTP/PostgreSQL/Worker 测试；后台支持发行版内置组件和通过完整 ZIP 导入的可信插件。
 
-P1/P3 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置 → 实际 API 身份探测 → 持久发布 Binding/connection epoch → HMAC 验证消息后持久 ACK → 全量 Context/最后触发切口 → 公平群 Actor → 单一持久 Agent 的模型—工具链 → 最终回复和发送意图原子提交 → 事务外 HTTP → SENT/NOT_SENT/UNKNOWN。受限 `#forest` 管理命令独立处理并使用 CONTROL 发送通道，普通业务暂停不关闭接收。详细行为和未实现边界见 [P1 接入说明](p1-integration.md)与[单 Agent 详细设计](p3-agent.md)。
+P1/P3 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置 → 实际 API 身份探测 → 持久发布 Binding/connection epoch → HMAC 验证消息后持久 ACK → 全量 Context/最后触发切口 → 公平群 Actor → 单一持久 Agent 的模型—工具链 → 最终回复和发送意图原子提交 → 事务外 HTTP → SENT/NOT_SENT/UNKNOWN。受限 `#forest` 管理命令独立处理并使用 CONTROL 发送通道；Shell/Web 的 Bot 维护写以 maintenance epoch 合流，普通业务暂停不关闭接收。详细行为和未实现边界见 [P1 接入说明](p1-integration.md)、[单 Agent 详细设计](p3-agent.md)与[群聊 Shell 详细设计](09-group-shell-command-system.md)。
 
 | 能力 | 当前实现及边界 | 主要证据 |
 |---|---|---|
@@ -91,8 +91,8 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
-| P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v3 只管理当前群主干，后台有界 scrub。自动语义联想、剩余自由文本族、部署库与备份/WAL 清理及大规模检索容量仍待完成 |
-| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、群聊运行/任务命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；完整类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
+| P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v4 只管理当前群主干，后台有界 scrub。自动语义联想、剩余自由文本族、部署库与备份/WAL 清理及大规模检索容量仍待完成 |
+| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、Bot 暂停/恢复、群聊运行/任务/维护命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；完整类型化管理服务、角色/密钥/预算管理、任务日志、备份迁移恢复及容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 
@@ -108,9 +108,11 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 本次跨主干联想切片在同一环境完成 `108 passed`，168.60 秒，覆盖人工关系 plan/apply/replay、同 revision 并发合流、解除/恢复、非主干离散窗口、持久待发布恢复、向量种子的一跳扩展、旧输入切口隔离、模型可见的关系路径、实际 Web/OneBot 管理流程及 001–052 非空旧库升级。最终直接影响范围另完成 `63 passed`，104.85 秒；更宽的记忆/Agent 绑定/Shell/Web 回归先通过 265 项，唯一失败是旧 051 权限测试未计入 052 派生权限，修正该精确断言后已纳入最终复验。无头 Edge 验证来源双选、联想预览/提交/解除/恢复入口以及原有配置竞态；Ruff、全部管理 JavaScript 语法和补丁空白检查通过。没有接入真实 QQ、商业嵌入/LLM 或 Linux 全量验收。
 
+本次 Bot 维护控制切片完成 `170 passed`，293.41 秒的 Windows 组合回归，覆盖 Shell v2/v3/v4、P0 保留槽、Web 与群 Shell 的共享维护事务、幂等重放、并发 maintenance epoch CAS、暂停时继续接收、恢复后的 Actor 换代、控制参数上下文脱敏、平台调度、原 BotStore 守卫，以及多条真实非空旧库升级链。另有 `9 passed` 最终增补复验最后触发输入切口和完整权限期望；真实 HTTP/Worker 的双 Bot Web 测试为 `2 passed`。无头 Edge 验证维护表单及迟到旧状态读取不能覆盖暂停结果；Ruff、管理 JavaScript 语法和补丁空白检查通过。没有接入真实 QQ、商业模型或 Linux 全量验收。
+
 039–041 接入管理输入、结果和确切关联的审计/outbox 载荷。原 operation、输入摘要、票据依据与修订事实保留，原结果正文列严格为空；重放区分 JSON null 和不可用回执，不再触发 Kernel、登记 Binding 或展示成功提示。Web 配置到 generation、人工工具裁定与送达对账均继承实际管理输入；旧配置升级后的 Worker 回复使用限定的来源证明。详见[管理输入与回执](p4-control-payloads.md)。
 
-管理页面在内容失效后清除旧预览，并拒绝同资源迟到响应重新填回；重新加载可读取独立的当前配置。注销会清空记忆配置与密钥草稿。迁移 042–049 已将 Agent、Memory、Binding、组件和 Watch 的 plan/revision 值、Agent frozen spec 及实际运行配置父链接入载荷存储；迁移 051 增加不可变遗忘计划，迁移 052 增加不可变联想计划/变更和可恢复关系头，两者都按原 issuer 能力升级权限。Job 定义到 occurrence、Shell 自由文本参数/结果、部署库正文和备份/WAL 仍待迁移，当前来源遗忘能力不等于所有外部副本均已回收。
+管理页面在内容失效后清除旧预览，并拒绝同资源迟到响应重新填回；重新加载可读取独立的当前配置。注销会清空记忆配置与密钥草稿。迁移 042–049 已将 Agent、Memory、Binding、组件和 Watch 的 plan/revision 值、Agent frozen spec 及实际运行配置父链接入载荷存储；迁移 051 增加不可变遗忘计划，迁移 052 增加不可变联想计划/变更和可恢复关系头，两者都按原 issuer 能力升级权限；迁移 053 仅为已有 message.read 映射 Bot runtime 读取，并要求同时已有 config.apply 与 message.cancel 才映射维护写。Job 定义到 occurrence、Shell 自由文本参数/结果、部署库正文和备份/WAL 仍待迁移，当前来源遗忘能力不等于所有外部副本均已回收。
 
 | 管理回执切片 | 结果 | 范围 |
 |---|---|---|
@@ -123,7 +125,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 两个 482 项综合回归使用同一冻结源码，均实际运行结束。清单核对不是一次最终全量重跑，也不把历史基线中的失败计为通过。浏览器专项不替代 PostgreSQL 或真实供应商验收。完整浏览器流程首次因未指定已安装的浏览器而退出，随后显式指定 Edge 完整通过；两次均只创建并清理独立随机 Compose 项目。以下保留各历史切片自身的验证范围。
 
-内置 Shell 命令使用按 gate 版本冻结的 CommandSpec 表生成帮助、选择 action/执行方法并提供优先级与参数 schema。`shell-gate-v2` 的词法、摘要和执行映射不变；新接纳消息使用 `shell-gate-v3`，增加本群来源列表、遗忘计划和提交。Dispatcher 按请求持久化的 gate 版本直接执行类型化参数，不重新解析原文本；遗忘 apply 为 P0，计划和列表为 P1，且计划目标和提交位置都复验当前群主干。此表不等同动态插件命令或持久 registry snapshot，完整 P5 管理协议仍在实现。见[群管理协议](p3-control.md)和[记忆来源管理](p4-memory-administration.md)。
+内置 Shell 命令使用按 gate 版本冻结的 CommandSpec 表生成帮助、选择 action/执行方法并提供优先级与参数 schema。`shell-gate-v2` 的词法、摘要和执行映射不变，v3 保留本群来源列表、遗忘计划和提交；新接纳消息使用 `shell-gate-v4`，增加 Bot 暂停/恢复。Dispatcher 按请求持久化的 gate 版本直接执行类型化参数，不重新解析原文本；遗忘 apply 和 Bot pause 为 P0，resume、计划和列表为 P1。Bot 维护写与 Web 共用 `bot.maintenance`、控制回执和维护版本 CAS，原因不进入 Context 或群回执。此表不等同动态插件命令或持久 registry snapshot，完整 P5 管理协议仍在实现。见[群聊 Shell 详细设计](09-group-shell-command-system.md)、[群管理协议](p3-control.md)和[记忆来源管理](p4-memory-administration.md)。
 
 | 固定 Shell 契约切片 | 结果 | 范围 |
 |---|---|---|

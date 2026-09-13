@@ -453,6 +453,13 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
                 "memory.config.plan",
                 "memory.config.apply",
                 "memory.read",
+                "bot.runtime.read",
+                "memory.forget.read",
+                "memory.forget.plan",
+                "memory.forget.apply",
+                "memory.association.read",
+                "memory.association.plan",
+                "memory.association.apply",
             }
             for table in (
                 "bot_memory_config_revisions",
@@ -504,6 +511,7 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
         "memory.config.plan": "config.plan",
         "memory.config.apply": "config.apply",
         "memory.read": "message.read",
+        "bot.runtime.read": "message.read",
     }
     async with old_bot(upgrade_database, tmp_path) as env:
         public = base64.b64encode(env.private.public_key().public_bytes_raw()).decode()
@@ -525,6 +533,14 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
             expected = set(row["actions"]) | {
                 action for action, old in mapping.items() if old in row["actions"]
             }
+            if {"config.apply", "message.cancel"} <= set(row["actions"]):
+                expected.add("bot.maintenance")
+            if "memory.read" in expected:
+                expected.update({"memory.forget.read", "memory.association.read"})
+            if {"memory.read", "memory.config.plan"} <= expected:
+                expected.update({"memory.forget.plan", "memory.association.plan"})
+            if {"memory.read", "memory.config.apply"} <= expected:
+                expected.update({"memory.forget.apply", "memory.association.apply"})
             after = actual[row["issuer_id"]]
             assert set(after["actions"]) == expected
             assert {k: v for k, v in after.items() if k != "actions"} == {

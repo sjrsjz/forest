@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 from forest.shell_registry import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V3,
-    SIMPLE_COMMANDS_V3,
+    DOMAIN_ALIASES_V4,
+    SIMPLE_COMMANDS_V4,
     get_command_spec,
 )
 
@@ -63,11 +63,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V3:
-        return _command(SIMPLE_COMMANDS_V3[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V4:
+        return _command(SIMPLE_COMMANDS_V4[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V3.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V4.get(words[0], words[0]), words[1]
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:
@@ -105,6 +105,13 @@ def _parse(words):
         return _command("run.approval", {
             "approval_id": _identity(words[2]), "arguments_digest": _identity(options["--digest"]),
             "decision": "APPROVE" if verb == "approve" else "REJECT",
+        })
+    if domain == "bot" and verb in {"pause", "resume"} and len(words) >= 2:
+        options = _options(words[2:], {"--expect-maintenance", "--reason"})
+        return _command("bot." + verb, {
+            "expected_maintenance_epoch": _revision(options["--expect-maintenance"]),
+            "data_admission": verb == "resume",
+            "reason": _reason(options["--reason"]),
         })
     if (domain, verb) == ("memory", "list") and len(words) == 2:
         return _command("memory.read")

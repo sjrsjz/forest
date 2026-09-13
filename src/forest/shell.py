@@ -146,7 +146,8 @@ class ShellDispatcher:
                         and all(isinstance(admin, str) for admin in admins)
                         and author.get("external_user_id") in admins
                     )
-                    paused = not binding["_runtime"]["data_admission"]
+                    runtime_state = binding["_runtime"]
+                    paused = not runtime_state["data_admission"]
                     if authorized and builtin_method == "status":
                         count = await (await conn.execute(
                             "SELECT COALESCE(sum(next_ingress_seq-1-context_applied_seq),0) AS pending "
@@ -161,8 +162,14 @@ class ShellDispatcher:
                     text = render_help(claim["gate_version"])
                     outcome = {"code": "HELP"}
                 elif builtin_method == "status":
-                    text = f"Forest 状态：{'业务已暂停' if paused else '运行中'}；待处理会话消息：{count['pending']}。"
-                    outcome = {"code": "STATUS", "paused": paused, "pending_messages": int(count["pending"])}
+                    text = (
+                        f"Forest 状态：{'业务已暂停' if paused else '运行中'}；"
+                        f"维护版本：{runtime_state['maintenance_epoch']}；"
+                        f"待处理会话消息：{count['pending']}。"
+                    )
+                    outcome = {"code": "STATUS", "paused": paused,
+                               "maintenance_epoch": runtime_state["maintenance_epoch"],
+                               "pending_messages": int(count["pending"])}
                 elif spec is not None and spec.action is not None:
                     try:
                         text, outcome = await self._typed(lease, claim)
@@ -205,10 +212,15 @@ class ShellDispatcher:
             from forest.storage.memory_administration import MemoryAdministration
 
             repository = MemoryAdministration(self.messages, control=control)
+        elif spec.execution_target == "bot":
+            from forest.storage.bot_runtime import BotRuntimeAdministration
+
+            repository = BotRuntimeAdministration(self.messages.store, control=control)
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
-        kwargs = {"lease": lease} if (spec.execution_target, spec.execution_method) == (
-            "memory", "apply"
+        kwargs = {"lease": lease} if (
+            (spec.execution_target, spec.execution_method) == ("memory", "apply")
+            or spec.execution_target == "bot"
         ) else {}
         result = await getattr(repository, spec.execution_method)(
             admission, operation, payload, **kwargs
@@ -273,6 +285,18 @@ class ShellDispatcher:
                        "deletion_epoch": result["deletion_epoch"],
                        "source_count": result["source_count"],
                        "target_count": result["target_count"]}
+            if self.on_change is not None:
+                self.on_change()
+        elif name in {"bot.pause", "bot.resume"}:
+            text = (
+                f"Bot {'已恢复业务处理' if result['data_admission'] else '已暂停业务处理'}；"
+                f"维护版本 {result['maintenance_epoch']}。"
+            )
+            outcome = {
+                "code": "BOT_MAINTENANCE",
+                "maintenance_epoch": result["maintenance_epoch"],
+                "data_admission": result["data_admission"],
+            }
             if self.on_change is not None:
                 self.on_change()
         else:

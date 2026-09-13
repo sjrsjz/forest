@@ -35,6 +35,8 @@ const state = (component, label, digest) => ({desired_revision:1,effective_revis
 window.fixture = {packages,states:{'fixture.alpha':state('fixture.alpha','Alpha','pkg-a'),
   'fixture.beta':state('fixture.beta','Beta','pkg-b')},hold:[],pending:[],calls:[],plans:{},unavailable:[],poll:null};
 fixture.bot = {bot_id:'bot-a',display_name:'Browser fixture',stage:'READY',revision:1,job_id:'job-a'};
+fixture.runtime = {status:'ACTIVE',storage_generation:1,maintenance_epoch:1,policy_revision:1,
+  data_admission:true,control_admission:true,supervisor:{attached:true,error_code:null,components:[]}};
 function reply(path, method, body) {
   if (fixture.unavailable.includes(path)) return {operation_id:'recorded-operation',action:'config.apply',
     operation_status:'RECORDED',result_payload_state:'UNAVAILABLE'};
@@ -43,6 +45,13 @@ function reply(path, method, body) {
   if (path==='/configuration') return {head_revision:1,defaults:{display_name:'Forest fixture',session_ttl_minutes:60}};
   if (path==='/bots') return {bots:[fixture.bot],managed_available:true};
   if (path==='/bots/bot-a') return fixture.bot;
+  if (path==='/bots/bot-a/runtime') return fixture.runtime;
+  if (path==='/bots/bot-a/maintenance' && method==='POST') {
+    if (body.expected_maintenance_epoch!==fixture.runtime.maintenance_epoch) throw Error('stale maintenance fixture');
+    fixture.runtime={...fixture.runtime,maintenance_epoch:fixture.runtime.maintenance_epoch+1,
+      data_admission:body.data_admission};
+    return fixture.runtime;
+  }
   if (path==='/provision-jobs/job-a') return {events:[]};
   if (path==='/packages') return method==='POST' ? packages[0] : {packages:fixture.packages,errors:{}};
   if (path.endsWith('/agent/configuration')) return {revision:0,values:{enabled:false,allowed_tools:[]},has_api_key:false};
@@ -150,6 +159,39 @@ def main():
             def release(key):
                 page.wait_for_function("key => fixture.pending.some(item=>item.key===key)", arg=key)
                 page.evaluate("key => {const index=fixture.pending.findIndex(item=>item.key===key); fixture.pending.splice(index,1)[0].resolve();}", key)
+
+            # A delayed old runtime read cannot overwrite a maintenance write.
+            runtime_key = "GET /bots/bot-a/runtime"
+            hold(runtime_key)
+            page.locator("#bot-maintenance-refresh").click()
+            page.wait_for_function("fixture.pending.some(item=>item.key==='GET /bots/bot-a/runtime')")
+            page.locator('#bot-maintenance-form [name="reason"]').fill('provider maintenance')
+            page.locator("#bot-maintenance-toggle").click()
+            expect(page.locator("#bot-maintenance-status")).to_contain_text("业务已暂停 · 维护版本 2")
+            release(runtime_key)
+            expect(page.locator("#bot-maintenance-refresh")).to_be_enabled()
+            expect(page.locator("#bot-maintenance-status")).to_contain_text("业务已暂停 · 维护版本 2")
+            pause = page.evaluate("fixture.calls.filter(call=>call.path==='/bots/bot-a/maintenance').at(-1)")
+            assert pause["body"] == {"expected_maintenance_epoch": 1, "data_admission": False,
+                                     "reason": "provider maintenance"}
+            page.locator('#bot-maintenance-form [name="reason"]').fill('provider recovered')
+            page.locator("#bot-maintenance-toggle").click()
+            expect(page.locator("#bot-maintenance-status")).to_contain_text("正在处理业务 · 维护版本 3")
+
+            # Re-selecting this Bot while its write response is delayed must
+            # refresh after the write instead of leaving runtime state hidden.
+            maintenance_key = "POST /bots/bot-a/maintenance"
+            hold(maintenance_key)
+            page.locator('#bot-maintenance-form [name="reason"]').fill('second incident')
+            page.locator("#bot-maintenance-toggle").click()
+            page.wait_for_function(
+                "fixture.pending.some(item=>item.key==='POST /bots/bot-a/maintenance')"
+            )
+            page.locator('[data-bot-id="bot-a"]').click()
+            release(maintenance_key)
+            expect(page.locator("#bot-maintenance-status")).to_contain_text(
+                "业务已暂停 · 维护版本 4"
+            )
 
             alpha = "/bots/bot-a/components/fixture.alpha"
             # Import's package refresh waits while the user chooses another form.
@@ -279,7 +321,11 @@ def main():
             expect(label).to_have_value('Beta')
             assert errors == [], errors
             browser.close()
-        print("Component panel browser checks passed: package refresh races, preserved drafts, stale invocation/history fencing, typed forms, and unavailable recorded receipts without re-execution.")
+        print(
+            "Component panel browser checks passed: maintenance read/write and reselection races, package refresh "
+            "races, preserved drafts, stale invocation/history fencing, typed forms, and "
+            "unavailable recorded receipts without re-execution."
+        )
     finally:
         server.shutdown()
         server.server_close()

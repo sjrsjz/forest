@@ -194,6 +194,16 @@ async def test_upgrade_job_grants_preserve_existing_issuer_restrictions(upgrade_
                                      ("memory.config.apply", "config.apply"), ("memory.read", "message.read")):
             if required in actions:
                 expected.add(permission)
+        if "message.read" in actions:
+            expected.add("bot.runtime.read")
+        if {"config.apply", "message.cancel"} <= set(actions):
+            expected.add("bot.maintenance")
+        if "memory.read" in expected:
+            expected.update({"memory.forget.read", "memory.association.read"})
+        if {"memory.read", "memory.config.plan"} <= expected:
+            expected.update({"memory.forget.plan", "memory.association.plan"})
+        if {"memory.read", "memory.config.apply"} <= expected:
+            expected.update({"memory.forget.apply", "memory.association.apply"})
         assert set(after["actions"]) == expected
         if scope in {"readonly", "config_readonly", "empty", "invoke_only"}:
             assert not {"memory.config.plan", "memory.config.apply"}.intersection(after["actions"])

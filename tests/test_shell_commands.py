@@ -31,6 +31,10 @@ def command(text, *, extras=(), self_message=False):
     ("#forest memory forget-apply plan:1 --digest sha256:abc --expect-deletion-epoch 4",
      "memory.forget.apply",
      {"plan_id": "plan:1", "plan_digest": "sha256:abc", "expected_deletion_epoch": 4}, 0),
+    ('#forest bot pause --reason "上游维护" --expect-maintenance 7', "bot.pause",
+     {"expected_maintenance_epoch": 7, "data_admission": False, "reason": "上游维护"}, 0),
+    ('#forest bot resume --expect-maintenance 8 --reason "上游恢复"', "bot.resume",
+     {"expected_maintenance_epoch": 8, "data_admission": True, "reason": "上游恢复"}, 1),
 ])
 def test_typed_commands(text, name, payload, priority):
     parsed = command(text)
@@ -44,6 +48,8 @@ def test_typed_commands(text, name, payload, priority):
     '#forest run cancel a --expect-checkpoint 1 --reason "unterminated',
     '#forest run cancel a --expect-checkpoint 1 --reason ""',
     '#forest job cancel a --expect-revision 1 --scope unknown --reason test',
+    '#forest bot pause --expect-maintenance 1 --reason ""',
+    '#forest bot resume --expect-maintenance true --reason restore',
     '#forest job run a --expect-revision 1; rm anything', '#forest confirm SECRET',
     '#forest job status ' + 'a' * 129,
     '#forest ' + 'a' * 4096,
@@ -67,6 +73,7 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v3():
-    assert command("#forest status").gate_version == "shell-gate-v3"
-    assert command("#forest memory list").gate_version == "shell-gate-v3"
+def test_new_admissions_are_explicitly_shell_gate_v4():
+    assert command("#forest status").gate_version == "shell-gate-v4"
+    assert command("#forest memory list").gate_version == "shell-gate-v4"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v4"

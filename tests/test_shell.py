@@ -90,6 +90,7 @@ async def test_control_status_works_while_chat_execution_slot_is_occupied_and_bo
         await until(lambda: completed(repository, 1))
         result = await row(repository, "SELECT outcome,delivery FROM public.bot_shell_requests")
         assert result["outcome"]["code"] == "STATUS" and result["outcome"]["paused"]
+        assert result["outcome"]["maintenance_epoch"] == 2
         assert result["delivery"]["send_lane"] == "CONTROL"
         assert (await row(repository, "SELECT count(*) AS n FROM public.bot_conversation_replies"))["n"] == 0
     finally:

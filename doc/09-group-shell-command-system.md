@@ -1,6 +1,6 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 状态：待实现的框架契约。本文命令、DTO 和配置名称为拟定接口，当前仓库不提供可执行实现。
+> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v4` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/Job 控制、本群记忆来源遗忘和 Bot 维护控制。其余命令树仍是待实现目标，不能从示例推断为现有能力。
 
 ## 1. 目标与边界
 
@@ -9,6 +9,27 @@
 默认入口为 `#forest`，保留 `#forest core` 作为稳定内核救援命令。框架 Shell 支持子命令、引号、选项、帮助、持久 Job 与受控原生进程扩展；业务插件可以增加自己的命令。它不改变[08](08-group-context-interaction.md)的单群 Agent 独占与输入切口规则。
 
 三件事分别建模：解析时谁拥有命令；调度时哪个服务等级先取得执行槽；相交资源最终按什么事务顺序提交。命中高优先级命令不会自动提升权限，也不能撤销已经发生的网络发送或其他外部效果。
+
+### 1.1 `shell-gate-v4`：Bot 维护控制
+
+当前兼容门增加两条可执行命令：
+
+```text
+#forest bot pause --expect-maintenance 7 --reason "上游接口异常"
+#forest bot resume --expect-maintenance 8 --reason "上游接口恢复"
+```
+
+两条命令都归一为类型化动作 `bot.maintenance`，参数固定为
+`{expected_maintenance_epoch, data_admission, reason}`；`pause` 固定
+`data_admission=false`，`resume` 固定为 `true`。解析后的参数和门版本随命令请求持久化，Worker 不重新解析原群消息。`shell-gate-v2`、`shell-gate-v3` 保留为只读兼容表，已经排队的旧命令继续按接纳时的 schema 执行。
+
+`pause` 是 P0：即使 Agent、普通 P1 查询或模型容量已占满，也保留一个控制执行槽。`resume` 是 P1，防止恢复命令与紧急停接竞争同一保留份额。优先级只影响领取顺序；两个动作最终都锁定全部组件 route、Bot runtime 和 host lease，并以 `maintenance_epoch` CAS 裁决。成功操作把 epoch 增加一；旧 Actor、模型/工具许可、媒体、索引和查询执行在各自提交守卫处因旧 epoch 失效。暂停不删除 Inbox，也不关闭 Binding 的可靠接收或 CONTROL 回执。
+
+`resume` 必须携带暂停后读到的新 epoch。它只恢复 `data_admission`，并重新开放当前宿主所拥有的 ACTIVE 组件 route；不会复活旧 generation、旧调用许可或已取消 Run。并发 pause/resume 中仅一个预期版本可以提交，失败方得到 `MAINTENANCE_CONFLICT` 后重新读取状态。相同来源与幂等键的重放返回原回执，不重复递增 epoch。
+
+群聊入口要求消息作者仍在当前 Binding 的 `admin_user_ids`，且在业务提交和 CONTROL 外发前再次检查 Binding epoch、配置正文、宿主 lease 与作者身份。首版这一名单代表该接入账号可执行 Bot 级维护的运维人员，不从平台群主/管理员标记自动推导。WebUI 通过目标 Bot 签发的 `bot.runtime.read` / `bot.maintenance` 权限调用同一管理服务；其按钮使用读取到的 epoch，发生冲突时刷新状态，不直接调用 `BotStore.set_maintenance`。
+
+操作效果、规范化输入、结果载荷、审计和 outbox 在目标 Bot 数据库的同一事务提交。群回执只展示运行/暂停状态和新 epoch；`reason` 留在受保护的控制输入与审计来源中，不进入 Agent Context 或群回执。该命令消息本身仍按原 `ingress_seq` 形成 `control_data` 投影，既不触发 Agent，也不改变当前模型调用的输入切口；暂停后已进入 Inbox 的普通消息等恢复后继续按单 Agent 队列处理。
 
 WebUI 不把点击转成伪造群消息或拼接 `#forest` 字符串：它以自己的可信主体和 `management_request_id` 提交相同 typed action，Shell 保留真实 platform event、`command_id` 和来源会话。两者在目标库关联同类 `operation_ref={kind,id}`，共同遵守当前授权、配置 CAS、维护/代际 fence、Job/生命周期/效果与批准账本；页面、HTTP 长连接和群消息都不拥有实际操作的执行权。
 
@@ -288,7 +309,7 @@ shell.command 的解析、帮助、丰富输出与扩展命令可以热重载。
 
 稳定内核保留 ShellGate、最小 core parser、授权执行、控制请求/回执账本访问与救援注册。`#forest core status/cancel/disable/reload` 无需调用故障 shell 或业务插件；救援 reload 只接纳现有受控包/配置引用，复杂构建转为 Job，P0 不运行任意脚本。内核救援也要鉴权、幂等、资源 lease 和审计。
 
-`bot pause --mode conversation` 停止新的 Agent/业务执行，按配置排空或明确取消当前工作，继续保存接纳消息并允许控制；`--mode maintenance` 优先关闭 data_admission 并提升 maintenance_epoch，保留 control_admission、Adapter 接收与必要恢复/静默记录。data_admission/control_admission 是独立持久门；重载结束不覆盖暂停期望。需要停止 Adapter、迁移事实库或宿主重启时必须给出可用通道与断连结果，不能承诺维护期间仍能通过该群控制。
+当前 `bot pause` 实现 maintenance 语义：关闭 data_admission 并提升 maintenance_epoch，保留 control_admission、Adapter 接收与必要恢复/静默记录；`bot resume` 基于新 epoch 恢复业务。data_admission/control_admission 是独立持久门，重载结束不覆盖暂停期望。只暂停单个 Conversation、选择排空或先取消当前 Run 的模式仍属后续命令；需要停止 Adapter、迁移事实库或宿主重启时必须给出可用通道与断连结果，不能承诺维护期间仍能通过该群控制。
 
 若仅 shell/业务模块崩溃，core 救援应可用；若对应 Adapter、Bot 事实库、宿主网络或整个主机失效，单一 QQ 通道无从自救。部署 CLI/独立管理 API 共享相同鉴权和操作协议，作为实际可访问时的另一管理入口。
 

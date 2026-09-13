@@ -1,4 +1,4 @@
-"""Frozen contracts for the builtin v2 and v3 Shell command languages.
+"""Frozen contracts for the builtin v2, v3, and v4 Shell command languages.
 
 This is a host-owned table, not a plugin registration or authorization API.
 Queued requests already contain typed arguments: executors select this fixed
@@ -15,7 +15,8 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 GATE_VERSION = "shell-gate-v2"
-CURRENT_GATE_VERSION = "shell-gate-v3"
+MEMORY_GATE_VERSION = "shell-gate-v3"
+CURRENT_GATE_VERSION = "shell-gate-v4"
 
 
 def _canonical(value) -> str:
@@ -208,7 +209,7 @@ SIMPLE_COMMANDS_V2 = MappingProxyType({
 
 def _build_v3():
     table = {
-        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        key: replace(spec, gate_version=MEMORY_GATE_VERSION)
         for key, spec in BUILTIN_GATE_V2.items()
     }
     additions = (
@@ -216,7 +217,7 @@ def _build_v3():
             _spec("memory.read", forms=(CommandForm(("memory", "list")),),
                   action="memory.forget.read", scope="group_memory_trunk",
                   target="memory", method="read"),
-            gate_version=CURRENT_GATE_VERSION,
+            gate_version=MEMORY_GATE_VERSION,
         ),
         replace(
             _spec(
@@ -229,7 +230,7 @@ def _build_v3():
                 action="memory.forget.plan", scope="group_memory_trunk",
                 target="memory", method="plan",
             ),
-            gate_version=CURRENT_GATE_VERSION,
+            gate_version=MEMORY_GATE_VERSION,
         ),
         replace(
             _spec(
@@ -244,7 +245,7 @@ def _build_v3():
                 action="memory.forget.apply", scope="group_memory_trunk", priority=0,
                 kind="forget_apply", target="memory", method="apply",
             ),
-            gate_version=CURRENT_GATE_VERSION,
+            gate_version=MEMORY_GATE_VERSION,
         ),
     )
     forms = {form.words for spec in table.values() for form in spec.forms}
@@ -262,13 +263,79 @@ SIMPLE_COMMANDS_V3 = MappingProxyType({
     form.words: spec.command_key for spec in BUILTIN_GATE_V3.values()
     if spec.execution_target == "builtin" for form in spec.forms
 })
+
+
+def _build_v4():
+    table = {
+        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        for key, spec in BUILTIN_GATE_V3.items()
+    }
+    additions = (
+        replace(
+            _spec(
+                "bot.pause",
+                forms=(CommandForm(
+                    ("bot", "pause"), (),
+                    (("--expect-maintenance", "expected_maintenance_epoch"),
+                     ("--reason", "reason")),
+                    (("data_admission", False),),
+                ),),
+                properties={
+                    "expected_maintenance_epoch": _revision("维护版本"),
+                    "data_admission": {"type": "boolean", "const": False},
+                    "reason": _reason(),
+                },
+                required=("expected_maintenance_epoch", "data_admission", "reason"),
+                action="bot.maintenance", scope="bot_runtime", priority=0,
+                kind="maintenance_pause", target="bot", method="set_maintenance",
+            ),
+            gate_version=CURRENT_GATE_VERSION,
+        ),
+        replace(
+            _spec(
+                "bot.resume",
+                forms=(CommandForm(
+                    ("bot", "resume"), (),
+                    (("--expect-maintenance", "expected_maintenance_epoch"),
+                     ("--reason", "reason")),
+                    (("data_admission", True),),
+                ),),
+                properties={
+                    "expected_maintenance_epoch": _revision("维护版本"),
+                    "data_admission": {"type": "boolean", "const": True},
+                    "reason": _reason(),
+                },
+                required=("expected_maintenance_epoch", "data_admission", "reason"),
+                action="bot.maintenance", scope="bot_runtime", priority=1,
+                kind="maintenance_resume", target="bot", method="set_maintenance",
+            ),
+            gate_version=CURRENT_GATE_VERSION,
+        ),
+    )
+    forms = {form.words for spec in table.values() for form in spec.forms}
+    for spec in additions:
+        if spec.command_key in table or any(form.words in forms for form in spec.forms):
+            raise ValueError("Duplicate builtin v4 command")
+        table[spec.command_key] = spec
+        forms.update(form.words for form in spec.forms)
+    return MappingProxyType(table)
+
+
+BUILTIN_GATE_V4 = _build_v4()
+DOMAIN_ALIASES_V4 = DOMAIN_ALIASES_V3
+SIMPLE_COMMANDS_V4 = MappingProxyType({
+    form.words: spec.command_key for spec in BUILTIN_GATE_V4.values()
+    if spec.execution_target == "builtin" for form in spec.forms
+})
 BUILTIN_GATES = MappingProxyType({
     GATE_VERSION: BUILTIN_GATE_V2,
-    CURRENT_GATE_VERSION: BUILTIN_GATE_V3,
+    MEMORY_GATE_VERSION: BUILTIN_GATE_V3,
+    CURRENT_GATE_VERSION: BUILTIN_GATE_V4,
 })
 DOMAIN_ALIASES = MappingProxyType({
     GATE_VERSION: DOMAIN_ALIASES_V2,
-    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V3,
+    MEMORY_GATE_VERSION: DOMAIN_ALIASES_V3,
+    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V4,
 })
 
 
