@@ -20,6 +20,25 @@ from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLim
 from forest.errors import ForestError
 from forest.packages import PackageSnapshot, contract_matches, digest_json
 from forest.storage.bot import BotStore, CallGrant, HostLease
+from forest.storage.events import EventStore
+
+
+@dataclass(frozen=True)
+class EventPublication:
+    topic: str
+    contract: str
+    schema_digest: str
+    validator: Draft202012Validator
+
+
+@dataclass(frozen=True)
+class EventSubscription:
+    subscriber_id: str
+    topic: str
+    contract: str
+    schema_digest: str
+    max_attempts: int
+    validator: Draft202012Validator
 
 
 @dataclass
@@ -28,6 +47,8 @@ class LoadedComponent:
     worker: PythonWorker
     grants: frozenset[str]
     validators: dict[str, tuple[Draft202012Validator, Draft202012Validator, int]]
+    publications: dict[str, EventPublication]
+    subscriptions: dict[str, EventSubscription]
     policy_revision: int
     route_epoch: int = 0
     dependencies: tuple[str, ...] = ()
@@ -161,6 +182,10 @@ class Kernel:
         self._start_lock = asyncio.Lock()
         self._heartbeat: asyncio.Task | None = None
         self._exposure_monitor: asyncio.Task | None = None
+        self._event_dispatcher: asyncio.Task | None = None
+        self._event_deliveries: dict[str, asyncio.Task] = {}
+        self._event_claims: dict[str, dict] = {}
+        self._event_wake = asyncio.Event()
         self._exposure_retirements: dict[str, asyncio.Task] = {}
         self._retire_revocations: dict[str, asyncio.Event] = {}
         self._retiring: set[str] = set()
@@ -185,6 +210,9 @@ class Kernel:
             self._heartbeat = asyncio.create_task(self._renew(), name="kernel-lease-renewal")
             self._exposure_monitor = asyncio.create_task(
                 self._supervise_exposures(), name="kernel-exposure-supervision",
+            )
+            self._event_dispatcher = asyncio.create_task(
+                self._supervise_events(), name="kernel-event-dispatcher"
             )
 
     def _authority(self, *, allow_closing: bool = False) -> HostLease:
@@ -523,6 +551,37 @@ class Kernel:
                 )
                 for svc in spec["provides"]
             }
+            publications = {}
+            subscriptions = {}
+            event_definitions = []
+            for item in spec.get("publishes", []):
+                schema = snapshot.schema(item["schema"])
+                publication = EventPublication(
+                    item["topic"], item["contract"], digest_json(schema),
+                    Draft202012Validator(schema),
+                )
+                publications[item["topic"]] = publication
+                major, minor = (int(value) for value in item["contract"].split("."))
+                event_definitions.append({
+                    "direction": "PUBLISH", "definition_id": item["topic"],
+                    "topic": item["topic"], "contract_major": major,
+                    "contract_minor": minor, "schema_digest": publication.schema_digest,
+                })
+            for item in spec.get("subscribes", []):
+                schema = snapshot.schema(item["schema"])
+                subscription = EventSubscription(
+                    item["subscriber_id"], item["topic"], item["contract"],
+                    digest_json(schema), item.get("max_attempts", 8),
+                    Draft202012Validator(schema),
+                )
+                subscriptions[item["subscriber_id"]] = subscription
+                major, minor = (int(value) for value in item["contract"].split("."))
+                event_definitions.append({
+                    "direction": "SUBSCRIBE", "definition_id": item["subscriber_id"],
+                    "topic": item["topic"], "contract_major": major,
+                    "contract_minor": minor, "schema_digest": subscription.schema_digest,
+                    "max_attempts": subscription.max_attempts,
+                })
             component_id = spec["id"]
             old = self.components.get(component_id)
             if old is not None and old.worker.identity.generation_id in self._retiring:
@@ -597,9 +656,13 @@ class Kernel:
                 self._state_rpc,
                 limits=WorkerLimits(**spec.get("resources", {})),
                 service_handler=self._service_rpc,
+                event_handler=self._event_rpc,
             )
             policy_revision = (await self.store.runtime())["policy_revision"]
-            new = LoadedComponent(snapshot, worker, requested & grants, validators, policy_revision)
+            new = LoadedComponent(
+                snapshot, worker, requested & grants, validators,
+                publications, subscriptions, policy_revision,
+            )
             published = False
             frozen = False
             operation = None
@@ -623,6 +686,7 @@ class Kernel:
                         snapshot.schema(spec["state_value_schema"])
                         if "state_value_schema" in spec else {}
                     ),
+                    event_definitions=event_definitions,
                 )
                 operation = await self.store.begin_operation(
                     authority,
@@ -723,6 +787,7 @@ class Kernel:
                 self._apply_dependencies(dependency_plan)
                 await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.activate()  # transport admission only; no plugin activation hook
+                self._event_wake.set()
                 if old is not None:
                     await self._retire(old, reason="replaced", revoke=False)
                 return self._route_receipt(route)
@@ -1113,6 +1178,56 @@ class Kernel:
         finally:
             self._call_count -= 1
 
+    async def _event_rpc(
+        self, identity: WorkerIdentity, parent_call_id: str, request: dict
+    ) -> dict:
+        self._authority(allow_closing=True)
+        parent = self._calls.get(parent_call_id)
+        if parent is None or parent[0] != identity:
+            raise ForestError(
+                "INVALID_CALL_CONTEXT", "Event RPC has no authenticated parent invocation", 403
+            )
+        if parent[1].admission_lane != "DATA":
+            raise ForestError("CONTROL_SCOPE_DENIED", "Control codec cannot publish events", 403)
+        if not isinstance(request, dict) or set(request) != {
+            "topic", "payload", "contract", "operation_id"
+        }:
+            raise ForestError("INVALID_EVENT_REQUEST", "Event request has unsupported fields", 422)
+        topic, contract, operation_id = (
+            request["topic"], request["contract"], request["operation_id"]
+        )
+        if (
+            not isinstance(topic, str)
+            or not 1 <= len(topic) <= 128
+            or not isinstance(contract, str)
+            or not isinstance(operation_id, str)
+            or not 1 <= len(operation_id) <= 128
+        ):
+            raise ForestError("INVALID_EVENT_REQUEST", "Invalid event identity", 422)
+        component = self.components.get(parent[1].component_id)
+        if component is None or component.worker.identity != identity:
+            raise ForestError("STALE_GENERATION", "Publisher generation is no longer loaded", 409)
+        publication = component.publications.get(topic)
+        if publication is None or publication.contract != contract:
+            raise ForestError("EVENT_DECLARATION_MISMATCH", "Event is not declared", 403)
+        if "event.publish:" + topic not in parent[2]:
+            raise ForestError("CAPABILITY_DENIED", "Caller is not granted this event topic", 403)
+        self._validate(publication.validator, request["payload"], "EVENT_PAYLOAD_INVALID")
+        payload = json.loads(json.dumps(request["payload"], allow_nan=False))
+        receipt = await EventStore(self.store).publish(
+            parent[1],
+            topic=topic,
+            contract=contract,
+            schema_digest=publication.schema_digest,
+            operation_id=operation_id,
+            input_digest=digest_json({
+                "topic": topic, "contract": contract, "payload": payload,
+            }),
+            payload=payload,
+        )
+        self._event_wake.set()
+        return receipt
+
     async def _invoke(
         self,
         component_id: str,
@@ -1127,6 +1242,7 @@ class Kernel:
         admission_lane: str = "DATA",
         agent_tool_id: str | None = None,
         input_parent_ids: tuple[str, ...] = (),
+        event_delivery: dict | None = None,
     ) -> InvocationReceipt:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
@@ -1135,6 +1251,8 @@ class Kernel:
         component = self.components.get(component_id)
         if component is None:
             raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
+        if event_delivery is not None and (parent is not None or admission_lane != "DATA"):
+            raise ForestError("INVALID_EVENT_DELIVERY", "Event delivery must be a root data call", 422)
         if admission_lane == "CONTROL" and (
             component_id != "adapter.onebot"
             or service not in {"onebot.normalize", "onebot.prepare"}
@@ -1175,6 +1293,10 @@ class Kernel:
                 "payload": payload,
                 **({"admission_lane": "CONTROL"} if admission_lane == "CONTROL" else {}),
                 **({"input_parent_ids": input_parent_ids} if input_parent_ids else {}),
+                **(
+                    {"event_delivery_id": event_delivery["delivery_id"]}
+                    if event_delivery is not None else {}
+                ),
             }
         )
 
@@ -1197,16 +1319,39 @@ class Kernel:
                 "Existing call must be reconciled, not executed again",
                 409,
             )
-        if service not in component.validators:
-            raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
+        subscription = None
+        if event_delivery is None:
+            if service not in component.validators:
+                raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
+            input_validator, output_validator, major = component.validators[service]
+            self._validate(input_validator, payload, "INPUT_INVALID")
+        else:
+            subscriber_id = event_delivery["subscriber_id"]
+            if service != "@event:" + subscriber_id:
+                raise ForestError("INVALID_EVENT_DELIVERY", "Event target identity differs", 422)
+            subscription = component.subscriptions.get(subscriber_id)
+            if (
+                subscription is None
+                or event_delivery["component_id"] != component_id
+                or event_delivery["target_generation_id"]
+                != component.worker.identity.generation_id
+                or event_delivery["route_epoch"] != component.route_epoch
+                or payload.get("topic") != subscription.topic
+                or payload.get("contract") != subscription.contract
+            ):
+                raise ForestError(
+                    "EVENT_DELIVERY_FENCED", "Event subscription route or contract changed", 409
+                )
+            self._validate(subscription.validator, payload.get("payload"), "EVENT_PAYLOAD_INVALID")
+            output_validator, major = Draft202012Validator({}), int(
+                subscription.contract.split(".")[0]
+            )
         if parent is None and component.worker.identity.generation_id in self._retiring:
             raise ForestError("GENERATION_EXPOSURE_EXHAUSTED", "Worker is draining before replacement", 429)
-        input_validator, output_validator, major = component.validators[service]
         if contract_major != major:
             raise ForestError(
                 "CONTRACT_INCOMPATIBLE", "Service contract major is not available", 422
             )
-        self._validate(input_validator, payload, "INPUT_INVALID")
         if component.worker.state != "ACTIVE":
             raise ForestError(
                 "SERVICE_RELOADING", "Worker transport is not accepting new calls", 409
@@ -1269,10 +1414,24 @@ class Kernel:
             timeout = min(timeout, (grant.deadline_at - datetime.now(timezone.utc)).total_seconds())
             if timeout <= 0:
                 raise ForestError("CALL_EXPIRED", "Call deadline elapsed during admission", 504)
-            result = await component.worker.invoke(
-                service, payload, call_id=call_id, operation_id=operation_id, timeout=timeout,
-                before_send=lambda: self.store.authorize_dispatch(grant),
-            )
+            async def authorize_worker_dispatch():
+                await self.store.authorize_dispatch(grant)
+                if event_delivery is not None:
+                    await EventStore(self.store).authorize_dispatch(
+                        self._authority(allow_closing=True), event_delivery
+                    )
+
+            if subscription is None:
+                result = await component.worker.invoke(
+                    service, payload, call_id=call_id, operation_id=operation_id, timeout=timeout,
+                    before_send=authorize_worker_dispatch,
+                )
+            else:
+                result = await component.worker.deliver_event(
+                    subscription.subscriber_id, payload,
+                    call_id=call_id, operation_id=operation_id, timeout=timeout,
+                    before_send=authorize_worker_dispatch,
+                )
             self._validate(output_validator, result, "OUTPUT_INVALID")
             completed = await self.store.finish_call(grant, result)
             return self._invocation_receipt(completed)
@@ -1290,6 +1449,151 @@ class Kernel:
             self._call_bindings.pop(call_id, None)
             async with self._calls_changed:
                 self._calls_changed.notify_all()
+
+    async def _deliver_event(self, delivery: dict) -> None:
+        try:
+            try:
+                component = self.components.get(delivery["component_id"])
+                if component is None:
+                    raise ForestError(
+                        "SUBSCRIPTION_UNAVAILABLE", "Subscriber component is not loaded", 409
+                    )
+                receipt = await self._invoke(
+                    delivery["component_id"],
+                    "@event:" + delivery["subscriber_id"],
+                    delivery["event"],
+                    operation_id=delivery["call_operation_id"],
+                    contract_major=delivery["contract_major"],
+                    timeout=30,
+                    input_parent_ids=(delivery["event_payload_id"],),
+                    event_delivery=delivery,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                code = exc.code if isinstance(exc, ForestError) else type(exc).__name__
+                transient = code in {
+                    "ADMISSION_CLOSED",
+                    "BACKPRESSURE",
+                    "EVENT_DELIVERY_FENCED",
+                    "GENERATION_EXPOSURE_EXHAUSTED",
+                    "OPERATION_PENDING",
+                    "OVERLOADED",
+                    "POLICY_REVOKED",
+                    "SERVICE_RELOADING",
+                    "STALE_ROUTE",
+                    "SUBSCRIPTION_UNAVAILABLE",
+                    "WORKER_NOT_ACTIVE",
+                }
+                with suppress(Exception):
+                    events = EventStore(self.store)
+                    if transient:
+                        await events.defer(
+                            self._authority(allow_closing=True), delivery, delay_seconds=0.25
+                        )
+                    else:
+                        await events.fail(
+                            self._authority(allow_closing=True),
+                            delivery,
+                            code,
+                            terminal=code in {
+                                "KERNEL_CONTENT_REVOKED",
+                                "EVENT_PAYLOAD_INVALID",
+                                "EVENT_DECLARATION_MISMATCH",
+                                "SUBSCRIPTION_MANIFEST_MISMATCH",
+                            },
+                        )
+                return
+            try:
+                await EventStore(self.store).acknowledge(
+                    self._authority(allow_closing=True),
+                    delivery,
+                    result_payload_id=receipt.result_payload_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # An unknown ACK outcome is reconciled against the completed
+                # call using this same attempt operation; never run the handler
+                # again merely because the acknowledgement response was lost.
+                with suppress(Exception):
+                    await EventStore(self.store).abandon(
+                        self._authority(allow_closing=True), delivery
+                    )
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await EventStore(self.store).abandon(
+                    self._authority(allow_closing=True), delivery
+                )
+            raise
+
+    def _event_delivery_done(self, _: asyncio.Task) -> None:
+        # A Task cancelled before its coroutine first runs does not execute that
+        # coroutine's finally block. The callback always releases the reserved slot.
+        self._call_count -= 1
+        self._event_wake.set()
+
+    async def _supervise_events(self) -> None:
+        events = EventStore(self.store)
+        try:
+            while not self._closing:
+                for delivery_id, task in tuple(self._event_deliveries.items()):
+                    if task.done():
+                        self._event_deliveries.pop(delivery_id, None)
+                        self._event_claims.pop(delivery_id, None)
+                        with suppress(asyncio.CancelledError):
+                            await task
+                claimed = False
+                while (
+                    len(self._event_deliveries) < 8
+                    and self._call_count < self.max_calls
+                    and not self._closing
+                ):
+                    delivery = await events.claim(self._authority(), lease_seconds=45)
+                    if delivery is None:
+                        break
+                    if self._call_count >= self.max_calls:
+                        await events.defer(self._authority(), delivery)
+                        break
+                    claimed = True
+                    self._call_count += 1
+                    task = asyncio.create_task(
+                        self._deliver_event(delivery),
+                        name="kernel-event-delivery:" + delivery["delivery_id"],
+                    )
+                    task.add_done_callback(self._event_delivery_done)
+                    self._event_deliveries[delivery["delivery_id"]] = task
+                    self._event_claims[delivery["delivery_id"]] = delivery
+                if claimed:
+                    await asyncio.sleep(0)
+                    continue
+                self._event_wake.clear()
+                try:
+                    async with asyncio.timeout(0.5):
+                        await self._event_wake.wait()
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.failure = exc.code if isinstance(exc, ForestError) else "EVENT_SUPERVISION_FAILED"
+            await self._terminate_remaining()
+        finally:
+            pending = list(self._event_deliveries.items())
+            tasks = [task for _, task in pending]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for delivery_id, _ in pending:
+                delivery = self._event_claims.get(delivery_id)
+                if delivery is not None:
+                    with suppress(Exception):
+                        await events.abandon(
+                            self._authority(allow_closing=True), delivery
+                        )
+            self._event_deliveries.clear()
+            self._event_claims.clear()
 
     async def cancel(self, call_id: str) -> None:
         await self.store.cancel_call(self._authority(), call_id)
@@ -1310,7 +1614,11 @@ class Kernel:
         self._closing = True
         async with self._start_lock:
             pass
-        owned = ([self._exposure_monitor] if self._exposure_monitor is not None else []) + list(self._exposure_retirements.values())
+        owned = (
+            ([self._exposure_monitor] if self._exposure_monitor is not None else [])
+            + ([self._event_dispatcher] if self._event_dispatcher is not None else [])
+            + list(self._exposure_retirements.values())
+        )
         for task in owned:
             task.cancel()
         if owned:

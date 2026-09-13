@@ -159,6 +159,37 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "publishes": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["topic", "contract", "schema"],
+                            "properties": {
+                                key: {"type": "string"}
+                                for key in ("topic", "contract", "schema")
+                            },
+                        },
+                    },
+                    "subscribes": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["subscriber_id", "topic", "contract", "schema"],
+                            "properties": {
+                                **{
+                                    key: {"type": "string"}
+                                    for key in ("subscriber_id", "topic", "contract", "schema")
+                                },
+                                "max_attempts": {
+                                    "type": "integer", "minimum": 1, "maximum": 32
+                                },
+                            },
+                        },
+                    },
                 },
             },
         },
@@ -421,16 +452,36 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_SERVICES", "A service contract major.minor is required")
         _schema(files, service.get("input_schema"))
         _schema(files, service.get("output_schema"))
+    published_topics = set()
+    for publication in component.get("publishes", []):
+        topic = publication.get("topic", "")
+        if not IDENTIFIER.fullmatch(topic) or topic in published_topics:
+            _fail("INVALID_EVENTS", "Published event topics must be valid and unique")
+        published_topics.add(topic)
+        if not re.fullmatch(r"[1-9]\d*\.\d+", publication.get("contract", "")):
+            _fail("INVALID_EVENTS", "Published events require an exact major.minor contract")
+        _schema(files, publication.get("schema"))
+    subscriber_ids = set()
+    for subscription in component.get("subscribes", []):
+        subscriber_id = subscription.get("subscriber_id", "")
+        if not IDENTIFIER.fullmatch(subscriber_id) or subscriber_id in subscriber_ids:
+            _fail("INVALID_EVENTS", "Durable subscriber identities must be valid and unique")
+        subscriber_ids.add(subscriber_id)
+        if not IDENTIFIER.fullmatch(subscription.get("topic", "")) or not re.fullmatch(
+            r"[1-9]\d*\.\d+", subscription.get("contract", "")
+        ):
+            _fail("INVALID_EVENTS", "Subscriptions require a valid topic and exact contract")
+        _schema(files, subscription.get("schema"))
     capabilities = component.get("capabilities", {}).get("requests", [])
     allowed_capabilities = {"state.read", "state.write"} | {
         "service.call:" + name for name in dependency_names
-    }
+    } | {"event.publish:" + topic for topic in published_topics}
     if any(item not in allowed_capabilities for item in capabilities) or len(capabilities) != len(
         set(capabilities)
     ):
         _fail(
             "UNSUPPORTED_CAPABILITY",
-            "Capabilities must be state.read/state.write or an explicitly declared service.call:<name>",
+            "Capabilities must name an explicitly declared state, service, or event operation",
         )
     for relative, source in files.items():
         if relative.endswith(".py"):

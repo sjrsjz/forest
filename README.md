@@ -107,6 +107,8 @@ forest dev --bot example --watch examples/counter --grant state.read --grant sta
 
 插件创建的连接或客户端应使用 `ctx.resources.register(...)` 登记。服务调用中的资源随该调用在返回前逆序关闭；`prepare` 根 Context 中的资源在代际停止时、且在 `Plugin.stop` 之后逆序关闭。manifest 的 `max_owned_resources` 提供有界登记额度，详细错误与取消语义见 [P0 Worker 资源监督 SDK](doc/p0-resource-sdk.md)。
 
+组件事实通过 manifest `publishes/subscribes` 与代码 `@subscribe(...)` 显式声明。`ctx.events.publish(...)` 在宿主核验当前调用、能力、契约和 schema 后持久写入事件正文引用及每订阅 delivery；dispatcher 按稳定 subscriber 身份独立确认、重试和死信，热重载只切换执行代际。详见 [P0 持久组件事件](doc/p0-component-events.md)。
+
 ## 远程入口与端口
 
 默认只绑定宿主机 loopback。远程管理需要在宿主机反向代理终止 HTTPS，再转发到 `127.0.0.1:8080`，并保留外部 `Host`。代理应保留浏览器实际 `Origin`，页面与 API 使用同一来源。

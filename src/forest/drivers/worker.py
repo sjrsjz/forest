@@ -15,7 +15,14 @@ from uuid import uuid4
 from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, read_frame, validate_json
 from forest.drivers.python_worker import WorkerLimits, _error_details, _error_envelope
 from forest.errors import ForestError
-from forest.sdk import CallScope, Plugin, PluginContext, _current_call, declared_services
+from forest.sdk import (
+    CallScope,
+    Plugin,
+    PluginContext,
+    _current_call,
+    declared_services,
+    declared_subscriptions,
+)
 
 
 class WorkerRuntime:
@@ -27,6 +34,7 @@ class WorkerRuntime:
         self.plugin: Plugin | None = None
         self.ctx: PluginContext | None = None
         self.services: dict = {}
+        self.subscriptions: dict = {}
         self.commands: dict[str, asyncio.Task] = {}
         self.calls: dict[str, asyncio.Task] = {}
         self.state_pending: dict[str, asyncio.Future] = {}
@@ -38,6 +46,9 @@ class WorkerRuntime:
 
     async def service_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("service", call_id, payload)
+
+    async def event_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("event", call_id, payload)
 
     async def _rpc(
         self, kind: str, call_id: str, payload: dict, *, action: str | None = None
@@ -68,11 +79,19 @@ class WorkerRuntime:
             )
 
     async def execute(self, command: str, payload: dict, deadline: float) -> Any:
-        if command == "invoke":
+        if command in {"invoke", "invoke_event"}:
             self.require("ACTIVE")
-            name, call_id = payload.get("service"), payload.get("call_id")
-            if name not in self.services:
-                raise ForestError("SERVICE_NOT_FOUND", "Requested service is not registered", 404)
+            call_id = payload.get("call_id")
+            if command == "invoke":
+                name = payload.get("service")
+                handler = self.services.get(name)
+                missing = "SERVICE_NOT_FOUND"
+            else:
+                name = payload.get("subscriber_id")
+                handler = self.subscriptions.get(name)
+                missing = "SUBSCRIPTION_NOT_FOUND"
+            if handler is None:
+                raise ForestError(missing, "Requested invocation target is not registered", 404)
             if len(self.calls) >= self.limits.max_inflight or call_id in self.calls:
                 raise ForestError("OVERLOADED", "Worker service slots are exhausted", 429)
             scope = CallScope(call_id, deadline, payload["operation_id"])
@@ -80,7 +99,7 @@ class WorkerRuntime:
             context = self.ctx._for_call(scope)
             self.calls[call_id] = asyncio.current_task()
             try:
-                result = await self.services[name](payload.get("payload"), context)
+                result = await handler(payload.get("payload"), context)
                 await self.ctx._task_owner.finish_call(scope)
                 await self.ctx._resource_owner.finish_call(scope)
                 return result
@@ -146,10 +165,25 @@ class WorkerRuntime:
                     )
                 self.plugin = candidate()
                 self.services = declared_services(self.plugin)
+                declared = declared_subscriptions(self.plugin)
+                self.subscriptions = {
+                    subscriber_id: method
+                    for subscriber_id, (_, method) in declared.items()
+                }
                 if sorted(self.services) != sorted(self.bootstrap["services"]):
                     raise ForestError(
                         "SERVICE_MANIFEST_MISMATCH",
                         "Decorated services differ from the immutable manifest",
+                        422,
+                    )
+                actual_subscriptions = sorted(
+                    (declaration for declaration, _ in declared.values()),
+                    key=lambda item: item["subscriber_id"],
+                )
+                if actual_subscriptions != self.bootstrap.get("subscriptions", []):
+                    raise ForestError(
+                        "SUBSCRIPTION_MANIFEST_MISMATCH",
+                        "Decorated subscriptions differ from the immutable manifest",
                         422,
                     )
                 config = payload.get("config", {})
@@ -163,10 +197,15 @@ class WorkerRuntime:
                     task_limit=self.limits.max_owned_tasks,
                     resource_limit=self.limits.max_owned_resources,
                     service_rpc=self.service_rpc,
+                    event_rpc=self.event_rpc,
                 )
                 await self.plugin.prepare(self.ctx, self.ctx.config, payload.get("restored_state"))
                 self.state = "PREPARED"
-                return {"state": self.state, "services": sorted(self.services)}
+                return {
+                    "state": self.state,
+                    "services": sorted(self.services),
+                    "subscriptions": sorted(self.subscriptions),
+                }
             if command == "start":
                 self.require("PREPARED")
                 await self.plugin.start()
@@ -183,6 +222,7 @@ class WorkerRuntime:
                     "plugin": health,
                     "state": self.state,
                     "services": sorted(self.services),
+                    "subscriptions": sorted(self.subscriptions),
                     "owned_tasks": len(self.ctx._task_owner.tasks),
                     "task_failures": list(self.ctx._task_owner.background_failures),
                     "owned_resources": len(self.ctx._resource_owner.entries),
@@ -285,7 +325,7 @@ class WorkerRuntime:
             while not self.stopping:
                 message = await read_frame(reader, self.limits.max_frame_bytes)
                 kind = message.get("kind")
-                if kind in {"state_result", "service_result"}:
+                if kind in {"state_result", "service_result", "event_result"}:
                     future = self.state_pending.get(message.get("id"))
                     if future is None or future.done():
                         continue
