@@ -35,6 +35,25 @@ def command(text, *, extras=(), self_message=False):
      {"expected_maintenance_epoch": 7, "data_admission": False, "reason": "上游维护"}, 0),
     ('#forest bot resume --expect-maintenance 8 --reason "上游恢复"', "bot.resume",
      {"expected_maintenance_epoch": 8, "data_admission": True, "reason": "上游恢复"}, 1),
+    ("#forest events list", "event.read", {}, 1),
+    ("#forest event replay delivery:1 --expect-revision 3", "event.replay",
+     {"delivery_id": "delivery:1", "expected_revision": 3}, 2),
+    ("#forest event retire-plan subscriber:1 --contract-major 2 --expect-revision 4",
+     "event.retire.plan",
+     {"subscriber_id": "subscriber:1", "contract_major": 2, "expected_revision": 4}, 1),
+    ("#forest event retire-apply plan:1 --digest sha256:abc --expect-revision 4",
+     "event.retire.apply",
+     {"plan_id": "plan:1", "plan_digest": "sha256:abc", "expected_revision": 4}, 1),
+    ("#forest component-jobs list", "component_job.read", {}, 1),
+    ("#forest component-job replay job:private --expect-revision 5",
+     "component_job.replay", {"job_id": "job:private", "expected_revision": 5}, 2),
+    ("#forest component-job retire-plan component.a work.persist --expect-revision 6",
+     "component_job.retire.plan",
+     {"component_id": "component.a", "handler_id": "work.persist", "expected_revision": 6},
+     1),
+    ("#forest component-job retire-apply plan:2 --digest sha256:def --expect-revision 6",
+     "component_job.retire.apply",
+     {"plan_id": "plan:2", "plan_digest": "sha256:def", "expected_revision": 6}, 1),
 ])
 def test_typed_commands(text, name, payload, priority):
     parsed = command(text)
@@ -50,6 +69,10 @@ def test_typed_commands(text, name, payload, priority):
     '#forest job cancel a --expect-revision 1 --scope unknown --reason test',
     '#forest bot pause --expect-maintenance 1 --reason ""',
     '#forest bot resume --expect-maintenance true --reason restore',
+    '#forest event retire-plan subscriber --contract-major 0 --expect-revision 1',
+    '#forest event replay delivery --expect-revision 1 --digest secret',
+    '#forest component-job retire-plan component --expect-revision 1',
+    '#forest component-job replay job --expect-revision -1',
     '#forest job run a --expect-revision 1; rm anything', '#forest confirm SECRET',
     '#forest job status ' + 'a' * 129,
     '#forest ' + 'a' * 4096,
@@ -73,7 +96,8 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v4():
-    assert command("#forest status").gate_version == "shell-gate-v4"
-    assert command("#forest memory list").gate_version == "shell-gate-v4"
-    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v4"
+def test_new_admissions_are_explicitly_shell_gate_v5():
+    assert command("#forest status").gate_version == "shell-gate-v5"
+    assert command("#forest memory list").gate_version == "shell-gate-v5"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v5"
+    assert command("#forest component-job list").gate_version == "shell-gate-v5"

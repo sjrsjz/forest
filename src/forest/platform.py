@@ -145,6 +145,8 @@ class BindingRuntime:
         self.scheduler.notify()
         self.jobs.notify()
         self.memory.notify()
+        self.kernel.notify_events()
+        self.kernel.notify_component_jobs()
 
     def notify(self):
         """Wake durable business workers after an out-of-band control change."""

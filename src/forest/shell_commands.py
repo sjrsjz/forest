@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 from forest.shell_registry import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V4,
-    SIMPLE_COMMANDS_V4,
+    DOMAIN_ALIASES_V5,
+    SIMPLE_COMMANDS_V5,
     get_command_spec,
 )
 
@@ -50,6 +50,13 @@ def _revision(value):
     return int(value)
 
 
+def _positive_revision(value):
+    result = _revision(value)
+    if result < 1:
+        raise ValueError("positive revision")
+    return result
+
+
 def _identity(value):
     if not _ID.fullmatch(value):
         raise ValueError("identity")
@@ -63,11 +70,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V4:
-        return _command(SIMPLE_COMMANDS_V4[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V5:
+        return _command(SIMPLE_COMMANDS_V5[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V4.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V5.get(words[0], words[0]), words[1]
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:
@@ -112,6 +119,50 @@ def _parse(words):
             "expected_maintenance_epoch": _revision(options["--expect-maintenance"]),
             "data_admission": verb == "resume",
             "reason": _reason(options["--reason"]),
+        })
+    if (domain, verb) == ("event", "list") and len(words) == 2:
+        return _command("event.read")
+    if (domain, verb) == ("event", "replay") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision"})
+        return _command("event.replay", {
+            "delivery_id": _identity(words[2]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        })
+    if (domain, verb) == ("event", "retire-plan") and len(words) >= 3:
+        options = _options(words[3:], {"--contract-major", "--expect-revision"})
+        return _command("event.retire.plan", {
+            "subscriber_id": _identity(words[2]),
+            "contract_major": _positive_revision(options["--contract-major"]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        })
+    if (domain, verb) == ("event", "retire-apply") and len(words) >= 3:
+        options = _options(words[3:], {"--digest", "--expect-revision"})
+        return _command("event.retire.apply", {
+            "plan_id": _identity(words[2]),
+            "plan_digest": _identity(options["--digest"]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        })
+    if (domain, verb) == ("component-job", "list") and len(words) == 2:
+        return _command("component_job.read")
+    if (domain, verb) == ("component-job", "replay") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision"})
+        return _command("component_job.replay", {
+            "job_id": _identity(words[2]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        })
+    if (domain, verb) == ("component-job", "retire-plan") and len(words) >= 4:
+        options = _options(words[4:], {"--expect-revision"})
+        return _command("component_job.retire.plan", {
+            "component_id": _identity(words[2]),
+            "handler_id": _identity(words[3]),
+            "expected_revision": _revision(options["--expect-revision"]),
+        })
+    if (domain, verb) == ("component-job", "retire-apply") and len(words) >= 3:
+        options = _options(words[3:], {"--digest", "--expect-revision"})
+        return _command("component_job.retire.apply", {
+            "plan_id": _identity(words[2]),
+            "plan_digest": _identity(options["--digest"]),
+            "expected_revision": _revision(options["--expect-revision"]),
         })
     if (domain, verb) == ("memory", "list") and len(words) == 2:
         return _command("memory.read")

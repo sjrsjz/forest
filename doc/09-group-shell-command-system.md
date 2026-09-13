@@ -1,6 +1,6 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v4` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/Job 控制、本群记忆来源遗忘和 Bot 维护控制。其余命令树仍是待实现目标，不能从示例推断为现有能力。
+> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v5` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护，以及 Bot 全局组件事件和组件持久任务的读取、死信回放与显式退役。其余命令树仍是待实现目标，不能从示例推断为现有能力。
 
 ## 1. 目标与边界
 
@@ -32,6 +32,37 @@
 操作效果、规范化输入、结果载荷、审计和 outbox 在目标 Bot 数据库的同一事务提交。群回执只展示运行/暂停状态和新 epoch；`reason` 留在受保护的控制输入与审计来源中，不进入 Agent Context 或群回执。该命令消息本身仍按原 `ingress_seq` 形成 `control_data` 投影，既不触发 Agent，也不改变当前模型调用的输入切口；暂停后已进入 Inbox 的普通消息等恢复后继续按单 Agent 队列处理。
 
 WebUI 不把点击转成伪造群消息或拼接 `#forest` 字符串：它以自己的可信主体和 `management_request_id` 提交相同 typed action，Shell 保留真实 platform event、`command_id` 和来源会话。两者在目标库关联同类 `operation_ref={kind,id}`，共同遵守当前授权、配置 CAS、维护/代际 fence、Job/生命周期/效果与批准账本；页面、HTTP 长连接和群消息都不拥有实际操作的执行权。
+
+### 1.2 `shell-gate-v5`：组件事件与持久任务
+
+v5 完整复制 v4 的冻结契约并增加两个明确分开的 Bot 全局域：
+
+```text
+#forest event list
+#forest event replay <delivery_id> --expect-revision <management_revision>
+#forest event retire-plan <subscriber_id> --contract-major <major> --expect-revision <management_revision>
+#forest event retire-apply <plan_id> --digest <plan_digest> --expect-revision <management_revision>
+
+#forest component-job list
+#forest component-job replay <job_id> --expect-revision <management_revision>
+#forest component-job retire-plan <component_id> <handler_id> --expect-revision <management_revision>
+#forest component-job retire-apply <plan_id> --digest <plan_digest> --expect-revision <management_revision>
+```
+
+`event/events` 与 `component-job/component-jobs` 分别是语法别名。后一个域只管理插件处理器的
+持久工作，不是 `job/jobs` 管理的群会话 Agent 计划。列表仅向发令群显示订阅/处理器、
+delivery/Job 身份、状态、回放轮次和管理修订；不显示 payload、结果正文、claim、调度
+operation、事件正文或其他群消息。
+
+回放沿用目标库的 DEAD/CAS/正文可用性检查，属于 P2 后台接纳，不占模型或群 Actor 槽。
+退役是 P1 的 plan/apply：计划回执给出待终结和执行中数量，并生成带 digest 与预期修订的
+提交命令；apply 再次验证同一发令主体、当前 Binding 管理员、计划来源和影响摘要。存在
+INFLIGHT handler 时拒绝，不抢断 Worker。成功后唤醒内核事件与组件任务 dispatcher，使
+新的可处理工作或退役围栏立即可见。
+
+v2、v3、v4 仍作为不可变兼容表。旧排队请求按持久 gate、command key 和类型化参数执行，
+不会因 v5 新增语法而重新解释。Shell 继续使用真实群事件作为控制输入父来源；Web 使用
+短效签名票据，两者调用相同 EventStore/ComponentJobStore 管理状态机和幂等回执。
 
 ## 2. 用户交互与命令树
 
@@ -68,6 +99,8 @@ WebUI 不把点击转成伪造群消息或拼接 `#forest` 字符串：它以自
 | `memory` | inspect/search/assert/retract/resolve/forget/rebuild；沿用全局 Bot 存储与 06 契约 | P1 |
 | `config` | get/diff/set/validate；类型校验、revision、preview 与 reload_policy | P1 |
 | `jobs`、`logs` | list/status/cancel；受限分页、tail、取消订阅 | P1；cancel 为 P0 |
+| `event` | 组件事件订阅/投递列表、DEAD 回放、订阅退役 plan/apply | 查询/退役 P1；回放接纳 P2 |
+| `component-job` | 插件持久处理器/任务列表、DEAD 回放、处理器退役 plan/apply；不操作会话 Agent 计划 | 查询/退役 P1；回放接纳 P2 |
 | `confirm`、`deny` | 对固定 approval 做单次批准/拒绝，解除既有等待 | P0 |
 | `ops` | runbook/exec/shell/reconcile；持久工作、外部效果对账 | P1；重计算在 P4 执行 |
 | `core` | status/cancel/disable/reload；最小稳定救援集合 | status/cancel/disable 为 P0；reload 为 P1 |

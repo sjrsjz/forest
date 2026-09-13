@@ -85,3 +85,9 @@ active head 检查处失败。
 幂等管理回执、正文不泄露、INFLIGHT 拒绝退役、待处理 Job 原子终结、旧代即时调度围栏、
 精确调度重试、退役后部署移除、相同 handler 禁止复活、最小权限迁移、Bot 切换的晚到读取
 围栏和移动端布局。
+
+群聊 Shell 的 `shell-gate-v5` 复用同一 read/replay/retirement 状态机。命令域固定为
+`component-job`，避免与注入群会话唯一 Agent 的 `job` 计划混淆；群回执只含处理器和
+任务的受限元数据。命令作者在每个目标事务和 CONTROL 回复前都要通过当前 Binding 管理员
+名单、binding epoch、host lease 与命令 claim 复核。完整语法见
+[群聊 Shell 设计](09-group-shell-command-system.md)。

@@ -16,7 +16,8 @@ from types import MappingProxyType
 
 GATE_VERSION = "shell-gate-v2"
 MEMORY_GATE_VERSION = "shell-gate-v3"
-CURRENT_GATE_VERSION = "shell-gate-v4"
+MAINTENANCE_GATE_VERSION = "shell-gate-v4"
+CURRENT_GATE_VERSION = "shell-gate-v5"
 
 
 def _canonical(value) -> str:
@@ -267,7 +268,7 @@ SIMPLE_COMMANDS_V3 = MappingProxyType({
 
 def _build_v4():
     table = {
-        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        key: replace(spec, gate_version=MAINTENANCE_GATE_VERSION)
         for key, spec in BUILTIN_GATE_V3.items()
     }
     additions = (
@@ -289,7 +290,7 @@ def _build_v4():
                 action="bot.maintenance", scope="bot_runtime", priority=0,
                 kind="maintenance_pause", target="bot", method="set_maintenance",
             ),
-            gate_version=CURRENT_GATE_VERSION,
+            gate_version=MAINTENANCE_GATE_VERSION,
         ),
         replace(
             _spec(
@@ -309,7 +310,7 @@ def _build_v4():
                 action="bot.maintenance", scope="bot_runtime", priority=1,
                 kind="maintenance_resume", target="bot", method="set_maintenance",
             ),
-            gate_version=CURRENT_GATE_VERSION,
+            gate_version=MAINTENANCE_GATE_VERSION,
         ),
     )
     forms = {form.words for spec in table.values() for form in spec.forms}
@@ -327,15 +328,184 @@ SIMPLE_COMMANDS_V4 = MappingProxyType({
     form.words: spec.command_key for spec in BUILTIN_GATE_V4.values()
     if spec.execution_target == "builtin" for form in spec.forms
 })
+
+
+def _build_v5():
+    table = {
+        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        for key, spec in BUILTIN_GATE_V4.items()
+    }
+    additions = (
+        _spec(
+            "event.read",
+            forms=(CommandForm(("event", "list")),),
+            action="event.read",
+            scope="bot_component_events",
+            target="event",
+            method="read",
+        ),
+        _spec(
+            "event.replay",
+            forms=(CommandForm(
+                ("event", "replay"),
+                ("delivery_id",),
+                (("--expect-revision", "expected_revision"),),
+            ),),
+            properties={
+                "delivery_id": _id("delivery_id"),
+                "expected_revision": _revision("管理修订"),
+            },
+            required=("delivery_id", "expected_revision"),
+            action="event.replay",
+            scope="bot_component_events",
+            priority=2,
+            kind="submit_run",
+            target="event",
+            method="replay",
+        ),
+        _spec(
+            "event.retire.plan",
+            forms=(CommandForm(
+                ("event", "retire-plan"),
+                ("subscriber_id",),
+                (
+                    ("--contract-major", "contract_major"),
+                    ("--expect-revision", "expected_revision"),
+                ),
+            ),),
+            properties={
+                "subscriber_id": _id("subscriber_id"),
+                "contract_major": {
+                    "type": "integer", "title": "契约主版本", "minimum": 1,
+                    "maximum": 2147483647,
+                },
+                "expected_revision": _revision("管理修订"),
+            },
+            required=("subscriber_id", "contract_major", "expected_revision"),
+            action="event.retire.plan",
+            scope="bot_component_events",
+            target="event",
+            method="plan_retirement",
+        ),
+        _spec(
+            "event.retire.apply",
+            forms=(CommandForm(
+                ("event", "retire-apply"),
+                ("plan_id",),
+                (
+                    ("--digest", "plan_digest"),
+                    ("--expect-revision", "expected_revision"),
+                ),
+            ),),
+            properties={
+                "plan_id": _id("plan_id"),
+                "plan_digest": _id("计划摘要"),
+                "expected_revision": _revision("管理修订"),
+            },
+            required=("plan_id", "plan_digest", "expected_revision"),
+            action="event.retire.apply",
+            scope="bot_component_events",
+            target="event",
+            method="apply_retirement",
+        ),
+        _spec(
+            "component_job.read",
+            forms=(CommandForm(("component-job", "list")),),
+            action="component_job.read",
+            scope="bot_component_jobs",
+            target="component_job",
+            method="read",
+        ),
+        _spec(
+            "component_job.replay",
+            forms=(CommandForm(
+                ("component-job", "replay"),
+                ("job_id",),
+                (("--expect-revision", "expected_revision"),),
+            ),),
+            properties={
+                "job_id": _id("component_job_id"),
+                "expected_revision": _revision("管理修订"),
+            },
+            required=("job_id", "expected_revision"),
+            action="component_job.replay",
+            scope="bot_component_jobs",
+            priority=2,
+            kind="submit_run",
+            target="component_job",
+            method="replay",
+        ),
+        _spec(
+            "component_job.retire.plan",
+            forms=(CommandForm(
+                ("component-job", "retire-plan"),
+                ("component_id", "handler_id"),
+                (("--expect-revision", "expected_revision"),),
+            ),),
+            properties={
+                "component_id": _id("component_id"),
+                "handler_id": _id("handler_id"),
+                "expected_revision": _revision("管理修订"),
+            },
+            required=("component_id", "handler_id", "expected_revision"),
+            action="component_job.retire.plan",
+            scope="bot_component_jobs",
+            target="component_job",
+            method="plan_retirement",
+        ),
+        _spec(
+            "component_job.retire.apply",
+            forms=(CommandForm(
+                ("component-job", "retire-apply"),
+                ("plan_id",),
+                (
+                    ("--digest", "plan_digest"),
+                    ("--expect-revision", "expected_revision"),
+                ),
+            ),),
+            properties={
+                "plan_id": _id("plan_id"),
+                "plan_digest": _id("计划摘要"),
+                "expected_revision": _revision("管理修订"),
+            },
+            required=("plan_id", "plan_digest", "expected_revision"),
+            action="component_job.retire.apply",
+            scope="bot_component_jobs",
+            target="component_job",
+            method="apply_retirement",
+        ),
+    )
+    forms = {form.words for spec in table.values() for form in spec.forms}
+    for spec in additions:
+        spec = replace(spec, gate_version=CURRENT_GATE_VERSION)
+        if spec.command_key in table or any(form.words in forms for form in spec.forms):
+            raise ValueError("Duplicate builtin v5 command")
+        table[spec.command_key] = spec
+        forms.update(form.words for form in spec.forms)
+    return MappingProxyType(table)
+
+
+BUILTIN_GATE_V5 = _build_v5()
+DOMAIN_ALIASES_V5 = MappingProxyType({
+    **DOMAIN_ALIASES_V4,
+    "events": "event",
+    "component-jobs": "component-job",
+})
+SIMPLE_COMMANDS_V5 = MappingProxyType({
+    form.words: spec.command_key for spec in BUILTIN_GATE_V5.values()
+    if spec.execution_target == "builtin" for form in spec.forms
+})
 BUILTIN_GATES = MappingProxyType({
     GATE_VERSION: BUILTIN_GATE_V2,
     MEMORY_GATE_VERSION: BUILTIN_GATE_V3,
-    CURRENT_GATE_VERSION: BUILTIN_GATE_V4,
+    MAINTENANCE_GATE_VERSION: BUILTIN_GATE_V4,
+    CURRENT_GATE_VERSION: BUILTIN_GATE_V5,
 })
 DOMAIN_ALIASES = MappingProxyType({
     GATE_VERSION: DOMAIN_ALIASES_V2,
     MEMORY_GATE_VERSION: DOMAIN_ALIASES_V3,
-    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V4,
+    MAINTENANCE_GATE_VERSION: DOMAIN_ALIASES_V4,
+    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V5,
 })
 
 

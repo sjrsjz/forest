@@ -13,9 +13,11 @@ from forest.shell_registry import (
     BUILTIN_GATE_V2,
     BUILTIN_GATE_V3,
     BUILTIN_GATE_V4,
+    BUILTIN_GATE_V5,
     CONTROL_DEADLINE,
     CURRENT_GATE_VERSION,
     DOMAIN_ALIASES_V2,
+    MAINTENANCE_GATE_VERSION,
     MEMORY_GATE_VERSION,
     command_action,
     get_command_spec,
@@ -68,7 +70,7 @@ def _value(name, schema):
     if "enum" in schema:
         return schema["enum"][0]
     if schema["type"] == "integer":
-        return 999999999999999999
+        return schema.get("maximum", 999999999999999999)
     return "中 文 原因" if name == "reason" else "sha256:abc" if name == "arguments_digest" else "id:1"
 
 
@@ -147,13 +149,58 @@ def test_gate_v3_adds_only_group_memory_administration_and_keeps_v2_resolvable()
 
 
 def test_gate_v4_adds_bot_maintenance_without_changing_old_gates():
-    assert CURRENT_GATE_VERSION == "shell-gate-v4"
+    assert MAINTENANCE_GATE_VERSION == "shell-gate-v4"
     assert set(BUILTIN_GATE_V4) - set(BUILTIN_GATE_V3) == {"bot.pause", "bot.resume"}
     pause, resume = BUILTIN_GATE_V4["bot.pause"], BUILTIN_GATE_V4["bot.resume"]
     assert pause.action == resume.action == "bot.maintenance"
     assert pause.priority == 0 and resume.priority == 1
     assert pause.forms[0].fixed_arguments == (("data_admission", False),)
     assert resume.forms[0].fixed_arguments == (("data_admission", True),)
-    assert all(spec.gate_version == CURRENT_GATE_VERSION for spec in BUILTIN_GATE_V4.values())
+    assert all(
+        spec.gate_version == MAINTENANCE_GATE_VERSION
+        for spec in BUILTIN_GATE_V4.values()
+    )
     assert get_command_spec("bot.pause", MEMORY_GATE_VERSION) is None
-    assert "#forest bot pause" in render_help(CURRENT_GATE_VERSION)
+    assert "#forest bot pause" in render_help(MAINTENANCE_GATE_VERSION)
+
+
+def test_gate_v5_adds_component_operations_without_changing_old_gates():
+    assert CURRENT_GATE_VERSION == "shell-gate-v5"
+    additions = set(BUILTIN_GATE_V5) - set(BUILTIN_GATE_V4)
+    assert additions == {
+        "event.read",
+        "event.replay",
+        "event.retire.plan",
+        "event.retire.apply",
+        "component_job.read",
+        "component_job.replay",
+        "component_job.retire.plan",
+        "component_job.retire.apply",
+    }
+    assert all(
+        spec.gate_version == CURRENT_GATE_VERSION for spec in BUILTIN_GATE_V5.values()
+    )
+    assert get_command_spec("event.read", MAINTENANCE_GATE_VERSION) is None
+    assert command_action("component_job.replay", CURRENT_GATE_VERSION) == (
+        "component_job.replay"
+    )
+    assert BUILTIN_GATE_V5["event.replay"].priority == 2
+    assert BUILTIN_GATE_V5["component_job.replay"].priority == 2
+    assert "#forest event retire-plan" in render_help(CURRENT_GATE_VERSION)
+    assert "#forest component-job retire-plan" in render_help(CURRENT_GATE_VERSION)
+    for key in additions:
+        spec = BUILTIN_GATE_V5[key]
+        Draft202012Validator.check_schema(spec.args_schema)
+        validator = Draft202012Validator(spec.args_schema)
+        for form in spec.forms:
+            payload = dict(form.fixed_arguments)
+            words = ["#forest", *form.words]
+            for name in form.positional:
+                payload[name] = _value(name, spec.args_schema["properties"][name])
+                words.append(str(payload[name]))
+            for option, name in form.options:
+                payload[name] = _value(name, spec.args_schema["properties"][name])
+                words.extend((option, str(payload[name])))
+            validator.validate(payload)
+            parsed = command("#forest " + shlex.join(words[1:]))
+            assert (parsed.name, parsed.payload) == (key, payload)

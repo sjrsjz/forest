@@ -216,6 +216,14 @@ class ShellDispatcher:
             from forest.storage.bot_runtime import BotRuntimeAdministration
 
             repository = BotRuntimeAdministration(self.messages.store, control=control)
+        elif spec.execution_target == "event":
+            from forest.storage.events import EventStore
+
+            repository = EventStore(self.messages.store, control=control)
+        elif spec.execution_target == "component_job":
+            from forest.storage.component_jobs import ComponentJobStore
+
+            repository = ComponentJobStore(self.messages.store, control=control)
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         kwargs = {"lease": lease} if (
@@ -246,6 +254,96 @@ class ShellDispatcher:
             outcome = {"code": "RUN_STATUS", "run_count": len(lines), "approval_count": len(approvals)}
         elif name == "job.read":
             text, outcome = self._job_status(result, claim["conversation_id"])
+        elif name == "event.read":
+            text, outcome = self._event_status(result)
+        elif name == "event.replay":
+            text = (
+                f"组件事件投递 {result['delivery_id']} 已进入回放轮次 "
+                f"{result['replay_epoch']}；管理修订 {result['management_revision']}。"
+            )
+            outcome = {
+                "code": "EVENT_REPLAYED",
+                "delivery_id": result["delivery_id"],
+                "replay_epoch": result["replay_epoch"],
+                "management_revision": result["management_revision"],
+            }
+            if self.on_change is not None:
+                self.on_change()
+        elif name == "event.retire.plan":
+            text = (
+                f"事件订阅退役预览：待终结 {result['impact']['retire_pending']}，"
+                f"执行中 {result['impact']['inflight']}。提交命令：#forest event retire-apply "
+                f"{result['plan_id']} --digest {result['plan_digest']} --expect-revision "
+                f"{result['expected_revision']}"
+            )
+            outcome = {
+                "code": "EVENT_RETIREMENT_PLAN",
+                "plan_id": result["plan_id"],
+                "plan_digest": result["plan_digest"],
+                "management_revision": result["expected_revision"],
+                "retire_pending": result["impact"]["retire_pending"],
+                "inflight": result["impact"]["inflight"],
+            }
+        elif name == "event.retire.apply":
+            text = (
+                f"事件订阅 {result['subscriber_id']} v{result['contract_major']} 已退役；"
+                f"终结投递 {result['retired_delivery_count']}，管理修订 "
+                f"{result['management_revision']}。"
+            )
+            outcome = {
+                "code": "EVENT_SUBSCRIPTION_RETIRED",
+                "subscriber_id": result["subscriber_id"],
+                "contract_major": result["contract_major"],
+                "management_revision": result["management_revision"],
+                "retired_delivery_count": result["retired_delivery_count"],
+            }
+            if self.on_change is not None:
+                self.on_change()
+        elif name == "component_job.read":
+            text, outcome = self._component_job_status(result)
+        elif name == "component_job.replay":
+            text = (
+                f"组件持久任务 {result['job_id']} 已进入回放轮次 "
+                f"{result['replay_epoch']}；管理修订 {result['management_revision']}。"
+            )
+            outcome = {
+                "code": "COMPONENT_JOB_REPLAYED",
+                "job_id": result["job_id"],
+                "replay_epoch": result["replay_epoch"],
+                "management_revision": result["management_revision"],
+            }
+            if self.on_change is not None:
+                self.on_change()
+        elif name == "component_job.retire.plan":
+            text = (
+                f"组件任务处理器退役预览：待终结 {result['impact']['retire_pending']}，"
+                f"执行中 {result['impact']['inflight']}。提交命令："
+                f"#forest component-job retire-apply {result['plan_id']} --digest "
+                f"{result['plan_digest']} --expect-revision {result['expected_revision']}"
+            )
+            outcome = {
+                "code": "COMPONENT_JOB_RETIREMENT_PLAN",
+                "plan_id": result["plan_id"],
+                "plan_digest": result["plan_digest"],
+                "management_revision": result["expected_revision"],
+                "retire_pending": result["impact"]["retire_pending"],
+                "inflight": result["impact"]["inflight"],
+            }
+        elif name == "component_job.retire.apply":
+            text = (
+                f"组件任务处理器 {result['component_id']} / {result['handler_id']} 已退役；"
+                f"终结任务 {result['retired_job_count']}，管理修订 "
+                f"{result['management_revision']}。"
+            )
+            outcome = {
+                "code": "COMPONENT_JOB_HANDLER_RETIRED",
+                "component_id": result["component_id"],
+                "handler_id": result["handler_id"],
+                "management_revision": result["management_revision"],
+                "retired_job_count": result["retired_job_count"],
+            }
+            if self.on_change is not None:
+                self.on_change()
         elif name == "memory.read":
             lines = []
             for row in result["sources"][:20]:
@@ -334,6 +432,46 @@ class ShellDispatcher:
             occurrences.append(detail)
         return "本群计划：\n" + "\n".join(lines + occurrences or ["暂无计划。"]), {
             "code": "JOB_STATUS", "count": len(lines), "occurrence_count": len(occurrences),
+        }
+
+    @staticmethod
+    def _event_status(result):
+        subscriptions = [
+            f"订阅 {row['subscriber_id']} v{row['contract_major']}："
+            f"{'启用' if row['active'] else '已退役'}；修订 {row['management_revision']}"
+            for row in result.get("subscriptions", [])[:12]
+        ]
+        deliveries = [
+            f"投递 {row['delivery_id']}：{row['status']}；回放 {row['replay_epoch']}；"
+            f"修订 {row['management_revision']}"
+            for row in result.get("deliveries", [])[:12]
+        ]
+        return "组件事件：\n" + "\n".join(
+            subscriptions + deliveries or ["暂无组件事件订阅或投递。"]
+        ), {
+            "code": "EVENT_STATUS",
+            "subscription_count": len(subscriptions),
+            "delivery_count": len(deliveries),
+        }
+
+    @staticmethod
+    def _component_job_status(result):
+        handlers = [
+            f"处理器 {row['component_id']} / {row['handler_id']}："
+            f"{'启用' if row['active'] else '已退役'}；修订 {row['management_revision']}"
+            for row in result.get("handlers", [])[:12]
+        ]
+        jobs = [
+            f"任务 {row['job_id']}：{row['status']}；回放 {row['replay_epoch']}；"
+            f"修订 {row['management_revision']}"
+            for row in result.get("jobs", [])[:12]
+        ]
+        return "组件持久任务（不属于会话 Agent 计划）：\n" + "\n".join(
+            handlers + jobs or ["暂无组件持久任务处理器或任务。"]
+        ), {
+            "code": "COMPONENT_JOB_STATUS",
+            "handler_count": len(handlers),
+            "job_count": len(jobs),
         }
 
     async def close(self) -> None:

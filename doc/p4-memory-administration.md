@@ -1,6 +1,6 @@
 # P4 记忆来源管理与公开遗忘协议
 
-状态：首版纵向切片已实现。底层来源抑制、删除 epoch、派生闭包和物理 scrub 已接入 Web 来源页、审核 plan/apply 与当前 `shell-gate-v4` 群命令；本文同时记录恢复和未覆盖的外部存储边界。
+状态：首版纵向切片已实现。底层来源抑制、删除 epoch、派生闭包和物理 scrub 已接入 Web 来源页、审核 plan/apply 与当前 `shell-gate-v5` 群命令；本文同时记录恢复和未覆盖的外部存储边界。
 
 ## 1. 管理对象和首版范围
 
@@ -44,7 +44,7 @@ WebUI 可以管理该 Bot 全局范围。群聊 Shell 只能列出和操作当�
 #forest memory forget-apply <plan_id> --digest <plan_digest> --expect-deletion-epoch <deletion_epoch>
 ```
 
-`shell-gate-v2` 的命令表和摘要保持不变。记忆命令首次发布于冻结的 `shell-gate-v3`，当前 `shell-gate-v4` 完整继承 v3 契约并增加 Bot 维护命令；Dispatcher 按持久 `gate_version` 选择冻结 registry，使升级前已排队的 v2/v3 命令继续使用原 schema 和动作映射。
+`shell-gate-v2` 的命令表和摘要保持不变。记忆命令首次发布于冻结的 `shell-gate-v3`，v4 完整继承 v3 契约并增加 Bot 维护命令，当前 v5 再继承 v4 并增加组件管理；Dispatcher 按持久 `gate_version` 选择冻结 registry，使升级前已排队的 v2/v3/v4 命令继续使用原 schema 和动作映射。
 
 ## 4. 持久结构和恢复
 

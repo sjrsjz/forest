@@ -29,7 +29,7 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 
 在同一 Bot 的记忆面板配置图文嵌入服务、密钥、允许的图片来源，以及索引、下载和查询预算，预览后启用。后台独立捕获原图并索引已接纳的全群消息；Agent 可根据触发消息的文字和图片召回其他群的记忆，结果逐条标注群及作者。文本模型会在调用时移除图片，图片索引与召回仍可工作。来源列表按群和作者展示完整图文来源；遗忘先生成影响预览，再以删除版本 CAS 提交，召回立即抑制，正文由后台分批清理。当前支持 `jina-clip-v2` 原生图文协议；配置、费用语义与未完成边界见[记忆运行说明](doc/p4-memory-runtime.md)和[来源管理说明](doc/p4-memory-administration.md)。
 
-「计划任务」可配置 interval/cron、时区、补跑规则、并发限制和委托期限，预览后保存，也可以立即执行、停用或取消待处理任务。任务按同一群聊触发队列运行，进入该会话唯一的 Agent Session，不另开模型 Agent 或群响应链。群内管理员可用 `#forest status` 读取维护版本，使用 `#forest bot pause --expect-maintenance <版本> --reason "原因"` 或对应的 `bot resume` 命令紧急暂停、恢复本 Bot，也可通过 `run list`、`jobs list` 和 `memory list` 查询并按显示版本取消、审批或遗忘本群来源；实际语法和授权边界见[群聊 Shell 详细设计](doc/09-group-shell-command-system.md)。
+「计划任务」可配置 interval/cron、时区、补跑规则、并发限制和委托期限，预览后保存，也可以立即执行、停用或取消待处理任务。任务按同一群聊触发队列运行，进入该会话唯一的 Agent Session，不另开模型 Agent 或群响应链。群内管理员可用 `#forest status` 读取维护版本，使用 `#forest bot pause --expect-maintenance <版本> --reason "原因"` 或对应的 `bot resume` 命令紧急暂停、恢复本 Bot，也可通过 `run list`、`jobs list` 和 `memory list` 查询并按显示版本取消、审批或遗忘本群来源。`event` 管理组件事件，`component-job` 单独管理插件持久任务，支持受限元数据列表、DEAD 回放和 plan/apply 退役；实际语法和授权边界见[群聊 Shell 详细设计](doc/09-group-shell-command-system.md)。
 
 Docker 内连接宿主机 OneBot 时，API 地址可使用 `http://host.docker.internal:5700`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。OneBot 上报必须能访问 Forest 的 HTTP 入口。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)。
 

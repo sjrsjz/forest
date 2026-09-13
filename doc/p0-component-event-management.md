@@ -65,7 +65,7 @@ DEAD -- explicit replay --> RETRY_WAIT
 
 旧 issuer 只按已有最小能力升级：拥有 `message.read` 或 `config.read` 才得到 `event.read`；同时拥有 `event.read + service.invoke` 才得到 replay；同时拥有 `event.read + config.plan` 才得到 retirement plan；同时拥有 `event.read + config.apply + message.cancel` 才得到 retirement apply。只读身份不会升级为写身份。
 
-WebUI 在 Bot 页面显示订阅和最近投递。DEAD 行只在服务端返回 `replay_allowed=true` 时显示回放按钮；active subscription 提供退役预览，apply 按钮只提交当前 plan。Bot 切换、内容撤销或并发刷新会清空草稿和 idempotency key。群聊 Shell 后续复用相同 Store 和票据协议，不另写直达数据库的旁路。
+WebUI 在 Bot 页面显示订阅和最近投递。DEAD 行只在服务端返回 `replay_allowed=true` 时显示回放按钮；active subscription 提供退役预览，apply 按钮只提交当前 plan。Bot 切换、内容撤销或并发刷新会清空草稿和 idempotency key。群聊 Shell 的 `shell-gate-v5` 已复用相同 Store 管理方法：`event` 域提供受限列表、DEAD 回放和订阅 plan/apply 退役，不另写直达数据库的旁路。每次目标事务和 CONTROL 回复都重新检查当前 Binding 管理员、binding epoch、host lease 与命令 claim。
 
 ## 6. 验收
 
@@ -78,3 +78,4 @@ WebUI 在 Bot 页面显示订阅和最近投递。DEAD 行只在服务端返回 
 - 退役后普通热重载允许省略旧声明，但拒绝同身份隐式复活；
 - 旧库权限迁移不扩大只读或无权 issuer；
 - Web 会话、CSRF、幂等键、plan 绑定与 Bot 隔离均经过真实 PostgreSQL 管理链路验证。
+- Shell v5 的冻结语法、旧 gate 兼容、当前管理员复核、受限群回执和同状态机管理经过真实 PostgreSQL/Worker 验证。
