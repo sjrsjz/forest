@@ -20,6 +20,7 @@ from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLim
 from forest.errors import ForestError
 from forest.packages import PackageSnapshot, contract_matches, digest_json
 from forest.storage.bot import BotStore, CallGrant, HostLease
+from forest.storage.component_jobs import ComponentJobStore
 from forest.storage.events import EventStore
 
 
@@ -41,6 +42,16 @@ class EventSubscription:
     validator: Draft202012Validator
 
 
+@dataclass(frozen=True)
+class ComponentJobDefinition:
+    handler_id: str
+    schema_digest: str
+    max_attempts: int
+    timeout_seconds: float
+    max_concurrency: int
+    validator: Draft202012Validator
+
+
 @dataclass
 class LoadedComponent:
     snapshot: PackageSnapshot
@@ -49,6 +60,7 @@ class LoadedComponent:
     validators: dict[str, tuple[Draft202012Validator, Draft202012Validator, int]]
     publications: dict[str, EventPublication]
     subscriptions: dict[str, EventSubscription]
+    jobs: dict[str, ComponentJobDefinition]
     policy_revision: int
     route_epoch: int = 0
     dependencies: tuple[str, ...] = ()
@@ -186,6 +198,10 @@ class Kernel:
         self._event_deliveries: dict[str, asyncio.Task] = {}
         self._event_claims: dict[str, dict] = {}
         self._event_wake = asyncio.Event()
+        self._component_job_dispatcher: asyncio.Task | None = None
+        self._component_job_deliveries: dict[str, asyncio.Task] = {}
+        self._component_job_claims: dict[str, dict] = {}
+        self._component_job_wake = asyncio.Event()
         self._exposure_retirements: dict[str, asyncio.Task] = {}
         self._retire_revocations: dict[str, asyncio.Event] = {}
         self._retiring: set[str] = set()
@@ -213,6 +229,9 @@ class Kernel:
             )
             self._event_dispatcher = asyncio.create_task(
                 self._supervise_events(), name="kernel-event-dispatcher"
+            )
+            self._component_job_dispatcher = asyncio.create_task(
+                self._supervise_component_jobs(), name="kernel-component-job-dispatcher"
             )
 
     def _authority(self, *, allow_closing: bool = False) -> HostLease:
@@ -554,6 +573,8 @@ class Kernel:
             publications = {}
             subscriptions = {}
             event_definitions = []
+            jobs = {}
+            job_definitions = []
             for item in spec.get("publishes", []):
                 schema = snapshot.schema(item["schema"])
                 publication = EventPublication(
@@ -566,6 +587,21 @@ class Kernel:
                     "direction": "PUBLISH", "definition_id": item["topic"],
                     "topic": item["topic"], "contract_major": major,
                     "contract_minor": minor, "schema_digest": publication.schema_digest,
+                })
+            for item in spec.get("jobs", []):
+                schema = snapshot.schema(item["input_schema"])
+                definition = ComponentJobDefinition(
+                    item["handler_id"], digest_json(schema), item.get("max_attempts", 8),
+                    float(item.get("timeout_s", 30)), item.get("max_concurrency", 1),
+                    Draft202012Validator(schema),
+                )
+                jobs[item["handler_id"]] = definition
+                job_definitions.append({
+                    "handler_id": definition.handler_id,
+                    "schema_digest": definition.schema_digest,
+                    "max_attempts": definition.max_attempts,
+                    "timeout_seconds": definition.timeout_seconds,
+                    "max_concurrency": definition.max_concurrency,
                 })
             for item in spec.get("subscribes", []):
                 schema = snapshot.schema(item["schema"])
@@ -657,11 +693,12 @@ class Kernel:
                 limits=WorkerLimits(**spec.get("resources", {})),
                 service_handler=self._service_rpc,
                 event_handler=self._event_rpc,
+                job_handler=self._job_rpc,
             )
             policy_revision = (await self.store.runtime())["policy_revision"]
             new = LoadedComponent(
                 snapshot, worker, requested & grants, validators,
-                publications, subscriptions, policy_revision,
+                publications, subscriptions, jobs, policy_revision,
             )
             published = False
             frozen = False
@@ -687,6 +724,7 @@ class Kernel:
                         if "state_value_schema" in spec else {}
                     ),
                     event_definitions=event_definitions,
+                    job_definitions=job_definitions,
                 )
                 operation = await self.store.begin_operation(
                     authority,
@@ -788,6 +826,7 @@ class Kernel:
                 await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 await worker.activate()  # transport admission only; no plugin activation hook
                 self._event_wake.set()
+                self._component_job_wake.set()
                 if old is not None:
                     await self._retire(old, reason="replaced", revoke=False)
                 return self._route_receipt(route)
@@ -1228,6 +1267,58 @@ class Kernel:
         self._event_wake.set()
         return receipt
 
+    async def _job_rpc(
+        self, identity: WorkerIdentity, parent_call_id: str, request: dict
+    ) -> dict:
+        self._authority(allow_closing=True)
+        parent = self._calls.get(parent_call_id)
+        if parent is None or parent[0] != identity:
+            raise ForestError(
+                "INVALID_CALL_CONTEXT", "Job RPC has no authenticated parent invocation", 403
+            )
+        if parent[1].admission_lane != "DATA":
+            raise ForestError("CONTROL_SCOPE_DENIED", "Control codec cannot schedule jobs", 403)
+        if not isinstance(request, dict) or set(request) != {
+            "handler_id", "payload", "operation_id", "delay_seconds"
+        }:
+            raise ForestError("INVALID_JOB_REQUEST", "Job request has unsupported fields", 422)
+        handler_id, operation_id, delay = (
+            request["handler_id"], request["operation_id"], request["delay_seconds"]
+        )
+        if (
+            not isinstance(handler_id, str)
+            or not 1 <= len(handler_id) <= 128
+            or not isinstance(operation_id, str)
+            or not 1 <= len(operation_id) <= 128
+            or isinstance(delay, bool)
+            or not isinstance(delay, (int, float))
+            or not 0 <= delay <= 30 * 24 * 60 * 60
+        ):
+            raise ForestError("INVALID_JOB_REQUEST", "Invalid component job request", 422)
+        component = self.components.get(parent[1].component_id)
+        if component is None or component.worker.identity != identity:
+            raise ForestError("STALE_GENERATION", "Scheduling generation is no longer loaded", 409)
+        definition = component.jobs.get(handler_id)
+        if definition is None:
+            raise ForestError("JOB_DECLARATION_MISMATCH", "Job handler is not declared", 403)
+        if "job.schedule:" + handler_id not in parent[2]:
+            raise ForestError("CAPABILITY_DENIED", "Caller is not granted this job handler", 403)
+        self._validate(definition.validator, request["payload"], "JOB_PAYLOAD_INVALID")
+        payload = json.loads(json.dumps(request["payload"], allow_nan=False))
+        receipt = await ComponentJobStore(self.store).schedule(
+            parent[1],
+            handler_id=handler_id,
+            schema_digest=definition.schema_digest,
+            operation_id=operation_id,
+            input_digest=digest_json({
+                "handler_id": handler_id, "payload": payload, "delay_seconds": delay,
+            }),
+            payload=payload,
+            delay_seconds=delay,
+        )
+        self._component_job_wake.set()
+        return receipt
+
     async def _invoke(
         self,
         component_id: str,
@@ -1243,6 +1334,7 @@ class Kernel:
         agent_tool_id: str | None = None,
         input_parent_ids: tuple[str, ...] = (),
         event_delivery: dict | None = None,
+        component_job: dict | None = None,
     ) -> InvocationReceipt:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
@@ -1251,8 +1343,12 @@ class Kernel:
         component = self.components.get(component_id)
         if component is None:
             raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
-        if event_delivery is not None and (parent is not None or admission_lane != "DATA"):
-            raise ForestError("INVALID_EVENT_DELIVERY", "Event delivery must be a root data call", 422)
+        if event_delivery is not None and component_job is not None:
+            raise ForestError("INVALID_DELIVERY", "A call cannot carry two durable deliveries", 422)
+        if (event_delivery is not None or component_job is not None) and (
+            parent is not None or admission_lane != "DATA"
+        ):
+            raise ForestError("INVALID_DELIVERY", "Durable delivery must be a root data call", 422)
         if admission_lane == "CONTROL" and (
             component_id != "adapter.onebot"
             or service not in {"onebot.normalize", "onebot.prepare"}
@@ -1297,6 +1393,10 @@ class Kernel:
                     {"event_delivery_id": event_delivery["delivery_id"]}
                     if event_delivery is not None else {}
                 ),
+                **(
+                    {"component_job_id": component_job["job_id"]}
+                    if component_job is not None else {}
+                ),
             }
         )
 
@@ -1320,12 +1420,13 @@ class Kernel:
                 409,
             )
         subscription = None
-        if event_delivery is None:
+        job_definition = None
+        if event_delivery is None and component_job is None:
             if service not in component.validators:
                 raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
             input_validator, output_validator, major = component.validators[service]
             self._validate(input_validator, payload, "INPUT_INVALID")
-        else:
+        elif event_delivery is not None:
             subscriber_id = event_delivery["subscriber_id"]
             if service != "@event:" + subscriber_id:
                 raise ForestError("INVALID_EVENT_DELIVERY", "Event target identity differs", 422)
@@ -1346,6 +1447,26 @@ class Kernel:
             output_validator, major = Draft202012Validator({}), int(
                 subscription.contract.split(".")[0]
             )
+        else:
+            handler_id = component_job["handler_id"]
+            if service != "@job:" + handler_id:
+                raise ForestError("INVALID_JOB_DELIVERY", "Job target identity differs", 422)
+            job_definition = component.jobs.get(handler_id)
+            if (
+                job_definition is None
+                or component_job["component_id"] != component_id
+                or component_job["target_generation_id"]
+                != component.worker.identity.generation_id
+                or component_job["route_epoch"] != component.route_epoch
+                or component_job["schema_digest"] != job_definition.schema_digest
+            ):
+                raise ForestError(
+                    "JOB_DELIVERY_FENCED", "Job handler route or schema changed", 409
+                )
+            self._validate(
+                job_definition.validator, payload.get("payload"), "JOB_PAYLOAD_INVALID"
+            )
+            output_validator, major = Draft202012Validator({}), 1
         if parent is None and component.worker.identity.generation_id in self._retiring:
             raise ForestError("GENERATION_EXPOSURE_EXHAUSTED", "Worker is draining before replacement", 429)
         if contract_major != major:
@@ -1420,16 +1541,26 @@ class Kernel:
                     await EventStore(self.store).authorize_dispatch(
                         self._authority(allow_closing=True), event_delivery
                     )
+                if component_job is not None:
+                    await ComponentJobStore(self.store).authorize_dispatch(
+                        self._authority(allow_closing=True), component_job
+                    )
 
-            if subscription is None:
-                result = await component.worker.invoke(
-                    service, payload, call_id=call_id, operation_id=operation_id, timeout=timeout,
-                    before_send=authorize_worker_dispatch,
-                )
-            else:
+            if subscription is not None:
                 result = await component.worker.deliver_event(
                     subscription.subscriber_id, payload,
                     call_id=call_id, operation_id=operation_id, timeout=timeout,
+                    before_send=authorize_worker_dispatch,
+                )
+            elif job_definition is not None:
+                result = await component.worker.deliver_job(
+                    job_definition.handler_id, payload,
+                    call_id=call_id, operation_id=operation_id, timeout=timeout,
+                    before_send=authorize_worker_dispatch,
+                )
+            else:
+                result = await component.worker.invoke(
+                    service, payload, call_id=call_id, operation_id=operation_id, timeout=timeout,
                     before_send=authorize_worker_dispatch,
                 )
             self._validate(output_validator, result, "OUTPUT_INVALID")
@@ -1599,6 +1730,152 @@ class Kernel:
             self._event_deliveries.clear()
             self._event_claims.clear()
 
+    async def _deliver_component_job(self, job: dict) -> None:
+        jobs = ComponentJobStore(self.store)
+        try:
+            try:
+                component = self.components.get(job["component_id"])
+                if component is None:
+                    raise ForestError(
+                        "JOB_HANDLER_UNAVAILABLE", "Job component is not loaded", 409
+                    )
+                task = {
+                    "job_id": job["job_id"],
+                    "handler_id": job["handler_id"],
+                    "scheduled_at": job["first_available_at"].isoformat(),
+                    "attempt": job["attempt_count"],
+                    "payload": job["payload"],
+                }
+                receipt = await self._invoke(
+                    job["component_id"],
+                    "@job:" + job["handler_id"],
+                    task,
+                    operation_id=job["call_operation_id"],
+                    contract_major=1,
+                    timeout=job["timeout_seconds"],
+                    input_parent_ids=(job["job_payload_id"],),
+                    component_job=job,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                code = exc.code if isinstance(exc, ForestError) else type(exc).__name__
+                transient = code in {
+                    "ADMISSION_CLOSED",
+                    "BACKPRESSURE",
+                    "GENERATION_EXPOSURE_EXHAUSTED",
+                    "JOB_DELIVERY_FENCED",
+                    "JOB_HANDLER_UNAVAILABLE",
+                    "OPERATION_PENDING",
+                    "OVERLOADED",
+                    "POLICY_REVOKED",
+                    "SERVICE_RELOADING",
+                    "STALE_ROUTE",
+                    "WORKER_NOT_ACTIVE",
+                }
+                with suppress(Exception):
+                    if transient:
+                        await jobs.defer(
+                            self._authority(allow_closing=True), job, delay_seconds=0.25
+                        )
+                    else:
+                        await jobs.fail(
+                            self._authority(allow_closing=True),
+                            job,
+                            code,
+                            terminal=code in {
+                                "KERNEL_CONTENT_REVOKED",
+                                "JOB_DECLARATION_MISMATCH",
+                                "JOB_MANIFEST_MISMATCH",
+                                "JOB_PAYLOAD_INVALID",
+                            },
+                        )
+                return
+            try:
+                await jobs.acknowledge(
+                    self._authority(allow_closing=True),
+                    job,
+                    result_payload_id=receipt.result_payload_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A lost ACK is reconciled through the completed call operation.
+                with suppress(Exception):
+                    await jobs.abandon(self._authority(allow_closing=True), job)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await jobs.abandon(self._authority(allow_closing=True), job)
+            raise
+
+    def _component_job_done(self, _: asyncio.Task) -> None:
+        self._call_count -= 1
+        self._component_job_wake.set()
+
+    def notify_component_jobs(self) -> None:
+        """Wake the durable component job dispatcher after an out-of-band change."""
+        self._component_job_wake.set()
+
+    async def _supervise_component_jobs(self) -> None:
+        jobs = ComponentJobStore(self.store)
+        try:
+            while not self._closing:
+                for job_id, task in tuple(self._component_job_deliveries.items()):
+                    if task.done():
+                        self._component_job_deliveries.pop(job_id, None)
+                        self._component_job_claims.pop(job_id, None)
+                        with suppress(asyncio.CancelledError):
+                            await task
+                claimed = False
+                while (
+                    len(self._component_job_deliveries) < 8
+                    and self._call_count < self.max_calls
+                    and not self._closing
+                ):
+                    job = await jobs.claim(self._authority(), lease_seconds=45)
+                    if job is None:
+                        break
+                    if self._call_count >= self.max_calls:
+                        await jobs.defer(self._authority(), job)
+                        break
+                    claimed = True
+                    self._call_count += 1
+                    task = asyncio.create_task(
+                        self._deliver_component_job(job),
+                        name="kernel-component-job:" + job["job_id"],
+                    )
+                    task.add_done_callback(self._component_job_done)
+                    self._component_job_deliveries[job["job_id"]] = task
+                    self._component_job_claims[job["job_id"]] = job
+                if claimed:
+                    await asyncio.sleep(0)
+                    continue
+                self._component_job_wake.clear()
+                try:
+                    async with asyncio.timeout(0.5):
+                        await self._component_job_wake.wait()
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.failure = exc.code if isinstance(exc, ForestError) else "JOB_SUPERVISION_FAILED"
+            await self._terminate_remaining()
+        finally:
+            pending = list(self._component_job_deliveries.items())
+            tasks = [task for _, task in pending]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for job_id, _ in pending:
+                job = self._component_job_claims.get(job_id)
+                if job is not None:
+                    with suppress(Exception):
+                        await jobs.abandon(self._authority(allow_closing=True), job)
+            self._component_job_deliveries.clear()
+            self._component_job_claims.clear()
+
     async def cancel(self, call_id: str) -> None:
         await self.store.cancel_call(self._authority(), call_id)
         current = self._calls.get(call_id)
@@ -1621,6 +1898,8 @@ class Kernel:
         owned = (
             ([self._exposure_monitor] if self._exposure_monitor is not None else [])
             + ([self._event_dispatcher] if self._event_dispatcher is not None else [])
+            + ([self._component_job_dispatcher]
+               if self._component_job_dispatcher is not None else [])
             + list(self._exposure_retirements.values())
         )
         for task in owned:

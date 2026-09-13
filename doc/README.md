@@ -12,6 +12,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P0 Worker 资源监督 SDK](p0-resource-sdk.md) | 调用/代际资源所有权、额度、LIFO 清理及取消/停止边界 |
 | [P0 持久组件事件](p0-component-events.md) | 事件声明、持久发布、稳定订阅、热重载接续、重试与死信 |
 | [P0 组件事件管理](p0-component-event-management.md) | 死信回放 epoch、订阅显式退役、并发围栏与 Web 管理边界 |
+| [P0 组件持久任务](p0-component-jobs.md) | 插件自有持久工作、固定主体与预算、调用账本对账、热重载接续及与会话 Agent 任务的边界 |
 | [P2 插件包与依赖环境](p2-plugin-packages.md) | 完整 ZIP、开发版本、离线锁、平台与 SDK 隔离 |
 | [P2 持久状态迁移](p2-state-migration.md) | 纯迁移接口、双次验证、状态/路由原子发布与故障恢复 |
 | [P2 Web 插件管理](p2-web-plugin-management.md) | 导入与启用、通用表单、版本切换、历史配置与重启恢复 |

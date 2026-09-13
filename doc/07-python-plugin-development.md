@@ -102,6 +102,8 @@ Context 只在当前调用及其受监督子调用中有效，不能存入 `self
 
 持久事件的 payload 正文进入受来源与删除 epoch 约束的内容存储。消费 envelope 明确携带发布组件、原契约与 event ID；同一订阅串行、不同订阅可并行。发布幂等、ACK 丢失恢复、热重载接续和死信边界见 [P0 持久组件事件](p0-component-events.md)。
 
+组件持久任务通过 manifest `jobs` 和代码 `@job(handler_id)` 成对声明；调用内使用 `ctx.jobs.schedule(handler_id, payload, operation_id=..., delay_seconds=...)`。它只调用同一组件当前代际的处理器，不创建 Agent、不读取群上下文，也不继承用户或管理员权限。处理器可用稳定 operation 调度下一周期，完整 claim、预算、重试与热重载协议见[组件持久任务详细设计](p0-component-jobs.md)。面向群会话唯一 Agent 的 interval/cron 任务仍使用 P3 会话任务协议。
+
 Agent 的工具提议必须引用其服务的 trigger/request ID，宿主分别检查对应主体；同批多个用户的权限不能取并集。`event.sender` 来自平台认证后规范化的作者快照，回复引用、转发作者、正文中的名字与管理员称谓都不能替换它。业务插件返回回复只生成 CHAT 意图，最终外发按该群 response_seq 排序。管理扩展通过绑定 command_id 的控制回执接口产生 CONTROL 意图，宿主验证命令授权；普通 `Reply` 不能自行选择控制通道来跳过聊天顺序或配额。
 
 handler 中直接 `asyncio.create_task` 后遗弃引用、跨请求修改模块级列表、创建未登记定时器都违反运行契约。必须跨热重载存活的工作提交为 Job/checkpoint，不能依靠后台协程自然留存。
