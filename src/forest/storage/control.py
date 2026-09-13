@@ -59,6 +59,7 @@ def _component_metadata(values):
     return {key: values[key] for key in ("package_digest", "grants")}
 
 ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "service.invoke",
+           "bot.runtime.read", "bot.maintenance",
            "job.read", "job.plan", "job.apply", "job.run", "job.cancel", "job.replay",
            "agent.config.read", "agent.config.plan", "agent.config.apply", "agent.read",
            "agent.approval", "agent.cancel", "agent.resolve",

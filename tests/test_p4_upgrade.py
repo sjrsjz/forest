@@ -111,7 +111,12 @@ def expected_after_memory_permissions(before):
             )
             if required <= actions
         }
-        issuers.append({**issuer, "actions": sorted(actions | additions)})
+        actions |= additions
+        if "message.read" in actions:
+            actions.add("bot.runtime.read")
+        if {"config.apply", "message.cancel"} <= actions:
+            actions.add("bot.maintenance")
+        issuers.append({**issuer, "actions": sorted(actions)})
     return {**before, "bot_web_issuers": issuers}
 
 

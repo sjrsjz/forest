@@ -49,6 +49,14 @@ class Invoke(Body):
     payload: dict[str, Any]
 
 
+class Maintenance(Body):
+    expected_maintenance_epoch: int = Field(ge=0, le=10**18 - 1, strict=True)
+    data_admission: bool = Field(strict=True)
+    reason: str = Field(
+        min_length=1, max_length=256, pattern=r"^[^\x00-\x1f]*[^\s\x00-\x1f][^\x00-\x1f]*$"
+    )
+
+
 def install_bot_routes(app: FastAPI, runtime: Any) -> None:
     def services():
         if runtime.catalog is None or runtime.fleet is None or runtime.authority is None:
@@ -117,6 +125,33 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
         who = await principal(request, True)
         return await services()[0].retry(bot_id=bot_id, **body.model_dump(), **who,
                                          idempotency_key=key(request))
+
+    @app.get("/management/v1/bots/{bot_id}/runtime")
+    async def bot_runtime(bot_id: str, request: Request):
+        from forest.storage.bot_runtime import BotRuntimeAdministration
+
+        bot, operation, signed = await ticket(
+            request, bot_id, "bot.runtime.read", {}, write=False
+        )
+        state = await BotRuntimeAdministration(bot.store, control=bot.control).read(
+            signed, operation, {}
+        )
+        return {**state, "supervisor": services()[1].status(bot_id)}
+
+    @app.post("/management/v1/bots/{bot_id}/maintenance", status_code=202)
+    async def bot_maintenance(bot_id: str, body: Maintenance, request: Request):
+        from forest.storage.bot_runtime import BotRuntimeAdministration
+
+        payload = body.model_dump()
+        bot, operation, signed = await ticket(
+            request, bot_id, "bot.maintenance", payload
+        )
+        result = await BotRuntimeAdministration(bot.store, control=bot.control).set_maintenance(
+            signed, operation, payload, lease=bot.kernel._authority()
+        )
+        if bot.platform is not None and result is not None and not bot.control.is_unavailable(result):
+            bot.platform.notify()
+        return result
 
     @app.get("/management/v1/provision-jobs/{job_id}")
     async def get_job(job_id: str, request: Request):
