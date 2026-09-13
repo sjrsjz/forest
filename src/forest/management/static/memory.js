@@ -45,8 +45,11 @@ const groups = [
 export function memoryPanel(api, busy, notice) {
   const form = $('memory-config');
   let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0, sourceSeq = 0;
+  let associationSeq = 0;
   let configuration = null, pending = null, planKey = null, applyKey = null;
   let sourceView = null, forgetPlan = null, forgetPlanKey = null, forgetApplyKey = null;
+  let associationView = null, associationPlan = null;
+  let associationPlanKey = null, associationApplyKey = null;
   const replace = replacementButton($('memory-config-status'), 'memory-replace-configuration', () => {
     if (!configuration?.defaults) return;
     show({...configuration, values:structuredClone(configuration.defaults), values_payload_state:'DRAFT'});
@@ -84,12 +87,14 @@ export function memoryPanel(api, busy, notice) {
     $('memory-preview').classList.add('hidden');
   }
   function reset() {
-    epoch++; readSeq++; statusSeq++; sourceSeq++; bot = null; configuration = null;
+    epoch++; readSeq++; statusSeq++; sourceSeq++; associationSeq++;
+    bot = null; configuration = null;
     clearPlan(); form.reset(); $('memory-edit').disabled = true;
     $('bot-memory').classList.add('hidden'); $('memory-state').textContent = '';
     $('memory-config-status').textContent = '';
     clearForget(); $('memory-sources').replaceChildren(); $('memory-sources-status').textContent = '';
     $('memory-sources-more').disabled = true;
+    clearAssociations();
     replace.classList.add('hidden');
   }
   function clearForget() {
@@ -97,6 +102,28 @@ export function memoryPanel(api, busy, notice) {
     $('memory-forget-plan').disabled = true;
     $('memory-forget-preview').classList.add('hidden');
     $('memory-forget-diff').textContent = '';
+  }
+  function clearAssociationPlan() {
+    associationPlan = null; associationPlanKey = null; associationApplyKey = null;
+    $('memory-association-preview').classList.add('hidden');
+    $('memory-association-diff').textContent = '';
+  }
+  function clearAssociations() {
+    associationView = null; clearAssociationPlan();
+    $('memory-association-plan').disabled = true;
+    $('memory-associations').replaceChildren();
+    $('memory-associations-status').textContent = '';
+  }
+  function selectedSourceIds() {
+    return [...$('memory-sources').querySelectorAll('input:checked')].map(item => item.value);
+  }
+  function updateSourceActions() {
+    const count = selectedSourceIds().length;
+    forgetPlan = null; forgetPlanKey = null; forgetApplyKey = null;
+    $('memory-forget-preview').classList.add('hidden');
+    clearAssociationPlan();
+    $('memory-forget-plan').disabled = count === 0;
+    $('memory-association-plan').disabled = count !== 2;
   }
   function sourceLabel(row) {
     const origin = row.source || {}, author = row.author || {};
@@ -112,8 +139,9 @@ export function memoryPanel(api, busy, notice) {
       sourceView = {...result, sources:[...sourceView.sources, ...result.sources]};
       forgetPlan = null; forgetPlanKey = null; forgetApplyKey = null;
       $('memory-forget-preview').classList.add('hidden');
+      clearAssociationPlan();
     } else {
-      sourceView = result; clearForget(); root.replaceChildren();
+      sourceView = result; clearForget(); clearAssociationPlan(); root.replaceChildren();
     }
     for (const row of result.sources) {
       const label = document.createElement('label'); label.className = 'check';
@@ -121,12 +149,9 @@ export function memoryPanel(api, busy, notice) {
       const body = document.createElement('span'), title = document.createElement('span'), id = document.createElement('code');
       title.textContent = sourceLabel(row); id.textContent = row.source_unit_id;
       body.append(title, document.createElement('br'), id); label.append(input, body); root.append(label);
-      input.addEventListener('change', () => {
-        forgetPlan = null; forgetPlanKey = null; forgetApplyKey = null;
-        $('memory-forget-preview').classList.add('hidden');
-        $('memory-forget-plan').disabled = !root.querySelector('input:checked');
-      });
+      input.addEventListener('change', updateSourceActions);
     }
+    updateSourceActions();
     const scrub = result.scrub || {};
     $('memory-sources-more').disabled = !sourceView.next_after;
     $('memory-sources-status').textContent = `删除版本 ${sourceView.deletion_epoch} · 已加载来源 ${sourceView.sources.length} · 待物理清理 ${scrub.revoked_payloads || 0} · 待传播 ${scrub.pending_links || 0}`;
@@ -138,6 +163,64 @@ export function memoryPanel(api, busy, notice) {
     const result = await api(`${prefix}/sources?limit=50${cursor}`);
     if (!valid(own) || seq !== sourceSeq) return;
     renderSources(result, append);
+  }
+  function renderAssociations(result) {
+    associationView = result;
+    const root = $('memory-associations'); root.replaceChildren();
+    for (const row of result.associations) {
+      const item = document.createElement('div'); item.className = 'memory-association';
+      const description = document.createElement('p');
+      description.textContent = `${sourceLabel(row.left)} ↔ ${sourceLabel(row.right)}`;
+      const identity = document.createElement('code'); identity.textContent = row.association_id;
+      const state = document.createElement('span');
+      state.textContent = ` · 版本 ${row.revision} · ${row.active ? '有效' : '已解除'} · ${row.projection_state === 'CURRENT' ? '图已同步' : '等待后台发布'}`;
+      const remove = document.createElement('button'); remove.type = 'button';
+      remove.className = 'subtle';
+      remove.textContent = row.active ? '预览解除联想' : '预览恢复联想';
+      remove.addEventListener('click', () => previewAssociation(row.active ? {
+          expected_deletion_epoch:result.deletion_epoch,
+          expected_revision:row.revision,
+          active:false,
+          association_id:row.association_id,
+        } : {
+          expected_deletion_epoch:result.deletion_epoch,
+          expected_revision:row.revision,
+          active:true,
+          source_unit_ids:[row.left.source_unit_id, row.right.source_unit_id],
+        }, remove));
+      item.append(description, identity, state, document.createElement('br'), remove); root.append(item);
+    }
+    $('memory-associations-status').textContent =
+      `图版本 ${result.graph_revision} · 关系记录 ${result.associations.length} · 有效 ${result.associations.filter(row => row.active).length}`;
+  }
+  async function refreshAssociations() {
+    if (!bot) return;
+    const own = epoch, seq = ++associationSeq, prefix = path();
+    const result = await api(`${prefix}/associations?limit=50`);
+    if (!valid(own) || seq !== associationSeq) return;
+    renderAssociations(result);
+  }
+  async function previewAssociation(payload, button) {
+    if (!bot) return;
+    clearAssociationPlan();
+    const own = epoch, seq = sourceSeq, prefix = path();
+    associationPlanKey = crypto.randomUUID(); const key = associationPlanKey;
+    await busy(button, async () => {
+      const result = await api(`${prefix}/association-plans`, payload, {
+        'Idempotency-Key':key,
+      });
+      if (!valid(own) || seq !== sourceSeq || key !== associationPlanKey) return;
+      associationPlan = result; associationApplyKey = crypto.randomUUID();
+      $('memory-association-diff').textContent = JSON.stringify({
+        action:result.active ? '创建联想' : '解除联想',
+        left:sourceLabel(result.left), right:sourceLabel(result.right),
+        association_id:result.association_id,
+        expected_revision:result.expected_revision,
+        deletion_epoch:result.expected_deletion_epoch,
+        expires_at:result.expires_at,
+      }, null, 2);
+      $('memory-association-preview').classList.remove('hidden');
+    });
   }
   function show(row) {
     configuration = row; clearPlan(); form.reset();
@@ -220,6 +303,34 @@ export function memoryPanel(api, busy, notice) {
     const after = sourceView?.next_after;
     if (after) busy(event.currentTarget, () => refreshSources(after, true));
   });
+  $('memory-associations-refresh').addEventListener('click', event =>
+    busy(event.currentTarget, refreshAssociations));
+  $('memory-association-plan').addEventListener('click', event => {
+    if (!sourceView) return;
+    const ids = selectedSourceIds();
+    if (ids.length !== 2) return;
+    previewAssociation({
+      expected_deletion_epoch:sourceView.deletion_epoch,
+      expected_revision:0,
+      active:true,
+      source_unit_ids:ids,
+    }, event.currentTarget);
+  });
+  $('memory-association-apply').addEventListener('click', event => {
+    if (!associationPlan) return;
+    const own = epoch, plan = associationPlan, key = associationApplyKey, prefix = path();
+    busy(event.currentTarget, async () => {
+      const result = await api(`${prefix}/association-requests`, {
+        expected_deletion_epoch:plan.expected_deletion_epoch,
+        plan_id:plan.plan_id,
+        plan_digest:plan.plan_digest,
+      }, {'Idempotency-Key':key});
+      if (!valid(own) || plan !== associationPlan) return;
+      clearAssociationPlan();
+      notice(`联想变更已提交：关系版本 ${result.revision}，后台正在发布召回图。`, true);
+      await refreshAssociations(); await refresh();
+    });
+  });
   $('memory-forget-plan').addEventListener('click', event => {
     if (!sourceView) return;
     const ids = [...$('memory-sources').querySelectorAll('input:checked')].map(item => item.value);
@@ -252,7 +363,7 @@ export function memoryPanel(api, busy, notice) {
       }, {'Idempotency-Key':key});
       if (!valid(own) || plan !== forgetPlan) return;
       notice(`遗忘已提交：删除版本 ${result.deletion_epoch}，后台正在清理正文。`, true);
-      await refreshSources(); await refresh();
+      await refreshSources(); await refreshAssociations(); await refresh();
     });
   });
   async function select(row) {
@@ -261,14 +372,17 @@ export function memoryPanel(api, busy, notice) {
     await read();
     if (valid(own)) await refresh();
     if (valid(own)) await refreshSources();
+    if (valid(own)) await refreshAssociations();
   }
   function invalidateContent(scope) {
     if (!bot || scope !== path()) return;
-    epoch++; readSeq++; statusSeq++; sourceSeq++; configuration = null; clearPlan();
+    epoch++; readSeq++; statusSeq++; sourceSeq++; associationSeq++;
+    configuration = null; clearPlan();
     clearConfiguration(form); $('memory-edit').disabled = true;
     $('memory-diff').replaceChildren(); $('memory-state').replaceChildren();
     clearForget(); $('memory-sources').replaceChildren(); $('memory-sources-status').textContent = '';
     $('memory-sources-more').disabled = true;
+    clearAssociations();
     $('memory-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';
     replace.classList.add('hidden');
   }

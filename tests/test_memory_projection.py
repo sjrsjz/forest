@@ -144,6 +144,22 @@ def test_text_only_model_keeps_image_query_and_source_bundle_immutable():
     assert (value, evidence) == before
 
 
+def test_association_path_is_explicit_in_model_visible_memory_attribution():
+    row = recalled()
+    row["retrieval"] = {
+        "kind": "graph_association",
+        "association_id": "memory-association:abc",
+        "edge_id": "graph-edge:sha256:abc",
+        "seed_source_unit_id": "memory-seed",
+        "graph_revision": 7,
+    }
+    request = prepare(evidence=bundle(row))
+    info = header(json.loads(request.body)["messages"][1])
+    assert info["retrieval"] == row["retrieval"]
+    assert info["source"]["channel_id"] == "group-b"
+    assert info["author"]["external_user_id"] == "bob"
+
+
 @pytest.mark.parametrize("visual", [False, True])
 @pytest.mark.parametrize("wrong", ["source", "alias", "bot", "part", "ref", "revision", "bytes"])
 def test_same_pixels_from_wrong_origin_rejected_even_for_text_only_or_budget_omission(visual, wrong):

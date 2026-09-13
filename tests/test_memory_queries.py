@@ -17,6 +17,7 @@ from forest.embeddings import EmbeddingClient, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.memory_index import profile
 from forest.memory_types import SourceRef
+from forest.storage.memory_associations import MemoryAssociationAdministration
 from forest.storage.memory_index import MemoryIndexStore
 from forest.storage.memory_queries import MemoryQueryStore
 
@@ -186,6 +187,129 @@ async def test_pg_vectors_recall_cross_group_sources_with_distinct_authors_and_f
     restarted = MemoryQueryStore(index)
     assert await restarted.retrieve(env.lease, "query") == bundle
     assert len(await rows(media, "SELECT * FROM public.bot_memory_evidence_bundles")) == 1
+
+
+async def test_vector_seed_expands_one_published_cross_trunk_association(media):
+    env, images, _ = media
+    await configure(env, [], max_result_tokens=16000)
+    asking = await source(media, 1, group="asking", user="questioner", text="find alpha")
+    seed = await source(media, 2, group="seed-group", user="alice", text="alpha seed")
+    neighbor = await source(
+        media, 3, group="neighbor-group", user="bob", text="associated beta"
+    )
+    index = MemoryIndexStore(images.messages, images)
+    store = MemoryQueryStore(index)
+    await documents(media, index, [seed["source_unit_id"]])
+
+    ticket = env.ticket
+    associations = MemoryAssociationAdministration(images.messages)
+    proposal = {
+        "expected_deletion_epoch": 0,
+        "expected_revision": 0,
+        "active": True,
+        "source_unit_ids": [seed["source_unit_id"], neighbor["source_unit_id"]],
+    }
+    plan_operation = "query-association-plan"
+    plan = await associations.plan(
+        await ticket("memory.association.plan", plan_operation, proposal),
+        plan_operation,
+        proposal,
+    )
+    apply_payload = {
+        key: plan[key]
+        for key in ("expected_deletion_epoch", "plan_id", "plan_digest")
+    }
+    apply_operation = "query-association-apply"
+    await associations.apply(
+        await ticket(
+            "memory.association.apply",
+            apply_operation,
+            apply_payload,
+            plan_digest=plan["plan_digest"],
+        ),
+        apply_operation,
+        apply_payload,
+        lease=env.lease,
+    )
+    pending = await associations.graph.pending(env.lease)
+    assert len(pending["scopes"]) == 1
+    published = await associations.graph.refresh(env.lease, pending["scopes"][0])
+
+    planned = await query(media, store, asking)
+    await embed(media, index, planned["facet_ids"], query_receipt=planned)
+    result = await store.retrieve(env.lease, "query")
+    assert [item["source_unit_id"] for item in result["evidence"]] == [
+        seed["source_unit_id"], neighbor["source_unit_id"]
+    ]
+    associated = result["evidence"][1]
+    assert associated["matched_facets"] == []
+    assert associated["source"]["channel_id"] == "neighbor-group"
+    assert associated["author"]["external_user_id"] == "bob"
+    assert associated["retrieval"] == {
+        "kind": "graph_association",
+        "association_id": plan["association_id"],
+        "edge_id": associated["retrieval"]["edge_id"],
+        "seed_source_unit_id": seed["source_unit_id"],
+        "graph_revision": published["graph_revision"],
+    }
+    assert result["completeness"]["graph"] == "CURRENT"
+    assert result["completeness"]["association_edges_considered"] == 1
+    assert result["completeness"]["association_sources_added"] == 1
+    assert await read_frozen(media, store, planned) == result
+
+
+async def test_association_cannot_pull_a_later_same_conversation_source_across_query_cut(media):
+    env, images, _ = media
+    await configure(env, [], max_result_tokens=16000)
+    asking = await source(media, 1, group="asking", text="frozen question")
+    seed = await source(media, 2, group="seed-group", text="visible seed")
+    index = MemoryIndexStore(images.messages, images)
+    store = MemoryQueryStore(index)
+    await documents(media, index, [seed["source_unit_id"]])
+    planned = await query(media, store, asking, query_id="cut-query")
+    await embed(media, index, planned["facet_ids"], query_receipt=planned)
+
+    future = await source(media, 3, group="asking", text="must remain beyond cut")
+    associations = MemoryAssociationAdministration(images.messages)
+    proposal = {
+        "expected_deletion_epoch": 0,
+        "expected_revision": 0,
+        "active": True,
+        "source_unit_ids": [seed["source_unit_id"], future["source_unit_id"]],
+    }
+    plan_operation = "cut-association-plan"
+    plan = await associations.plan(
+        await env.ticket("memory.association.plan", plan_operation, proposal),
+        plan_operation,
+        proposal,
+    )
+    apply_payload = {
+        key: plan[key]
+        for key in ("expected_deletion_epoch", "plan_id", "plan_digest")
+    }
+    apply_operation = "cut-association-apply"
+    await associations.apply(
+        await env.ticket(
+            "memory.association.apply",
+            apply_operation,
+            apply_payload,
+            plan_digest=plan["plan_digest"],
+        ),
+        apply_operation,
+        apply_payload,
+        lease=env.lease,
+    )
+    pending = await associations.graph.pending(env.lease)
+    await associations.graph.refresh(env.lease, pending["scopes"][0])
+
+    result = await store.retrieve(env.lease, "cut-query")
+    assert [item["source_unit_id"] for item in result["evidence"]] == [
+        seed["source_unit_id"]
+    ]
+    assert result["completeness"]["graph"] == "CURRENT"
+    assert result["completeness"]["association_edges_considered"] == 0
+    assert result["completeness"]["association_sources_added"] == 0
+    assert "must remain beyond cut" not in json.dumps(result)
 
 
 async def test_unread_current_occurrence_and_private_source_cannot_bypass_query_cut(media):

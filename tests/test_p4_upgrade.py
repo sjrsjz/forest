@@ -99,16 +99,19 @@ def expected_after_memory_permissions(before):
             ("memory.config.apply", "config.apply"), ("memory.read", "message.read"),
         ) if required in actions}
         actions |= mapped
-        forget = {
+        additions = {
             permission
             for permission, required in (
                 ("memory.forget.read", {"memory.read"}),
                 ("memory.forget.plan", {"memory.read", "memory.config.plan"}),
                 ("memory.forget.apply", {"memory.read", "memory.config.apply"}),
+                ("memory.association.read", {"memory.read"}),
+                ("memory.association.plan", {"memory.read", "memory.config.plan"}),
+                ("memory.association.apply", {"memory.read", "memory.config.apply"}),
             )
             if required <= actions
         }
-        issuers.append({**issuer, "actions": sorted(actions | forget)})
+        issuers.append({**issuer, "actions": sorted(actions | additions)})
     return {**before, "bot_web_issuers": issuers}
 
 

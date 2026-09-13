@@ -93,16 +93,19 @@ class GraphScope:
     def __post_init__(self):
         _id(self.partition)
         windows = tuple(sorted(self.windows))
+        structural = self.partition == "trunk"
         if (
             not 1 <= len(windows) <= MAX_WINDOWS
             or any(type(w) is not GraphWindow for w in windows)
-            or sum(w.end_seq - w.start_seq + 2 for w in windows) > MAX_UNITS
+            or sum(w.end_seq - w.start_seq + 1 + int(structural) for w in windows) > MAX_UNITS
         ):
             _error("GRAPH_COVERAGE_LIMIT", "Scope exceeds bounded windows including halos", 422)
-        # One contiguous window per source: reducing disjoint windows together
-        # would incorrectly invent an edge across their unexamined gap.
-        if len({w.source_id for w in windows}) != len(windows):
+        if structural and len({w.source_id for w in windows}) != len(windows):
             _error("GRAPH_INVALID", "A scope has one contiguous window per source", 422)
+        if not structural:
+            for left, right in zip(windows, windows[1:]):
+                if left.source_id == right.source_id and left.end_seq >= right.start_seq:
+                    _error("GRAPH_INVALID", "Non-trunk windows for one source cannot overlap", 422)
         object.__setattr__(self, "windows", windows)
 
     @property
@@ -185,6 +188,17 @@ def build(snapshot: GraphSnapshot) -> GraphCandidate:
         relations=groups["relation"],
         retractions=groups["retraction"],
     )
+    if scope.partition != "trunk":
+        # Fact/association scopes may select disjoint positions from one trunk.
+        # Their projection must not invent structural adjacency across gaps.
+        graph = GraphProjection(
+            graph.bot_id,
+            tuple(node for node in graph.nodes if node.ref.kind != "TRUNK_ROOT"),
+            tuple(edge for edge in graph.edges if edge.kind not in {"MEMBER_OF", "TRUNK_NEXT"}),
+            graph.facts,
+            graph.reducer_version,
+            graph.aggregation_version,
+        )
     # The reducer sees only this window plus its explicitly declared predecessor.
     # This metadata cap also bounds all adjacency writes in the publish transaction.
     projection = graph.canonical_bytes()
@@ -255,6 +269,7 @@ class GraphStore:
 
     async def _selected_in(self, conn, scope):
         selected, halos = set(), {}
+        structural = scope.partition == "trunk"
         for window in scope.windows:
             rows = await (
                 await conn.execute(
@@ -273,7 +288,7 @@ class GraphStore:
             ).fetchall()
             selected.update(r["source_unit_id"] for r in rows)
             halo = None
-            if rows and window.start_seq > 1:
+            if structural and rows and window.start_seq > 1:
                 halo = await (
                     await conn.execute(
                         "SELECT source_unit_id FROM public.bot_memory_source_units "
@@ -283,7 +298,8 @@ class GraphStore:
                         (self.store.bot_id, window.source_id, window.start_seq),
                     )
                 ).fetchone()
-            halos[window.source_id] = halo["source_unit_id"] if halo else None
+            if structural:
+                halos[window.source_id] = halo["source_unit_id"] if halo else None
             if halo:
                 selected.add(halo["source_unit_id"])
         if len(selected) > MAX_UNITS:
@@ -419,7 +435,7 @@ class GraphStore:
         _encode(rows)
         return rows
 
-    async def append(self, lease, scope, command, *, expected_deletion_epoch):
+    async def append_in(self, conn, lease, scope, command, *, expected_deletion_epoch):
         if type(command) not in {Assertion, RelationContribution, Retraction}:
             _error("GRAPH_INVALID", "Only typed graph operations are accepted", 422)
         if command.bot_id != self.store.bot_id:
@@ -438,103 +454,109 @@ class GraphStore:
             if kind == "relation"
             else "retraction:" + command.operation_id
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
-            clock = await self._guard(conn, lease)
-            head = await self._scope_in(conn, scope)
-            previous = await (
-                await conn.execute(
-                    "SELECT operation_id,input_digest FROM public.bot_memory_graph_operations "
-                    "WHERE bot_id=%s AND (operation_id=%s OR fact_id=%s)",
-                    (self.store.bot_id, command.operation_id, identity),
+        clock = await self._guard(conn, lease)
+        head = await self._scope_in(conn, scope)
+        previous = await (
+            await conn.execute(
+                "SELECT operation_id,input_digest FROM public.bot_memory_graph_operations "
+                "WHERE bot_id=%s AND (operation_id=%s OR fact_id=%s)",
+                (self.store.bot_id, command.operation_id, identity),
+            )
+        ).fetchall()
+        if previous:
+            if len(previous) != 1 or previous[0]["input_digest"] != digest:
+                _error(
+                    "IDEMPOTENCY_CONFLICT", "Graph operation identity has different metadata"
                 )
-            ).fetchall()
-            if previous:
-                if len(previous) != 1 or previous[0]["input_digest"] != digest:
-                    _error(
-                        "IDEMPOTENCY_CONFLICT", "Graph operation identity has different metadata"
-                    )
-                await self.store._host(conn, lease)
-                return {"operation_id": command.operation_id, "duplicate": True}
-            if clock["deletion_epoch"] != expected_deletion_epoch:
-                _error("DELETION_CONFLICT", "Memory deletion epoch changed")
-            if head["operation_revision"] >= MAX_OPERATIONS:
-                _error("GRAPH_COVERAGE_LIMIT", "Graph operation shard is full", 413)
-            if kind != "retraction":
-                ids = {r.source_unit_id for r in command.source_refs}
-                qualified = await self._qualified_in(conn, ids)
-                if {r["source_unit_id"] for r in qualified} != ids:
-                    _error(
-                        "GRAPH_SOURCE_UNAVAILABLE",
-                        "Graph fact requires currently qualified sources",
-                    )
-                for row in qualified:
-                    part_ids = {str(p.get("part_id", i)) for i, p in enumerate(row["parts"])}
-                    if any(
-                        ref.source_unit_id == row["source_unit_id"]
-                        and (
-                            ref.source_revision != row["source_revision"]
-                            or (ref.part_id != "*" and ref.part_id not in part_ids)
-                        )
-                        for ref in command.source_refs
-                    ):
-                        _error(
-                            "GRAPH_SOURCE_REFERENCE",
-                            "Evidence refers to an unknown source revision or part",
-                            422,
-                        )
-                    if not any(
-                        w.source_id == row["source_id"]
-                        and w.start_seq <= row["source_order_seq"] <= w.end_seq
-                        for w in scope.windows
-                    ):
-                        _error(
-                            "GRAPH_SOURCE_SCOPE",
-                            "Fact evidence is outside its declared window",
-                            422,
-                        )
-                if kind == "assertion":
-                    header = await self.payloads._header_in(conn, command.value.value_ref)
-                    refs = {SourceRef(**r) for r in header["manifest"]["sources"]}
-                    if (
-                        header["owner_kind"] != "memory.assertion"
-                        or header["digest"] != command.value.value_digest
-                        or not refs
-                        or refs != set(command.source_refs)
-                    ):
-                        _error(
-                            "GRAPH_VALUE_MANIFEST",
-                            "Assertion value must bind its complete source manifest",
-                            422,
-                        )
-                    await self.payloads.require_available_in(
-                        conn,
-                        (header["payload_id"],),
-                        expected_deletion_epoch=expected_deletion_epoch,
-                    )
-            await conn.execute(
-                "INSERT INTO public.bot_memory_graph_operations(bot_id,scope_id,operation_id,fact_id,kind,metadata,input_digest) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    self.store.bot_id,
-                    scope.scope_id,
-                    command.operation_id,
-                    identity,
-                    kind,
-                    Jsonb(metadata),
-                    digest,
-                ),
-            )
-            await conn.execute(
-                "UPDATE public.bot_memory_graph_scopes SET operation_revision=operation_revision+1 "
-                "WHERE bot_id=%s AND scope_id=%s",
-                (self.store.bot_id, scope.scope_id),
-            )
-            await conn.execute(
-                "UPDATE public.bot_memory_clock SET fact_revision=fact_revision+1 WHERE bot_id=%s",
-                (self.store.bot_id,),
-            )
             await self.store._host(conn, lease)
-            return {"operation_id": command.operation_id, "duplicate": False}
+            return {"operation_id": command.operation_id, "duplicate": True}
+        if clock["deletion_epoch"] != expected_deletion_epoch:
+            _error("DELETION_CONFLICT", "Memory deletion epoch changed")
+        if head["operation_revision"] >= MAX_OPERATIONS:
+            _error("GRAPH_COVERAGE_LIMIT", "Graph operation shard is full", 413)
+        if kind != "retraction":
+            ids = {r.source_unit_id for r in command.source_refs}
+            qualified = await self._qualified_in(conn, ids)
+            if {r["source_unit_id"] for r in qualified} != ids:
+                _error(
+                    "GRAPH_SOURCE_UNAVAILABLE",
+                    "Graph fact requires currently qualified sources",
+                )
+            for row in qualified:
+                part_ids = {str(p.get("part_id", i)) for i, p in enumerate(row["parts"])}
+                if any(
+                    ref.source_unit_id == row["source_unit_id"]
+                    and (
+                        ref.source_revision != row["source_revision"]
+                        or (ref.part_id != "*" and ref.part_id not in part_ids)
+                    )
+                    for ref in command.source_refs
+                ):
+                    _error(
+                        "GRAPH_SOURCE_REFERENCE",
+                        "Evidence refers to an unknown source revision or part",
+                        422,
+                    )
+                if not any(
+                    w.source_id == row["source_id"]
+                    and w.start_seq <= row["source_order_seq"] <= w.end_seq
+                    for w in scope.windows
+                ):
+                    _error(
+                        "GRAPH_SOURCE_SCOPE",
+                        "Fact evidence is outside its declared window",
+                        422,
+                    )
+            if kind == "assertion":
+                header = await self.payloads._header_in(conn, command.value.value_ref)
+                refs = {SourceRef(**r) for r in header["manifest"]["sources"]}
+                if (
+                    header["owner_kind"] != "memory.assertion"
+                    or header["digest"] != command.value.value_digest
+                    or not refs
+                    or refs != set(command.source_refs)
+                ):
+                    _error(
+                        "GRAPH_VALUE_MANIFEST",
+                        "Assertion value must bind its complete source manifest",
+                        422,
+                    )
+                await self.payloads.require_available_in(
+                    conn,
+                    (header["payload_id"],),
+                    expected_deletion_epoch=expected_deletion_epoch,
+                )
+        await conn.execute(
+            "INSERT INTO public.bot_memory_graph_operations(bot_id,scope_id,operation_id,fact_id,kind,metadata,input_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (
+                self.store.bot_id,
+                scope.scope_id,
+                command.operation_id,
+                identity,
+                kind,
+                Jsonb(metadata),
+                digest,
+            ),
+        )
+        await conn.execute(
+            "UPDATE public.bot_memory_graph_scopes SET operation_revision=operation_revision+1 "
+            "WHERE bot_id=%s AND scope_id=%s",
+            (self.store.bot_id, scope.scope_id),
+        )
+        await conn.execute(
+            "UPDATE public.bot_memory_clock SET fact_revision=fact_revision+1 WHERE bot_id=%s",
+            (self.store.bot_id,),
+        )
+        await self.store._host(conn, lease)
+        return {"operation_id": command.operation_id, "duplicate": False}
+
+    async def append(self, lease, scope, command, *, expected_deletion_epoch):
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.append_in(
+                conn, lease, scope, command,
+                expected_deletion_epoch=expected_deletion_epoch,
+            )
 
     async def capture(self, lease, scope):
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -835,6 +857,31 @@ class GraphStore:
             return {
                 "graph_revision": selected,
                 "scopes": rows[:limit],
+                "next_after": rows[limit - 1]["scope_id"] if len(rows) > limit else None,
+            }
+
+    async def pending(self, lease, *, after_scope_id="", limit=16):
+        """Persisted operation scopes whose latest projection is behind."""
+        _id(after_scope_id, empty=True)
+        if type(limit) is not int or not 1 <= limit <= 64:
+            _error("GRAPH_INVALID", "Pending graph page must be bounded", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._guard(conn, lease)
+            rows = await (
+                await conn.execute(
+                    "SELECT s.scope_id,s.windows FROM public.bot_memory_graph_scopes s "
+                    "LEFT JOIN LATERAL (SELECT (p.snapshot->>'operation_revision')::bigint AS published "
+                    "FROM public.bot_memory_graph_publications p WHERE p.bot_id=s.bot_id "
+                    "AND p.scope_id=s.scope_id ORDER BY p.revision DESC LIMIT 1) latest ON true "
+                    "WHERE s.bot_id=%s AND s.scope_id>%s AND s.operation_revision>0 "
+                    "AND s.operation_revision>COALESCE(latest.published,-1) "
+                    "ORDER BY s.scope_id LIMIT %s",
+                    (self.store.bot_id, after_scope_id, limit + 1),
+                )
+            ).fetchall()
+            await self.store._host(conn, lease)
+            return {
+                "scopes": [_scope(row["windows"]) for row in rows[:limit]],
                 "next_after": rows[limit - 1]["scope_id"] if len(rows) > limit else None,
             }
 

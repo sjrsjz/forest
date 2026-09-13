@@ -66,6 +66,37 @@ class ForgetApply(Body):
     plan_digest: str = Field(min_length=1, max_length=128)
 
 
+class AssociationPlan(Body):
+    expected_deletion_epoch: int = Field(ge=0, strict=True)
+    expected_revision: int = Field(ge=0, strict=True)
+    active: bool = Field(strict=True)
+    source_unit_ids: list[str] | None = Field(default=None, min_length=2, max_length=2)
+    association_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def target(self):
+        if self.active:
+            if (
+                self.association_id is not None
+                or self.source_unit_ids is None
+                or len(set(self.source_unit_ids)) != 2
+                or any(
+                    not 1 <= len(item) <= 256 or any(ord(char) < 32 for char in item)
+                    for item in self.source_unit_ids
+                )
+            ):
+                raise ValueError("Select exactly two distinct bounded sources")
+        elif self.association_id is None or self.source_unit_ids is not None:
+            raise ValueError("Retraction requires one association identity")
+        return self
+
+
+class AssociationApply(Body):
+    expected_deletion_epoch: int = Field(ge=0, strict=True)
+    plan_id: str = Field(min_length=1, max_length=128)
+    plan_digest: str = Field(min_length=1, max_length=128)
+
+
 def install_memory_routes(app, runtime):
     async def target(request, bot_id, *, write=False):
         session = await runtime.principal(request, write=write)
@@ -176,6 +207,43 @@ def install_memory_routes(app, runtime):
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "memory.forget.apply", payload)
         result = await bot.platform.memory.administration.apply(
+            ticket, operation, payload, lease=bot.kernel._authority()
+        )
+        bot.platform.memory.notify()
+        return result
+
+    @app.get("/management/v1/bots/{bot_id}/memory/associations")
+    async def associations(bot_id: str, request: Request):
+        if set(request.query_params) - {"after", "limit"}:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Unknown association selector", 422)
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+        except ValueError:
+            raise ForestError(
+                "MEMORY_ASSOCIATION_INVALID", "Association limit is invalid", 422
+            ) from None
+        payload = {"limit": limit}
+        if "after" in request.query_params:
+            payload["after"] = request.query_params["after"]
+        who, bot = await target(request, bot_id)
+        ticket, operation = await signed(
+            request, bot, who, "memory.association.read", payload, write=False
+        )
+        return await bot.platform.memory.associations.read(ticket, operation, payload)
+
+    @app.post("/management/v1/bots/{bot_id}/memory/association-plans")
+    async def association_plan(bot_id: str, body: AssociationPlan, request: Request):
+        who, bot = await target(request, bot_id, write=True)
+        payload = body.model_dump(exclude_none=True)
+        ticket, operation = await signed(request, bot, who, "memory.association.plan", payload)
+        return await bot.platform.memory.associations.plan(ticket, operation, payload)
+
+    @app.post("/management/v1/bots/{bot_id}/memory/association-requests")
+    async def association_apply(bot_id: str, body: AssociationApply, request: Request):
+        who, bot = await target(request, bot_id, write=True)
+        payload = body.model_dump()
+        ticket, operation = await signed(request, bot, who, "memory.association.apply", payload)
+        result = await bot.platform.memory.associations.apply(
             ticket, operation, payload, lease=bot.kernel._authority()
         )
         bot.platform.memory.notify()

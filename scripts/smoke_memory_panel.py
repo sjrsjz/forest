@@ -12,13 +12,43 @@ from forest.memory_settings import DEFAULT_MEMORY_SETTINGS
 
 BOOTSTRAP = r"""
 import {memoryPanel} from '/static/memory.js';
-window.fixture = {calls:[],hold:[],pending:[],plans:{},receipts:{},
-  row:{revision:1,secret_revision:1,has_api_key:true,values:DEFAULT_VALUES}};
+window.fixture = {calls:[],hold:[],pending:[],plans:{},receipts:{},associations:[],
+  row:{revision:1,secret_revision:1,has_api_key:true,values:DEFAULT_VALUES},
+  sources:[
+    {source_unit_id:'source-one',source_revision:1,kind:'INPUT',source:{channel_id:'group-one'},
+      author:{display_name:'Alice'},parts:[{type:'text',text:'first memory'}]},
+    {source_unit_id:'source-two',source_revision:1,kind:'INPUT',source:{channel_id:'group-two'},
+      author:{display_name:'Bob'},parts:[{type:'text',text:'second memory'}]},
+  ]};
 const api = async (path,body,headers) => {
   fixture.calls.push({path,body:structuredClone(body),headers:structuredClone(headers)});
   let result;
   if(path.endsWith('/configuration')) result=structuredClone(fixture.row);
   else if(path.endsWith('/status')) result={state:'DISABLED',last_error:null};
+  else if(path.includes('/sources?')) result={deletion_epoch:0,fact_revision:2,
+    sources:structuredClone(fixture.sources),next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
+  else if(path.includes('/associations?')) result={deletion_epoch:0,fact_revision:2,graph_revision:1,
+    associations:structuredClone(fixture.associations),next_after:null};
+  else if(path.endsWith('/association-plans')) {
+    const endpoints=body.active ? body.source_unit_ids.map(id=>fixture.sources.find(row=>row.source_unit_id===id))
+      : [fixture.associations.find(row=>row.association_id===body.association_id).left,
+         fixture.associations.find(row=>row.association_id===body.association_id).right];
+    result={plan_id:'association-plan-'+fixture.calls.length,plan_digest:'association-digest',
+      association_id:body.association_id||'association-one',expected_revision:body.expected_revision,
+      expected_deletion_epoch:body.expected_deletion_epoch,active:body.active,
+      left:structuredClone(endpoints[0]),right:structuredClone(endpoints[1]),expires_at:'2030-01-01T00:00:00Z'};
+    fixture.plans[result.plan_id]=structuredClone(result);
+  } else if(path.endsWith('/association-requests')) {
+    const plan=fixture.plans[body.plan_id],key=headers['Idempotency-Key'];
+    if(!fixture.receipts[key]) {
+      const row={association_id:plan.association_id,revision:plan.expected_revision+1,active:plan.active,
+        projection_state:'PENDING',left:plan.left,right:plan.right};
+      fixture.associations=[row];
+      fixture.receipts[key]={association_id:plan.association_id,revision:row.revision,
+        active:plan.active,projection_state:'PENDING'};
+    }
+    result=fixture.receipts[key];
+  }
   else if(path.endsWith('/change-plans')) {
     result={plan_id:'plan-'+fixture.calls.length,plan_digest:'digest',expected_revision:body.expected_revision,
       values:body.values,before_values:fixture.row.values,credentials_changed:body.api_key!==null||body.clear_api_key};
@@ -104,6 +134,26 @@ def main():
             key = page.locator('#memory-config [name="api_key"]')
             expect(budget).to_have_value("200")
             expect(page.locator("#memory-state")).to_contain_text("DISABLED")
+            sources = page.locator("#memory-sources input[type=checkbox]")
+            expect(sources).to_have_count(2)
+            expect(page.locator("#memory-association-plan")).to_be_disabled()
+            sources.nth(0).check()
+            expect(page.locator("#memory-association-plan")).to_be_disabled()
+            sources.nth(1).check()
+            expect(page.locator("#memory-association-plan")).to_be_enabled()
+            page.locator("#memory-association-plan").click()
+            expect(page.locator("#memory-association-preview")).to_be_visible()
+            expect(page.locator("#memory-association-diff")).to_contain_text("group-one")
+            page.locator("#memory-association-apply").click()
+            expect(page.locator("#memory-associations .memory-association")).to_have_count(1)
+            expect(page.locator("#memory-associations-status")).to_contain_text("有效 1")
+            page.locator("#memory-associations .memory-association button").click()
+            expect(page.locator("#memory-association-preview")).to_be_visible()
+            expect(page.locator("#memory-association-diff")).to_contain_text("解除联想")
+            page.locator("#memory-association-apply").click()
+            expect(page.locator("#memory-associations .memory-association")).to_have_count(1)
+            expect(page.locator("#memory-associations-status")).to_contain_text("有效 0")
+            expect(page.locator("#memory-associations .memory-association button")).to_contain_text("恢复")
             page.locator('#memory-config [name="dimensions"]').select_option("1024")
             page.locator('#memory-config [name="enabled"]').check()
             page.locator('#memory-config [name="media_allowed_origins"]').fill(

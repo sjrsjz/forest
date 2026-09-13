@@ -11,6 +11,7 @@ from forest.memory_index import profile
 from forest.storage.agent_memory import AgentMemoryStore
 from forest.storage.control import BotControl
 from forest.storage.memory_administration import MemoryAdministration
+from forest.storage.memory_associations import MemoryAssociationAdministration
 from forest.storage.memory_config import MemoryConfig
 from forest.storage.memory_graph import GraphStore
 from forest.storage.memory_index import MemoryIndexStore
@@ -28,6 +29,7 @@ class MemoryRuntime:
         self.queries = MemoryQueryStore(self.index)
         self.graph = GraphStore(platform.messages)
         self.administration = MemoryAdministration(platform.messages)
+        self.associations = MemoryAssociationAdministration(platform.messages)
         self.payloads = PayloadStore(self.store)
         self.task = None
         self.workers, self.errors, self.clients = {}, {}, set()
@@ -77,6 +79,11 @@ class MemoryRuntime:
                 # without reopening a deleted/disabled configuration body.
                 await self.index.recover(lease)
                 await self.media.recover(lease)
+                # Manual association publication is independent of embedding
+                # configuration, including a Bot that has never enabled memory
+                # indexing. This pending-only worker runs before config lookup.
+                if "graph:refresh" not in self.workers:
+                    self._spawn("graph:refresh", lambda: self._graph(lease, discover=False))
                 cfg = await self.config.runtime(lease)
                 if self.closed:
                     break
@@ -127,9 +134,13 @@ class MemoryRuntime:
                                 "index:" + uuid4().hex,
                                 lambda selected=selected: self.embed(lease, cfg, selected),
                             )
-                    if "graph:refresh" not in self.workers:
-                        self._spawn("graph:refresh", lambda: self._graph(lease))
                     self.errors.pop("scan", None)
+                # Ordinary trunk discovery remains tied to enabled indexing.
+                if cfg["values"]["enabled"] and "graph:refresh" not in self.workers:
+                    self._spawn(
+                        "graph:refresh",
+                        lambda: self._graph(lease),
+                    )
             except asyncio.CancelledError:
                 raise
             except ForestError as exc:
@@ -154,7 +165,13 @@ class MemoryRuntime:
             self.notify()
         return result
 
-    async def _graph(self, lease):
+    async def _graph(self, lease, *, discover=True):
+        pending = await self.graph.pending(lease, limit=1)
+        if pending["scopes"]:
+            await self.graph.refresh(lease, pending["scopes"][0])
+            return
+        if not discover:
+            return
         page = await self.graph.discover(lease, **self._graph_cursor, limit=1)
         for scope in page["scopes"]:
             if self.closed:

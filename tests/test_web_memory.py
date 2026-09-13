@@ -188,8 +188,47 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             source = next(
                 row for row in listed["sources"] if row["source"]["channel_id"] == "31001"
             )
+            other = next(
+                row for row in listed["sources"] if row["source"]["channel_id"] == "31002"
+            )
             assert source["source"]["channel_id"] == "31001"
             assert source["author"]["external_user_id"] == "20001"
+            association = await post(
+                client,
+                root + "/memory/association-plans",
+                {
+                    "expected_deletion_epoch": 0,
+                    "expected_revision": 0,
+                    "active": True,
+                    "source_unit_ids": [source["source_unit_id"], other["source_unit_id"]],
+                },
+                "association-plan",
+            )
+            association_request = {
+                key: association[key]
+                for key in ("expected_deletion_epoch", "plan_id", "plan_digest")
+            }
+            associated = await post(
+                client,
+                root + "/memory/association-requests",
+                association_request,
+                "association-apply",
+            )
+            assert await post(
+                client,
+                root + "/memory/association-requests",
+                association_request,
+                "association-apply",
+            ) == associated
+            current_associations = await wait_for(
+                lambda: get(client, root + "/memory/associations?limit=50"),
+                lambda value: len(value["associations"]) == 1
+                and value["associations"][0]["projection_state"] == "CURRENT",
+            )
+            assert {
+                current_associations["associations"][0][side]["source"]["channel_id"]
+                for side in ("left", "right")
+            } == {"31001", "31002"}
             proposal = await post(
                 client,
                 root + "/memory/forget-plans",
@@ -209,10 +248,15 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             current = await get(client, root + "/memory/sources?limit=50")
             assert current["deletion_epoch"] == 1
             assert {row["source"]["channel_id"] for row in current["sources"]} == {"31002"}
+            assert (await get(client, root + "/memory/associations?limit=50"))[
+                "associations"
+            ] == []
             drained = await wait_for(
                 lambda: get(client, root + "/memory/sources?limit=50"),
                 lambda value: value["scrub"] == {"revoked_payloads": 0, "pending_links": 0},
             )
             assert drained["deletion_epoch"] == 1
             bad = await client.get(root + "/memory/sources?unexpected=true")
+            assert bad.status_code == 422
+            bad = await client.get(root + "/memory/associations?unexpected=true")
             assert bad.status_code == 422

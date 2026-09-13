@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：初版目标设计，实现进行中。更新日期：2026-09-13。当前已接通独立 Web 管理、多 Bot 运行、原生 Python Worker、OneBot HTTP、持久单 Agent、定时任务、跨群图文记忆和来源遗忘；QiYu Agentlib 的固定 CorePrompt、PresetContext、原子 ModelTurn 和单 Agent 工具循环已经接入，旧产品子 Agent 已从活动协议退役。记忆关联图管理和完整运维能力仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
+状态：初版目标设计，实现进行中。更新日期：2026-09-14。当前已接通独立 Web 管理、多 Bot 运行、原生 Python Worker、OneBot HTTP、持久单 Agent、定时任务、跨群图文记忆、来源遗忘和审核式跨主干联想召回；QiYu Agentlib 的固定 CorePrompt、PresetContext、原子 ModelTurn 和单 Agent 工具循环已经接入，旧产品子 Agent 已从活动协议退役。完整运维和长期容量治理仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -19,6 +19,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P3 群聊管理与监督](p3-control.md) | 实际 Shell 命令、共同管理协议、控制预留槽及定时授权边界 |
 | [P4 来源与载荷存储](p4-source-payloads.md) | 已接入消息流水的来源/资格、可清理正文基础及尚未迁移的旧副本 |
 | [P4 纯图归约器](p4-graph-reducer.md) | 固定源事实的多主干、乱序合流、撤回、并列冲突及必要证据 |
+| [P4 跨主干联想管理与召回](p4-association-retrieval.md) | 审核式来源联想、非主干分片、持久发布和有界一跳召回 |
 | [P4 图文嵌入驱动](p4-embedding-driver.md) | 原生文本/图片 HTTP 协议、向量空间、精确请求和取消/计费边界 |
 | [P4 正文迁移协议](p4-content-migration.md) | 事务内正文搬运、冻结迁移算法、旧宿主隔离与保守来源撤销 |
 | [P4 Agent 载荷](p4-agent-payloads.md) | 快照/精确请求/工具结果的来源传递、删除守卫与恢复结算 |
