@@ -1,7 +1,7 @@
 """Small native SDK. Context handles cross an authenticated host boundary.
 
-Persistent jobs and arbitrary subprocesses are not provided by this P0 SDK.
-Use owned async tasks for local work; per-call children complete before reply.
+Durable component jobs cross that boundary explicitly. Arbitrary subprocesses
+remain outside the SDK; per-call owned children complete before reply.
 """
 
 from __future__ import annotations
@@ -49,6 +49,20 @@ def subscribe(subscriber_id: str, topic: str, contract: str):
             "topic": topic,
             "contract": contract,
         }
+        return function
+
+    return decorate
+
+
+def job(handler_id: str):
+    identifier = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
+    if not isinstance(handler_id, str) or not identifier.fullmatch(handler_id):
+        raise ValueError("Job handler ID must be a bounded identifier")
+
+    def decorate(function):
+        if not inspect.iscoroutinefunction(function):
+            raise TypeError("A component job must be an async method(task, ctx)")
+        function.__forest_job__ = handler_id
         return function
 
     return decorate
@@ -102,6 +116,31 @@ def declared_subscriptions(plugin: Plugin) -> dict[str, tuple[dict, Callable[...
                 422,
             )
         result[subscriber_id] = (dict(declaration), method)
+    return result
+
+
+def declared_jobs(plugin: Plugin) -> dict[str, Callable[..., Awaitable[Any]]]:
+    result = {}
+    for _, method in inspect.getmembers(plugin, predicate=inspect.ismethod):
+        handler_id = getattr(method, "__forest_job__", None)
+        if handler_id is None:
+            continue
+        parameters = list(inspect.signature(method).parameters.values())
+        if (
+            not inspect.iscoroutinefunction(method)
+            or [parameter.name for parameter in parameters] != ["task", "ctx"]
+            or any(
+                parameter.kind not in {parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}
+                for parameter in parameters
+            )
+            or handler_id in result
+        ):
+            raise ForestError(
+                "JOB_DECLARATION_INVALID",
+                "Jobs must be unique async methods(task, ctx)",
+                422,
+            )
+        result[handler_id] = method
     return result
 
 
@@ -515,6 +554,50 @@ class EventsHandle:
         )
 
 
+class JobsHandle:
+    def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
+        self._rpc = rpc
+        self._scope = scope
+
+    async def schedule(
+        self,
+        handler_id: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        delay_seconds: float = 0,
+    ) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No component job gateway is available", 403)
+        if (
+            not isinstance(handler_id, str)
+            or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}", handler_id)
+        ):
+            raise ForestError("INVALID_JOB_REQUEST", "A bounded job handler ID is required", 422)
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ForestError(
+                "INVALID_JOB_REQUEST", "A stable job operation ID is required", 422
+            )
+        if (
+            isinstance(delay_seconds, bool)
+            or not isinstance(delay_seconds, (int, float))
+            or not 0 <= delay_seconds <= 30 * 24 * 60 * 60
+        ):
+            raise ForestError(
+                "INVALID_JOB_REQUEST", "Job delay must be between zero and 30 days", 422
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "handler_id": handler_id,
+                "payload": payload,
+                "operation_id": operation_id,
+                "delay_seconds": delay_seconds,
+            },
+        )
+
+
 class PluginContext:
     def __init__(
         self,
@@ -528,12 +611,14 @@ class PluginContext:
         resource_owner: OwnedResources | None = None,
         service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        job_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
         self._scope = scope
         self._rpc = rpc
         self._service_rpc = service_rpc
         self._event_rpc = event_rpc
+        self._job_rpc = job_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
         self._resource_owner = (
             resource_owner if resource_owner is not None else OwnedResources(resource_limit)
@@ -544,6 +629,7 @@ class PluginContext:
         self.operations = OperationsHandle(scope)
         self.services = ServicesHandle(service_rpc, scope)
         self.events = EventsHandle(event_rpc, scope)
+        self.jobs = JobsHandle(job_rpc, scope)
 
     def _for_call(self, scope: CallScope) -> PluginContext:
         return PluginContext(
@@ -554,6 +640,7 @@ class PluginContext:
             resource_owner=self._resource_owner,
             service_rpc=self._service_rpc,
             event_rpc=self._event_rpc,
+            job_rpc=self._job_rpc,
         )
 
     @property

@@ -2,9 +2,11 @@
 
 更新日期：2026-09-14。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**已接通 Web 多 Bot、原生微内核、OneBot HTTP、P2 插件升级、P3 持久 Agent/定时任务，以及 P4 跨群图文记忆链路、来源遗忘和审核式跨主干联想召回；首版框架仍在实现中。**页面支持模型、人格、图文能力、工具权限、嵌入及媒体/查询预算、审批、任务配置与运行取消，也能按群和作者核对记忆来源后预览遗忘、建立/解除/恢复来源联想，并通过维护版本暂停或恢复 Bot 业务。模型/工具步骤以数据库安全点接入群消息，输入投影保留作者及群来源，裁剪不调用摘要 API。
 
-Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 Agent 详细设计](p3-agent.md)改为每个 `(bot_id, conversation_id)` 一条模型—工具执行链。宿主固定不可覆盖的 CorePrompt v1 及摘要，Bot 人格进入独立 PresetContext；Provider 输出按原子 XML ModelTurn 解析，一轮至多一个 FunctionCall，非法输出仅允许一次有界修复。`forest_analyze`、ChildScheduler、Child 配置和页面入口已删除，迁移 050 终结并封存旧记录。旧验证章节只证明被撤销代码当时可运行。公开来源遗忘已经通过 Web 和 Shell 接通；`shell-gate-v4` 新增 P0 Bot 暂停和 P1 恢复，v2/v3 继续解析既有排队命令。审核式来源联想通过 Web 接入既有纯图归约器和 Agent 召回，群 Shell 暂不提供跨群联想命令。组件事件已经提供 Web 元数据观察、DEAD 回放和订阅退役；部署库与备份/WAL 清理、剩余自由文本族、通用持久 Job SDK 和完整管理 Shell 仍待完成。
+Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 Agent 详细设计](p3-agent.md)改为每个 `(bot_id, conversation_id)` 一条模型—工具执行链。宿主固定不可覆盖的 CorePrompt v1 及摘要，Bot 人格进入独立 PresetContext；Provider 输出按原子 XML ModelTurn 解析，一轮至多一个 FunctionCall，非法输出仅允许一次有界修复。`forest_analyze`、ChildScheduler、Child 配置和页面入口已删除，迁移 050 终结并封存旧记录。旧验证章节只证明被撤销代码当时可运行。公开来源遗忘已经通过 Web 和 Shell 接通；`shell-gate-v4` 新增 P0 Bot 暂停和 P1 恢复，v2/v3 继续解析既有排队命令。审核式来源联想通过 Web 接入既有纯图归约器和 Agent 召回，群 Shell 暂不提供跨群联想命令。组件事件已经提供 Web 元数据观察、DEAD 回放和订阅退役；通用组件持久任务 SDK 已接入 manifest、Worker、调用账本和热重载路由，并与会话 Agent 定时任务保持独立。部署库与备份/WAL 清理、剩余自由文本族、组件任务管理页和完整管理 Shell 仍待完成。
 
 本次组件事件管理切片使用迁移 055 增加独立 management revision、replay epoch、不可变回放/退役审计和 RETIRED 终态。事件状态机与权限迁移 `10 passed`，Web 权威、并发回放和退役纵向链路 `2 passed`，四组旧库权限升级 `12 passed`，Kernel/Generation/WebAuthority/维护交叉回归 `58 passed`；真实 Edge 页面验证通过状态筛选、回放、plan/apply 退役、Bot 切换迟到响应隔离和移动布局。这些是分次定向结果，不冒充一次最终全量测试。详细语义见[组件事件管理](p0-component-event-management.md)。
+
+本次 P0 组件持久任务切片使用迁移 056 增加 immutable generation handler 声明、稳定 handler head、Bot 内任务序列和租约执行状态。SDK/PostgreSQL 专项为 `10 passed`，覆盖并发同 operation 合流、正文冲突、延迟、丢 ACK、默认串行、失败后热重载接续、旧 generation 围栏不消耗尝试、schema 身份与隐式删除拒绝；Kernel、事件、调用树、Worker、包和四条旧库升级交叉回归为 `195 passed, 1 skipped`，214.20 秒，跳过项是既有 POSIX 权限测试。实现前的 SDK/manifest/Worker 基线另为 `105 passed, 1 skipped`。这些是分次定向结果，不代表新的全仓库或 Linux 验收。详细语义见[组件持久任务](p0-component-jobs.md)。
 
 ## 1. 当前可以执行的流程
 
@@ -33,6 +35,7 @@ P1/P3 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置
 | 当前 SDK | `Plugin`、`@service`、`@subscribe`、只读配置、调用作用域 state/events、受监督异步任务、调用/代际资源监督与稳定步骤 ID；显式 manifest，不自动生成装饰器声明 | [sdk.py](../src/forest/sdk.py)、[资源监督说明](p0-resource-sdk.md)、[事件说明](p0-component-events.md)、[counter 示例](../examples/counter/python/counter.py) |
 | 持久组件事件 | manifest 发布/订阅与 schema、调用内能力核验、内容引用、Bot 事务序列、稳定订阅 head、独立 claim/ACK、指数退避、死信、热重载接续和确认丢失对账 | [EventStore](../src/forest/storage/events.py)、[迁移 054](../src/forest/storage/bot_migrations/054_component_events.sql)、[真实测试](../tests/test_events.py) |
 | 组件事件管理 | 有界元数据读取、DEAD 回放 epoch/CAS、旧 INFLIGHT operation 恢复、订阅退役 plan/apply、发布/claim 围栏、不可变审计和 WebUI | [管理协议](p0-component-event-management.md)、[迁移 055](../src/forest/storage/bot_migrations/055_component_event_management.sql)、[Web 测试](../tests/test_web_events.py) |
+| 组件持久任务 | manifest/装饰器声明、调用内调度能力、正文来源、幂等任务事实、租约 claim/ACK、重试预算、每 handler 并发和热重载接续；不创建或调度产品 Agent | [详细设计](p0-component-jobs.md)、[迁移 056](../src/forest/storage/bot_migrations/056_component_jobs.sql)、[真实测试](../tests/test_component_jobs.py) |
 | 原生 Worker | 全新解释器、认证 loopback IPC、版本化且有界的 JSON 帧；prepare/start/health、业务 admission、调用并发/排队、取消与进程回收 | [Worker Driver](../src/forest/drivers/python_worker.py)、[Worker 运行时](../src/forest/drivers/worker.py)、[Worker 测试](../tests/test_worker.py) |
 | Bot 存储权威 | 一个数据库固定一个 Bot 身份，与部署库分离；事务迁移、宿主 lease/incarnation、组件 generation/route、调用 grant、状态 revision/步骤回执、审计/outbox | [BotStore](../src/forest/storage/bot.py)、[内核迁移](../src/forest/storage/bot_migrations/001_kernel.sql)、[BotStore 测试](../tests/test_bot_store.py) |
 | 最终提交守卫 | 在实际状态读写/调用完成事务核验当前 Bot、宿主、代际、调用、期限、取消、权限与维护修订；CAS 与幂等在同一目标事务裁决 | [BotStore](../src/forest/storage/bot.py)、[内核集成测试](../tests/test_kernel.py) |
@@ -91,7 +94,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
-| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、调用/代际资源监督和 Web/Fleet 接线；仍缺通用持久 Job SDK、自动声明生成、宿主级资源种类和其余消息契约 |
+| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK、调用/代际资源监督和 Web/Fleet 接线；仍缺组件 Job 管理、自动声明生成、宿主级资源种类和其余消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
@@ -334,4 +337,4 @@ P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最
 
 ## 5. 下一步
 
-继续补齐通用持久 Job SDK、事件 replay/retirement、宿主资源契约和其余消息契约，推进 P4 多主干多模态记忆的自动语义关联、全链路遗忘以及 P5 完整管理和容量治理。已接通的 Web/Fleet、插件运行环境、OneBot/Binding、消息/发送、调用树、持久组件事件、持久单 Agent 和定时任务作为后续基础；首版目标仍按 01–12 实施，当前切片可运行不代表整个目标已经完成。
+继续补齐组件持久任务的 Web 管理与显式退休/重放、宿主资源契约和其余消息契约，推进 P4 多主干多模态记忆的自动语义关联、全链路遗忘以及 P5 完整管理和容量治理。已接通的 Web/Fleet、插件运行环境、OneBot/Binding、消息/发送、调用树、持久组件事件、组件持久任务、持久单 Agent 和会话定时任务作为后续基础；首版目标仍按 01–12 实施，当前切片可运行不代表整个目标已经完成。

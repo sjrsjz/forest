@@ -95,6 +95,7 @@ class WorkerLimits:
 StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
 ServiceHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 EventHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+JobHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 
 
 class PythonWorker:
@@ -108,12 +109,14 @@ class PythonWorker:
         python_executable: str = sys.executable,
         service_handler: ServiceHandler | None = None,
         event_handler: EventHandler | None = None,
+        job_handler: JobHandler | None = None,
     ):
         self.package = snapshot
         self.identity = identity
         self.state_handler = state_handler
         self.service_handler = service_handler
         self.event_handler = event_handler
+        self.job_handler = job_handler
         self.limits = limits or WorkerLimits()
         self.python_executable = python_executable
         self.environment = None
@@ -121,6 +124,7 @@ class PythonWorker:
         self.state = "NEW"
         self.services: list[str] = []
         self.subscriptions: list[str] = []
+        self.jobs: list[str] = []
         self.process: subprocess.Popen | None = None
         self._temporary: tempfile.TemporaryDirectory | None = None
         self._writer: FrameWriter | None = None
@@ -182,6 +186,15 @@ class PythonWorker:
             ),
             key=lambda item: item["subscriber_id"],
         )
+
+    def _expected_jobs(self) -> list[str]:
+        jobs = self.package.manifest["components"][0].get("jobs", [])
+        identities = [item["handler_id"] for item in jobs]
+        if len(identities) != len(set(identities)):
+            raise ForestError(
+                "JOB_DECLARATION_INVALID", "Manifest contains duplicate job handlers", 422
+            )
+        return sorted(identities)
 
     async def launch(self, timeout: float = 10) -> None:
         if self.state != "NEW":
@@ -299,6 +312,7 @@ class PythonWorker:
                 "package_digest": self.package.digest,
                 "services": expected_services,
                 "subscriptions": self._expected_subscriptions(),
+                "jobs": self._expected_jobs(),
                 "limits": asdict(self.limits),
             }
             encoded = json.dumps(bootstrap, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -364,7 +378,7 @@ class PythonWorker:
                                 details=_error_details(error),
                             )
                         )
-                elif message.get("kind") in {"state", "service", "event"}:
+                elif message.get("kind") in {"state", "service", "event", "job"}:
                     request_id = message.get("id")
                     if (
                         not isinstance(request_id, str)
@@ -463,6 +477,15 @@ class PythonWorker:
                 if self.event_handler is None:
                     raise ForestError("CAPABILITY_DENIED", "No event gateway is available", 403)
                 value = await self.event_handler(self.identity, call_id, payload)
+            elif kind == "job":
+                expected = {"handler_id", "payload", "operation_id", "delay_seconds"}
+                if not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "JOB_REQUEST_INVALID", "Job request contains unsupported fields", 422
+                    )
+                if self.job_handler is None:
+                    raise ForestError("CAPABILITY_DENIED", "No job gateway is available", 403)
+                value = await self.job_handler(self.identity, call_id, payload)
             else:
                 expected = (
                     {"key"}
@@ -505,11 +528,15 @@ class PythonWorker:
                     "id": message["id"],
                     "ok": False,
                     "error": {
-                        "code": "STATE_RESULT_INVALID"
-                        if kind == "state"
-                        else "SERVICE_RESULT_INVALID"
-                        if kind == "service"
-                        else "EVENT_RESULT_INVALID",
+                        "code": (
+                            "STATE_RESULT_INVALID"
+                            if kind == "state"
+                            else "SERVICE_RESULT_INVALID"
+                            if kind == "service"
+                            else "EVENT_RESULT_INVALID"
+                            if kind == "event"
+                            else "JOB_RESULT_INVALID"
+                        ),
                         "message": "Host RPC result exceeds JSON protocol limits",
                         "status": 413,
                     },
@@ -573,6 +600,7 @@ class PythonWorker:
             )
             self.services = result["services"]
             self.subscriptions = result["subscriptions"]
+            self.jobs = result["jobs"]
             self.state = "PREPARED"
             return result
         except BaseException:
@@ -623,6 +651,22 @@ class PythonWorker:
             before_send=before_send,
         )
 
+    async def deliver_job(
+        self,
+        handler_id: str,
+        task: dict,
+        *,
+        call_id: str,
+        operation_id: str,
+        timeout: float = 30,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> Any:
+        return await self._invoke(
+            "invoke_job", "handler_id", handler_id, task,
+            call_id=call_id, operation_id=operation_id, timeout=timeout,
+            before_send=before_send,
+        )
+
     async def _invoke(
         self,
         command: str,
@@ -641,10 +685,20 @@ class PythonWorker:
             )
         if self._admitted >= self.limits.max_inflight + self.limits.max_queue_items:
             raise ForestError("OVERLOADED", "Worker bounded invocation queue is full", 429)
-        available = self.services if command == "invoke" else self.subscriptions
+        available = (
+            self.services
+            if command == "invoke"
+            else self.subscriptions
+            if command == "invoke_event"
+            else self.jobs
+        )
         if target not in available:
             raise ForestError(
-                "SERVICE_NOT_FOUND" if command == "invoke" else "SUBSCRIPTION_NOT_FOUND",
+                "SERVICE_NOT_FOUND"
+                if command == "invoke"
+                else "SUBSCRIPTION_NOT_FOUND"
+                if command == "invoke_event"
+                else "JOB_HANDLER_NOT_FOUND",
                 "Invocation target is not registered by this worker",
                 404,
             )

@@ -599,6 +599,7 @@ class BotStore:
         state_migrations: list[dict] | None = None,
         configuration_operation_id: str | None = None,
         event_definitions: list[dict] | None = None,
+        job_definitions: list[dict] | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -620,6 +621,7 @@ class BotStore:
         state_value_schema = json.loads(json.dumps(state_value_schema or {}, allow_nan=False))
         state_migrations = json.loads(json.dumps(state_migrations or [], allow_nan=False))
         event_definitions = json.loads(json.dumps(event_definitions or [], allow_nan=False))
+        job_definitions = json.loads(json.dumps(job_definitions or [], allow_nan=False))
         if not isinstance(state_migrations, list) or len(state_migrations) > 64 or any(
             not isinstance(item, dict) or set(item) != {"from_schema", "to_schema"}
             or type(item["from_schema"]) is not int or item["from_schema"] < 1
@@ -687,6 +689,15 @@ class BotStore:
                     event_definitions,
                     existing_generation=True,
                 )
+                from forest.storage.component_jobs import ComponentJobStore
+
+                await ComponentJobStore(self).register_generation_in(
+                    conn,
+                    generation_id,
+                    component_id,
+                    job_definitions,
+                    existing_generation=True,
+                )
                 await self.content.guard_in(conn, [generation_id], phase="admission")
                 await self._host(conn, lease)
                 return existing
@@ -735,6 +746,11 @@ class BotStore:
 
             await EventStore(self).register_generation_in(
                 conn, generation_id, component_id, event_definitions
+            )
+            from forest.storage.component_jobs import ComponentJobStore
+
+            await ComponentJobStore(self).register_generation_in(
+                conn, generation_id, component_id, job_definitions
             )
             await self._event(
                 conn,
@@ -1368,6 +1384,11 @@ class BotStore:
             from forest.storage.events import EventStore
 
             await EventStore(self).publish_generation_in(
+                conn, candidate["generation_id"], operation["component_id"]
+            )
+            from forest.storage.component_jobs import ComponentJobStore
+
+            await ComponentJobStore(self).publish_generation_in(
                 conn, candidate["generation_id"], operation["component_id"]
             )
             await conn.execute(

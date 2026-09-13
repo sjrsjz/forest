@@ -20,6 +20,7 @@ from forest.sdk import (
     Plugin,
     PluginContext,
     _current_call,
+    declared_jobs,
     declared_services,
     declared_subscriptions,
 )
@@ -35,6 +36,7 @@ class WorkerRuntime:
         self.ctx: PluginContext | None = None
         self.services: dict = {}
         self.subscriptions: dict = {}
+        self.jobs: dict = {}
         self.commands: dict[str, asyncio.Task] = {}
         self.calls: dict[str, asyncio.Task] = {}
         self.state_pending: dict[str, asyncio.Future] = {}
@@ -49,6 +51,9 @@ class WorkerRuntime:
 
     async def event_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("event", call_id, payload)
+
+    async def job_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("job", call_id, payload)
 
     async def _rpc(
         self, kind: str, call_id: str, payload: dict, *, action: str | None = None
@@ -79,17 +84,21 @@ class WorkerRuntime:
             )
 
     async def execute(self, command: str, payload: dict, deadline: float) -> Any:
-        if command in {"invoke", "invoke_event"}:
+        if command in {"invoke", "invoke_event", "invoke_job"}:
             self.require("ACTIVE")
             call_id = payload.get("call_id")
             if command == "invoke":
                 name = payload.get("service")
                 handler = self.services.get(name)
                 missing = "SERVICE_NOT_FOUND"
-            else:
+            elif command == "invoke_event":
                 name = payload.get("subscriber_id")
                 handler = self.subscriptions.get(name)
                 missing = "SUBSCRIPTION_NOT_FOUND"
+            else:
+                name = payload.get("handler_id")
+                handler = self.jobs.get(name)
+                missing = "JOB_HANDLER_NOT_FOUND"
             if handler is None:
                 raise ForestError(missing, "Requested invocation target is not registered", 404)
             if len(self.calls) >= self.limits.max_inflight or call_id in self.calls:
@@ -170,6 +179,7 @@ class WorkerRuntime:
                     subscriber_id: method
                     for subscriber_id, (_, method) in declared.items()
                 }
+                self.jobs = declared_jobs(self.plugin)
                 if sorted(self.services) != sorted(self.bootstrap["services"]):
                     raise ForestError(
                         "SERVICE_MANIFEST_MISMATCH",
@@ -186,6 +196,12 @@ class WorkerRuntime:
                         "Decorated subscriptions differ from the immutable manifest",
                         422,
                     )
+                if sorted(self.jobs) != sorted(self.bootstrap.get("jobs", [])):
+                    raise ForestError(
+                        "JOB_MANIFEST_MISMATCH",
+                        "Decorated jobs differ from the immutable manifest",
+                        422,
+                    )
                 config = payload.get("config", {})
                 if not isinstance(config, dict):
                     raise ForestError(
@@ -198,6 +214,7 @@ class WorkerRuntime:
                     resource_limit=self.limits.max_owned_resources,
                     service_rpc=self.service_rpc,
                     event_rpc=self.event_rpc,
+                    job_rpc=self.job_rpc,
                 )
                 await self.plugin.prepare(self.ctx, self.ctx.config, payload.get("restored_state"))
                 self.state = "PREPARED"
@@ -205,6 +222,7 @@ class WorkerRuntime:
                     "state": self.state,
                     "services": sorted(self.services),
                     "subscriptions": sorted(self.subscriptions),
+                    "jobs": sorted(self.jobs),
                 }
             if command == "start":
                 self.require("PREPARED")
@@ -223,6 +241,7 @@ class WorkerRuntime:
                     "state": self.state,
                     "services": sorted(self.services),
                     "subscriptions": sorted(self.subscriptions),
+                    "jobs": sorted(self.jobs),
                     "owned_tasks": len(self.ctx._task_owner.tasks),
                     "task_failures": list(self.ctx._task_owner.background_failures),
                     "owned_resources": len(self.ctx._resource_owner.entries),
@@ -325,7 +344,7 @@ class WorkerRuntime:
             while not self.stopping:
                 message = await read_frame(reader, self.limits.max_frame_bytes)
                 kind = message.get("kind")
-                if kind in {"state_result", "service_result", "event_result"}:
+                if kind in {"state_result", "service_result", "event_result", "job_result"}:
                     future = self.state_pending.get(message.get("id"))
                     if future is None or future.done():
                         continue

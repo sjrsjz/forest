@@ -190,6 +190,28 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "jobs": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["handler_id", "input_schema"],
+                            "properties": {
+                                "handler_id": {"type": "string"},
+                                "input_schema": {"type": "string"},
+                                "max_attempts": {
+                                    "type": "integer", "minimum": 1, "maximum": 32
+                                },
+                                "timeout_s": {
+                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                },
+                                "max_concurrency": {
+                                    "type": "integer", "minimum": 1, "maximum": 16
+                                },
+                            },
+                        },
+                    },
                 },
             },
         },
@@ -472,16 +494,25 @@ def _manifest(files: dict[str, bytes]) -> dict:
         ):
             _fail("INVALID_EVENTS", "Subscriptions require a valid topic and exact contract")
         _schema(files, subscription.get("schema"))
+    job_ids = set()
+    for definition in component.get("jobs", []):
+        handler_id = definition.get("handler_id", "")
+        if not IDENTIFIER.fullmatch(handler_id) or handler_id in job_ids:
+            _fail("INVALID_JOBS", "Durable job handler identities must be valid and unique")
+        job_ids.add(handler_id)
+        _schema(files, definition.get("input_schema"))
     capabilities = component.get("capabilities", {}).get("requests", [])
     allowed_capabilities = {"state.read", "state.write"} | {
         "service.call:" + name for name in dependency_names
-    } | {"event.publish:" + topic for topic in published_topics}
+    } | {"event.publish:" + topic for topic in published_topics} | {
+        "job.schedule:" + handler_id for handler_id in job_ids
+    }
     if any(item not in allowed_capabilities for item in capabilities) or len(capabilities) != len(
         set(capabilities)
     ):
         _fail(
             "UNSUPPORTED_CAPABILITY",
-            "Capabilities must name an explicitly declared state, service, or event operation",
+            "Capabilities must name an explicitly declared state, service, event, or job operation",
         )
     for relative, source in files.items():
         if relative.endswith(".py"):
