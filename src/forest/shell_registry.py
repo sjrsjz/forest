@@ -17,7 +17,8 @@ from types import MappingProxyType
 GATE_VERSION = "shell-gate-v2"
 MEMORY_GATE_VERSION = "shell-gate-v3"
 MAINTENANCE_GATE_VERSION = "shell-gate-v4"
-CURRENT_GATE_VERSION = "shell-gate-v5"
+COMPONENT_GATE_VERSION = "shell-gate-v5"
+CURRENT_GATE_VERSION = "shell-gate-v6"
 
 
 def _canonical(value) -> str:
@@ -332,7 +333,7 @@ SIMPLE_COMMANDS_V4 = MappingProxyType({
 
 def _build_v5():
     table = {
-        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        key: replace(spec, gate_version=COMPONENT_GATE_VERSION)
         for key, spec in BUILTIN_GATE_V4.items()
     }
     additions = (
@@ -477,7 +478,7 @@ def _build_v5():
     )
     forms = {form.words for spec in table.values() for form in spec.forms}
     for spec in additions:
-        spec = replace(spec, gate_version=CURRENT_GATE_VERSION)
+        spec = replace(spec, gate_version=COMPONENT_GATE_VERSION)
         if spec.command_key in table or any(form.words in forms for form in spec.forms):
             raise ValueError("Duplicate builtin v5 command")
         table[spec.command_key] = spec
@@ -495,17 +496,68 @@ SIMPLE_COMMANDS_V5 = MappingProxyType({
     form.words: spec.command_key for spec in BUILTIN_GATE_V5.values()
     if spec.execution_target == "builtin" for form in spec.forms
 })
+
+
+def _build_v6():
+    table = {
+        key: replace(spec, gate_version=CURRENT_GATE_VERSION)
+        for key, spec in BUILTIN_GATE_V5.items()
+    }
+    audit = replace(
+        _spec(
+            "audit.read",
+            forms=(CommandForm(
+                ("audit", "list"),
+                options=(
+                    ("--action", "action"),
+                    ("--before", "before"),
+                    ("--limit", "limit"),
+                ),
+            ),),
+            properties={
+                "action": _id("action"),
+                "before": _id("audit_id"),
+                "limit": {
+                    "type": "integer", "title": "limit", "minimum": 1, "maximum": 20,
+                },
+            },
+            action="audit.read",
+            scope="bot_audit_metadata",
+            target="audit",
+            method="read",
+            note="审计查询只返回脱敏元数据；详情、主体和正文不会发送到群聊。",
+        ),
+        gate_version=CURRENT_GATE_VERSION,
+    )
+    if audit.command_key in table:
+        raise ValueError("Duplicate builtin v6 command")
+    table[audit.command_key] = audit
+    return MappingProxyType(table)
+
+
+BUILTIN_GATE_V6 = _build_v6()
+DOMAIN_ALIASES_V6 = MappingProxyType({
+    **DOMAIN_ALIASES_V5,
+    "log": "audit",
+    "logs": "audit",
+})
+SIMPLE_COMMANDS_V6 = MappingProxyType({
+    form.words: spec.command_key for spec in BUILTIN_GATE_V6.values()
+    if spec.execution_target == "builtin" for form in spec.forms
+})
 BUILTIN_GATES = MappingProxyType({
     GATE_VERSION: BUILTIN_GATE_V2,
     MEMORY_GATE_VERSION: BUILTIN_GATE_V3,
     MAINTENANCE_GATE_VERSION: BUILTIN_GATE_V4,
-    CURRENT_GATE_VERSION: BUILTIN_GATE_V5,
+    COMPONENT_GATE_VERSION: BUILTIN_GATE_V5,
+    CURRENT_GATE_VERSION: BUILTIN_GATE_V6,
 })
 DOMAIN_ALIASES = MappingProxyType({
     GATE_VERSION: DOMAIN_ALIASES_V2,
     MEMORY_GATE_VERSION: DOMAIN_ALIASES_V3,
     MAINTENANCE_GATE_VERSION: DOMAIN_ALIASES_V4,
-    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V5,
+    COMPONENT_GATE_VERSION: DOMAIN_ALIASES_V5,
+    CURRENT_GATE_VERSION: DOMAIN_ALIASES_V6,
 })
 
 

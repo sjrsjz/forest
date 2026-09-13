@@ -130,6 +130,12 @@
           <div id="event-retirement-preview" class="hidden"><h3>确认订阅退役</h3><pre id="event-retirement-diff"></pre><p class="hint">若预览后出现新投递或处理状态变化，提交会要求重新预览。正在执行的处理器必须先结束。</p><button id="event-retirement-apply" type="button">提交订阅退役</button></div>
           <h3>最近投递</h3><div id="event-deliveries" aria-live="polite"></div>
         </section>
+        <section id="bot-audit" class="card hidden" aria-labelledby="bot-audit-title">
+          <h2 id="bot-audit-title">Bot 审计元数据</h2>
+          <p class="hint">按稳定时间游标查看当前 Bot 的运行与控制事实。这里只返回动作、来源类型、时间和不可变标识；审计详情、操作者身份、消息正文及控制正文不会发送到浏览器。</p>
+          <form id="bot-audit-filter" class="actions"><label>动作<input id="bot-audit-action" maxlength="128" pattern="[A-Za-z0-9_.:-]+" placeholder="例如 agent.cancel"></label><button type="submit" class="subtle">筛选</button><button id="bot-audit-refresh" type="button" class="subtle">刷新</button><button id="bot-audit-more" type="button" class="subtle hidden">更早记录</button></form>
+          <p id="bot-audit-empty" class="hint hidden">当前筛选条件下没有审计记录。</p><div id="bot-audit-list" aria-live="polite"></div>
+        </section>
         <section id="bot-memory" class="card hidden">
           <h2>图文记忆</h2><p id="memory-config-status" role="status"></p>
           <p class="hint">各群保留独立来源与时间主干，共享当前 Bot 的记忆。文本与图片片段分别嵌入；文本模型也能使用图片召回的来源信息。裁剪不调用摘要模型。模型版本由管理员声明，保存配置不代表已验证远端语义质量。</p>

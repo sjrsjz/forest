@@ -1,6 +1,6 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v5` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护，以及 Bot 全局组件事件和组件持久任务的读取、死信回放与显式退役。其余命令树仍是待实现目标，不能从示例推断为现有能力。
+> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v6` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理，以及脱敏 Bot 审计查询。其余命令树仍是待实现目标，不能从示例推断为现有能力。
 
 ## 1. 目标与边界
 
@@ -64,6 +64,32 @@ v2、v3、v4 仍作为不可变兼容表。旧排队请求按持久 gate、comma
 不会因 v5 新增语法而重新解释。Shell 继续使用真实群事件作为控制输入父来源；Web 使用
 短效签名票据，两者调用相同 EventStore/ComponentJobStore 管理状态机和幂等回执。
 
+### 1.3 `shell-gate-v6`：Bot 审计元数据
+
+v6 完整复制并冻结 v5，新增一个 Bot 全局只读动作：
+
+```text
+#forest audit list
+#forest audit list --action agent.cancel --limit 12
+#forest audit list --before <audit_id> --limit 12
+```
+
+`log/logs` 只作为 `audit` 的语法别名；当前没有自由文本 tail、宿主 stdout 或系统终端入口。
+命令归一为 `audit.read`，固定作用域为接收消息的 Bot。它不受发令群的记忆主干限制，因此
+同一 Bot 的授权管理员可从任一 Binding 群查看 Bot 级运行元数据；结果只发送回原群，不能
+指定其他群作为输出目标。
+
+查询按 `(created_at,audit_id)` 逆序读取不可变 `bot_audit_records`，`--before` 使用已返回的
+`audit_id` 恢复二元组边界。相同时间写入仍由 ID 确定顺序；第一页之后的新记录不会插入旧页
+区间。群命令默认 12 条、最多 20 条，输出只含 audit ID、action、来源类型、时间和续页命令。
+服务端不读取或投影 `details`、控制结果正文、消息正文、操作者/QQ 主体、票据依据和密钥。
+
+`audit.read` 是 P1 CONTROL 查询，直接调用 BotAuditStore；它不进入 LLM，不取得会话 Agent
+所有权，也不产生新的审计记录，避免查看日志导致递归写入。领取和事务返回前仍复核 Host
+lease、Binding epoch、命令 claim、冻结 gate、原参数以及当前 `admin_user_ids`。WebUI 使用
+同一 action 和目标 Store，固定 viewer 也可读取这组脱敏 Bot 元数据；部署审计仍是独立库、
+独立页面和独立权限，不建立跨数据库伪全序。完整协议见 [P5 Bot 审计](p5-bot-audit.md)。
+
 ## 2. 用户交互与命令树
 
 ### 2.1 典型操作
@@ -80,7 +106,7 @@ v2、v3、v4 仍作为不可变兼容表。旧排队请求按持久 gate、comma
 #forest config set agent.max_steps 12 --expect-revision 8 --preview
 #forest confirm approval-23 <一次性确认码>
 #forest jobs status job-83
-#forest logs tail --job job-83 --lines 40
+#forest job-log tail --job job-83 --lines 40
 #forest ops runbook restart-provider --arg provider=qiyu
 #forest ops exec --profile maintenance -- python --version
 #forest --bot bot-b module status
@@ -98,7 +124,8 @@ v2、v3、v4 仍作为不可变兼容表。旧排队请求按持久 gate、comma
 | `context` | inspect/compact/reset；读取历史、申请裁剪、建立新上下文视图 | P1 |
 | `memory` | inspect/search/assert/retract/resolve/forget/rebuild；沿用全局 Bot 存储与 06 契约 | P1 |
 | `config` | get/diff/set/validate；类型校验、revision、preview 与 reload_policy | P1 |
-| `jobs`、`logs` | list/status/cancel；受限分页、tail、取消订阅 | P1；cancel 为 P0 |
+| `jobs` | list/status/cancel；会话 Agent 计划与 occurrence | P1；cancel 为 P0 |
+| `audit`、`log/logs` | 当前 Bot 的脱敏审计元数据、动作筛选与稳定分页 | P1 |
 | `event` | 组件事件订阅/投递列表、DEAD 回放、订阅退役 plan/apply | 查询/退役 P1；回放接纳 P2 |
 | `component-job` | 插件持久处理器/任务列表、DEAD 回放、处理器退役 plan/apply；不操作会话 Agent 计划 | 查询/退役 P1；回放接纳 P2 |
 | `confirm`、`deny` | 对固定 approval 做单次批准/拒绝，解除既有等待 | P0 |
@@ -221,7 +248,7 @@ CONTROL 回执标记 `origin=control_output`，先入控制输出账本；平台
 
 ## 6. 长任务、内容处理与原生进程
 
-命令接纳后尽快回复 `command_id / operation_id / job_id / state`，不能在控制槽里等待编译、索引重建、模型、长文件任务完成。长工作使用现有 `jobs`，记录固定参数、身份、目标、deadline、lease、取消和恢复点；`jobs status` 可查询，即使发令者暂时离线也能继续。`logs tail` 是有速率、行数、字节与 TTL 上限的订阅，支持分页 cursor 和停止；进度可合并，终态必持久。
+命令接纳后尽快回复 `command_id / operation_id / job_id / state`，不能在控制槽里等待编译、索引重建、模型、长文件任务完成。长工作使用现有 `jobs`，记录固定参数、身份、目标、deadline、lease、取消和恢复点；`jobs status` 可查询，即使发令者暂时离线也能继续。后续 `job-log tail` 才是有速率、行数、字节与 TTL 上限的正文订阅；当前 `log/logs` 已固定为脱敏 Bot 审计查询别名，不提供正文 tail。进度可合并，终态必持久。
 
 配置修改先 schema 校验再生成差异，提交必须携带 expected_revision；generation/restart/migration 字段转交对应生命周期工作流。上传配置附件只形成受限工件，命令显式引用该工件摘要并 preview，附件不自动执行。记忆内容修改沿用 Assert/Retract/Resolve/Forget，不把一段 LLM 生成 JSON 覆盖成整库状态。
 

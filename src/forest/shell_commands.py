@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 from forest.shell_registry import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V5,
-    SIMPLE_COMMANDS_V5,
+    DOMAIN_ALIASES_V6,
+    SIMPLE_COMMANDS_V6,
     get_command_spec,
 )
 
@@ -44,6 +44,18 @@ def _options(words, required):
     return values
 
 
+def _optional_options(words, allowed):
+    if len(words) % 2:
+        raise ValueError("options")
+    values = {}
+    for index in range(0, len(words), 2):
+        key, value = words[index:index + 2]
+        if key not in allowed or key in values:
+            raise ValueError("option")
+        values[key] = value
+    return values
+
+
 def _revision(value):
     if not re.fullmatch(r"0|[1-9][0-9]{0,17}", value):
         raise ValueError("revision")
@@ -70,11 +82,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V5:
-        return _command(SIMPLE_COMMANDS_V5[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V6:
+        return _command(SIMPLE_COMMANDS_V6[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V5.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V6.get(words[0], words[0]), words[1]
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:
@@ -164,6 +176,19 @@ def _parse(words):
             "plan_digest": _identity(options["--digest"]),
             "expected_revision": _revision(options["--expect-revision"]),
         })
+    if (domain, verb) == ("audit", "list"):
+        options = _optional_options(words[2:], {"--action", "--before", "--limit"})
+        payload = {"limit": 12}
+        if "--action" in options:
+            payload["action"] = _identity(options["--action"])
+        if "--before" in options:
+            payload["before"] = _identity(options["--before"])
+        if "--limit" in options:
+            limit = _positive_revision(options["--limit"])
+            if limit > 20:
+                raise ValueError("limit")
+            payload["limit"] = limit
+        return _command("audit.read", payload)
     if (domain, verb) == ("memory", "list") and len(words) == 2:
         return _command("memory.read")
     if (domain, verb) == ("memory", "forget-plan") and len(words) >= 3:

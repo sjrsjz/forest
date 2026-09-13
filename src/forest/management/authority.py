@@ -20,7 +20,7 @@ READ_ACTIONS = frozenset({
     "config.read", "config.history", "bot.runtime.read", "job.read",
     "agent.config.read", "agent.read", "memory.config.read", "memory.read",
     "memory.forget.read", "memory.association.read", "event.read", "component_job.read",
-    "binding.read", "message.read",
+    "audit.read", "binding.read", "message.read",
 })
 
 

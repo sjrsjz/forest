@@ -14,6 +14,8 @@ from forest.shell_registry import (
     BUILTIN_GATE_V3,
     BUILTIN_GATE_V4,
     BUILTIN_GATE_V5,
+    BUILTIN_GATE_V6,
+    COMPONENT_GATE_VERSION,
     CONTROL_DEADLINE,
     CURRENT_GATE_VERSION,
     DOMAIN_ALIASES_V2,
@@ -165,7 +167,7 @@ def test_gate_v4_adds_bot_maintenance_without_changing_old_gates():
 
 
 def test_gate_v5_adds_component_operations_without_changing_old_gates():
-    assert CURRENT_GATE_VERSION == "shell-gate-v5"
+    assert COMPONENT_GATE_VERSION == "shell-gate-v5"
     additions = set(BUILTIN_GATE_V5) - set(BUILTIN_GATE_V4)
     assert additions == {
         "event.read",
@@ -178,16 +180,16 @@ def test_gate_v5_adds_component_operations_without_changing_old_gates():
         "component_job.retire.apply",
     }
     assert all(
-        spec.gate_version == CURRENT_GATE_VERSION for spec in BUILTIN_GATE_V5.values()
+        spec.gate_version == COMPONENT_GATE_VERSION for spec in BUILTIN_GATE_V5.values()
     )
     assert get_command_spec("event.read", MAINTENANCE_GATE_VERSION) is None
-    assert command_action("component_job.replay", CURRENT_GATE_VERSION) == (
+    assert command_action("component_job.replay", COMPONENT_GATE_VERSION) == (
         "component_job.replay"
     )
     assert BUILTIN_GATE_V5["event.replay"].priority == 2
     assert BUILTIN_GATE_V5["component_job.replay"].priority == 2
-    assert "#forest event retire-plan" in render_help(CURRENT_GATE_VERSION)
-    assert "#forest component-job retire-plan" in render_help(CURRENT_GATE_VERSION)
+    assert "#forest event retire-plan" in render_help(COMPONENT_GATE_VERSION)
+    assert "#forest component-job retire-plan" in render_help(COMPONENT_GATE_VERSION)
     for key in additions:
         spec = BUILTIN_GATE_V5[key]
         Draft202012Validator.check_schema(spec.args_schema)
@@ -204,3 +206,21 @@ def test_gate_v5_adds_component_operations_without_changing_old_gates():
             validator.validate(payload)
             parsed = command("#forest " + shlex.join(words[1:]))
             assert (parsed.name, parsed.payload) == (key, payload)
+
+
+def test_gate_v6_adds_only_redacted_bot_audit_query_and_keeps_v5_resolvable():
+    assert CURRENT_GATE_VERSION == "shell-gate-v6"
+    assert set(BUILTIN_GATE_V6) - set(BUILTIN_GATE_V5) == {"audit.read"}
+    assert all(spec.gate_version == CURRENT_GATE_VERSION for spec in BUILTIN_GATE_V6.values())
+    assert get_command_spec("audit.read", COMPONENT_GATE_VERSION) is None
+    spec = get_command_spec("audit.read", CURRENT_GATE_VERSION)
+    assert (spec.action, spec.resource_scope, spec.priority) == (
+        "audit.read", "bot_audit_metadata", 1,
+    )
+    assert spec.output_visibility == "origin_conversation_metadata"
+    Draft202012Validator.check_schema(spec.args_schema)
+    assert Draft202012Validator(spec.args_schema).is_valid(
+        {"action": "agent.cancel", "before": "audit:1", "limit": 20}
+    )
+    assert not Draft202012Validator(spec.args_schema).is_valid({"limit": 21})
+    assert "#forest audit list" in render_help(CURRENT_GATE_VERSION)

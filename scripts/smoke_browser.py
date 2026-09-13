@@ -224,6 +224,9 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                 page.locator("#bot-config-apply").click()
                 expect(page.locator("#bot-effective")).to_have_text("1", timeout=30000)
                 expect(page.locator("#bot-runtime-status")).to_have_text("组件已生效并运行中", timeout=30000)
+                expect(page.locator("#bot-audit")).to_be_visible()
+                page.locator("#bot-audit-refresh").click()
+                expect(page.locator("#bot-audit-list")).to_contain_text("config.apply")
                 return page.locator("#bot-list button").filter(has_text=name).get_attribute("data-bot-id")
 
             def select_bot(page, bot_id: str) -> None:
@@ -526,6 +529,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "setup",
                         "login",
                         "Web account creation, fixed viewer boundary and redacted deployment audit",
+                        "redacted per-Bot audit panel",
                         "preview",
                         "apply",
                         "two-tab conflict",

@@ -224,6 +224,10 @@ class ShellDispatcher:
             from forest.storage.component_jobs import ComponentJobStore
 
             repository = ComponentJobStore(self.messages.store, control=control)
+        elif spec.execution_target == "audit":
+            from forest.storage.bot_audit import BotAuditStore
+
+            repository = BotAuditStore(self.messages.store, control=control)
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         kwargs = {"lease": lease} if (
@@ -344,6 +348,8 @@ class ShellDispatcher:
             }
             if self.on_change is not None:
                 self.on_change()
+        elif name == "audit.read":
+            text, outcome = self._audit_status(result)
         elif name == "memory.read":
             lines = []
             for row in result["sources"][:20]:
@@ -472,6 +478,21 @@ class ShellDispatcher:
             "code": "COMPONENT_JOB_STATUS",
             "handler_count": len(handlers),
             "job_count": len(jobs),
+        }
+
+    @staticmethod
+    def _audit_status(result):
+        lines = [
+            f"{row['audit_id']}：{row['action']}；{row['origin_kind']}；{row['created_at']}"
+            for row in result.get("records", [])[:20]
+        ]
+        cursor = result.get("next_before")
+        if cursor:
+            lines.append(f"继续读取：#forest audit list --before {cursor}")
+        return "Bot 审计元数据：\n" + "\n".join(lines or ["暂无审计记录。"]), {
+            "code": "AUDIT_STATUS",
+            "count": min(len(result.get("records", [])), 20),
+            "next_before": cursor,
         }
 
     async def close(self) -> None:

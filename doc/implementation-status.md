@@ -16,6 +16,8 @@ P5 账号管理切片使用迁移 058 增加不可变账号计划/请求和独�
 
 部署审计切片使用迁移 059 为不可变部署事实增加有界查询索引。管理员页面支持动作、资源前缀和操作者筛选，以 `(created_at,audit_id)` 稳定游标分页；服务端按 action 白名单返回标量详情，未知或额外字段不透传。部署管理与旧库升级组合回归 `11 passed`，Ruff、管理 JavaScript 语法和补丁空白检查通过；重新构建的镜像已在独立 Compose/Edge 流程中核对真实 `account.create` 记录及操作者，并继续通过完整多 Bot 流程。它不合并多个 Bot 数据库的局部审计顺序，查看者当前无权读取。详细语义见[部署审计查询](p5-deployment-audit.md)。
 
+Bot 审计查询切片以 Bot 迁移 058 增加时间/action 索引和既有 issuer 的最小只读升级。`BotAuditStore` 使用 `(created_at,audit_id)` 键集分页且不选择 `details` 或 hydrate 控制正文；WebUI 在当前 Bot 页面显示固定元数据，`shell-gate-v6` 增加 P1 CONTROL 的 `audit list`（`log/logs` 别名）。它不经过 LLM、不取得 Agent 会话所有权、不会因读取递归生成审计事实。真实 PostgreSQL authority/Shell 与 ASGI 定向测试 `3 passed`，v2–v6 registry/语法测试 `74 passed`，旧库升级组合测试 `5 passed`。镜像已重新构建，独立 Compose/Edge 完整流程验证了每个 Bot 的脱敏审计面板，并继续通过双 Bot、OneBot、Agent、记忆、组件热重载和重启恢复。详细语义见[Bot 审计协议](p5-bot-audit.md)。
+
 ## 1. 当前可以执行的流程
 
 从空部署启动独立管理服务，使用本机 CLI 交付的一次性配对码在浏览器创建首管理员，登录后读取配置、预览差异、基于预期版本提交，再读取实际生效修订。注销使服务端会话失效；重启后从原 PostgreSQL 和本地冻结计划恢复管理状态。此流程不依赖 Bot、插件、QQ、LLM 或 Embedding 凭据。
@@ -108,7 +110,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
 | P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v4 只管理当前群主干，后台有界 scrub。自动语义联想、剩余自由文本族、部署库与备份/WAL 清理及大规模检索容量仍待完成 |
-| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、群聊运行/任务/维护/组件命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；Bot 级 scope 与完整角色模板、统一 Bot 任务日志、备份迁移恢复及容量治理尚未完成 |
+| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、Bot 脱敏审计、群聊运行/任务/维护/组件/审计命令、CorePrompt 只读展示和 PresetContext 配置已接通，子 Agent 页面已删除；Bot 级账号 scope 与完整角色模板、任务正文日志、备份迁移恢复及容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 
@@ -145,7 +147,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 两个 482 项综合回归使用同一冻结源码，均实际运行结束。清单核对不是一次最终全量重跑，也不把历史基线中的失败计为通过。浏览器专项不替代 PostgreSQL 或真实供应商验收。完整浏览器流程首次因未指定已安装的浏览器而退出，随后显式指定 Edge 完整通过；两次均只创建并清理独立随机 Compose 项目。以下保留各历史切片自身的验证范围。
 
-内置 Shell 命令使用按 gate 版本冻结的 CommandSpec 表生成帮助、选择 action/执行方法并提供优先级与参数 schema。`shell-gate-v2` 的词法、摘要和执行映射不变，v3 保留本群来源列表、遗忘计划和提交，v4 增加 Bot 暂停/恢复，当前 v5 增加组件事件和组件持久任务的列表、DEAD 回放和 plan/apply 退役。Dispatcher 按请求持久化的 gate 版本直接执行类型化参数，不重新解析原文本；遗忘 apply 和 Bot pause 为 P0，resume、计划、退役和列表为 P1，后台回放接纳为 P2。Bot 维护写与 Web 共用 `bot.maintenance`、控制回执和维护版本 CAS；组件命令与 Web 共用 EventStore/ComponentJobStore 的管理修订和回执。控制输入不进入 Context，群回执不含原因或组件正文。此表不等同动态插件命令或持久 registry snapshot，完整 P5 管理协议仍在实现。见[群聊 Shell 详细设计](09-group-shell-command-system.md)、[群管理协议](p3-control.md)和[记忆来源管理](p4-memory-administration.md)。
+内置 Shell 命令使用按 gate 版本冻结的 CommandSpec 表生成帮助、选择 action/执行方法并提供优先级与参数 schema。`shell-gate-v2` 的词法、摘要和执行映射不变，v3 保留本群来源列表、遗忘计划和提交，v4 增加 Bot 暂停/恢复，v5 增加组件事件和组件持久任务的列表、DEAD 回放和 plan/apply 退役，当前 v6 增加 Bot 审计元数据查询。Dispatcher 按请求持久化的 gate 版本直接执行类型化参数，不重新解析原文本；遗忘 apply 和 Bot pause 为 P0，resume、计划、退役和列表为 P1，后台回放接纳为 P2。Bot 维护写与 Web 共用 `bot.maintenance`、控制回执和维护版本 CAS；组件命令与 Web 共用 EventStore/ComponentJobStore 的管理修订和回执；审计命令与 Web 共用不读取详情的 BotAuditStore。控制输入不进入 Context，群回执不含原因、组件正文、审计详情或操作者主体。此表不等同动态插件命令或持久 registry snapshot，完整 P5 管理协议仍在实现。见[群聊 Shell 详细设计](09-group-shell-command-system.md)、[群管理协议](p3-control.md)和[Bot 审计协议](p5-bot-audit.md)。
 
 | 固定 Shell 契约切片 | 结果 | 范围 |
 |---|---|---|

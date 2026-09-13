@@ -9,6 +9,7 @@ import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
 import { accountsPanel } from './accounts-panel.js';
 import { auditPanel } from './audit-panel.js';
+import { botAuditPanel } from './bot-audit-panel.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -126,6 +127,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
+  botAudit.reset();
   accountPanel.reset();
   deploymentAudit.reset();
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
@@ -185,6 +187,7 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
   setIdentity(null); show('login'); notice(message, true);
 });
 const deploymentAudit = auditPanel(api, busy);
+const botAudit = botAuditPanel(api, busy);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -194,7 +197,7 @@ function invalidateControl(scope) {
     $('bot-config-diff').replaceChildren(); $('bot-invoke-result').replaceChildren();
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
-  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel, componentEventsPanel, durableJobsPanel]) panel.invalidateContent(scope);
+  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
@@ -337,6 +340,7 @@ async function selectBot(id) {
   scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
+  botAudit.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
   renameKey = null; retryKey = null; maintenanceKey = null; botRuntime = null;
@@ -369,6 +373,8 @@ async function selectBot(id) {
     await componentEventsPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await durableJobsPanel.select(row);
+    if (epoch !== selectionEpoch) return;
+    await botAudit.select(row);
     if (epoch !== selectionEpoch) return;
     await memoriesPanel.select(row);
   }
