@@ -113,9 +113,11 @@ class BindingRuntime:
         from forest.agent_runtime import AgentRuntime
         from forest.group_scheduler import GroupScheduler
         from forest.job_scheduler import JobDispatcher
+        from forest.memory_runtime import MemoryRuntime
         from forest.shell import ShellDispatcher
         from forest.storage.jobs import JobStore
 
+        self.memory = MemoryRuntime(self)
         self.agent = AgentRuntime(self)
 
         self.scheduler = GroupScheduler(
@@ -184,6 +186,7 @@ class BindingRuntime:
             await self.shell.start()
             await self.agent.start()
             await self.jobs.start()
+            await self.memory.start()
             self._tasks = [
                 asyncio.create_task(self.run_forever(), name="binding-supervisor"),
                 asyncio.create_task(self.delivery_worker.run_forever(), name="binding-delivery"),
@@ -198,6 +201,8 @@ class BindingRuntime:
                 self._tasks.append(self.jobs.task)
             if self.agent.children.task is not None:
                 self._tasks.append(self.agent.children.task)
+            if self.memory.task is not None:
+                self._tasks.append(self.memory.task)
             for task in self._tasks:
                 task.add_done_callback(self._critical_done)
             self._started = True
@@ -678,7 +683,7 @@ class BindingRuntime:
             task.cancel()
         errors = []
         for closer in (self.jobs.close, self.scheduler.close, self.shell.close,
-                       self.delivery_worker.close, self.agent.close):
+                       self.delivery_worker.close, self.agent.close, self.memory.close):
             try:
                 await closer()
             except Exception as exc:

@@ -7,13 +7,17 @@ the periodic poll clock are controlled; this is not external service acceptance.
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from forest.memory_settings import DEFAULT_MEMORY_SETTINGS
+
 BOOTSTRAP = r"""
+const memoryDefaults = __MEMORY_DEFAULTS__;
 const fields = {type:'object',additionalProperties:false,required:['label','enabled','mode','tags'],properties:{
   label:{type:'string',minLength:1},enabled:{type:'boolean'},mode:{type:'string',enum:['fast','precise']},
   note:{type:'string'},tags:{type:'array',items:{type:'string'}}}};
@@ -39,6 +43,9 @@ function reply(path, method, body) {
   if (path==='/packages') return method==='POST' ? packages[0] : {packages:fixture.packages,errors:{}};
   if (path.endsWith('/agent/configuration')) return {revision:0,values:{enabled:false,allowed_tools:[]},has_api_key:false};
   if (path.endsWith('/agent/runs')) return {runs:[],approvals:[]};
+  if (path.endsWith('/memory/configuration')) return {revision:0,values:memoryDefaults,has_api_key:false,secret_revision:0};
+  if (path.endsWith('/memory/status')) return {configured:false,enabled:false,revision:0,counts:{facets:{},captures:{},attempts:{}},budget:null,errors:{}};
+  if (path.endsWith('/jobs')) return {jobs:[],occurrences:[]};
   if (path.endsWith('/bindings')) return {bindings:[]};
   if (path.endsWith('/conversations')) return {conversations:[]};
   if (path.endsWith('/delivery')) return {parts:[]};
@@ -76,7 +83,7 @@ window.fetch=async(url,options={}) => {
 window.setInterval=(callback,ms)=>{fixture.poll=callback; return 1;};
 await import('/static/app.js');
 window.fixtureReady=true;
-"""
+""".replace("__MEMORY_DEFAULTS__", json.dumps(DEFAULT_MEMORY_SETTINGS))
 
 
 def main():
@@ -93,7 +100,7 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for name in ("app.js", "schema-form.js", "bindings.js", "agent-panel.js", "style.css"):
+            for name in ("app.js", "schema-form.js", "bindings.js", "agent-panel.js", "jobs-panel.js", "memory.js", "style.css"):
                 resources["/static/" + name] = ((static / name).read_bytes(),
                     "text/css" if name.endswith(".css") else "text/javascript")
             if self.path not in resources:
@@ -127,6 +134,10 @@ def main():
             page.locator('[data-bot-id="bot-a"]').click()
             label = page.locator('#bot-config-fields [name="label"]')
             expect(label).to_have_value("Alpha")
+            # Bot selection must finish all installed panels, not silently stop
+            # at a missing fixture endpoint before reaching component race checks.
+            expect(page.locator('#memory-config-status')).to_contain_text('配置版本 0')
+            expect(page.locator('#memory-state')).to_contain_text('"configured": false')
 
             def hold(key):
                 page.evaluate("key => fixture.hold.push(key)", key)

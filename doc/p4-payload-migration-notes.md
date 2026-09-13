@@ -1,8 +1,8 @@
 # P4 准备：正文分离、物理清理与不可复活的删除闭包
 
-状态：**只读调查与迁移提案，尚未实现 P4 遗忘。** 调查范围是 Bot migrations `001_kernel.sql` 至 `020_shell_commands.sql`，以及 MessageStore、MediaStore、AgentStore、ChildStore、DeliveryStore、BotStore 和模型序列化器。此文不把现有 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
+状态：**旧正文副本的迁移提案，全链路遗忘尚未完成。** 初始调查覆盖 Bot migrations `001_kernel.sql` 至 `020_shell_commands.sql`，以及 MessageStore、MediaStore、AgentStore、ChildStore、DeliveryStore、BotStore 和模型序列化器。当前 021–028 已实现新 PayloadStore、来源资格、原图捕获、图/向量、EvidenceBundle 及当前 Run 的召回撤权检查；下表所列旧副本仍需迁移。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
 
-建议首先落地统一的“永久事实头 + 可清理载荷体 + 来源依赖”存储契约，然后接入 raw unit、图和向量。否则，先实现记忆表再补遗忘会遗漏既有模型请求、工具观察、Kernel 回执等独立明文副本。
+“永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆数据。下一切片应把原生输入和上下文读取切换到受抑制规则约束的载荷读取器，同时给模型步骤固定完整来源清单。已有模型请求、工具观察、Kernel 回执等独立明文副本必须继续逐族迁移。当前 Reply 仍保持 `lineage_complete=false`，不能直接改为 true；新完整 Reply 必须从最终步骤的显式依赖登记，覆盖跨群证据、工具与子 Agent。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
 
 ## 1. 已确认的载荷清单
 

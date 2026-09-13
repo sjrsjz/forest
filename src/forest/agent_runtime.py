@@ -70,6 +70,7 @@ class AgentRuntime:
             resolve_client=self.resolve_client,
             materialize_context=self.materialize_context,
             authorize_tool=self.authorize_tool,
+            retrieve_memory=self.retrieve_memory,
         )
         from forest.children import ChildScheduler
         from forest.storage.children import ChildStore
@@ -193,6 +194,9 @@ class AgentRuntime:
             actor, snapshot, allowed_origins=spec["values"]["media_allowed_origins"]
         )
         return snapshot, media
+
+    async def retrieve_memory(self, actor, spec, snapshot):
+        return await self.platform.memory.retrieve_for_step(actor, snapshot, self.runner.state)
 
     async def authorize_tool(self, actor, spec, tool, trigger):
         current = await self._configuration(actor, spec["config_revision"])

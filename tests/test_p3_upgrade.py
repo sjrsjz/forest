@@ -227,13 +227,18 @@ async def test_upgrade_keeps_preexisting_web_issuer_usable_for_agent_configurati
         assert issuer["public_key"] == public and issuer["key_revision"] == 1
         assert issuer["enabled"] is (scope != "disabled")
         if scope == "readonly":
-            assert set(issuer["actions"]) == {"config.read", "config.history", "agent.config.read"}
+            assert set(issuer["actions"]) == {"config.read", "config.history", "agent.config.read", "memory.config.read"}
         elif scope == "empty":
             assert issuer["actions"] == []
         else:
             assert set(previous_actions).issubset(issuer["actions"])
             assert {"agent.config.read", "agent.config.plan", "agent.config.apply", "agent.read", "agent.cancel",
                     "agent.approval", "agent.resolve"}.issubset(issuer["actions"])
+        # The current target also applies 023's independent permission mapping;
+        # an old config reader gains neither memory contents nor write actions.
+        for permission, required in (("memory.config.read", "config.read"), ("memory.config.plan", "config.plan"),
+                                     ("memory.config.apply", "config.apply"), ("memory.read", "message.read")):
+            assert (permission in issuer["actions"]) == (required in previous_actions)
         now = datetime.now(UTC)
         claims = {"ticket_id": str(uuid4()), "issuer_id": "old-issuer", "subject_id": "old-admin", "session_ref": "session",
                   "bot_id": "bot-a", "operation_id": "upgrade-agent-read", "action": "agent.config.read", "input_digest": digest_json({}),

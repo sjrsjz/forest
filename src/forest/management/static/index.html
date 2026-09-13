@@ -82,6 +82,17 @@
             <h3>执行与回复记录</h3><button id="job-runs-refresh" type="button" class="subtle">刷新执行记录</button><div id="job-runs" aria-live="polite"></div>
           </div>
         </section>
+        <section id="bot-memory" class="card hidden">
+          <h2>图文记忆</h2><p id="memory-config-status" role="status"></p>
+          <p class="hint">各群保留独立来源与时间主干，共享当前 Bot 的记忆。文本与图片片段分别嵌入；文本模型也能使用图片召回的来源信息。裁剪不调用摘要模型。模型版本由管理员声明，保存配置不代表已验证远端语义质量。</p>
+          <form id="memory-config"><fieldset id="memory-edit" disabled>
+            <div id="memory-fields" class="columns"></div>
+            <div class="actions"><button type="submit">预览记忆变更</button><button id="memory-reload" type="button" class="subtle">读取最新记忆配置</button></div>
+          </fieldset></form>
+          <div id="memory-preview" class="hidden"><h3>待应用记忆配置</h3><pre id="memory-diff"></pre><button id="memory-apply" type="button">应用记忆变更</button></div>
+          <h3>记忆服务状态</h3><p class="hint">下方显示运行时观测。费用不确定的请求不会自动重试；尚未完成索引的配置可能还没有可召回记录。</p>
+          <button id="memory-refresh" class="subtle" type="button">刷新记忆状态</button><pre id="memory-state" aria-live="polite"></pre>
+        </section>
         <section id="bot-agent" class="card hidden">
           <h2>Agent 与模型</h2><p id="agent-config-status" role="status"></p>
           <p class="hint">先配置模型，再将账号的回复模式设为 Agent。所有群消息都进入短期上下文；同群串行、跨群并行，裁剪不调用摘要模型。</p>

@@ -88,6 +88,19 @@ async def snapshot(conn, tables):
     }
 
 
+def expected_after_memory_permissions(before):
+    """023 adds only grants derived from each old capability; all facts stay exact."""
+    issuers = []
+    for issuer in before["bot_web_issuers"]:
+        actions = set(issuer["actions"])
+        mapped = {permission for permission, required in (
+            ("memory.config.read", "config.read"), ("memory.config.plan", "config.plan"),
+            ("memory.config.apply", "config.apply"), ("memory.read", "message.read"),
+        ) if required in actions}
+        issuers.append({**issuer, "actions": sorted(actions | mapped)})
+    return {**before, "bot_web_issuers": issuers}
+
+
 async def p3_authority(dsn):
     """Write only old SQL tables; no modern ingest monkeypatch or source API."""
     await old_authority(dsn)
@@ -298,7 +311,7 @@ async def test_actual_p3_upgrade_preserves_nonempty_history_and_exact_wire(upgra
         await store.migrate()
         await store.migrate()
         async with store.pool.connection() as conn:
-            assert await snapshot(conn, OLD_TABLES) == before
+            assert await snapshot(conn, OLD_TABLES) == expected_after_memory_permissions(before)
             ledger = await (
                 await conn.execute(
                     "SELECT version,checksum FROM public.forest_bot_schema_migrations ORDER BY version"
@@ -361,7 +374,7 @@ async def test_old_sources_backfill_restart_qualification_and_original_provenanc
         assert processed == scanned == 7
         async with store.pool.connection() as conn:
             final = await snapshot(conn, MEMORY_TABLES)
-            assert await snapshot(conn, OLD_TABLES) == before
+            assert await snapshot(conn, OLD_TABLES) == expected_after_memory_permissions(before)
         units = {r["source_event_id"]: r for r in final["bot_memory_source_units"]}
         assert set(units) == {
             "source-event-1",
@@ -449,6 +462,6 @@ async def test_old_sources_backfill_restart_qualification_and_original_provenanc
         }
         async with store.pool.connection() as conn:
             assert await snapshot(conn, MEMORY_TABLES) == final
-            assert await snapshot(conn, OLD_TABLES) == before
+            assert await snapshot(conn, OLD_TABLES) == expected_after_memory_permissions(before)
     finally:
         await store.close()

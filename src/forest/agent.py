@@ -107,6 +107,7 @@ class AgentRunner:
         resolve_client: Callable[..., Awaitable[tuple]],
         materialize_context: Callable[..., Awaitable[tuple]],
         authorize_tool: Callable[..., Awaitable[None]],
+        retrieve_memory: Callable[..., Awaitable[tuple]] | None = None,
         state=None,
     ):
         if state is None:
@@ -116,6 +117,7 @@ class AgentRunner:
         self.messages, self.kernel, self.state = messages, kernel, state
         self.resolve_spec, self.resolve_client = resolve_spec, resolve_client
         self.materialize_context, self.authorize_tool = materialize_context, authorize_tool
+        self.retrieve_memory = retrieve_memory
 
     @staticmethod
     def disposition(head: dict) -> RunDisposition:
@@ -195,6 +197,7 @@ class AgentRunner:
                 "DATA_ADMISSION_CLOSED",
                 "STORAGE_SEALED",
                 "CONTROL_CLOSED",
+                "MEMORY_QUERY_RECOVERY_REQUIRED",
             }:
                 raise AgentExecutionError(
                     exc.code, "Agent ownership changed; recover from its checkpoint", 503
@@ -239,6 +242,16 @@ class AgentRunner:
                 raise ForestError(
                     "MODEL_INPUT_CUT_CHANGED", "Media materialization changed canonical input", 409
                 )
+            evidence = None
+            if self.retrieve_memory is not None:
+                evidence, memory_media = await self.retrieve_memory(actor, spec, deepcopy(snapshot))
+                if any(key in media and media[key] != value for key, value in memory_media.items()):
+                    raise ForestError(
+                        "MODEL_MEDIA_CONFLICT",
+                        "Memory and context name conflicting original media",
+                        409,
+                    )
+                media = {**media, **memory_media}
             prepared = prepare_model_request(
                 materialized,
                 capabilities,
@@ -247,6 +260,7 @@ class AgentRunner:
                 system_prompt=values.get("system_prompt", ""),
                 tools=self._tool_schemas(spec, snapshot),
                 media=media,
+                evidence=evidence,
                 output_tokens=values.get("max_output_tokens", 1024),
                 stream=values.get("stream", True),
             )
@@ -444,6 +458,15 @@ class AgentRunner:
                     pass
                 raise
             except Exception as exc:
+                if isinstance(exc, ForestError) and exc.code == "AGENT_MEMORY_REVOKED":
+                    call = await self.kernel.store.read_call(grant_data["operation_id"])
+                    if call is None:
+                        # The current source guard rejected Kernel admission;
+                        # no durable invocation existed and no effect ran.
+                        await self._observe_tool(
+                            actor, grant, status="NOT_SENT", result={"error_code": exc.code}
+                        )
+                        return await self.state.fail(actor, run_id, exc.code)
                 if isinstance(exc, ForestError) and exc.code == "BACKPRESSURE":
                     call = await self.kernel.store.read_call(grant_data["operation_id"])
                     if call is None:
@@ -482,7 +505,7 @@ class AgentRunner:
                 actor, disposition.run_id, "agent-final:" + disposition.run_id, delivery
             )
         except ForestError as exc:
-            if exc.code != "AGENT_CONFIGURATION_REVOKED":
+            if exc.code not in {"AGENT_CONFIGURATION_REVOKED", "AGENT_MEMORY_REVOKED"}:
                 raise
             # FINAL_READY proves the entire model/tool group has closed. An
             # explicit disable/key revocation may terminate this unsent final;

@@ -395,6 +395,150 @@ class MemorySourceStore:
             result["fact_revision"] = clock["fact_revision"]
         return result
 
+    async def authorize_sources_in(
+        self,
+        conn,
+        conversation=None,
+        *,
+        input_cut=None,
+        source_unit_ids=None,
+        limit=256,
+        include_payload=True,
+        after_source_unit_id=None,
+    ):
+        """Trusted host transaction: global index or frozen conversation candidates.
+
+        Caller holds its current runtime/host and, for a conversation, its
+        authority/row locks. Global mode removes only local cut and visibility;
+        it never waives eligibility, complete lineage or suppression checks.
+        Metadata mode verifies headers and body existence without loading bytes.
+        """
+        if type(limit) is not int or not 1 <= limit <= 256 or type(include_payload) is not bool:
+            raise ValueError("Source read limits")
+        if conversation is not None:
+            if conversation["bot_id"] != self.store.bot_id:
+                raise ForestError("MEMORY_SOURCE_SCOPE", "Another Bot conversation", 403)
+            if type(input_cut) is not int or input_cut < 0:
+                raise ValueError("Source input cut")
+            if input_cut > conversation["context_applied_seq"]:
+                raise ForestError(
+                    "MEMORY_INPUT_CUT",
+                    "Source retrieval cannot advance the committed input cut",
+                    409,
+                )
+        elif input_cut is not None:
+            raise ValueError("Global source authorization has no conversation cut")
+        if source_unit_ids is not None:
+            source_unit_ids = list(source_unit_ids)
+            if len(source_unit_ids) > 256 or any(
+                not isinstance(v, str) or not 1 <= len(v) <= 256 for v in source_unit_ids
+            ):
+                raise ValueError("Source identifiers")
+        paged = conversation is None and source_unit_ids is None
+        if after_source_unit_id is not None and (
+            not paged
+            or not isinstance(after_source_unit_id, str)
+            or len(after_source_unit_id) > 256
+        ):
+            raise ValueError("Source cursor")
+        clock = await self.payloads.lock_in(conn)
+        rows = await (
+            await conn.execute(
+                "SELECT u.*,s.source_kind,s.visibility,s.platform,s.realm_id,s.identity_schema,s.channel_kind,s.channel_id,s.target_group_source_id,s.owner_conversation_id,s.has_reconstructed_order "
+                "FROM public.bot_memory_source_units u JOIN public.bot_memory_sources s USING(bot_id,source_id) "
+                "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
+                "WHERE u.bot_id=%s AND (%s::text[] IS NULL OR u.source_unit_id=ANY(%s)) "
+                "AND (%s::text IS NULL OR u.source_unit_id>%s) "
+                "AND h.state='ACTIVE' AND u.lineage_complete "
+                "AND EXISTS(SELECT 1 FROM public.bot_payload_bodies b WHERE b.bot_id=h.bot_id AND b.payload_id=h.payload_id) "
+                "AND NOT EXISTS(SELECT 1 FROM public.bot_payload_sources p "
+                "LEFT JOIN public.bot_memory_source_units d ON d.bot_id=p.bot_id AND d.source_unit_id=p.source_unit_id "
+                "LEFT JOIN public.bot_memory_sources ds ON ds.bot_id=d.bot_id AND ds.source_id=d.source_id "
+                "LEFT JOIN public.bot_payload_headers dh ON dh.bot_id=d.bot_id AND dh.payload_id=d.payload_id "
+                "WHERE p.bot_id=u.bot_id AND p.payload_id=u.payload_id AND ("
+                "d.source_unit_id IS NULL OR NOT d.lineage_complete OR d.source_revision<>p.source_revision OR dh.state<>'ACTIVE' "
+                "OR NOT EXISTS(SELECT 1 FROM public.bot_payload_bodies db WHERE db.bot_id=dh.bot_id AND db.payload_id=dh.payload_id) "
+                "OR (%s AND NOT (ds.visibility='bot_shared' OR (ds.source_kind='DIRECT' AND ds.source_id=%s) OR COALESCE(ds.owner_conversation_id=%s,false))) "
+                "OR NOT EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_memory_source_eligibility e USING(bot_id,occurrence_id) WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id) "
+                "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o LEFT JOIN public.bot_memory_source_eligibility e USING(bot_id,occurrence_id) "
+                "WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id AND o.conversation_id=%s AND (o.ingress_seq>%s OR e.occurrence_id IS NULL)) "
+                "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_message_inbox i USING(bot_id,event_id) "
+                "LEFT JOIN public.bot_conversation_triggers t ON t.bot_id=i.bot_id AND t.event_id=i.event_id "
+                "WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id AND (i.context_disposition<>'READABLE' OR (i.origin='job' AND t.status='CANCELLED'))) "
+                "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_message_echo_aliases a USING(bot_id,event_id) WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id))) "
+                + (
+                    "ORDER BY u.source_unit_id LIMIT %s"
+                    if paged
+                    else "ORDER BY u.accepted_at DESC,u.source_unit_id LIMIT %s"
+                ),
+                (
+                    self.store.bot_id,
+                    source_unit_ids,
+                    source_unit_ids,
+                    (after_source_unit_id or "") if paged else None,
+                    (after_source_unit_id or "") if paged else None,
+                    conversation is not None,
+                    conversation["group_source_id"] if conversation else None,
+                    conversation["conversation_id"] if conversation else None,
+                    conversation["conversation_id"] if conversation else None,
+                    input_cut,
+                    limit,
+                ),
+            )
+        ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                if include_payload:
+                    value = await self.payloads.read_json_in(
+                        conn, row["payload_id"], expected_deletion_epoch=clock["deletion_epoch"]
+                    )
+                else:
+                    await self.payloads.require_available_in(
+                        conn, (row["payload_id"],), expected_deletion_epoch=clock["deletion_epoch"]
+                    )
+            except ForestError as exc:
+                if exc.code not in {
+                    "PAYLOAD_ERASED",
+                    "PAYLOAD_SUPPRESSED",
+                    "SOURCE_SUPPRESSED",
+                    "PAYLOAD_UNAVAILABLE",
+                    "PAYLOAD_INCOMPLETE",
+                }:
+                    raise
+                continue
+            source = {
+                key: row[key]
+                for key in (
+                    "source_id",
+                    "source_kind",
+                    "platform",
+                    "realm_id",
+                    "identity_schema",
+                    "channel_kind",
+                    "channel_id",
+                    "target_group_source_id",
+                )
+            }
+            source["group_source_id"] = row["source_id"]
+            result.append(
+                {
+                    **row,
+                    "source": source,
+                    **(
+                        {"author": value["author"], "parts": value["parts"]}
+                        if include_payload
+                        else {}
+                    ),
+                }
+            )
+        return {
+            "deletion_epoch": clock["deletion_epoch"],
+            "fact_revision": clock["fact_revision"],
+            "input_cut": input_cut,
+            "sources": result,
+        }
+
     async def read(
         self,
         lease,
@@ -405,119 +549,23 @@ class MemorySourceStore:
         limit=64,
         include_payload=True,
     ):
-        """Return recall candidates only when their known lineage is complete.
-
-        Official replies remain registered for audit and payload diagnostics;
-        incomplete history is never an authorization basis for recall.
-        """
-        if (
-            type(input_cut) is not int
-            or input_cut < 0
-            or type(limit) is not int
-            or not 1 <= limit <= 256
-            or type(include_payload) is not bool
-        ):
-            raise ValueError("Source read limits")
-        if source_unit_ids is not None:
-            source_unit_ids = list(source_unit_ids)
-            if len(source_unit_ids) > 256 or any(
-                not isinstance(v, str) or not 1 <= len(v) <= 256 for v in source_unit_ids
-            ):
-                raise ValueError("Source identifiers")
+        """Return only candidates with complete lineage and current source rights."""
         async with self.store.pool.connection() as conn, conn.transaction():
             location = await self.messages._locate(conn, conversation_id)
             binding = await self.messages.bindings._guard(
                 conn, lease, location["binding_id"], data=False
             )
             conversation = await self.messages._conversation(conn, conversation_id)
-            if input_cut > conversation["context_applied_seq"]:
-                raise ForestError(
-                    "MEMORY_INPUT_CUT",
-                    "Source retrieval cannot advance the committed input cut",
-                    409,
-                )
-            clock = await self.payloads.lock_in(conn)
-            rows = await (
-                await conn.execute(
-                    "SELECT u.*,s.source_kind,s.visibility,s.platform,s.realm_id,s.identity_schema,s.channel_kind,s.channel_id,s.target_group_source_id,s.owner_conversation_id,s.has_reconstructed_order "
-                    "FROM public.bot_memory_source_units u JOIN public.bot_memory_sources s USING(bot_id,source_id) "
-                    "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
-                    "WHERE u.bot_id=%s AND (%s::text[] IS NULL OR u.source_unit_id=ANY(%s)) "
-                    "AND h.state='ACTIVE' AND u.lineage_complete "
-                    "AND NOT EXISTS(SELECT 1 FROM public.bot_payload_sources p "
-                    "LEFT JOIN public.bot_memory_source_units d ON d.bot_id=p.bot_id AND d.source_unit_id=p.source_unit_id "
-                    "LEFT JOIN public.bot_memory_sources ds ON ds.bot_id=d.bot_id AND ds.source_id=d.source_id "
-                    "LEFT JOIN public.bot_payload_headers dh ON dh.bot_id=d.bot_id AND dh.payload_id=d.payload_id "
-                    "WHERE p.bot_id=u.bot_id AND p.payload_id=u.payload_id AND ("
-                    "d.source_unit_id IS NULL OR NOT d.lineage_complete OR d.source_revision<>p.source_revision OR dh.state<>'ACTIVE' "
-                    "OR NOT (ds.visibility='bot_shared' OR (ds.source_kind='DIRECT' AND ds.source_id=%s) OR COALESCE(ds.owner_conversation_id=%s,false)) "
-                    "OR NOT EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_memory_source_eligibility e USING(bot_id,occurrence_id) WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id) "
-                    "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o LEFT JOIN public.bot_memory_source_eligibility e USING(bot_id,occurrence_id) "
-                    "WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id AND o.conversation_id=%s AND (o.ingress_seq>%s OR e.occurrence_id IS NULL)) "
-                    "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_message_inbox i USING(bot_id,event_id) "
-                    "LEFT JOIN public.bot_conversation_triggers t ON t.bot_id=i.bot_id AND t.event_id=i.event_id "
-                    "WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id AND (i.context_disposition<>'READABLE' OR (i.origin='job' AND t.status='CANCELLED'))) "
-                    "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_message_echo_aliases a USING(bot_id,event_id) WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id))) "
-                    "ORDER BY u.accepted_at DESC,u.source_unit_id LIMIT %s",
-                    (
-                        self.store.bot_id,
-                        source_unit_ids,
-                        source_unit_ids,
-                        conversation["group_source_id"],
-                        conversation_id,
-                        conversation_id,
-                        input_cut,
-                        limit,
-                    ),
-                )
-            ).fetchall()
-            result = []
-            for row in rows:
-                try:
-                    value = await self.payloads.read_json_in(
-                        conn, row["payload_id"], expected_deletion_epoch=clock["deletion_epoch"]
-                    )
-                except ForestError as exc:
-                    if exc.code not in {
-                        "PAYLOAD_ERASED",
-                        "PAYLOAD_SUPPRESSED",
-                        "SOURCE_SUPPRESSED",
-                        "PAYLOAD_UNAVAILABLE",
-                    }:
-                        raise
-                    continue
-                source = {
-                    key: row[key]
-                    for key in (
-                        "source_id",
-                        "source_kind",
-                        "platform",
-                        "realm_id",
-                        "identity_schema",
-                        "channel_kind",
-                        "channel_id",
-                        "target_group_source_id",
-                    )
-                }
-                source["group_source_id"] = row["source_id"]
-                result.append(
-                    {
-                        **row,
-                        "source": source,
-                        **(
-                            {"author": value["author"], "parts": value["parts"]}
-                            if include_payload
-                            else {}
-                        ),
-                    }
-                )
+            result = await self.authorize_sources_in(
+                conn,
+                conversation,
+                input_cut=input_cut,
+                source_unit_ids=source_unit_ids,
+                limit=limit,
+                include_payload=include_payload,
+            )
             await self.messages.bindings._final_guard(conn, lease, binding, data=False)
-            return {
-                "deletion_epoch": clock["deletion_epoch"],
-                "fact_revision": clock["fact_revision"],
-                "input_cut": input_cut,
-                "sources": result,
-            }
+            return result
 
     async def backfill(self, lease, *, limit=64):
         """Bounded primary-key scan; persistent cursors never sort all history.

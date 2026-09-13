@@ -183,10 +183,17 @@ async def test_upgrade_job_grants_preserve_existing_issuer_restrictions(upgrade_
         expected = set(actions)
         for permission, required in (("job.read", "message.read"), ("job.plan", "config.plan"),
                                      ("job.apply", "config.apply"), ("job.run", "service.invoke"),
-                                     ("job.cancel", "message.cancel"), ("job.replay", "service.invoke")):
+                                     ("job.cancel", "message.cancel"), ("job.replay", "service.invoke"),
+                                     # migrate() targets the current schema, including 023.
+                                     ("memory.config.read", "config.read"), ("memory.config.plan", "config.plan"),
+                                     ("memory.config.apply", "config.apply"), ("memory.read", "message.read")):
             if required in actions:
                 expected.add(permission)
         assert set(after["actions"]) == expected
+        if scope in {"readonly", "config_readonly", "empty", "invoke_only"}:
+            assert not {"memory.config.plan", "memory.config.apply"}.intersection(after["actions"])
+        if "message.read" not in actions:
+            assert "memory.read" not in after["actions"]
         assert after["enabled"] is (scope != "disabled")
         assert after["key_revision"] == before["key_revision"] and after["public_key"] == public
         now = datetime.now(UTC)

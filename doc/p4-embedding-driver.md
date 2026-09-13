@@ -63,7 +63,7 @@ finally:
 
 `EmbeddingCancelled` 继承 `asyncio.CancelledError` 并携带安全 `.result`，标记本驱动能够确认的 NOT_SENT 或 UNKNOWN。取消正常传播，数据库记录由持久 owner 负责；驱动没有隐式提交。池等待计入总 timeout。每次 dispatch 创建驱动自己拥有的 transport task；关闭只取消这些内部任务，不等待调用方捕获取消后的其他工作。transport 回收与连接池关闭各有 1 秒等待限额。若 host permit 回调吞掉取消，仍关闭底层连接池，保留未退出任务并返回 `EMBEDDING_CLEANUP_FAILED`，由宿主监督和重试清理；回调返回后也不能重新发送。外层任务在 finally 中再次关闭同一客户端不会发生相互等待。
 
-API key 只在构造客户端时成为 Authorization header，不进入 profile、prepared manifest、结果、repr 或配置读取响应。后续 Web 集成应采用只写输入、加密存储、secret_set/secret_revision 读取形式。EmbeddingProfile 不读取 Agent 的 vision 开关；文本 LLM 仍能配合该驱动进行图片召回。
+API key 只在构造客户端时成为 Authorization header，不进入 profile、prepared manifest、结果、repr 或配置读取响应。当前 [Web 记忆配置](p4-memory-config.md)使用只写输入、加密存储和 has_api_key/secret_revision 读取形式。EmbeddingProfile 不读取 Agent 的 vision 开关；文本 LLM 仍能配合该驱动进行图片召回。持久预算、索引及 Agent 接线见[记忆运行链路](p4-memory-runtime.md)。
 
 ## 验证范围
 

@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from forest.errors import ForestError
 from forest.models import PreparedModelRequest
 from forest.packages import digest_json
+from forest.storage.agent_memory import AgentMemoryStore
 from forest.storage.control import BotControl
 from forest.storage.messages import ActorLease, MessageStore, _json, _text, _tokens
 
@@ -121,6 +122,7 @@ class AgentStore:
                 "AGENT_TOOL_REVOKED", "Agent tool execution lost its current authority", 403
             )
         current = AgentStore._values(head)
+        await AgentMemoryStore.guard_run_in(conn, bot_id, head["run_id"])
         revision = head["spec"].get("config_revision", 0)
         if revision:
             cfg = await (
@@ -792,6 +794,7 @@ class AgentStore:
             raise ForestError("AGENT_BOUNDARY_CLOSED", "A model or tool group is still open", 409)
 
     async def _flush(self, conn, head):
+        await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, head["run_id"])
         conversation = await self.messages._conversation(conn, head["conversation_id"])
         rows = await (
             await conn.execute(
@@ -1088,6 +1091,7 @@ class AgentStore:
                 raise ForestError(
                     "AGENT_BUDGET_EXCEEDED", "Model exceeds Run output/time budget", 409
                 )
+            await AgentMemoryStore.check_manifest_in(conn, self.store.bot_id, step, manifest)
             if head["phase"] == "RETRY_MODEL":
                 old = await (
                     await conn.execute(
@@ -1261,6 +1265,7 @@ class AgentStore:
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, head, _, attempt = await self._current_attempt(conn, actor, permit)
             await self._configuration(conn, actor, head)
+            await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, head["run_id"])
             if (
                 attempt["status"] != "PERMITTED"
                 or attempt["wire_digest"] != prepared.payload_digest
@@ -1366,6 +1371,49 @@ class AgentStore:
                 raise ForestError(
                     "MODEL_ATTEMPT_STALE", "This model call cannot publish another result", 409
                 )
+            try:
+                await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, head["run_id"])
+            except ForestError as exc:
+                if exc.code != "AGENT_MEMORY_REVOKED":
+                    raise
+                # A known bill remains known after source revocation. Retain
+                # only identity, cost and digest; no returned text/tool body.
+                observation = {
+                    k: data.get(k)
+                    for k in (
+                        "status",
+                        "request_id",
+                        "transport_attempt_id",
+                        "payload_digest",
+                        "usage",
+                    )
+                }
+                observation["discarded_reason"] = exc.code
+                await conn.execute(
+                    "UPDATE public.bot_model_transport_attempts SET status=%s,result=%s,result_digest=%s WHERE bot_id=%s AND transport_attempt_id=%s",
+                    (
+                        data["status"],
+                        Jsonb(observation),
+                        digest_json(data),
+                        self.store.bot_id,
+                        permit.transport_attempt_id,
+                    ),
+                )
+                await self._settle(
+                    conn,
+                    permit.transport_attempt_id,
+                    status=data["status"],
+                    usage=data.get("usage"),
+                )
+                await self._abandon(conn, head)
+                await conn.execute(
+                    "UPDATE public.bot_agent_steps SET status='FAILED' WHERE bot_id=%s AND logical_step_id=%s",
+                    (self.store.bot_id, step["logical_step_id"]),
+                )
+                await self.messages._end_run_in(conn, actor, run_id=head["run_id"], reason=exc.code)
+                head = await self._checkpoint(conn, head, phase="FAILED", error_code=exc.code)
+                await self.messages._actor_final(conn, actor, binding)
+                return await self._expanded(conn, head)
             await conn.execute(
                 "UPDATE public.bot_model_transport_attempts SET status=%s,result=%s,result_digest=%s WHERE bot_id=%s AND transport_attempt_id=%s",
                 (
@@ -1551,6 +1599,7 @@ class AgentStore:
             binding, _, _, _, head = await self._guard(conn, actor, run_id)
             current = await self._configuration(conn, actor, head)
             tool = await self._tool(conn, run_id, tool_call_id)
+            await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, run_id)
             settings = self._tool_settings(head, current, tool["tool_name"])
             if head["current_step_id"] != tool["logical_step_id"] or head["phase"] not in {
                 "WAIT_TOOL",
@@ -1773,6 +1822,7 @@ class AgentStore:
     async def close_tools(self, actor, run_id):
         async with self.store.pool.connection() as conn, conn.transaction():
             binding, conversation, _, _, head = await self._guard(conn, actor, run_id)
+            await AgentMemoryStore.guard_run_in(conn, self.store.bot_id, run_id)
             tools = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_agent_tools WHERE bot_id=%s AND logical_step_id=%s ORDER BY call_index FOR UPDATE",
@@ -1947,7 +1997,14 @@ class AgentStore:
             if head["phase"] in {"FAILED", "CANCELLED", "COMPLETED"}:
                 await self.messages._actor_final(conn, actor, binding)
                 return head
-            await self._flush(conn, head)
+            try:
+                await self._flush(conn, head)
+            except ForestError as exc:
+                if exc.code != "AGENT_MEMORY_REVOKED":
+                    raise
+                # Termination must remain possible after evidence revocation;
+                # unflushed derived context cannot be admitted by this path.
+                error_code = exc.code
             await self._abandon(conn, head)
             await self.messages._end_run_in(
                 conn, actor, run_id=run_id, reason=error_code, status=status, delivery=delivery

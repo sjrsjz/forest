@@ -67,6 +67,7 @@ def main() -> None:
         password = secrets.token_urlsafe(32)
         api_token, webhook_secret = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
         model_key = secrets.token_urlsafe(24)
+        memory_key = secrets.token_urlsafe(24)
 
         def start_model():
             source = '''import json
@@ -186,11 +187,72 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                 page.locator('#bot-invoke-form button').click()
                 expect(page.locator("#bot-invoke-result")).to_contain_text(expected, timeout=15000)
 
+            memory_budgets = {
+                "alpha": {"daily_request_budget":17, "daily_token_budget":54000,
+                    "request_token_reservation":1024, "capture_daily_bytes":1048576,
+                    "capture_storage_bytes":8388608, "query_max_parts":5, "query_max_images":2},
+                "beta": {"daily_request_budget":29, "daily_token_budget":87000,
+                    "request_token_reservation":2048, "capture_daily_bytes":2097152,
+                    "capture_storage_bytes":16777216, "query_max_parts":3, "query_max_images":1},
+            }
+
+            def check_memory(bot_id: str, label: str, *, has_key: bool) -> None:
+                expect(page.locator('#memory-config-status')).to_contain_text('配置版本 1')
+                expect(page.locator('#memory-config-status')).to_contain_text('未启用')
+                expect(page.locator('#memory-config [name="enabled"]')).not_to_be_checked()
+                expect(page.locator('#memory-config [name="api_key"]')).to_have_value('')
+                for field, expected_value in memory_budgets[label].items():
+                    expect(page.locator(f'#memory-config [name="{field}"]')).to_have_value(str(expected_value))
+                result = page.evaluate("async prefix => {const config=await fetch(prefix+'/configuration');"
+                    "const status=await fetch(prefix+'/status');if(!config.ok||!status.ok)throw Error('Memory read failed');"
+                    "return {config:await config.json(),status:await status.json()};}",
+                    '/management/v1/bots/' + bot_id + '/memory')
+                serialized = json.dumps(result, ensure_ascii=False)
+                assert memory_key not in serialized and 'secret_ciphertext' not in serialized
+                assert result['config']['revision'] == 1 and result['config']['has_api_key'] is has_key
+                assert result['config']['values']['enabled'] is False
+                assert result['config']['values']['deployment_id'] == 'browser-disabled-' + label
+                assert all(result['config']['values'][name] == value for name, value in memory_budgets[label].items())
+                # Disabled configuration must not start embedding or image downloads.
+                assert result['status']['enabled'] is False
+                assert result['status']['counts']['attempts'] == {}
+                assert result['status']['counts']['captures'] == {}
+                assert result['status']['budget'] is None
+
+            def save_memory(bot_id: str, label: str, *, with_key: bool) -> None:
+                expect(page.locator('#bot-memory')).to_be_visible()
+                expect(page.locator('#memory-config-status')).to_contain_text('配置版本 0')
+                form = page.locator('#memory-config')
+                form.locator('[name="enabled"]').uncheck()
+                # A disabled loopback endpoint makes this test independent of any
+                # external embedding service; saving is not inference acceptance.
+                form.locator('[name="endpoint"]').fill('http://127.0.0.1:5902/v1/embeddings')
+                form.locator('[name="deployment_id"]').fill('browser-disabled-' + label)
+                for field, value in memory_budgets[label].items():
+                    form.locator(f'[name="{field}"]').fill(str(value))
+                if with_key:
+                    form.locator('[name="api_key"]').fill(memory_key)
+                prefix = '/management/v1/bots/' + bot_id + '/memory'
+                with page.expect_response(lambda response: response.url.endswith(prefix + '/change-plans')) as planned:
+                    form.locator('button[type="submit"]').click()
+                assert planned.value.ok
+                assert memory_key not in planned.value.text()
+                expect(page.locator('#memory-preview')).to_be_visible()
+                assert memory_key not in page.locator('#memory-diff').text_content()
+                expect(page.locator('#memory-diff')).to_contain_text(str(memory_budgets[label]['daily_token_budget']))
+                with page.expect_response(lambda response: response.url.endswith(prefix + '/management-requests')) as applied:
+                    page.locator('#memory-apply').click()
+                assert applied.value.ok and memory_key not in applied.value.text()
+                check_memory(bot_id, label, has_key=with_key)
+
             alpha = create_bot("Alpha 浏览器 Bot", 2)
             invoke(3, "：6（状态修订 1）")
+            save_memory(alpha, 'alpha', with_key=True)
             beta = create_bot("Beta 浏览器 Bot", 1)
             invoke(3, "：3（状态修订 1）")
+            save_memory(beta, 'beta', with_key=False)
             select_bot(page, alpha)
+            check_memory(alpha, 'alpha', has_key=True)
             rival.locator("#nav-bots").click()
             select_bot(rival, alpha)
             rival.locator('#bot-config-fields [name="multiplier"]').fill("77")
@@ -327,6 +389,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             )
             page.locator("#nav-bots").click()
             select_bot(page, alpha)
+            check_memory(alpha, 'alpha', has_key=True)
             invoke(1, "：14（状态修订 3）")
             page.locator('#binding-list button').first.click()
             expect(page.locator('#binding-state')).to_contain_text('在线', timeout=30000)
@@ -342,6 +405,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             group_message(5, '/chat 重启后继续')
             expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 6', timeout=20000)
             select_bot(page, beta)
+            check_memory(beta, 'beta', has_key=False)
             invoke(1, "：4（状态修订 2）")
 
             # Import complete native packages through the authenticated WebUI.
@@ -428,6 +492,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Web model configuration, real Agent HTTP reply and credential recovery after restart",
                         "Web Jobs source refresh, preview/apply, idempotent manual Agent reply, delivery, disable and restart persistence",
                         "Private child controls saved and recovered after restart",
+                        "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
                         "logout revocation",

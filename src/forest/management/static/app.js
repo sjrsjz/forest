@@ -1,5 +1,6 @@
 import { bindingsPanel } from './bindings.js';
 import { agentPanel } from './agent-panel.js';
+import { memoryPanel } from './memory.js';
 import { jobsPanel } from './jobs-panel.js';
 import { schemaForm } from './schema-form.js';
 
@@ -136,6 +137,7 @@ let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0;
 let readConfigFields, readInvokeFields, historyBefore = null, importKey = null;
 const bindingPanel = bindingsPanel(api, busy, notice);
 const modelPanel = agentPanel(api, busy, notice);
+const memoriesPanel = memoryPanel(api, busy, notice);
 const scheduledPanel = jobsPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
@@ -238,6 +240,7 @@ async function selectBot(id) {
   const epoch = ++selectionEpoch;
   bindingPanel.reset();
   modelPanel.reset();
+  memoriesPanel.reset();
   scheduledPanel.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
@@ -265,6 +268,8 @@ async function selectBot(id) {
     await modelPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await scheduledPanel.select(row);
+    if (epoch !== selectionEpoch) return;
+    await memoriesPanel.select(row);
   }
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));
