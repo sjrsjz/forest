@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+from importlib.resources import files
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -12,6 +13,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.kernel import Kernel
@@ -347,3 +349,78 @@ async def test_job_delay_schema_and_operation_conflicts_are_enforced(
         assert identity.value.code == "JOB_HANDLER_IDENTITY_CONFLICT"
     finally:
         await kernel.close()
+
+
+async def test_component_job_management_permission_upgrade_preserves_least_privilege(
+    component_job_store,
+):
+    scopes = {
+        "readonly": ["message.read"],
+        "config-reader": ["config.read"],
+        "replay": ["message.read", "service.invoke"],
+        "planner": ["config.read", "config.plan"],
+        "apply-without-cancel": ["message.read", "config.apply"],
+        "full": [
+            "message.read",
+            "service.invoke",
+            "config.plan",
+            "config.apply",
+            "message.cancel",
+        ],
+        "empty": [],
+    }
+    async with component_job_store.pool.connection() as conn, conn.transaction():
+        for issuer, actions in scopes.items():
+            await conn.execute(
+                "INSERT INTO public.bot_web_issuers("
+                "bot_id,issuer_id,key_revision,public_key,actions) VALUES (%s,%s,1,%s,%s)",
+                (
+                    component_job_store.bot_id,
+                    issuer,
+                    "component-job-permission-test-key",
+                    Jsonb(actions),
+                ),
+            )
+        source = (
+            files("forest.storage")
+            .joinpath("bot_migrations", "057_component_job_management.sql")
+            .read_text(encoding="utf-8")
+        )
+        permission_upgrade = "UPDATE public.bot_web_issuers" + source.split(
+            "UPDATE public.bot_web_issuers", 1
+        )[1]
+        await conn.execute(permission_upgrade)
+        rows = await (
+            await conn.execute(
+                "SELECT issuer_id,actions FROM public.bot_web_issuers "
+                "WHERE issuer_id=ANY(%s)",
+                (list(scopes),),
+            )
+        ).fetchall()
+    actual = {row["issuer_id"]: set(row["actions"]) for row in rows}
+    assert actual["readonly"] == {"message.read", "component_job.read"}
+    assert actual["config-reader"] == {"config.read", "component_job.read"}
+    assert actual["replay"] == {
+        "message.read",
+        "service.invoke",
+        "component_job.read",
+        "component_job.replay",
+    }
+    assert actual["planner"] == {
+        "config.read",
+        "config.plan",
+        "component_job.read",
+        "component_job.retire.plan",
+    }
+    assert actual["apply-without-cancel"] == {
+        "message.read",
+        "config.apply",
+        "component_job.read",
+    }
+    assert actual["full"] == set(scopes["full"]) | {
+        "component_job.read",
+        "component_job.replay",
+        "component_job.retire.plan",
+        "component_job.retire.apply",
+    }
+    assert actual["empty"] == set()

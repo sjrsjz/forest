@@ -124,6 +124,13 @@ def expected_after_memory_permissions(before):
                 actions.add("event.retire.plan")
             if {"config.apply", "message.cancel"} <= actions:
                 actions.add("event.retire.apply")
+            actions.add("component_job.read")
+            if "service.invoke" in actions:
+                actions.add("component_job.replay")
+            if "config.plan" in actions:
+                actions.add("component_job.retire.plan")
+            if {"config.apply", "message.cancel"} <= actions:
+                actions.add("component_job.retire.apply")
         issuers.append({**issuer, "actions": sorted(actions)})
     return {**before, "bot_web_issuers": issuers}
 

@@ -1,6 +1,6 @@
 # P0 组件持久任务详细设计
 
-状态：实现基线。本文中的“组件任务”是插件请求内核稍后执行的持久工作，和
+状态：首版已实现，包含显式死信回放、处理器退役和 WebUI。本文中的“组件任务”是插件请求内核稍后执行的持久工作，和
 `p3-jobs.md` 中向某个群会话的唯一 Agent 注入提示词的“会话定时任务”是两个独立
 领域。组件任务不会创建 Agent、不会获得群上下文，也不会直接形成群聊回复。
 
@@ -47,7 +47,8 @@ async def rebuild(self, task, ctx):
 ```
 
 `handler_id` 是同一 Bot 内、同一组件的稳定任务身份。`input_schema` 的摘要在该身份的
-生命周期内不可变化；修改输入契约需要新身份。`max_attempts`、`timeout_s` 和
+生命周期内不可变化；修改输入契约需要新身份。处理器一旦显式退役不能由普通部署重新
+启用；恢复相同语义也必须使用新的 `handler_id`。`max_attempts`、`timeout_s` 和
 `max_concurrency` 可以随 generation 调整，并在 publication 后用于新认领。省略时分别
 是 8、30 秒和 1；上限分别是 32、120 秒和 16。
 
@@ -86,16 +87,18 @@ Web 操作者权限，也不携带可延长的 bearer token。
 
 `bot_component_job_heads` 保存稳定 handler 到当前 generation 的路由头：组件、输入
 schema 摘要不可改变；publication 仅更新 generation 和可调预算。已有活动 handler 不能
-通过普通部署消失，P0 会以 `JOB_HANDLER_REMOVAL_REQUIRES_MANAGEMENT` 拒绝。显式退休和
-死信重放沿用事件管理的 plan/apply/CAS 模式，列入后续管理切片。
+通过普通部署消失，P0 会以 `JOB_HANDLER_REMOVAL_REQUIRES_MANAGEMENT` 拒绝。显式退役后
+head 立即停止新调度与认领，普通部署才可移除声明。详细管理协议见
+[组件持久任务管理](p0-component-job-management.md)。
 
 `bot_component_job_clock` 为每个 Bot 分配严格递增 `job_seq`。`bot_component_jobs` 保存
 不可变工作事实和可变执行状态：
 
 - 不可变：任务身份、顺序、执行主体、来源、调度 operation/input digest、正文引用与
   摘要、首次可用时间、创建时的最大尝试数；
-- 可变：`PENDING / INFLIGHT / RETRY_WAIT / ACKED / DEAD`、尝试/派发计数、当前 claim、
-  当前调用 operation、结果正文引用、最后错误和完成时间。
+- 可变：`PENDING / INFLIGHT / RETRY_WAIT / ACKED / DEAD / RETIRED`、尝试/派发计数、
+  回放 epoch、管理修订、当前 claim、当前调用 operation、结果正文引用、最后错误、完成
+  和退役时间。
 
 唯一键 `(bot_id, component_id, operation_id)` 提供调度幂等性。相同 operation 和相同
 handler、payload、delay 返回原 receipt；任何差异返回 `IDEMPOTENCY_CONFLICT`。任务正文
@@ -114,7 +117,7 @@ generation 与 route epoch，以及当前 attempt operation。任务 handler 经
 admission、claim、handler head、generation route 和 route epoch。Worker 只接受 manifest
 已登记的 `invoke_job` 目标。
 
-调用 operation 由 `job_id + attempt + dispatch` 派生。新尝试先增加 attempt；如果容量竞争
+调用 operation 由 `job_id + replay_epoch + dispatch` 派生。新尝试先增加 attempt；如果容量竞争
 发生在创建调用账本之前，deferral 回退这次尝试。Worker 已经可能执行后，claim 到期或 ACK
 丢失时继续使用原 operation：
 
@@ -146,15 +149,15 @@ generation 的任务会在发送前被 route fence 拒绝，且在调用尚未�
 payload clock再锁 job clock、head 和 job。任何事务都不得在持有数据库锁时调用 Worker
 或外部 API。
 
-## 7. 可观测性与后续管理面
+## 7. 可观测性与管理面
 
 内核审计记录 `component.job.scheduled` 和 `component.job.dead`，正文不进入审计 details。
-SDK receipt、日志和未来 Web API 只显示有界元数据。P0 的管理后续切片应增加：
+SDK receipt、日志和 Web API 只显示有界元数据。Bot 后台的“组件持久任务”面板已经提供：
 
 - 按 Bot、组件、handler、状态读取任务元数据；
 - 仅对 DEAD 任务执行带 CAS 的重放；
 - 处理器退休 preview/apply，并拒绝有 INFLIGHT 工作时 apply；
-- WebUI 区分“组件持久任务”和“会话 Agent 定时任务”，避免产品语义混淆。
+- 明确区分“组件持久任务”和“会话 Agent 定时任务”，避免产品语义混淆。
 
 ## 8. 必须验证的性质
 
@@ -166,3 +169,6 @@ SDK receipt、日志和未来 Web API 只显示有界元数据。P0 的管理后
 - Bot maintenance、host lease、policy revision 和总调用容量均能阻止新派发；
 - 正文删除使任务终止为 DEAD，且任何元数据接口都不泄露正文；
 - prepare 时 manifest/装饰器不一致、隐式删除 handler、未获调度 capability 均被拒绝。
+- 并发死信回放只有一个 CAS 胜者；相同管理幂等键返回原回执；
+- 退役立即阻止旧 generation 提交新任务，已成功调度操作的精确重试仍返回原 receipt；
+- WebUI 在切换 Bot 或正文失效后丢弃晚到读取，窄屏不产生横向溢出。

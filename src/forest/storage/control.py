@@ -67,6 +67,8 @@ ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "serv
            "memory.forget.read", "memory.forget.plan", "memory.forget.apply",
            "memory.association.read", "memory.association.plan", "memory.association.apply",
            "event.read", "event.replay", "event.retire.plan", "event.retire.apply",
+           "component_job.read", "component_job.replay", "component_job.retire.plan",
+           "component_job.retire.apply",
            "binding.create", "binding.read", "binding.plan", "binding.apply",
            "message.read", "message.cancel", "delivery.reconcile")
 _REVISION_CLAIMS = frozenset(

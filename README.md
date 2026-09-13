@@ -109,7 +109,7 @@ forest dev --bot example --watch examples/counter --grant state.read --grant sta
 
 组件事实通过 manifest `publishes/subscribes` 与代码 `@subscribe(...)` 显式声明。`ctx.events.publish(...)` 在宿主核验当前调用、能力、契约和 schema 后持久写入事件正文引用及每订阅 delivery；dispatcher 按稳定 subscriber 身份独立确认、重试和死信，热重载只切换执行代际。Bot 页的「组件事件」面板可以筛选投递、显式回放 DEAD、预览并提交订阅退役；页面只显示元数据，不读取事件正文。详见 [P0 持久组件事件](doc/p0-component-events.md)和[组件事件管理](doc/p0-component-event-management.md)。
 
-插件自有的延迟或长工作通过 manifest `jobs`、代码 `@job(...)` 和调用内 `ctx.jobs.schedule(...)` 提交。宿主持久化正文引用、固定组件主体与尝试/超时/并发预算，使用调用账本处理丢失 ACK，并在兼容热重载后交给新代际。它与上面的群会话「计划任务」分属不同协议，不创建新的模型 Agent；详见[组件持久任务详细设计](doc/p0-component-jobs.md)。
+插件自有的延迟或长工作通过 manifest `jobs`、代码 `@job(...)` 和调用内 `ctx.jobs.schedule(...)` 提交。宿主持久化正文引用、固定组件主体与尝试/超时/并发预算，使用调用账本处理丢失 ACK，并在兼容热重载后交给新代际。Bot 页的「组件持久任务」面板可筛选元数据、显式回放 DEAD，并以 preview/apply 退役处理器；退役会立即封住旧代的新调度和认领。它与上面的群会话「计划任务」分属不同协议，不创建新的模型 Agent；详见[组件持久任务详细设计](doc/p0-component-jobs.md)和[组件持久任务管理](doc/p0-component-job-management.md)。
 
 ## 远程入口与端口
 
