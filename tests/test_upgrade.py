@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from retention_upgrade import content as retained_content
 
 from forest.storage.bot import BotStore
 from forest.storage.postgres import PostgresStore
@@ -118,15 +119,24 @@ async def test_bot_001_upgrade_preserves_results_state_and_backfills_root_identi
         await store.migrate()
         async with store.pool.connection() as conn:
             call = await (await conn.execute(
-                "SELECT root_call_id,parent_call_id,call_depth,dependency_components,result "
+                "SELECT root_call_id,parent_call_id,call_depth,dependency_components,status,input_digest,"
+                "result,result_payload_id,result_digest "
                 "FROM bot_calls WHERE call_id='old-call'"
             )).fetchone()
-            assert call == {"root_call_id": "old-call", "parent_call_id": None, "call_depth": 0,
-                            "dependency_components": [], "result": {"value": 7}}
+            original_call = {"root_call_id": "old-call", "parent_call_id": None, "call_depth": 0,
+                             "dependency_components": [], "status": "COMPLETED", "input_digest": "input"}
+            assert {key: call[key] for key in original_call} == original_call
+            # The old columns are sealed after 037. Independently audit their
+            # referenced bytes rather than requiring a second plaintext copy.
+            assert call["result"] is None and call["result_payload_id"]
+            assert call["result_digest"] == "sha256:" + hashlib.sha256(b'{"value":7}').hexdigest()
+            assert await retained_content(conn, "old-bot", call["result_payload_id"]) == {"value": 7}
             state = await (await conn.execute(
-                "SELECT revision,value FROM bot_component_state WHERE key='counter'"
+                "SELECT revision,value,value_payload_id,value_digest FROM bot_component_state WHERE key='counter'"
             )).fetchone()
-            assert state == {"revision": 7, "value": 7}
+            assert state["revision"] == 7 and state["value"] is None and state["value_payload_id"]
+            assert state["value_digest"] == "sha256:" + hashlib.sha256(b"7").hexdigest()
+            assert await retained_content(conn, "old-bot", state["value_payload_id"]) == 7
             grants = await (await conn.execute(
                 "SELECT capability_grants FROM bot_generations WHERE generation_id='old-gen'"
             )).fetchone()

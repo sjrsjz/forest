@@ -1863,7 +1863,8 @@ class AgentStore:
 
         try:
             await guard_payload_scope_in(
-                conn, self.store, conversation, head["selected_input_end_seq"], payload_ids
+                conn, self.store, conversation, head["selected_input_end_seq"], payload_ids,
+                legacy_run_id=head["run_id"],
             )
         except ForestError as exc:
             if exc.code != "PAYLOAD_SCOPE_DENIED":

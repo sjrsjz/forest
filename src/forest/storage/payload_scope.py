@@ -25,7 +25,7 @@ def _denied():
     )
 
 
-async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_ids):
+async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_ids, *, legacy_run_id=None):
     if (
         not isinstance(conversation, dict) or conversation.get("bot_id") != store.bot_id
         or type(input_cut) is not int or input_cut < 0
@@ -55,6 +55,32 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
     )).fetchall()
     if len(initial) > MAX_SOURCES:
         raise _denied()
+    from forest.storage.payload_history import authorize_legacy_history_in, legacy_marker
+
+    marker, local = legacy_marker(store.bot_id), set()
+    historical = any(row["source_unit_id"] == marker for row in initial)
+    if historical:
+        extra, local = await authorize_legacy_history_in(
+            conn, store, conversation, input_cut, ids, run_id=legacy_run_id,
+        )
+        extra = sorted(extra)
+        clock = await payloads.lock_in(conn)
+        for offset in range(0, len(extra), 256):
+            try:
+                await payloads.require_available_in(
+                    conn, extra[offset:offset + 256], expected_deletion_epoch=clock["deletion_epoch"],
+                )
+            except ForestError as exc:
+                if exc.code not in {"PAYLOAD_ERASED", "SOURCE_SUPPRESSED", "PAYLOAD_INCOMPLETE", "SOURCE_LINK_SCOPE_LIMIT"}:
+                    raise
+                raise _denied() from None
+        initial = await (await conn.execute(
+            "SELECT DISTINCT source_unit_id,source_revision,part_id FROM public.bot_payload_sources "
+            "WHERE bot_id=%s AND payload_id=ANY(%s) LIMIT %s",
+            (store.bot_id, sorted(set(ids) | set(extra)), MAX_SOURCES + 1),
+        )).fetchall()
+        if len(initial) > MAX_SOURCES:
+            raise _denied()
     linked = await (await conn.execute(
         "SELECT * FROM public.forest_source_dependency_closure(%s,%s,%s)",
         (store.bot_id, Jsonb(initial), MAX_SOURCES),
@@ -73,13 +99,17 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
     )).fetchone()
     if suppressed:
         raise _denied()
+    historical_refs = local | ({marker} if historical else set())
+    if any(ref.source_revision != 1 or ref.part_id != "*" for ref in refs if ref.source_unit_id in historical_refs):
+        raise _denied()
     domains = {row["source_unit_id"] for row in await (await conn.execute(
         "SELECT source_unit_id FROM public.bot_payload_domains WHERE bot_id=%s AND source_unit_id=ANY(%s)",
         (store.bot_id, sorted({ref.source_unit_id for ref in refs})),
     )).fetchall()}
     if any(ref.source_revision != 1 or ref.part_id != "*" for ref in refs if ref.source_unit_id in domains):
         raise _denied()
-    required = sorted({ref.source_unit_id for ref in refs if ref.source_unit_id not in domains})
+    exempt = domains | historical_refs
+    required = sorted({ref.source_unit_id for ref in refs if ref.source_unit_id not in exempt})
     sources = MemorySourceStore(SimpleNamespace(store=store))
     authorized = {}
     for offset in range(0, len(required), 256):
@@ -93,7 +123,7 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
         authorized.update({row["source_unit_id"]: row for row in current["sources"]})
     part_sources = set()
     for ref in refs:
-        if ref.source_unit_id in domains:
+        if ref.source_unit_id in exempt:
             continue
         if ref.source_revision != authorized[ref.source_unit_id]["source_revision"]:
             raise _denied()
@@ -115,5 +145,5 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
         )).fetchall()
         found_parts.update((row["source_unit_id"], row["part_id"]) for row in parts)
     if any((ref.source_unit_id, ref.part_id) not in found_parts for ref in refs
-           if ref.source_unit_id not in domains and ref.part_id != "*"):
+           if ref.source_unit_id not in exempt and ref.part_id != "*"):
         raise _denied()

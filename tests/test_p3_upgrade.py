@@ -13,6 +13,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from retention_upgrade import content as retained_content
 from test_upgrade import upgrade_database as upgrade_database
 
 from forest.errors import ForestError
@@ -198,7 +199,13 @@ async def test_upgrade_preserves_old_call_trees_control_lane_and_pending_media_s
             assert by_id["old-control"]["admission_lane"] == "CONTROL"
             assert by_id["old-control"]["control_service"] == "onebot.normalize"
             assert [BotStore._grant_value(row).agent_tool_id for row in calls] == [None, None, None]
-            assert all(row["result"] == {"value": row["call_id"]} for row in calls)
+            # Migration 037 moves the body; the original call tree and exact
+            # result remain independently verifiable through its payload ID.
+            for call in calls:
+                expected_result = {"value": call["call_id"]}
+                assert call["result"] is None and call["result_payload_id"]
+                assert call["result_digest"] == digest_json(expected_result)
+                assert await retained_content(conn, call["bot_id"], call["result_payload_id"]) == expected_result
             row = await (await conn.execute("SELECT * FROM public.bot_inbound_media_refs WHERE media_ref='old-media'")).fetchone()
             assert row["status"] == "PENDING_FETCH" and row["capture_epoch"] == 0
             assert all(row[key] is None for key in ("capture_id", "capture_expires_at", "retry_after", "error_code"))

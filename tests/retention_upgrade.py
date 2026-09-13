@@ -6,6 +6,7 @@ import json
 from psycopg import sql
 
 _FIELDS = {
+    "bot_calls": {"result": "result_payload_id"},
     "bot_agent_steps": {"snapshot": "snapshot_payload_id", "output": "output_payload_id", "closed_parts": "closed_parts_payload_id"},
     "bot_model_request_manifests": {"manifest": "manifest_payload_id"},
     "bot_model_transport_attempts": {"request_body": "request_payload_id", "result": "result_payload_id"},

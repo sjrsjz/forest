@@ -10,6 +10,18 @@ Plugin 对象会跨调用存活。调用 A 读取的内容可能保存在对象�
 
 配置、prepare 状态、每个调用输入、状态读取、子调用结果、迁移源和 restore 候选都在事务提交后才交给 Worker。`commit_state` 和 `finish_call` 使用该代际的整个集合构造派生载荷，并在最后提交点复验全部来源。子 Worker 的结果在交给父 Worker 前加入父代际集合，命中已完成回执的路径同样登记。
 
+```mermaid
+flowchart LR
+    I[配置、状态、调用输入] --> H[Host 登记交付与累积依赖]
+    C[子服务真实回执] --> H
+    H -->|提交后交付正文| W[固定代际 Worker]
+    W -->|结果或状态写入| G[最终提交守卫]
+    H -->|整代依赖集合| G
+    G --> P[派生载荷与永久事实]
+    D[来源撤销] --> G
+    D --> S[关闭准入与进程回收]
+```
+
 ## 2. 容量与回收
 
 每代最多 256 个直接暴露载荷。第 256 个仍可接纳；下一个新增成员使内容事务回滚，包含尚未提交的 Call/input header。Host 使用这次真实候选的稳定 ID 和预期 exposure revision，在独立事务中证明容量溢出并标记 `EXHAUSTED`。Worker RPC 不能调用这个管理入口或提供其参数。
@@ -62,6 +74,8 @@ OneBot 接收路径先验证签名和 Binding，再用 Host 固定解析器确�
 
 非 Agent 回复拥有真实 Kernel result 父链时，登记完整的 Reply 来源依赖；相同 operation 重放复验原父链，且不改写原 SourceUnit。旧的不完整回复不会仅因重放而被升级成完整来源。
 
+旧 Run 的迁移内容有单独的本会话恢复证明。通用 legacy 标记仅用于保守删除；读取方必须沿有界父依赖图，把每个携带该标记的分支追溯到冻结 031 owner 哈希对应的真实旧 Run 行，或当前切口内已发布的本会话正文。旧 snapshot 再次核对实际输入身份、切口、READABLE 状态、Job 取消及回声资格，原 HTTP 请求字节保持不变。合法历史与未发表 Kernel 缓存混在一起仍被拒绝；这个例外不升级 `lineage_complete`，也不授权跨群召回。普通来源、当前权限和删除屏障继续检查；证明图按节点/边限额及线性拓扑遍历处理。
+
 ## 6. 事务与外部边界
 
 统一顺序为组件 lifecycle/route → runtime/policy → Host → Call 树及状态头 → 排序后的 generation exposure heads → memory clock → payload。涉及多个代际时先取得完整的 exposure 锁集合，再读取 Agent 或记忆载荷。全新 generation 的 exposure head 在本事务内创建，尚未对其他事务可见。
@@ -79,5 +93,6 @@ OneBot 接收路径先验证签名和 Binding，再用 Host 固定解析器确�
 - [配置域的图资格与真实主干发布](../tests/test_graph_source_domains.py)。
 - [状态迁移与删除恢复](../tests/test_state_migration.py)、[平台来源和实际发送回执](../tests/test_platform_payloads.py)。
 - [来源去重与总量](../tests/test_payload_source_union.py)、[业务结果的会话可见性](../tests/test_payload_visibility.py)。
+- [旧 Run 与本会话已发布历史的逐分支证明](../tests/test_payload_history.py)、[旧流水线精确请求与后续 Run 恢复](../tests/test_memory_pipeline_upgrade.py)。
 
 最终已执行的组合验证、平台差异及镜像证据记录于[实现状态](implementation-status.md)。

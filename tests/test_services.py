@@ -531,13 +531,27 @@ class Component(Plugin):
     )
     await kernel.install_many([spec(caller), spec(target)])
     assert await invoke(kernel) == {"code": "DEADLINE_EXCEEDED"}
-    assert not kernel._calls
+    assert not kernel._calls and not kernel._call_bindings and kernel._call_count == 0
     assert all(component.worker.alive for component in kernel.components.values())
+    assert all(
+        component.worker._admitted == 0
+        and not component.worker._reserved_calls
+        and not component.worker._invocation_tasks
+        for component in kernel.components.values()
+    )
     async with kernel.store.pool.connection() as conn:
         rows = await (
-            await conn.execute("SELECT status FROM bot_calls ORDER BY call_depth")
+            await conn.execute("SELECT call_id,parent_call_id,call_depth,status FROM bot_calls ORDER BY call_depth")
         ).fetchall()
-    assert [row["status"] for row in rows] == ["COMPLETED", "FAILED"]
+        assert (await (await conn.execute("SELECT count(*) AS n FROM bot_live_calls")).fetchone())["n"] == 0
+    assert len(rows) in {1, 2}
+    assert rows[0]["status"] == "COMPLETED" and rows[0]["call_depth"] == 0
+    assert rows[0]["parent_call_id"] is None
+    # The 100 ms child budget includes admission. Expiry before that transaction
+    # commits leaves no child row; a committed child must have been failed.
+    for child in rows[1:]:
+        assert child["status"] == "FAILED" and child["call_depth"] == 1
+        assert child["parent_call_id"] == rows[0]["call_id"]
 
 
 @pytest.mark.postgres

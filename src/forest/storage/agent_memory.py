@@ -244,6 +244,7 @@ class AgentMemoryStore:
                 await guard_payload_scope_in(
                     conn, scope, head["conversation"], head["selected_input_end_seq"],
                     [row["payload_id"] for row in refs if row["payload_id"] is not None],
+                    legacy_run_id=run_id,
                 )
             except ForestError as exc:
                 if exc.code != "PAYLOAD_SCOPE_DENIED":

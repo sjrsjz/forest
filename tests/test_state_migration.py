@@ -462,7 +462,7 @@ async def test_one_hundred_reload_cycles_have_stable_owned_resource_baseline(
     retired = []
     try:
         await kernel.install(snapshot, grants=GRANTS)
-        initial_tasks = len(asyncio.all_tasks())
+        initial_tasks = asyncio.all_tasks()
         for index in range(100):
             retired.append(kernel.components["example.counter"].worker)
             await kernel.install(snapshot, grants=GRANTS, operation_id=f"reload-{index}")
@@ -473,8 +473,32 @@ async def test_one_hundred_reload_cycles_have_stable_owned_resource_baseline(
                 "value": index + 1,
                 "revision": index + 1,
             }
-        await asyncio.sleep(0)
-        assert len(asyncio.all_tasks()) <= initial_tasks
+        # Pool/IPC completion and the supervised periodic scan can still be
+        # finishing after the last call. Require the original task-count bound
+        # throughout an idle interval, without excluding or allowing extra tasks.
+        loop = asyncio.get_running_loop()
+        settle_deadline = loop.time() + 5
+        quiet_since = None
+        while True:
+            current_tasks = asyncio.all_tasks()
+            now = loop.time()
+            if len(current_tasks) <= len(initial_tasks):
+                quiet_since = now if quiet_since is None else quiet_since
+                if now - quiet_since >= 0.2:
+                    break
+            else:
+                quiet_since = None
+            if now >= settle_deadline:
+                extras = sorted(
+                    (task.get_name(), repr(task.get_coro()))
+                    for task in current_tasks - initial_tasks
+                )
+                pytest.fail(
+                    f"Task count did not settle to baseline {len(initial_tasks)}; "
+                    f"current={len(current_tasks)}, extra tasks={extras}"
+                )
+            await asyncio.sleep(0.05)
+        assert len(current_tasks) <= len(initial_tasks)
     finally:
         await kernel.close()
     assert not kernel.cleanup_errors and not kernel._workers
