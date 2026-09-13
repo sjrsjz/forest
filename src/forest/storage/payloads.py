@@ -102,13 +102,7 @@ class PayloadStore:
         # Exact platform aliases discovered after body publication live in a
         # separate immutable ledger. Reading or writing an old manifest must
         # still consult their transitive prerequisites; the manifest is not edited.
-        linked = await (await conn.execute(
-            "SELECT * FROM public.forest_source_dependency_closure(%s,%s,%s)",
-            (self.store.bot_id, Jsonb([asdict(source) for source in sources]), MAX_SOURCES),
-        )).fetchall()
-        if len(linked) > MAX_SOURCES:
-            raise ForestError("SOURCE_LINK_SCOPE_LIMIT", "Source dependency closure exceeds its limit", 422)
-        sources = tuple(SourceRef(**row) for row in linked)
+        sources = await self.source_dependency_closure_in(conn, sources)
         rows = await (await conn.execute(
             "SELECT source_unit_id,part_id FROM public.bot_payload_suppression "
             "WHERE bot_id=%s AND source_unit_id=ANY(%s)",
@@ -121,6 +115,35 @@ class PayloadStore:
                    for unit, part in targets):
                 raise ForestError("SOURCE_SUPPRESSED", "A source dependency was removed", 409)
 
+    async def source_dependency_closure_in(
+        self, conn, sources, *, maximum=None, fail_on_limit=True
+    ):
+        """Expand late source links, avoiding recursive SQL when none can match."""
+        maximum = MAX_SOURCES if maximum is None else maximum
+        sources = tuple(sorted(set(sources)))
+        if not sources:
+            return ()
+        linked = await (
+            await conn.execute(
+                "SELECT 1 FROM public.bot_payload_source_links WHERE bot_id=%s "
+                "AND dependent_source_unit_id=ANY(%s) LIMIT 1",
+                (self.store.bot_id, sorted({source.source_unit_id for source in sources})),
+            )
+        ).fetchone()
+        if linked is None:
+            return sources
+        rows = await (
+            await conn.execute(
+                "SELECT * FROM public.forest_source_dependency_closure(%s,%s,%s)",
+                (self.store.bot_id, Jsonb([asdict(source) for source in sources]), maximum),
+            )
+        ).fetchall()
+        if len(rows) > maximum and fail_on_limit:
+            raise ForestError(
+                "SOURCE_LINK_SCOPE_LIMIT", "Source dependency closure exceeds its limit", 422
+            )
+        return tuple(sorted(SourceRef(**row) for row in rows))
+
     async def _header_in(self, conn, payload_id: str) -> dict:
         _identifier(payload_id)
         row = await (await conn.execute(
@@ -131,16 +154,63 @@ class PayloadStore:
             raise ForestError("PAYLOAD_NOT_FOUND", "Payload does not exist in this Bot", 404)
         return row
 
+    @staticmethod
+    async def _effective_source_relation_in(conn):
+        row = await (
+            await conn.execute(
+                "SELECT to_regclass('public.forest_payload_effective_sources') AS name"
+            )
+        ).fetchone()
+        return (
+            "public.forest_payload_effective_sources"
+            if row["name"] is not None
+            else "public.bot_payload_sources"
+        )
+
+    async def effective_sources_in(self, conn, payload_id):
+        """Original sources plus proven prerequisites of frozen old copies."""
+        relation = await self._effective_source_relation_in(conn)
+        rows = await (await conn.execute(
+            f"SELECT source_unit_id,source_revision,part_id FROM {relation} "
+            "WHERE bot_id=%s AND payload_id=%s LIMIT %s",
+            (self.store.bot_id, payload_id, MAX_SOURCES + 1),
+        )).fetchall()
+        if len(rows) > MAX_SOURCES:
+            raise ForestError("SOURCE_LINK_SCOPE_LIMIT", "Source dependency union exceeds its limit", 422)
+        return tuple(SourceRef(**row) for row in rows)
+
     async def require_available_in(self, conn, payload_ids, *, expected_deletion_epoch: int):
         await self._epoch_in(conn, expected_deletion_epoch)
         ids = tuple(payload_ids)
         if len(ids) > MAX_PARENTS:
             raise ForestError("PAYLOAD_DEPENDENCY_LIMIT", "Too many payload dependencies", 422)
-        for payload_id in sorted(set(ids)):
+        identities = tuple(sorted(set(ids)))
+        for payload_id in identities:
+            _identifier(payload_id)
+        legacy = {
+            row["payload_id"]
+            for row in await (
+                await conn.execute(
+                    "SELECT DISTINCT payload_id FROM public.bot_payload_legacy_closure "
+                    "WHERE bot_id=%s AND payload_id=ANY(%s)",
+                    (self.store.bot_id, list(identities)),
+                )
+            ).fetchall()
+        }
+        for payload_id in identities:
             row = await self._header_in(conn, payload_id)
             if row["state"] != "ACTIVE":
                 raise ForestError("PAYLOAD_ERASED", "Payload content is no longer available", 410)
-            await self._check_sources_in(conn, tuple(SourceRef(**s) for s in row["manifest"]["sources"]))
+            await self._check_sources_in(conn, await self.effective_sources_in(conn, payload_id))
+            if payload_id in legacy:
+                available = await (await conn.execute(
+                    "SELECT public.forest_payload_dependencies_available(%s,%s) AS available",
+                    (self.store.bot_id, payload_id),
+                )).fetchone()
+                if not available["available"]:
+                    raise ForestError(
+                        "PAYLOAD_ERASED", "A legacy content prerequisite is unavailable", 410
+                    )
             exists = await (await conn.execute(
                 "SELECT 1 FROM public.bot_payload_bodies WHERE bot_id=%s AND payload_id=%s",
                 (self.store.bot_id, payload_id),
@@ -167,10 +237,12 @@ class PayloadStore:
         # overlap heavily across long-lived Worker inputs, so budget their
         # unique union while accumulating rather than an expanded duplicate list.
         source_union = set(source_set)
+        original_union = set(source_set)
         for parent in parent_set:
-            row = await self._header_in(conn, parent)
-            for source in row["manifest"]["sources"]:
-                source_union.add(SourceRef(**source))
+            parent_header = await self._header_in(conn, parent)
+            original_union.update(SourceRef(**item) for item in parent_header["manifest"]["sources"])
+            for source in await self.effective_sources_in(conn, parent):
+                source_union.add(source)
                 if len(source_union) > MAX_SOURCES:
                     raise ForestError("SOURCE_LINK_SCOPE_LIMIT", "Source dependency union exceeds its limit", 422)
         source_set = tuple(sorted(source_union))
@@ -184,7 +256,19 @@ class PayloadStore:
         )).fetchone()
         if row:
             if row["input_digest"] != input_digest:
-                raise ForestError("PAYLOAD_CONFLICT", "Payload owner already has different content", 409)
+                # A pre-044 parent's immutable manifest can gain a separately
+                # proven configuration prerequisite. Never rewrite that old
+                # child receipt to match a new flattening. Accept only when the
+                # original algorithm reproduces its complete admitted digest:
+                # same bytes, encoding, owner, direct parents and direct input
+                # sources plus those parents' actual original manifests.
+                original_manifest = {
+                    "sources": [asdict(source) for source in sorted(original_union)],
+                    "parents": list(parent_set),
+                }
+                original_digest = digest_json([owner_kind, owner_id, encoding, digest, original_manifest])
+                if row["input_digest"] != original_digest:
+                    raise ForestError("PAYLOAD_CONFLICT", "Payload owner already has different content", 409)
             # A receipt survives deletion. Returning its state never restores a
             # body and does not authorize reading or dispatching old content.
             return PayloadRef(payload_id, row["digest"], row["encoding"], row["byte_length"], row["state"])
@@ -361,9 +445,10 @@ class PayloadStore:
                     "UPDATE public.bot_memory_clock SET deletion_epoch=%s,fact_revision=fact_revision+1 "
                     "WHERE bot_id=%s", (epoch, self.store.bot_id),
                 )
+                source_relation = await self._effective_source_relation_in(conn)
                 await conn.execute(
                     "UPDATE public.bot_payload_headers h SET state='REVOKED',forget_operation_id=%s "
-                    "WHERE h.bot_id=%s AND h.state='ACTIVE' AND EXISTS(SELECT 1 FROM public.bot_payload_sources s,"
+                    f"WHERE h.bot_id=%s AND h.state='ACTIVE' AND EXISTS(SELECT 1 FROM {source_relation} s,"
                     "jsonb_array_elements(%s::jsonb) t WHERE s.bot_id=h.bot_id AND s.payload_id=h.payload_id "
                     "AND s.source_unit_id=t->>'source_unit_id' "
                     "AND (s.part_id='*' OR t->>'part_id'='*' OR s.part_id=t->>'part_id'))",

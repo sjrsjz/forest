@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.config_payloads import ConfigPayloadStore
 from forest.storage.control_payloads import ControlPayloadStore
 
 _NO_REPLAY = object()
@@ -45,6 +46,17 @@ def _ticket_snapshot(ticket):
         return json.loads(json.dumps(ticket, allow_nan=False))
     except (TypeError, ValueError):
         raise ForestError("WEB_AUTHORITY_REJECTED", "Target Web authority is invalid", 403) from None
+
+
+def _component_metadata(values):
+    if (not isinstance(values, dict) or set(values) != {"package_digest", "config", "grants"}
+            or not isinstance(values["package_digest"], str) or not 1 <= len(values["package_digest"]) <= 256
+            or not isinstance(values["config"], dict) or not isinstance(values["grants"], list)
+            or len(values["grants"]) > 256
+            or any(not isinstance(g, str) or not 1 <= len(g) <= 128 for g in values["grants"])
+            or len(set(values["grants"])) != len(values["grants"])):
+        raise ForestError("CONFIGURATION_VALUES_INVALID", "Component configuration fields differ", 422)
+    return {key: values[key] for key in ("package_digest", "grants")}
 
 ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "service.invoke",
            "job.read", "job.plan", "job.apply", "job.run", "job.cancel", "job.replay",
@@ -298,31 +310,14 @@ class BotControl:
             claims = await self._guard(
                 conn, ticket, "config.read", operation_id, {"component_id": component_id}
             )
-            # One statement gives matching desired/effective revisions and values.
-            row = await (
-                await conn.execute(
-                    "SELECT h.desired_revision,h.effective_revision,d.values AS desired_values,"
-                    "e.values AS effective_values FROM public.bot_config_heads h "
-                    "LEFT JOIN public.bot_config_revisions d ON (d.bot_id,d.component_id,d.revision)="
-                    "(h.bot_id,h.component_id,h.desired_revision) "
-                    "LEFT JOIN public.bot_config_revisions e ON (e.bot_id,e.component_id,e.revision)="
-                    "(h.bot_id,h.component_id,h.effective_revision) WHERE h.bot_id=%s AND h.component_id=%s",
-                    (self.store.bot_id, component_id),
-                )
-            ).fetchone()
-            await self._time(conn, claims)
-            result = row or {
-                "desired_revision": 0,
-                "effective_revision": 0,
-                "desired_values": None,
-                "effective_values": None,
-            }
-            revisions = await (await conn.execute(
-                "SELECT * FROM public.bot_config_revisions WHERE bot_id=%s AND component_id=%s AND revision=ANY(%s)",
-                (self.store.bot_id, component_id, [result["desired_revision"], result["effective_revision"]]),
-            )).fetchall()
-            for revision in revisions:
-                await self.revision_parents(conn, "config", revision, resource=component_id)
+            head = await self._head(conn, component_id)
+            result = {"defaults": {"package_digest": "", "config": {}, "grants": []}}
+            for kind in ("desired", "effective"):
+                revision = head[kind + "_revision"]
+                saved = await self.config_revision_in(conn, component_id, revision, required=False)
+                result[kind + "_revision"] = revision
+                result[kind + "_values"] = saved["values"] if saved else None
+                result[kind + "_values_payload_state"] = saved["values_payload_state"] if saved else "UNCONFIGURED"
             operations = await (await conn.execute(
                 "SELECT operation_id,phase,error_code,created_at,op_epoch,candidate_generation_id "
                 "FROM public.bot_lifecycle_operations WHERE bot_id=%s AND component_id=%s "
@@ -335,26 +330,62 @@ class BotControl:
             await self._time(conn, claims)
             return result
 
+    async def config_values_in(self, conn, row, *, kind="REVISION", required=True):
+        """Caller owns the component configuration head before this body read."""
+        if row is None:
+            return None
+        content = ConfigPayloadStore(self.store)
+        hydrated = await content.hydrate_values_in(
+            conn, row, family="config", kind=kind, resource=row["component_id"],
+            identity=row["plan_id"] if kind == "PLAN" else str(row["revision"]),
+            epoch=(await content.payloads.lock_in(conn))["deletion_epoch"], required=required,
+        )
+        if hydrated["values_payload_state"] == "ACTIVE":
+            values = hydrated["values"]
+            if {key: values[key] for key in ("package_digest", "grants")} != row["values_metadata"]:
+                raise ForestError("CONFIGURATION_METADATA_CONFLICT", "Configuration identity metadata differs", 409)
+        return {**row, **hydrated}
+
+    async def config_revision_in(self, conn, component_id, revision, *, required=True):
+        row = await (await conn.execute(
+            "SELECT * FROM public.bot_config_revisions WHERE bot_id=%s AND component_id=%s AND revision=%s",
+            (self.store.bot_id, component_id, revision),
+        )).fetchone()
+        hydrated = await self.config_values_in(conn, row, required=required)
+        if hydrated and hydrated["values_payload_state"] == "ACTIVE":
+            await self.revision_parents(conn, "config", hydrated, resource=component_id)
+        return hydrated
+
     async def history(self, ticket: dict, operation_id: str, payload: dict) -> dict:
         ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self._guard(conn, ticket, "config.history", operation_id, payload)
+            await self._head(conn, payload["component_id"])
             rows = await (await conn.execute(
-                "SELECT r.revision,r.previous_revision,r.values,r.operation_id,w.subject_id,w.created_at "
+                "SELECT r.*,w.subject_id,w.created_at "
                 "FROM public.bot_config_revisions r JOIN public.bot_web_operations w "
                 "USING(bot_id,operation_id) WHERE r.bot_id=%s AND r.component_id=%s "
                 "AND r.revision < %s ORDER BY r.revision DESC LIMIT 51",
                 (self.store.bot_id, payload["component_id"], payload["before"]),
             )).fetchall()
             await self._time(conn, claims)
+            result = []
             for revision in rows[:50]:
-                await self.revision_parents(conn, "config", revision, resource=payload["component_id"])
+                hydrated = await self.config_values_in(conn, revision, required=False)
+                if hydrated["values_payload_state"] == "ACTIVE":
+                    await self.revision_parents(conn, "config", hydrated, resource=payload["component_id"])
+                result.append({key: hydrated[key] for key in (
+                    "revision", "previous_revision", "values", "values_payload_state", "operation_id", "subject_id", "created_at")})
             await self._time(conn, claims)
-            return {"revisions": [{**r, "created_at": r["created_at"].isoformat()} for r in rows[:50]],
+            return {"revisions": [{**r, "created_at": r["created_at"].isoformat()} for r in result],
                     "next_before": rows[49]["revision"] if len(rows) > 50 else None}
 
     async def plan(self, ticket: dict, operation_id: str, payload: dict) -> dict:
         ticket, payload = _ticket_snapshot(ticket), _normalized_input(payload)
+        metadata = _component_metadata(payload.get("values"))
+        source_revision = payload.get("source_revision")
+        if "source_revision" in payload and (type(source_revision) is not int or not 1 <= source_revision < 2**63):
+            raise ForestError("CONFIGURATION_SOURCE_INVALID", "Historical revision identity is invalid", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self._guard(conn, ticket, "config.plan", operation_id, payload)
             head = await self._head(conn, payload["component_id"])
@@ -375,10 +406,25 @@ class BotControl:
                     "issuer_id": claims["issuer_id"],
                 }
             )
+            before = await self.config_revision_in(conn, payload["component_id"], head["desired_revision"], required=False)
+            if source_revision is not None:
+                copied = await self.config_revision_in(conn, payload["component_id"], source_revision)
+                if copied is None:
+                    raise ForestError("CONFIGURATION_SOURCE_NOT_FOUND", "Historical configuration is unavailable", 404)
+                # A declared history copy remains derived even after editing.
+                # Preview-only before values never enter this input parent set.
+                claims.parents = tuple(sorted(set(claims.parents) | {copied["values_payload_id"]}))
+            original = await self.admitted_input_in(conn, claims)
+            content = ConfigPayloadStore(self.store)
+            ref = await content.put_values_in(
+                conn, family="config", kind="PLAN", resource=payload["component_id"], identity=plan_id,
+                values=payload["values"], parents=(original.payload_id,),
+                epoch=(await content.payloads.lock_in(conn))["deletion_epoch"],
+            )
             await conn.execute(
                 "INSERT INTO public.bot_config_plans(bot_id,plan_id,component_id,subject_id,issuer_id,"
-                "expected_revision,values,plan_digest,expires_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
+                "expected_revision,values,values_payload_id,values_payload_digest,values_metadata,plan_digest,expires_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
                 (
                     self.store.bot_id,
                     plan_id,
@@ -386,7 +432,8 @@ class BotControl:
                     claims["subject_id"],
                     claims["issuer_id"],
                     payload["expected_revision"],
-                    Jsonb(payload["values"]),
+                    ref.payload_id, ref.digest,
+                    Jsonb(metadata),
                     digest,
                 ),
             )
@@ -395,8 +442,14 @@ class BotControl:
                 "plan_digest": digest,
                 "expected_revision": payload["expected_revision"],
                 "values": payload["values"],
+                "before_values": before["values"] if before else None,
+                "before_values_payload_state": before["values_payload_state"] if before else "UNCONFIGURED",
             }
-            await self._record(conn, claims, result)
+            parents = (ref.payload_id,)
+            if before and before["values_payload_state"] == "ACTIVE":
+                parents += (before["values_payload_id"],)
+            await self._record(conn, claims, result, parents=parents)
+            await self._time(conn, claims)
             return result
 
     async def apply(self, ticket: dict, operation_id: str, payload: dict) -> dict:
@@ -431,23 +484,32 @@ class BotControl:
                     "REVISION_CONFLICT", "Bot configuration was changed in another request", 409
                 )
             revision = head["desired_revision"] + 1
+            saved = await self.config_values_in(conn, saved, kind="PLAN")
             source = await self.plan_parent(conn, "config", saved)
+            original = await self.admitted_input_in(conn, claims)
+            content = ConfigPayloadStore(self.store)
+            ref = await content.put_values_in(
+                conn, family="config", kind="REVISION", resource=payload["component_id"], identity=str(revision),
+                values=saved["values"], parents=(source, original.payload_id),
+                epoch=(await content.payloads.lock_in(conn))["deletion_epoch"],
+            )
             result = {
                 "operation_id": operation_id,
                 "desired_revision": revision,
                 "effective_revision": head["effective_revision"],
                 "status": "ACCEPTED",
             }
-            await self._record(conn, claims, result, parents=(source,))
+            await self._record(conn, claims, result, parents=(ref.payload_id,))
             await conn.execute(
                 "INSERT INTO public.bot_config_revisions(bot_id,component_id,revision,previous_revision,"
-                "values,policy_revision,plan_id,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                "values,values_payload_id,values_payload_digest,values_metadata,policy_revision,plan_id,operation_id) "
+                "VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s)",
                 (
                     self.store.bot_id,
                     payload["component_id"],
                     revision,
                     revision - 1,
-                    Jsonb(saved["values"]),
+                    ref.payload_id, ref.digest, Jsonb(saved["values_metadata"]),
                     claims["policy_revision"],
                     saved["plan_id"],
                     operation_id,
@@ -457,22 +519,27 @@ class BotControl:
                 "UPDATE public.bot_config_heads SET desired_revision=%s WHERE bot_id=%s AND component_id=%s",
                 (revision, self.store.bot_id, payload["component_id"]),
             )
+            if saved["expires_at"] <= await self.store._now(conn):
+                raise ForestError("PLAN_EXPIRED", "Preview the configuration again", 409)
             await self._time(conn, claims)
             return result
 
     async def desired(self, lease: HostLease) -> list[dict]:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._host(conn, lease)
-            return await (
-                await conn.execute(
-                    "SELECT r.*,h.effective_revision,e.values AS effective_values FROM public.bot_config_heads h "
-                    "JOIN public.bot_config_revisions r ON (r.bot_id,r.component_id,r.revision)="
-                    "(h.bot_id,h.component_id,h.desired_revision) "
-                    "LEFT JOIN public.bot_config_revisions e ON (e.bot_id,e.component_id,e.revision)="
-                    "(h.bot_id,h.component_id,h.effective_revision) WHERE h.bot_id=%s ORDER BY h.component_id",
-                    (self.store.bot_id,),
-                )
-            ).fetchall()
+            heads = await (await conn.execute(
+                "SELECT * FROM public.bot_config_heads WHERE bot_id=%s AND desired_revision>0 "
+                "ORDER BY component_id FOR SHARE", (self.store.bot_id,),
+            )).fetchall()
+            result = []
+            for head in heads:
+                desired = await self.config_revision_in(conn, head["component_id"], head["desired_revision"], required=False)
+                effective = await self.config_revision_in(conn, head["component_id"], head["effective_revision"], required=False)
+                result.append({**desired, "effective_revision": head["effective_revision"],
+                    "effective_values": effective["values"] if effective else None,
+                    "effective_values_payload_state": effective["values_payload_state"] if effective else "UNCONFIGURED"})
+            await self.store._host(conn, lease)
+            return result
 
     async def bind_activation(
         self, lease: HostLease, component_id: str, revision: int, operation_id: str,
@@ -502,6 +569,7 @@ class BotControl:
                     "Configuration must be authorized under current Bot policy",
                     403,
                 )
+            await self.config_revision_in(conn, component_id, revision)
             await conn.execute(
                 "INSERT INTO public.bot_config_activations(bot_id,operation_id,component_id,revision,host_incarnation,recover_effective) "
                 "VALUES (%s,%s,%s,%s,%s,%s)",

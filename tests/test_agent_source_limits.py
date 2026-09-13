@@ -7,7 +7,6 @@ from test_agent_memory import bound
 from test_agent_runner import agent_env as agent_env
 from test_agent_runner import begin
 from test_agent_store import prepare, query, respond, start, tool_calls
-from test_children import acquire, family
 from test_memory_config import environment as environment
 from test_memory_media import media as media
 from test_messages import fails, owner, receive
@@ -22,6 +21,47 @@ pytestmark = pytest.mark.postgres
 
 async def history(repository, lease):
     await receive(repository, lease, "earlier", group="group-1", text="earlier source")
+
+
+async def configuration_source_limit(state, actor, head, memory_payload_id):
+    refs = [head["spec_payload_id"]]
+    binding = await query(
+        state,
+        "SELECT r.values_payload_id FROM public.bot_bindings b "
+        "JOIN public.bot_binding_revisions r ON (r.bot_id,r.binding_id,r.revision)="
+        "(b.bot_id,b.binding_id,b.effective_revision) "
+        "WHERE b.bot_id=%s AND b.binding_id=%s",
+        (state.store.bot_id, actor.binding_id),
+    )
+    if binding:
+        refs.append(binding[0]["values_payload_id"])
+    revision = head["spec_metadata"]["config_revision"]
+    if revision:
+        agent = await query(
+            state,
+            "SELECT values_payload_id FROM public.bot_agent_config_revisions "
+            "WHERE bot_id=%s AND revision=%s",
+            (state.store.bot_id, revision),
+        )
+        refs.append(agent[0]["values_payload_id"])
+    counts = []
+    for payload_id in refs:
+        rows = await query(
+            state,
+            "SELECT count(*) AS n FROM public.forest_payload_effective_sources "
+            "WHERE bot_id=%s AND payload_id=%s",
+            (state.store.bot_id, payload_id),
+        )
+        counts.append(rows[0]["n"])
+    limit = max(counts)
+    memory = await query(
+        state,
+        "SELECT count(*) AS n FROM public.forest_payload_effective_sources "
+        "WHERE bot_id=%s AND payload_id=%s",
+        (state.store.bot_id, memory_payload_id),
+    )
+    assert memory[0]["n"] > limit
+    return limit
 
 
 async def assert_drained(state, actor):
@@ -90,7 +130,9 @@ async def test_late_model_over_limit_source_records_known_cost_without_new_body(
     state, actor, head = await start(messages)
     _, request, permit = await prepare(state, actor, head)
     await state.check_model_permit(actor, permit, request)
-    monkeypatch.setattr(payloads_module, "MAX_SOURCES", 1)
+    attempt = (await query(state, "SELECT * FROM public.bot_model_transport_attempts"))[0]
+    limit = await configuration_source_limit(state, actor, head, attempt["request_payload_id"])
+    monkeypatch.setattr(payloads_module, "MAX_SOURCES", limit)
     result = ModelResult(
         "RESPONDED",
         request.request_id,
@@ -129,7 +171,11 @@ async def test_late_tool_over_limit_source_keeps_effect_receipt_without_publicat
     tool = await state.permit_tool(
         actor, head["run_id"], "call-0", authority_trigger_id=snapshot["trigger_ids"][0]
     )
-    monkeypatch.setattr(payloads_module, "MAX_SOURCES", 1)
+    stored_tool = (await query(state, "SELECT * FROM public.bot_agent_tools"))[0]
+    limit = await configuration_source_limit(
+        state, actor, head, stored_tool["arguments_payload_id"]
+    )
+    monkeypatch.setattr(payloads_module, "MAX_SOURCES", limit)
     finished = await state.observe_tool(
         actor, tool, status="SUCCEEDED", result={"text": "OVERFLOW-TOOL-SECRET"}
     )
@@ -144,48 +190,30 @@ async def test_late_tool_over_limit_source_keeps_effect_receipt_without_publicat
     await assert_drained(state, actor)
 
 
-async def test_child_over_limit_source_settles_then_parent_can_end(messages, monkeypatch):
-    await history(messages[0], messages[1])
-    children, actor, head, _ = await family(messages)
-    lease, child, request, attempt_id = await acquire(children, messages[1])
-    await children.check_permit(lease, attempt_id, request)
+async def test_late_tool_configuration_over_limit_settles_effect_without_body(
+    messages, monkeypatch
+):
+    state, actor, head = await start(messages)
+    snapshot, request, permit = await prepare(state, actor, head)
+    await respond(state, actor, permit, request, calls=tool_calls(snapshot))
+    tool = await state.permit_tool(
+        actor, head["run_id"], "call-0", authority_trigger_id=snapshot["trigger_ids"][0]
+    )
     monkeypatch.setattr(payloads_module, "MAX_SOURCES", 1)
-    async with children.store.pool.connection() as conn, conn.transaction():
-        await fails("AGENT_MEMORY_REVOKED", children.payloads.guard_in(conn, child))
-        await fails("AGENT_MEMORY_REVOKED", children.payloads.hydrate_in(conn, child))
-    finished = await children.complete(
-        lease,
-        attempt_id,
-        ModelResult(
-            "RESPONDED",
-            request.request_id,
-            attempt_id,
-            request.payload_digest,
-            text="OVERFLOW-CHILD-SECRET",
-            usage_json='{"total_tokens":21}',
-        ),
+    finished = await state.observe_tool(
+        actor, tool, status="SUCCEEDED", result={"text": "CONFIG-OVERFLOW-TOOL-SECRET"}
     )
-    assert finished["status"] == "FAILED" and finished["result_payload_id"] is None
-    observation = (await query(children.agent, "SELECT * FROM public.bot_child_model_attempts"))[0]
-    assert (
-        observation["status"] == "RESPONDED"
-        and observation["settled"]
-        and observation["charged_tokens"] == 21
+    assert finished["phase"] == "FAILED"
+    assert finished["error_code"] == "AGENT_CONFIGURATION_REVOKED"
+    row = (await query(state, "SELECT * FROM public.bot_agent_tools"))[0]
+    assert row["status"] == "SUCCEEDED" and row["result_payload_id"] is None
+    assert row["result_metadata"] == {"discarded_reason": "AGENT_MEMORY_REVOKED"}
+    assert not await query(
+        state,
+        "SELECT 1 FROM public.bot_payload_bodies "
+        "WHERE position('CONFIG-OVERFLOW-TOOL-SECRET'::bytea IN content)>0",
     )
-    assert (
-        observation["result_payload_id"] is None
-        and observation["result_metadata"]["discarded_reason"] == "AGENT_MEMORY_REVOKED"
-    )
-    await fails("AGENT_MEMORY_REVOKED", children.adopt(actor, head["run_id"]))
-    assert (await children.agent.fail_revoked(actor, head["run_id"]))["phase"] == "FAILED"
-    budget = (
-        await query(
-            children.agent,
-            "SELECT reserved_tokens,charged_tokens FROM public.bot_agent_budget_days",
-        )
-    )[0]
-    assert budget == {"reserved_tokens": 0, "charged_tokens": 36}
-    await assert_drained(children.agent, actor)
+    await assert_drained(state, actor)
 
 
 async def test_bound_memory_scope_limit_never_replaces_bound_evidence_and_can_end(

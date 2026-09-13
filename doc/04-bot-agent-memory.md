@@ -54,11 +54,15 @@ flowchart LR
 
 一个群只有一个活跃 ConversationSession，内部 Run 与 Provider 调用串行。所有群消息先进入该会话的持久输入流水；触发只决定是否调用 Agent，不决定是否保存上下文。下一次模型调用前的安全边界选取截至最后一个待触发记录的连续消息前缀，包含中间其他用户的普通发言；其后的非触发尾部保留到下一触发或工作结束后的静默排空。无触发的空闲群也会持续入 Context 和裁剪。完整契约见[08 群聊交互设计](08-group-context-interaction.md)。
 
-同群唯一响应链是强约束，不能以“只串行最终提交、允许多个模型并行生成”替代。子 Agent 可以做受监督的独立分析，但不拥有另一条群对话链或直接回复权。
+同群唯一响应链是强约束，不能以“只串行最终提交、允许多个模型并行生成”替代。Agent 内部只有顺序的 ModelTurn/工具循环，不创建另一个模型 Agent。Kernel 中组件发起的嵌套 RPC 只是同一工具调用树，不具有 Prompt、Context、记忆或回复身份。
 
-每个 GroupMessage 保留可信 sender_id/subject_id、当时显示名快照、source_ingress_seq、时间、平台来源、回复/转发引用与内容段。模型中的多用户消息即使共享 `role=user`，也必须有结构化作者边界；昵称、引用中的作者和正文自述不能替换真实发言者。摘要和长期事实沿用这些归属，不能把全群“我”的陈述归给触发 Agent 的最后一个用户。
+每个 GroupMessage 保留可信 sender_id/subject_id、当时显示名快照、source_ingress_seq、时间、平台来源、回复/转发引用与内容段。模型中的多用户消息即使共享 `role=user`，也必须有结构化作者边界；昵称、引用中的作者和正文自述不能替换真实发言者。归档和长期事实沿用这些归属，不能把全群“我”的陈述归给触发 Agent 的最后一个用户。
 
 ## 3. Agent 运行模型
+
+Agent 使用不可混合的三层输入：宿主内置且不可覆盖的 `ForestCorePrompt`、Bot 配置产生的不可裁剪 `PresetContext`、群会话的可裁剪 `ContextView`。CorePrompt 定义原子 ModelTurn、工具状态机、来源边界和多模态诚实性；人格、语气与 Bot 行为约束只进入 PresetContext。两者都不进入聊天历史或记忆。完整提示词和协议见 [P3 单 Agent 详细设计](p3-agent.md)。
+
+模型每次只能返回一个完整 ModelTurn，内部按序包含 Thinking、Assistant 和至多一个最终 FunctionCall。Thinking 不直接发送到群；FunctionCall 后的模型文本不可信并被丢弃；真实 FunctionResponse 持久化后才允许下一次模型调用。终止 Assistant 出现前的 ModelTurn 保持在本 Run 的持久私有分支，不能启动第二个 Agent 解释它。
 
 ### 3.1 Run 输入与资源
 
@@ -107,7 +111,7 @@ Run 状态机不负责释放整个群的响应资格：WAIT_TOOL、WAIT_APPROVAL
 1. 在当前会话唯一 Session 下取得执行 lease，选择并持久化下一 InputBatch 的固定切口。初次触发和忙时接入均包含从 context_applied_seq 之后直到最后待触发记录的所有消息，不能只取触发文本。
 2. 输入批次独立追加 Context、更新输入水位并 claim 对应触发；执行正常裁剪，固定本次 context_revision/context_view_revision/input_revision。输入已提交不等于触发已回应。
 3. 从冻结输入的合法text/image parts构造记忆查询，召回Bot全局多模态证据；按实际Provider/模型能力投影历史、证据及工具结果并校验请求预算。事务外构建精确载荷，最终许可事务保存语义ModelRequestManifest、传输ModelTransportAttempt及预算预留后发送，详见[11](11-multimodal-memory-and-model-projection.md)。图片嵌入/查询能力不因对话LLM仅支持文本而失效，运行中的请求不随新消息或迟到图片变化。
-4. 解析输出为 TextPart/ToolProposal/ControlProposal。工具按其具体请求主体校验参数、权限、预算、幂等与目标，提交意图并等待结果或保存 checkpoint。
+4. 按 `forest-agent-protocol/v1` 将输出解析为一个原子 ModelTurn。协议错误最多进行一次有界修复；合法 FunctionCall 按其具体请求主体校验参数、权限、预算、幂等与目标，提交意图并等待结果或保存 checkpoint。模型不得直接产生可信 ControlProposal；管理控制继续走确定性 Shell/管理服务。
 5. 模型流和工具结果闭合后形成安全边界。完整步骤先保存有序 RunStep/checkpoint；若有新触发，在下一输入批次追加之前或同一事务中 flush 前序尚未发布的完整步骤，再按新切口接入消息。未闭合的工具调用与流之间禁止插入新群消息。
 6. 每次安全边界更新视图并检查裁剪预算；没有新触发时不吸收普通尾部，仅按当前任务决定是否继续调用模型。裁剪不能只在首次创建 Agent 时执行。
 7. 最终回复事务校验 epoch、Session、输入版本、Run 状态与证据权限，原子追加完整 ModelTurn、标记实际覆盖的触发、完成 Run、分配 CHAT response_seq、写回复 outbox 与记忆 Job。仅因为队列中有新触发，不默认丢弃当前已生成的合法回答。
@@ -174,13 +178,13 @@ ToolExecution 以稳定 `(bot_id, run_id, logical_step_id)` 形成 operation_id�
 
 确认记录绑定 `bot_id, principal, target_scope, operation_id, input_digest, tool_contract, expires_at`。只确认展示的具体操作，参数改变需要新的确认。Run 恢复或模块重载不能扩大已确认范围。
 
-## 6. 自主 Agent、子 Agent 与计划任务
+## 6. 自主任务与计划任务
 
 触发源包括消息、定时器、记忆维护事件、外部订阅和人工任务。统一写 Job/Run，不在模块 import 或后台无限循环中偷偷启动自主行为。
 
 计划任务定义 cron/interval、时区、misfire（跳过/补一次/有界补跑）、最大重叠数、dedupe key、过期时间和目标范围。默认同一 Job 定义不重叠执行，接管通过 lease；不因重连重新注册重复定时任务。
 
-子 Agent 使用 parent_run_id 与受衰减的权限/预算，可并行完成独立读取或分析。返回值是候选结果与来源；默认由父 Run 决定会话提交和回复。被允许独立写记忆时也提交事实操作，不能共享修改父 Agent 的 Context 列表。
+计划任务若需要对群产生对话，必须向目标 Conversation 提交受权 trigger，并进入同一条串行 Agent Session。后台索引、图重建、确定性维护和组件 RPC 可以并行，但没有独立 Agent 身份，不能绕过群输入切口、工具授权或回复提交守卫。
 
 自主反思、关系推断、记忆整理等行为有独立速率和预算，并在 source digest 未变化时跳过。事件携带 causation chain 和 hop 上限，禁止“记忆更新→反思→同内容写记忆→再次反思”的无限自激环。
 

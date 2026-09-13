@@ -36,6 +36,7 @@ class RenameBot(Revision):
 
 class ConfigPlan(Revision):
     values: dict[str, Any]
+    source_revision: int | None = Field(default=None, ge=1, le=2**63 - 1, strict=True)
 
 
 class ConfigApply(Revision):
@@ -173,7 +174,7 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
     async def config_plan(bot_id: str, component_id: str, body: ConfigPlan, request: Request):
         await principal(request, True)
         services()[1].validate(component_id, body.values)
-        payload = {"component_id": component_id, **body.model_dump()}
+        payload = {"component_id": component_id, **body.model_dump(exclude_none=True)}
         payload["values"]["grants"] = sorted(payload["values"]["grants"])
         bot, operation, signed = await ticket(request, bot_id, "config.plan", payload)
         return await bot.control.plan(signed, operation, payload)

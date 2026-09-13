@@ -1,8 +1,8 @@
 # QiYu / RAG 源码调研记录
 
-状态：设计输入，依据 2026-09-12 的本地源码快照；不代表 Forest 已实现相应能力。
+状态：设计输入，依据 2026-09-13 的本地源码快照；不代表 Forest 已实现相应能力。Agentlib 的逐模块实现、优缺点与 Forest 采用矩阵见[专项审计](research-qiyu-agentlib.md)。
 
-阅读范围为 `../../RAG/backend/app`、相关迁移与测试、`../../RAG/libs/agentlib/agentlib` 和对应测试。先阅读了 `../../RAG/AGENTS.md`，以实际实现优先于设计说明。未读取运行配置、凭据、数据库内容或私人对话，未修改源项目，未运行源项目测试。RAG 的 HEAD 为 `d9e278f`，agentlib 的 HEAD 为 `471a5c2`；下述行号指阅读时工作区文件，未把 HEAD 当作工作区无改动的证明。
+阅读范围为 `../../RAG/backend/app`、相关迁移与测试、`../../RAG/libs/agentlib/agentlib` 和对应测试。先阅读了 `../../RAG/AGENTS.md`，以实际实现优先于设计说明。未读取运行配置、凭据、数据库内容或私人对话，也未修改源项目。Agentlib 的 HEAD 为 `471a5c2`；下述行号指阅读时工作区文件，未把 HEAD 当作工作区无改动的证明。使用 Forest 现有 Python 环境直接加载 Agentlib 源码，关闭 pytest cache/bytecode 写入后运行不依赖缺失可选包的 7 个核心测试文件，结果为 `68 passed`；完整收集因当前环境没有 Agentlib 的 `openai`、`websockets` 可选依赖而未执行。
 
 **结论：QiYu 适合作为 Agent 执行、记忆证据链、持久任务和应用鉴权的参考；其当前自动记忆按会话隔离，不能直接用作 Forest 的 Bot 全局记忆模型。** 热重载模块管理、Bot 身份和跨进程执行恢复也需要单独设计。
 
@@ -15,7 +15,7 @@
 | 执行拥有资源 | [factory.py](../../RAG/backend/app/agent/factory.py) 第 78–97 行：`ConversationRuntime` 拥有 Agent、Provider、摘要 Provider、ContextStore、证据收集器、确认 Broker；关闭过程逐级 `finally` 释放 | Forest 的 `RunScope` 应登记资源和子任务，模块卸载通过 Scope 收敛，而不是要求插件自行回忆所有资源 |
 | 私有分支与原子提交 | [agent.py](../../RAG/libs/agentlib/agentlib/runtime/agent.py) 第 143–168、178–182、356–473 行：模型轮次、工具响应、RAG 和追加消息先进入私有分支，终止回答出现后才提交；不是每个 token 修改共享 Context | 聊天历史提交点、事件流和外部发送应分别定义，已流出的 token 不等同于已提交的对话事实 |
 | 安全边界接收追加消息 | 同文件第 298–325 行：`enqueue_pending` 不打断当前 Provider 或 Tool，FIFO 消息在下一次模型调用前生效；每次执行默认最多接受 8 条 | 可用于同一对话的跟进消息；其他群聊消息不能作为此分支的 pending message 注入 |
-| 有界 Agent 循环 | 同文件第 202–205、398–415、474–478 行：默认工具迭代 8 次、非终止思考 4 次、协议修复 1 次；单模型步骤最多接收一个原生工具调用 | 现有 Agent 不是并行工具 DAG 调度器。Forest 若支持并行 Tool/子 Agent，须新增依赖关系、并发上限、join 和失败策略 |
+| 有界 Agent 循环 | 同文件第 202–205、398–415、474–478 行：默认工具迭代 8 次、非终止思考 4 次、协议修复 1 次；单模型步骤最多接收一个原生工具调用 | Forest 采用每个 ModelTurn 至多一个工具调用。Kernel 服务内部可以有受生命周期监督的组件 RPC 调用树，但它不是另一个 Agent，也不改变群聊响应链 |
 | 失败分支恢复 | 同文件第 334–354 行保存 `_RunState` 与 `ExceptionContext`；[runtime_registry.py](../../RAG/backend/app/agent/runtime_registry.py) 第 66–75、306–332 行保存 `_SuspendedRuntime` | 恢复保留失败阶段和待提交分支；现有恢复依赖 Python 对象存活，不是可迁移的持久 checkpoint |
 | 关闭传播取消 | [runtime_registry.py](../../RAG/backend/app/agent/runtime_registry.py) 第 345–375、641–657 行清理 pending、记录取消、取消并等待活动任务、关闭挂起资源 | 可借鉴顺序；Forest 还需明确关闭的最大耗时、不可取消任务如何终止、旧模块写入如何被 fence 拒绝 |
 

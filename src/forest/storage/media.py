@@ -147,16 +147,21 @@ class MediaStore:
         frozen = {_url(value, origin_only=True)[1] for value in allowed_origins}
         row = await (
             await conn.execute(
-                "SELECT r.values FROM public.bot_agent_config_heads h JOIN public.bot_agent_config_revisions r "
+                "SELECT r.* FROM public.bot_agent_config_heads h JOIN public.bot_agent_config_revisions r "
                 "ON (r.bot_id,r.revision)=(h.bot_id,h.revision) WHERE h.bot_id=%s FOR SHARE OF h",
                 (self.store.bot_id,),
             )
         ).fetchone()
-        if not row or not row["values"].get("enabled"):
+        if not row:
+            return set()
+        from forest.storage.agent_config import AgentConfig
+
+        saved = await AgentConfig(self.store)._hydrate(conn, row, kind="REVISION", required=False)
+        if saved["values_payload_state"] != "ACTIVE" or not saved["values"].get("enabled"):
             return set()
         return frozen & {
             _url(value, origin_only=True)[1]
-            for value in row["values"].get("media_allowed_origins", [])
+            for value in saved["values"].get("media_allowed_origins", [])
         }
 
     async def _source(self, conn, actor, request, cut):

@@ -58,10 +58,16 @@ class AgentMemoryStore:
                         (self.store.bot_id,),
                     )
                 ).fetchone()
-                enabled = bool(cfg and cfg["values"]["enabled"])
+                enabled = bool(cfg and cfg["values_metadata"]["enabled"])
                 revision = cfg["revision"] if cfg else 0
+                configuration_error = None
                 if enabled:
-                    await MemoryConfig.guard_in(conn, actor.host, revision)
+                    try:
+                        await MemoryConfig.guard_in(conn, actor.host, revision)
+                    except ForestError as exc:
+                        if exc.code != "MEMORY_CONFIGURATION_REVOKED":
+                            raise
+                        enabled, configuration_error = False, exc.code
                 # Only actual triggers already present in this immutable snapshot
                 # may select query data; trailing inbox messages cannot advance it.
                 trigger = max(
@@ -100,13 +106,13 @@ class AgentMemoryStore:
                             ]
                         )
                     )
-                    if enabled
+                    if enabled or configuration_error
                     else None
                 )
                 row = await (
                     await conn.execute(
                         "INSERT INTO public.bot_agent_memory_bindings(bot_id,logical_step_id,run_id,snapshot_digest,input_cut,input_revision,"
-                        "config_revision,query_id,source_unit_ids,status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                        "config_revision,query_id,source_unit_ids,status,error_code) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                         (
                             self.store.bot_id,
                             step["logical_step_id"],
@@ -117,7 +123,8 @@ class AgentMemoryStore:
                             revision,
                             query_id,
                             Jsonb(sources),
-                            "PENDING" if enabled else "DISABLED",
+                            "PENDING" if enabled else "BYPASSED" if configuration_error else "DISABLED",
+                            configuration_error,
                         ),
                     )
                 ).fetchone()
@@ -148,7 +155,7 @@ class AgentMemoryStore:
                             input_cut=row["input_cut"],
                         )
                     except ForestError as exc:
-                        if exc.code not in CONTENT_UNAVAILABLE_CODES:
+                        if exc.code not in CONTENT_UNAVAILABLE_CODES | {"MEMORY_CONFIGURATION_REVOKED", "CONTROL_CONTENT_REVOKED"}:
                             raise
                         raise ForestError(
                             "AGENT_MEMORY_REVOKED", "Frozen evidence content is unavailable", 409
@@ -233,12 +240,13 @@ class AgentMemoryStore:
         )).fetchone()
         if head is not None:
             refs = await (await conn.execute(
-                "SELECT snapshot_payload_id AS payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
+                "SELECT spec_payload_id AS payload_id FROM public.bot_agent_runs WHERE bot_id=%s AND run_id=%s "
+                "UNION SELECT snapshot_payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
                 "UNION SELECT output_payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
                 "UNION SELECT closed_parts_payload_id FROM public.bot_agent_steps WHERE bot_id=%s AND run_id=%s "
                 "UNION SELECT arguments_payload_id FROM public.bot_agent_tools WHERE bot_id=%s AND run_id=%s "
                 "UNION SELECT result_payload_id FROM public.bot_agent_tools WHERE bot_id=%s AND run_id=%s",
-                (bot_id, run_id) * 5,
+                (bot_id, run_id) * 6,
             )).fetchall()
             try:
                 await guard_payload_scope_in(

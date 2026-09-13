@@ -201,7 +201,7 @@ class MessageStore:
             )
             parsed = parse_event(body, self_id=binding["self_id"])
             if parsed is None:
-                await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+                await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
                 return None, None
             event = self._normalized(parsed.as_dict())
             source_event = self.platform_source_event_id(event)
@@ -216,7 +216,7 @@ class MessageStore:
             await contents.payloads.require_available_in(
                 conn, [ref.payload_id], expected_deletion_epoch=clock["deletion_epoch"],
             )
-            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
             return event, ref.payload_id
 
     async def ingest(
@@ -344,7 +344,7 @@ class MessageStore:
                 await self._reconcile_exact_echo_in(conn, lease, binding, conversation, event_id)
             await self.store._event(conn, "conversation.input", event_id,
                                     {"conversation_id": conversation_id, "ingress_seq": seq})
-            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
             return {"conversation_id": conversation_id, "event_id": event_id,
                     "ingress_seq": seq, "duplicate": False, "command_id": command_id,
                     "trigger_decision": decision or "PENDING"}
@@ -471,7 +471,7 @@ class MessageStore:
             row = await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
             await self.store._event(conn, "conversation.classified", event_id,
                                     {"conversation_id": conversation_id})
-            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
             return row
 
     async def pending(self, lease: HostLease, *, limit: int = 128,
@@ -489,10 +489,6 @@ class MessageStore:
                 "AND (%s::text IS NULL OR c.conversation_id>%s) "
                 "AND (a.phase IS NULL OR (a.phase<>'BLOCKED_UNKNOWN' AND (a.deadline_at<=clock_timestamp() "
                 "OR (a.phase<>'WAIT_APPROVAL' AND (a.phase<>'WAIT_INPUT' OR c.classified_through_seq>a.wait_classified_seq))))) "
-                "AND (a.phase IS DISTINCT FROM 'WAIT_TOOL' OR a.deadline_at<=clock_timestamp() "
-                "OR NOT EXISTS(SELECT 1 FROM public.bot_agent_tools t WHERE t.bot_id=a.bot_id AND t.logical_step_id=a.current_step_id AND t.status='WAIT_CHILD') "
-                "OR EXISTS(SELECT 1 FROM public.bot_agent_tools t WHERE t.bot_id=a.bot_id AND t.logical_step_id=a.current_step_id AND t.status IN ('PROPOSED','NOT_SENT','DISPATCHING')) "
-                "OR EXISTS(SELECT 1 FROM public.bot_agent_children x WHERE x.bot_id=a.bot_id AND x.parent_step_id=a.current_step_id AND x.status IN ('RESULT_READY','FAILED','CANCELLED'))) "
                 "AND b.enabled AND (c.context_applied_seq<c.classified_through_seq OR "
                 "c.mailbox_revision>c.processed_mailbox_revision OR c.active_session_id IS NOT NULL "
                 "OR EXISTS (SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=c.bot_id "
@@ -778,7 +774,7 @@ class MessageStore:
                 conversation_id=current["conversation_id"], lane="CONTROL", command_id=current["command_id"],
                 control_seq=1, root_operation_id=current["command_id"],
                 expected_policy_revision=current["policy_revision"],
-                parents=(command_input["payload_id"],),
+                parents=(command_input["payload_id"], binding["config_payload_id"]),
             )
             if current["expires_at"] <= await self.store._now(conn):
                 raise ForestError("STALE_COMMAND", "Control claim expired before commit", 409)
@@ -789,7 +785,7 @@ class MessageStore:
             )).fetchone()
             await self.store._event(conn, "shell.completed", operation_id,
                                     {"command_id": current["command_id"], "conversation_id": current["conversation_id"]})
-            await self.bindings._final_guard(conn, lease, binding, data=False)
+            await self.bindings._final_guard(conn, lease, binding, data=False, require_config=True)
             return updated
 
     async def acquire_actor(self, lease: HostLease, conversation_id: str, actor_id: str,
@@ -1282,6 +1278,7 @@ class MessageStore:
         inputs = InputContentStore(self.store)
         clock = await content.payloads.lock_in(conn)
         payload_ids = set()
+        initial = await self.bindings.initial_in(conn, binding) if any(u["kind"] == "CONTROL" for u in units) else None
         for unit in units:
             unit["step_parts"] = unit["reply_parts"] = None
             if unit["kind"] == "INPUT":
@@ -1313,8 +1310,10 @@ class MessageStore:
             if unit["kind"] == "CONTROL":
                 unit["origin"] = "control_output"
                 unit["author"] = {"external_user_id": binding["self_id"],
-                                  "display_name": binding["display_name"],
+                                  "display_name": initial["display_name"] if initial["display_name_payload_state"] == "ACTIVE" else binding["self_id"],
                                   "identity_origin": "host_output", "is_self": True}
+                if initial["display_name_payload_state"] == "ACTIVE":
+                    payload_ids.add(initial["initial_payload_id"])
             if unit["origin"] == "job":
                 unit["source"] = {**source, "source_kind": "SYSTEM", "platform": "forest",
                                   "target_platform": source["platform"],

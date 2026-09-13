@@ -39,7 +39,15 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
     if not ids:
         return
     payloads = PayloadStore(store)
-    await payloads.lock_in(conn)
+    clock = await payloads.lock_in(conn)
+    for offset in range(0, len(ids), 256):
+        try:
+            await payloads.require_available_in(conn, ids[offset:offset + 256],
+                expected_deletion_epoch=clock["deletion_epoch"])
+        except ForestError as exc:
+            if exc.code not in {"PAYLOAD_ERASED", "SOURCE_SUPPRESSED", "PAYLOAD_INCOMPLETE", "SOURCE_LINK_SCOPE_LIMIT", "PAYLOAD_NOT_FOUND"}:
+                raise
+            raise _denied() from None
     headers = await (await conn.execute(
         "SELECT h.payload_id,h.state,EXISTS(SELECT 1 FROM public.bot_payload_bodies b "
         "WHERE b.bot_id=h.bot_id AND b.payload_id=h.payload_id) AS has_body "
@@ -49,7 +57,7 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
     if len(headers) != len(ids) or any(r["state"] != "ACTIVE" or not r["has_body"] for r in headers):
         raise _denied()
     initial = await (await conn.execute(
-        "SELECT DISTINCT source_unit_id,source_revision,part_id FROM public.bot_payload_sources "
+        "SELECT DISTINCT source_unit_id,source_revision,part_id FROM public.forest_payload_effective_sources "
         "WHERE bot_id=%s AND payload_id=ANY(%s) LIMIT %s",
         (store.bot_id, ids, MAX_SOURCES + 1),
     )).fetchall()
@@ -75,7 +83,7 @@ async def guard_payload_scope_in(conn, store, conversation, input_cut, payload_i
                     raise
                 raise _denied() from None
         initial = await (await conn.execute(
-            "SELECT DISTINCT source_unit_id,source_revision,part_id FROM public.bot_payload_sources "
+            "SELECT DISTINCT source_unit_id,source_revision,part_id FROM public.forest_payload_effective_sources "
             "WHERE bot_id=%s AND payload_id=ANY(%s) LIMIT %s",
             (store.bot_id, sorted(set(ids) | set(extra)), MAX_SOURCES + 1),
         )).fetchall()

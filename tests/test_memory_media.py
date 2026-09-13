@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import pytest
 import pytest_asyncio
+from binding_seed import create_online_binding
 from test_media import media_server, picture, respond
 from test_memory_config import apply, plan
 from test_memory_config import environment as environment
@@ -25,12 +26,7 @@ pytestmark = pytest.mark.postgres
 @pytest_asyncio.fixture
 async def media(environment):
     env = environment
-    async with env.store.pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-            "VALUES (%s,'binding-a','onebot-v11','1000','test','register',%s,%s,true,true,'ONLINE')",
-            (env.store.bot_id, env.lease.incarnation, env.lease.owner_epoch),
-        )
+    await create_online_binding(env.store, env.lease, "binding-a", "1000", ticket=env.ticket)
     messages = MessageStore(env.store)
     yield env, MemoryMediaStore(messages), MemorySourceStore(messages)
 

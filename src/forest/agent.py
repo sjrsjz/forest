@@ -149,11 +149,13 @@ class AgentRunner:
         head = None
         try:
             head = await self.state.load(actor, run_id)
-            spec = head["spec"] if head is not None else await self.resolve_spec(actor, None)
+            spec = await self.resolve_spec(actor, head["spec"] if head is not None else None)
             # Actor handoff renews only execution ownership. The original spec,
             # input, request bytes and tool operation identities remain fixed.
             head = await self.state.ensure_run(actor, run_id, spec)
             if head["phase"] == "BLOCKED_UNKNOWN":
+                if head.get("spec_payload_state") == "UNAVAILABLE":
+                    return self.disposition(head)
                 for tool in head.get("tools", []):
                     if tool["status"] == "UNKNOWN":
                         head = await self.state.recover_tool(actor, run_id, tool["tool_call_id"])
@@ -215,18 +217,21 @@ class AgentRunner:
                     "AGENT_RECOVERY_REQUIRED", "Agent failure could not be committed", 503
                 ) from None
             return self.disposition(ended)
-        except Exception:
+        except Exception as exc:
             # Database/transport uncertainty must not route through the legacy
             # callback end_run path and falsely mark an executed tool abandoned.
             raise AgentExecutionError(
                 "AGENT_RECOVERY_REQUIRED", "Agent progress needs durable reconciliation", 503
-            ) from None
+            ) from exc
 
     async def _model(self, actor, head: dict) -> dict:
         from forest.models import ModelResult, prepare_model_request
 
-        run_id, spec = head["run_id"], head["spec"]
-        values = spec.get("values", spec)
+        run_id = head["run_id"]
+        spec = await self.resolve_spec(actor, head["spec"])
+        from forest.agent_settings import project_stored_agent_values
+
+        values = project_stored_agent_values(spec.get("values", spec))
         client, capabilities = await self.resolve_client(actor, spec)
         if head["phase"] == "RETRY_MODEL":
             prepared = await self.state.replay_prepared(actor, run_id)
@@ -263,7 +268,7 @@ class AgentRunner:
                 capabilities,
                 request_id="model:" + snapshot["logical_step_id"],
                 transport_attempt_id=uuid4().hex,
-                system_prompt=values.get("system_prompt", ""),
+                preset_context=values.get("preset_context", ()),
                 tools=self._tool_schemas(spec, snapshot),
                 media=media,
                 evidence=evidence,
@@ -356,26 +361,15 @@ class AgentRunner:
                     },
                 }
             )
-        if spec.get("values", spec).get("children_enabled", False):
-            from forest.storage.children import declaration
-
-            tools.append(declaration(snapshot))
         return tools
 
     async def _tools(self, actor, head: dict) -> dict:
-        run_id, spec = head["run_id"], head["spec"]
-        from forest.storage.children import TOOL_NAME, ChildStore
-
-        if any(p["tool_name"] == TOOL_NAME for p in head.get("tools", [])):
-            children = ChildStore(self.state)
-            head = await children.spawn(actor, run_id)
-            head = await children.adopt(actor, run_id)
+        run_id = head["run_id"]
+        spec = await self.resolve_spec(actor, head["spec"])
         definitions = {tool["name"]: tool for tool in spec.get("tools", [])}
         # Rows are created together in the Provider's call_index order. Each
         # complete result is saved before another effect is attempted.
         for proposal in sorted(head.get("tools", []), key=lambda tool: tool["call_index"]):
-            if proposal["status"] == "WAIT_CHILD":
-                continue
             if proposal["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 continue
             if proposal["status"] == "UNKNOWN":
@@ -505,9 +499,6 @@ class AgentRunner:
                 )
                 if head["phase"] in {"FAILED", "CANCELLED", "COMPLETED"}:
                     return head
-        latest = await self.state.load(actor, run_id)
-        if any(p["status"] == "WAIT_CHILD" for p in latest.get("tools", [])):
-            return latest
         return await self.state.close_tools(actor, run_id)
 
     async def finalize(self, actor, disposition: RunDisposition, delivery) -> dict:

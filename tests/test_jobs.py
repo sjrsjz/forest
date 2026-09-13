@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from binding_seed import create_online_binding
 from test_messages import event, owner
 from test_web_authority import environment as environment
 
@@ -20,13 +21,7 @@ pytestmark = pytest.mark.postgres
 @pytest_asyncio.fixture
 async def jobs(environment):
     env = environment
-    async with env.store.pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,"
-            "host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-            "VALUES (%s,'binding-a','onebot-v11','1000','test','registry',%s,%s,true,true,'ONLINE')",
-            (env.store.bot_id, env.lease.incarnation, env.lease.owner_epoch),
-        )
+    await create_online_binding(env.store, env.lease, "binding-a", "1000", ticket=env.ticket)
     messages = MessageStore(env.store)
     receipt = await messages.ingest(env.lease, "binding-a", event(1), decision="NO_TRIGGER")
     yield env, JobStore(messages), receipt["conversation_id"]

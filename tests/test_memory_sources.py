@@ -335,6 +335,7 @@ async def test_complete_candidate_cannot_recall_through_an_incomplete_parent(mes
 
 async def test_scrubbed_source_replay_keeps_metadata_without_restoring_new_payload(messages):
     repository, lease, _ = messages
+    original_bodies = await rows(repository, "SELECT * FROM public.bot_payload_bodies ORDER BY payload_id")
     sources = MemorySourceStore(repository)
     first = await receive(repository, lease, 1, text="source-canary")
     await drain(repository, lease, first)
@@ -347,7 +348,7 @@ async def test_scrubbed_source_replay_keeps_metadata_without_restoring_new_paylo
     repeated = await receive(repository, lease, 1, text="source-canary")
     assert repeated["duplicate"]
     assert len(await rows(repository, "SELECT * FROM public.bot_memory_source_units")) == 1
-    assert not await rows(repository, "SELECT * FROM public.bot_payload_bodies")
+    assert await rows(repository, "SELECT * FROM public.bot_payload_bodies ORDER BY payload_id") == original_bodies
     # Input content now shares the source suppression barrier; immutable identity
     # remains, with neither the old column nor a payload body restoring its text.
     assert await rows(repository, "SELECT segments FROM public.bot_message_inbox") == [
@@ -456,6 +457,7 @@ async def test_host_expiry_at_final_guard_rolls_back_source_and_inbox_together(
 ):
     repository, lease, _ = messages
     original = MemorySourceStore.register_input_in
+    original_bodies = await rows(repository, "SELECT * FROM public.bot_payload_bodies ORDER BY payload_id")
 
     async def expire_after_source(self, conn, *args, **kwargs):
         value = await original(self, conn, *args, **kwargs)
@@ -471,10 +473,10 @@ async def test_host_expiry_at_final_guard_rolls_back_source_and_inbox_together(
     for table in (
         "bot_memory_source_units",
         "bot_memory_sources",
-        "bot_payload_bodies",
         "bot_message_inbox",
     ):
         assert not await rows(repository, "SELECT * FROM public." + table)
+    assert await rows(repository, "SELECT * FROM public.bot_payload_bodies ORDER BY payload_id") == original_bodies
 
 
 async def test_job_is_system_source_and_cancelled_prompt_is_never_retrievable(jobs):

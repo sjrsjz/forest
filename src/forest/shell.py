@@ -134,7 +134,11 @@ class ShellDispatcher:
                         conn, lease, claim["binding_id"], claim["binding_epoch"], data=False,
                     )
                     author = claim["source"]["author"]
-                    admins = binding["config"].get("admin_user_ids", [])
+                    settings = await self.bindings.current_config_in(
+                        conn, self.runtime.bot_id, claim["binding_id"],
+                        expected_binding_epoch=claim["binding_epoch"],
+                    )
+                    admins = settings["config"].get("admin_user_ids", [])
                     authorized = (
                         not author.get("is_self") and author.get("anonymous") is None
                         and author.get("identity_origin") == "adapter_verified"
@@ -150,7 +154,7 @@ class ShellDispatcher:
                         )).fetchone()
                     else:
                         count = None
-                    await self.bindings._final_guard(conn, lease, binding, data=False)
+                    await self.bindings._final_guard(conn, lease, binding, data=False, require_config=True)
                 if not authorized:
                     text, outcome = "当前账号没有 Forest 管理权限。", {"code": "DENIED"}
                 elif builtin_method == "help":

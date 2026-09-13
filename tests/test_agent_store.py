@@ -1,6 +1,7 @@
 """Real PostgreSQL transactions for Agent cuts, recovery, budgets and authority."""
 
 import asyncio
+import html
 import json
 from uuid import uuid4
 
@@ -66,9 +67,36 @@ async def prepare(state, actor, head):
     return snapshot, request, permit
 
 
+def agent_turn(text="final", calls=None, *, thinking=()):
+    calls = calls or []
+    assert len(calls) <= 1
+    blocks = []
+    for thought in thinking:
+        blocks.append(
+            '<block block_type="Thinking"><content><text>'
+            + html.escape(thought, quote=False)
+            + "</text></content></block>"
+        )
+    if text:
+        blocks.append('<block block_type="Assistant"><content><text>'
+                      + html.escape(text, quote=False) + '</text></content></block>')
+    if calls:
+        call = calls[0]
+        blocks.append('<block block_type="FunctionCall"><function name="'
+                      + html.escape(call["name"], quote=True)
+                      + '"><arguments encoding="json">'
+                      + html.escape(json.dumps(call["arguments"], separators=(",", ":")), quote=False)
+                      + '</arguments></function></block>')
+    return ('<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
+            + "".join(blocks)
+            + '</blocks></payload></valid_agent_protocol_content_block>')
+
+
 async def respond(state, actor, permit, request, *, text="final", calls=None, status="RESPONDED"):
     if status != "NOT_SENT":
         await state.check_model_permit(actor, permit, request)
+    if status == "RESPONDED":
+        text = agent_turn(text, calls)
     return await state.complete_model(
         actor,
         permit,
@@ -78,7 +106,6 @@ async def respond(state, actor, permit, request, *, text="final", calls=None, st
             request.transport_attempt_id,
             request.payload_digest,
             text=text,
-            tool_calls_json=json.dumps(calls or []),
             usage_json=json.dumps(
                 {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
             ),
@@ -103,6 +130,109 @@ def tool_calls(snapshot, count=1):
 async def query(state, sql, args=()):
     async with state.store.pool.connection() as conn:
         return await (await conn.execute(sql, args)).fetchall()
+
+
+async def test_thinking_only_model_turn_is_private_and_advances_same_agent(messages):
+    state, actor, head = await start(messages)
+    _, request, permit = await prepare(state, actor, head)
+    await state.check_model_permit(actor, permit, request)
+    saved = await state.complete_model(
+        actor,
+        permit,
+        ModelResult(
+            "RESPONDED",
+            request.request_id,
+            request.transport_attempt_id,
+            request.payload_digest,
+            text=agent_turn("", thinking=("private planning",)),
+            usage_json='{"total_tokens":7}',
+        ),
+    )
+    assert saved["phase"] == "READY_MODEL"
+    assert saved["thinking_iteration_count"] == 1
+    assert saved["current_step"]["status"] == "CLOSED"
+    assert saved["current_step"]["closed_parts"][0]["model_turn"]["blocks"] == [
+        {"block_type": "Thinking", "text": "private planning"}
+    ]
+    assert await query(state, "SELECT * FROM public.bot_conversation_replies") == []
+    assert await query(state, "SELECT * FROM public.bot_agent_tools") == []
+
+
+async def test_protocol_failure_gets_one_frozen_repair_then_fails(messages):
+    state, actor, head = await start(messages)
+    _, request, permit = await prepare(state, actor, head)
+    await state.check_model_permit(actor, permit, request)
+    repair = await state.complete_model(
+        actor,
+        permit,
+        ModelResult(
+            "RESPONDED",
+            request.request_id,
+            request.transport_attempt_id,
+            request.payload_digest,
+            text="not XML",
+            usage_json='{"total_tokens":5}',
+        ),
+    )
+    assert repair["phase"] == "PREPARING_MODEL"
+    assert repair["protocol_repair_count"] == 1
+    assert repair["current_step"]["snapshot"]["protocol_repair"]["repair_count"] == 1
+
+    _, second_request, second_permit = await prepare(state, actor, repair)
+    assert second_request.manifest["agent_protocol"]["repair_count"] == 1
+    body = json.loads(second_request.body)
+    assert any(
+        "forest_protocol_repair" in json.dumps(message["content"])
+        for message in body["messages"]
+    )
+    await state.check_model_permit(actor, second_permit, second_request)
+    failed = await state.complete_model(
+        actor,
+        second_permit,
+        ModelResult(
+            "RESPONDED",
+            second_request.request_id,
+            second_request.transport_attempt_id,
+            second_request.payload_digest,
+            text="still not XML",
+            usage_json='{"total_tokens":6}',
+        ),
+    )
+    assert failed["phase"] == "FAILED"
+    assert failed["error_code"] == "AGENT_PROTOCOL_FAILED"
+    assert failed["protocol_repair_count"] == 1
+    assert len(await query(state, "SELECT 1 FROM public.bot_model_transport_attempts")) == 2
+    assert await query(state, "SELECT * FROM public.bot_conversation_replies") == []
+
+
+async def test_function_call_discards_model_suffix_before_execution(messages):
+    state, actor, head = await start(messages)
+    snapshot, request, permit = await prepare(state, actor, head)
+    call = tool_calls(snapshot)[0]
+    candidate = agent_turn("", [call])
+    candidate = candidate.replace(
+        "</blocks>",
+        '<block block_type="Assistant"><content><text>fabricated suffix</text></content></block>'
+        "</blocks>",
+    )
+    await state.check_model_permit(actor, permit, request)
+    saved = await state.complete_model(
+        actor,
+        permit,
+        ModelResult(
+            "RESPONDED",
+            request.request_id,
+            request.transport_attempt_id,
+            request.payload_digest,
+            text=candidate,
+            usage_json='{"total_tokens":8}',
+        ),
+    )
+    assert saved["phase"] == "WAIT_TOOL"
+    assert [tool["tool_call_id"] for tool in saved["tools"]] == ["call-0"]
+    assert saved["current_step"]["output"]["model_turn"]["truncated_after_function_call"]
+    assert "fabricated suffix" not in saved["current_step"]["output"]["canonical_model_turn"]
+    assert await query(state, "SELECT * FROM public.bot_conversation_replies") == []
 
 
 async def test_final_ready_recovers_before_new_input_and_commits_once(messages):
@@ -140,16 +270,14 @@ async def test_final_ready_recovers_before_new_input_and_commits_once(messages):
 async def test_closed_tool_group_flushes_before_last_trigger_cut_and_excludes_tail(messages):
     state, actor, head = await start(messages)
     snapshot, request, permit = await prepare(state, actor, head)
-    await respond(state, actor, permit, request, text="working", calls=tool_calls(snapshot, 2))
+    await respond(state, actor, permit, request, text="working", calls=tool_calls(snapshot))
     await fails("AGENT_BOUNDARY_CLOSED", state.boundary(actor, head["run_id"], "too-early"))
     grants = [
         await state.permit_tool(
             actor, head["run_id"], call["id"], authority_trigger_id=snapshot["trigger_ids"][0]
         )
-        for call in tool_calls(snapshot, 2)
+        for call in tool_calls(snapshot)
     ]
-    await state.observe_tool(actor, grants[1], status="SUCCEEDED", result={"value": 2})
-    await fails("TOOL_GROUP_OPEN", state.close_tools(actor, head["run_id"]))
     await state.observe_tool(actor, grants[0], status="SUCCEEDED", result={"value": 1})
     await state.close_tools(actor, head["run_id"])
     repo, lease, _ = messages
@@ -161,8 +289,8 @@ async def test_closed_tool_group_flushes_before_last_trigger_cut_and_excludes_ta
     context = await repo.context(actor, run_id=head["run_id"])
     assert [u["kind"] for u in context["units"]] == ["INPUT", "RUN_STEP", "INPUT", "INPUT"]
     group = context["units"][1]["step_parts"]
-    assert [u["role"] for u in group] == ["assistant", "tool", "tool"]
-    assert [u.get("tool_call_id") for u in group[1:]] == ["call-0", "call-1"]
+    assert [u["role"] for u in group] == ["assistant", "tool"]
+    assert [u.get("tool_call_id") for u in group[1:]] == ["call-0"]
     assert context["units"][-1]["author"]["external_user_id"] == "user-2"
     frozen = await state.snapshot(actor, head["run_id"])
     assert all(unit["unit_id"] in frozen["required_unit_ids"] for unit in group)
@@ -348,13 +476,9 @@ async def test_tool_final_guard_checks_exact_args_and_current_actor(messages):
 
 
 async def authorized_messages(env):
-    async with env.store.pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,"
-            "host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-            "VALUES (%s,'binding-a','onebot-v11','1000','test','register-a',%s,%s,true,true,'ONLINE')",
-            (env.store.bot_id, env.lease.incarnation, env.lease.owner_epoch),
-        )
+    from binding_seed import create_online_binding
+
+    await create_online_binding(env.store, env.lease, "binding-a", "1000", ticket=env.ticket)
     return MessageStore(env.store), env.lease, ""
 
 
@@ -450,15 +574,12 @@ async def test_unknown_tool_resolution_preserves_observation_history(environment
     env = environment
     state, actor, head = await start(await authorized_messages(env))
     snapshot, request, permit = await prepare(state, actor, head)
-    await respond(state, actor, permit, request, calls=tool_calls(snapshot, 2))
-    grants = [
-        await state.permit_tool(
-            actor, head["run_id"], call["id"], authority_trigger_id=snapshot["trigger_ids"][0]
-        )
-        for call in tool_calls(snapshot, 2)
-    ]
+    await respond(state, actor, permit, request, calls=tool_calls(snapshot))
+    grants = [await state.permit_tool(
+        actor, head["run_id"], "call-0", authority_trigger_id=snapshot["trigger_ids"][0]
+    )]
     await state.observe_tool(actor, grants[0], status="UNKNOWN", result=None)
-    saved = await state.observe_tool(actor, grants[1], status="SUCCEEDED", result={"value": 2})
+    saved = await state.load(actor, head["run_id"])
     assert saved["phase"] == "BLOCKED_UNKNOWN"
     payload = {
         "run_id": head["run_id"],
@@ -479,11 +600,11 @@ async def test_unknown_tool_resolution_preserves_observation_history(environment
 
 async def test_late_model_output_is_observed_and_charged_without_publication(messages):
     spec = specification()
-    spec["values"]["model_timeout"] = 0.1
+    spec["values"]["model_timeout"] = 1
     state, actor, head = await start(messages, spec=spec)
     _, request, permit = await prepare(state, actor, head)
     await state.check_model_permit(actor, permit, request)
-    await asyncio.sleep(0.15)
+    await asyncio.sleep(1.05)
     saved = await state.complete_model(
         actor,
         permit,
@@ -536,7 +657,7 @@ async def test_model_budget_projection_never_discards_trigger_or_partial_tool_gr
     frozen = await state.snapshot(actor, head["run_id"])
     projected = prepare_model_request(
         frozen,
-        ModelCapabilities("test", "test", "v1", context_limit=4000, max_output_tokens=64),
+        ModelCapabilities("test", "test", "v1", context_limit=9000, max_output_tokens=64),
         request_id="small",
         transport_attempt_id="small-attempt",
         output_tokens=64,

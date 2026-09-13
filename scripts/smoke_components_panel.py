@@ -29,6 +29,8 @@ const packages = [pkg('pkg-a','fixture.alpha','1.0.0'),pkg('pkg-b','fixture.beta
 const values = label => ({label,enabled:true,mode:'fast',tags:['original']});
 const state = (component, label, digest) => ({desired_revision:1,effective_revision:1,
   desired_values:{package_digest:digest,config:values(label),grants:[]},effective_values:{package_digest:digest,config:values(label),grants:[]},
+  desired_values_payload_state:'ACTIVE',effective_values_payload_state:'ACTIVE',
+  defaults:{package_digest:'',config:{},grants:[]},
   operations:[],runtime:{components:[{component_id:component,worker_state:'ACTIVE',loaded_revision:1}],error_code:null}});
 window.fixture = {packages,states:{'fixture.alpha':state('fixture.alpha','Alpha','pkg-a'),
   'fixture.beta':state('fixture.beta','Beta','pkg-b')},hold:[],pending:[],calls:[],plans:{},unavailable:[],poll:null};
@@ -54,7 +56,8 @@ function reply(path, method, body) {
   const component = path.match(/\/components\/([^/]+)/)?.[1], current=fixture.states[component];
   if (path.endsWith('/configuration')) return current;
   if (path.includes('/configuration/history')) return {next_before:null,revisions:[{revision:1,
-    created_at:'2026-09-13T00:00:00Z',values:{package_digest:'pkg-a-old',config:values('Historical draft'),grants:[]}}]};
+    created_at:'2026-09-13T00:00:00Z',values_payload_state:'ACTIVE',
+    values:{package_digest:'pkg-a-old',config:values('Historical draft'),grants:[]}}]};
   if (path.endsWith('/change-plans')) {
     const plan={plan_id:'plan-'+fixture.calls.length,plan_digest:'digest-'+fixture.calls.length,
       expected_revision:body.expected_revision,values:body.values};
@@ -102,7 +105,7 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for name in ("app.js", "schema-form.js", "control-receipts.js", "bindings.js", "agent-panel.js", "jobs-panel.js", "memory.js", "style.css"):
+            for name in ("app.js", "schema-form.js", "configuration-forms.js", "control-receipts.js", "bindings.js", "agent-panel.js", "jobs-panel.js", "memory.js", "style.css"):
                 resources["/static/" + name] = ((static / name).read_bytes(),
                     "text/css" if name.endswith(".css") else "text/javascript")
             if self.path not in resources:
@@ -176,6 +179,7 @@ def main():
             expect(label).to_have_value("Edited during read")
             page.locator('#bot-config-form button[type="submit"]').click()
             expect(page.locator("#bot-config-preview")).to_be_visible()
+            assert page.evaluate("fixture.calls.filter(call=>call.path.endsWith('/change-plans')).at(-1).body.source_revision") == 1
             hold("POST " + alpha + "/management-requests")
             page.locator("#bot-config-apply").click()
             page.wait_for_function("fixture.pending.length===1")

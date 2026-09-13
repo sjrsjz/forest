@@ -5,17 +5,24 @@ import copy
 import io
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 import psycopg
 import pytest
+from binding_seed import signed_ticket_factory
+from cryptography.fernet import Fernet
 from PIL import Image
-from psycopg.types.json import Jsonb
+from test_agent_config_payloads import erase_payload
 from test_messages import event, owner
 from test_messages import messages as messages
 
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
 from forest.errors import ForestError
 from forest.models import ModelCapabilities, prepare_model_request
+from forest.packages import digest_json
+from forest.storage.agent import AgentStore
+from forest.storage.agent_config import AgentConfig
 from forest.storage.input_payloads import InputContentStore
 from forest.storage.media import MAX_MEDIA_BYTES, MediaStore, _url, _validate_image
 
@@ -65,30 +72,38 @@ async def respond(writer, body, *, status=200, extra=""):
     await writer.drain()
 
 
-async def configure(repository, origins, *, enabled=True):
-    """Seed immutable config facts in this test's private disposable database."""
+class _EphemeralModelVault:
+    """Real encryption for an unused empty API key; disk key handling is separate."""
+
+    def __init__(self):
+        self.cipher = Fernet(Fernet.generate_key())
+
+    def encrypt(self, value):
+        return self.cipher.encrypt(value.encode()).decode()
+
+    def decrypt(self, value):
+        return self.cipher.decrypt(value.encode()).decode()
+
+
+_MODEL_VAULTS = WeakKeyDictionary()
+
+
+async def configure(repository, origins, *, enabled=True, ticket=None):
+    """Admit real signed Agent configuration, without sending a model request."""
     values = {**DEFAULT_AGENT_SETTINGS, "enabled": enabled, "model": "test", "media_allowed_origins": origins}
-    async with repository.store.pool.connection() as conn, conn.transaction():
-        await conn.execute("INSERT INTO public.bot_agent_config_heads(bot_id) VALUES ('bot-a') ON CONFLICT DO NOTHING")
-        row = await (await conn.execute("SELECT revision FROM public.bot_agent_config_heads WHERE bot_id='bot-a' FOR UPDATE")).fetchone()
-        revision = row["revision"] + 1
-        identifier = "media-test-" + str(revision)
-        await conn.execute(
-            "INSERT INTO public.bot_web_operations(bot_id,operation_id,action,input_digest,subject_id,issuer_id,ticket_basis,result) "
-            "VALUES ('bot-a',%s,'agent.config.apply','test','admin','test','{}','{}')", (identifier,),
-        )
-        await conn.execute(
-            "INSERT INTO public.bot_agent_config_plans(bot_id,plan_id,subject_id,issuer_id,expected_revision,values,"
-            "secret_ciphertext,credentials_changed,plan_digest,expires_at) "
-            "VALUES ('bot-a',%s,'admin','test',%s,%s,'cipher',false,'test',clock_timestamp()+interval '1 minute')",
-            (identifier, revision - 1, Jsonb(values)),
-        )
-        await conn.execute(
-            "INSERT INTO public.bot_agent_config_revisions(bot_id,revision,previous_revision,values,secret_revision,"
-            "secret_ciphertext,policy_revision,plan_id,operation_id) VALUES ('bot-a',%s,%s,%s,1,'cipher',1,%s,%s)",
-            (revision, revision - 1, Jsonb(values), identifier, identifier),
-        )
-        await conn.execute("UPDATE public.bot_agent_config_heads SET revision=%s,secret_revision=1 WHERE bot_id='bot-a'", (revision,))
+    ticket = ticket or await signed_ticket_factory(repository.store)
+    vault = _MODEL_VAULTS.setdefault(repository.store, _EphemeralModelVault())
+    config = AgentConfig(repository.store, vault)
+    operation = "media-read-" + uuid4().hex
+    previous = await config.read(await ticket("agent.config.read", operation, {}), operation)
+    operation = "media-plan-" + uuid4().hex
+    payload = {"expected_revision": previous["revision"], "values": values,
+               "credentials_changed": False, "secret_digest": digest_json({"api_key": None})}
+    proposed = await config.plan(await ticket("agent.config.plan", operation, payload), operation, payload)
+    operation = "media-apply-" + uuid4().hex
+    payload = {key: proposed[key] for key in ("expected_revision", "plan_id", "plan_digest")}
+    return await config.apply(await ticket("agent.config.apply", operation, payload,
+                                          plan_digest=payload["plan_digest"]), operation, payload)
 
 
 async def context(repository, lease, uri, *, number=1, group="group-1"):
@@ -279,14 +294,9 @@ async def test_capture_time_is_clipped_to_remaining_persistent_run_deadline(mess
     async with media_server(handler) as (origin, _):
         await configure(repository, [origin])
         actor, snapshot = await context(repository, lease, origin + "/image")
-        async with repository.store.pool.connection() as conn:
-            await conn.execute(
-                "INSERT INTO public.bot_agent_runs(bot_id,run_id,conversation_id,session_id,session_epoch,spec,spec_digest,"
-                "actor_epoch,actor_host_incarnation,input_revision,selected_input_end_seq,deadline_at) "
-                "SELECT bot_id,run_id,conversation_id,session_id,1,'{}','test',%s,%s,input_revision,selected_input_end_seq,"
-                "clock_timestamp()+interval '0.3 seconds' FROM public.bot_conversation_runs WHERE run_id=%s",
-                (actor.actor_epoch, actor.host.incarnation, snapshot["run_id"]),
-            )
+        await AgentStore(repository).ensure_run(actor, snapshot["run_id"], {
+            "config_revision": 0, "values": {"run_timeout": 1, "max_output_tokens": 64},
+        })
         result = await asyncio.wait_for(MediaStore(repository).materialize(actor, snapshot, allowed_origins=[origin]), 2)
         assert result == {}
 
@@ -323,6 +333,68 @@ async def test_inflight_revocation_prevents_publishing_pixels(messages, revocati
             assert await task == {}
         async with repository.store.pool.connection() as conn:
             assert (await (await conn.execute("SELECT count(*) AS n FROM public.bot_media_captures")).fetchone())["n"] == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("stage", ["before_download", "inflight", "after_capture"])
+async def test_erased_configuration_never_authorizes_new_capture_and_is_not_pixel_provenance(messages, stage):
+    repository, lease, _ = messages
+    entered, release = asyncio.Event(), asyncio.Event()
+    content = picture()
+
+    async def handler(writer, request):
+        entered.set()
+        if stage == "inflight":
+            await release.wait()
+        await respond(writer, content)
+
+    async with media_server(handler) as (origin, requests):
+        await configure(repository, [origin])
+        actor, snapshot = await context(repository, lease, origin + "/original")
+        media = MediaStore(repository)
+        task, captured = None, None
+        if stage == "inflight":
+            task = asyncio.create_task(media.materialize(actor, snapshot, allowed_origins=[origin]))
+            await asyncio.wait_for(entered.wait(), 5)
+        elif stage == "after_capture":
+            captured = await media.materialize(actor, snapshot, allowed_origins=[origin])
+            assert len(captured) == 1 and next(iter(captured.values())).content == content
+        async with repository.store.pool.connection() as conn:
+            revision = await (await conn.execute(
+                "SELECT values,values_payload_id FROM public.bot_agent_config_revisions WHERE revision=1"
+            )).fetchone()
+        assert revision["values"] is None
+        await erase_payload(repository.store, lease, revision["values_payload_id"])
+        if task:
+            release.set()
+            with pytest.raises(ForestError) as stale:
+                await task
+            assert stale.value.code == "MEDIA_CAPTURE_STALE"
+        elif stage == "before_download":
+            assert await media.materialize(actor, snapshot, allowed_origins=[origin]) == {}
+        else:
+            # The original pixels were authored by the message. Reading a
+            # permission configuration did not make that configuration their
+            # content parent or erase independently authored, captured bytes.
+            assert await media.materialize(actor, snapshot, allowed_origins=[origin]) == captured
+        fresh_actor, fresh_snapshot = await context(
+            repository, lease, origin + "/never-authorized", number=2, group="fresh-after-delete",
+        )
+        assert await media.materialize(fresh_actor, fresh_snapshot, allowed_origins=[origin]) == {}
+        assert len(requests) == (0 if stage == "before_download" else 1)
+        async with repository.store.pool.connection() as conn:
+            assert not await (await conn.execute(
+                "SELECT 1 FROM public.bot_payload_bodies WHERE payload_id=%s", (revision["values_payload_id"],)
+            )).fetchone()
+            bodies = await (await conn.execute(
+                "SELECT h.state,h.manifest,b.content FROM public.bot_media_captures c "
+                "JOIN public.bot_payload_headers h USING(bot_id,payload_id) "
+                "LEFT JOIN public.bot_payload_bodies b USING(bot_id,payload_id)"
+            )).fetchall()
+        assert len(bodies) == (1 if stage == "after_capture" else 0)
+        if bodies:
+            assert bodies[0]["state"] == "ACTIVE" and bytes(bodies[0]["content"]) == content
+            assert revision["values_payload_id"] not in bodies[0]["manifest"]["parents"]
 
 
 @pytest.mark.postgres

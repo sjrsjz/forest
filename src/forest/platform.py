@@ -83,9 +83,9 @@ class PendingActivation:
 
 class BindingRuntime:
     def __init__(self, bot, vault, packages: dict, *, global_slots=None, job_authority=None,
-                 global_model_slots=None, global_child_slots=None):
+                 global_model_slots=None):
         self.bot, self.kernel, self.vault = bot, bot.kernel, vault
-        self.global_model_slots, self.global_child_slots = global_model_slots, global_child_slots
+        self.global_model_slots = global_model_slots
         self.packages = dict(packages)
         self.bindings = BindingStore(bot.store)
         self.messages = MessageStore(bot.store, self.bindings)
@@ -199,8 +199,6 @@ class BindingRuntime:
                 self._tasks.append(self.shell.task)
             if self.jobs.task is not None:
                 self._tasks.append(self.jobs.task)
-            if self.agent.children.task is not None:
-                self._tasks.append(self.agent.children.task)
             if self.memory.task is not None:
                 self._tasks.append(self.memory.task)
             for task in self._tasks:
@@ -214,7 +212,6 @@ class BindingRuntime:
                 or self.delivery_worker.failure is not None
                 or self.shell.failure is not None
                 or self.jobs.failure is not None
-                or self.agent.children.failure is not None
             ):
                 self._fatal("PLATFORM_CHILD_FAILED")
                 return
@@ -320,7 +317,7 @@ class BindingRuntime:
                 and row["binding_epoch"] == pending.expected_binding_epoch + 1
                 and row["effective_revision"] == pending.revision
             )
-            if ours and adopt:
+            if ours and adopt and row["config_payload_state"] == "ACTIVE":
                 self._adopt(pending, row)
                 return True
             if ours:
@@ -353,14 +350,20 @@ class BindingRuntime:
         self.errors.pop(pending.binding_id, None)
 
     async def _replace(self, desired):
-        binding_id, revision = desired["binding_id"], desired["revision"]
+        binding_id = desired["binding_id"]
+        recover = desired["desired_values_payload_state"] != "ACTIVE"
+        revision = desired["effective_revision"] if recover else desired["revision"]
         candidate, pending = None, None
         try:
             async with self._connect_slots:
                 if self._closed.is_set():
                     return
-                values = desired["desired_values"]
-                secrets = json.loads(self.vault.decrypt(desired["secret_ciphertext"]))
+                saved = await self.bindings.candidate_config(
+                    self.kernel._authority(), binding_id, revision,
+                    expected_desired_revision=desired["revision"], recover_effective=recover,
+                )
+                values = saved["values"]
+                secrets = json.loads(self.vault.decrypt(saved["secret_ciphertext"]))
                 webhook = secrets["webhook_secret"]
                 if values["enabled"]:
                     if not isinstance(webhook, str) or not 1 <= len(webhook) <= 4096:
@@ -374,7 +377,7 @@ class BindingRuntime:
                         raise ForestError(
                             "ONEBOT_IDENTITY_MISMATCH", "API account differs from binding", 409
                         )
-                drained = await self.bindings.drain(self.kernel._authority(), binding_id, revision)
+                drained = await self.bindings.drain(self.kernel._authority(), binding_id, desired["revision"])
                 old = self.connections.get(binding_id)
                 if old is not None:
                     old.accepting = False
@@ -395,6 +398,8 @@ class BindingRuntime:
                     enabled=values["enabled"],
                     client_incarnation=pending.client_incarnation,
                     expected_binding_epoch=pending.expected_binding_epoch,
+                    recover_effective=recover,
+                    expected_desired_revision=desired["revision"],
                 )
                 self._adopt(pending, row)
                 candidate = None
@@ -427,7 +432,7 @@ class BindingRuntime:
                 self._fatal(code)
             try:
                 await self.bindings.report_error(
-                    self.kernel._authority(), binding_id, revision, code
+                    self.kernel._authority(), binding_id, desired["revision"], code
                 )
             except Exception:
                 self.errors["store"] = "BINDING_REPORT_UNAVAILABLE"
@@ -446,6 +451,20 @@ class BindingRuntime:
                 desired = await self.bindings.desired(self.kernel._authority())
                 for row in desired:
                     binding_id = row["binding_id"]
+                    old = self.connections.get(binding_id)
+                    if old is not None and row["config_payload_state"] != "ACTIVE":
+                        old.accepting = False
+                        old.row["config"] = None
+                        old.row["config_payload_state"] = "UNAVAILABLE"
+                        await self._disconnect(old)
+                        await old.close()
+                        self._clients.discard(old.client)
+                        self.connections.pop(binding_id, None)
+                        self._applied.pop(binding_id, None)
+                    if (row["desired_values_payload_state"] != "ACTIVE"
+                            and row["effective_values_payload_state"] != "ACTIVE"):
+                        self.errors[binding_id] = "CONTROL_CONTENT_REVOKED"
+                        continue
                     job = self._jobs.get(binding_id)
                     if job is not None:
                         if not job.done():
@@ -493,9 +512,13 @@ class BindingRuntime:
                 pass
 
     def _matches_owner(self, row):
-        if self._applied.get(row["binding_id"]) != (row["revision"], row["client_incarnation"]):
+        desired_available = row["desired_values_payload_state"] == "ACTIVE"
+        revision = row["revision"] if desired_available else row["effective_revision"]
+        values = row["desired_values"] if desired_available else row["effective_values"]
+        if (row["config_payload_state"] != "ACTIVE" or values is None
+                or self._applied.get(row["binding_id"]) != (revision, row["client_incarnation"])):
             return False
-        if not row["desired_values"]["enabled"]:
+        if not values["enabled"]:
             return row["state"] == "DISABLED" and not row["enabled"]
         connection = self.connections.get(row["binding_id"])
         return (
@@ -561,7 +584,11 @@ class BindingRuntime:
                 )
                 if echo:
                     return {"accepted": True, "kind": "KNOWN_ECHO"}
-            config = connection.row["config"]
+            current = await self.bindings.execution_config(
+                self.kernel._authority(), binding_id,
+                expected_binding_epoch=connection.row["binding_epoch"],
+            )
+            config = current["config"]
             text = "".join(s.get("text", "") for s in event["segments"] if s["type"] == "text")
             mention = any(
                 s["type"] == "mention" and s.get("external_user_id") == connection.row["self_id"]
@@ -597,7 +624,10 @@ class BindingRuntime:
         connection = self.connection(actor.binding_id)
         if connection.row["binding_epoch"] != actor.binding_epoch:
             raise ForestError("STALE_BINDING", "Conversation belongs to an old connection", 409)
-        config = connection.row["config"]
+        current = await self.bindings.execution_config(
+            self.kernel._authority(), actor.binding_id, expected_binding_epoch=actor.binding_epoch, data=True,
+        )
+        config = current["config"]
         if selected.get("agent_phase") is not None or config["response_mode"] == "agent":
             return await self.agent.runner.advance(actor, selected, context)
         if config["response_mode"] != "component":
@@ -623,7 +653,7 @@ class BindingRuntime:
             },
             operation_id="response:" + str(uuid4()),
             expected_policy_revision=actor.policy_revision,
-            input_parent_ids=tuple(context["payload_ids"]),
+            input_parent_ids=(*context["payload_ids"], current["config_payload_id"]),
         )
         from forest.group_scheduler import ComponentReply
 
@@ -636,6 +666,9 @@ class BindingRuntime:
             or connection.row["connection_epoch"] != claim.connection_epoch
         ):
             raise ForestError("STALE_BINDING", "Delivery belongs to an old connection", 409)
+        current = await self.bindings.execution_config(
+            self.kernel._authority(), claim.route["binding_id"], expected_binding_epoch=claim.binding_epoch,
+        )
         await self.ensure_components(("adapter.onebot",))
         operation = "format:" + str(uuid4())
         receipt = await self.kernel.invoke_control_with_receipt(
@@ -648,7 +681,7 @@ class BindingRuntime:
             },
             operation_id=operation,
             timeout=5,
-            input_parent_ids=(claim.payload_id,),
+            input_parent_ids=(claim.payload_id, current["config_payload_id"]),
         )
         value = receipt.value
         call = await self.bot.store.read_call(operation)

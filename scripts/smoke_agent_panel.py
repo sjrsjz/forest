@@ -10,19 +10,19 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from forest.agent_protocol import protocol_descriptor
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
 
 BOOTSTRAP = r"""
 import {agentPanel} from '/static/agent-panel.js';
 window.fixture={rows:{},calls:[],hold:[],pending:[],errors:[]};
 const defaults=__DEFAULTS__;
-for (const bot of ['a','b']) fixture.rows[bot]={revision:1,values:{...defaults,model:'model-'+bot},has_api_key:true};
+for (const bot of ['a','b']) fixture.rows[bot]={revision:1,values:{...defaults,model:'model-'+bot},protocol:__PROTOCOL__,has_api_key:true};
 function respond(path, options={}) {
   const bot=path.split('/')[2], row=fixture.rows[bot];
   if(path.endsWith('/configuration')) return structuredClone(row);
   if(path.endsWith('/runs')) return {runs:[{run_id:'run-a',conversation_id:'group-a',phase:'WAIT_APPROVAL',checkpoint_seq:3}],
     approvals:[{approval_id:'approval-a',arguments_digest:'digest-a',tool_name:'counter',arguments:{amount:2}}],
-    children:[{child_id:'child-a',parent_run_id:'run-a',status:'SUCCEEDED',source_unit_ids:['unit-a'],principal_ref:'principal-a',authority_trigger_id:'trigger-a',deadline_at:'2030-01-01T00:00:00Z'}],
     run_budgets:[{run_id:'run-a',reserved_tokens:100,charged_tokens:30}]};
   if(path.endsWith('/change-plans')) return {plan_id:'plan-a',plan_digest:'plan-digest',
     expected_revision:row.revision,values:options.body.values,before_values:row.values,
@@ -60,13 +60,15 @@ def main():
         '<script type="module" src="/static/app.js"></script>',
         '<script type="module" src="/fixture.js"></script>',
     )
-    bootstrap = BOOTSTRAP.replace("__DEFAULTS__", json.dumps(DEFAULT_AGENT_SETTINGS))
+    bootstrap = BOOTSTRAP.replace("__DEFAULTS__", json.dumps(DEFAULT_AGENT_SETTINGS)).replace(
+        "__PROTOCOL__", json.dumps(protocol_descriptor())
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (bootstrap.encode(), "text/javascript")}
-            for name in ("agent-panel.js", "style.css"):
+            for name in ("agent-panel.js", "configuration-forms.js", "style.css"):
                 resources["/static/" + name] = ((static / name).read_bytes(),
                     "text/css" if name.endswith(".css") else "text/javascript")
             if self.path not in resources:
@@ -97,20 +99,21 @@ def main():
             model = page.locator('#agent-config [name="model"]')
             expect(model).to_have_value("model-a")
             model.fill("edited-model")
-            page.get_by_text('子分析与单次运行预算', exact=True).click()
-            page.locator('[name="children_enabled"]').check()
-            page.locator('[name="max_children"]').fill('3')
+            page.get_by_text('协议与单次运行预算', exact=True).click()
             page.locator('[name="run_token_budget"]').fill('24000')
+            page.locator('[name="max_tool_iterations"]').fill('6')
+            page.locator('[name="preset_context"]').fill('浏览器测试人格')
             page.get_by_role("button", name="预览 Agent 变更").click()
             expect(page.locator('#agent-preview')).to_be_visible()
             planned = page.evaluate("fixture.calls.find(c=>c.path.endsWith('/change-plans')).body.values")
-            assert planned['children_enabled'] and planned['max_children'] == 3 and planned['run_token_budget'] == 24000
+            assert planned['preset_context'] == ['浏览器测试人格']
+            assert planned['max_tool_iterations'] == 6 and planned['run_token_budget'] == 24000
             page.locator('#agent-apply').click()
             expect(page.locator('#agent-config-status')).to_contain_text("配置修订 2")
             expect(model).to_have_value("edited-model")
-            expect(page.locator('#agent-runs')).to_contain_text('私有子分析')
-            expect(page.locator('#agent-runs')).to_contain_text('父运行与子分析共用预算')
-            expect(page.locator('#agent-runs')).to_contain_text('子分析结果只交回父运行')
+            expect(page.locator('#agent-runs')).to_contain_text('每次运行预算')
+            expect(page.locator('#agent-protocol-version')).to_contain_text('forest-agent-protocol v1')
+            expect(page.locator('#agent-core-prompt')).to_contain_text('valid_agent_protocol_content_block')
             page.get_by_role("button", name="批准本次参数").click()
             page.wait_for_function("fixture.calls.some(c=>c.path.endsWith('/approvals'))")
             assert page.evaluate("fixture.calls.find(c=>c.path.endsWith('/approvals')).body") == {
@@ -152,7 +155,7 @@ def main():
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "mobile overflow"
             page.screenshot(path=str(artifacts / "agent-mobile.png"), full_page=True)
             browser.close()
-            print("PASS: Agent and child config, private child status/budgets, approval, read/apply drafts, Bot switching and mobile layout")
+            print("PASS: single-Agent protocol/preset config, budgets, approval, read/apply drafts, Bot switching and mobile layout")
     finally:
         server.shutdown()
         thread.join()

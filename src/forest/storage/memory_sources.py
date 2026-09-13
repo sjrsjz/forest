@@ -155,7 +155,8 @@ class MemorySourceStore:
             inherited = await (
                 await conn.execute(
                     "SELECT DISTINCT p.source_unit_id,p.source_revision,p.part_id "
-                    "FROM public.bot_memory_source_units d JOIN public.bot_payload_sources p USING(bot_id,payload_id) "
+                    "FROM public.bot_memory_source_units d "
+                    "JOIN public.forest_payload_effective_sources p USING(bot_id,payload_id) "
                     "WHERE d.bot_id=%s AND d.source_unit_id=ANY(%s) LIMIT 4097",
                     (self.store.bot_id, [ref.source_unit_id for ref in dependencies]),
                 )
@@ -349,10 +350,16 @@ class MemorySourceStore:
             return existing
         binding = await (
             await conn.execute(
-                "SELECT self_id,display_name FROM public.bot_bindings WHERE bot_id=%s AND binding_id=%s",
+                "SELECT self_id,binding_id,registry_operation_id,initial_payload_id,initial_payload_digest "
+                "FROM public.bot_bindings WHERE bot_id=%s AND binding_id=%s",
                 (self.store.bot_id, conversation["binding_id"]),
             )
         ).fetchone()
+        from forest.storage.bindings import BindingStore
+
+        initial = await BindingStore(self.store).initial_in(conn, binding)
+        initial_parents = ((initial["initial_payload_id"],)
+                           if initial["display_name_payload_state"] == "ACTIVE" else ())
         run = await (
             await conn.execute(
                 "SELECT selected_input_end_seq FROM public.bot_conversation_runs WHERE bot_id=%s AND run_id=%s",
@@ -398,14 +405,14 @@ class MemorySourceStore:
         )
         complete = False
         if dependency_payload_ids is not None:
-            parents = tuple(dependency_payload_ids)
+            parents = tuple(dict.fromkeys((*dependency_payload_ids, *initial_parents)))
             clock = await self.payloads.lock_in(conn)
             await self.payloads.require_available_in(
                 conn, parents, expected_deletion_epoch=clock["deletion_epoch"]
             )
             incomplete = await (
                 await conn.execute(
-                    "SELECT 1 FROM public.bot_payload_sources p "
+                    "SELECT 1 FROM public.forest_payload_effective_sources p "
                     "LEFT JOIN public.bot_memory_source_units u ON u.bot_id=p.bot_id AND u.source_unit_id=p.source_unit_id "
                     "LEFT JOIN public.bot_payload_domains pd ON pd.bot_id=p.bot_id AND pd.source_unit_id=p.source_unit_id "
                     "WHERE p.bot_id=%s AND p.payload_id=ANY(%s) "
@@ -419,10 +426,12 @@ class MemorySourceStore:
             # The bounded legacy scan is not a complete provenance proof. A
             # migrated formal reply may additionally carry the conservative
             # legacy scope: every new copy must inherit that deletion barrier.
-            parents = (reply["payload_id"],) if reply.get("payload_id") else ()
+            parents = tuple(dict.fromkeys((
+                *((reply["payload_id"],) if reply.get("payload_id") else ()), *initial_parents,
+            )))
         author = {
             "external_user_id": binding["self_id"],
-            "display_name": binding["display_name"],
+            "display_name": initial["display_name"] if initial["display_name_payload_state"] == "ACTIVE" else binding["self_id"],
             "principal_ref": "principal:"
             + digest_json([self.store.bot_id, conversation["platform"], binding["self_id"]]),
             "identity_origin": "host_output",
@@ -513,7 +522,7 @@ class MemorySourceStore:
                 "AND (%s::text IS NULL OR u.source_unit_id>%s) "
                 "AND h.state='ACTIVE' AND u.lineage_complete "
                 "AND EXISTS(SELECT 1 FROM public.bot_payload_bodies b WHERE b.bot_id=h.bot_id AND b.payload_id=h.payload_id) "
-                "AND NOT EXISTS(SELECT 1 FROM public.bot_payload_sources p "
+                "AND NOT EXISTS(SELECT 1 FROM public.forest_payload_effective_sources p "
                 "LEFT JOIN public.bot_memory_source_units d ON d.bot_id=p.bot_id AND d.source_unit_id=p.source_unit_id "
                 "LEFT JOIN public.bot_memory_sources ds ON ds.bot_id=d.bot_id AND ds.source_id=d.source_id "
                 "LEFT JOIN public.bot_payload_headers dh ON dh.bot_id=d.bot_id AND dh.payload_id=d.payload_id "

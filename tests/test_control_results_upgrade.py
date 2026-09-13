@@ -18,6 +18,7 @@ from forest.errors import ForestError
 from forest.memory_types import SourceRef
 from forest.packages import digest_json
 from forest.storage.bot import MIGRATION_HANDLERS, BotStore, _migration_checksum
+from forest.storage.control import BotControl
 from forest.storage.control_payloads import ControlPayloadStore
 from forest.storage.migration_v1 import _migration_context, install_writer_gate_in
 from forest.storage.payloads import PayloadStore
@@ -29,6 +30,11 @@ pytestmark = pytest.mark.postgres
 RELEASED_038_CHAIN = "f977e9b46c7e8ffc243ee38856cb38c6ccc39185f9866ddd81328b3c1b381192"
 LONG = "legacy-" + "长" * 1800
 CANARY = {"values": {"label": "CONTROL-OLD-CANARY", "multiplier": 7}}
+CONFIG_CANARY = {
+    "package_digest": "old-package",
+    "config": {"label": "COMPONENT-OLD-CANARY"},
+    "grants": [],
+}
 
 
 async def schema_038(store):
@@ -82,12 +88,13 @@ async def seed(store):
         await conn.execute(
             "INSERT INTO public.bot_config_plans(bot_id,plan_id,component_id,subject_id,issuer_id,"
             "expected_revision,values,plan_digest,expires_at) VALUES ('bot-a','old-plan','counter','admin',"
-            "'issuer',0,%s,'old-plan-digest','2025-01-03T00:00:00Z')", (Jsonb(CANARY),),
+            "'issuer',0,%s,'old-plan-digest','2025-01-03T00:00:00Z')",
+            (Jsonb(CONFIG_CANARY),),
         )
         await conn.execute(
             "INSERT INTO public.bot_config_revisions(bot_id,component_id,revision,previous_revision,"
             "values,policy_revision,plan_id,operation_id) VALUES ('bot-a','counter',1,0,%s,4,'old-plan',%s)",
-            (Jsonb(CANARY), LONG),
+            (Jsonb(CONFIG_CANARY), LONG),
         )
         await conn.execute("INSERT INTO public.bot_audit_records(bot_id,audit_id,action,operation_id,details) "
                            "VALUES ('bot-a','old-audit','config.plan',%s,%s)", (LONG, Jsonb(CANARY)))
@@ -146,11 +153,22 @@ async def test_nonempty_038_preserves_facts_json_null_and_legacy_scope(upgrade_d
                 await conn.execute("UPDATE public.bot_web_operations SET input_legacy_unknown=false "
                                    "WHERE operation_id=%s", (target["operation_id"],))
         assert not await read_rows(store, "SELECT * FROM public.bot_payload_domains WHERE kind='CONTROL_INPUT'")
-        # Audit/outbox/config remain explicit later-family work, not silently
-        # claimed erased by this one operation-result migration.
+        # Audit/outbox remain exact facts. Component configuration is now a
+        # removable 048 body with its original revision identity.
         assert (await read_rows(store, "SELECT details FROM public.bot_audit_records WHERE audit_id='old-audit'"))[0]["details"] == CANARY
         assert (await read_rows(store, "SELECT payload FROM public.bot_outbox_events WHERE event_id='old-outbox'"))[0]["payload"] == CANARY
-        assert (await read_rows(store, "SELECT values FROM public.bot_config_revisions"))[0]["values"] == CANARY
+        config = (await read_rows(store, "SELECT * FROM public.bot_config_revisions"))[0]
+        assert config["values"] is None and config["values_payload_id"]
+        async with store.pool.connection() as conn, conn.transaction():
+            restored_config = await BotControl(store).config_values_in(
+                conn, config, required=False
+            )
+        assert restored_config["values_payload_state"] == (
+            "UNAVAILABLE" if forgotten_before else "ACTIVE"
+        )
+        assert restored_config["values"] == (
+            None if forgotten_before else CONFIG_CANARY
+        )
         headers_before = await read_rows(store, "SELECT * FROM public.bot_payload_headers ORDER BY payload_id")
         ledger_before = await read_rows(store, "SELECT * FROM public.forest_bot_schema_migrations ORDER BY version")
         await store.close()

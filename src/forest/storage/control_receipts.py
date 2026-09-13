@@ -64,6 +64,10 @@ class ControlReceiptStore:
         return row["payload_id"], value
 
     async def plan_parent_in(self, conn, family, plan):
+        if "values_payload_id" in plan:
+            ref = await self.plan_values_proof_in(conn, family, plan)
+            await self.content.require_in(conn, (ref,), epoch=await self._epoch(conn))
+            return ref
         ref, value = await self._bridge_in(conn, family, "PLAN", plan["plan_id"])
         if not isinstance(value, dict) or any(value.get(key) != plan[key] for key in ("plan_id", "plan_digest", "values")):
             raise ForestError("CONTROL_PLAN_SOURCE_CONFLICT", "Plan differs from its immutable source receipt", 409)
@@ -72,6 +76,10 @@ class ControlReceiptStore:
     async def revision_parent_in(self, conn, family, revision, *, resource=""):
         if revision is None:
             return None
+        if "values_payload_id" in revision:
+            ref = await self.revision_values_proof_in(conn, family, revision, resource=resource)
+            await self.content.require_in(conn, (ref,), epoch=await self._epoch(conn))
+            return ref
         row = await (await conn.execute(
             "SELECT operation_id,action FROM public.bot_web_operations WHERE bot_id=%s AND operation_id=%s",
             (self.store.bot_id, revision["operation_id"]),
@@ -88,9 +96,37 @@ class ControlReceiptStore:
             raise ForestError("CONTROL_SOURCE_CONFLICT", "Revision differs from its legacy source", 409)
         return ref
 
+    async def plan_values_proof_in(self, conn, family, plan, *, resource=""):
+        from forest.storage.control_value_proofs import plan_values_proof_in
+
+        return await plan_values_proof_in(conn, self.store, family, plan, resource=resource)
+
+    async def revision_values_proof_in(self, conn, family, revision, *, resource=""):
+        from forest.storage.control_value_proofs import revision_values_proof_in
+
+        return await revision_values_proof_in(conn, self.store, family, revision, resource=resource)
+
+    async def activation_heads_in(self, conn, component, operation_id):
+        """Only business heads, before any configuration/exposure body clock."""
+        if operation_id is None:
+            return
+        await conn.execute(
+            "SELECT h.component_id FROM public.bot_config_heads h JOIN public.bot_config_activations a "
+            "ON a.bot_id=h.bot_id AND a.component_id=h.component_id "
+            "WHERE a.bot_id=%s AND a.operation_id=%s AND a.component_id=%s FOR UPDATE OF h",
+            (self.store.bot_id, operation_id, component),
+        )
+        await conn.execute(
+            "SELECT h.watch_id FROM public.bot_dev_watch_heads h JOIN public.bot_dev_watch_activations a "
+            "ON a.bot_id=h.bot_id AND a.watch_id=h.watch_id "
+            "WHERE a.bot_id=%s AND a.operation_id=%s AND h.component_id=%s FOR UPDATE OF h",
+            (self.store.bot_id, operation_id, component),
+        )
+
     async def generation_parents_in(self, conn, component, operation_id, *, config, package_digest, grants):
         if operation_id is None:
             return ()
+        await self.activation_heads_in(conn, component, operation_id)
         row = await (await conn.execute(
             "SELECT r.* FROM public.bot_config_activations a JOIN public.bot_config_revisions r "
             "ON r.bot_id=a.bot_id AND r.component_id=a.component_id AND r.revision=a.revision "
@@ -98,7 +134,23 @@ class ControlReceiptStore:
             (self.store.bot_id, operation_id, component),
         )).fetchone()
         if row is None:
-            return ()
+            from forest.storage.watch import WatchStore
+            watch = await (await conn.execute(
+                "SELECT h.*,b.package_digest AS activated_package FROM public.bot_dev_watch_activations a "
+                "JOIN public.bot_dev_watch_heads h ON h.bot_id=a.bot_id AND h.watch_id=a.watch_id "
+                "JOIN public.bot_dev_watch_builds b ON b.bot_id=a.bot_id AND b.request_id=a.request_id "
+                "WHERE a.bot_id=%s AND a.operation_id=%s AND h.component_id=%s AND b.component_id=%s",
+                (self.store.bot_id, operation_id, component, component),
+            )).fetchone()
+            if watch is None:
+                return ()
+            watch = await WatchStore(self.store).hydrate_in(conn, watch)
+            if (watch["config"] != config or watch["activated_package"] != package_digest
+                    or sorted(watch["grants"]) != sorted(grants)):
+                raise ForestError("WATCH_SUPERSEDED", "Generation differs from its actual watch activation", 409)
+            return (watch["spec_payload_id"],)
+        from forest.storage.control import BotControl
+        row = await BotControl(self.store).config_values_in(conn, row)
         values = row["values"]
         if values["config"] != config or values["package_digest"] != package_digest or sorted(values["grants"]) != sorted(grants):
             raise ForestError("CONFIGURATION_SUPERSEDED", "Generation differs from its actual activation", 409)

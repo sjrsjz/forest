@@ -34,6 +34,16 @@ async def rows(store, query, parameters=()):
         return await (await conn.execute(query, parameters)).fetchall()
 
 
+async def delivery_bodies(store):
+    return await rows(
+        store,
+        "SELECT h.payload_id FROM public.bot_payload_headers h "
+        "JOIN public.bot_payload_bodies b USING(bot_id,payload_id) "
+        "WHERE h.owner_kind IN ('delivery.payload','delivery.request','delivery.receipt') "
+        "OR (h.owner_kind='context.parts' AND h.owner_id='input-source')",
+    )
+
+
 async def sourced(d, lease, *, operation="send", sequence=1):
     body = await d.contents.payloads.put_json(
         lease,
@@ -99,7 +109,7 @@ async def test_erasure_prevents_each_new_transport_boundary(delivery, boundary):
         )
         == original
     )
-    assert not await rows(d.store, "SELECT 1 FROM public.bot_payload_bodies")
+    assert not await delivery_bodies(d.store)
 
 
 @pytest.mark.parametrize("status", ["SENT", "UNKNOWN"])
@@ -122,7 +132,7 @@ async def test_late_effect_observation_preserves_metadata_without_reviving_body(
     row = (await rows(d.store, "SELECT * FROM public.bot_send_attempts"))[0]
     assert row["wire_body"] is None and row["receipt_payload_id"] is None
     assert row["wire_digest"] == attempt.wire_digest and row["started_at"] is not None
-    assert not await rows(d.store, "SELECT 1 FROM public.bot_payload_bodies")
+    assert not await delivery_bodies(d.store)
     if status == "UNKNOWN":
         with pytest.raises(ForestError) as exc:
             await d.reconcile(
@@ -157,7 +167,7 @@ async def test_late_effect_observation_preserves_metadata_without_reviving_body(
             )
             == skipped
         )
-        assert not await rows(d.store, "SELECT 1 FROM public.bot_payload_bodies")
+        assert not await delivery_bodies(d.store)
         assert (
             await rows(
                 d.store, "SELECT reason,result,payload_id FROM public.bot_delivery_resolutions"
@@ -203,7 +213,7 @@ async def test_full_receipt_and_resolution_are_payloads_then_physically_erased(d
         )
         assert resolved["reason"] == "REASON-CANARY"
     await erase(d, lease)
-    assert not await rows(d.store, "SELECT 1 FROM public.bot_payload_bodies")
+    assert not await delivery_bodies(d.store)
     assert (await d.list(lease))[0]["state"] == "SKIPPED"
 
 
@@ -234,7 +244,7 @@ async def test_real_socket_receipt_after_erasure_does_not_restore_transmitted_by
             assert await asyncio.wait_for(task, 5)
             assert len(requests) == 1 and b"SEND-CANARY" in requests[0][2]
             assert (await d.list(lease))[0]["receipt"] == {"status": "SENT", "message_id": "123"}
-            assert not await rows(d.store, "SELECT 1 FROM public.bot_payload_bodies")
+            assert not await delivery_bodies(d.store)
             assert not await worker.run_once()
         finally:
             release.set()

@@ -61,16 +61,21 @@ async def old_config_leaves_in(conn, bot_id, payload_ids):
         # The actual configuration activation of a published generation gives
         # a bounded, exact revision identity. Without it we decline the proof.
         selected = await (await conn.execute(
-            "SELECT DISTINCT d.parent_payload_id,r.component_id,r.revision,r.operation_id "
-            "FROM public.bot_payload_derivations d JOIN public.bot_generations g "
-            "ON g.bot_id=d.bot_id AND g.config_payload_id=d.payload_id "
+            "SELECT DISTINCT source.parent_payload_id,r.component_id,r.revision,r.operation_id "
+            "FROM public.bot_generations g "
             "JOIN public.bot_lifecycle_operations l ON l.bot_id=g.bot_id "
             "AND l.candidate_generation_id=g.generation_id AND l.component_id=g.component_id AND l.phase='COMMITTED' "
             "JOIN public.bot_config_activations a ON a.bot_id=l.bot_id "
             "AND a.operation_id=l.operation_id AND a.component_id=g.component_id "
             "JOIN public.bot_config_revisions r ON r.bot_id=a.bot_id "
             "AND r.component_id=a.component_id AND r.revision=a.revision "
-            "WHERE d.bot_id=%s AND d.parent_payload_id=ANY(%s) LIMIT %s",
+            "JOIN (SELECT bot_id,payload_id,parent_payload_id FROM public.bot_payload_derivations "
+            "UNION SELECT bot_id,payload_id,parent_payload_id FROM public.bot_payload_legacy_dependencies) dependency "
+            "ON dependency.bot_id=g.bot_id AND dependency.payload_id=g.config_payload_id "
+            "AND dependency.parent_payload_id=r.values_payload_id "
+            "JOIN public.bot_payload_derivations source ON source.bot_id=r.bot_id "
+            "AND source.payload_id=r.values_payload_id "
+            "WHERE g.bot_id=%s AND source.parent_payload_id=ANY(%s) LIMIT %s",
             (bot_id, untracked, MAX_BATCH + 1),
         )).fetchall()
         if len(selected) > MAX_BATCH:

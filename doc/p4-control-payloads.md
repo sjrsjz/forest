@@ -75,4 +75,4 @@ UI 资源粒度是 Bot + 组件 ID，或该 Bot 的 Agent、Memory、Job、Bindi
 
 基础载荷与旧库升级见 [control payload 测试](../tests/test_control_payloads.py)和 [040 升级测试](../tests/test_control_results_upgrade.py)。组件页面的真实浏览器反例见 [组件表单冒烟脚本](../scripts/smoke_components_panel.py)，覆盖回执失效、延迟配置/历史响应及不自动重做。[管理回执浏览器脚本](../scripts/smoke_control_receipts.py)已通过 14 个 Edge 场景，包括五类面板失效、同面板重新加载、任务取消提示、跨 Bot 的迟到错误，以及注销后记忆配置和密钥清空。这些场景使用受控 HTTP fixture，不替代 PostgreSQL、真实平台或模型服务验收。最终 Windows 和非 root Linux 各通过 482 项综合测试；当前候选也通过完整 Edge/独立 Compose 流程，实际证据及边界见[实现状态](implementation-status.md)。
 
-本片之外仍包括配置正文的完整迁移、Agent spec 到模型/Child 的来源边、Job 定义到 occurrence、Shell 参数/结果、自由取消原因与 checkpoint、副本不确定的其他事件，以及部署库、WAL、备份与公开遗忘管理。已有外部效果不因删除回执而变成“未执行”。
+本片之后，042–049 已完成 Agent、Memory、Binding、组件和 Watch 配置正文、Agent frozen spec 及其实际运行父链，详见[配置正文与独立替换](p5-configuration-payloads.md)。Job 定义到 occurrence、Shell 参数/结果、自由取消原因与部分 checkpoint、副本不确定的其他事件，以及部署库、WAL、备份与公开遗忘管理仍未完成。已有外部效果不因删除回执而变成“未执行”。

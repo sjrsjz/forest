@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
+from copy import deepcopy
 
 from forest.agent import AgentRunner
+from forest.agent_settings import normalize_stored_agent_values
 from forest.errors import ForestError
 from forest.models import ChatCompletionsClient, ModelCapabilities
 from forest.packages import digest_json
@@ -16,17 +17,12 @@ from forest.storage.agent_config import AgentConfig
 class _ScopedClient:
     """Allocate transport only for dispatch; drafts/config revisions own no pools."""
 
-    def __init__(self, runtime, endpoint, api_key, *, child=False):
+    def __init__(self, runtime, endpoint, api_key):
         self.runtime, self.endpoint, self.api_key = runtime, endpoint, api_key
-        self.child = child
 
     async def dispatch(self, prepared, *, permitcheck, timeout):
-        # Waiting for capacity is bounded by the same call timeout. Children
-        # acquire their smaller global pool first, preserving foreground slots.
+        # Waiting for capacity is bounded by the same call timeout.
         async with asyncio.timeout(timeout):
-            if self.child:
-                async with self.runtime.global_child_slots:
-                    return await self._limited(prepared, permitcheck, timeout)
             return await self._limited(prepared, permitcheck, timeout)
 
     async def _limited(self, prepared, permitcheck, timeout):
@@ -53,15 +49,10 @@ class AgentRuntime:
         self.config = AgentConfig(platform.bot.store, platform.vault)
         self.clients = set()
         self.client_lock = asyncio.Lock()
-        # At most two child workers can occupy four HTTP slots; foreground
-        # conversation processing always retains capacity.
         self.model_slots = asyncio.Semaphore(4)
         self.global_model_slots = getattr(
             platform, "global_model_slots", None
         ) or asyncio.Semaphore(32)
-        self.global_child_slots = getattr(
-            platform, "global_child_slots", None
-        ) or asyncio.Semaphore(8)
         self.closed = False
         self.runner = AgentRunner(
             self.messages,
@@ -72,28 +63,8 @@ class AgentRuntime:
             authorize_tool=self.authorize_tool,
             retrieve_memory=self.retrieve_memory,
         )
-        from forest.children import ChildScheduler
-        from forest.storage.children import ChildStore
-
-        self.children = ChildScheduler(
-            ChildStore(self.runner.state), lambda: self.kernel.lease, self.resolve_child_client
-        )
-
     async def start(self):
-        await self.children.start()
-
-    async def resolve_child_client(self, lease, child):
-        saved = await self.children.store.load(lease)
-        values = saved["spec"]["values"]
-        revision = saved["spec"]["config_revision"]
-        row = await self.config.runtime(lease.host, revision=revision)
-        capabilities = self._capabilities(values, revision)
-        return _ScopedClient(
-            self,
-            values["endpoint"],
-            self.platform.vault.decrypt(row["secret_ciphertext"]),
-            child=True,
-        ), replace(capabilities, supports_tools=False)
+        return None
 
     def _capabilities(self, values, revision):
         return ModelCapabilities(
@@ -148,14 +119,23 @@ class AgentRuntime:
     async def resolve_spec(self, actor, saved=None):
         if saved is not None:
             await self._configuration(actor, saved["config_revision"])
-            return saved
+            result = deepcopy(saved)
+            runtime_values = normalize_stored_agent_values(result["values"])
+            for key, value in runtime_values.items():
+                result[key] = value
+            for key in ("system_prompt", "children_enabled", "max_children",
+                        "child_concurrency", "child_timeout", "child_max_output_tokens"):
+                result.pop(key, None)
+            return result
         row = await self.config.runtime(actor.host)
         await self._configuration(actor, row["revision"])
         values = row["values"]
         tools = [self._freeze_tool(tool) for tool in values["allowed_tools"]]
         return {
             **values,
-            "values": values,
+            # The immutable config body remains the receipt for upgraded
+            # revisions. Runtime code always derives the current schema from it.
+            "values": row.get("stored_values", values),
             "config_revision": row["revision"],
             "secret_revision": row["secret_revision"],
             "tools": tools,
@@ -163,7 +143,7 @@ class AgentRuntime:
 
     async def resolve_client(self, actor, spec):
         await self._configuration(actor, spec["config_revision"])
-        values = spec["values"]
+        values = normalize_stored_agent_values(spec["values"])
         capabilities = ModelCapabilities(
             deployment_id=f"{self.messages.store.bot_id}:agent:{spec['config_revision']}",
             capability_revision=f"configuration:{spec['config_revision']}",
@@ -191,7 +171,11 @@ class AgentRuntime:
         # Canonical refs survive text-only projection and remain available to
         # the independent multimodal memory/embedding path.
         media = await MediaStore(self.messages).materialize(
-            actor, snapshot, allowed_origins=spec["values"]["media_allowed_origins"]
+            actor,
+            snapshot,
+            allowed_origins=normalize_stored_agent_values(spec["values"])[
+                "media_allowed_origins"
+            ],
         )
         return snapshot, media
 
@@ -218,6 +202,12 @@ class AgentRuntime:
         async with self.messages.store.pool.connection() as conn, conn.transaction():
             binding, conversation = await self.messages._actor(conn, actor)
             session = await self.messages._session(conn, conversation)
+            from forest.storage.bindings import BindingStore
+
+            effective = await BindingStore.current_config_in(
+                conn, self.messages.store.bot_id, actor.binding_id, expected_binding_epoch=actor.binding_epoch
+            )
+            binding["config"] = effective["config"]
             row = await (
                 await conn.execute(
                     "SELECT t.*,i.author FROM public.bot_conversation_triggers t JOIN public.bot_message_inbox i "
@@ -254,7 +244,6 @@ class AgentRuntime:
             await self.messages._actor_final(conn, actor, binding)
 
     async def close(self):
-        await self.children.close()
         async with self.client_lock:
             self.closed = True
             results = await asyncio.gather(

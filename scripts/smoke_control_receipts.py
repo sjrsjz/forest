@@ -60,7 +60,9 @@ function reply(path,method,body) {
     if (path.includes('/agent/')) return {revision:1,secret_revision:1,has_api_key:true,values:agentDefaults};
     if (path.includes('/memory/')) return {revision:1,secret_revision:1,has_api_key:true,values:memoryDefaults};
     const component=path.match(/\/components\/([^/]+)/)[1], value={package_digest:'pkg-'+component,config:{label:'Stored '+component},grants:[]};
-    return {desired_revision:1,effective_revision:1,desired_values:value,effective_values:value,operations:[],runtime:{components:[]}};
+    return {desired_revision:1,effective_revision:1,desired_values:value,effective_values:value,
+      desired_values_payload_state:'ACTIVE',effective_values_payload_state:'ACTIVE',
+      defaults:{package_digest:'',config:{},grants:[]},operations:[],runtime:{components:[]}};
   }
   if (clean.endsWith('/configuration/history')) return {next_before:null,revisions:[{revision:1,created_at:'2030-01-01T00:00:00Z',
     values:{package_digest:'pkg-alpha',config:{label:'Stored history body'},grants:[]}}]};
@@ -167,7 +169,7 @@ def panel_check(page, name, mode):
         page.locator("#job-list button").click()
         expect(page.locator("#job-form-title")).to_contain_text("Stored job")
     form = page.locator("#" + form_id)
-    field = {"component": "label", "agent": "system_prompt", "memory": "deployment_id",
+    field = {"component": "label", "agent": "preset_context", "memory": "deployment_id",
              "binding": "response_template", "job": "prompt"}[name]
     canary = "ERASE-" + name + "-" + mode
     form.locator('[name="' + field + '"]').fill(canary)
@@ -228,7 +230,7 @@ def panel_check(page, name, mode):
         # editor. The next read returns a distinct, currently available revision.
         values = dict(DEFAULT_AGENT_SETTINGS if name == "agent" else DEFAULT_MEMORY_SETTINGS)
         recovered = "Independent-" + name + "-current"
-        values[field] = recovered
+        values[field] = [recovered] if name == "agent" else recovered
         if name == "agent":
             values["model"] = "fixture-model"
         page.evaluate("({get,post,row})=>{delete fixture.overrides[post];fixture.overrides[get]={status:200,body:row};}",
@@ -249,7 +251,7 @@ def panel_check(page, name, mode):
         page.set_viewport_size({"width": 1440, "height": 1080})
     # Selecting another Bot does not inherit the former resource's invalidation.
     select_bot(page, "bot-b")
-    expect(page.locator('#agent-config [name="system_prompt"]')).to_be_enabled()
+    expect(page.locator('#agent-config [name="preset_context"]')).to_be_enabled()
     expect(page.locator('#memory-config [name="deployment_id"]')).to_be_enabled()
     assert not page.evaluate("fixture.unexpected")
 
@@ -324,6 +326,142 @@ def logout_check(page):
     assert not page.evaluate("fixture.pending")
 
 
+def configuration_repair_check(page, name, late_read):
+    prefix, form_id, preview_id, _, apply_id, reload_id = PANELS[name]
+    key = "GET /bots/bot-a/" + prefix + "/configuration"
+    post = "/bots/bot-a/" + prefix + "/change-plans"
+    if name == "binding":
+        page.locator('[data-binding-id="binding-a"]').click()
+        defaults = {"enabled": True, "api_base_url": "http://127.0.0.1:5700", "response_mode": "component",
+            "response_template": "New template", "trigger_mentions": True, "trigger_prefix": "",
+            "private_trigger": True, "admin_user_ids": []}
+        row = {"binding_id": "binding-a", "self_id": "123", "display_name": None, "state": "ONLINE",
+            "revision": 7, "effective_revision": 6, "desired_values": None, "defaults": defaults,
+            "desired_values_payload_state": "UNAVAILABLE", "config_payload_state": "ACTIVE",
+            "display_name_payload_state": "UNAVAILABLE", "webhook_url": "http://127.0.0.1/onebot/binding-a"}
+        field, secret, status = "response_template", "access_token", "binding-state"
+    else:
+        defaults = ({**DEFAULT_AGENT_SETTINGS, "model": "fixture-model"}
+                    if name == "agent" else DEFAULT_MEMORY_SETTINGS)
+        row = {"revision": 7, "secret_revision": 4, "has_api_key": True, "values": None,
+            "values_payload_state": "UNAVAILABLE", "defaults": defaults}
+        field, secret, status = (("preset_context", "api_key", "agent-config-status") if name == "agent"
+                                else ("deployment_id", "api_key", "memory-config-status"))
+    form = page.locator("#" + form_id)
+    form.locator('[name="' + field + '"]').fill("OLD-CONFIGURATION-CANARY")
+    form.locator('[name="' + secret + '"]').fill("OLD-SECRET-DRAFT")
+    page.evaluate("({key,row})=>fixture.overrides[key]={status:200,body:row}", {"key": key, "row": row})
+    page.locator("#" + reload_id).click()
+    expect(page.locator("#" + status)).to_contain_text("正文已清理")
+    expect(form.locator('[name="' + field + '"]')).to_have_value("")
+    expect(form.locator('[name="' + field + '"]')).to_be_disabled()
+    expect(form.locator('[name="' + secret + '"]')).to_have_value("")
+    if name == "binding":
+        expect(page.locator("#binding-name")).to_have_text("名称已清理 · 123")
+        expect(page.locator("#binding-state")).to_contain_text("已生效 6")
+    before = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).length", post)
+    form.evaluate("form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
+    assert page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).length", post) == before
+    if late_read:
+        page.evaluate("key=>fixture.hold.push(key)", key)
+        page.locator("#" + reload_id).click()
+        page.wait_for_function("key=>fixture.pending.some(x=>x.key===key)", arg=key)
+    page.locator("#" + name + "-replace-configuration").click()
+    expect(form.locator('[name="' + field + '"]')).to_be_enabled()
+    expect(page.locator("#" + status)).to_contain_text("草稿")
+    canary = "EXPLICIT-NEW-" + name
+    form.locator('[name="' + field + '"]').fill(canary)
+    if late_read:
+        page.evaluate("key=>fixture.release(key)", key)
+        expect(page.locator("#notice")).to_contain_text("保留")
+        expect(form.locator('[name="' + field + '"]')).to_have_value(canary)
+        expect(form.locator('[name="' + field + '"]')).to_be_enabled()
+    form.locator('button[type="submit"]').click()
+    expect(page.locator("#" + preview_id)).to_be_visible()
+    submitted = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).at(-1).body", post)
+    assert submitted["expected_revision"] == 7 and submitted["values"][field] == canary
+    assert set(submitted["values"]) == set(defaults)
+    assert "OLD-CONFIGURATION-CANARY" not in json.dumps(submitted) and "OLD-SECRET-DRAFT" not in json.dumps(submitted)
+    saved = {**row, "revision": 8, "values_payload_state": "ACTIVE", "values": submitted["values"]}
+    if name == "binding":
+        saved.update(desired_values=submitted["values"], desired_values_payload_state="ACTIVE")
+    page.evaluate("({key,row,post})=>{fixture.overrides[key]={status:200,body:row};"
+        "fixture.overrides[post]={status:200,body:{revision:8,secret_revision:4}};}",
+        {"key": key, "row": saved, "post": "POST /bots/bot-a/" + prefix + "/management-requests"})
+    page.locator("#" + apply_id).click()
+    expect(page.locator("#" + preview_id)).to_be_hidden()
+    expect(form.locator('[name="' + field + '"]')).to_have_value(canary)
+    expect(page.locator("#" + status)).to_contain_text("8")
+    assert not page.evaluate("fixture.pending")
+
+
+def component_configuration_repair_check(page, late_read):
+    prefix = "/bots/bot-a/components/alpha"
+    key = "GET " + prefix + "/configuration"
+    row = {"desired_revision": 7, "effective_revision": 6, "desired_values": None,
+        "effective_values": {"package_digest": "pkg-alpha", "config": {"label": "EFFECTIVE-ONLY"}, "grants": []},
+        "desired_values_payload_state": "UNAVAILABLE", "effective_values_payload_state": "ACTIVE",
+        "defaults": {"package_digest": "", "config": {}, "grants": []},
+        "operations": [], "runtime": {"components": []}}
+    form = page.locator("#bot-config-form")
+    form.locator('[name="label"]').fill("OLD-COMPONENT-CANARY")
+    page.evaluate("({key,row})=>fixture.overrides[key]={status:200,body:row}", {"key": key, "row": row})
+    page.locator("#reload-bot-config").click()
+    expect(page.locator("#bot-runtime-status")).to_contain_text("已保存配置正文已清理")
+    expect(page.locator("#bot-runtime-status")).not_to_contain_text("已生效配置正文已清理")
+    expect(page.locator("#bot-config-fields")).to_be_empty()
+    expect(form.locator('button[type="submit"]')).to_be_disabled()
+    expect(page.locator("#bot-grants")).not_to_be_checked()
+    form.evaluate("form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
+    expect(form.locator('button[type="submit"]')).to_be_disabled()
+    assert not page.evaluate("path=>fixture.calls.some(x=>x.method==='POST'&&x.path===path)", prefix + "/change-plans")
+    page.evaluate("({key})=>fixture.overrides[key]={status:200,body:{next_before:null,revisions:["
+        "{revision:7,created_at:'2030-01-01T00:00:00Z',values:null,values_payload_state:'UNAVAILABLE'},"
+        "{revision:6,created_at:'2029-01-01T00:00:00Z',values:{package_digest:'pkg-alpha',config:{label:'HISTORY-ONLY'},grants:[]},values_payload_state:'ACTIVE'}]}}",
+        {"key": "GET " + prefix + "/configuration/history"})
+    page.locator("#read-bot-history").click()
+    expect(page.locator("#bot-history button")).to_have_count(2)
+    expect(page.locator("#bot-history button").nth(0)).to_be_disabled()
+    expect(page.locator("#bot-history button").nth(1)).to_be_enabled()
+    expect(page.locator("#bot-history")).to_contain_text("修订 7")
+    expect(page.locator("#bot-history")).to_contain_text("配置正文已清理")
+    page.locator("#bot-history button").nth(1).click()
+    expect(form.locator('[name="label"]')).to_have_value("HISTORY-ONLY")
+    form.locator('[name="label"]').fill("EDITED-HISTORY")
+    form.locator('button[type="submit"]').click()
+    expect(page.locator("#bot-config-preview")).to_be_visible()
+    copied = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).at(-1).body", prefix + "/change-plans")
+    assert copied == {"expected_revision": 7, "source_revision": 6, "values": {"package_digest": "pkg-alpha",
+        "config": {"label": "EDITED-HISTORY"}, "grants": []}}
+    if late_read:
+        page.evaluate("key=>fixture.hold.push(key)", key)
+        page.locator("#reload-bot-config").click()
+        page.wait_for_function("key=>fixture.pending.some(x=>x.key===key)", arg=key)
+    page.locator("#component-replace-configuration").click()
+    expect(form.locator('[name="label"]')).to_have_value("")
+    expect(page.locator("#bot-runtime-status")).to_contain_text("草稿")
+    form.locator('[name="label"]').fill("EXPLICIT-NEW-COMPONENT")
+    if late_read:
+        page.evaluate("key=>fixture.release(key)", key)
+        expect(page.locator("#notice")).to_contain_text("保留")
+        expect(form.locator('[name="label"]')).to_have_value("EXPLICIT-NEW-COMPONENT")
+    form.locator('button[type="submit"]').click()
+    expect(page.locator("#bot-config-preview")).to_be_visible()
+    submitted = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).at(-1).body", prefix + "/change-plans")
+    assert submitted == {"expected_revision": 7, "values": {"package_digest": "pkg-alpha",
+        "config": {"label": "EXPLICIT-NEW-COMPONENT"}, "grants": []}}
+    saved = {**row, "desired_revision": 8, "desired_values": submitted["values"], "desired_values_payload_state": "ACTIVE"}
+    page.evaluate("({key,row,post})=>{fixture.overrides[key]={status:200,body:row};"
+        "fixture.overrides[post]={status:200,body:{revision:8}};}",
+        {"key": key, "row": saved, "post": "POST " + prefix + "/management-requests"})
+    page.locator("#bot-config-apply").click()
+    expect(page.locator("#bot-config-preview")).to_be_hidden()
+    expect(page.locator("#bot-desired")).to_have_text("8")
+    expect(page.locator("#bot-effective")).to_have_text("6")
+    expect(form.locator('[name="label"]')).to_have_value("EXPLICIT-NEW-COMPONENT")
+    assert not page.evaluate("fixture.pending")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--browser", type=Path, required=True)
@@ -370,7 +508,8 @@ def main():
             try:
                 for name, mode in [("protocol", "barriers"), *[
                     (name, mode) for name in PANELS for mode in ("receipt", "http")
-                ], ("job-cancel", "receipt"), ("job-cancel", "http"), ("logout", "late-memory")]:
+                ], ("job-cancel", "receipt"), ("job-cancel", "http"), ("logout", "late-memory"),
+                    *[(name + "-repair", mode) for name in ("agent", "memory", "binding", "component") for mode in ("replace", "late-read")]]:
                     page = browser.new_page(viewport={"width": 1440, "height": 1080})
                     errors = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -385,6 +524,10 @@ def main():
                             select_bot(page)
                             if name == "job-cancel":
                                 cancel_check(page, mode)
+                            elif name == "component-repair":
+                                component_configuration_repair_check(page, mode == "late-read")
+                            elif name.endswith("-repair"):
+                                configuration_repair_check(page, name.removesuffix("-repair"), mode == "late-read")
                             elif name == "logout":
                                 logout_check(page)
                             else:

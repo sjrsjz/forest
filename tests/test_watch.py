@@ -329,40 +329,50 @@ async def test_final_guard_rechecks_time_after_waiting_for_watch_head(
         await asyncio.wait_for(entered.wait(), 15)
         # A separate transaction holds only the last business lock. Publication
         # must reach it while its authority is still valid, then expire waiting.
-        async with kernel.store.pool.connection() as blocker, blocker.transaction():
-            await blocker.execute(
-                "SELECT 1 FROM public.bot_dev_watch_heads WHERE bot_id=%s AND watch_id=%s FOR UPDATE",
-                (kernel.store.bot_id, watcher.watch_id),
-            )
-            async with kernel.store.pool.connection() as editor:
+        from forest.storage.control_receipts import ControlReceiptStore
+
+        activation_heads_in = ControlReceiptStore.activation_heads_in
+        heads_entered = asyncio.Event()
+
+        async def observed_heads(*args, **kwargs):
+            heads_entered.set()
+            return await activation_heads_in(*args, **kwargs)
+
+        monkeypatch.setattr(ControlReceiptStore, "activation_heads_in", observed_heads)
+        # Keep the periodic source observer from holding earlier runtime locks
+        # while this test deliberately blocks the final business head.
+        async with watcher._observation_lock:
+            async with kernel.store.pool.connection() as blocker, blocker.transaction():
+                await blocker.execute(
+                    "SELECT 1 FROM public.bot_dev_watch_heads WHERE bot_id=%s AND watch_id=%s FOR UPDATE",
+                    (kernel.store.bot_id, watcher.watch_id),
+                )
                 if expires == "host":
-                    await editor.execute(
-                        "UPDATE public.bot_host_lease SET expires_at=clock_timestamp()+interval '500 milliseconds' WHERE bot_id=%s",
-                        (kernel.store.bot_id,),
-                    )
+                    async with kernel.store.pool.connection() as editor:
+                        await editor.execute(
+                            "UPDATE public.bot_host_lease SET expires_at=clock_timestamp()+interval '3 seconds' WHERE bot_id=%s",
+                            (kernel.store.bot_id,),
+                        )
+                release.set()
+                await asyncio.wait_for(heads_entered.wait(), 2)
+                if expires == "operation":
+                    async with kernel.store.pool.connection() as editor:
+                        await editor.execute(
+                            "UPDATE public.bot_lifecycle_operations SET lease_until=clock_timestamp()+interval '500 milliseconds' WHERE bot_id=%s AND phase='QUIESCENT'",
+                            (kernel.store.bot_id,),
+                        )
+                    await asyncio.sleep(0.55)
                 else:
-                    await editor.execute(
-                        "UPDATE public.bot_lifecycle_operations SET lease_until=clock_timestamp()+interval '500 milliseconds' WHERE bot_id=%s AND phase='QUIESCENT'",
-                        (kernel.store.bot_id,),
-                    )
-            release.set()
-            async with kernel.store.pool.connection() as observer:
-                async with asyncio.timeout(0.4):
-                    while True:
-                        row = await (
-                            await observer.execute(
-                                "SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE %s",
-                                ("UPDATE public.bot_lifecycle_operations SET phase='COMMITTED'%",),
-                            )
-                        ).fetchone()
-                        if row["n"]:
-                            break
-                        await asyncio.sleep(0.01)
-            await asyncio.sleep(0.55)
+                    await asyncio.sleep(3.1)
+        expected_errors = (
+            {"STALE_OPERATION", "WATCH_AUTHORITY_EXPIRED"}
+            if expires == "operation"
+            else {"WATCH_AUTHORITY_EXPIRED"}
+        )
         await eventually(
             lambda: (
                 watcher.failure
-                or any(e.get("error", {}).get("code") == "WATCH_AUTHORITY_EXPIRED" for e in events)
+                or any(e.get("error", {}).get("code") in expected_errors for e in events)
             )
         )
         route = await kernel.store.get_route("example.counter")

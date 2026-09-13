@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 import pytest_asyncio
+from binding_seed import VALUES as BINDING_VALUES
 from legacy_control import FrozenBotControl
 from psycopg.types.json import Jsonb
 from test_control_results_upgrade import schema_038
@@ -74,6 +75,26 @@ async def configured(environment, upgrade_database, tmp_path, request):
                     )
                 await conn.execute("UPDATE public.bot_config_heads SET desired_revision=2 "
                     "WHERE bot_id=%s AND component_id=%s", (store.bot_id, component))
+            await conn.execute(
+                "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,"
+                "revision,effective_revision,host_incarnation,host_owner_epoch,enabled,receive_enabled,config,state) "
+                "VALUES ('bot-a','binding-a','onebot-v11','1000','test','registry',1,1,%s,%s,true,true,%s,'ONLINE')",
+                (lease.incarnation, lease.owner_epoch, Jsonb(BINDING_VALUES)),
+            )
+            await conn.execute(
+                "INSERT INTO public.bot_binding_plans(bot_id,binding_id,plan_id,subject_id,issuer_id,"
+                "expected_revision,values,secret_ciphertext,plan_digest,expires_at) "
+                "VALUES ('bot-a','binding-a','legacy-binding-plan',%s,%s,0,%s,'legacy-secret',"
+                "'legacy-binding-plan-digest','2030-01-01Z')",
+                (env.subject, env.authority.issuer_id, Jsonb(BINDING_VALUES)),
+            )
+            await conn.execute(
+                "INSERT INTO public.bot_binding_revisions(bot_id,binding_id,revision,previous_revision,"
+                "plan_id,values,secret_ciphertext,policy_revision,operation_id) "
+                "VALUES ('bot-a','binding-a',1,0,'legacy-binding-plan',%s,'legacy-secret',1,"
+                "'legacy-binding-apply')",
+                (Jsonb(BINDING_VALUES),),
+            )
         await store.release_host(lease)
         await store.migrate()
         kernel = Kernel(store)
@@ -85,18 +106,18 @@ async def configured(environment, upgrade_database, tmp_path, request):
             operation_id="actual-worker")
         async with store.pool.connection() as conn:
             await conn.execute(
-                "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,"
-                "host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-                "VALUES ('bot-a','binding-a','onebot-v11','1000','test','registry',%s,%s,true,true,'ONLINE')",
-                (kernel.lease.incarnation, kernel.lease.owner_epoch),
+                "UPDATE public.bot_bindings SET host_incarnation=%s,host_owner_epoch=%s "
+                "WHERE bot_id=%s AND binding_id='binding-a'",
+                (kernel.lease.incarnation, kernel.lease.owner_epoch, store.bot_id),
             )
+        current = replace(env, store=store, control=controls, lease=kernel.lease)
         messages = MessageStore(store)
         received = await messages.ingest(kernel.lease, "binding-a", event(1), decision="TRIGGER")
         actor = await owner(messages, kernel.lease, received["conversation_id"])
         selected = await messages.select_input(actor, "select")
         yield SimpleNamespace(store=store, kernel=kernel, lease=kernel.lease, messages=messages,
             actor=actor, selected=selected, receipt=receipt,
-            env=replace(env, store=store, control=controls, lease=kernel.lease), values=values)
+            env=current, values=values)
     finally:
         if kernel is not None:
             await kernel.close()

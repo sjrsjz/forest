@@ -62,7 +62,12 @@ async def test_formal_kernel_derived_reply_is_a_real_graph_halo_and_private_scop
         "JOIN public.bot_payload_domains d USING(bot_id,source_unit_id) WHERE p.payload_id=%s",
         (unit["payload_id"],),
     )
-    assert {row["kind"] for row in domain_kinds} == {"SERVICE_INPUT", "GENERATION_CONFIG"}
+    assert {row["kind"] for row in domain_kinds} == {
+        "AGENT_SPEC",
+        "CONTROL_INPUT",
+        "GENERATION_CONFIG",
+        "SERVICE_INPUT",
+    }
     assert unit["lineage_complete"] and await eligible(repository, unit["source_unit_id"])
 
     next_message = await receive(repository, lease, "next-after-reply")

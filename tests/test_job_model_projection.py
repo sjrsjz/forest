@@ -44,9 +44,8 @@ def test_old_frozen_request_can_replay_after_the_projection_revision_changes():
     assert historic.body == result.body and historic.payload_digest == result.payload_digest
 
 
-def test_child_host_tool_has_capacity_reserved_during_configuration_validation():
+def test_single_agent_keeps_all_sixteen_configured_tool_slots():
     tools = [dict(name=f"tool_{index}", component_id="component", service="read") for index in range(16)]
     assert len(AgentSettings(allowed_tools=tools).allowed_tools) == 16
-    with pytest.raises(ValueError, match="sixteen"):
-        AgentSettings(allowed_tools=tools, children_enabled=True)
-    assert len(AgentSettings(allowed_tools=tools[:15], children_enabled=True).allowed_tools) == 15
+    with pytest.raises(ValueError):
+        AgentSettings(allowed_tools=tools + [dict(name="overflow", component_id="c", service="s")])

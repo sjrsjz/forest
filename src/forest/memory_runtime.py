@@ -67,11 +67,14 @@ class MemoryRuntime:
             self._wake.clear()
             try:
                 lease = self.platform.kernel._authority()
+                # Attempt identities carry enough accounting facts to recover
+                # without reopening a deleted/disabled configuration body.
+                await self.index.recover(lease)
+                await self.media.recover(lease)
                 cfg = await self.config.runtime(lease)
                 if self.closed:
                     break
                 if cfg["values"]["enabled"]:
-                    await self.index.recover(lease)
                     await self.index.enroll(lease, cfg["revision"], limit=32)
                     captures = await self.media.scan(lease, limit=32)
                     for capture in captures:
@@ -126,7 +129,7 @@ class MemoryRuntime:
             except ForestError as exc:
                 if exc.code in {"STALE_HOST", "STORAGE_SEALED", "BOT_SCOPE_MISMATCH"}:
                     raise
-                if exc.code not in {"MEMORY_NOT_CONFIGURED", "MEMORY_CONFIGURATION_REVOKED"}:
+                if exc.code not in {"MEMORY_NOT_CONFIGURED", "MEMORY_CONFIGURATION_REVOKED", "CONTROL_CONTENT_REVOKED"}:
                     self.errors["scan"] = exc.code
                 delay = 5
             except Exception:
@@ -256,7 +259,22 @@ class MemoryRuntime:
         decision = await memory.begin(actor, snapshot)
         if decision["status"] in {"DISABLED", "BYPASSED"}:
             return await memory.finish(actor, snapshot)
-        cfg = await self.config.runtime(actor.host, revision=decision["config_revision"])
+        try:
+            cfg = await self.config.runtime(actor.host, revision=decision["config_revision"])
+        except ForestError as exc:
+            if exc.code not in {"CONTROL_CONTENT_REVOKED", "MEMORY_CONFIGURATION_REVOKED"}:
+                raise
+            # finish refuses to replace an already BOUND bundle. Pending query
+            # decisions may commit a metadata-only failure without config text.
+            try:
+                async with asyncio.timeout(1):
+                    return await memory.finish(actor, snapshot, error_code="MEMORY_CONFIGURATION_REVOKED")
+            except TimeoutError:
+                raise ForestError(
+                    "MEMORY_QUERY_RECOVERY_REQUIRED",
+                    "Configuration was revoked before the retrieval decision could commit",
+                    503,
+                ) from None
         deadline = asyncio.timeout(cfg["values"]["query_timeout"])
         try:
             async with deadline:
@@ -341,10 +359,11 @@ class MemoryRuntime:
             claims = await control._guard(conn, ticket, "memory.read", operation_id, payload)
             cfg = await (
                 await conn.execute(
-                    "SELECT r.revision,r.values FROM public.bot_memory_config_heads h JOIN public.bot_memory_config_revisions r ON (r.bot_id,r.revision)=(h.bot_id,h.revision) WHERE h.bot_id=%s",
+                    "SELECT r.* FROM public.bot_memory_config_heads h JOIN public.bot_memory_config_revisions r ON (r.bot_id,r.revision)=(h.bot_id,h.revision) WHERE h.bot_id=%s FOR SHARE OF h",
                     (self.store.bot_id,),
                 )
             ).fetchone()
+            cfg = await MemoryConfig.hydrate_in(conn, self.store, cfg, required=False)
             counts = {}
             for name, table, field in (
                 ("facets", "bot_memory_index_facets", "state"),
@@ -367,7 +386,8 @@ class MemoryRuntime:
             await control._time(conn, claims)
             return {
                 "configured": cfg is not None,
-                "enabled": bool(cfg and cfg["values"]["enabled"]),
+                "enabled": bool(cfg and cfg["values_payload_state"] == "ACTIVE" and cfg["values"]["enabled"]),
+                "values_payload_state": cfg["values_payload_state"] if cfg else "UNCONFIGURED",
                 "revision": cfg["revision"] if cfg else 0,
                 "index_consistency": "eventual",
                 "counts": counts,

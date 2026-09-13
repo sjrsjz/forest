@@ -10,13 +10,27 @@ from forest.errors import ForestError
 from forest.memory_settings import DEFAULT_MEMORY_SETTINGS, MemorySettings
 from forest.packages import digest_json
 from forest.storage.bindings import _clone, _revision
+from forest.storage.config_payloads import ConfigPayloadStore
 from forest.storage.control import BotControl
+
+NUMERIC_FIELDS = (
+    "dimensions", "batch_size", "index_concurrency", "request_timeout",
+    "daily_request_budget", "daily_token_budget", "request_token_reservation",
+    "capture_concurrency", "capture_timeout", "capture_daily_bytes", "capture_storage_bytes",
+    "media_max_bytes", "capture_max_attempts", "query_max_parts", "query_max_images",
+    "query_limit", "query_timeout", "max_result_tokens", "max_result_images", "max_result_bytes",
+)
+
+
+def _metadata(values):
+    return {key: values[key] for key in ("enabled", *NUMERIC_FIELDS)}
 
 
 class MemoryConfig:
     def __init__(self, store, vault=None):
         self.store, self.vault = store, vault
         self.control = BotControl(store)
+        self.content = ConfigPayloadStore(store)
 
     async def _head(self, conn):
         await conn.execute(
@@ -30,20 +44,37 @@ class MemoryConfig:
             )
         ).fetchone()
 
-    async def _revision(self, conn, revision):
-        return await (
+    async def _revision(self, conn, revision, *, required=True):
+        row = await (
             await conn.execute(
                 "SELECT * FROM public.bot_memory_config_revisions WHERE bot_id=%s AND revision=%s",
                 (self.store.bot_id, revision),
             )
         ).fetchone()
+        return await self.hydrate_in(conn, self.store, row, required=required)
+
+    @staticmethod
+    async def hydrate_in(conn, scope, row, *, kind="REVISION", required=True):
+        """Caller holds the applicable config head before taking the clock."""
+        if row is None:
+            return None
+        content = ConfigPayloadStore(scope)
+        epoch = (await content.payloads.lock_in(conn))["deletion_epoch"]
+        hydrated = await content.hydrate_values_in(
+            conn, row, family="memory.config", kind=kind, resource="",
+            identity=str(row["revision"]) if kind == "REVISION" else row["plan_id"],
+            epoch=epoch, required=required,
+        )
+        if hydrated["values_payload_state"] == "ACTIVE" and _metadata(hydrated["values"]) != row["values_metadata"]:
+            raise ForestError("MEMORY_CONFIG_METADATA_CONFLICT", "Memory metadata differs from its values", 409)
+        return {**row, **hydrated}
 
     async def _deployment(self, conn, values):
         conflict = await (
             await conn.execute(
-                "SELECT 1 FROM public.bot_memory_config_revisions WHERE bot_id=%s "
-                "AND values->>'deployment_id'=%s AND values->>'endpoint'<>%s LIMIT 1",
-                (self.store.bot_id, values["deployment_id"], values["endpoint"]),
+                "SELECT 1 FROM public.bot_memory_deployment_bindings WHERE bot_id=%s "
+                "AND deployment_digest=%s AND endpoint_digest<>%s",
+                (self.store.bot_id, digest_json([values["deployment_id"]]), digest_json([values["endpoint"]])),
             )
         ).fetchone()
         if conflict:
@@ -57,15 +88,20 @@ class MemoryConfig:
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "memory.config.read", operation_id, {})
             head = await self._head(conn)
-            saved = await self._revision(conn, head["revision"])
-            await self.control.revision_parents(conn, "memory.config", saved)
+            saved = await self._revision(conn, head["revision"], required=False)
+            if saved and saved["values_payload_state"] == "ACTIVE":
+                await self.control.revision_parents(conn, "memory.config", saved)
             await self.control._time(conn, claims)
-            return {
+            result = {
                 "revision": head["revision"],
                 "values": saved["values"] if saved else DEFAULT_MEMORY_SETTINGS,
                 "has_api_key": bool(saved and self.vault.decrypt(saved["secret_ciphertext"])),
                 "secret_revision": head["secret_revision"],
+                "defaults": _clone(DEFAULT_MEMORY_SETTINGS),
             }
+            if saved:
+                result["values_payload_state"] = saved["values_payload_state"]
+            return result
 
     async def plan(self, ticket, operation_id, payload, *, secret_ciphertext=None):
         payload = _clone(payload)
@@ -104,7 +140,7 @@ class MemoryConfig:
                 raise ForestError(
                     "REVISION_CONFLICT", "Memory settings changed; reload before applying"
                 )
-            saved = await self._revision(conn, head["revision"])
+            saved = await self._revision(conn, head["revision"], required=False)
             await self._deployment(conn, values)
             cipher = (
                 secret_ciphertext
@@ -120,16 +156,28 @@ class MemoryConfig:
                     "issuer_id": claims["issuer_id"],
                 }
             )
+            before_parents = ()
+            if saved and saved["values_payload_state"] == "ACTIVE":
+                before_parents = await self.control.revision_parents(conn, "memory.config", saved)
+            original = await self.control.admitted_input_in(conn, claims)
+            epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+            proposed = await self.content.put_values_in(
+                conn, family="memory.config", kind="PLAN", resource="", identity=plan_id,
+                values=values, parents=(original.payload_id,), epoch=epoch,
+            )
             await conn.execute(
-                "INSERT INTO public.bot_memory_config_plans(bot_id,plan_id,subject_id,issuer_id,expected_revision,values,secret_ciphertext,credentials_changed,plan_digest,expires_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
+                "INSERT INTO public.bot_memory_config_plans(bot_id,plan_id,subject_id,issuer_id,expected_revision,values,"
+                "values_payload_id,values_payload_digest,values_metadata,secret_ciphertext,credentials_changed,plan_digest,expires_at) "
+                "VALUES (%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
                 (
                     self.store.bot_id,
                     plan_id,
                     claims["subject_id"],
                     claims["issuer_id"],
                     head["revision"],
-                    Jsonb(values),
+                    proposed.payload_id,
+                    proposed.digest,
+                    Jsonb(_metadata(values)),
                     cipher,
                     payload["credentials_changed"],
                     digest,
@@ -141,10 +189,10 @@ class MemoryConfig:
                 "expected_revision": head["revision"],
                 "values": values,
                 "before_values": saved["values"] if saved else DEFAULT_MEMORY_SETTINGS,
+                "before_values_payload_state": saved["values_payload_state"] if saved else "UNCONFIGURED",
                 "credentials_changed": payload["credentials_changed"],
             }
-            parents = await self.control.revision_parents(conn, "memory.config", saved)
-            await self.control._record(conn, claims, result, parents=parents)
+            await self.control._record(conn, claims, result, parents=(proposed.payload_id, *before_parents))
             await self.control._time(conn, claims)
             return result
 
@@ -178,6 +226,7 @@ class MemoryConfig:
                 )
             if plan["expires_at"] <= await self.store._now(conn):
                 raise ForestError("PLAN_EXPIRED", "Preview the Memory settings again")
+            plan = await self.hydrate_in(conn, self.store, plan, kind="PLAN")
             await self._deployment(conn, plan["values"])
             revision = head["revision"] + 1
             secret_revision = head["secret_revision"] + int(
@@ -185,14 +234,24 @@ class MemoryConfig:
             )
             result = {"revision": revision, "status": "APPLIED", "secret_revision": secret_revision}
             parent = await self.control.plan_parent(conn, "memory.config", plan)
-            await self.control._record(conn, claims, result, parents=(parent,))
+            original = await self.control.admitted_input_in(conn, claims)
+            epoch = (await self.content.payloads.lock_in(conn))["deletion_epoch"]
+            selected = await self.content.put_values_in(
+                conn, family="memory.config", kind="REVISION", resource="", identity=str(revision),
+                values=plan["values"], parents=(original.payload_id, parent), epoch=epoch,
+            )
+            await self.control._record(conn, claims, result, parents=(selected.payload_id,))
             await conn.execute(
-                "INSERT INTO public.bot_memory_config_revisions(bot_id,revision,previous_revision,values,secret_revision,secret_ciphertext,policy_revision,plan_id,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_memory_config_revisions(bot_id,revision,previous_revision,values,"
+                "values_payload_id,values_payload_digest,values_metadata,secret_revision,secret_ciphertext,policy_revision,plan_id,operation_id) "
+                "VALUES (%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     self.store.bot_id,
                     revision,
                     head["revision"],
-                    Jsonb(plan["values"]),
+                    selected.payload_id,
+                    selected.digest,
+                    Jsonb(_metadata(plan["values"])),
                     secret_revision,
                     plan["secret_ciphertext"],
                     claims["policy_revision"],
@@ -204,6 +263,8 @@ class MemoryConfig:
                 "UPDATE public.bot_memory_config_heads SET revision=%s,secret_revision=%s WHERE bot_id=%s",
                 (revision, secret_revision, self.store.bot_id),
             )
+            if plan["expires_at"] <= await self.store._now(conn):
+                raise ForestError("PLAN_EXPIRED", "Memory plan expired before publication")
             await self.control._time(conn, claims)
             return result
 
@@ -225,7 +286,7 @@ class MemoryConfig:
         ).fetchone()
         if (
             not saved
-            or not saved["values"]["enabled"]
+            or not saved["values_metadata"]["enabled"]
             or saved["policy_revision"] != saved["current_policy_revision"]
         ):
             raise ForestError(
@@ -234,7 +295,14 @@ class MemoryConfig:
                 403,
             )
         del saved["current_policy_revision"]
-        return saved
+        try:
+            return await MemoryConfig.hydrate_in(conn, lease, saved)
+        except ForestError as exc:
+            if exc.code != "CONTROL_CONTENT_REVOKED":
+                raise
+            raise ForestError(
+                "MEMORY_CONFIGURATION_REVOKED", "Memory configuration content is unavailable", 403,
+            ) from None
 
     async def runtime(self, lease, *, revision=None):
         if revision is not None:

@@ -1,3 +1,5 @@
+import {clearConfiguration, replacementButton} from './configuration-forms.js';
+
 const $ = (id) => document.getElementById(id);
 const status = (row) => `${({ONLINE:'在线',OFFLINE:'离线',DISABLED:'未启用',DRAINING:'正在切换',RESERVED:'待完成登记'})[row.state || row.stage] || row.state}${row.error_code ? ` · ${row.error_code}` : ''}`;
 
@@ -5,18 +7,38 @@ export function bindingsPanel(api, busy, notice) {
   let bot = null, selected = null, epoch = 0, edit = 0;
   let pending = null, planKey = null, applyKey = null, createKey = null;
   let refreshSequence = 0, configSequence = 0;
+  let replacementRequired = false, replacementDraft = false;
+  const replace = replacementButton($('binding-state'), 'binding-replace-configuration', () => {
+    if (!selected?.defaults) return;
+    clearPlan(); fill(selected.defaults); replacementRequired = false; replacementDraft = true;
+    replace.classList.add('hidden'); state(selected);
+  });
   const deliveryNodes = new Map(), resolutionRequests = new Map();
   const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
   const path = () => `${base()}/bindings/${encodeURIComponent(selected.binding_id)}`;
   const valid = (value) => value === epoch && bot !== null;
   function clearPlan() { edit++; pending = null; planKey = null; applyKey = null; $('binding-preview').classList.add('hidden'); }
-  function state(row) { $('binding-state').textContent = `${status(row)} · 已保存 ${row.revision} / 已生效 ${row.effective_revision}`; }
+  function state(row) {
+    const missing = row.desired_values_payload_state === 'UNAVAILABLE' ? '（正文已清理）' : '';
+    const effective = row.config_payload_state === 'UNAVAILABLE' ? '（正文已清理）' : '';
+    $('binding-state').textContent = `${status(row)} · 已保存 ${row.revision}${missing} / 已生效 ${row.effective_revision}${effective}${replacementDraft ? ' · 正在填写独立新配置草稿' : replacementRequired ? ' · 可填写完整新配置后保存替换' : ''}`;
+  }
+  function fill(values) {
+    const form = $('binding-config'); clearConfiguration(form);
+    for (const field of form.elements) field.disabled = false;
+    for (const [name, value] of Object.entries(values)) {
+      const field = form.elements[name]; if (!field) continue;
+      if (field.type === 'checkbox') field.checked = value;
+      else field.value = Array.isArray(value) ? value.join(', ') : value;
+    }
+  }
   function reset() {
     epoch++; bot = null; selected = null; createKey = null; clearPlan();
     refreshSequence++; configSequence++; deliveryNodes.clear(); resolutionRequests.clear();
     $('binding-create').reset(); $('binding-config').reset();
     $('binding-detail').classList.add('hidden'); $('bot-bindings').classList.add('hidden');
     for (const id of ['binding-list','conversation-list','delivery-list']) $(id).replaceChildren();
+    replacementRequired = false; replacementDraft = false; replace.classList.add('hidden');
   }
   async function readSelected() {
     if (!selected) return;
@@ -26,14 +48,17 @@ export function bindingsPanel(api, busy, notice) {
     if (edited !== edit) {
       state(row); notice('读取期间有新的配置输入，已保留。需要丢弃草稿时可再次重新加载。'); return;
     }
-    selected = row; clearPlan(); state(row);
-    $('binding-name').textContent = `${row.display_name} · ${row.self_id}`;
+    selected = row; clearPlan(); replacementDraft = false;
+    replacementRequired = row.desired_values_payload_state === 'UNAVAILABLE' || (row.revision > 0 && row.desired_values === null);
+    state(row);
+    $('binding-name').textContent = `${row.display_name ?? '名称已清理'} · ${row.self_id}`;
     $('binding-webhook').value = row.webhook_url;
-    const values = row.desired_values || row.defaults, form = $('binding-config'); form.reset();
-    for (const [name, value] of Object.entries(values)) {
-      const field = form.elements[name]; if (!field) continue;
-      if (field.type === 'checkbox') field.checked = value;
-      else field.value = Array.isArray(value) ? value.join(', ') : value;
+    replace.classList.toggle('hidden', !replacementRequired); replace.disabled = !row.defaults;
+    if (replacementRequired) {
+      const form = $('binding-config'); clearConfiguration(form);
+      for (const field of form.elements) field.disabled = true;
+    } else {
+      fill(row.desired_values ?? row.defaults);
     }
     $('binding-detail').classList.remove('hidden');
   }
@@ -50,7 +75,7 @@ export function bindingsPanel(api, busy, notice) {
     if (!data.bindings.length) $('binding-list').textContent = '尚未登记账号。';
     for (const row of data.bindings) {
       const button = document.createElement('button'); button.className = 'bot-row subtle';
-      button.textContent = `${row.display_name} · ${row.self_id} · ${status(row)}`; button.dataset.bindingId = row.binding_id;
+      button.textContent = `${row.display_name ?? '名称已清理'} · ${row.self_id} · ${status(row)}`; button.dataset.bindingId = row.binding_id;
       button.addEventListener('click', () => busy(button, async () => {
         const own = epoch;
         if (row.registration_stage === 'RESERVED') {
@@ -60,7 +85,10 @@ export function bindingsPanel(api, busy, notice) {
         if (valid(own)) await choose(row);
       }));
       $('binding-list').append(button);
-      if (selected?.binding_id === row.binding_id && row.revision !== undefined) state(row);
+      // A list read can finish after a newer configuration read or save.
+      // Keep the known desired/effective heads while that older list catches up.
+      if (selected?.binding_id === row.binding_id && row.revision >= selected.revision &&
+          row.effective_revision >= selected.effective_revision) state(row);
     }
     $('conversation-list').replaceChildren();
     if (!queues.conversations.length) $('conversation-list').textContent = '收到消息后显示群聊与私聊。';
@@ -154,6 +182,7 @@ export function bindingsPanel(api, busy, notice) {
   $('binding-config').addEventListener('input', clearPlan);
   $('binding-config').addEventListener('submit', (event) => {
     event.preventDefault(); const form = event.currentTarget;
+    if (!selected || replacementRequired || !form.reportValidity()) return;
     busy(form.querySelector('button'), async () => {
       const own = epoch, edited = edit, values = {};
       for (const name of ['enabled','trigger_mentions','private_trigger']) values[name] = form.elements[name].checked;
@@ -187,6 +216,7 @@ export function bindingsPanel(api, busy, notice) {
       epoch++; configSequence++; clearPlan(); selected = null;
       $('binding-config').reset(); $('binding-diff').replaceChildren();
       $('binding-detail').classList.add('hidden'); $('binding-list').replaceChildren();
+      replacementRequired = false; replacementDraft = false; replace.classList.add('hidden');
     } else {
       $('delivery-list').replaceChildren(); deliveryNodes.clear(); resolutionRequests.clear();
     }

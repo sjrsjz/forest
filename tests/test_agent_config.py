@@ -90,7 +90,7 @@ async def test_key_input_and_plan_owner_are_bound(environment):
     {"enabled": True, "model": ""}, {"endpoint": "https://key:secret@example.com/v1"},
     {"enabled": True, "model": "   "}, {"model": "configured\nmodel"}, {"model": "model\x7f"},
     {"endpoint": "https://@example.com/v1"}, {"endpoint": "https://:password@example.com/v1"},
-    {"system_prompt": "中" * 12000},
+    {"preset_context": ["中" * 12000]},
     {"allowed_tools": [{"name": f"tool_{index}", "component_id": "service", "service": "call"}
                        for index in range(17)]},
     {"media_allowed_origins": ["https://images.example.com/path"]},
@@ -102,12 +102,20 @@ def test_agent_settings_reject_invalid_provider_inputs(changes):
         AgentSettings.model_validate({**DEFAULT_AGENT_SETTINGS, **changes})
 
 
-def test_agent_settings_allow_exact_provider_prompt_and_tool_bounds():
+def test_agent_settings_allow_exact_preset_and_tool_bounds():
     values = AgentSettings.model_validate({
         **DEFAULT_AGENT_SETTINGS, "enabled": True, "model": "explicit-model", "endpoint": "http://localhost:8080/v1/",
-        "system_prompt": "中" * 10922 + "ab",
+        "preset_context": ["中" * 10922 + "ab"],
         "allowed_tools": [{"name": f"tool_{index}", "component_id": "service", "service": "call"}
                           for index in range(16)],
     })
-    assert len(values.system_prompt.encode()) == 32768
+    assert len(values.preset_context[0].encode()) == 32768
     assert len(values.allowed_tools) == 16 and values.endpoint == "http://localhost:8080/v1"
+
+
+async def test_agent_configuration_exposes_core_protocol_read_only(environment):
+    row = await read(environment)
+    assert row["protocol"]["protocol_id"] == "forest-agent-protocol"
+    assert row["protocol"]["protocol_version"] == 1
+    assert row["protocol"]["core_prompt_digest"].startswith("sha256:")
+    assert "valid_agent_protocol_content_block" in row["protocol"]["core_prompt"]

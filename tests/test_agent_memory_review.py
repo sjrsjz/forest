@@ -62,7 +62,7 @@ async def tool_step(media, tmp_path, monkeypatch):
         permit = await state.prepare_model(actor, snapshot["run_id"], "model", request)
         calls = [
             {
-                "id": "counter-call",
+                "id": "ignored-model-call-id",
                 "name": "increment",
                 "arguments": {
                     "authority_trigger_id": snapshot["trigger_ids"][0],
@@ -95,7 +95,7 @@ async def test_real_kernel_state_gateway_rechecks_evidence_after_tool_admission(
         permit = await state.permit_tool(
             actor,
             snapshot["run_id"],
-            "counter-call",
+            "call-0",
             authority_trigger_id=snapshot["trigger_ids"][0],
         )
         with pytest.raises(ForestError) as rejected:
@@ -120,7 +120,12 @@ async def test_real_kernel_state_gateway_rechecks_evidence_after_tool_admission(
         )
         assert (await state.fail(actor, snapshot["run_id"], rejected.value.code))[
             "phase"
-        ] == "FAILED"
+        ] == "BLOCKED_UNKNOWN"
+        # This test calls Kernel directly and never delivers its failure to the
+        # Agent observation boundary. A dispatched tool without an observation
+        # must remain UNKNOWN; it cannot be replayed or silently discarded.
+        assert await rows(media, "SELECT status FROM public.bot_agent_tools WHERE operation_id=%s",
+            (permit.operation_id,)) == [{"status": "UNKNOWN"}]
         assert not await rows(media, "SELECT * FROM public.bot_conversation_replies")
     finally:
         await kernel.close()
@@ -139,6 +144,9 @@ async def test_revoke_before_kernel_call_exists_finishes_run_instead_of_unknown(
         await forget(media, bundle)
         return await original(*args, **kwargs)
 
+    async def saved_spec(_actor, saved):
+        return saved
+
     async def unused(*args):
         return None
 
@@ -147,7 +155,7 @@ async def test_revoke_before_kernel_call_exists_finishes_run_instead_of_unknown(
         state.messages,
         kernel,
         state=state,
-        resolve_spec=unused,
+        resolve_spec=saved_spec,
         resolve_client=unused,
         materialize_context=unused,
         authorize_tool=unused,
@@ -180,9 +188,13 @@ async def test_same_cut_tool_round_reuses_frozen_bundle_and_latest_trigger_advan
         permit = await state.prepare_model(actor, current["run_id"], label, request)
         calls = tool_calls(current)
         calls[0]["id"] = "call-" + label
-        await respond(state, actor, permit, request, calls=calls)
+        proposed = await respond(state, actor, permit, request, calls=calls)
+        call_id = proposed["tools"][0]["tool_call_id"]
         grant = await state.permit_tool(
-            actor, current["run_id"], calls[0]["id"], authority_trigger_id=current["trigger_ids"][0]
+            actor,
+            current["run_id"],
+            call_id,
+            authority_trigger_id=current["trigger_ids"][0],
         )
         await state.observe_tool(actor, grant, status="SUCCEEDED", result={"value": label})
         await state.close_tools(actor, current["run_id"])

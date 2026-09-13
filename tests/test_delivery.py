@@ -12,6 +12,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 import pytest_asyncio
+from binding_seed import create_online_binding, reconnect_binding
 from psycopg import sql
 
 from forest.adapters.onebot import SendResult, prepare_send
@@ -38,11 +39,7 @@ async def delivery():
         await store.open()
         await store.migrate()
         lease = await store.acquire_host("host", "inc-a", ttl_seconds=120)
-        async with store.pool.connection() as conn:
-            await conn.execute(
-                "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,revision,effective_revision,binding_epoch,connection_epoch,host_incarnation,host_owner_epoch,enabled,receive_enabled,state) VALUES (%s,'binding-a','onebot-v11','10000','Test','register',1,1,1,1,%s,%s,true,true,'ONLINE')",
-                (store.bot_id, lease.incarnation, lease.owner_epoch),
-            )
+        await create_online_binding(store, lease, "binding-a", "10000")
         yield DeliveryStore(store), lease
     finally:
         await store.close()
@@ -51,7 +48,7 @@ async def delivery():
         await admin.close()
 
 
-def route(group="20000", epoch=1):
+def route(group="20000", epoch=2):
     return {
         "bot_id": "bot-a",
         "binding_id": "binding-a",
@@ -245,17 +242,15 @@ async def test_same_account_reconnect_rebases_pending_but_not_unknown(delivery):
     d, lease = delivery
     await enqueue(d, lease)
     claim = await d.claim(lease, "w")
-    async with d.store.pool.connection() as conn:
-        await conn.execute("UPDATE public.bot_bindings SET binding_epoch=2,connection_epoch=2")
+    await reconnect_binding(d.store, lease)
     await expect("STALE_BINDING", permit(d, lease, claim))
     await d.release(lease, claim, delay_seconds=0)
     newer = await d.claim(lease, "w")
-    assert newer.binding_epoch == 2 and newer.route["binding_epoch"] == 1
+    assert newer.binding_epoch == 3 and newer.route["binding_epoch"] == 2
     p = await permit(d, lease, newer)
-    assert p.binding_epoch == 2 and p.connection_epoch == 2
+    assert p.binding_epoch == 3 and p.connection_epoch == 2
     await d.complete(p, "UNKNOWN")
-    async with d.store.pool.connection() as conn:
-        await conn.execute("UPDATE public.bot_bindings SET binding_epoch=3,connection_epoch=3")
+    await reconnect_binding(d.store, lease)
     assert await d.claim(lease, "w") is None
     assert await d.recover(lease) == {"unknown": 0, "requeued": 0}
 
@@ -267,11 +262,7 @@ async def test_host_replacement_keeps_unknown_and_accepts_original_late_receipt(
     p = await permit(d, lease, claim)
     await d.store.release_host(lease)
     newer = await d.store.acquire_host("host", "inc-b", ttl_seconds=120)
-    async with d.store.pool.connection() as conn:
-        await conn.execute(
-            "UPDATE public.bot_bindings SET host_incarnation=%s,host_owner_epoch=%s,binding_epoch=2,connection_epoch=2",
-            (newer.incarnation, newer.owner_epoch),
-        )
+    await reconnect_binding(d.store, newer)
     assert await d.recover(newer) == {"unknown": 1, "requeued": 0}
     assert await d.claim(newer, "new") is None
     assert (await d.complete(p, "SENT", {"message_id": "late"}))["state"] == "SENT"
@@ -495,11 +486,10 @@ async def test_final_claim_deadline_and_reconnect_fence_cannot_be_forged(deliver
     await expect("STALE_DELIVERY_OWNER", task)
     assert (await d.recover(lease))["requeued"] == 1
     claim = await d.claim(lease, "new")
-    async with d.store.pool.connection() as conn:
-        await conn.execute("UPDATE public.bot_bindings SET binding_epoch=2,connection_epoch=2")
+    await reconnect_binding(d.store, lease)
     await expect(
         "STALE_DELIVERY_OWNER",
-        permit(d, lease, replace(claim, binding_epoch=2, connection_epoch=2)),
+        permit(d, lease, replace(claim, binding_epoch=3, connection_epoch=2)),
     )
 
 
@@ -633,10 +623,7 @@ async def test_offline_prefix_cannot_hide_another_binding_beyond_candidate_limit
         await enqueue(d, lease, group=str(20000 + index))
     async with d.store.pool.connection() as conn:
         await conn.execute("UPDATE public.bot_bindings SET state='OFFLINE'")
-        await conn.execute(
-            "INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,registry_operation_id,revision,effective_revision,binding_epoch,connection_epoch,host_incarnation,host_owner_epoch,enabled,receive_enabled,state) VALUES (%s,'binding-b','onebot-v11','10001','Other','register-b',1,1,1,1,%s,%s,true,true,'ONLINE')",
-            (d.store.bot_id, lease.incarnation, lease.owner_epoch),
-        )
+    await create_online_binding(d.store, lease, "binding-b", "10001", name="Other")
     other = await d.enqueue(
         lease,
         operation_id="other-binding",

@@ -28,10 +28,11 @@ from psycopg_pool import AsyncConnectionPool
 from forest.errors import ForestError
 from forest.storage.kernel_content import KernelContentStore, capacity_boundary
 from forest.storage.migration_v1 import (
-    WRITER_GENERATION,
     _migration_context,
     install_writer_gate_in,
 )
+from forest.storage.migration_v2 import WRITER_GENERATION
+from forest.storage.migration_v2 import install_writer_gate_in as install_writer_gate_v2_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -45,11 +46,48 @@ MIGRATION_HANDLERS = {
     "038_generation_payloads.sql": "generation_payloads_v1",
     "040_control_results.sql": "control_results_v1",
     "041_control_receipts.sql": "control_receipts_v1",
+    "044_config_dependencies.sql": "config_dependencies_v2",
+    "045_agent_config_payloads.sql": "agent_config_payloads_v2",
+    "046_memory_config_payloads.sql": "memory_config_payloads_v2",
+    "047_binding_config_payloads.sql": "binding_config_payloads_v2",
+    "048_component_config_payloads.sql": "component_config_payloads_v2",
+    "049_binding_template_dependencies.sql": "binding_template_dependencies_v2",
 }
+
+# Explicitly version the helper dependency envelope. Released SQL-only and v1
+# checksums must never start depending on the current writer's helper source.
+MIGRATION_V2 = frozenset({
+    "042_schema_writer_v2.sql", "043_config_payload_reader.sql", "044_config_dependencies.sql",
+    "045_agent_config_payloads.sql", "046_memory_config_payloads.sql",
+    "047_binding_config_payloads.sql",
+    "048_component_config_payloads.sql",
+    "049_binding_template_dependencies.sql",
+})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
+    if version in MIGRATION_V2:
+        root = files("forest.storage")
+        try:
+            body = (root.joinpath("data_migrations", handler + ".py").read_text(encoding="utf-8")
+                    if handler is not None else None)
+            helpers = [[name, root.joinpath(name).read_text(encoding="utf-8")]
+                       for name in ("migration_v1.py", "migration_v2.py")]
+            if version in {"045_agent_config_payloads.sql", "046_memory_config_payloads.sql",
+                           "047_binding_config_payloads.sql", "048_component_config_payloads.sql",
+                           "049_binding_template_dependencies.sql"}:
+                name = "data_migrations/config_dependencies_v2.py"
+                helpers.append([name, root.joinpath(*name.split("/")).read_text(encoding="utf-8")])
+        except FileNotFoundError as exc:
+            raise ForestError(
+                "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
+            ) from exc
+        envelope = json.dumps(
+            ["forest.bot.migration.v2", source, body, helpers],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(envelope).hexdigest()
     if handler is None:
         # Released 001--028 retain their original SQL-only checksums.
         return hashlib.sha256(source.encode()).hexdigest()
@@ -230,11 +268,15 @@ class BotStore:
                     (self.bot_id,),
                 )
             gated = False
+            gated_v2 = False
             for version, source, checksum in plan:
                 handler = MIGRATION_HANDLERS.get(version)
                 if handler and not gated:
                     await install_writer_gate_in(conn)
                     gated = True
+                if version in MIGRATION_V2 and not gated_v2:
+                    await install_writer_gate_v2_in(conn)
+                    gated_v2 = True
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)
@@ -904,6 +946,10 @@ class BotStore:
             return await self.content.bodies.hydrate_migration_result_in(conn, result, epoch=epoch)
 
     async def _publish_state(self, conn: AsyncConnection, operation: dict, route: dict, candidate: dict) -> None:
+        from forest.storage.control_receipts import ControlReceiptStore
+        await ControlReceiptStore(self).activation_heads_in(
+            conn, operation["component_id"], operation["operation_id"],
+        )
         generation_id = candidate["generation_id"]
         await self.content.lock_in(conn, [generation_id], [operation["component_id"]])
         await self.content.guard_in(conn, [generation_id], phase="commit")

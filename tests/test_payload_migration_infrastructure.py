@@ -90,6 +90,9 @@ async def upgrade(database, tmp_path, monkeypatch, request):
                     (handlers / path.name).write_text(
                         path.read_text(encoding="utf-8"), encoding="utf-8"
                     )
+            (root / "migration_v2.py").write_text(
+                released.joinpath("migration_v2.py").read_text(encoding="utf-8"), encoding="utf-8"
+            )
             monkeypatch.setattr(bot_module, "import_module", actual_import)
 
         yield SimpleNamespace(

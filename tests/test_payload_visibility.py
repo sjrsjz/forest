@@ -124,7 +124,9 @@ async def test_long_lived_worker_output_cannot_import_private_source_into_agent(
     assert call["status"] == "COMPLETED" and call["result_payload_id"]
     assert (await query(repository, "SELECT count(*) AS n FROM public.bot_memory_config_heads"))["n"] == 0
     if private:
-        assert result.status == "FAILED" and tool["status"] == "UNKNOWN"
+        # The private result is refused, while the dispatched tool remains a
+        # durable UNKNOWN observation requiring explicit reconciliation.
+        assert result.status == "BLOCKED_UNKNOWN" and tool["status"] == "UNKNOWN"
         assert len(client.prepared) == 1
         assert (await query(repository, "SELECT count(*) AS n FROM public.bot_send_intents"))["n"] == 0
         if tool["result_payload_id"]:

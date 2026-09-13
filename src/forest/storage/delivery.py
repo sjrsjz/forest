@@ -745,6 +745,9 @@ class DeliveryStore:
                 )
             if part["claim_until"] <= now:
                 raise ForestError("STALE_DELIVERY_OWNER", "Delivery claim expired")
+            settings = await self.bindings.current_config_in(
+                conn, self.store.bot_id, intent["binding_id"], expected_binding_epoch=claim.binding_epoch,
+            )
             clock = await self.contents.payloads.lock_in(conn)
             if clock["deletion_epoch"] != claim.deletion_epoch:
                 raise ForestError(
@@ -755,7 +758,7 @@ class DeliveryStore:
             await self.contents.payloads.require_available_in(
                 conn, (part["payload_id"],), expected_deletion_epoch=claim.deletion_epoch
             )
-            wire_parents = [part["payload_id"]]
+            wire_parents = [part["payload_id"], settings["config_payload_id"]]
             if "component_id" in executor_ref:
                 call = await (await conn.execute(
                     "SELECT * FROM public.bot_calls WHERE bot_id=%s AND call_id=%s",

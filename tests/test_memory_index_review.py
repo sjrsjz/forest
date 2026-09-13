@@ -41,7 +41,7 @@ def runtime_fixture():
 
     runtime.config = SimpleNamespace(runtime=config)
     runtime.index = SimpleNamespace(recover=empty, enroll=empty, retryable=empty, pending=empty)
-    runtime.media = SimpleNamespace(scan=empty)
+    runtime.media = SimpleNamespace(recover=empty, scan=empty)
     return runtime, cfg
 
 

@@ -99,6 +99,7 @@ class Environment:
             "worker-" + generation,
             config=values["config"],
             capability_grants=values["grants"],
+            configuration_operation_id=operation,
         )
         await self.store.mark_ready(self.lease, generation)
         route = await self.store.get_route(COMPONENT)
@@ -402,22 +403,19 @@ async def test_incomplete_desired_configuration_cannot_pass_null_publication_gua
     env = environment
     malformed = deepcopy(VALUES)
     del malformed[missing]
-    # A deliberately faulty, trusted issuer simulates bypassing gateway schema
-    # validation. Final publication must independently reject absent fields.
-    await env.apply(await env.plan(values=malformed))
-    lifecycle = await env.candidate()
-    with pytest.raises(RaiseException, match="CONFIGURATION_SUPERSEDED"):
-        await env.store.publish(env.lease, lifecycle["operation_id"], lifecycle["op_epoch"])
+    # A faulty trusted issuer bypasses the gateway schema; the values writer
+    # now refuses this incomplete body before any revision or candidate exists.
+    await rejected("CONFIGURATION_VALUES_INVALID", env.plan(values=malformed))
     assert (await env.read())["effective_revision"] == 0
+    assert (await env.read())["desired_revision"] == 0
 
 
 async def test_different_grants_or_revoked_configuration_cannot_activate(environment):
     env = environment
     await env.apply(await env.plan())
     expanded = {**VALUES, "grants": ["state.read", "state.write"]}
-    lifecycle = await env.candidate(values=expanded)
-    with pytest.raises(RaiseException, match="CONFIGURATION_SUPERSEDED"):
-        await env.store.publish(env.lease, lifecycle["operation_id"], lifecycle["op_epoch"])
+    # Real activation provenance is checked before Worker preparation too.
+    await rejected("CONFIGURATION_SUPERSEDED", env.candidate(values=expanded))
     await env.store.revoke_policy(env.lease, expected_revision=1)
     await rejected("POLICY_REVOKED", env.control.bind_activation(env.lease, COMPONENT, 1, "late"))
     assert (await env.read())["effective_revision"] == 0
@@ -437,7 +435,7 @@ async def test_publication_cannot_outlive_operation_while_configuration_trigger_
                 env.store.publish(env.lease, lifecycle["operation_id"], lifecycle["op_epoch"])
             )
             await wait_for_lock(
-                env.store, "UPDATE public.bot_lifecycle_operations SET phase='COMMITTED'%"
+                env.store, "SELECT h.component_id FROM public.bot_config_heads h%FOR UPDATE OF h"
             )
             await asyncio.sleep(0.35)
         await rejected("STALE_OPERATION", task)

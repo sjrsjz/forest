@@ -127,7 +127,7 @@ class DevWatcher:
             self.kernel._authority(), self.watch_id, good["request_id"], operation, recovering=True
         )
         route = await self.kernel.install(
-            snapshot, config=self.config, grants=self.grants, operation_id=operation
+            snapshot, config=head["config"], grants=frozenset(head["grants"]), operation_id=operation
         )
         self._fingerprint = (
             good["source_digest"] if head["desired_request_id"] == good["request_id"] else None
@@ -138,9 +138,11 @@ class DevWatcher:
 
     async def _observe(self) -> None:
         async with self._observation_lock:
+            head = await self.store.current(self.kernel._authority(), self.watch_id)
+            source = Path(head["source_identity"])
             error = None
             try:
-                fingerprint = await self._thread(source_fingerprint, self.source)
+                fingerprint = await self._thread(source_fingerprint, source)
             except ForestError as exc:
                 error = exc.code
                 # Even an unreadable/unstable new source fences an older pending
@@ -192,7 +194,8 @@ class DevWatcher:
         if request["scan_error"]:
             raise ForestError(request["scan_error"], "Package source could not be captured", 422)
         self._emit("building", request_id=request_id)
-        snapshot = await self._thread(self.catalog.build, self.source, development=True)
+        head = await self.store.current(self.kernel._authority(), self.watch_id)
+        snapshot = await self._thread(self.catalog.build, Path(head["source_identity"]), development=True)
         original_digest = "sha256:" + snapshot.manifest["version"].rsplit("+dev.", 1)[-1]
         await self._observe()
         if original_digest != request["source_digest"] or self._fingerprint != original_digest:
@@ -210,9 +213,10 @@ class DevWatcher:
         )
         operation = "dev-build:" + request_id
         await self.store.activate(self.kernel._authority(), self.watch_id, request_id, operation)
+        head = await self.store.current(self.kernel._authority(), self.watch_id)
         self._emit("validating", request_id=request_id, package_digest=snapshot.digest)
         route = await self.kernel.install(
-            snapshot, config=self.config, grants=self.grants, operation_id=operation
+            snapshot, config=head["config"], grants=frozenset(head["grants"]), operation_id=operation
         )
         self.published_count += 1
         self._emit("published", request_id=request_id, package_digest=snapshot.digest, route=route)

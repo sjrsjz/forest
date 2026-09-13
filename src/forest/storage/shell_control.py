@@ -23,6 +23,7 @@ class ShellControl(BotControl):
         self.claim_epoch, self.binding_id = claim["claim_epoch"], claim["binding_id"]
         self.admission = object()
         self.binding = None
+        self.author = None
 
     async def _guard(self, conn, ticket, action, operation_id, payload, plan_digest=""):
         if ticket is not self.admission or plan_digest or operation_id != "shell-action:" + self.command_id:
@@ -49,11 +50,17 @@ class ShellControl(BotControl):
             (self.store.bot_id, request["event_id"]),
         )).fetchone()
         author = source["author"] if source else {}
-        if (author.get("identity_origin") != "adapter_verified" or author.get("anonymous") is not None
-                or author.get("is_self") or not isinstance(author.get("principal_ref"), str)
-                or author.get("external_user_id") not in self.binding["config"].get("admin_user_ids", [])):
-            raise ForestError("SHELL_FORBIDDEN", "Command author is not a current Bot administrator", 403)
         await self._scope(conn, request["conversation_id"], action, payload)
+        if (author.get("identity_origin") != "adapter_verified" or author.get("anonymous") is not None
+                or author.get("is_self") or not isinstance(author.get("principal_ref"), str)):
+            raise ForestError("SHELL_FORBIDDEN", "Command author is not a current Bot administrator", 403)
+        self.author = author
+        # The caller still has business rows to lock. Read only the immutable
+        # effective reference here; the content/admin decision is mandatory in
+        # _time before this transaction can return or commit any result.
+        config_ref = self.binding["config_payload_id"]
+        if config_ref is None:
+            raise ForestError("CONTROL_CONTENT_REVOKED", "Binding configuration is unavailable", 409)
         return BotControl.admission({
             "issuer_id": "shell:" + self.binding_id, "subject_id": author["principal_ref"],
             "operation_id": operation_id, "action": action, "input_digest": digest_json(payload),
@@ -62,7 +69,7 @@ class ShellControl(BotControl):
             "origin_kind": "shell", "source_binding_id": self.binding_id,
             "source_principal": author["principal_ref"], "source_event_id": request["event_id"],
             "source_conversation_id": request["conversation_id"], "command_id": self.command_id,
-        }, payload, parents=(source["payload_id"],))
+        }, payload, parents=(source["payload_id"], config_ref))
 
     async def _scope(self, conn, conversation_id, action, payload):
         target = None
@@ -91,4 +98,10 @@ class ShellControl(BotControl):
         await super()._time(conn, claims)
         if self.binding is None:
             raise ForestError("SHELL_AUTHORITY_REJECTED", "No command admission", 403)
-        await self.messages.bindings._final_guard(conn, self.lease, self.binding, data=False)
+        settings = await self.messages.bindings.current_config_in(
+            conn, self.store.bot_id, self.binding_id,
+            expected_binding_epoch=self.binding["binding_epoch"],
+        )
+        if self.author is None or self.author.get("external_user_id") not in settings["config"].get("admin_user_ids", []):
+            raise ForestError("SHELL_FORBIDDEN", "Command author is not a current Bot administrator", 403)
+        await self.messages.bindings._final_guard(conn, self.lease, self.binding, data=False, require_config=True)

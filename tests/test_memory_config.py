@@ -69,6 +69,7 @@ async def test_secret_replay_preservation_clear_and_stale_publication(environmen
         "values": DEFAULT_MEMORY_SETTINGS,
         "has_api_key": False,
         "secret_revision": 0,
+        "defaults": DEFAULT_MEMORY_SETTINGS,
     }
     enabled = {**DEFAULT_MEMORY_SETTINGS, "enabled": True}
     first = await plan(env, values=enabled, secret="first-private-key", operation="first-plan")

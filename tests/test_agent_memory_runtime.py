@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+import html
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from retention_upgrade import content
 from test_agent_config import apply as apply_agent
 from test_agent_config import plan as plan_agent
+from test_agent_store import agent_turn
 from test_embeddings import send, server
 from test_media import media_server, picture, respond
 from test_memory_index_runtime import EMBEDDING_KEY, configure, rows, source_ready, wait_state
@@ -86,18 +88,32 @@ async def test_agent_recalls_cross_group_pixels_and_reuses_fixed_query_across_to
             if not previous:
                 first_model.set()
                 await release_first.wait()
-                tool = body["tools"][0]["function"]
+                catalogue_text = body["messages"][0]["content"].split(
+                    '<available_tools encoding="json">', 1
+                )[1].split("</available_tools>", 1)[0]
+                tool = json.loads(html.unescape(catalogue_text))[0]["function"]
                 trigger = tool["parameters"]["properties"]["authority_trigger_id"]["enum"][0]
-                message = {"role": "assistant", "content": None, "tool_calls": [{
-                    "id": "memory-counter", "type": "function", "function": {
-                        "name": "increment", "arguments": json.dumps({
-                            "authority_trigger_id": trigger, "arguments": {"increment": 3},
-                        }),
-                    },
-                }]}
-                finish = "tool_calls"
+                message = {
+                    "role": "assistant",
+                    "content": agent_turn(
+                        "",
+                        [
+                            {
+                                "name": "increment",
+                                "arguments": {
+                                    "authority_trigger_id": trigger,
+                                    "arguments": {"increment": 3},
+                                },
+                            }
+                        ],
+                    ),
+                }
+                finish = "stop"
             else:
-                message = {"role": "assistant", "content": "Retrieved photographer from group 30002."}
+                message = {
+                    "role": "assistant",
+                    "content": agent_turn("Retrieved photographer from group 30002."),
+                }
                 finish = "stop"
             await send(writer, {"id": "model-second" if previous else "model-first", "model": "local-memory-model",
                                 "choices": [{"index": 0, "message": message, "finish_reason": finish}],

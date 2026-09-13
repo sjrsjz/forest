@@ -1,7 +1,9 @@
 """Web configuration through durable Agent steps and real HTTP protocol sockets."""
 
 import asyncio
+import html
 import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from test_web_bindings import configure, get, onebot_server, receive, wait_for
 from test_web_bots import ORIGIN, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
+from forest.agent_protocol import AssistantBlock, FunctionCallBlock, ModelTurn, serialize_model_turn
 from forest.bootstrap import BootstrapState
 from forest.errors import ForestError
 from forest.management.app import WebSettings
@@ -18,6 +21,17 @@ from forest.storage.agent_payloads import AgentPayloadStore
 
 pytestmark = pytest.mark.postgres
 MODEL_KEY = "only-a-test-model-key"
+
+
+def _turn(*blocks):
+    return serialize_model_turn(ModelTurn(tuple(blocks), "test-provider-candidate"))
+
+
+def _available_tools(body):
+    content = body["messages"][0]["content"]
+    match = re.search(r'<available_tools encoding="json">(.*)</available_tools>\Z', content)
+    assert match is not None
+    return json.loads(html.unescape(match.group(1)))
 
 
 @asynccontextmanager
@@ -43,37 +57,32 @@ async def model_server():
             state["requests"].append(body)
             text = json.dumps(body, ensure_ascii=False)
             if "first request" in text and not any(
-                message.get("tool_calls") for message in body["messages"]
+                message.get("role") == "assistant"
+                and (
+                    message.get("tool_calls")
+                    or 'block_type=\\"FunctionCall\\"' in str(message.get("content", ""))
+                )
+                for message in body["messages"]
             ):
                 state["first_entered"].set()
                 await state["release_first"].wait()
-                authority = body["tools"][0]["function"]["parameters"]["properties"][
+                authority = _available_tools(body)[0]["function"]["parameters"]["properties"][
                     "authority_trigger_id"
                 ]["enum"][0]
                 message = {
                     "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "increment-call",
-                            "type": "function",
-                            "function": {
-                                "name": "increment",
-                                "arguments": json.dumps(
-                                    {
-                                        "authority_trigger_id": authority,
-                                        "arguments": {"increment": 3},
-                                    }
-                                ),
-                            },
-                        }
-                    ],
+                    "content": _turn(FunctionCallBlock("increment", json.dumps({
+                        "authority_trigger_id": authority,
+                        "arguments": {"increment": 3},
+                    }, sort_keys=True, separators=(",", ":")))),
                 }
-                reason = "tool_calls"
+                reason = "stop"
             else:
                 message = {
                     "role": "assistant",
-                    "content": "other-final" if "other request" in text else "model-final",
+                    "content": _turn(AssistantBlock(
+                        "other-final" if "other request" in text else "model-final"
+                    )),
                 }
                 reason = "stop"
             data = json.dumps(
@@ -313,7 +322,11 @@ async def test_web_agent_multigroup_and_next_model_trigger_cut(tmp_path, web_bot
             final_request = next(
                 body
                 for body in model["requests"]
-                if any(message.get("tool_calls") for message in body["messages"])
+                if any(
+                    message.get("role") == "assistant"
+                    and message.get("tool_calls")
+                    for message in body["messages"]
+                )
             )
             text = json.dumps(final_request, ensure_ascii=False)
             assert "ordinary between" in text and "latest trigger" in text

@@ -378,6 +378,7 @@ class MemoryIndexStore:
                     owner_id=request_id + ":wire",
                     value=prepared.body,
                     sources=refs,
+                    parents=(cfg["values_payload_id"],),
                     expected_deletion_epoch=clock["deletion_epoch"],
                 )
                 manifest = await self.payloads.put_json_in(
@@ -386,6 +387,13 @@ class MemoryIndexStore:
                     owner_id=request_id + ":manifest",
                     value=prepared.manifest,
                     sources=refs,
+                    parents=(cfg["values_payload_id"],),
+                    expected_deletion_epoch=clock["deletion_epoch"],
+                )
+                profile_values = profile(cfg["values"]).as_dict()
+                profile_ref = await self.payloads.put_json_in(
+                    conn, owner_kind="memory.embedding", owner_id="profile:" + digest_json([request_id]),
+                    value=profile_values, parents=(cfg["values_payload_id"],),
                     expected_deletion_epoch=clock["deletion_epoch"],
                 )
                 runtime = await self.store._runtime(conn)
@@ -396,8 +404,8 @@ class MemoryIndexStore:
                     for key in ("policy_revision", "maintenance_epoch", "storage_generation")
                 }
                 await conn.execute(
-                    "INSERT INTO public.bot_memory_embedding_requests(bot_id,request_id,purpose,config_revision,space_id,facet_ids,conversation_id,input_cut,deletion_epoch,body_payload_id,manifest_payload_id,wire_digest,profile,runtime_fence) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "INSERT INTO public.bot_memory_embedding_requests(bot_id,request_id,purpose,config_revision,space_id,facet_ids,conversation_id,input_cut,deletion_epoch,body_payload_id,manifest_payload_id,wire_digest,profile,profile_payload_id,profile_payload_digest,profile_metadata,runtime_fence) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s)",
                     (
                         lease.bot_id,
                         request_id,
@@ -411,7 +419,9 @@ class MemoryIndexStore:
                         wire.payload_id,
                         manifest.payload_id,
                         prepared.payload_digest,
-                        Jsonb(profile(cfg["values"]).as_dict()),
+                        profile_ref.payload_id,
+                        profile_ref.digest,
+                        Jsonb({key: profile_values[key] for key in ("dimensions", "protocol_revision")}),
                         Jsonb(fence),
                     ),
                 )
@@ -704,7 +714,7 @@ class MemoryIndexStore:
                             422,
                         )
                     vector_lookup[vector.facet_id] = checked_vector(
-                        vector.values, request["profile"]["dimensions"]
+                        vector.values, request["profile_metadata"]["dimensions"]
                     )
             charged = (
                 usage["total_tokens"]
@@ -718,6 +728,11 @@ class MemoryIndexStore:
                 )
             result_ref = None
             if publish and result.status == "RESPONDED":
+                # These vectors/usage/space hashes contain no configuration text.
+                # Their content lineage stays with the original chat/image;
+                # the actual profile, HTTP body and manifest copies inherit V.
+                # Current configuration remains a separate publication permit,
+                # including the final guard of an Agent's BOUND evidence.
                 refs = tuple(
                     SourceRef(row["source_unit_id"], row["source_revision"], row["part_id"])
                     for row in rows

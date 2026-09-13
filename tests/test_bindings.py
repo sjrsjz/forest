@@ -259,14 +259,22 @@ async def test_signed_plan_freezes_caller_values_and_claims_before_business_wait
     assert result["values"] == original
     async with b.env.store.pool.connection() as conn:
         plan = await (
-            await conn.execute("SELECT values,subject_id FROM public.bot_binding_plans")
+            await conn.execute("SELECT * FROM public.bot_binding_plans")
         ).fetchone()
         receipt = await (
             await conn.execute(
                 "SELECT subject_id,ticket_basis FROM public.bot_web_operations WHERE operation_id='mutable-plan'"
             )
         ).fetchone()
-    assert plan == {"values": original, "subject_id": b.env.subject}
+        assert plan["values"] is None and plan["values_payload_id"]
+        stored = await b.bindings._values_in(conn, plan, kind="PLAN")
+        content = await (await conn.execute(
+            "SELECT content FROM public.bot_payload_bodies WHERE payload_id=%s", (plan["values_payload_id"],),
+        )).fetchone()
+    from forest.packages import digest_json
+
+    assert stored["values"] == original and plan["subject_id"] == b.env.subject
+    assert digest_json(json.loads(bytes(content["content"]))) == plan["values_payload_digest"]
     assert receipt["subject_id"] == receipt["ticket_basis"]["subject_id"] == b.env.subject
 
 
