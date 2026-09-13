@@ -6,6 +6,7 @@ const $ = id => document.getElementById(id);
 const groups = [
   ['嵌入服务', [
     ['enabled', '启用此 Bot 的图文记忆', 'checkbox'],
+    ['semantic_associations_enabled', '启用跨群自动语义联想（复用已生成向量）', 'checkbox'],
     ['endpoint', '完整嵌入 API 地址', 'url'],
     ['deployment_id', '部署身份（更换服务地址时使用新身份）', 'text'],
     ['model', '模型协议', ['jina-clip-v2']],

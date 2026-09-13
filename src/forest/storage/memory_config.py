@@ -65,8 +65,22 @@ class MemoryConfig:
             identity=str(row["revision"]) if kind == "REVISION" else row["plan_id"],
             epoch=epoch, required=required,
         )
-        if hydrated["values_payload_state"] == "ACTIVE" and _metadata(hydrated["values"]) != row["values_metadata"]:
-            raise ForestError("MEMORY_CONFIG_METADATA_CONFLICT", "Memory metadata differs from its values", 409)
+        if hydrated["values_payload_state"] == "ACTIVE":
+            if _metadata(hydrated["values"]) != row["values_metadata"]:
+                raise ForestError(
+                    "MEMORY_CONFIG_METADATA_CONFLICT",
+                    "Memory metadata differs from its values",
+                    409,
+                )
+            try:
+                normalized = MemorySettings.model_validate(hydrated["values"]).model_dump()
+            except ValueError:
+                raise ForestError(
+                    "MEMORY_CONFIG_INVALID",
+                    "Stored Memory settings do not match the current schema",
+                    409,
+                ) from None
+            hydrated = {**hydrated, "values": normalized}
         return {**row, **hydrated}
 
     async def _deployment(self, conn, values):

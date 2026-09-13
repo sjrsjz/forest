@@ -551,7 +551,11 @@ class MemoryQueryStore:
             try:
                 async with conn.transaction():
                     merged, graph_detail = await self._expand_associations_in(
-                        conn, query, conversation, merged
+                        conn,
+                        query,
+                        conversation,
+                        merged,
+                        semantic_enabled=cfg["values"]["semantic_associations_enabled"],
                     )
             except (ForestError, psycopg.Error):
                 pass
@@ -672,7 +676,9 @@ class MemoryQueryStore:
             },
         )
 
-    async def _expand_associations_in(self, conn, query, conversation, merged):
+    async def _expand_associations_in(
+        self, conn, query, conversation, merged, *, semantic_enabled=True
+    ):
         seeds = merged[:16]
         seed_ids = [row["source_unit_id"] for row in seeds]
         seed_order = {identity: index for index, identity in enumerate(seed_ids)}
@@ -686,9 +692,27 @@ class MemoryQueryStore:
                 "association_edges_considered": 0, "association_sources_added": 0,
             }
         rows = await (await conn.execute(
-            "SELECT h.*,s.operation_revision,latest.graph_revision AS published_graph_revision,"
+            "WITH association_heads AS ("
+            " SELECT h.bot_id,h.association_id,h.left_source_unit_id,h.right_source_unit_id,"
+            "h.scope_id,h.current_contribution_id,'reviewed'::text AS association_origin,"
+            "NULL::integer AS score_ppm FROM public.bot_memory_association_heads h WHERE h.active "
+            " UNION ALL SELECT semantic.* FROM (SELECT DISTINCT ON (v.association_id) "
+            "v.bot_id,v.association_id,LEAST(v.origin_source_unit_id,v.neighbor_source_unit_id),"
+            "GREATEST(v.origin_source_unit_id,v.neighbor_source_unit_id),v.scope_id,"
+            "v.current_contribution_id,'semantic'::text,v.score_ppm "
+            "FROM public.bot_memory_semantic_votes v "
+            "JOIN public.bot_memory_vectors ov ON ov.bot_id=v.bot_id "
+            "AND ov.facet_id=v.origin_facet_id AND ov.source_unit_id=v.origin_source_unit_id "
+            "JOIN public.bot_memory_vectors nv ON nv.bot_id=v.bot_id "
+            "AND nv.facet_id=v.neighbor_facet_id AND nv.source_unit_id=v.neighbor_source_unit_id "
+            "JOIN public.bot_payload_headers oh ON oh.bot_id=ov.bot_id AND oh.payload_id=ov.payload_id "
+            "JOIN public.bot_payload_headers nh ON nh.bot_id=nv.bot_id AND nh.payload_id=nv.payload_id "
+            "WHERE v.bot_id=%s AND v.space_id=%s AND %s AND v.active "
+            "AND oh.state='ACTIVE' AND nh.state='ACTIVE' "
+            "ORDER BY v.association_id,v.score_ppm DESC,v.origin_source_unit_id) semantic"
+            ") SELECT h.*,s.operation_revision,latest.graph_revision AS published_graph_revision,"
             "latest.published_operation_revision,edge.metadata AS edge "
-            "FROM public.bot_memory_association_heads h "
+            "FROM association_heads h "
             "JOIN public.bot_memory_graph_scopes s USING(bot_id,scope_id) "
             "LEFT JOIN LATERAL (SELECT p.revision,p.graph_revision,"
             "(p.snapshot->>'operation_revision')::bigint AS published_operation_revision "
@@ -699,9 +723,17 @@ class MemoryQueryStore:
             "AND edge.scope_id=h.scope_id AND edge.revision=latest.revision "
             "AND edge.metadata->>'kind'='ASSOCIATES_WITH' "
             "AND edge.metadata->'contribution_ids' ? h.current_contribution_id "
-            "WHERE h.bot_id=%s AND h.active AND (h.left_source_unit_id=ANY(%s) "
+            "WHERE h.bot_id=%s AND (h.left_source_unit_id=ANY(%s) "
             "OR h.right_source_unit_id=ANY(%s)) ORDER BY h.association_id LIMIT 65",
-            (graph_clock["graph_revision"], self.store.bot_id, seed_ids, seed_ids),
+            (
+                self.store.bot_id,
+                query["space_id"],
+                semantic_enabled,
+                graph_clock["graph_revision"],
+                self.store.bot_id,
+                seed_ids,
+                seed_ids,
+            ),
         )).fetchall()
         limited = len(rows) > 64
         rows = rows[:64]
@@ -773,6 +805,8 @@ class MemoryQueryStore:
                 "association": {
                     "kind": "graph_association",
                     "association_id": association_id,
+                    "association_origin": row["association_origin"],
+                    "score_ppm": row["score_ppm"],
                     "edge_id": row["edge"]["edge_id"],
                     "seed_source_unit_id": seed_id,
                     "graph_revision": row["published_graph_revision"],

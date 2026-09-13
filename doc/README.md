@@ -25,6 +25,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P4 来源与载荷存储](p4-source-payloads.md) | 已接入消息流水的来源/资格、可清理正文基础及尚未迁移的旧副本 |
 | [P4 纯图归约器](p4-graph-reducer.md) | 固定源事实的多主干、乱序合流、撤回、并列冲突及必要证据 |
 | [P4 跨主干联想管理与召回](p4-association-retrieval.md) | 审核式来源联想、非主干分片、持久发布和有界一跳召回 |
+| [P4 自动跨主干语义联想](p4-semantic-associations.md) | 复用图文向量的持久 Top-K 维护、并发合流、删除失效与召回来源标记 |
 | [P4 图文嵌入驱动](p4-embedding-driver.md) | 原生文本/图片 HTTP 协议、向量空间、精确请求和取消/计费边界 |
 | [P4 正文迁移协议](p4-content-migration.md) | 事务内正文搬运、冻结迁移算法、旧宿主隔离与保守来源撤销 |
 | [P4 Agent 载荷](p4-agent-payloads.md) | 快照/精确请求/工具结果的来源传递、删除守卫与恢复结算 |

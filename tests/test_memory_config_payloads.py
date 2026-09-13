@@ -535,7 +535,10 @@ async def test_actual_041_upgrade_preserves_facts_and_never_reconstructs_erased_
                                   ([current["values_payload_id"], request["profile_payload_id"],
                                     request["body_payload_id"], request["manifest_payload_id"]],))
         else:
-            assert (await MemoryConfig(store).runtime(lease))["values"] == original["revisions"][0]["values"]
+            assert (await MemoryConfig(store).runtime(lease))["values"] == {
+                **original["revisions"][0]["values"],
+                "semantic_associations_enabled": True,
+            }
             assert await PayloadStore(store).read_json(lease, request["profile_payload_id"], expected_deletion_epoch=0) == original["requests"][0]["profile"]
         before = await rows(env, "SELECT * FROM public.bot_payload_headers ORDER BY payload_id")
         await store.migrate()

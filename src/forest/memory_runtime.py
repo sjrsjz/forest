@@ -17,6 +17,7 @@ from forest.storage.memory_graph import GraphStore
 from forest.storage.memory_index import MemoryIndexStore
 from forest.storage.memory_media import MemoryMediaStore
 from forest.storage.memory_queries import MemoryQueryStore
+from forest.storage.memory_semantic import MemorySemanticAssociationStore
 from forest.storage.payloads import PayloadStore
 
 
@@ -30,6 +31,7 @@ class MemoryRuntime:
         self.graph = GraphStore(platform.messages)
         self.administration = MemoryAdministration(platform.messages)
         self.associations = MemoryAssociationAdministration(platform.messages)
+        self.semantic = MemorySemanticAssociationStore(platform.messages)
         self.payloads = PayloadStore(self.store)
         self.task = None
         self.workers, self.errors, self.clients = {}, {}, set()
@@ -83,7 +85,12 @@ class MemoryRuntime:
                 # configuration, including a Bot that has never enabled memory
                 # indexing. This pending-only worker runs before config lookup.
                 if "graph:refresh" not in self.workers:
-                    self._spawn("graph:refresh", lambda: self._graph(lease, discover=False))
+                    pending_graph = await self.graph.pending(lease, limit=1)
+                    if pending_graph["scopes"]:
+                        self._spawn(
+                            "graph:refresh",
+                            lambda: self._graph(lease, discover=False),
+                        )
                 cfg = await self.config.runtime(lease)
                 if self.closed:
                     break
@@ -134,6 +141,15 @@ class MemoryRuntime:
                                 "index:" + uuid4().hex,
                                 lambda selected=selected: self.embed(lease, cfg, selected),
                             )
+                    if (
+                        cfg["values"]["semantic_associations_enabled"]
+                        and not self.platform.scheduler.active_conversations
+                        and "semantic:reconcile" not in self.workers
+                    ):
+                        self._spawn(
+                            "semantic:reconcile",
+                            lambda: self._semantic(lease),
+                        )
                     self.errors.pop("scan", None)
                 # Ordinary trunk discovery remains tied to enabled indexing.
                 if cfg["values"]["enabled"] and "graph:refresh" not in self.workers:
@@ -165,12 +181,27 @@ class MemoryRuntime:
             self.notify()
         return result
 
+    async def _semantic(self, lease):
+        await self.semantic.repair_stale(lease)
+        result = await self.semantic.process_one(lease)
+        if result is None:
+            self.errors.pop("semantic", None)
+            return
+        if result["affected"]:
+            await self.semantic.enqueue_sources(
+                lease, result["space_id"], result["affected"]
+            )
+        self.errors.pop("semantic", None)
+        self.notify()
+
     async def _graph(self, lease, *, discover=True):
         pending = await self.graph.pending(lease, limit=1)
         if pending["scopes"]:
             await self.graph.refresh(lease, pending["scopes"][0])
+            self.errors.pop("graph", None)
             return
         if not discover:
+            self.errors.pop("graph", None)
             return
         page = await self.graph.discover(lease, **self._graph_cursor, limit=1)
         for scope in page["scopes"]:
@@ -178,6 +209,7 @@ class MemoryRuntime:
                 return
             await self.graph.refresh(lease, scope)
         self._graph_cursor = page["next_after"] or {}
+        self.errors.pop("graph", None)
 
     async def embed(
         self, lease, cfg, facet_ids, *, request_id=None, conversation_id=None, input_cut=None

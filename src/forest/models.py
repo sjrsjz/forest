@@ -472,9 +472,16 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
             raise _error("MODEL_INPUT_INVALID", "Memory evidence requires bounded ordered parts")
         retrieval = row.get("retrieval")
         if retrieval is not None:
-            if not isinstance(retrieval, dict) or set(retrieval) != {
+            legacy_fields = {
                 "kind", "association_id", "edge_id", "seed_source_unit_id", "graph_revision"
-            } or retrieval.get("kind") != "graph_association":
+            }
+            current_fields = legacy_fields | {"association_origin", "score_ppm"}
+            retrieval_fields = frozenset(retrieval) if isinstance(retrieval, dict) else frozenset()
+            if (
+                not isinstance(retrieval, dict)
+                or retrieval_fields not in {frozenset(legacy_fields), frozenset(current_fields)}
+                or retrieval.get("kind") != "graph_association"
+            ):
                 raise _error("MODEL_INPUT_INVALID", "Memory association path is invalid")
             retrieval = {
                 "kind": "graph_association",
@@ -486,12 +493,39 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
                     retrieval.get("seed_source_unit_id"), "memory association seed"
                 ),
                 "graph_revision": retrieval.get("graph_revision"),
+                **(
+                    {
+                        "association_origin": retrieval.get("association_origin"),
+                        "score_ppm": retrieval.get("score_ppm"),
+                    }
+                    if retrieval_fields == frozenset(current_fields)
+                    else {}
+                ),
             }
             if (
                 type(retrieval["graph_revision"]) is not int
                 or not 1 <= retrieval["graph_revision"] < 2**63
             ):
                 raise _error("MODEL_INPUT_INVALID", "Memory graph revision is invalid")
+            if retrieval_fields == frozenset(current_fields) and (
+                retrieval["association_origin"] not in {"reviewed", "semantic"}
+                or (
+                    retrieval["score_ppm"] is not None
+                    and (
+                        type(retrieval["score_ppm"]) is not int
+                        or not 0 <= retrieval["score_ppm"] <= 1_000_000
+                    )
+                )
+                or (
+                    retrieval["association_origin"] == "semantic"
+                    and retrieval["score_ppm"] is None
+                )
+                or (
+                    retrieval["association_origin"] == "reviewed"
+                    and retrieval["score_ppm"] is not None
+                )
+            ):
+                raise _error("MODEL_INPUT_INVALID", "Memory association provenance is invalid")
         if source["source_kind"] == "GROUP":
             relation = ("SAME_GROUP" if source["source_id"] == current_source["group_source_id"]
                         else "CROSS_GROUP") if current_source.get("channel_kind") == "group" else "GROUP_SOURCE"

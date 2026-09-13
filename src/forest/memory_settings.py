@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class MemorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = Field(default=False, strict=True)
+    semantic_associations_enabled: bool = Field(default=True, strict=True)
     endpoint: str = Field(default="https://api.jina.ai/v1/embeddings", max_length=2048)
     deployment_id: str = Field(default="jina-clip-v2", min_length=1, max_length=128)
     model: Literal["jina-clip-v2"] = "jina-clip-v2"

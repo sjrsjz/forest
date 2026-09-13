@@ -160,6 +160,39 @@ def test_association_path_is_explicit_in_model_visible_memory_attribution():
     assert info["author"]["external_user_id"] == "bob"
 
 
+def test_semantic_association_provenance_is_typed_before_model_projection():
+    row = recalled()
+    row["retrieval"] = {
+        "kind": "graph_association",
+        "association_id": "memory-semantic-association:abc",
+        "association_origin": "semantic",
+        "score_ppm": 925_000,
+        "edge_id": "graph-edge:sha256:semantic",
+        "seed_source_unit_id": "memory-seed",
+        "graph_revision": 8,
+    }
+    request = prepare(evidence=bundle(row))
+    assert header(json.loads(request.body)["messages"][1])["retrieval"] == row["retrieval"]
+
+    for field, value in (("association_origin", "model"), ("score_ppm", 1_000_001)):
+        invalid = bundle(recalled())
+        invalid["evidence"][0]["retrieval"] = {**row["retrieval"], field: value}
+        with pytest.raises(ForestError) as error:
+            prepare(evidence=invalid)
+        assert error.value.code == "MODEL_INPUT_INVALID"
+
+    for origin, score in (("semantic", None), ("reviewed", 925_000)):
+        invalid = bundle(recalled())
+        invalid["evidence"][0]["retrieval"] = {
+            **row["retrieval"],
+            "association_origin": origin,
+            "score_ppm": score,
+        }
+        with pytest.raises(ForestError) as error:
+            prepare(evidence=invalid)
+        assert error.value.code == "MODEL_INPUT_INVALID"
+
+
 @pytest.mark.parametrize("visual", [False, True])
 @pytest.mark.parametrize("wrong", ["source", "alias", "bot", "part", "ref", "revision", "bytes"])
 def test_same_pixels_from_wrong_origin_rejected_even_for_text_only_or_budget_omission(visual, wrong):

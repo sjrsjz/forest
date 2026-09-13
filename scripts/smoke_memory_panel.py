@@ -156,6 +156,7 @@ def main():
             expect(page.locator("#memory-associations .memory-association button")).to_contain_text("恢复")
             page.locator('#memory-config [name="dimensions"]').select_option("1024")
             page.locator('#memory-config [name="enabled"]').check()
+            page.locator('#memory-config [name="semantic_associations_enabled"]').uncheck()
             page.locator('#memory-config [name="media_allowed_origins"]').fill(
                 "https://images.example.com"
             )
@@ -167,6 +168,7 @@ def main():
                 "fixture.calls.filter(c=>c.path.endsWith('/change-plans')).at(-1).body"
             )
             assert sent["values"]["dimensions"] == 1024 and sent["values"]["enabled"]
+            assert not sent["values"]["semantic_associations_enabled"]
             assert sent["values"]["media_allowed_origins"] == ["https://images.example.com"]
 
             # An old read cannot replace edits made while it was in flight.

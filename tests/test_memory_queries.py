@@ -248,6 +248,8 @@ async def test_vector_seed_expands_one_published_cross_trunk_association(media):
     assert associated["retrieval"] == {
         "kind": "graph_association",
         "association_id": plan["association_id"],
+        "association_origin": "reviewed",
+        "score_ppm": None,
         "edge_id": associated["retrieval"]["edge_id"],
         "seed_source_unit_id": seed["source_unit_id"],
         "graph_revision": published["graph_revision"],

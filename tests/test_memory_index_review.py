@@ -28,6 +28,7 @@ def runtime_fixture():
             messages=SimpleNamespace(store=store),
             kernel=SimpleNamespace(_authority=lambda: "host"),
             vault=SimpleNamespace(decrypt=lambda value: "test-key"),
+            scheduler=SimpleNamespace(active_conversations={}),
         )
     )
     cfg = {
@@ -39,9 +40,21 @@ def runtime_fixture():
     async def config(host):
         return cfg
 
+    async def graph_pending(*args, **kwargs):
+        return {"scopes": []}
+
+    async def scrub(*args, **kwargs):
+        return {"remaining": False}
+
+    async def semantic_process(*args, **kwargs):
+        return None
+
     runtime.config = SimpleNamespace(runtime=config)
     runtime.index = SimpleNamespace(recover=empty, enroll=empty, retryable=empty, pending=empty)
     runtime.media = SimpleNamespace(recover=empty, scan=empty)
+    runtime.graph = SimpleNamespace(pending=graph_pending)
+    runtime.payloads = SimpleNamespace(scrub=scrub)
+    runtime.semantic = SimpleNamespace(repair_stale=empty, process_one=semantic_process)
     return runtime, cfg
 
 
@@ -53,12 +66,16 @@ async def test_empty_graph_completion_does_not_self_wake_another_scan():
     async def enroll(*args, **kwargs):
         scans.append("scan")
 
-    async def graph(host):
+    async def graph(host, **kwargs):
         graphs.append("graph")
         entered.set()
 
+    async def graph_pending(*args, **kwargs):
+        return {"scopes": [object()]}
+
     runtime.index.enroll = enroll
     runtime._graph = graph
+    runtime.graph.pending = graph_pending
     try:
         await runtime.start()
         await asyncio.wait_for(entered.wait(), 2)
