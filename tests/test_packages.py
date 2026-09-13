@@ -140,6 +140,47 @@ def test_supported_resource_and_lifecycle_limits_survive_snapshot(tmp_path):
     assert snapshot.component["lifecycle"]["prepare_timeout_s"] == 0.5
 
 
+def test_event_declarations_and_capabilities_survive_static_snapshot(tmp_path):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    text = manifest.read_text(encoding="utf-8").replace(
+        'requests = ["state.read", "state.write"]',
+        'requests = ["state.read", "state.write", "event.publish:counter.changed"]',
+    )
+    text += '''
+[[components.publishes]]
+topic = "counter.changed"
+contract = "1.0"
+schema = "schemas/input.json"
+
+[[components.subscribes]]
+subscriber_id = "counter.projection"
+topic = "counter.changed"
+contract = "1.0"
+schema = "schemas/input.json"
+max_attempts = 5
+'''
+    manifest.write_text(text, encoding="utf-8")
+    snapshot = PackageCatalog(tmp_path / "catalog").build(root)
+    assert snapshot.component["publishes"][0]["topic"] == "counter.changed"
+    assert snapshot.component["subscribes"][0]["max_attempts"] == 5
+
+
+def test_event_capability_without_publication_is_rejected(tmp_path):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'requests = ["state.read", "state.write"]',
+            'requests = ["state.read", "state.write", "event.publish:undeclared"]',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as error:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert error.value.code == "UNSUPPORTED_CAPABILITY"
+
+
 @pytest.mark.parametrize("extra", ['unknown = "ignored"', '[metadata]\nvalue = "unknown"'])
 def test_unknown_manifest_properties_are_rejected(tmp_path, extra):
     root = source(tmp_path)

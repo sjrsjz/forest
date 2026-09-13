@@ -598,6 +598,7 @@ class BotStore:
         state_value_schema: dict | None = None,
         state_migrations: list[dict] | None = None,
         configuration_operation_id: str | None = None,
+        event_definitions: list[dict] | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -618,6 +619,7 @@ class BotStore:
             raise ForestError("STATE_SCHEMA_INVALID", "State schema must be a positive integer", 422)
         state_value_schema = json.loads(json.dumps(state_value_schema or {}, allow_nan=False))
         state_migrations = json.loads(json.dumps(state_migrations or [], allow_nan=False))
+        event_definitions = json.loads(json.dumps(event_definitions or [], allow_nan=False))
         if not isinstance(state_migrations, list) or len(state_migrations) > 64 or any(
             not isinstance(item, dict) or set(item) != {"from_schema", "to_schema"}
             or type(item["from_schema"]) is not int or item["from_schema"] < 1
@@ -676,6 +678,15 @@ class BotStore:
                     raise ForestError("GENERATION_CONFLICT", "Generation configuration provenance changed", 409)
                 if any(existing[key] != value for key, value in fixed.items()):
                     raise ForestError("GENERATION_CONFLICT", "Generation identity cannot be reused")
+                from forest.storage.events import EventStore
+
+                await EventStore(self).register_generation_in(
+                    conn,
+                    generation_id,
+                    component_id,
+                    event_definitions,
+                    existing_generation=True,
+                )
                 await self.content.guard_in(conn, [generation_id], phase="admission")
                 await self._host(conn, lease)
                 return existing
@@ -720,6 +731,11 @@ class BotStore:
                     ),
                 )
             ).fetchone()
+            from forest.storage.events import EventStore
+
+            await EventStore(self).register_generation_in(
+                conn, generation_id, component_id, event_definitions
+            )
             await self._event(
                 conn,
                 "generation.registered",
@@ -1349,6 +1365,11 @@ class BotStore:
             await self._host(conn, lease, runtime)
             if operation["lease_until"] <= await self._now(conn):
                 raise ForestError("STALE_OPERATION", "Lifecycle lease expired before publication")
+            from forest.storage.events import EventStore
+
+            await EventStore(self).publish_generation_in(
+                conn, candidate["generation_id"], operation["component_id"]
+            )
             await conn.execute(
                 "UPDATE public.bot_generations SET status='RETIRED' WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",
                 (self.bot_id, route["generation_id"]),

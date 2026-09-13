@@ -11,6 +11,7 @@ import contextvars
 import hashlib
 import inspect
 import json
+import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -28,6 +29,26 @@ def service(name: str):
         if not inspect.iscoroutinefunction(function):
             raise TypeError("A service must be an async method(payload, ctx)")
         function.__forest_service__ = name
+        return function
+
+    return decorate
+
+
+def subscribe(subscriber_id: str, topic: str, contract: str):
+    identifier = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
+    if not identifier.fullmatch(subscriber_id) or not identifier.fullmatch(topic):
+        raise ValueError("Subscriber ID and topic must be bounded identifiers")
+    if not re.fullmatch(r"[1-9]\d*\.\d+", contract):
+        raise ValueError("Subscription contract must be an exact major.minor version")
+
+    def decorate(function):
+        if not inspect.iscoroutinefunction(function):
+            raise TypeError("An event subscriber must be an async method(event, ctx)")
+        function.__forest_subscription__ = {
+            "subscriber_id": subscriber_id,
+            "topic": topic,
+            "contract": contract,
+        }
         return function
 
     return decorate
@@ -55,6 +76,32 @@ def declared_services(plugin: Plugin) -> dict[str, Callable[..., Awaitable[Any]]
                 422,
             )
         result[name] = method
+    return result
+
+
+def declared_subscriptions(plugin: Plugin) -> dict[str, tuple[dict, Callable[..., Awaitable[Any]]]]:
+    result = {}
+    for _, method in inspect.getmembers(plugin, predicate=inspect.ismethod):
+        declaration = getattr(method, "__forest_subscription__", None)
+        if declaration is None:
+            continue
+        parameters = list(inspect.signature(method).parameters.values())
+        subscriber_id = declaration["subscriber_id"]
+        if (
+            not inspect.iscoroutinefunction(method)
+            or [parameter.name for parameter in parameters] != ["event", "ctx"]
+            or any(
+                parameter.kind not in {parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}
+                for parameter in parameters
+            )
+            or subscriber_id in result
+        ):
+            raise ForestError(
+                "SUBSCRIPTION_DECLARATION_INVALID",
+                "Subscriptions must be unique async methods(event, ctx)",
+                422,
+            )
+        result[subscriber_id] = (dict(declaration), method)
     return result
 
 
@@ -431,6 +478,43 @@ class ServicesHandle:
         )
 
 
+class EventsHandle:
+    def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
+        self._rpc = rpc
+        self._scope = scope
+
+    async def publish(
+        self,
+        topic: str,
+        payload: Any,
+        *,
+        contract: str,
+        operation_id: str,
+    ) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No component event gateway is available", 403)
+        if not isinstance(topic, str) or not 1 <= len(topic) <= 128:
+            raise ForestError("INVALID_EVENT_REQUEST", "A bounded event topic is required", 422)
+        if not isinstance(contract, str) or not re.fullmatch(r"[1-9]\d*\.\d+", contract):
+            raise ForestError(
+                "INVALID_EVENT_REQUEST", "Event contract must be an exact major.minor version", 422
+            )
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ForestError(
+                "INVALID_EVENT_REQUEST", "A stable event operation ID is required", 422
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "topic": topic,
+                "payload": payload,
+                "contract": contract,
+                "operation_id": operation_id,
+            },
+        )
+
+
 class PluginContext:
     def __init__(
         self,
@@ -443,11 +527,13 @@ class PluginContext:
         task_owner: OwnedTasks | None = None,
         resource_owner: OwnedResources | None = None,
         service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
         self._scope = scope
         self._rpc = rpc
         self._service_rpc = service_rpc
+        self._event_rpc = event_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
         self._resource_owner = (
             resource_owner if resource_owner is not None else OwnedResources(resource_limit)
@@ -457,6 +543,7 @@ class PluginContext:
         self.resources = ResourcesHandle(self._resource_owner, scope)
         self.operations = OperationsHandle(scope)
         self.services = ServicesHandle(service_rpc, scope)
+        self.events = EventsHandle(event_rpc, scope)
 
     def _for_call(self, scope: CallScope) -> PluginContext:
         return PluginContext(
@@ -466,6 +553,7 @@ class PluginContext:
             task_owner=self._task_owner,
             resource_owner=self._resource_owner,
             service_rpc=self._service_rpc,
+            event_rpc=self._event_rpc,
         )
 
     @property

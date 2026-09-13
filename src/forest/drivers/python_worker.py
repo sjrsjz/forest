@@ -94,6 +94,7 @@ class WorkerLimits:
 
 StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
 ServiceHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+EventHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 
 
 class PythonWorker:
@@ -106,17 +107,20 @@ class PythonWorker:
         limits: WorkerLimits | None = None,
         python_executable: str = sys.executable,
         service_handler: ServiceHandler | None = None,
+        event_handler: EventHandler | None = None,
     ):
         self.package = snapshot
         self.identity = identity
         self.state_handler = state_handler
         self.service_handler = service_handler
+        self.event_handler = event_handler
         self.limits = limits or WorkerLimits()
         self.python_executable = python_executable
         self.environment = None
         self._environment_task: asyncio.Task | None = None
         self.state = "NEW"
         self.services: list[str] = []
+        self.subscriptions: list[str] = []
         self.process: subprocess.Popen | None = None
         self._temporary: tempfile.TemporaryDirectory | None = None
         self._writer: FrameWriter | None = None
@@ -157,6 +161,27 @@ class PythonWorker:
                 "SERVICE_DECLARATION_INVALID", "Manifest contains duplicate services", 422
             )
         return sorted(names)
+
+    def _expected_subscriptions(self) -> list[dict]:
+        subscriptions = self.package.manifest["components"][0].get("subscribes", [])
+        identities = [item["subscriber_id"] for item in subscriptions]
+        if len(identities) != len(set(identities)):
+            raise ForestError(
+                "SUBSCRIPTION_DECLARATION_INVALID",
+                "Manifest contains duplicate subscriber identities",
+                422,
+            )
+        return sorted(
+            (
+                {
+                    "subscriber_id": item["subscriber_id"],
+                    "topic": item["topic"],
+                    "contract": item["contract"],
+                }
+                for item in subscriptions
+            ),
+            key=lambda item: item["subscriber_id"],
+        )
 
     async def launch(self, timeout: float = 10) -> None:
         if self.state != "NEW":
@@ -273,6 +298,7 @@ class PythonWorker:
                 "module_root": str(self.package.module_root),
                 "package_digest": self.package.digest,
                 "services": expected_services,
+                "subscriptions": self._expected_subscriptions(),
                 "limits": asdict(self.limits),
             }
             encoded = json.dumps(bootstrap, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -338,7 +364,7 @@ class PythonWorker:
                                 details=_error_details(error),
                             )
                         )
-                elif message.get("kind") in {"state", "service"}:
+                elif message.get("kind") in {"state", "service", "event"}:
                     request_id = message.get("id")
                     if (
                         not isinstance(request_id, str)
@@ -426,6 +452,17 @@ class PythonWorker:
                 if self.service_handler is None:
                     raise ForestError("CAPABILITY_DENIED", "No service gateway is available", 403)
                 value = await self.service_handler(self.identity, call_id, payload)
+            elif kind == "event":
+                expected = {"topic", "payload", "contract", "operation_id"}
+                if not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "EVENT_REQUEST_INVALID",
+                        "Event request contains unsupported fields",
+                        422,
+                    )
+                if self.event_handler is None:
+                    raise ForestError("CAPABILITY_DENIED", "No event gateway is available", 403)
+                value = await self.event_handler(self.identity, call_id, payload)
             else:
                 expected = (
                     {"key"}
@@ -470,7 +507,9 @@ class PythonWorker:
                     "error": {
                         "code": "STATE_RESULT_INVALID"
                         if kind == "state"
-                        else "SERVICE_RESULT_INVALID",
+                        else "SERVICE_RESULT_INVALID"
+                        if kind == "service"
+                        else "EVENT_RESULT_INVALID",
                         "message": "Host RPC result exceeds JSON protocol limits",
                         "status": 413,
                     },
@@ -533,6 +572,7 @@ class PythonWorker:
                 "prepare", {"config": config, "restored_state": restored_state}, timeout=timeout
             )
             self.services = result["services"]
+            self.subscriptions = result["subscriptions"]
             self.state = "PREPARED"
             return result
         except BaseException:
@@ -561,14 +601,53 @@ class PythonWorker:
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
+        return await self._invoke(
+            "invoke", "service", service, payload,
+            call_id=call_id, operation_id=operation_id, timeout=timeout,
+            before_send=before_send,
+        )
+
+    async def deliver_event(
+        self,
+        subscriber_id: str,
+        event: dict,
+        *,
+        call_id: str,
+        operation_id: str,
+        timeout: float = 30,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> Any:
+        return await self._invoke(
+            "invoke_event", "subscriber_id", subscriber_id, event,
+            call_id=call_id, operation_id=operation_id, timeout=timeout,
+            before_send=before_send,
+        )
+
+    async def _invoke(
+        self,
+        command: str,
+        target_key: str,
+        target: str,
+        payload: Any,
+        *,
+        call_id: str | None,
+        operation_id: str | None,
+        timeout: float,
+        before_send: Callable[[], Awaitable[None]] | None,
+    ) -> Any:
         if self.state != "ACTIVE":
             raise ForestError(
                 "WORKER_NOT_ACTIVE", "Candidate or quiescing worker has no business admission", 409
             )
         if self._admitted >= self.limits.max_inflight + self.limits.max_queue_items:
             raise ForestError("OVERLOADED", "Worker bounded invocation queue is full", 429)
-        if service not in self.services:
-            raise ForestError("SERVICE_NOT_FOUND", "Service is not registered by this worker", 404)
+        available = self.services if command == "invoke" else self.subscriptions
+        if target not in available:
+            raise ForestError(
+                "SERVICE_NOT_FOUND" if command == "invoke" else "SUBSCRIPTION_NOT_FOUND",
+                "Invocation target is not registered by this worker",
+                404,
+            )
         call_id = call_id or str(uuid4())
         operation_id = operation_id or call_id
         if (
@@ -615,9 +694,9 @@ class PythonWorker:
                     self._calls[call_id] = request_id
                     sent = True
                     return await self._request(
-                        "invoke",
+                        command,
                         {
-                            "service": service,
+                            target_key: target,
                             "payload": payload,
                             "call_id": call_id,
                             "operation_id": operation_id,

@@ -1,6 +1,6 @@
 # 原生 Python 插件与开发体验详细设计
 
-> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@service`、state/tasks/operations SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check` 和单次 `forest dev`。本文的 `@plugin/@command`、声明自动生成、记忆/回复/通用服务代理、完整资源 SDK 与自动 watch 仍是目标接口；真实示例见 [counter](../examples/counter/python/counter.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
+> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@service`、`@subscribe`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check` 和单次 `forest dev`。本文的 `@plugin/@command`、声明自动生成、记忆/回复/通用服务代理与自动 watch 仍是目标接口；真实示例见 [counter](../examples/counter/python/counter.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
 
 ## 1. 插件作者看到的接口
 
@@ -62,7 +62,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 | `@command(name, permission)` | 命令匹配、输入 schema、终结处理器、用户动作权限 |
 | handler 的 DTO 类型 | 契约 major/minor、输入输出 schema 与摘要 |
 | `requests=[...]` | 组件申请的能力；不自动授予 |
-| `@subscribe(contract, durable=True)` | 稳定 subscriber ID、事件 schema、消费与重试配置 |
+| `@subscribe(subscriber_id, topic, contract)` | 与显式 manifest 对照的稳定 subscriber ID 与精确事件契约；schema、次数仍由 manifest 声明 |
 | SDK/项目配置默认值 | API 兼容范围、资源配额、生命周期超时与 `reload_mode=drain` |
 
 动态拼接的装饰器参数无法静态求值时，构建失败并指出位置；作者可改用显式 manifest。正式产物必须包含 02 中要求的完整声明，便利接口不能省略状态 schema、必需依赖或权限边界。
@@ -90,7 +90,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 | `event.parts`、`ctx.media` | 按来源顺序访问ContentPart，申请获权媒体状态/读取或物化；SDK不把临时URL当长期图片身份 |
 | `ctx.memory.append(...)` | 提交显式断言/关系操作，幂等接纳并返回持久回执 |
 | `ctx.turn.commit(...)` | 提交 Context、最终回复与可选记忆操作的同 Bot 原子事务 |
-| `ctx.events.publish(...)` | 持久领域事件与 outbox；临时进度使用另行声明的通道 |
+| `ctx.events.publish(topic, payload, contract=..., operation_id=...)` | 当前调用内持久发布领域事实与逐订阅 delivery；临时进度使用另行声明的通道 |
 | `ctx.tasks.spawn_owned(...)` | 登记受监督任务，继承取消、deadline 和资源额度 |
 | `ctx.jobs.schedule(...)` | 持久长任务/定时任务，具有固定主体、预算和目标范围 |
 | `ctx.resources`、`ctx.state` | 登记调用/代际临时资源并按 LIFO 关闭；受版本与 scope 约束的小型状态接口 |
@@ -99,6 +99,8 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 这些接口是宿主服务的类型化代理，`ctx.memory` 不是共享 dict。作者不能从代理取得原始 WebSocket、数据库连接、凭据或另一个 Bot 的 Context。消息与媒体通过 DTO/MediaRef 编码，禁止 pickle 或传入可执行 Python 对象。
 
 Context 只在当前调用及其受监督子调用中有效，不能存入 `self` 后交给下一条消息使用。跨服务只声明契约，不 `import other_plugin`；同包 `helpers.py` 可正常相对 import，因为它随整个包一起形成同一不可变版本。
+
+持久事件的 payload 正文进入受来源与删除 epoch 约束的内容存储。消费 envelope 明确携带发布组件、原契约与 event ID；同一订阅串行、不同订阅可并行。发布幂等、ACK 丢失恢复、热重载接续和死信边界见 [P0 持久组件事件](p0-component-events.md)。
 
 Agent 的工具提议必须引用其服务的 trigger/request ID，宿主分别检查对应主体；同批多个用户的权限不能取并集。`event.sender` 来自平台认证后规范化的作者快照，回复引用、转发作者、正文中的名字与管理员称谓都不能替换它。业务插件返回回复只生成 CHAT 意图，最终外发按该群 response_seq 排序。管理扩展通过绑定 command_id 的控制回执接口产生 CONTROL 意图，宿主验证命令授权；普通 `Reply` 不能自行选择控制通道来跳过聊天顺序或配额。
 

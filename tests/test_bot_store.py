@@ -180,6 +180,27 @@ async def test_ready_has_no_production_authority_and_generation_identity_is_immu
             "worker-gen-1",
         ),
     )
+    await fails(
+        "GENERATION_CONFLICT",
+        store.register_generation(
+            lease,
+            "counter",
+            "gen-1",
+            "package-v1",
+            "config-v1",
+            "worker-gen-1",
+            config={"initial": 0},
+            instance_id="instance-gen-1",
+            event_definitions=[{
+                "direction": "PUBLISH",
+                "definition_id": "counter.changed",
+                "topic": "counter.changed",
+                "contract_major": 1,
+                "contract_minor": 0,
+                "schema_digest": "event-schema",
+            }],
+        ),
+    )
     op = await operation(store, lease)
     await fails("INVALID_OPERATION_PHASE", store.publish(lease, op["operation_id"], op["op_epoch"]))
     async with store.pool.connection() as conn:
