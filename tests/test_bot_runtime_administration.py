@@ -195,11 +195,12 @@ async def test_053_upgrade_adds_only_implied_runtime_rights_and_keeps_disabled_i
                 )
             ).fetchall()
         upgraded = {item["issuer_id"]: set(item["actions"]) for item in rows}
-        assert upgraded["reader"] == {"message.read", "bot.runtime.read"}
+        assert upgraded["reader"] == {"message.read", "bot.runtime.read", "event.read"}
         assert upgraded["cancel-only"] == {"message.cancel"}
         assert upgraded["apply-only"] == {"config.apply"}
         assert upgraded["operator"] == {
             "message.read", "message.cancel", "config.apply", "bot.runtime.read", "bot.maintenance",
+            "event.read", "event.retire.apply",
         }
         assert upgraded["disabled"] == upgraded["operator"]
         assert not next(item for item in rows if item["issuer_id"] == "disabled")["enabled"]

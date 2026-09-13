@@ -244,7 +244,10 @@ async def test_upgrade_keeps_preexisting_web_issuer_usable_for_agent_configurati
         assert issuer["public_key"] == public and issuer["key_revision"] == 1
         assert issuer["enabled"] is (scope != "disabled")
         if scope == "readonly":
-            assert set(issuer["actions"]) == {"config.read", "config.history", "agent.config.read", "memory.config.read"}
+            assert set(issuer["actions"]) == {
+                "config.read", "config.history", "agent.config.read", "memory.config.read",
+                "event.read",
+            }
         elif scope == "empty":
             assert issuer["actions"] == []
         else:

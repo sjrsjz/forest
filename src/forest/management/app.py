@@ -30,6 +30,7 @@ from forest.management.authority import WebAuthority
 from forest.management.bindings_api import install_binding_routes
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
+from forest.management.events_api import install_event_routes
 from forest.management.fleet import BotFleet
 from forest.management.jobs_api import install_job_routes
 from forest.management.memory_api import install_memory_routes
@@ -590,6 +591,7 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_agent_routes(app, runtime)
     install_memory_routes(app, runtime)
     install_job_routes(app, runtime)
+    install_event_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")
 

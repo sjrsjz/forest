@@ -82,6 +82,15 @@
             <h3>执行与回复记录</h3><button id="job-runs-refresh" type="button" class="subtle">刷新执行记录</button><div id="job-runs" aria-live="polite"></div>
           </div>
         </section>
+        <section id="bot-events" class="card hidden" aria-labelledby="events-title">
+          <h2 id="events-title">组件事件</h2>
+          <p class="hint">这里显示组件间持久事件的订阅与投递元数据，不读取事件正文。死信回放保留原事件身份并建立新的回放轮次；订阅退役需要先预览，且不会抢断正在执行的处理器。</p>
+          <div class="actions"><label>投递状态<select id="event-status-filter"><option value="">全部</option><option value="PENDING">排队中</option><option value="INFLIGHT">处理中</option><option value="RETRY_WAIT">等待重试</option><option value="ACKED">已确认</option><option value="DEAD">死信</option><option value="RETIRED">已退役</option></select></label><button id="event-refresh" type="button" class="subtle">刷新事件状态</button></div>
+          <p id="event-status" role="status"></p>
+          <h3>持久订阅</h3><div id="event-subscriptions" aria-live="polite"></div>
+          <div id="event-retirement-preview" class="hidden"><h3>确认订阅退役</h3><pre id="event-retirement-diff"></pre><p class="hint">若预览后出现新投递或处理状态变化，提交会要求重新预览。正在执行的处理器必须先结束。</p><button id="event-retirement-apply" type="button">提交订阅退役</button></div>
+          <h3>最近投递</h3><div id="event-deliveries" aria-live="polite"></div>
+        </section>
         <section id="bot-memory" class="card hidden">
           <h2>图文记忆</h2><p id="memory-config-status" role="status"></p>
           <p class="hint">各群保留独立来源与时间主干，共享当前 Bot 的记忆。文本与图片片段分别嵌入；文本模型也能使用图片召回的来源信息。裁剪不调用摘要模型。模型版本由管理员声明，保存配置不代表已验证远端语义质量。</p>
