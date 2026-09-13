@@ -1533,6 +1533,10 @@ class Kernel:
         self._call_count -= 1
         self._event_wake.set()
 
+    def notify_events(self) -> None:
+        """Wake the durable event dispatcher after an out-of-band control change."""
+        self._event_wake.set()
+
     async def _supervise_events(self) -> None:
         events = EventStore(self.store)
         try:

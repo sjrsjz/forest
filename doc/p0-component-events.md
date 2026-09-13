@@ -17,7 +17,7 @@ await ctx.events.publish(
 
 订阅方通过 manifest `components.subscribes` 声明稳定 `subscriber_id`、topic、精确契约、输入 schema 和最大尝试次数，并在代码上使用 `@subscribe(subscriber_id, topic, contract)`。代码声明与不可变 manifest 必须完全一致。`subscriber_id + contract_major` 是 Bot 数据库内的消费身份；Generation、进程 PID 和 Worker incarnation 都不能进入这个身份。
 
-同一稳定订阅在热重载时可以升级实现，但不能换组件、topic、精确契约或 schema。首版尚未提供可声明的 minor 兼容范围，因此也拒绝暗中改变 minor。首版同样拒绝从新版本中移除已有 durable subscriber；下线、换 schema、重建历史需要后续显式 retirement/replay 管理操作，不能借一次普通热重载丢掉积压。
+同一稳定订阅在热重载时可以升级实现，但不能换组件、topic、精确契约或 schema。首版尚未提供可声明的 minor 兼容范围，因此也拒绝暗中改变 minor。移除已有 durable subscriber 必须经过[显式退役](p0-component-event-management.md)，不能借一次普通热重载丢掉积压；退役身份也不能由部署隐式复活。
 
 ## 2. 发布事务与内容
 
@@ -51,7 +51,7 @@ PENDING / RETRY_WAIT -> INFLIGHT -> ACKED
                               `-> RETRY_WAIT -> ... -> DEAD
 ```
 
-claim 租约过期的 INFLIGHT 会回到可领取集合。失败记录只保存稳定错误码和 attempt 计数，不保存任意异常正文。达到 manifest `max_attempts` 后进入 DEAD，保留事件、payload 身份和最后错误码。首版提供数据库可审计死信事实；显式 replay 管理操作与 WebUI 入口属于下一片，不能通过重启或重装暗中清零 attempt。
+claim 租约过期的 INFLIGHT 会回到可领取集合。失败记录只保存稳定错误码和 attempt 计数，不保存任意异常正文。达到 manifest `max_attempts` 后进入 DEAD，保留事件、payload 身份和最后错误码。[显式 replay 管理操作与 WebUI](p0-component-event-management.md)为新一轮尝试分配 replay epoch；重启或重装仍不能暗中清零 attempt。
 
 payload 已按来源遗忘、Bot 暂停、订阅组件无当前可用路由或 Kernel 没有 Host 权威时都不会把正文交给 Worker。内容撤销属于不可自动重试的 DEAD；暂停和换代属于可恢复等待。
 

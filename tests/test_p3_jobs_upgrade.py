@@ -204,6 +204,14 @@ async def test_upgrade_job_grants_preserve_existing_issuer_restrictions(upgrade_
             expected.update({"memory.forget.plan", "memory.association.plan"})
         if {"memory.read", "memory.config.apply"} <= expected:
             expected.update({"memory.forget.apply", "memory.association.apply"})
+        if {"config.read", "message.read"}.intersection(actions):
+            expected.add("event.read")
+            if "service.invoke" in actions:
+                expected.add("event.replay")
+            if "config.plan" in actions:
+                expected.add("event.retire.plan")
+            if {"config.apply", "message.cancel"} <= set(actions):
+                expected.add("event.retire.apply")
         assert set(after["actions"]) == expected
         if scope in {"readonly", "config_readonly", "empty", "invoke_only"}:
             assert not {"memory.config.plan", "memory.config.apply"}.intersection(after["actions"])

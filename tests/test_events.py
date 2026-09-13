@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from importlib.resources import files
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -11,6 +12,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.kernel import Kernel
@@ -387,16 +389,18 @@ async def test_expired_claim_keeps_attempt_operation_for_completion_reconciliati
         events = EventStore(event_store)
         first = await events.claim(kernel.lease, lease_seconds=3)
         assert first is not None and first["attempt_count"] == 1
+        legacy_operation = "event:legacy-pre-replay-epoch-operation"
         async with event_store.pool.connection() as conn:
             await conn.execute(
-                "UPDATE bot_event_deliveries SET claim_until=clock_timestamp()-interval '1 second' "
+                "UPDATE bot_event_deliveries SET claim_until=clock_timestamp()-interval '1 second',"
+                "call_operation_id=%s "
                 "WHERE delivery_id=%s",
-                (first["delivery_id"],),
+                (legacy_operation, first["delivery_id"]),
             )
         recovered = await events.claim(kernel.lease, lease_seconds=3)
         assert recovered is not None
         assert recovered["attempt_count"] == 1
-        assert recovered["call_operation_id"] == first["call_operation_id"]
+        assert recovered["call_operation_id"] == legacy_operation
         assert recovered["claim_token"] != first["claim_token"]
     finally:
         await kernel.close()
@@ -533,5 +537,62 @@ async def test_subscription_code_mismatch_and_implicit_removal_are_rejected(tmp_
                 incompatible, grants=frozenset({"event.publish:profile.changed"})
             )
         assert schema.value.code == "EVENT_CONTRACT_SCHEMA_CONFLICT"
+    finally:
+        await kernel.close()
+
+
+async def test_event_management_permission_upgrade_preserves_least_privilege(event_store):
+    kernel = Kernel(event_store)
+    await kernel.start()
+    try:
+        scopes = {
+            "readonly": ["message.read"],
+            "config-reader": ["config.read"],
+            "replay": ["message.read", "service.invoke"],
+            "planner": ["config.read", "config.plan"],
+            "apply-without-cancel": ["message.read", "config.apply"],
+            "full": [
+                "message.read", "service.invoke", "config.plan", "config.apply",
+                "message.cancel",
+            ],
+            "empty": [],
+        }
+        async with event_store.pool.connection() as conn, conn.transaction():
+            for issuer, actions in scopes.items():
+                await conn.execute(
+                    "INSERT INTO public.bot_web_issuers("
+                    "bot_id,issuer_id,key_revision,public_key,actions) VALUES (%s,%s,1,%s,%s)",
+                    (event_store.bot_id, issuer, "permission-upgrade-test-key", Jsonb(actions)),
+                )
+            source = files("forest.storage").joinpath(
+                "bot_migrations", "055_component_event_management.sql"
+            ).read_text(encoding="utf-8")
+            permission_upgrade = "UPDATE public.bot_web_issuers" + source.split(
+                "UPDATE public.bot_web_issuers", 1
+            )[1]
+            await conn.execute(permission_upgrade)
+            rows = await (
+                await conn.execute(
+                    "SELECT issuer_id,actions FROM public.bot_web_issuers "
+                    "WHERE issuer_id=ANY(%s)",
+                    (list(scopes),),
+                )
+            ).fetchall()
+        actual = {row["issuer_id"]: set(row["actions"]) for row in rows}
+        assert actual["readonly"] == {"message.read", "event.read"}
+        assert actual["config-reader"] == {"config.read", "event.read"}
+        assert actual["replay"] == {
+            "message.read", "service.invoke", "event.read", "event.replay",
+        }
+        assert actual["planner"] == {
+            "config.read", "config.plan", "event.read", "event.retire.plan",
+        }
+        assert actual["apply-without-cancel"] == {
+            "message.read", "config.apply", "event.read",
+        }
+        assert actual["full"] == set(scopes["full"]) | {
+            "event.read", "event.replay", "event.retire.plan", "event.retire.apply",
+        }
+        assert actual["empty"] == set()
     finally:
         await kernel.close()

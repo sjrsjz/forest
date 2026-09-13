@@ -116,6 +116,14 @@ def expected_after_memory_permissions(before):
             actions.add("bot.runtime.read")
         if {"config.apply", "message.cancel"} <= actions:
             actions.add("bot.maintenance")
+        if {"config.read", "message.read"}.intersection(actions):
+            actions.add("event.read")
+            if "service.invoke" in actions:
+                actions.add("event.replay")
+            if "config.plan" in actions:
+                actions.add("event.retire.plan")
+            if {"config.apply", "message.cancel"} <= actions:
+                actions.add("event.retire.apply")
         issuers.append({**issuer, "actions": sorted(actions)})
     return {**before, "bot_web_issuers": issuers}
 
