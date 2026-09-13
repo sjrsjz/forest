@@ -33,6 +33,7 @@ SERVICES = [
         "latecommit",
         "config",
         "cache",
+        "resources",
     ]
 ]
 
@@ -521,6 +522,68 @@ async def test_owned_task_limit_rejects_without_leaking_coroutines():
     assert inspect.getcoroutinestate(extra) == inspect.CORO_CLOSED
     await tasks.close()
     assert not tasks.tasks
+
+
+async def test_real_worker_closes_call_and_generation_resources_in_lifecycle_order(tmp_path):
+    marker = tmp_path / "resource-order.txt"
+    worker = await active_worker(tmp_path, config={"resource_marker": str(marker)})
+    try:
+        assert await worker.invoke(
+            "probe.resources", {"marker": str(marker)},
+            call_id="resource-call", operation_id="resource-operation",
+        ) == {"registered": True}
+        assert marker.read_text(encoding="utf-8").splitlines() == [
+            "handler", "call-second", "call-first",
+        ]
+        health = await worker.health()
+        assert health["owned_resources"] == 2
+        assert health["resource_failures"] == []
+    finally:
+        await worker.stop()
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        "handler", "call-second", "call-first", "stop", "root-second", "root-first",
+    ]
+
+
+async def test_real_worker_cleans_generation_resources_when_stop_hook_fails(tmp_path):
+    marker = tmp_path / "failed-stop-resources.txt"
+    worker = await active_worker(
+        tmp_path, class_name="FailStop", config={"resource_marker": str(marker)}
+    )
+    await worker.stop()
+    assert not worker.alive
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        "stop-failed", "root-second", "root-first",
+    ]
+
+
+async def test_real_worker_closes_call_resources_on_error_and_cancellation(tmp_path):
+    marker = tmp_path / "resource-failures.txt"
+    worker = await active_worker(tmp_path)
+    try:
+        with pytest.raises(ForestError) as error:
+            await worker.invoke(
+                "probe.resources", {"marker": str(marker), "fail": True, "owned_task": True},
+                call_id="resource-error", operation_id="resource-error-operation",
+            )
+        assert error.value.code == "PLUGIN_FAILED"
+        waiting = asyncio.create_task(worker.invoke(
+            "probe.resources", {"marker": str(marker), "wait": True, "owned_task": True},
+            call_id="resource-cancel", operation_id="resource-cancel-operation",
+        ))
+        for _ in range(100):
+            if marker.exists() and marker.read_text(encoding="utf-8").splitlines().count("handler") == 2:
+                break
+            await asyncio.sleep(0.01)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert marker.read_text(encoding="utf-8").splitlines() == [
+            "handler", "task-finally", "call-second", "call-first",
+            "handler", "task-finally", "call-second", "call-first",
+        ]
+    finally:
+        await worker.stop()
 
 
 @pytest.mark.parametrize(

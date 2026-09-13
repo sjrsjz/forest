@@ -104,6 +104,7 @@ def test_invalid_schema_errors_are_normalized_without_resolving_references(tmp_p
     ("resources", "max_inflight = 0"),
     ("resources", "max_state_inflight = 257"),
     ("resources", "max_owned_tasks = 1.5"),
+    ("resources", "max_owned_resources = 0"),
     ("resources", "max_queue_items = -1"),
     ("resources", "max_queue_bytes = 4096"),
     ("resources", "memory_mb = 128"),
@@ -130,10 +131,12 @@ def test_supported_resource_and_lifecycle_limits_survive_snapshot(tmp_path):
     with manifest.open("a", encoding="utf-8") as stream:
         stream.write("\n[components.resources]\nmax_frame_bytes = 1024\nmax_queue_items = 0\n"
                      "max_inflight = 2\nmax_state_inflight = 3\nmax_owned_tasks = 4\n"
+                     "max_owned_resources = 5\n"
                      "[components.lifecycle]\nprepare_timeout_s = 0.5\nstart_timeout_s = 120\n"
                      "drain_timeout_s = 10\nstop_timeout_s = 1\n")
     snapshot = PackageCatalog(tmp_path / "catalog").build(root)
     assert snapshot.component["resources"]["max_queue_items"] == 0
+    assert snapshot.component["resources"]["max_owned_resources"] == 5
     assert snapshot.component["lifecycle"]["prepare_timeout_s"] == 0.5
 
 

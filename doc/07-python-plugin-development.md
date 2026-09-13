@@ -93,7 +93,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 | `ctx.events.publish(...)` | 持久领域事件与 outbox；临时进度使用另行声明的通道 |
 | `ctx.tasks.spawn_owned(...)` | 登记受监督任务，继承取消、deadline 和资源额度 |
 | `ctx.jobs.schedule(...)` | 持久长任务/定时任务，具有固定主体、预算和目标范围 |
-| `ctx.resources`、`ctx.state` | 登记临时资源；受版本与 scope 约束的小型状态接口 |
+| `ctx.resources`、`ctx.state` | 登记调用/代际临时资源并按 LIFO 关闭；受版本与 scope 约束的小型状态接口 |
 | `ctx.operations.stable(step)` | 从持久逻辑执行身份派生幂等操作 ID，重试不改变 |
 
 这些接口是宿主服务的类型化代理，`ctx.memory` 不是共享 dict。作者不能从代理取得原始 WebSocket、数据库连接、凭据或另一个 Bot 的 Context。消息与媒体通过 DTO/MediaRef 编码，禁止 pickle 或传入可执行 Python 对象。

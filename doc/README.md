@@ -9,6 +9,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 文档 | 解决的问题 |
 |---|---|
 | [实现状态与验证记录](implementation-status.md) | 当前可运行切片、尚未完成的阶段、启动入口及真实验证边界 |
+| [P0 Worker 资源监督 SDK](p0-resource-sdk.md) | 调用/代际资源所有权、额度、LIFO 清理及取消/停止边界 |
 | [P2 插件包与依赖环境](p2-plugin-packages.md) | 完整 ZIP、开发版本、离线锁、平台与 SDK 隔离 |
 | [P2 持久状态迁移](p2-state-migration.md) | 纯迁移接口、双次验证、状态/路由原子发布与故障恢复 |
 | [P2 Web 插件管理](p2-web-plugin-management.md) | 导入与启用、通用表单、版本切换、历史配置与重启恢复 |
