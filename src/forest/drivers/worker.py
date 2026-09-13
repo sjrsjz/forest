@@ -82,11 +82,19 @@ class WorkerRuntime:
             try:
                 result = await self.services[name](payload.get("payload"), context)
                 await self.ctx._task_owner.finish_call(scope)
+                await self.ctx._resource_owner.finish_call(scope)
                 return result
             finally:
-                await self.ctx._task_owner.close_call(scope)
-                self.calls.pop(call_id, None)
-                _current_call.reset(token)
+                try:
+                    # Tasks may still be using call-owned resources. Cancel and
+                    # join them before closing those resources on every exit.
+                    await self.ctx._task_owner.close_call(scope)
+                finally:
+                    try:
+                        await self.ctx._resource_owner.close_call(scope)
+                    finally:
+                        self.calls.pop(call_id, None)
+                        _current_call.reset(token)
 
         if command == "cancel":
             task = self.calls.get(payload.get("call_id"))
@@ -102,10 +110,25 @@ class WorkerRuntime:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            failure = None
+            try:
+                if self.plugin:
+                    await self.plugin.stop(str(payload.get("reason", "shutdown")))
+            except BaseException as error:
+                failure = error
             if self.ctx:
-                await self.ctx._task_owner.close()
-            if self.plugin:
-                await self.plugin.stop(str(payload.get("reason", "shutdown")))
+                try:
+                    await self.ctx._task_owner.close()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+                try:
+                    await self.ctx._resource_owner.close()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+            if failure is not None:
+                raise failure
             self.state = "STOPPED"
             self.stopping = True
             return {"state": self.state}
@@ -138,6 +161,7 @@ class WorkerRuntime:
                     config,
                     self.state_rpc,
                     task_limit=self.limits.max_owned_tasks,
+                    resource_limit=self.limits.max_owned_resources,
                     service_rpc=self.service_rpc,
                 )
                 await self.plugin.prepare(self.ctx, self.ctx.config, payload.get("restored_state"))
@@ -161,6 +185,8 @@ class WorkerRuntime:
                     "services": sorted(self.services),
                     "owned_tasks": len(self.ctx._task_owner.tasks),
                     "task_failures": list(self.ctx._task_owner.background_failures),
+                    "owned_resources": len(self.ctx._resource_owner.entries),
+                    "resource_failures": list(self.ctx._resource_owner.failures),
                 }
             if command == "activate":
                 self.require("READY")

@@ -120,7 +120,12 @@ MANIFEST_SCHEMA = {
                             "max_queue_items": {"type": "integer", "minimum": 0, "maximum": 256},
                             **{
                                 key: {"type": "integer", "minimum": 1, "maximum": 256}
-                                for key in ("max_inflight", "max_state_inflight", "max_owned_tasks")
+                                for key in (
+                                    "max_inflight",
+                                    "max_state_inflight",
+                                    "max_owned_tasks",
+                                    "max_owned_resources",
+                                )
                             },
                         },
                     },

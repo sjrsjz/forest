@@ -148,6 +148,164 @@ class OwnedTasks:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
+@dataclass
+class _OwnedResource:
+    value: Any
+    closer: Callable[[], Any]
+    scope: CallScope | None
+    name: str
+
+
+class OwnedResources:
+    """Bounded LIFO ownership for call-scoped and generation-scoped resources."""
+
+    def __init__(self, limit: int = 64):
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("Resource limit must be 1 to 256")
+        self.limit = limit
+        self.entries: list[_OwnedResource] = []
+        self.failures: deque[str] = deque(maxlen=8)
+        self._closing_scopes: set[int] = set()
+        self.closed = False
+
+    @staticmethod
+    def _scope_key(scope: CallScope | None) -> int:
+        return 0 if scope is None else id(scope)
+
+    @staticmethod
+    def _closer(resource: Any, closer: Callable[[], Any] | None) -> Callable[[], Any]:
+        if closer is None:
+            closer = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+        if not callable(closer):
+            raise ForestError(
+                "RESOURCE_CLOSER_REQUIRED",
+                "Owned resources require a callable close or aclose method",
+                422,
+            )
+        return closer
+
+    def register(
+        self,
+        resource: Any,
+        *,
+        scope: CallScope | None,
+        closer: Callable[[], Any] | None = None,
+        name: str | None = None,
+    ) -> Any:
+        if self.closed:
+            raise ForestError("RESOURCE_OWNER_CLOSED", "Resource owner is closed", 409)
+        if self._scope_key(scope) in self._closing_scopes:
+            raise ForestError("RESOURCE_SCOPE_CLOSING", "Resource scope is closing", 409)
+        if any(entry.value is resource for entry in self.entries):
+            raise ForestError("RESOURCE_ALREADY_OWNED", "Resource is already registered", 409)
+        if len(self.entries) >= self.limit:
+            raise ForestError("OWNED_RESOURCE_LIMIT", "Resource owner reached its limit", 429)
+        if name is not None and (
+            not isinstance(name, str)
+            or not 1 <= len(name) <= 128
+            or any(ord(character) < 32 for character in name)
+        ):
+            raise ForestError("RESOURCE_NAME_INVALID", "Resource name is invalid", 422)
+        selected = self._closer(resource, closer)
+        self.entries.append(
+            _OwnedResource(resource, selected, scope, name or type(resource).__name__[:128])
+        )
+        return resource
+
+    def _entry(self, resource: Any, scope: CallScope | None) -> _OwnedResource:
+        entry = next((item for item in self.entries if item.value is resource), None)
+        if entry is None:
+            raise ForestError("RESOURCE_NOT_OWNED", "Resource is not registered", 404)
+        if entry.scope is not scope:
+            raise ForestError(
+                "RESOURCE_SCOPE_MISMATCH", "Resource belongs to another Context scope", 403
+            )
+        return entry
+
+    async def _close_entry(self, entry: _OwnedResource) -> str | None:
+        # Remove first so cancellation, a failing closer, or explicit retry never
+        # calls a resource closer twice.
+        index = next(index for index, current in enumerate(self.entries) if current is entry)
+        self.entries.pop(index)
+        try:
+            result = entry.closer()
+            if inspect.isawaitable(result):
+                await result
+            return None
+        except Exception as error:
+            failure = type(error).__name__
+            self.failures.append(failure)
+            return failure
+
+    async def release(self, resource: Any, *, scope: CallScope | None) -> None:
+        if self.closed:
+            raise ForestError("RESOURCE_OWNER_CLOSED", "Resource owner is closed", 409)
+        if self._scope_key(scope) in self._closing_scopes:
+            raise ForestError("RESOURCE_SCOPE_CLOSING", "Resource scope is closing", 409)
+        failure = await self._close_entry(self._entry(resource, scope))
+        if failure is not None:
+            raise ForestError(
+                "OWNED_RESOURCE_FAILED", "An owned resource failed to close", 500,
+                {"failures": [failure]},
+            )
+
+    async def _close_scope(self, scope: CallScope | None) -> list[str]:
+        key, failures = self._scope_key(scope), []
+        cancellation: asyncio.CancelledError | None = None
+        self._closing_scopes.add(key)
+        try:
+            for entry in reversed(tuple(self.entries)):
+                if entry.scope is scope and any(current is entry for current in self.entries):
+                    try:
+                        failure = await self._close_entry(entry)
+                    except asyncio.CancelledError as error:
+                        # A closer may itself be cancelled, or cancellation may
+                        # arrive while it is awaited. Finish the ownership sweep
+                        # before preserving cancellation at the call boundary.
+                        failure = "CancelledError"
+                        self.failures.append(failure)
+                        cancellation = error
+                    if failure is not None and len(failures) < 8:
+                        failures.append(failure)
+            if cancellation is not None:
+                raise cancellation
+            return failures
+        finally:
+            self._closing_scopes.discard(key)
+
+    async def finish_call(self, scope: CallScope) -> None:
+        failures = await self._close_scope(scope)
+        if failures:
+            raise ForestError(
+                "OWNED_RESOURCE_FAILED", "One or more call resources failed to close", 500,
+                {"failures": failures},
+            )
+
+    async def close_call(self, scope: CallScope) -> None:
+        await self._close_scope(scope)
+
+    async def close(self) -> None:
+        self.closed = True
+        failures = []
+        cancellation: asyncio.CancelledError | None = None
+        for entry in reversed(tuple(self.entries)):
+            try:
+                failure = await self._close_entry(entry)
+            except asyncio.CancelledError as error:
+                failure = "CancelledError"
+                self.failures.append(failure)
+                cancellation = error
+            if failure is not None and len(failures) < 8:
+                failures.append(failure)
+        if cancellation is not None:
+            raise cancellation
+        if failures:
+            raise ForestError(
+                "OWNED_RESOURCE_FAILED", "One or more generation resources failed to close", 500,
+                {"failures": failures},
+            )
+
+
 class StateHandle:
     def __init__(self, rpc: Callable[[str, str, dict], Awaitable[Any]], scope: CallScope | None):
         self._rpc = rpc
@@ -193,6 +351,39 @@ class TasksHandle:
                 coroutine.close()
             raise
         return self._owner.spawn_owned(coroutine, name=name)
+
+
+class ResourcesHandle:
+    def __init__(self, owner: OwnedResources, scope: CallScope | None):
+        self._owner = owner
+        self._scope = scope
+
+    def _require_scope(self) -> None:
+        if self._scope is None:
+            if _current_call.get() is not None:
+                raise ForestError(
+                    "CALL_CONTEXT_REQUIRED",
+                    "Generation resource handles cannot be reused inside a business call",
+                    403,
+                )
+        else:
+            _require_call(self._scope)
+
+    def register(
+        self,
+        resource: Any,
+        *,
+        closer: Callable[[], Any] | None = None,
+        name: str | None = None,
+    ) -> Any:
+        self._require_scope()
+        return self._owner.register(
+            resource, scope=self._scope, closer=closer, name=name
+        )
+
+    async def release(self, resource: Any) -> None:
+        self._require_scope()
+        await self._owner.release(resource, scope=self._scope)
 
 
 class ServicesHandle:
@@ -247,8 +438,10 @@ class PluginContext:
         rpc: Callable[[str, str, dict], Awaitable[Any]],
         *,
         task_limit: int = 64,
+        resource_limit: int = 64,
         scope: CallScope | None = None,
         task_owner: OwnedTasks | None = None,
+        resource_owner: OwnedResources | None = None,
         service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
@@ -256,8 +449,12 @@ class PluginContext:
         self._rpc = rpc
         self._service_rpc = service_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
+        self._resource_owner = (
+            resource_owner if resource_owner is not None else OwnedResources(resource_limit)
+        )
         self.state = StateHandle(rpc, scope)
         self.tasks = TasksHandle(self._task_owner, scope)
+        self.resources = ResourcesHandle(self._resource_owner, scope)
         self.operations = OperationsHandle(scope)
         self.services = ServicesHandle(service_rpc, scope)
 
@@ -267,6 +464,7 @@ class PluginContext:
             self._rpc,
             scope=scope,
             task_owner=self._task_owner,
+            resource_owner=self._resource_owner,
             service_rpc=self._service_rpc,
         )
 

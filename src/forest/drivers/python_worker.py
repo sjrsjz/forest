@@ -75,14 +75,20 @@ class WorkerLimits:
     max_queue_items: int = 64
     max_state_inflight: int = 16
     max_owned_tasks: int = 64
+    max_owned_resources: int = 64
 
     def __post_init__(self):
-        if not 1024 <= self.max_frame_bytes <= MAX_FRAME_BYTES:
+        if type(self.max_frame_bytes) is not int or not 1024 <= self.max_frame_bytes <= MAX_FRAME_BYTES:
             raise ValueError("Frame limit must be 1024 to 262144 bytes")
-        for value in (self.max_inflight, self.max_state_inflight, self.max_owned_tasks):
-            if not 1 <= value <= 256:
+        for value in (
+            self.max_inflight,
+            self.max_state_inflight,
+            self.max_owned_tasks,
+            self.max_owned_resources,
+        ):
+            if type(value) is not int or not 1 <= value <= 256:
                 raise ValueError("Execution limits must be 1 to 256")
-        if not 0 <= self.max_queue_items <= 256:
+        if type(self.max_queue_items) is not int or not 0 <= self.max_queue_items <= 256:
             raise ValueError("Queue size must be 0 to 256")
 
 

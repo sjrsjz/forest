@@ -9,6 +9,25 @@ from forest.errors import ForestError
 from forest.sdk import Plugin, service
 
 
+def _mark(path, value):
+    with Path(path).open("a", encoding="utf-8") as stream:
+        stream.write(value + "\n")
+
+
+class _SyncMarker:
+    def __init__(self, path, value):
+        self.path, self.value = path, value
+
+    def close(self):
+        _mark(self.path, self.value)
+
+
+class _AsyncMarker(_SyncMarker):
+    async def aclose(self):
+        await asyncio.sleep(0)
+        self.close()
+
+
 class Probe(Plugin):
     async def prepare(self, ctx, config, restored_state):
         await super().prepare(ctx, config, restored_state)
@@ -16,6 +35,9 @@ class Probe(Plugin):
             ctx.tasks.spawn_owned(self.background(), name="probe-background")
         if config.get("candidate_write"):
             await ctx.state.commit("counter", 1, 0, "forbidden-candidate-operation")
+        if marker := config.get("resource_marker"):
+            ctx.resources.register(_SyncMarker(marker, "root-first"))
+            ctx.resources.register(_AsyncMarker(marker, "root-second"))
 
     async def background(self):
         try:
@@ -155,6 +177,31 @@ class Probe(Plugin):
         results["fresh_state"] = await ctx.state.get("counter")
         return results
 
+    @service("probe.resources")
+    async def resources(self, payload, ctx):
+        marker = payload["marker"]
+        ctx.resources.register(_SyncMarker(marker, "call-first"))
+        ctx.resources.register(_AsyncMarker(marker, "call-second"))
+        _mark(marker, "handler")
+        if payload.get("owned_task"):
+            ctx.tasks.spawn_owned(self.resource_task(marker), name="resource-task")
+            await asyncio.sleep(0)
+        if payload.get("wait"):
+            await asyncio.Event().wait()
+        if payload.get("fail"):
+            raise RuntimeError("synthetic resource handler failure")
+        return {"registered": True}
+
+    async def resource_task(self, marker):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            _mark(marker, "task-finally")
+
+    async def stop(self, reason):
+        if marker := self.ctx.config.get("resource_marker"):
+            _mark(marker, "stop")
+
 
 class FailPrepare(Probe):
     async def prepare(self, ctx, config, restored_state):
@@ -165,6 +212,13 @@ class FailPrepare(Probe):
 class FailStart(Probe):
     async def start(self):
         raise RuntimeError("synthetic start failure")
+
+
+class FailStop(Probe):
+    async def stop(self, reason):
+        if marker := self.ctx.config.get("resource_marker"):
+            _mark(marker, "stop-failed")
+        raise RuntimeError("synthetic stop failure")
 
 
 class BlockStop(Probe):

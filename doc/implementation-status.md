@@ -28,7 +28,7 @@ P1/P3 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置
 | 管理页面 | 初始化、登录、配置表单、差异预览、版本显示、应用、冲突提示和注销；草稿保留在当前页面内存中 | [页面](../src/forest/management/static/index.html)、[页面逻辑](../src/forest/management/static/app.js) |
 | 容器部署 | 专用卷初始化、随机数据库密码、非 root 应用、只读应用文件系统、loopback HTTP 端口；数据库只在 Compose 网络内访问 | [Compose](../compose.yaml)、[Dockerfile](../Dockerfile)、[卷初始化脚本](../scripts/container_init.py) |
 | 不可变 Python 包 | 静态编译与封闭 manifest/schema 校验，捕获源码、helpers、schema 和资源；内容寻址、同版本内容冲突、链接/路径逃逸、变化捕获、文件/字节/目录上限检查 | [packages.py](../src/forest/packages.py)、[包测试](../tests/test_packages.py) |
-| 当前 SDK | `Plugin`、`@service`、只读配置、受调用作用域限制的 state、受监督异步任务、稳定步骤 ID；显式 manifest，不自动生成装饰器声明 | [sdk.py](../src/forest/sdk.py)、[counter 示例](../examples/counter/python/counter.py) |
+| 当前 SDK | `Plugin`、`@service`、只读配置、受调用作用域限制的 state、受监督异步任务、调用/代际资源监督与稳定步骤 ID；显式 manifest，不自动生成装饰器声明 | [sdk.py](../src/forest/sdk.py)、[资源监督说明](p0-resource-sdk.md)、[counter 示例](../examples/counter/python/counter.py) |
 | 原生 Worker | 全新解释器、认证 loopback IPC、版本化且有界的 JSON 帧；prepare/start/health、业务 admission、调用并发/排队、取消与进程回收 | [Worker Driver](../src/forest/drivers/python_worker.py)、[Worker 运行时](../src/forest/drivers/worker.py)、[Worker 测试](../tests/test_worker.py) |
 | Bot 存储权威 | 一个数据库固定一个 Bot 身份，与部署库分离；事务迁移、宿主 lease/incarnation、组件 generation/route、调用 grant、状态 revision/步骤回执、审计/outbox | [BotStore](../src/forest/storage/bot.py)、[内核迁移](../src/forest/storage/bot_migrations/001_kernel.sql)、[BotStore 测试](../tests/test_bot_store.py) |
 | 最终提交守卫 | 在实际状态读写/调用完成事务核验当前 Bot、宿主、代际、调用、期限、取消、权限与维护修订；CAS 与幂等在同一目标事务裁决 | [BotStore](../src/forest/storage/bot.py)、[内核集成测试](../tests/test_kernel.py) |
@@ -57,7 +57,7 @@ Web 请求采用“服务器保存计划 → 页面显示差异 → 按 plan ID/
 
 包格式限定 `runtime=python-worker`、一个 `scope=bot` 组件和 `reload_mode=drain`；`state_schema` 是正整数版本，版本变更须声明并执行状态迁移。服务声明输入/输出 JSON schema 和契约 major.minor。能力包括显式 `state.read/state.write` 与 `service.call:<name>`，跨组件依赖必须同时在 manifest 声明。服务重复、缺少必需依赖、契约不兼容和依赖环在执行插件前拒绝；缺少可选依赖时固定降级状态。不支持的约束或 manifest 字段会明确拒绝，不能把未执行的 `memory_mb` 等限制显示为受保护。
 
-资源字段包含 `max_frame_bytes`、`max_inflight`、`max_queue_items`、`max_state_inflight`、`max_owned_tasks`，生命周期字段包含 prepare/start/drain/stop 的 timeout。它们约束本切片的 IPC、调用与受监督任务，不能等同操作系统沙箱、CPU/内存硬配额或完整资源 SDK。普通 Python 插件仍要求可信来源。
+资源字段包含 `max_frame_bytes`、`max_inflight`、`max_queue_items`、`max_state_inflight`、`max_owned_tasks`、`max_owned_resources`，生命周期字段包含 prepare/start/drain/stop 的 timeout。`ctx.resources` 已对正常 SDK 路径提供调用/代际归属、LIFO 关闭及失败聚合；这些约束仍不能等同操作系统沙箱或 CPU/内存硬配额。普通 Python 插件仍要求可信来源。
 
 `check/dev --config-json` 默认提供 `{}`，按包配置 schema 验证；Kernel 为一次安装固定配置，Worker 取得只读视图。管理员可在 WebUI 创建 Bot、导入第三方包、选择版本、编辑 schema 表单、查看 desired/effective 和配置历史，无需编辑服务器配置文件。开发者仍显式维护 manifest 与 schema；模型配置在 P3 接入。见 [Web 插件管理](p2-web-plugin-management.md)。
 
@@ -87,7 +87,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
-| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树及 Web/Fleet 接线；仍缺通用事件/Job、自动声明生成、完整资源 SDK 和其余消息契约 |
+| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树、调用/代际资源监督及 Web/Fleet 接线；仍缺通用事件/Job、自动声明生成、宿主级资源种类和其余消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
@@ -109,6 +109,8 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 本次跨主干联想切片在同一环境完成 `108 passed`，168.60 秒，覆盖人工关系 plan/apply/replay、同 revision 并发合流、解除/恢复、非主干离散窗口、持久待发布恢复、向量种子的一跳扩展、旧输入切口隔离、模型可见的关系路径、实际 Web/OneBot 管理流程及 001–052 非空旧库升级。最终直接影响范围另完成 `63 passed`，104.85 秒；更宽的记忆/Agent 绑定/Shell/Web 回归先通过 265 项，唯一失败是旧 051 权限测试未计入 052 派生权限，修正该精确断言后已纳入最终复验。无头 Edge 验证来源双选、联想预览/提交/解除/恢复入口以及原有配置竞态；Ruff、全部管理 JavaScript 语法和补丁空白检查通过。没有接入真实 QQ、商业嵌入/LLM 或 Linux 全量验收。
 
 本次 Bot 维护控制切片完成 `170 passed`，293.41 秒的 Windows 组合回归，覆盖 Shell v2/v3/v4、P0 保留槽、Web 与群 Shell 的共享维护事务、幂等重放、并发 maintenance epoch CAS、暂停时继续接收、恢复后的 Actor 换代、控制参数上下文脱敏、平台调度、原 BotStore 守卫，以及多条真实非空旧库升级链。另有 `9 passed` 最终增补复验最后触发输入切口和完整权限期望；真实 HTTP/Worker 的双 Bot Web 测试为 `2 passed`。无头 Edge 验证维护表单及迟到旧状态读取不能覆盖暂停结果；Ruff、管理 JavaScript 语法和补丁空白检查通过。没有接入真实 QQ、商业模型或 Linux 全量验收。
+
+本次 P0 资源监督切片完成 `146 passed, 1 skipped` 的 Windows 组合回归，覆盖 SDK、真实 Worker 子进程、manifest、Kernel、调用树与 Kernel 正文；其中唯一跳过项是既有 POSIX 权限测试。最终资源/Worker/manifest 聚焦复验为 `104 passed, 1 skipped`。正常返回、插件异常、调用取消、stop hook 失败、同步/异步关闭器、关闭期间取消、额度与跨作用域误用均有可执行证据；Ruff 与补丁空白检查通过。它不证明可信 Python 无法绕过 SDK，也不替代后续持久事件/Job 和宿主级网络/文件资源网关。
 
 039–041 接入管理输入、结果和确切关联的审计/outbox 载荷。原 operation、输入摘要、票据依据与修订事实保留，原结果正文列严格为空；重放区分 JSON null 和不可用回执，不再触发 Kernel、登记 Binding 或展示成功提示。Web 配置到 generation、人工工具裁定与送达对账均继承实际管理输入；旧配置升级后的 Worker 回复使用限定的来源证明。详见[管理输入与回执](p4-control-payloads.md)。
 
