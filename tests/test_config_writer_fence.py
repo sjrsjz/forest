@@ -21,6 +21,7 @@ from forest.storage import bot as bot_module
 from forest.storage.bot import BotStore, _migration_checksum
 
 FENCE = "042_schema_writer_v2.sql"
+CURRENT_FENCE = "060_schema_writer_v3.sql"
 OLD_CHAIN = "addb66245fdf6113bf0067bd0c4a5be8fc114f88155ac55545bc93691f8be5ba"
 OLD_WRITER_SHA = "8960f47437997394d2b07aa9f9bdbc2616da4d6a34b741f029ff170d072934dc"
 CANARY = {"config": {"label": "旧配置 CANARY", "optional": None}, "grants": []}
@@ -36,8 +37,10 @@ def resources(path, *, cutoff="042"):
     for name in bot_module.MIGRATION_HANDLERS.values():
         item = source.joinpath("data_migrations", name + ".py")
         (path / "data_migrations" / item.name).write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
-    for name in ("migration_v1.py", "migration_v2.py"):
-        if name.endswith("v1.py") or cutoff >= "042":
+    for name, introduced in (
+        ("migration_v1.py", "001"), ("migration_v2.py", "042"), ("migration_v3.py", "060"),
+    ):
+        if cutoff >= introduced:
             (path / name).write_text(source.joinpath(name).read_text(encoding="utf-8"), encoding="utf-8")
     return path
 
@@ -125,15 +128,15 @@ def test_v2_checksum_dependencies_leave_every_001_041_checksum_unchanged(tmp_pat
 
 
 @pytest.mark.postgres
-async def test_fresh_database_crosses_both_gates_and_noop_preserves_live_host(upgrade_database):
+async def test_fresh_database_crosses_all_gates_and_noop_preserves_live_host(upgrade_database):
     store = BotStore(upgrade_database, "bot-a")
     await store.open()
     try:
         await store.migrate()
         lease = await store.acquire_host("new", "fresh", ttl_seconds=60)
         before = await state(store)
-        assert before["gate"] == 2
-        assert FENCE in {row["version"] for row in before["ledger"]}
+        assert before["gate"] == 3
+        assert {FENCE, CURRENT_FENCE} <= {row["version"] for row in before["ledger"]}
         assert before["runtime"]["storage_generation"] == 1
         await store.migrate()
         assert await state(store) == before
@@ -178,7 +181,7 @@ async def test_actual_041_live_host_then_upgrade_blocks_existing_pool_and_reconn
         fresh = await reopened_new.acquire_host("new", "reconnected-new", ttl_seconds=60)
         assert fresh.owner_epoch > lease.owner_epoch
         async with reopened_new.pool.connection() as conn:
-            assert (await (await conn.execute("SHOW forest.writer_generation")).fetchone())["forest.writer_generation"] == "2"
+            assert (await (await conn.execute("SHOW forest.writer_generation")).fetchone())["forest.writer_generation"] == "3"
         await reopened_new.migrate()
         assert (await reopened_new.renew_host(fresh)).owner_epoch == fresh.owner_epoch
     finally:

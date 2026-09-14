@@ -29,7 +29,9 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.payloads import MAX_PARENTS, PayloadRef, PayloadStore, _json
 
-FAMILIES = frozenset({"config", "agent.config", "memory.config", "binding", "watch"})
+FAMILIES = frozenset({
+    "config", "agent.config", "memory.config", "binding", "watch", "job", "job.delegation",
+})
 KINDS = frozenset({"PLAN", "REVISION", "INITIAL"})
 UNAVAILABLE = frozenset({
     "PAYLOAD_ERASED", "PAYLOAD_INCOMPLETE", "SOURCE_SUPPRESSED", "SOURCE_LINK_SCOPE_LIMIT",

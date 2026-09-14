@@ -1,6 +1,6 @@
 # P4 来源与载荷存储切片
 
-本文描述来源账本与载荷存储的实际实现。图/向量发布、Agent 图文召回、Web 记忆配置和公开来源遗忘已接通，见[记忆运行链路](p4-memory-runtime.md)与[记忆来源管理](p4-memory-administration.md)。029–035 将输入、上下文、Agent、升级前遗留子 Agent 和发送正文迁入可删除载荷，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文。旧子 Agent 数据继续参与遗忘闭包，但不再构成可调度产品能力，详见[退役设计](p3-children.md)。Job 定义到 occurrence、Shell 自由文本参数/结果、部署库和备份/WAL 仍需完成；公开流程只能对已经具备完整来源闭包的来源承诺立即抑制和托管 body 清理。
+本文描述来源账本与载荷存储的实际实现。图/向量发布、Agent 图文召回、Web 记忆配置和公开来源遗忘已接通，见[记忆运行链路](p4-memory-runtime.md)与[记忆来源管理](p4-memory-administration.md)。029–035 将输入、上下文、Agent、升级前遗留子 Agent 和发送正文迁入可删除载荷，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文，060–061 接通会话 Job settings/delegation 及 occurrence 撤权。旧子 Agent 数据继续参与遗忘闭包，但不再构成可调度产品能力，详见[退役设计](p3-children.md)。Shell 自由文本参数/结果、部署库和备份/WAL 仍需完成；公开流程只能对已经具备完整来源闭包的来源承诺立即抑制和托管 body 清理。
 
 ## 来源进入实际消息流水
 

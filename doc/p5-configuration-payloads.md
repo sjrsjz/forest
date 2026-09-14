@@ -76,4 +76,4 @@ Agent 新模型调用、工具或媒体获取许可严格核验实际 spec/confi
 
 [受控浏览器脚本](../scripts/smoke_control_receipts.py)已通过 22 个真实 Edge 场景，包含原管理回执屏障和四类配置的清理、独立替换及迟到读取；组件历史的可用/不可用项分别验证。该脚本使用发行页面和 JS、受控 HTTP 响应，不替代数据库或真实外部服务验收。最终跨平台和完整容器验收结果另记于[实现状态](implementation-status.md)。
 
-Job 定义到 occurrence、Shell 自由文本参数/结果、自由取消原因与部分 checkpoint、部署库正文、备份/WAL 和完整角色管理仍有后续工作。公开来源遗忘已经使用独立 plan/apply 与删除 epoch 接通 Web 和群聊 Shell；它只承诺当前托管载荷的立即抑制与后台 scrub。外部模型、平台及用户已经接收的字节不能由本地清理撤回。普通组件 JSON 尚无统一秘密字段契约。
+会话 Job 的 settings/delegation 已由迁移 060/061 接入来源载荷，并在 occurrence 领取和 trigger claim 前复验可用性。Shell 自由文本参数/结果、自由取消原因与部分 checkpoint、部署库正文、备份/WAL 和完整角色管理仍有后续工作。公开来源遗忘已经使用独立 plan/apply 与删除 epoch 接通 Web 和群聊 Shell；它只承诺当前托管载荷的立即抑制与后台 scrub。外部模型、平台及用户已经接收的字节不能由本地清理撤回。普通组件 JSON 尚无统一秘密字段契约。

@@ -10,9 +10,15 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.schedules import JobSettings, aware, expand_schedule, next_occurrence, preview
+from forest.schedules import aware, expand_schedule, next_occurrence, preview
 from forest.storage.bindings import _clone
 from forest.storage.control import BotControl
+from forest.storage.job_payloads import (
+    JobPayloadStore,
+    delegation_metadata,
+    normalize_settings,
+    settings_metadata,
+)
 
 
 def _validate(payload, required, optional=()):
@@ -53,6 +59,7 @@ class JobStore:
     def __init__(self, messages, *, control=None):
         self.messages, self.store = messages, messages.store
         self.control = control or BotControl(self.store)
+        self.payloads = JobPayloadStore(self.store)
 
     @staticmethod
     async def cancel_revoked_triggers_in(conn, bot_id, conversation_id):
@@ -97,7 +104,10 @@ class JobStore:
             raise ForestError("JOB_NOT_FOUND", "Job does not belong to this Bot", 404)
         return row
 
-    async def _definition(self, conn, job_id, revision):
+    async def _epoch(self, conn):
+        return (await self.payloads.content.payloads.lock_in(conn))["deletion_epoch"]
+
+    async def _definition(self, conn, job_id, revision, *, required=True):
         row = await (
             await conn.execute(
                 "SELECT * FROM public.bot_job_revisions WHERE bot_id=%s AND job_id=%s AND revision=%s",
@@ -106,7 +116,14 @@ class JobStore:
         ).fetchone()
         if row is None:
             raise ForestError("JOB_NOT_CONFIGURED", "Apply a Job definition first", 409)
-        return row
+        return await self.payloads.hydrate_definition_in(
+            conn, row, epoch=await self._epoch(conn), required=required
+        )
+
+    async def _plan(self, conn, row, *, required=True):
+        return await self.payloads.hydrate_plan_in(
+            conn, row, epoch=await self._epoch(conn), required=required
+        )
 
     async def _host(self, conn, lease, *, data=False):
         runtime = await self.store._runtime(conn)
@@ -145,7 +162,7 @@ class JobStore:
             claims = await self.control._guard(conn, ticket, "job.read", operation_id, payload)
             rows = await (
                 await conn.execute(
-                    "SELECT j.*,r.values,r.delegation,c.binding_id,c.platform,c.channel_kind,c.channel_id,c.thread_id,c.group_source_id "
+                    "SELECT j.*,c.binding_id,c.platform,c.channel_kind,c.channel_id,c.thread_id,c.group_source_id "
                     "FROM public.bot_jobs j JOIN public.bot_job_revisions r ON r.bot_id=j.bot_id AND r.job_id=j.job_id AND r.revision=j.definition_revision "
                     "JOIN public.bot_conversations c ON c.bot_id=j.bot_id AND c.conversation_id=j.conversation_id "
                     "WHERE j.bot_id=%s AND (%s::text IS NULL OR j.job_id=%s) "
@@ -180,10 +197,20 @@ class JobStore:
                 )
             ).fetchall()
             now = await self.store._now(conn)
-            jobs, previews = [], {}
+            jobs, previews, definitions = [], {}, {}
             for row in rows:
-                definition = await self._definition(conn, row["job_id"], row["definition_revision"])
-                await self.control.revision_parents(conn, "job", definition, resource=row["job_id"])
+                definition = await self._definition(
+                    conn, row["job_id"], row["definition_revision"], required=False
+                )
+                definitions[row["job_id"]] = definition
+                active = (
+                    definition["values_payload_state"] == "ACTIVE"
+                    and definition["delegation_payload_state"] == "ACTIVE"
+                )
+                if active:
+                    await self.control.revision_parents(
+                        conn, "job", definition, resource=row["job_id"]
+                    )
                 conversation = {
                     key: row[key]
                     for key in (
@@ -199,19 +226,32 @@ class JobStore:
                 jobs.append(
                     {
                         **row,
-                        "values": {**row["values"], "enabled": row["enabled"]},
+                        "values": (
+                            {**definition["values"], "enabled": row["enabled"]}
+                            if active else None
+                        ),
+                        "delegation": definition["delegation"] if active else None,
+                        "values_payload_state": definition["values_payload_state"],
+                        "delegation_payload_state": definition["delegation_payload_state"],
                         "conversation": conversation,
                     }
                 )
                 previews[row["job_id"]] = (
-                    preview(row["values"]["schedule"], now, limit=3) if row["enabled"] else []
+                    preview(definition["values"]["schedule"], now, limit=3)
+                    if row["enabled"] and active else []
                 )
             heads = {row["job_id"]: row for row in rows}
             valid_heads = set()
             runtime = await self.store._runtime(conn)
             for head in rows:
+                definition = definitions[head["job_id"]]
+                if (
+                    definition["values_payload_state"] != "ACTIVE"
+                    or definition["delegation_payload_state"] != "ACTIVE"
+                ):
+                    continue
                 try:
-                    await self._delegation(conn, head, runtime)
+                    await self._delegation(conn, definition, runtime)
                     valid_heads.add(head["job_id"])
                 except ForestError:
                     pass
@@ -231,12 +271,7 @@ class JobStore:
     async def plan(self, ticket, operation_id, payload):
         payload = _clone(payload)
         _validate(payload, ("job_id", "expected_revision", "values"))
-        try:
-            values = JobSettings.model_validate(payload["values"]).model_dump()
-        except ValueError:
-            raise ForestError(
-                "JOB_INVALID", "Job schedule and delegation settings are invalid", 422
-            ) from None
+        values = normalize_settings(payload["values"])
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "job.plan", operation_id, payload)
             head = await self._head(conn, payload["job_id"], create=True)
@@ -259,7 +294,9 @@ class JobStore:
                     "JOB_DELEGATION_EXPIRED", "Delegation must expire in the future", 422
                 )
             before = (
-                await self._definition(conn, head["job_id"], head["definition_revision"])
+                await self._definition(
+                    conn, head["job_id"], head["definition_revision"], required=False
+                )
                 if head["definition_revision"] is not None
                 else None
             )
@@ -273,8 +310,21 @@ class JobStore:
                     "issuer_id": claims["issuer_id"],
                 }
             )
+            original = await self.control.admitted_input_in(conn, claims)
+            epoch = await self._epoch(conn)
+            values_ref = await self.payloads.put_settings_in(
+                conn,
+                kind="PLAN",
+                job_id=head["job_id"],
+                identity=plan_id,
+                values=values,
+                parents=(original.payload_id,),
+                epoch=epoch,
+            )
             await conn.execute(
-                "INSERT INTO public.bot_job_plans(bot_id,job_id,plan_id,expected_revision,subject_id,issuer_id,values,plan_digest,expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
+                "INSERT INTO public.bot_job_plans(bot_id,job_id,plan_id,expected_revision,subject_id,"
+                "issuer_id,values,values_payload_id,values_payload_digest,values_metadata,plan_digest,expires_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')",
                 (
                     self.store.bot_id,
                     head["job_id"],
@@ -282,7 +332,9 @@ class JobStore:
                     head["revision"],
                     claims["subject_id"],
                     claims["issuer_id"],
-                    Jsonb(values),
+                    values_ref.payload_id,
+                    values_ref.digest,
+                    Jsonb(settings_metadata(values)),
                     digest,
                 ),
             )
@@ -293,12 +345,27 @@ class JobStore:
                 "plan_digest": digest,
                 "values": values,
                 "before_values": (
-                    {**before["values"], "enabled": head["enabled"]} if before else None
+                    {**before["values"], "enabled": head["enabled"]}
+                    if before and before["values_payload_state"] == "ACTIVE"
+                    and before["delegation_payload_state"] == "ACTIVE" else None
+                ),
+                "before_values_payload_state": (
+                    before["values_payload_state"] if before else "UNCONFIGURED"
                 ),
                 "next_occurrences": preview(values["schedule"], now),
                 "conversation": conversation,
             }
-            parents = await self.control.revision_parents(conn, "job", before, resource=head["job_id"])
+            parents = [values_ref.payload_id]
+            if (
+                before
+                and before["values_payload_state"] == "ACTIVE"
+                and before["delegation_payload_state"] == "ACTIVE"
+            ):
+                parents.extend(
+                    await self.control.revision_parents(
+                        conn, "job", before, resource=head["job_id"]
+                    )
+                )
             await self.control._record(conn, claims, result, parents=parents)
             await self.control._time(conn, claims)
             return result
@@ -334,6 +401,8 @@ class JobStore:
                 )
             if head["revision"] != payload["expected_revision"]:
                 raise ForestError("REVISION_CONFLICT", "Job changed after the preview", 409)
+            plan = await self._plan(conn, plan)
+            parent = await self.control.plan_parent(conn, "job", plan)
             now = await self.store._now(conn)
             if plan["expires_at"] <= now or aware(plan["values"]["delegation_expires_at"]) <= now:
                 raise ForestError("PLAN_EXPIRED", "Job plan or delegation expired", 409)
@@ -366,16 +435,53 @@ class JobStore:
                 if key in claims:
                     delegation[key] = claims[key]
             due = next_occurrence(plan["values"]["schedule"], now - timedelta(microseconds=1))
+            original = await self.control.admitted_input_in(conn, claims)
+            deletion_epoch = await self._epoch(conn)
+            value_ref = await self.payloads.put_settings_in(
+                conn,
+                kind="REVISION",
+                job_id=head["job_id"],
+                identity=str(revision),
+                values=plan["values"],
+                parents=(original.payload_id, parent),
+                epoch=deletion_epoch,
+            )
+            delegation_ref = await self.payloads.put_delegation_in(
+                conn,
+                job_id=head["job_id"],
+                revision=revision,
+                delegation=delegation,
+                parents=(original.payload_id, parent),
+                epoch=deletion_epoch,
+            )
+            result = {
+                "job_id": head["job_id"],
+                "revision": revision,
+                "status": "APPLIED",
+                "delegation": delegation,
+                "next_due_at": due.isoformat() if due else None,
+            }
+            await self.control._record(
+                conn, claims, result, parents=(value_ref.payload_id, delegation_ref.payload_id)
+            )
             await conn.execute(
-                "INSERT INTO public.bot_job_revisions(bot_id,job_id,revision,values,delegation,definition_digest,operation_id) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO public.bot_job_revisions(bot_id,job_id,revision,values,delegation,"
+                "definition_digest,operation_id,plan_id,values_payload_id,values_payload_digest,"
+                "values_metadata,delegation_payload_id,delegation_payload_digest,delegation_metadata) "
+                "VALUES (%s,%s,%s,NULL,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     self.store.bot_id,
                     head["job_id"],
                     revision,
-                    Jsonb(plan["values"]),
-                    Jsonb(delegation),
                     digest_json(plan["values"]),
                     operation_id,
+                    plan["plan_id"],
+                    value_ref.payload_id,
+                    value_ref.digest,
+                    Jsonb(settings_metadata(plan["values"])),
+                    delegation_ref.payload_id,
+                    delegation_ref.digest,
+                    Jsonb(delegation_metadata(delegation)),
                 ),
             )
             await conn.execute(
@@ -395,15 +501,6 @@ class JobStore:
                 "UPDATE public.bot_job_occurrences SET status='CANCELLED',revision=revision+1,error_code='JOB_DEFINITION_REPLACED',completed_at=clock_timestamp() WHERE bot_id=%s AND job_id=%s AND status IN ('QUEUED','CLAIMED')",
                 (self.store.bot_id, head["job_id"]),
             )
-            result = {
-                "job_id": head["job_id"],
-                "revision": revision,
-                "status": "APPLIED",
-                "delegation": delegation,
-                "next_due_at": due.isoformat() if due else None,
-            }
-            parent = await self.control.plan_parent(conn, "job", plan)
-            await self.control._record(conn, claims, result, parents=(parent,))
             await self.control._time(conn, claims)
             if min(plan["expires_at"], aware(delegation["expires_at"])) <= await self.store._now(
                 conn
@@ -526,11 +623,11 @@ class JobStore:
             ).fetchall()
             count = 0
             for head in rows:
-                definition = await self._definition(
-                    conn, head["job_id"], head["definition_revision"]
-                )
                 now = await self.store._now(conn)
                 try:
+                    definition = await self._definition(
+                        conn, head["job_id"], head["definition_revision"]
+                    )
                     await self._delegation(conn, definition, runtime)
                 except ForestError:
                     await conn.execute(
@@ -599,7 +696,7 @@ class JobStore:
                     "AND o.delegation_epoch=j.delegation_epoch AND (o.status='QUEUED' OR (o.status='CLAIMED' AND "
                     "(o.lease_until<=clock_timestamp() OR o.host_incarnation<>%s))) "
                     "AND (SELECT count(*) FROM public.bot_job_occurrences a WHERE a.bot_id=o.bot_id AND a.job_id=o.job_id "
-                    "AND a.occurrence_id<>o.occurrence_id AND (a.status='ENQUEUED' OR (a.status='CLAIMED' AND a.lease_until>clock_timestamp() AND a.host_incarnation=%s))) < (d.values->>'max_overlap')::int "
+                    "AND a.occurrence_id<>o.occurrence_id AND (a.status='ENQUEUED' OR (a.status='CLAIMED' AND a.lease_until>clock_timestamp() AND a.host_incarnation=%s))) < (d.values_metadata->>'max_overlap')::int "
                     "ORDER BY o.scheduled_for,o.occurrence_id LIMIT 1",
                     (self.store.bot_id, lease.incarnation, lease.incarnation),
                 )
@@ -614,8 +711,46 @@ class JobStore:
                     (self.store.bot_id, rows[0]["occurrence_id"]),
                 )
             ).fetchone()
-            definition = await self._definition(conn, head["job_id"], row["job_revision"])
-            await self._delegation(conn, definition, runtime)
+            now = await self.store._now(conn)
+            reclaimable = bool(
+                row
+                and row["status"] == "CLAIMED"
+                and (row["lease_until"] <= now or row["host_incarnation"] != lease.incarnation)
+            )
+            if (
+                row is None
+                or (row["status"] != "QUEUED" and not reclaimable)
+                or row["next_attempt_at"] > now
+                or row["expires_at"] <= now
+                or row["delegation_epoch"] != head["delegation_epoch"]
+            ):
+                await self.store._host(conn, lease, runtime)
+                return None
+            try:
+                definition = await self._definition(conn, head["job_id"], row["job_revision"])
+                await self._delegation(conn, definition, runtime)
+            except ForestError as exc:
+                if exc.code not in {
+                    "CONTROL_CONTENT_REVOKED", "JOB_DELEGATION_REVOKED", "JOB_DELEGATION_EXPIRED",
+                }:
+                    raise
+                await conn.execute(
+                    "UPDATE public.bot_job_occurrences SET status='CANCELLED',revision=revision+1,"
+                    "error_code=%s,completed_at=clock_timestamp(),lease_until=NULL "
+                    "WHERE bot_id=%s AND occurrence_id=%s",
+                    (exc.code, self.store.bot_id, row["occurrence_id"]),
+                )
+                await self.store._host(conn, lease, runtime)
+                return None
+            overlap = await (await conn.execute(
+                "SELECT count(*) AS n FROM public.bot_job_occurrences a WHERE a.bot_id=%s "
+                "AND a.job_id=%s AND a.occurrence_id<>%s AND (a.status='ENQUEUED' OR "
+                "(a.status='CLAIMED' AND a.lease_until>clock_timestamp() AND a.host_incarnation=%s))",
+                (self.store.bot_id, row["job_id"], row["occurrence_id"], lease.incarnation),
+            )).fetchone()
+            if overlap["n"] >= definition["values"]["max_overlap"]:
+                await self.store._host(conn, lease, runtime)
+                return None
             target = await self.messages._locate(conn, definition["values"]["conversation_id"])
             row = await (
                 await conn.execute(

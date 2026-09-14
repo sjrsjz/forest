@@ -32,6 +32,8 @@ _CONFIG_FAMILIES = {
     "bot_memory_config_revisions": ("memory.config", "REVISION", None),
     "bot_binding_plans": ("binding", "PLAN", "binding_id"),
     "bot_binding_revisions": ("binding", "REVISION", "binding_id"),
+    "bot_job_plans": ("job", "PLAN", "job_id"),
+    "bot_job_revisions": ("job", "REVISION", "job_id"),
 }
 
 
@@ -109,6 +111,25 @@ the monotonic memory clock, whose independently allocated fact counter may grow.
                 await configuration_identity(conn, row, row["values_payload_id"], row["values_payload_digest"],
                     "config-values-v1:" + digest([family, kind, resource, identity]))
                 value["values"] = body["values"]
+            if table == "bot_job_revisions" and "delegation_payload_id" in row:
+                assert row["delegation"] is None and row["delegation_payload_id"]
+                body = await content(conn, row["bot_id"], row["delegation_payload_id"])
+                assert set(body) == {"family", "kind", "resource", "identity", "values"}
+                assert {key: body[key] for key in ("family", "kind", "resource", "identity")} == {
+                    "family": "job.delegation", "kind": "REVISION",
+                    "resource": row["job_id"], "identity": str(row["revision"]),
+                }
+                assert row["delegation_payload_digest"] == digest(body)
+                await configuration_identity(
+                    conn,
+                    row,
+                    row["delegation_payload_id"],
+                    row["delegation_payload_digest"],
+                    "config-values-v1:" + digest(
+                        ["job.delegation", "REVISION", row["job_id"], str(row["revision"])]
+                    ),
+                )
+                value["delegation"] = body["values"]
             if table == "bot_message_inbox" and "payload_id" in row:
                 assert row["segments"] is None
                 body = await content(conn, row["bot_id"], row["payload_id"])

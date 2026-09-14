@@ -20,6 +20,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P3 单 Agent 协议与持久运行](p3-agent.md) | 不可覆盖 CorePrompt、PresetContext、原子 ModelTurn、模型/工具安全点与持久恢复 |
 | [P3 Agent 状态与并发](p3-agent-state.md) | 许可、预算、精确切口、工具观察、取消与最终提交恢复 |
 | [P3 定时任务](p3-jobs.md) | 持久计划、日历与补跑、受权入队、非重叠占用和管理取消 |
+| [P4 Job 定义载荷](p4-job-payloads.md) | prompt/settings 与 delegation 的来源证明、正文遗忘、调度撤权及 writer v3 切换 |
 | [P3 产品子 Agent 退役](p3-children.md) | 撤销错误产品语义、旧数据库终结与只读兼容迁移 |
 | [P3 群聊管理与监督](p3-control.md) | 实际 Shell 命令、共同管理协议、控制预留槽及定时授权边界 |
 | [P4 来源与载荷存储](p4-source-payloads.md) | 已接入消息流水的来源/资格、可清理正文基础及尚未迁移的旧副本 |

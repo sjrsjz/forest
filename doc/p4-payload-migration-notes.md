@@ -1,6 +1,6 @@
 # P4 准备：正文分离、物理清理与不可复活的删除闭包
 
-状态：**迁移依据与剩余族设计，全链路遗忘尚未完成。** 第 1–9 节保留最初针对 `001_kernel.sql` 至 `020_shell_commands.sql` 的副本调查、约束和验收要求；其中的旧字段用于说明迁移来源，不表示它们现在仍全部保存明文。021–035 接通载荷、图文召回及消息/Agent/发送正文，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文。实际协议分别见[迁移协议](p4-content-migration.md)、[Kernel 正文](p4-kernel-payloads.md)、[控制回执](p4-control-payloads.md)和[配置正文](p5-configuration-payloads.md)。产品子 Agent 已从目标架构退役；下文所有 Child 入口、表和测试仅描述历史实现、迁移来源与遗忘/结算兼容，不构成现行运行许可，详见[退役设计](p3-children.md)。第 10–11 节保留各阶段设计演进，当前剩余范围以本页开头和实现状态为准。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
+状态：**迁移依据与剩余族设计，全链路遗忘尚未完成。** 第 1–9 节保留最初针对 `001_kernel.sql` 至 `020_shell_commands.sql` 的副本调查、约束和验收要求；其中的旧字段用于说明迁移来源，不表示它们现在仍全部保存明文。021–035 接通载荷、图文召回及消息/Agent/发送正文，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文，060–061 又接通会话 Job settings/delegation。实际协议分别见[迁移协议](p4-content-migration.md)、[Kernel 正文](p4-kernel-payloads.md)、[控制回执](p4-control-payloads.md)、[配置正文](p5-configuration-payloads.md)和[Job 定义载荷](p4-job-payloads.md)。产品子 Agent 已从目标架构退役；下文所有 Child 入口、表和测试仅描述历史实现、迁移来源与遗忘/结算兼容，不构成现行运行许可，详见[退役设计](p3-children.md)。第 10–11 节保留各阶段设计演进，当前剩余范围以本页开头和实现状态为准。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
 
 “永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆和上述正文族。新 Agent Reply 从最终步骤的显式父载荷登记；旧回复和不能证明来源闭包的内容继续保持 `lineage_complete=false`。Kernel 状态读取和 Worker 跨调用缓存仍需要补齐真实依赖，不能把局部来源传递称为全链路保证。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
 
@@ -201,7 +201,7 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 
 ## 10. 029–035 之后的剩余族与下一实现切片
 
-本节保留 029–035 完成时的后续设计依据。其中 Kernel、状态、迁移正文、代际配置及长期 Worker 暴露账本已由 036–038 接入，实际协议见 [Kernel 正文与代际来源](p4-kernel-payloads.md)；其余管理正文、Job 和备份路径仍不能视为完成。
+本节保留 029–035 完成时的后续设计依据。其中 Kernel、状态、迁移正文、代际配置及长期 Worker 暴露账本已由 036–038 接入，会话 Job settings/delegation 已由 060–061 接入；实际协议见 [Kernel 正文与代际来源](p4-kernel-payloads.md)和[Job 定义载荷](p4-job-payloads.md)。Shell、部署管理正文和备份路径仍不能视为完成。
 
 ### 10.1 Kernel 返回值、状态及迁移副本应一起处理
 
@@ -239,7 +239,7 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 | `bot_agent_runs.spec` | `AgentRuntime.resolve_spec` 同时把 values 展开在顶层并保留 values 子对象，`AgentStore.ensure_run` 冻结整个 spec；system_prompt 实际存在重复。整体迁为 spec 载荷，另保留白名单的配置/权限/预算 metadata，使正文失效后仍能终止和结算 |
 | `bot_config_plans/revisions.values`、`bot_agent_config_plans/revisions.values`、Binding plans/revisions/current config、`bot_generations.config`、`bot_dev_watch_heads.config` | 配置预览、发布、热重载与重启都应 hydrate 同一配置载荷链。schema/template/自由 JSON 也可能含正文，不能只处理名为 system_prompt 的键。凭据 ciphertext 保持独立生命周期 |
 | `bot_web_operations.result`、`bot_audit_records.details`、`bot_outbox_events.payload` | `BotControl._record` 将预览 result 写 Web 回执，又经 `BotStore._event` 复制到 audit/outbox；result 含 values/before_values 时形成至少三份正文。改为白名单 metadata 与同一结果载荷引用；`_replay`、history、inspect 均经授权 hydrate |
-| `bot_job_plans/revisions.values`、`bot_shell_requests.arguments/outcome` | Job prompt 会生成新 Inbox 输入；Shell 参数/诊断结果进入控制回复和回执。定义/请求载荷必须传到生成内容，删除后旧计划/命令不能凭新 operation 或当前 epoch 重建正文 |
+| `bot_shell_requests.arguments/outcome` | Shell 参数/诊断结果进入控制回复和回执。请求载荷必须传到生成内容，删除后旧命令不能凭新 operation 或当前 epoch 重建正文。Job prompt/settings/delegation 已由 060–061 完成该约束 |
 
 配置是独立的管理员输入，不应凭文本相似就擅自推断其来自某条聊天。新的自动复制路径必须显式继承来源；手工输入以配置/命令自身的可管理删除域登记。旧无法证明上游的派生体继续使用明确的 legacy conservative 策略；管理计划应展示影响范围，不能悄悄把保守清理包装成精确单条遗忘。
 
@@ -267,7 +267,7 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 | 控制结果、审计与 outbox | `BotControl._record` 当前复制同一预览结果到三处；改为共享结果载荷和封闭 metadata。旧 operation 的完成状态、原摘要保留，正文不可用时不得重新执行 |
 | 取消及分类原因 | 自由 reason 与固定状态码分离。旧 checkpoint 的原 checksum 不改写，迁移原正文并保留其引用；终止和结算不能依赖已删原因正文 |
 | Bot 配置与冻结 spec | 组件/Agent/Memory/Binding/Watch 的 plan、revision、current 和 `AgentRun.spec`；真实配置父载荷须继续传到 generation、模型请求及子 Agent。SQL 发布、调度字段和表达式索引同时更新 |
-| Shell 与 Job | 已接受命令输入 → arguments → 管理结果/CONTROL；Job definition → occurrence 输入。最终写事务复验实际父载荷，不能换新 operation 或 occurrence 恢复旧 prompt |
+| Shell | 已接受命令输入 → arguments → 管理结果/CONTROL。最终写事务复验实际父载荷，不能换新 operation 恢复旧参数或结果；Job definition → occurrence 输入已由 060–061 接通 |
 
 Web/CLI 的手工配置属于独立管理员输入域，不按文本相似猜测聊天来源。Shell 命令来自真实群消息，其派生内容须继承该消息；框架自动复制配置或记忆时同样继承实际父载荷。旧 generation/Reply 的不可变 manifest 不能原地补写；无法证明旧上游时采用明确的保守迁移策略。
 

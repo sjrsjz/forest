@@ -53,6 +53,8 @@ Cron 的不存在本地时刻直接跳过；重复本地时刻按 `dst_fold=firs
 
 `event_id`、`trigger_id` 一旦绑定 occurrence 就不可更改。Job 的作用域始终是一个 Bot 内的既有 Conversation；它不建立独立群记忆库，普通群消息和 Job 任务仍共享该 Conversation 的同一 ingress 序号及对应 Bot 的全局记忆体系。
 
+完整 `name`、`prompt`、settings 和 delegation 已由迁移 060/061 移出裸 JSONB。调度元数据不含 prompt 或管理员主体；来源失效时不从计划回执或摘要回退，现有 occurrence 也失去领取和 trigger claim 资格。数据布局、writer fence 与删除竞态见 [P4 Job 定义载荷](p4-job-payloads.md)。
+
 ## 3. 展开、扫描与执行状态
 
 ```mermaid

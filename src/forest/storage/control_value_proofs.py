@@ -9,6 +9,7 @@ FAMILIES = {
     "agent.config": ("bot_agent_config", None),
     "memory.config": ("bot_memory_config", None),
     "binding": ("bot_binding", "binding_id"),
+    "job": ("bot_job", "job_id"),
 }
 
 
