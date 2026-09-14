@@ -223,3 +223,84 @@ def test_invalid_setup_tokens_are_bounded_and_cannot_freeze(
         state.freeze(token, DSN, "admin", password_hash)
     assert error.value.code == "SETUP_TOKEN_INVALID"
     assert state.load_plan() is None
+
+
+def test_recovery_head_switches_dsn_without_changing_setup_identity(
+    tmp_path: Path, password_hash: str
+) -> None:
+    state = BootstrapState(tmp_path)
+    token = state.initialize()
+    original = state.freeze(token, DSN, "admin", password_hash)
+    state.complete(original["setup_id"], original["plan_digest"])
+    artifact = tmp_path / "backup.forest-backup"
+    artifact.write_bytes(b"validated-test-artifact")
+    recovered_dsn = DSN.replace("/forest", "/forest_recovered")
+    planned = state.plan_recovery(
+        recovery_id="recovery-a",
+        target_dsn=recovered_dsn,
+        artifact_path=artifact,
+        artifact_digest="sha256:" + "1" * 64,
+        backup_id="backup-a",
+        manifest_digest="sha256:" + "2" * 64,
+        content_digest="sha256:" + "3" * 64,
+        restore_id="2d6de1e0-5d2c-4c5e-8ba6-6f1dd9857a53",
+        target_marker=(
+            "forest:restore-stage:2d6de1e0-5d2c-4c5e-8ba6-6f1dd9857a53:sha256:"
+            + "3" * 64
+        ),
+    )
+    assert planned["state"] == "PLANNED"
+    assert state.load_dsn() == original["dsn"]
+    applied = state.apply_recovery("recovery-a", planned["plan_digest"])
+    assert applied["state"] == "APPLIED" and applied["head_revision"] == 1
+    effective = BootstrapState(tmp_path).load_plan()
+    assert effective["dsn"] == normalize_dsn(recovered_dsn)[0]
+    assert effective["target_identity"]["dbname"] == "forest_recovered"
+    for key in ("deployment_id", "setup_id", "plan_digest", "username", "password_hash"):
+        assert effective[key] == original[key]
+    assert state.apply_recovery("recovery-a", planned["plan_digest"]) == applied
+    raw = (tmp_path / "bootstrap.sqlite3").read_bytes()
+    assert recovered_dsn.encode() not in raw
+    assert DSN.encode() not in raw
+
+
+def test_only_one_recovery_plan_can_advance_each_head(
+    tmp_path: Path, password_hash: str
+) -> None:
+    state = BootstrapState(tmp_path)
+    token = state.initialize()
+    original = state.freeze(token, DSN, "admin", password_hash)
+    state.complete(original["setup_id"], original["plan_digest"])
+    artifact = tmp_path / "backup.forest-backup"
+    artifact.write_bytes(b"validated-test-artifact")
+
+    def plan(recovery_id: str, database: str, digit: str):
+        return state.plan_recovery(
+            recovery_id=recovery_id,
+            target_dsn=DSN.replace("/forest", "/" + database),
+            artifact_path=artifact,
+            artifact_digest="sha256:" + "1" * 64,
+            backup_id="backup-a",
+            manifest_digest="sha256:" + "2" * 64,
+            content_digest="sha256:" + digit * 64,
+            restore_id="2d6de1e0-5d2c-4c5e-8ba6-6f1dd9857a53",
+            target_marker=(
+                "forest:restore-stage:2d6de1e0-5d2c-4c5e-8ba6-6f1dd9857a53:sha256:"
+                + digit * 64
+            ),
+        )
+
+    first = plan("recovery-a", "forest_recovered_a", "3")
+    second = plan("recovery-b", "forest_recovered_b", "4")
+    state.apply_recovery("recovery-a", first["plan_digest"])
+    with pytest.raises(ForestError) as stale:
+        state.apply_recovery("recovery-b", second["plan_digest"])
+    assert stale.value.code == "RECOVERY_PLAN_STALE"
+    with sqlite3.connect(state.path) as connection:
+        connection.execute(
+            "UPDATE deployment_recovery_plans SET content_digest=? WHERE recovery_id=?",
+            ("sha256:" + "5" * 64, "recovery-a"),
+        )
+    with pytest.raises(ForestError) as corrupt:
+        state.load_plan()
+    assert corrupt.value.code == "RECOVERY_STATE_INVALID"

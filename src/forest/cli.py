@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -15,13 +16,13 @@ from forest.bootstrap import BootstrapState
 from forest.errors import ForestError
 
 
-def managed_database() -> str | None:
+def managed_database(database: str = "forest") -> str | None:
     filename = os.environ.get("FOREST_DATABASE_PASSWORD_FILE")
     if not filename:
         return None
     password = Path(filename).read_text(encoding="utf-8").strip()
     host = os.environ.get("FOREST_DATABASE_HOST", "postgres")
-    return f"postgresql://forest:{quote(password, safe='')}@{host}:5432/forest"
+    return f"postgresql://forest:{quote(password, safe='')}@{host}:5432/{quote(database, safe='')}"
 
 
 def _reject_constant(value: str):
@@ -66,6 +67,27 @@ def main() -> None:
     pair.add_argument(
         "--data-dir", type=Path, default=Path(os.environ.get("FOREST_DATA_DIR", ".forest"))
     )
+    recovery = sub.add_parser(
+        "deployment-recovery", help="离线验证并切换部署控制面数据库"
+    )
+    recovery_actions = recovery.add_subparsers(dest="recovery_command", required=True)
+    recovery_plan = recovery_actions.add_parser("plan", help="验证并冻结部署恢复计划")
+    recovery_apply = recovery_actions.add_parser("apply", help="复验并应用部署恢复计划")
+    for command in (recovery_plan, recovery_apply):
+        command.add_argument(
+            "--data-dir",
+            type=Path,
+            default=Path(os.environ.get("FOREST_DATA_DIR", ".forest")),
+        )
+        command.add_argument("--passphrase-file", type=Path, required=True)
+    recovery_plan.add_argument("--artifact", type=Path, required=True)
+    recovery_target = recovery_plan.add_mutually_exclusive_group(required=True)
+    recovery_target.add_argument("--target-dsn-file", type=Path)
+    recovery_target.add_argument(
+        "--target-database", help="使用 Compose 托管连接访问这个恢复数据库"
+    )
+    recovery_apply.add_argument("--recovery-id", required=True)
+    recovery_apply.add_argument("--plan-digest", required=True)
     plugin = sub.add_parser("plugin", help="构建或验证普通 Python 插件")
     actions = plugin.add_subparsers(dest="plugin_command", required=True)
     for name in ("build", "check"):
@@ -106,12 +128,23 @@ def main() -> None:
         parser.error(
             "--watch is a continuous lifecycle; service/input/operation options belong to --package"
         )
+    deployment_lock = None
     try:
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         if args.command in {"plugin", "dev"}:
             asyncio.run(run_plugin_command(args))
             return
+        if args.command == "deployment-recovery":
+            from forest.deployment_lock import DeploymentLock
+
+            with DeploymentLock(args.data_dir):
+                asyncio.run(run_deployment_recovery_command(args))
+            return
+        if args.command == "serve":
+            from forest.deployment_lock import DeploymentLock
+
+            deployment_lock = DeploymentLock(args.data_dir).acquire()
         state = BootstrapState(args.data_dir)
         token = state.initialize()
         if args.command == "setup-token":
@@ -150,6 +183,42 @@ def main() -> None:
         parser.exit(1, f"{exc.code}: {exc.message}\n")
     except KeyboardInterrupt:
         parser.exit(130, "Development host stopped.\n")
+    finally:
+        if deployment_lock is not None:
+            deployment_lock.close()
+
+
+async def run_deployment_recovery_command(args: argparse.Namespace) -> None:
+    from forest.deployment_recovery import DeploymentRecoveryManager
+
+    manager = DeploymentRecoveryManager(args.data_dir)
+    if args.recovery_command == "plan":
+        target_dsn = None
+        if args.target_database is not None:
+            if not re.fullmatch(r"forest_restore_[a-f0-9]{20}_[0-9]{4}", args.target_database):
+                raise ForestError(
+                    "RECOVERY_TARGET_INVALID", "Managed restore database name is invalid", 422
+                )
+            target_dsn = managed_database(args.target_database)
+            if target_dsn is None:
+                raise ForestError(
+                    "RECOVERY_MANAGED_DATABASE_UNAVAILABLE",
+                    "Managed database credentials are unavailable",
+                    409,
+                )
+        result = await manager.plan(
+            artifact_path=args.artifact,
+            passphrase_file=args.passphrase_file,
+            target_dsn_file=args.target_dsn_file,
+            target_dsn=target_dsn,
+        )
+    else:
+        result = await manager.apply(
+            recovery_id=args.recovery_id,
+            plan_digest=args.plan_digest,
+            passphrase_file=args.passphrase_file,
+        )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 async def run_plugin_command(args: argparse.Namespace) -> None:

@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 Core 救援 form，v10 把 P0 保留容量绑定到接纳时的当前 Binding 管理员资格，v11 接通模块完整快照校验及独立启停状态轴。剩余部署正文族、部署控制面整库恢复、其余管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
+**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活、部署控制面离线切换和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 Core 救援 form，v10 把 P0 保留容量绑定到接纳时的当前 Binding 管理员资格，v11 接通模块完整快照校验及独立启停状态轴。剩余部署正文族、裸机恢复身份胶囊、其余管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -41,7 +41,18 @@ docker compose logs --tail 100 forest
 docker compose down
 ```
 
-普通 `down` 保留命名卷。`forest_data` 包含本地初始化状态、加密主密钥、包快照和加密备份，`forest_secrets` 包含数据库凭据，`postgres_data` 包含部署、托管 Bot 数据库及尚未清理的隔离恢复副本。管理员可在「存储与备份」创建部署及全部 READY Bot 的加密逻辑备份，保存恢复口令并下载工件；每个数据库是独立一致切片，目录变化会标为 `INCONSISTENT`。建立隔离副本前必须先完成独立只读校验：后台认证解密精确密文、检查 ZIP、清单和切片证明，生成 24 小时有效且绑定密文与清单摘要的凭据，不创建或连接恢复数据库。隔离恢复只接受有效凭据，再将整套工件恢复为随机命名的数据库，精确核对 schema、行数、外键和身份，并封存 Bot 副本。托管 Bot 副本可在页面生成五分钟激活预览并经当前密码提交；服务端要求当前库与恢复库的删除代际、Binding 和关键副作用账本一致，然后先封存旧库、原子推进目录代际 head、最后启用新库。中断保持 Bot 离线，同一持久任务可人工重试。备份、未采用的隔离副本和激活后旧存储代际分别默认保留 30 天、7 天和 7 天；当前 head 永远不能进入旧代回收，物理删除前还会复核受管集群、数据库 owner 与 Forest marker。部署控制面整库激活仍需本机恢复流程，不能通过删除初始化状态或手工登记数据库绕过。管理员也可在 WebUI 创建后台账号，并通过带预览、当前密码复核和会话撤销的账号计划重置密码、调整固定角色或停用账号。
+普通 `down` 保留命名卷。`forest_data` 包含本地初始化状态、加密主密钥、包快照和加密备份，`forest_secrets` 包含数据库凭据，`postgres_data` 包含部署、托管 Bot 数据库及尚未清理的隔离恢复副本。管理员可在「存储与备份」创建部署及全部 READY Bot 的加密逻辑备份，保存恢复口令并下载工件；每个数据库是独立一致切片，目录变化会标为 `INCONSISTENT`。建立隔离副本前必须先完成独立只读校验：后台认证解密精确密文、检查 ZIP、清单和切片证明，生成 24 小时有效且绑定密文与清单摘要的凭据，不创建或连接恢复数据库。隔离恢复只接受有效凭据，再将整套工件恢复为随机命名的数据库，精确核对 schema、行数、外键和身份，并封存 Bot 副本。托管 Bot 副本可在页面生成五分钟激活预览并经当前密码提交；服务端要求当前库与恢复库的删除代际、Binding 和关键副作用账本一致，然后先封存旧库、原子推进目录代际 head、最后启用新库。中断保持 Bot 离线，同一持久任务可人工重试。备份、未采用的隔离副本和激活后旧存储代际分别默认保留 30 天、7 天和 7 天；当前 head 永远不能进入旧代回收，物理删除前还会复核受管集群、数据库 owner 与 Forest marker。部署控制面副本只能由停服后的本机恢复命令复验并切换，不能通过删除初始化状态或手工登记数据库绕过。管理员也可在 WebUI 创建后台账号，并通过带预览、当前密码复核和会话撤销的账号计划重置密码、调整固定角色或停用账号。
+
+部署控制面离线恢复要求原 `forest_data` 仍可用。先在 WebUI 完成备份校验和隔离恢复，记下部署目标 `forest_restore_..._0000` 并下载同一加密工件；把工件和只含恢复口令的一行文本文件放入宿主 `recovery` 目录。随后停止应用但保留 PostgreSQL，生成只读计划并按输出的 recovery ID 和 plan digest 应用：
+
+```sh
+docker compose stop forest
+docker compose run --rm --no-deps -v "${PWD}/recovery:/recovery:ro" forest deployment-recovery plan --data-dir /data --artifact /recovery/backup.forest-backup --passphrase-file /recovery/passphrase --target-database forest_restore_0123456789abcdefabcd_0000
+docker compose run --rm --no-deps -v "${PWD}/recovery:/recovery:ro" forest deployment-recovery apply --data-dir /data --recovery-id <recovery-id> --plan-digest <sha256:...> --passphrase-file /recovery/passphrase
+docker compose up -d --wait forest
+```
+
+原生部署在 `plan` 中用 `--target-dsn-file` 传递恢复库 URI。`plan` 和 `apply` 都会认证解密工件、精确核对 schema/身份并逐表重算 binary COPY 摘要；`apply` 以本地 CAS 原子推进有效目标。旧部署库保留且不再是该数据目录的 head。完整失败边界见[部署控制面离线恢复](doc/p5-deployment-recovery.md)。
 
 ## 使用 Python 开发
 
