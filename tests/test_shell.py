@@ -122,6 +122,36 @@ async def test_control_status_works_while_chat_execution_slot_is_occupied_and_bo
         await asyncio.gather(chats.close(), controls.close())
 
 
+async def test_core_status_and_disable_use_reserved_p0_control_capacity(messages):
+    repository, lease, _ = messages
+    await allow(repository, "user-1")
+    status = await receive(repository, lease, "core-status", text="#forest core status")
+    disable = await receive(
+        repository,
+        lease,
+        "core-disable",
+        text='#forest core disable --expect-maintenance 1 --reason "故障隔离"',
+    )
+    before = await shell_records(repository)
+    assert {row["command_id"]: row["priority"] for row in before} == {
+        status["command_id"]: 0,
+        disable["command_id"]: 0,
+    }
+    controls = dispatcher(repository, lease)
+    try:
+        await controls._process(status["command_id"])
+        await controls._process(disable["command_id"])
+        results = {row["command_id"]: row for row in await shell_records(repository)}
+        assert results[status["command_id"]]["outcome"]["code"] == "STATUS"
+        paused = results[disable["command_id"]]["outcome"]
+        assert paused["code"] == "BOT_MAINTENANCE"
+        assert paused["maintenance_epoch"] == 2
+        runtime = await repository.store.runtime()
+        assert not runtime["data_admission"] and runtime["control_admission"]
+    finally:
+        await controls.close()
+
+
 async def test_unknown_sensitive_command_produces_only_fixed_safe_reply(messages):
     repository, lease, _ = messages
     await allow(repository, "user-1")

@@ -65,6 +65,13 @@ def command(text, *, extras=(), self_message=False):
      {"component_id": "forest.weather"}, 1),
     ("#forest module reload forest.weather --expect-revision 18", "module.reload",
      {"component_id": "forest.weather", "expected_revision": 18}, 1),
+    ("#forest core status", "core.status", {}, 0),
+    ('#forest core cancel run:1 --reason "紧急停止" --expect-checkpoint 7', "run.cancel",
+     {"run_id": "run:1", "expected_checkpoint_seq": 7, "reason": "紧急停止"}, 0),
+    ('#forest core disable --reason "组件故障" --expect-maintenance 9', "bot.pause",
+     {"expected_maintenance_epoch": 9, "data_admission": False, "reason": "组件故障"}, 0),
+    ("#forest core reload forest.weather --expect-revision 18", "module.reload",
+     {"component_id": "forest.weather", "expected_revision": 18}, 1),
 ])
 def test_typed_commands(text, name, payload, priority):
     parsed = command(text)
@@ -93,6 +100,10 @@ def test_typed_commands(text, name, payload, priority):
     '#forest module reload component',
     '#forest module reload component --expect-revision 0',
     '#forest module reload component --expect-revision 1 --expect-revision 2',
+    '#forest core status extra', '#forest core cancel run --expect-checkpoint 1',
+    '#forest core cancel run --expect-checkpoint 1 --reason ""',
+    '#forest core disable --expect-maintenance -1 --reason stop',
+    '#forest core reload component --expect-revision 0',
     '#forest job run a --expect-revision 1; rm anything', '#forest confirm SECRET',
     '#forest job status ' + 'a' * 129,
     '#forest ' + 'a' * 4096,
@@ -116,11 +127,11 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v8():
-    assert command("#forest status").gate_version == "shell-gate-v8"
-    assert command("#forest memory list").gate_version == "shell-gate-v8"
-    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v8"
-    assert command("#forest component-job list").gate_version == "shell-gate-v8"
-    assert command("#forest audit list").gate_version == "shell-gate-v8"
-    assert command("#forest context inspect").gate_version == "shell-gate-v8"
-    assert command("#forest module status forest.weather").gate_version == "shell-gate-v8"
+def test_new_admissions_are_explicitly_shell_gate_v9():
+    assert command("#forest status").gate_version == "shell-gate-v9"
+    assert command("#forest memory list").gate_version == "shell-gate-v9"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v9"
+    assert command("#forest component-job list").gate_version == "shell-gate-v9"
+    assert command("#forest audit list").gate_version == "shell-gate-v9"
+    assert command("#forest context inspect").gate_version == "shell-gate-v9"
+    assert command("#forest module status forest.weather").gate_version == "shell-gate-v9"

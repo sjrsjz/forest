@@ -21,10 +21,10 @@ from forest.packages import digest_json
 from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
-from forest.storage.shell_payloads_v8 import (
+from forest.storage.shell_payloads_v9 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
 )
-from forest.storage.shell_payloads_v8 import (
+from forest.storage.shell_payloads_v9 import (
     ShellPayloadStore,
     arguments_metadata,
     delivery_metadata,

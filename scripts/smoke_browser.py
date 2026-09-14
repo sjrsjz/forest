@@ -363,10 +363,12 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             group_message(1, '不触发的群聊消息')
             expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 1', timeout=15000)
             expect(page.locator('#delivery-list')).to_contain_text('暂无发送记录')
-            group_message(2, '/chat 浏览器接入验证')
+            group_message(2, '#forest core status')
+            expect(page.locator('#delivery-list')).to_contain_text('Forest 状态', timeout=20000)
+            group_message(3, '/chat 浏览器接入验证')
             expect(page.locator('#delivery-list')).to_contain_text('SENT', timeout=20000)
             compose('exec','-T','forest','python','-c',"from pathlib import Path; Path('/tmp/onebot-unknown').touch()")
-            group_message(3, '/chat 等待核对的消息')
+            group_message(4, '/chat 等待核对的消息')
             expect(page.locator('#delivery-list')).to_contain_text('UNKNOWN', timeout=20000)
             resolution = page.locator('#delivery-list form').first
             resolution.locator('[name="decision"]').select_option('SKIP')
@@ -393,7 +395,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             page.locator('#binding-config button[type="submit"]').click()
             page.locator('#apply-binding').click()
             expect(page.locator('#binding-state')).to_contain_text('已生效 2', timeout=30000)
-            group_message(4, '/chat 使用真正 Agent 链路')
+            group_message(5, '/chat 使用真正 Agent 链路')
             expect(page.locator('#delivery-list')).to_contain_text('浏览器 Agent 已回复', timeout=20000)
             page.locator('#agent-refresh').click()
             expect(page.locator('#agent-runs')).to_contain_text('COMPLETED', timeout=15000)
@@ -466,8 +468,8 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#job-current')).to_contain_text('修订 2')
             expect(page.locator('#job-current')).to_contain_text('已停用')
             expect(page.locator('#job-runs')).to_contain_text('平台已确认送达')
-            group_message(5, '/chat 重启后继续')
-            expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 6', timeout=20000)
+            group_message(6, '/chat 重启后继续')
+            expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 7', timeout=20000)
             select_bot(page, beta)
             check_memory(beta, 'beta', has_key=False)
             invoke(1, "：4（状态修订 2）")
@@ -676,6 +678,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "component two-tab conflict preserves draft",
                         "Bot configuration and state recover after restart",
                         "OneBot Web configuration and credentials stay private",
+                        "real P0 Core status admission, CONTROL reply and context projection",
                         "real HTTP ingress, silent context, template reply and delivery",
                         "Web model configuration, real Agent HTTP reply and credential recovery after restart",
                         "Web Jobs source refresh, preview/apply, idempotent manual Agent reply, delivery, disable and restart persistence",

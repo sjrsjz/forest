@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.shell_registry import CONTROL_DEADLINE
-from forest.shell_registry_v8 import get_command_spec, render_help
+from forest.shell_registry_v9 import get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore

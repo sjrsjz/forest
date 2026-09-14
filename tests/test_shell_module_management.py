@@ -129,7 +129,7 @@ async def test_shell_lists_metadata_and_reload_creates_an_ordinary_config_revisi
         repository,
         lease,
         "module-complete",
-        text=f"#forest module reload {COMPONENT} --expect-revision 2",
+        text=f"#forest core reload {COMPONENT} --expect-revision 2",
     )
     controls.command_timeout = 5
     await controls._process(incoming["command_id"])

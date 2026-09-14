@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.shell_registry_v8 import command_action
+from forest.shell_registry_v9 import command_action
 from forest.storage.control import BotControl
 
 

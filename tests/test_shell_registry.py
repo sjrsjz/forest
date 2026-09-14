@@ -26,6 +26,7 @@ from forest.shell_registry import (
     registry_manifest,
     render_help,
 )
+from forest.shell_registry_v9 import get_command_spec as get_current_command_spec
 
 
 def test_contract_export_is_detached_and_cannot_change_execution_or_help():
@@ -95,7 +96,9 @@ def test_every_advertised_form_and_alias_is_accepted_with_exact_schema(spec):
         validator.validate(payload)
         rendered = "#forest " + shlex.join(words[1:])
         parsed = command(rendered)
-        assert (parsed.name, parsed.payload, parsed.priority) == (spec.command_key, payload, spec.priority)
+        assert (parsed.name, parsed.payload) == (spec.command_key, payload)
+        current = get_current_command_spec(parsed.name, parsed.gate_version)
+        assert current is not None and parsed.priority == current.priority
         for alias, canonical in DOMAIN_ALIASES_V2.items():
             if form.words and form.words[0] == canonical:
                 aliased = command("#forest " + shlex.join([alias, *words[2:]]))

@@ -153,7 +153,8 @@ async def test_urgent_cancel_has_a_slot_while_normal_control_is_waiting(messages
         await controls.start()
         await asyncio.wait_for(entered.wait(), 3)
         await receive(repository, lease, "cancel", text=
-            f'#forest run cancel {head["run_id"]} --expect-checkpoint {head["checkpoint_seq"]} --reason test')
+            f'#forest core cancel {head["run_id"]} --expect-checkpoint '
+            f'{head["checkpoint_seq"]} --reason test')
         controls.notify()
         await until(lambda: completed(repository, 1))
         assert not release.is_set()
@@ -188,7 +189,7 @@ async def test_shell_memory_forget_plan_is_bound_to_origin_group(messages):
         number="memory-plan",
         group="group-1",
     )
-    assert plan_claim["gate_version"] == "shell-gate-v8"
+    assert plan_claim["gate_version"] == "shell-gate-v9"
     _, proposal = await controls._typed(lease, plan_claim)
     apply_text = (
         f"#forest memory forget-apply {proposal['plan_id']} --digest {proposal['plan_digest']} "

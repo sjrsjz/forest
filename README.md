@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，并分别由 writer v3/v4 隔离旧写者；Shell v7 的上下文检查和异步本地裁剪请求由 writer v5 隔离旧执行器。剩余部署正文族、部署控制面整库恢复、完整管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
+**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 P0/P1 Core 救援 form。剩余部署正文族、部署控制面整库恢复、完整管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -29,7 +29,7 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 
 在同一 Bot 的记忆面板配置图文嵌入服务、密钥、允许的图片来源，以及索引、下载和查询预算，预览后启用。后台独立捕获原图并索引已接纳的全群消息；Agent 可根据触发消息的文字和图片召回其他群的记忆，结果逐条标注群及作者。文本模型会在调用时移除图片，图片索引与召回仍可工作。来源列表按群和作者展示完整图文来源；遗忘先生成影响预览，再以删除版本 CAS 提交，召回立即抑制，正文由后台分批清理。当前支持 `jina-clip-v2` 原生图文协议；配置、费用语义与未完成边界见[记忆运行说明](doc/p4-memory-runtime.md)和[来源管理说明](doc/p4-memory-administration.md)。
 
-「计划任务」可配置 interval/cron、时区、补跑规则、并发限制和委托期限，预览后保存，也可以立即执行、停用或取消待处理任务。任务按同一群聊触发队列运行，进入该会话唯一的 Agent Session，不另开模型 Agent 或群响应链。群内管理员可用 `#forest status` 读取维护版本，使用 `#forest bot pause --expect-maintenance <版本> --reason "原因"` 或对应的 `bot resume` 命令紧急暂停、恢复本 Bot，也可通过 `run list`、`jobs list` 和 `memory list` 查询并按显示版本取消、审批或遗忘本群来源。`context inspect` 只显示发令群的视图、队列和 Agent 元数据；`context compact --expect-view <版本>` 只登记异步请求，由该群唯一 Actor 在下一模型调用安全点按 CAS 执行本地裁剪，不调用摘要模型。`event` 管理组件事件，`component-job` 单独管理插件持久任务；`audit list`（别名 `log/logs list`）按稳定游标读取当前 Bot 的脱敏审计元数据，不打开宿主终端或进入 Agent。实际语法和授权边界见[群聊 Shell 详细设计](doc/09-group-shell-command-system.md)。
+「计划任务」可配置 interval/cron、时区、补跑规则、并发限制和委托期限，预览后保存，也可以立即执行、停用或取消待处理任务。任务按同一群聊触发队列运行，进入该会话唯一的 Agent Session，不另开模型 Agent 或群响应链。群内管理员可用 `#forest status` 读取维护版本，使用 `#forest bot pause --expect-maintenance <版本> --reason "原因"` 或对应的 `bot resume` 命令紧急暂停、恢复本 Bot，也可通过 `run list`、`jobs list` 和 `memory list` 查询并按显示版本取消、审批或遗忘本群来源。固定 `core status/cancel/disable/reload` 在插件故障时复用相同 Run、维护版本和组件配置权威，其中 status/cancel/disable 使用 P0 保留控制容量，且 Core 不是服务器终端。`context inspect` 只显示发令群的视图、队列和 Agent 元数据；`context compact --expect-view <版本>` 只登记异步请求，由该群唯一 Actor 在下一模型调用安全点按 CAS 执行本地裁剪，不调用摘要模型。`event` 管理组件事件，`component-job` 单独管理插件持久任务；`audit list`（别名 `log/logs list`）按稳定游标读取当前 Bot 的脱敏审计元数据，不打开宿主终端或进入 Agent。实际语法和授权边界见[群聊 Shell 详细设计](doc/09-group-shell-command-system.md)。
 
 Docker 内连接宿主机 OneBot 时，API 地址可使用 `http://host.docker.internal:5700`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。OneBot 上报必须能访问 Forest 的 HTTP 入口。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)。
 

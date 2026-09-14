@@ -6,10 +6,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry_v8 import (
+from forest.shell_registry_v9 import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V8,
-    SIMPLE_COMMANDS_V8,
+    DOMAIN_ALIASES_V9,
+    SIMPLE_COMMANDS_V9,
     get_command_spec,
 )
 
@@ -82,11 +82,31 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V8:
-        return _command(SIMPLE_COMMANDS_V8[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V9:
+        return _command(SIMPLE_COMMANDS_V9[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V8.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V9.get(words[0], words[0]), words[1]
+    if (domain, verb) == ("core", "cancel") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-checkpoint", "--reason"})
+        return _command("run.cancel", {
+            "run_id": _identity(words[2]),
+            "expected_checkpoint_seq": _revision(options["--expect-checkpoint"]),
+            "reason": _reason(options["--reason"]),
+        })
+    if (domain, verb) == ("core", "disable") and len(words) >= 2:
+        options = _options(words[2:], {"--expect-maintenance", "--reason"})
+        return _command("bot.pause", {
+            "expected_maintenance_epoch": _revision(options["--expect-maintenance"]),
+            "data_admission": False,
+            "reason": _reason(options["--reason"]),
+        })
+    if (domain, verb) == ("core", "reload") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision"})
+        return _command("module.reload", {
+            "component_id": _identity(words[2]),
+            "expected_revision": _positive_revision(options["--expect-revision"]),
+        })
     if (domain, verb) == ("module", "list") and len(words) == 2:
         return _command("module.read")
     if (domain, verb) == ("module", "status") and len(words) == 3:
