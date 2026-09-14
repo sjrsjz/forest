@@ -2,7 +2,7 @@
 
 ## 1. 范围
 
-`shell-gate-v8` 首次提供、当前 v9 完整继承：
+`shell-gate-v8` 首次提供、当前 v10 完整继承：
 
 ```text
 #forest module list
@@ -10,7 +10,7 @@
 #forest module reload <component_id> --expect-revision <desired_revision>
 ```
 
-`modules` 是 `module` 的确定性别名。v8 首次发布这些 form；新请求现由 v9 接纳，已经排队的 v2–v8 请求继续按各自 gate 解释，不会被新语法重新解析。v9 的固定 `core reload` 复用这里的同一 reload 权威；`module validate/enable/disable` 仍未实现，不能用本协议冒充。
+`modules` 是 `module` 的确定性别名。v8 首次发布这些 form；新请求现由 v10 接纳，已经排队的 v2–v9 请求继续按各自 gate 解释，不会被新语法重新解析。v9 的固定 `core reload` 复用这里的同一 reload 权威；`module validate/enable/disable` 仍未实现，不能用本协议冒充。
 
 ## 2. 查询投影
 

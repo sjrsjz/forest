@@ -6,7 +6,8 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.shell_registry_v9 import command_action
+from forest.shell_authority import is_shell_admin
+from forest.shell_registry_v10 import command_action
 from forest.storage.control import BotControl
 
 
@@ -190,6 +191,6 @@ class ShellControl(BotControl):
             conn, self.store.bot_id, self.binding_id,
             expected_binding_epoch=self.binding["binding_epoch"],
         )
-        if self.author is None or self.author.get("external_user_id") not in settings["config"].get("admin_user_ids", []):
+        if not is_shell_admin(self.author, settings["config"]):
             raise ForestError("SHELL_FORBIDDEN", "Command author is not a current Bot administrator", 403)
         await self.messages.bindings._final_guard(conn, self.lease, self.binding, data=False, require_config=True)

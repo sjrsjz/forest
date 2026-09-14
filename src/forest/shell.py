@@ -7,8 +7,9 @@ from collections.abc import Callable
 from uuid import uuid4
 
 from forest.errors import ForestError
+from forest.shell_authority import is_shell_admin
 from forest.shell_registry import CONTROL_DEADLINE
-from forest.shell_registry_v9 import get_command_spec, render_help
+from forest.shell_registry_v10 import get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore
@@ -139,14 +140,7 @@ class ShellDispatcher:
                         conn, self.runtime.bot_id, claim["binding_id"],
                         expected_binding_epoch=claim["binding_epoch"],
                     )
-                    admins = settings["config"].get("admin_user_ids", [])
-                    authorized = (
-                        not author.get("is_self") and author.get("anonymous") is None
-                        and author.get("identity_origin") == "adapter_verified"
-                        and isinstance(admins, list)
-                        and all(isinstance(admin, str) for admin in admins)
-                        and author.get("external_user_id") in admins
-                    )
+                    authorized = is_shell_admin(author, settings["config"])
                     runtime_state = binding["_runtime"]
                     paused = not runtime_state["data_admission"]
                     if authorized and builtin_method == "status":

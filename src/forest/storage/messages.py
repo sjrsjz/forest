@@ -18,13 +18,14 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.shell_authority import qualify_priority
 from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
-from forest.storage.shell_payloads_v9 import (
+from forest.storage.shell_payloads_v10 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
 )
-from forest.storage.shell_payloads_v9 import (
+from forest.storage.shell_payloads_v10 import (
     ShellPayloadStore,
     arguments_metadata,
     delivery_metadata,
@@ -269,6 +270,21 @@ class MessageStore:
             )
             if binding["self_id"] != value["self_id"] or binding["platform"] != value["platform"]:
                 raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
+            priority_admission = None
+            if parsed_command is not None:
+                settings = await self.bindings.current_config_in(
+                    conn,
+                    self.store.bot_id,
+                    binding_id,
+                    expected_binding_epoch=binding["binding_epoch"],
+                )
+                priority_admission = {
+                    **qualify_priority(
+                        parsed_command.priority, value["author"], settings["config"]
+                    ),
+                    "priority_basis_binding_epoch": binding["binding_epoch"],
+                    "priority_basis_config_revision": settings["effective_revision"],
+                }
             await conn.execute(
                 "INSERT INTO public.bot_conversations(bot_id,conversation_id,binding_id,platform,"
                 "channel_kind,channel_id,thread_id,group_source_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
@@ -346,15 +362,21 @@ class MessageStore:
                 await conn.execute(
                     "INSERT INTO public.bot_shell_requests(bot_id,command_id,event_id,conversation_id,"
                     "binding_id,command_name,raw_digest,arguments,arguments_payload_id,"
-                    "arguments_payload_digest,arguments_metadata,priority,gate_version) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s)",
+                    "arguments_payload_digest,arguments_metadata,priority,gate_version,"
+                    "requested_priority,priority_eligible,priority_policy,"
+                    "priority_basis_binding_epoch,priority_basis_config_revision) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (self.store.bot_id, command_id, event_id, conversation_id, binding_id,
                      shell_command, digest_json(value["segments"]),
                      arguments_ref.payload_id, arguments_ref.digest,
                      Jsonb(arguments_metadata(
                          shell_command, parsed_command.gate_version, parsed_command.payload
-                     )), parsed_command.priority,
-                     parsed_command.gate_version),
+                     )), priority_admission["priority"], parsed_command.gate_version,
+                     priority_admission["requested_priority"],
+                     priority_admission["priority_eligible"],
+                     priority_admission["priority_policy"],
+                     priority_admission["priority_basis_binding_epoch"],
+                     priority_admission["priority_basis_config_revision"]),
                 )
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"

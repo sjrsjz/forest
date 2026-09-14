@@ -127,11 +127,11 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v9():
-    assert command("#forest status").gate_version == "shell-gate-v9"
-    assert command("#forest memory list").gate_version == "shell-gate-v9"
-    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v9"
-    assert command("#forest component-job list").gate_version == "shell-gate-v9"
-    assert command("#forest audit list").gate_version == "shell-gate-v9"
-    assert command("#forest context inspect").gate_version == "shell-gate-v9"
-    assert command("#forest module status forest.weather").gate_version == "shell-gate-v9"
+def test_new_admissions_are_explicitly_shell_gate_v10():
+    assert command("#forest status").gate_version == "shell-gate-v10"
+    assert command("#forest memory list").gate_version == "shell-gate-v10"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v10"
+    assert command("#forest component-job list").gate_version == "shell-gate-v10"
+    assert command("#forest audit list").gate_version == "shell-gate-v10"
+    assert command("#forest context inspect").gate_version == "shell-gate-v10"
+    assert command("#forest module status forest.weather").gate_version == "shell-gate-v10"

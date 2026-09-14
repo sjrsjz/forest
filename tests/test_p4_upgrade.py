@@ -361,6 +361,28 @@ async def test_actual_p3_upgrade_preserves_nonempty_history_and_exact_wire(upgra
             }
             migrated = (await snapshot(conn, MEMORY_TABLES))["bot_memory_source_units"]
             assert len(migrated) == 6 and all(row["kind"] == "INPUT" for row in migrated)
+            priority_rows = await (
+                await conn.execute(
+                    "SELECT priority,requested_priority,priority_eligible,priority_policy,"
+                    "priority_basis_binding_epoch,priority_basis_config_revision "
+                    "FROM public.bot_shell_requests"
+                )
+            ).fetchall()
+            assert priority_rows and all(
+                row["requested_priority"] == row["priority"]
+                and not row["priority_eligible"]
+                and row["priority_policy"] == "legacy-v1"
+                and row["priority_basis_binding_epoch"] is None
+                and row["priority_basis_config_revision"] is None
+                for row in priority_rows
+            )
+            result_guard = await (
+                await conn.execute(
+                    "SELECT tgenabled FROM pg_trigger WHERE tgrelid="
+                    "'public.bot_shell_requests'::regclass AND tgname='bot_shell_result_guard'"
+                )
+            ).fetchone()
+            assert result_guard["tgenabled"] == "O"
         assert [u["unit_id"] for u in before["bot_context_units"] if not u["visible"]] == [
             "event-1"
         ]

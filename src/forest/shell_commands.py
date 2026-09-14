@@ -6,10 +6,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry_v9 import (
+from forest.shell_registry_v10 import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V9,
-    SIMPLE_COMMANDS_V9,
+    DOMAIN_ALIASES_V10,
+    SIMPLE_COMMANDS_V10,
     get_command_spec,
 )
 
@@ -82,11 +82,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V9:
-        return _command(SIMPLE_COMMANDS_V9[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V10:
+        return _command(SIMPLE_COMMANDS_V10[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V9.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V10.get(words[0], words[0]), words[1]
     if (domain, verb) == ("core", "cancel") and len(words) >= 3:
         options = _options(words[3:], {"--expect-checkpoint", "--reason"})
         return _command("run.cancel", {

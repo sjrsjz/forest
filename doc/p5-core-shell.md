@@ -2,7 +2,7 @@
 
 ## 1. 当前命令
 
-`shell-gate-v9` 在 Host 内固定以下最小救援语法：
+`shell-gate-v9` 在 Host 内首次固定、当前 `shell-gate-v10` 完整继承以下最小救援语法：
 
 ```text
 #forest core status
@@ -11,7 +11,7 @@
 #forest core reload <component_id> --expect-revision <desired_revision>
 ```
 
-`core status/cancel/disable` 是 P0；`core reload` 是 P1。旧 v2–v8 请求继续使用接纳时持久保存的 gate 和 priority，其中旧 `core status` 仍是 P1，不会因升级被重新排队。迁移 067 把 writer generation 提升为 7，使不认识 v9 grammar 与新优先级的 generation-6 Host 永久失去写权。
+`core status/cancel/disable` 声明 P0；`core reload` 是 P1。v10 只有在可信发言主体命中当前 Binding 管理员名单时才保留声明的 P0，否则实际持久为 P1。旧 v2–v9 请求继续使用接纳时持久保存的 gate 和 priority，其中 v2–v8 的旧 `core status` 仍是 P1，不会因升级被重新排队。迁移 067 把 writer generation 提升为 7，排除不认识 v9 grammar 的 generation-6 Host；迁移 068 再提升为 8，排除不会生成 v10 优先级依据的 generation-7 Host。
 
 Core 不是服务器终端、交互式 Shell 或第二套管理框架。它不接受自由 argv、脚本、路径、环境变量、密钥、跨 Bot 目标或插件注册命令。解析只依赖发行版内的冻结 token、封闭参数 schema 和固定动作映射；业务插件及其 Worker 不能覆盖这些 form。
 
@@ -30,13 +30,13 @@ Core 不是服务器终端、交互式 Shell 或第二套管理框架。它不�
 
 ## 3. P0 容量与权限
 
-控制调度器按持久 priority 排序，并在并发上限大于一时为 priority 0 保留至少一个执行槽。普通 P1 查询占满其份额时，新的 `core cancel`、`core disable` 和 v9 `core status` 仍可被领取；它们不能抢断已经进入提交阶段的事务，也不能撤销已经提交的外部效果。`core reload` 需要候选准备和排空，保持 P1，不能借 Core 前缀占用紧急槽。
+控制调度器按持久 priority 排序，并在并发上限大于一时为 priority 0 保留至少一个执行槽。普通 P1 查询占满其份额时，通过 v10 预检的 `core cancel`、`core disable` 和 `core status` 仍可被领取；它们不能抢断已经进入提交阶段的事务，也不能撤销已经提交的外部效果。`core reload` 需要候选准备和排空，保持 P1，不能借 Core 前缀占用紧急槽。
 
-所有 Core form 仍要求 Adapter 验证的真实发言主体位于当前 Binding 的 `admin_user_ids`。每个事务复核命令 claim/epoch/期限、Binding epoch、当前配置正文、Host incarnation、Bot policy 和目标业务版本；平台群主标记、昵称、引用消息、匿名身份和 Bot echo 都不能授权。`core status` 也先完成相同管理员与 Binding 最终检查，未授权只返回固定拒绝。
+所有 Core form 仍要求 Adapter 验证的真实发言主体位于当前 Binding 的 `admin_user_ids`。接纳事务持有 Binding 行锁并读取有效配置正文，把声明优先级、实际优先级、资格结果、策略名、Binding epoch 和 effective config revision 一起写成不可变事实；因此配置发布与请求接纳只有一个数据库顺序。每个执行事务再复核命令 claim/epoch/期限、Binding epoch、当前配置正文、Host incarnation、Bot policy 和目标业务版本；平台群主标记、昵称、引用消息、匿名身份和 Bot echo 都不能授权。`core status` 也完成相同最终检查，未授权只返回固定拒绝。接纳后撤权会拒绝操作；接纳后加权可以让请求执行，但不会追溯提升已经持久的 P1。
 
 P0 表示调度容量，不表示更高权限或数据库锁优先级。两条 `core disable` 基于相同 maintenance epoch 时只有一条成功；cancel 与最终回答提交按 Run 守卫决胜；Core 与普通 reload 基于相同 config revision 时只有一个能生成下一 revision。失败方收到现有的 `MAINTENANCE_CONFLICT`、Run 终态或 `REVISION_CONFLICT`，不能以到达顺序覆盖胜者。
 
-当前 P0 保留只覆盖已接纳的授权命令与普通 P1 控制任务之间的容量竞争。管理员资格仍在持久化之后由执行器复核；入站前资格索引与独立拒绝预算尚未实现，因此恶意伪造的 P0 命令洪泛仍是容量治理缺口。
+当前预检已阻止未授权命令占用 `bot_shell_requests` 的 P0 保留槽，但它发生在同一消息接纳事务内，群消息 Inbox 和正文载荷此前仍使用共享接入容量。独立拒绝预算、接入前资格缓存、主体速率限制与专用数据库连接份额尚未实现；伪造命令洪泛仍可能压迫公共接入路径，已获授权但失陷的管理员也仍可提交大量 P0 请求。
 
 ## 4. 正文、恢复与验证
 
@@ -44,4 +44,4 @@ Core 参数从首次接收起进入 `shell.arguments` payload，不进入 Agent 
 
 相同 command ID 重试读取原业务回执，不能重复取消、递增 maintenance epoch 或创建配置 revision。`core reload` 还继承 module reload 的两阶段恢复：apply 已提交而外层回执尚未写入时，Host 核对实际 apply 输入、结果、来源和 revision 后补齐回执。
 
-验证覆盖 v2–v8 冻结兼容、v9 manifest/form/priority、非法参数不保留、真实 PostgreSQL P0 status/disable、普通控制占槽时的 Core cancel、Core reload 完整 CONTROL 回执、Web/config CAS，以及 generation-6 连接在 067 提交后无法再次取得写权。Core 当前不提供主机进程、部署数据库或存储灾难恢复能力；这些必须由单独的受控本机恢复与 ops profile 协议完成。
+验证覆盖 v2–v9 冻结兼容、v10 priority-admission manifest、非法参数不保留、匿名/伪造主体降级、接纳后加权与撤权、优先级依据不可变、真实 PostgreSQL P0 status/disable、普通控制占槽时的 Core cancel、Core reload 完整 CONTROL 回执、Web/config CAS，以及 generation-7 连接在 068 提交后无法再次取得写权。Core 当前不提供主机进程、部署数据库或存储灾难恢复能力；这些必须由单独的受控本机恢复与 ops profile 协议完成。

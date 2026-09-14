@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 from uuid import uuid4
 
+import psycopg
 import pytest
 from binding_seed import _ticket_factory
 from test_group_scheduler import row, until
@@ -76,19 +77,26 @@ async def completed(repository, number):
 async def test_unauthorized_platform_admin_and_anonymous_cannot_use_control_allowlist(messages):
     repository, lease, _ = messages
     await allow(repository, "trusted", "anonymous-shared")
-    forged = event(1, user="not-listed", text="#forest status")
+    forged = event(1, user="not-listed", text="#forest core status")
     forged["author"]["role"] = "owner"
-    anonymous = event(2, user="anonymous-shared", text="#forest status")
+    anonymous = event(2, user="anonymous-shared", text="#forest core status")
     anonymous["author"]["anonymous"] = {"id": "anon-id", "name": "trusted"}
     await repository.ingest(lease, "binding-a", forged)
     await repository.ingest(lease, "binding-a", anonymous)
-    await receive(repository, lease, 3, user="trusted", text="#forest help")
+    await receive(repository, lease, 3, user="trusted", text="#forest core status")
+    admitted = await shell_records(repository)
+    assert [row["requested_priority"] for row in admitted] == [0, 0, 0]
+    assert [row["priority"] for row in admitted] == [1, 1, 0]
+    assert [row["priority_eligible"] for row in admitted] == [False, False, True]
+    assert {row["priority_policy"] for row in admitted} == {"current-binding-admin-v1"}
+    assert all(row["priority_basis_binding_epoch"] >= 1 for row in admitted)
+    assert all(row["priority_basis_config_revision"] >= 1 for row in admitted)
     instance = dispatcher(repository, lease)
     try:
         await instance.start()
         await until(lambda: completed(repository, 3))
         outcomes = await shell_records(repository)
-        assert [r["outcome"]["code"] for r in outcomes] == ["DENIED", "DENIED", "HELP"]
+        assert [r["outcome"]["code"] for r in outcomes] == ["DENIED", "DENIED", "STATUS"]
         assert not instance.failure
     finally:
         await instance.close()
@@ -172,7 +180,9 @@ async def test_unknown_sensitive_command_produces_only_fixed_safe_reply(messages
 async def test_allowlist_replacement_before_complete_prevents_stale_status_receipt(messages):
     repository, lease, _ = messages
     await allow(repository, "user-1")
-    command = await receive(repository, lease, 1, text="#forest status")
+    command = await receive(repository, lease, 1, text="#forest core status")
+    admitted = await shell_record(repository, command["command_id"])
+    assert admitted["priority"] == 0 and admitted["priority_eligible"]
     before_complete, resume = asyncio.Event(), asyncio.Event()
     original = repository.complete_control
     first = True
@@ -199,6 +209,47 @@ async def test_allowlist_replacement_before_complete_prevents_stale_status_recei
     finally:
         resume.set()
         await instance.close()
+
+
+async def test_later_allowlist_grant_does_not_retroactively_promote_persisted_priority(messages):
+    repository, lease, _ = messages
+    command = await receive(repository, lease, 1, text="#forest core status")
+    before = await shell_record(repository, command["command_id"])
+    assert (before["requested_priority"], before["priority"], before["priority_eligible"]) == (
+        0,
+        1,
+        False,
+    )
+    basis = (
+        before["priority_policy"],
+        before["priority_basis_binding_epoch"],
+        before["priority_basis_config_revision"],
+    )
+    await allow(repository, "user-1")
+    controls = dispatcher(repository, lease)
+    try:
+        await controls._process(command["command_id"])
+        after = await shell_record(repository, command["command_id"])
+        assert after["outcome"]["code"] == "STATUS"
+        assert (after["requested_priority"], after["priority"], after["priority_eligible"]) == (
+            0,
+            1,
+            False,
+        )
+        assert (
+            after["priority_policy"],
+            after["priority_basis_binding_epoch"],
+            after["priority_basis_config_revision"],
+        ) == basis
+        async with repository.store.pool.connection() as conn:
+            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+                await conn.execute(
+                    "UPDATE public.bot_shell_requests SET priority_eligible=true "
+                    "WHERE bot_id=%s AND command_id=%s",
+                    (repository.store.bot_id, command["command_id"]),
+                )
+    finally:
+        await controls.close()
 
 
 async def test_one_control_failure_does_not_block_another_binding(messages):

@@ -111,7 +111,7 @@ async def test_group_shell_audit_is_bot_scoped_control_output_without_body(messa
         number="audit-first",
         group="group-1",
     )
-    assert first["gate_version"] == "shell-gate-v9"
+    assert first["gate_version"] == "shell-gate-v10"
     text, outcome = await controls._typed(lease, first)
     assert outcome == {
         "code": "AUDIT_STATUS", "count": 2, "next_before": "audit:shell-b"
