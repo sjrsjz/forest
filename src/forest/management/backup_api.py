@@ -27,6 +27,20 @@ class StageRestore(Body):
     current_password: str = Field(min_length=12, max_length=1024)
 
 
+class CleanupPlan(Body):
+    pass
+
+
+class CleanupApply(Body):
+    plan_id: str = Field(min_length=1, max_length=128)
+    plan_digest: str = Field(min_length=1, max_length=128)
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
+class CleanupRetry(Body):
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
 def install_backup_routes(app, runtime) -> None:
     def manager():
         if runtime.backups is None:
@@ -113,6 +127,58 @@ def install_backup_routes(app, runtime) -> None:
         if runtime.restores is None:
             raise ForestError("RESTORE_SERVICE_UNAVAILABLE", "Restore service is unavailable", 503)
         return runtime.restores
+
+    def cleanup():
+        if runtime.cleanup is None:
+            raise ForestError("CLEANUP_SERVICE_UNAVAILABLE", "Cleanup service is unavailable", 503)
+        return runtime.cleanup
+
+    @app.post("/management/v1/backups/{backup_id}/cleanup-plan")
+    async def plan_backup_cleanup(backup_id: str, body: CleanupPlan, request: Request):
+        session = await runtime.principal(request, write=True)
+        return await cleanup().plan(
+            kind="BACKUP_ARTIFACT", resource_id=backup_id,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.post("/management/v1/restore-stages/{restore_id}/cleanup-plan")
+    async def plan_restore_cleanup(restore_id: str, body: CleanupPlan, request: Request):
+        session = await runtime.principal(request, write=True)
+        return await cleanup().plan(
+            kind="RESTORE_STAGE", resource_id=restore_id,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.post("/management/v1/storage-cleanups", status_code=202)
+    async def apply_cleanup(body: CleanupApply, request: Request):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        return await cleanup().apply(
+            plan_id=body.plan_id, plan_digest=body.plan_digest,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, idempotency_key=key(request),
+        )
+
+    @app.get("/management/v1/storage-cleanups/{cleanup_id}")
+    async def read_cleanup(cleanup_id: str, request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        return await cleanup().read(
+            cleanup_id=cleanup_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.post("/management/v1/storage-cleanups/{cleanup_id}/retry", status_code=202)
+    async def retry_cleanup(cleanup_id: str, body: CleanupRetry, request: Request):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        return await cleanup().retry(
+            cleanup_id=cleanup_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, idempotency_key=key(request),
+        )
 
     @app.get("/management/v1/restore-stages")
     async def restore_stages(request: Request):

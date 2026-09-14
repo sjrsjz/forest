@@ -39,10 +39,16 @@ _DATABASE_KEYS = {
 }
 _TABLE_KEYS = {"name", "member", "rows", "columns", "copied_columns"}
 _COLUMN_KEYS = {"name", "type", "not_null", "identity", "generated"}
-_JOB_SELECT = "SELECT * FROM restore_stage_jobs "
+_JOB_SELECT = (
+    "SELECT j.*,c.cleanup_id,c.state AS cleanup_state,c.error_code AS cleanup_error_code,"
+    "c.completed_at AS cleanup_completed_at FROM restore_stage_jobs j "
+    "LEFT JOIN storage_cleanup_jobs c ON c.resource_kind='RESTORE_STAGE' "
+    "AND c.resource_id=j.restore_id "
+)
 _PUBLIC_KEYS = (
     "restore_id", "backup_id", "state", "owner_epoch", "database_total",
-    "database_completed", "manifest_digest", "error_code", "created_at", "updated_at",
+    "database_completed", "manifest_digest", "error_code", "expires_at", "created_at", "updated_at",
+    "cleanup_id", "cleanup_state", "cleanup_error_code", "cleanup_completed_at",
 )
 
 
@@ -126,7 +132,7 @@ class RestoreManager:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._authorize(conn, subject_id, session_token_hash, expected_password_hash)
             previous = await (await conn.execute(
-                _JOB_SELECT + "WHERE subject_id=%s AND idempotency_key=%s",
+                _JOB_SELECT + "WHERE j.subject_id=%s AND j.idempotency_key=%s",
                 (subject_id, idempotency_key),
             )).fetchone()
             if previous is not None:
@@ -160,7 +166,7 @@ class RestoreManager:
             await conn.execute("SELECT pg_advisory_xact_lock(679330170790)")
             await self._authorize(conn, subject_id, session_token_hash, expected_password_hash)
             previous = await (await conn.execute(
-                _JOB_SELECT + "WHERE subject_id=%s AND idempotency_key=%s",
+                _JOB_SELECT + "WHERE j.subject_id=%s AND j.idempotency_key=%s",
                 (subject_id, idempotency_key),
             )).fetchone()
             if previous is not None:
@@ -228,7 +234,7 @@ class RestoreManager:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._authorize(conn, subject_id, session_token_hash)
             rows = await (await conn.execute(
-                _JOB_SELECT + "ORDER BY created_at DESC,restore_id DESC LIMIT %s", (limit,)
+                _JOB_SELECT + "ORDER BY j.created_at DESC,j.restore_id DESC LIMIT %s", (limit,)
             )).fetchall()
             await self._authorize(conn, subject_id, session_token_hash)
             return [_public(row) for row in rows]
@@ -239,7 +245,7 @@ class RestoreManager:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._authorize(conn, subject_id, session_token_hash)
             row = await (await conn.execute(
-                _JOB_SELECT + "WHERE restore_id=%s", (restore_id,)
+                _JOB_SELECT + "WHERE j.restore_id=%s", (restore_id,)
             )).fetchone()
             if row is None:
                 raise ForestError("RESTORE_NOT_FOUND", "Restore stage does not exist", 404)
@@ -352,7 +358,7 @@ class RestoreManager:
     async def _read_internal(self, restore_id: str) -> dict[str, Any]:
         async with self.store.pool.connection() as conn:
             return await (await conn.execute(
-                _JOB_SELECT + "WHERE restore_id=%s", (restore_id,)
+                _JOB_SELECT + "WHERE j.restore_id=%s", (restore_id,)
             )).fetchone()
 
     async def _stage(self, job: dict[str, Any]) -> dict[str, Any]:

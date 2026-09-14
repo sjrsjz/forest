@@ -16,7 +16,8 @@ function size(value) {
 }
 
 export function backupPanel(api, busy, notice) {
-  let rows = [], restoreRows = [], createKey = null, restoreKey = null;
+  let rows = [], restoreRows = [], createKey = null, restoreKey = null, cleanupKey = null;
+  let cleanupPlan = null, cleanupRetry = null;
   let selectedBackup = null, readSeq = 0;
 
   function closeRestoreForm() {
@@ -31,6 +32,34 @@ export function backupPanel(api, busy, notice) {
     $('backup-restore-source').textContent = `来源备份：${backupId}`;
     $('backup-restore-form').classList.remove('hidden');
     $('backup-restore-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
+  function closeCleanupForm() {
+    cleanupPlan = null; cleanupRetry = null; cleanupKey = null;
+    $('storage-cleanup-form').reset(); $('storage-cleanup-form').classList.add('hidden');
+    $('storage-cleanup-resource').textContent = '';
+  }
+
+  async function openCleanup(kind, resourceId) {
+    closeCleanupForm();
+    const base = kind === 'BACKUP_ARTIFACT' ? `/backups/${encodeURIComponent(resourceId)}` :
+      `/restore-stages/${encodeURIComponent(resourceId)}`;
+    cleanupPlan = await api(`${base}/cleanup-plan`, {});
+    $('storage-cleanup-resource').textContent = `${kind === 'BACKUP_ARTIFACT' ? '备份' : '隔离恢复'}：${resourceId}`;
+    $('storage-cleanup-warning').textContent = kind === 'BACKUP_ARTIFACT' ?
+      '应用后下载立即失效，后台随后删除加密工件。' :
+      '应用后隔离副本立即进入 EXPIRED，后台只删除名称和 owner marker 都匹配的数据库。';
+    $('storage-cleanup-form').querySelector('button[type="submit"]').textContent = '撤销并清理';
+    $('storage-cleanup-form').classList.remove('hidden');
+    $('storage-cleanup-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
+  function openCleanupRetry(row) {
+    closeCleanupForm(); cleanupRetry = row.cleanup_id;
+    $('storage-cleanup-resource').textContent = `清理任务：${row.cleanup_id}`;
+    $('storage-cleanup-warning').textContent = `上次清理已阻塞：${row.cleanup_error_code || '未知错误'}。确认外部冲突已排除后再重试。`;
+    $('storage-cleanup-form').querySelector('button[type="submit"]').textContent = '重试清理';
+    $('storage-cleanup-form').classList.remove('hidden');
   }
 
   function renderCut(cut) {
@@ -53,7 +82,8 @@ export function backupPanel(api, busy, notice) {
         `${row.include_packages ? '包含插件工件' : '不含插件工件'} · ${size(row.byte_size)}`;
       const meta = document.createElement('p'); meta.className = 'hint';
       meta.textContent = `创建 ${row.created_at} · 更新 ${row.updated_at}` +
-        `${row.error_code ? ` · ${row.error_code}` : ''}`;
+        `${row.error_code ? ` · ${row.error_code}` : ''}` +
+        `${row.cleanup_state ? ` · 清理 ${row.cleanup_state}${row.cleanup_error_code ? ` (${row.cleanup_error_code})` : ''}` : ''}`;
       card.append(title, progress, meta);
       if (row.roster_start_digest && row.roster_end_digest &&
           row.roster_start_digest !== row.roster_end_digest) {
@@ -78,6 +108,16 @@ export function backupPanel(api, busy, notice) {
         restore.addEventListener('click', () => openRestoreForm(row.backup_id));
         card.append(restore);
       }
+      if (['READY', 'INCONSISTENT'].includes(row.state)) {
+        const remove = document.createElement('button'); remove.className = 'danger';
+        remove.type = 'button'; remove.textContent = '预览并删除备份';
+        remove.addEventListener('click', () => busy(remove, () => openCleanup('BACKUP_ARTIFACT', row.backup_id)));
+        card.append(remove);
+      } else if (row.cleanup_state === 'BLOCKED') {
+        const retry = document.createElement('button'); retry.className = 'danger';
+        retry.type = 'button'; retry.textContent = '处理冲突后重试清理';
+        retry.addEventListener('click', () => openCleanupRetry(row)); card.append(retry);
+      }
       target.append(card);
     }
     const restoreTarget = $('restore-list'); restoreTarget.replaceChildren();
@@ -90,7 +130,8 @@ export function backupPanel(api, busy, notice) {
       progress.textContent = `数据库 ${row.database_completed}/${row.database_total} · 来源 ${row.backup_id}`;
       const meta = document.createElement('p'); meta.className = 'hint';
       meta.textContent = `创建 ${row.created_at} · 更新 ${row.updated_at}` +
-        `${row.error_code ? ` · ${row.error_code}` : ''}`;
+        `${row.error_code ? ` · ${row.error_code}` : ''}` +
+        `${row.cleanup_state ? ` · 清理 ${row.cleanup_state}${row.cleanup_error_code ? ` (${row.cleanup_error_code})` : ''}` : ''}`;
       card.append(title, progress, meta);
       if (row.targets?.length) {
         const list = document.createElement('ul');
@@ -101,6 +142,16 @@ export function backupPanel(api, busy, notice) {
           list.append(item);
         }
         card.append(list);
+      }
+      if (['STAGED', 'FAILED'].includes(row.state)) {
+        const remove = document.createElement('button'); remove.className = 'danger';
+        remove.type = 'button'; remove.textContent = '预览并删除隔离副本';
+        remove.addEventListener('click', () => busy(remove, () => openCleanup('RESTORE_STAGE', row.restore_id)));
+        card.append(remove);
+      } else if (row.cleanup_state === 'BLOCKED') {
+        const retry = document.createElement('button'); retry.className = 'danger';
+        retry.type = 'button'; retry.textContent = '处理冲突后重试清理';
+        retry.addEventListener('click', () => openCleanupRetry(row)); card.append(retry);
       }
       restoreTarget.append(card);
     }
@@ -168,14 +219,41 @@ export function backupPanel(api, busy, notice) {
       notice('隔离恢复任务已接纳。目标数据库不会登记为在线 Bot。', true);
     });
   });
+  $('storage-cleanup-cancel').addEventListener('click', closeCleanupForm);
+  $('storage-cleanup-form').addEventListener('input', () => { cleanupKey = null; });
+  $('storage-cleanup-form').addEventListener('submit', (event) => {
+    event.preventDefault(); const form = event.currentTarget;
+    if ((!cleanupPlan && !cleanupRetry) || !form.reportValidity()) return;
+    busy(form.querySelector('button[type="submit"]'), async () => {
+      cleanupKey ||= crypto.randomUUID();
+      try {
+        if (cleanupRetry) {
+          await api(`/storage-cleanups/${encodeURIComponent(cleanupRetry)}/retry`, {
+            current_password: form.elements.current_password.value,
+          }, {'Idempotency-Key': cleanupKey});
+        } else {
+          await api('/storage-cleanups', {
+            plan_id: cleanupPlan.plan_id, plan_digest: cleanupPlan.plan_digest,
+            current_password: form.elements.current_password.value,
+          }, {'Idempotency-Key': cleanupKey});
+        }
+      } finally {
+        form.elements.current_password.value = '';
+      }
+      closeCleanupForm(); await load();
+      notice('资源可见性已撤销；物理清理状态会在列表中继续更新。', true);
+    });
+  });
 
   return {
     load,
-    hasRunning: () => rows.some((row) => ['QUEUED', 'CAPTURING', 'SEALING'].includes(row.state)) ||
-      restoreRows.some((row) => ['QUEUED', 'VERIFYING', 'RESTORING', 'VALIDATING'].includes(row.state)),
+    hasRunning: () => rows.some((row) => ['QUEUED', 'CAPTURING', 'SEALING'].includes(row.state) ||
+      ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)) ||
+      restoreRows.some((row) => ['QUEUED', 'VERIFYING', 'RESTORING', 'VALIDATING'].includes(row.state) ||
+        ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)),
     reset() {
       readSeq++; rows = []; restoreRows = []; createKey = null;
-      closeRestoreForm();
+      closeRestoreForm(); closeCleanupForm();
       $('backup-create-form').reset(); $('backup-list').replaceChildren();
       $('restore-list').replaceChildren();
       $('backup-empty').classList.remove('hidden'); $('restore-empty').classList.remove('hidden');

@@ -35,6 +35,7 @@ from forest.management.bindings_api import install_binding_routes
 from forest.management.bot_audit_api import install_bot_audit_routes
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
+from forest.management.cleanup import StorageCleanupManager
 from forest.management.component_jobs_api import install_component_job_routes
 from forest.management.events_api import install_event_routes
 from forest.management.fleet import BotFleet
@@ -188,6 +189,7 @@ class ManagementRuntime:
         self.provisioner: BotProvisioner | None = None
         self.backups: BackupManager | None = None
         self.restores: RestoreManager | None = None
+        self.cleanup: StorageCleanupManager | None = None
         self.service_tasks: list[asyncio.Task] = []
         self.service_errors: dict[str, str] = {}
 
@@ -237,6 +239,7 @@ class ManagementRuntime:
                 catalog, fleet.artifacts, self.settings.data_dir, plan["dsn"]
             )
             restores = RestoreManager(catalog, backups, self.settings.data_dir)
+            cleanup = StorageCleanupManager(catalog, backups)
         except BaseException:
             await candidate.close()
             raise
@@ -247,12 +250,14 @@ class ManagementRuntime:
         self.catalog, self.authority, self.fleet = catalog, authority, fleet
         self.backups = backups
         self.restores = restores
+        self.cleanup = cleanup
         self.provisioner = BotProvisioner(catalog)
         self.service_tasks = [
             asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
             asyncio.create_task(fleet.run_forever(), name="bot-fleet"),
             asyncio.create_task(backups.run_forever(), name="backup-jobs"),
             asyncio.create_task(restores.run_forever(), name="restore-stage-jobs"),
+            asyncio.create_task(cleanup.run_forever(), name="storage-cleanup-jobs"),
         ]
         self.recovery_error = None
 
@@ -263,6 +268,8 @@ class ManagementRuntime:
             await self.backups.close()
         if self.restores is not None:
             await self.restores.close()
+        if self.cleanup is not None:
+            await self.cleanup.close()
         for task in self.service_tasks:
             task.cancel()
         await asyncio.gather(*self.service_tasks, return_exceptions=True)
@@ -280,6 +287,7 @@ class ManagementRuntime:
                         ("bot-fleet", self.fleet.run_forever),
                         ("backup-jobs", self.backups.run_forever),
                         ("restore-stage-jobs", self.restores.run_forever),
+                        ("storage-cleanup-jobs", self.cleanup.run_forever),
                     )):
                         task = self.service_tasks[index]
                         if task.done():

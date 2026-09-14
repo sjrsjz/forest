@@ -22,6 +22,12 @@ _DETAIL_FIELDS = {
     "restore.stage.completed": frozenset({
         "restore_id", "backup_id", "database_total", "manifest_digest",
     }),
+    "backup.cleanup.request": frozenset({"cleanup_id", "reason"}),
+    "backup.cleanup.completed": frozenset({"cleanup_id", "reason"}),
+    "restore.cleanup.request": frozenset({"cleanup_id", "reason"}),
+    "restore.cleanup.completed": frozenset({"cleanup_id", "reason"}),
+    "storage.cleanup.retry": frozenset({"cleanup_id"}),
+    "backup.orphan.cleaned": frozenset({"owner_epoch", "path_kind", "byte_size"}),
     "account.create": frozenset({"username", "role", "revision"}),
     "account.apply": frozenset({
         "previous_revision", "revision", "role", "disabled", "password_changed",

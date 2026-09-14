@@ -89,7 +89,8 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         await login(admin)
         html = await admin.get("/")
         script = await admin.get("/static/backup-panel.js")
-        assert 'id="nav-backups"' in html.text and script.status_code == 200
+        assert 'id="nav-backups"' in html.text and 'id="storage-cleanup-form"' in html.text
+        assert script.status_code == 200 and "cleanup-plan" in script.text
         empty = await admin.get("/management/v1/backups")
         assert empty.status_code == 200 and empty.json()["backups"] == []
 
@@ -177,6 +178,55 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
             "manifest_digest": restore["manifest_digest"],
         }
         assert not restore_record["details_redacted"]
+
+        restore_cleanup_plan = await admin.post(
+            f"/management/v1/restore-stages/{restore['restore_id']}/cleanup-plan", json={}
+        )
+        assert restore_cleanup_plan.status_code == 200, restore_cleanup_plan.text
+        restore_cleanup_plan = restore_cleanup_plan.json()
+        restore_cleanup = await admin.post(
+            "/management/v1/storage-cleanups",
+            json={
+                "plan_id": restore_cleanup_plan["plan_id"],
+                "plan_digest": restore_cleanup_plan["plan_digest"],
+                "current_password": PASSWORD,
+            },
+            headers={"idempotency-key": "web-restore-cleanup"},
+        )
+        assert restore_cleanup.status_code == 202, restore_cleanup.text
+        restore_cleanup = restore_cleanup.json()
+        expired_restore = await admin.get(
+            f"/management/v1/restore-stages/{restore['restore_id']}"
+        )
+        assert expired_restore.json()["state"] == "EXPIRED"
+        for _ in range(100):
+            cleanup_status = await admin.get(
+                f"/management/v1/storage-cleanups/{restore_cleanup['cleanup_id']}"
+            )
+            assert cleanup_status.status_code == 200
+            if cleanup_status.json()["state"] in {"COMPLETE", "BLOCKED"}:
+                break
+            await asyncio.sleep(0.05)
+        assert cleanup_status.json()["state"] == "COMPLETE", cleanup_status.text
+
+        backup_cleanup_plan = await admin.post(
+            f"/management/v1/backups/{queued['backup_id']}/cleanup-plan", json={}
+        )
+        assert backup_cleanup_plan.status_code == 200
+        backup_cleanup_plan = backup_cleanup_plan.json()
+        backup_cleanup = await admin.post(
+            "/management/v1/storage-cleanups",
+            json={
+                "plan_id": backup_cleanup_plan["plan_id"],
+                "plan_digest": backup_cleanup_plan["plan_digest"],
+                "current_password": PASSWORD,
+            },
+            headers={"idempotency-key": "web-backup-cleanup"},
+        )
+        assert backup_cleanup.status_code == 202, backup_cleanup.text
+        assert (await admin.get(
+            f"/management/v1/backups/{queued['backup_id']}/download"
+        )).status_code == 404
 
         audit = await admin.get("/management/v1/audit?action=backup.create")
         record = audit.json()["records"][0]

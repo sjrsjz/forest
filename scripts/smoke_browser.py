@@ -559,6 +559,21 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#restore-list li')).to_have_count(3)
             expect(restore_form).to_be_hidden()
             page.screenshot(path=str(artifacts / 'backups-desktop.png'), full_page=True)
+            page.get_by_role('button', name='预览并删除隔离副本').first.click()
+            cleanup_form = page.locator('#storage-cleanup-form')
+            expect(cleanup_form).to_be_visible()
+            expect(page.locator('#storage-cleanup-warning')).to_contain_text('owner marker')
+            cleanup_form.locator('[name="current_password"]').fill(password)
+            cleanup_form.locator('button[type="submit"]').click()
+            expect(page.locator('#restore-list')).to_contain_text('清理 COMPLETE', timeout=60000)
+            page.get_by_role('button', name='预览并删除备份').first.click()
+            expect(cleanup_form).to_be_visible()
+            expect(page.locator('#storage-cleanup-warning')).to_contain_text('下载立即失效')
+            cleanup_form.locator('[name="current_password"]').fill(password)
+            cleanup_form.locator('button[type="submit"]').click()
+            expect(page.locator('#backup-list')).to_contain_text('清理 COMPLETE', timeout=60000)
+            expect(page.locator('#backup-list .button-link')).to_have_count(0)
+            page.screenshot(path=str(artifacts / 'storage-cleanup-desktop.png'), full_page=True)
             page.locator("#logout").click()
             expect(page.locator("#login")).to_be_visible()
             rival.reload()
@@ -588,7 +603,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
-                        "Web encrypted deployment and two-Bot backup, package inclusion, download, local verification and isolated three-database restore",
+                        "Web encrypted deployment and two-Bot backup, isolated three-database restore, tombstone, and verified cleanup",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

@@ -87,6 +87,13 @@
           <div class="actions"><button type="submit">校验并恢复到隔离数据库</button><button id="backup-restore-cancel" class="subtle" type="button">取消</button></div>
           <p class="hint">目标使用随机数据库名，不登记到 Fleet；Bot 副本保持 SEALED，页面不会提供在线激活按钮。</p>
         </form>
+        <form id="storage-cleanup-form" class="hidden">
+          <h3>清理存储资源</h3><p id="storage-cleanup-resource" class="hint"></p>
+          <p id="storage-cleanup-warning" class="notice"></p>
+          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
+          <div class="actions"><button type="submit">撤销并清理</button><button id="storage-cleanup-cancel" class="subtle" type="button">取消</button></div>
+          <p class="hint">提交后会先撤销下载或隔离副本的可见性，再由可续跑后台任务删除 Forest 精确拥有的文件或数据库。普通磁盘不提供不可恢复证明。</p>
+        </form>
       </div></div>
       <p id="backup-empty" class="hint hidden">还没有备份任务。</p><div id="backup-list" aria-live="polite"></div>
       <h2>隔离恢复任务</h2><p id="restore-empty" class="hint hidden">还没有隔离恢复任务。</p><div id="restore-list" aria-live="polite"></div>

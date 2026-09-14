@@ -2,22 +2,43 @@
 
 import asyncio
 import json
+import os
 import threading
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.types.json import Jsonb
 from test_bot_catalog import fixture as fixture
 
 from forest.backup_artifact import decrypt_file, inspect_zip
 from forest.errors import ForestError
 from forest.management.backups import BackupManager
+from forest.management.cleanup import StorageCleanupManager
 from forest.management.provision import BotProvisioner
 from forest.management.restores import RestoreManager
 from forest.packages import PackageCatalog, digest_json
 
 pytestmark = pytest.mark.postgres
+
+
+async def _deployment_backup(fixture, data_dir, *, key):
+    manager = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    queued = await manager.create(
+        **fixture.auth, expected_password_hash="unused-test-hash",
+        passphrase="cleanup recovery passphrase for tests",
+        passphrase_digest="cleanup-passphrase-hmac", include_packages=False,
+        idempotency_key=key,
+    )
+    ready = await manager.run_once()
+    assert ready["state"] == "READY"
+    return manager, queued
 
 
 async def test_encrypted_backup_captures_deployment_and_bot_consistent_cuts(
@@ -458,5 +479,274 @@ async def test_restore_stage_cancels_database_work_when_lease_renewal_fails(
         assert lost.value.code == "RESTORE_LEASE_LOST"
         assert cancelled.is_set()
     finally:
+        await restores.close()
+        await backups.close()
+
+
+async def test_backup_cleanup_tombstones_before_exact_file_deletion(fixture, tmp_path):
+    backups, queued = await _deployment_backup(
+        fixture, tmp_path / "vault", key="cleanup-backup-source"
+    )
+    cleanup = StorageCleanupManager(fixture.catalog, backups)
+    path, _ = await backups.artifact(backup_id=queued["backup_id"], **fixture.auth)
+    assert path.is_file()
+    try:
+        async with fixture.store.pool.connection() as conn, conn.transaction():
+            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+                await conn.execute(
+                    "UPDATE backup_jobs SET state='EXPIRED' WHERE backup_id=%s",
+                    (queued["backup_id"],),
+                )
+
+        plan = await cleanup.plan(
+            kind="BACKUP_ARTIFACT", resource_id=queued["backup_id"], **fixture.auth
+        )
+        applied = await cleanup.apply(
+            plan_id=plan["plan_id"], plan_digest=plan["plan_digest"], **fixture.auth,
+            expected_password_hash="unused-test-hash", idempotency_key="cleanup-backup-apply",
+        )
+        assert applied["state"] == "QUEUED" and path.is_file()
+        with pytest.raises(ForestError) as unavailable:
+            await backups.artifact(backup_id=queued["backup_id"], **fixture.auth)
+        assert unavailable.value.code == "BACKUP_DOWNLOAD_UNAVAILABLE"
+        tombstoned = await backups.read(backup_id=queued["backup_id"], **fixture.auth)
+        assert tombstoned["state"] == "EXPIRED"
+        assert tombstoned["cleanup_id"] == applied["cleanup_id"]
+
+        complete = await cleanup.run_once()
+        assert complete["state"] == "COMPLETE" and not path.exists()
+        replay = await cleanup.apply(
+            plan_id=plan["plan_id"], plan_digest=plan["plan_digest"], **fixture.auth,
+            expected_password_hash="unused-test-hash", idempotency_key="cleanup-backup-apply",
+        )
+        assert replay == applied
+    finally:
+        await cleanup.close()
+        await backups.close()
+
+
+async def test_expired_backup_is_automatically_tombstoned_and_cleaned(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    cleanup = StorageCleanupManager(fixture.catalog, backups)
+    backup_id = str(uuid4())
+    name = backup_id + ".1.forest-backup"
+    path = backups.backup_dir / name
+    path.write_bytes(b"expired encrypted artifact")
+    digest = BackupManager._file_digest(path)
+    now = datetime.now(UTC)
+    try:
+        async with fixture.store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO backup_jobs(backup_id,subject_id,idempotency_key,input_digest,"
+                "include_packages,state,archive_key_ciphertext,archive_header,database_total,"
+                "database_completed,roster_start_digest,roster_end_digest) "
+                "VALUES (%s,%s,%s,%s,false,'READY','sealed',%s,1,1,'same','same')",
+                (backup_id, fixture.auth["subject_id"], "expired-source", "sha256:input",
+                 Jsonb({"format": "test"})),
+            )
+            await conn.execute(
+                "INSERT INTO backup_artifacts(backup_id,relative_path,ciphertext_digest,byte_size,"
+                "manifest_digest,ready_at,expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (backup_id, name, digest, path.stat().st_size, "sha256:manifest",
+                 now - timedelta(days=2), now - timedelta(days=1)),
+            )
+        complete = await cleanup.run_once()
+        assert complete["state"] == "COMPLETE" and complete["reason"] == "RETENTION"
+        assert not path.exists()
+        detail = await backups.read(backup_id=backup_id, **fixture.auth)
+        assert detail["state"] == "EXPIRED" and detail["cleanup_state"] == "COMPLETE"
+    finally:
+        await cleanup.close()
+        await backups.close()
+
+
+async def test_expired_restore_stage_is_automatically_tombstoned(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    cleanup = StorageCleanupManager(fixture.catalog, backups)
+    backup_id, restore_id = str(uuid4()), str(uuid4())
+    target_name = "forest_restore_" + restore_id.replace("-", "")[:20] + "_0000"
+    now = datetime.now(UTC)
+    try:
+        async with fixture.store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO backup_jobs(backup_id,subject_id,idempotency_key,input_digest,"
+                "include_packages,state,archive_key_ciphertext,archive_header,database_total,"
+                "database_completed,roster_start_digest,roster_end_digest) "
+                "VALUES (%s,%s,%s,'sha256:source',false,'READY','sealed',%s,1,1,'same','same')",
+                (backup_id, fixture.auth["subject_id"], "restore-retention-source",
+                 Jsonb({"format": "test"})),
+            )
+            await conn.execute(
+                "INSERT INTO backup_artifacts(backup_id,relative_path,ciphertext_digest,byte_size,"
+                "manifest_digest,ready_at,expires_at) VALUES (%s,%s,'sha256:cipher',1,"
+                "'sha256:manifest',%s,%s)",
+                (backup_id, backup_id + ".1.forest-backup", now, now + timedelta(days=1)),
+            )
+            await conn.execute(
+                "INSERT INTO restore_stage_jobs(restore_id,backup_id,subject_id,idempotency_key,"
+                "input_digest,artifact_digest,archive_key_ciphertext,state,database_total,"
+                "database_completed,manifest_digest,expires_at) VALUES "
+                "(%s,%s,%s,%s,'sha256:restore','sha256:cipher','sealed','STAGED',1,1,"
+                "'sha256:manifest',%s)",
+                (restore_id, backup_id, fixture.auth["subject_id"], "expired-restore",
+                 now - timedelta(days=1)),
+            )
+            await conn.execute(
+                "INSERT INTO restore_stage_targets(restore_id,ordinal,database_scope,bot_id,"
+                "database_name,content_digest,migration_digest,state,restored_rows) "
+                "VALUES (%s,0,'deployment','',%s,'sha256:content','sha256:migration','STAGED',0)",
+                (restore_id, target_name),
+            )
+        complete = await cleanup.run_once()
+        assert complete["state"] == "COMPLETE" and complete["reason"] == "RETENTION"
+        detail = await cleanup.read(cleanup_id=complete["cleanup_id"], **fixture.auth)
+        assert detail["resource_kind"] == "RESTORE_STAGE"
+        async with fixture.store.pool.connection() as conn:
+            row = await (await conn.execute(
+                "SELECT state FROM restore_stage_jobs WHERE restore_id=%s", (restore_id,)
+            )).fetchone()
+        assert row["state"] == "EXPIRED"
+    finally:
+        await cleanup.close()
+        await backups.close()
+
+
+async def test_old_unpublished_backup_paths_require_job_epoch_proof(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    cleanup = StorageCleanupManager(fixture.catalog, backups, orphan_grace_seconds=60)
+    backup_id = str(uuid4())
+    candidate = backups.backup_dir / (backup_id + ".1.forest-backup")
+    workspace = backups.backup_dir / (".job-" + backup_id + "-2")
+    future = backups.backup_dir / (backup_id + ".3.forest-backup")
+    candidate.write_bytes(b"unpublished-candidate")
+    workspace.mkdir()
+    (workspace / "payload.zip").write_bytes(b"sensitive plaintext workspace")
+    future.write_bytes(b"unproven-future-epoch")
+    old = datetime.now().timestamp() - 120
+    os.utime(candidate, (old, old))
+    os.utime(workspace / "payload.zip", (old, old))
+    os.utime(workspace, (old, old))
+    os.utime(future, (old, old))
+    try:
+        async with fixture.store.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO backup_jobs(backup_id,subject_id,idempotency_key,input_digest,"
+                "include_packages,state,archive_key_ciphertext,archive_header,owner_epoch,error_code) "
+                "VALUES (%s,%s,%s,'sha256:orphan',false,'FAILED','sealed',%s,2,'TEST_FAILURE')",
+                (backup_id, fixture.auth["subject_id"], "orphan-source", Jsonb({"format": "test"})),
+            )
+        first = await cleanup.run_once()
+        second = await cleanup.run_once()
+        assert {first["path_kind"], second["path_kind"]} == {"CANDIDATE", "JOB_DIRECTORY"}
+        assert not candidate.exists() and not workspace.exists()
+        assert future.exists()
+        async with fixture.store.pool.connection() as conn:
+            receipts = await (await conn.execute(
+                "SELECT path_kind,byte_size FROM backup_orphan_cleanup_receipts "
+                "WHERE backup_id=%s ORDER BY path_kind", (backup_id,)
+            )).fetchall()
+        assert [row["path_kind"] for row in receipts] == ["CANDIDATE", "JOB_DIRECTORY"]
+        assert all(row["byte_size"] > 0 for row in receipts)
+    finally:
+        future.unlink(missing_ok=True)
+        await cleanup.close()
+        await backups.close()
+
+
+async def test_restore_cleanup_blocks_foreign_marker_then_retries_safely(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups, queued = await _deployment_backup(
+        fixture, data_dir, key="cleanup-restore-source"
+    )
+    restores = RestoreManager(fixture.catalog, backups, data_dir)
+    cleanup = StorageCleanupManager(fixture.catalog, backups)
+    target_name = None
+    try:
+        restore = await restores.create(
+            backup_id=queued["backup_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash",
+            passphrase="cleanup recovery passphrase for tests",
+            passphrase_digest="cleanup-passphrase-hmac",
+            idempotency_key="cleanup-restore-stage",
+        )
+        staged = await restores.run_once()
+        assert staged["state"] == "STAGED"
+        detail = await restores.read(restore_id=restore["restore_id"], **fixture.auth)
+        target_name = detail["targets"][0]["database_name"]
+        async with await psycopg.AsyncConnection.connect(
+            fixture.catalog.managed_dsn, autocommit=True
+        ) as conn:
+            await conn.execute(sql.SQL("COMMENT ON DATABASE {} IS 'foreign-owner'").format(
+                sql.Identifier(target_name)
+            ))
+
+        plan = await cleanup.plan(
+            kind="RESTORE_STAGE", resource_id=restore["restore_id"], **fixture.auth
+        )
+        applied = await cleanup.apply(
+            plan_id=plan["plan_id"], plan_digest=plan["plan_digest"], **fixture.auth,
+            expected_password_hash="unused-test-hash", idempotency_key="cleanup-restore-apply",
+        )
+        assert (await restores.read(
+            restore_id=restore["restore_id"], **fixture.auth
+        ))["state"] == "EXPIRED"
+        blocked = await cleanup.run_once()
+        assert blocked["state"] == "BLOCKED"
+        assert blocked["error_code"] == "RESTORE_CLEANUP_OWNERSHIP_CONFLICT"
+        async with await psycopg.AsyncConnection.connect(
+            fixture.catalog.managed_dsn, autocommit=True, row_factory=psycopg.rows.dict_row
+        ) as conn:
+            exists = await (await conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname=%s", (target_name,)
+            )).fetchone()
+        assert exists is not None
+
+        async with fixture.store.pool.connection() as conn:
+            target = await (await conn.execute(
+                "SELECT content_digest FROM restore_stage_targets "
+                "WHERE restore_id=%s AND ordinal=0", (restore["restore_id"],)
+            )).fetchone()
+        marker = "forest:restore-stage:" + restore["restore_id"] + ":" + target["content_digest"]
+        async with await psycopg.AsyncConnection.connect(
+            fixture.catalog.managed_dsn, autocommit=True
+        ) as conn:
+            await conn.execute(sql.SQL("COMMENT ON DATABASE {} IS {}").format(
+                sql.Identifier(target_name), sql.Literal(marker)
+            ))
+        retried = await cleanup.retry(
+            cleanup_id=applied["cleanup_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash", idempotency_key="cleanup-retry",
+        )
+        assert retried["state"] == "QUEUED"
+        assert (await cleanup.run_once())["state"] == "COMPLETE"
+        async with await psycopg.AsyncConnection.connect(
+            fixture.catalog.managed_dsn, autocommit=True, row_factory=psycopg.rows.dict_row
+        ) as conn:
+            exists = await (await conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname=%s", (target_name,)
+            )).fetchone()
+        assert exists is None
+        target_name = None
+    finally:
+        if target_name is not None:
+            async with await psycopg.AsyncConnection.connect(
+                fixture.catalog.managed_dsn, autocommit=True
+            ) as conn:
+                await conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(target_name)
+                ))
+        await cleanup.close()
         await restores.close()
         await backups.close()

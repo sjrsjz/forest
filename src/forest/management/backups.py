@@ -36,12 +36,16 @@ _TABLE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _PUBLIC_KEYS = (
     "backup_id", "state", "include_packages", "database_total", "database_completed",
     "roster_start_digest", "roster_end_digest", "error_code", "owner_epoch", "created_at",
-    "updated_at",
+    "updated_at", "cleanup_id", "cleanup_state", "cleanup_error_code", "cleanup_completed_at",
 )
 _JOB_SELECT = (
     "SELECT j.*,a.relative_path,a.ciphertext_digest,a.byte_size,a.manifest_digest,"
-    "a.ready_at,a.expires_at,a.deleted_at FROM backup_jobs j "
+    "a.ready_at,a.expires_at,a.deleted_at,c.cleanup_id,c.state AS cleanup_state,"
+    "c.error_code AS cleanup_error_code,c.completed_at AS cleanup_completed_at "
+    "FROM backup_jobs j "
     "LEFT JOIN backup_artifacts a USING(backup_id) "
+    "LEFT JOIN storage_cleanup_jobs c ON c.resource_kind='BACKUP_ARTIFACT' "
+    "AND c.resource_id=j.backup_id "
 )
 
 
