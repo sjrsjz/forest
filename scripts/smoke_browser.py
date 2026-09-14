@@ -323,6 +323,13 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             rival.locator('#bot-config-form button[type="submit"]').click()
             expect(rival.locator("#notice")).to_contain_text("REVISION_CONFLICT")
             expect(rival.locator('#bot-config-fields [name="multiplier"]')).to_have_value("77")
+            page.locator('#restart-bot-component').click()
+            expect(page.locator('#bot-desired')).to_have_text('3', timeout=15000)
+            expect(page.locator('#bot-effective')).to_have_text('3', timeout=30000)
+            expect(page.locator('#bot-runtime-status')).to_have_text(
+                '组件已生效并运行中', timeout=30000
+            )
+            expect(page.locator('#bot-config-fields [name="multiplier"]')).to_have_value('4')
             invoke(1, "：10（状态修订 2）")
             expect(page.locator("#bot-bindings")).to_be_visible()
             page.locator('#binding-create [name="self_id"]').fill("10001")

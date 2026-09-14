@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.shell_registry import CONTROL_DEADLINE
-from forest.shell_registry_v7 import get_command_spec, render_help
+from forest.shell_registry_v8 import get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore
@@ -233,6 +233,10 @@ class ShellDispatcher:
             from forest.storage.context_administration import ContextAdministration
 
             repository = ContextAdministration(self.messages, control=control)
+        elif spec.execution_target == "module":
+            from forest.storage.module_administration import ModuleAdministration
+
+            repository = ModuleAdministration(self.messages.store, control=control)
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         kwargs = {"lease": lease} if (
@@ -395,6 +399,41 @@ class ShellDispatcher:
                 "request_id": result["request_id"],
                 "status": result["status"],
                 "expected_view_revision": result["expected_view_revision"],
+            }
+            if self.on_change is not None:
+                self.on_change()
+        elif name == "module.read":
+            lines = []
+            for row in result["modules"][:20]:
+                lifecycle = row["lifecycle_phase"] or "NONE"
+                if row["lifecycle_error_code"]:
+                    lifecycle += "/" + row["lifecycle_error_code"]
+                lines.append(
+                    f"{row['component_id']}：{row['state']}；desired "
+                    f"{row['desired_revision']} / effective {row['effective_revision']}；"
+                    f"generation {row['generation_status'] or 'NONE'}；lifecycle {lifecycle}"
+                )
+            text = "Bot 组件：\n" + "\n".join(lines or ["暂无已配置组件。"])
+            outcome = {
+                "code": "MODULE_STATUS",
+                "count": len(lines),
+                "pending": sum(row["state"] == "PENDING" for row in result["modules"][:20]),
+            }
+        elif name == "module.reload":
+            text = (
+                f"组件 {result['component_id']} 的重载已接纳：复制修订 "
+                f"{result['reload_of_revision']} 为 desired {result['desired_revision']}；"
+                f"当前 effective 仍为 {result['effective_revision']}。"
+                "生命周期协调器发布后才算生效，可用 module status 查询。"
+            )
+            outcome = {
+                "code": "MODULE_RELOAD_ACCEPTED",
+                "operation_id": result["operation_id"],
+                "component_id": result["component_id"],
+                "reload_of_revision": result["reload_of_revision"],
+                "desired_revision": result["desired_revision"],
+                "effective_revision": result["effective_revision"],
+                "status": result["status"],
             }
             if self.on_change is not None:
                 self.on_change()

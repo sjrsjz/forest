@@ -38,6 +38,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P5 Web 账号与固定角色管理](p5-account-management.md) | 管理账号创建、角色/停用/改密计划、会话撤销、最后管理员与幂等恢复 |
 | [P5 部署审计查询](p5-deployment-audit.md) | 不可变部署事实、稳定键集分页、服务端字段脱敏与 Web 核对入口 |
 | [P5 Bot 审计元数据](p5-bot-audit.md) | Bot 局部审计权威、群聊/Web 脱敏读取、稳定游标与 v6 Shell gate |
+| [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md) | v8 模块元数据、复用配置 plan/apply 的 reload、Web/Shell 并发 CAS 与 writer v6 围栏 |
 | [P5 多数据库备份与隔离恢复](p5-backup-restore.md) | 每库一致切口、加密工件、持久任务、删除屏障、隔离恢复与目录切换 |
 | [P4 剩余载荷迁移](p4-payload-migration-notes.md) | Kernel、配置等剩余正文副本、来源依赖及完整物理清理边界 |
 | [P4 记忆配置](p4-memory-config.md) | 独立嵌入/媒体/查询配置、Web 表单、修订与预算边界 |

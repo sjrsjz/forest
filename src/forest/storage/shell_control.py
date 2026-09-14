@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.shell_registry_v7 import command_action
+from forest.shell_registry_v8 import command_action
 from forest.storage.control import BotControl
 
 
@@ -25,11 +27,76 @@ class ShellControl(BotControl):
         self.arguments_payload_id = claim.get("arguments_payload_id")
         self.arguments_payload_digest = claim.get("arguments_payload_digest")
         self.admission = object()
+        self._delegations = {}
         self.binding = None
         self.author = None
 
+    def delegate_module_reload(self, action, operation_id, payload, *, plan_digest=""):
+        """Mint one process-local ticket for the two existing config services.
+
+        The group command authorizes only copying its exact expected revision.
+        BotControl still owns the durable plan/apply CAS and value provenance.
+        """
+        expected = self.arguments
+        if (
+            not isinstance(expected, dict)
+            or set(expected) != {"component_id", "expected_revision"}
+            or type(expected["expected_revision"]) is not int
+            or expected["expected_revision"] < 1
+        ):
+            raise ForestError("SHELL_AUTHORITY_REJECTED", "Reload command arguments differ", 403)
+        prefix = "shell-action:" + self.command_id
+        if action == "config.plan":
+            valid = (
+                operation_id == prefix + ":module-plan"
+                and isinstance(payload, dict)
+                and set(payload) == {
+                    "component_id", "expected_revision", "source_revision", "values"
+                }
+                and payload["component_id"] == expected["component_id"]
+                and payload["expected_revision"] == expected["expected_revision"]
+                and payload["source_revision"] == expected["expected_revision"]
+                and plan_digest == ""
+            )
+        elif action == "config.apply":
+            valid = (
+                operation_id == prefix + ":module-apply"
+                and isinstance(payload, dict)
+                and set(payload) == {
+                    "component_id", "expected_revision", "plan_id", "plan_digest"
+                }
+                and payload["component_id"] == expected["component_id"]
+                and payload["expected_revision"] == expected["expected_revision"]
+                and payload.get("plan_digest") == plan_digest
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ForestError("SHELL_AUTHORITY_REJECTED", "Reload delegation differs", 403)
+        token = str(uuid4())
+        self._delegations[token] = {
+            "action": action,
+            "operation_id": operation_id,
+            "input_digest": digest_json(payload),
+            "plan_digest": plan_digest,
+        }
+        return {"shell_module_reload_delegation": token}
+
+    def _delegated(self, ticket, action, operation_id, payload, plan_digest):
+        if not isinstance(ticket, dict) or set(ticket) != {"shell_module_reload_delegation"}:
+            return False
+        expected = self._delegations.get(ticket["shell_module_reload_delegation"])
+        return expected == {
+            "action": action,
+            "operation_id": operation_id,
+            "input_digest": digest_json(payload),
+            "plan_digest": plan_digest,
+        }
+
     async def _guard(self, conn, ticket, action, operation_id, payload, plan_digest=""):
-        if ticket is not self.admission or operation_id != "shell-action:" + self.command_id:
+        direct = ticket is self.admission and operation_id == "shell-action:" + self.command_id
+        delegated = self._delegated(ticket, action, operation_id, payload, plan_digest)
+        if not direct and not delegated:
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Invalid command admission", 403)
         self.binding = await self.messages.bindings._guard(
             conn, self.lease, self.binding_id, data=False,
@@ -45,10 +112,11 @@ class ShellControl(BotControl):
                 or request["binding_id"] != self.binding_id
                 or request["binding_epoch"] != self.binding["binding_epoch"]
                 or request["policy_revision"] != self.binding["_runtime"]["policy_revision"]
-                or command_action(request["command_name"], request["gate_version"]) != action
+                or command_action(request["command_name"], request["gate_version"])
+                != (action if direct else "module.reload")
                 or request["arguments_payload_id"] != self.arguments_payload_id
                 or request["arguments_payload_digest"] != self.arguments_payload_digest
-                or self.arguments != payload
+                or (direct and self.arguments != payload)
                 or plan_digest != payload.get("plan_digest", "")):
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Command claim changed or expired", 403)
         source = await (await conn.execute(

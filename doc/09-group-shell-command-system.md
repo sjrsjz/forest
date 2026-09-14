@@ -1,6 +1,8 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v7` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理、脱敏 Bot 审计查询，以及本群 Context 元数据检查与安全点裁剪请求。其余命令树仍是待实现目标，不能从示例推断为现有能力。
+当前实现已经推进到 `shell-gate-v8`。v8 在完整继承 v2–v7 冻结命令的基础上增加 `module list`、`module status <component_id>` 和 `module reload <component_id> --expect-revision <desired_revision>`。查询只显示 Bot 内配置头、路由、generation 与最近生命周期元数据；reload 从指定不可变 desired revision 读取实际配置，再调用 Web 配置入口相同的 `config.plan/config.apply` 推进一个新修订。命令本身不杀 Worker、不改路由，接纳回执明确区分 desired/effective，最终切换仍由 Fleet 与微内核生命周期完成。Web 与 Shell 同 revision 并发时由同一个配置 head CAS 决胜。协议、恢复边界和 writer generation 6 见 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)。`module validate/enable/disable` 与 core 救援入口仍是后续范围。
+
+> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v8` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理、脱敏 Bot 审计查询、本群 Context 元数据检查与安全点裁剪请求，以及组件 list/status/reload。其余命令树仍是待实现目标，不能从示例推断为现有能力。
 
 ## 1. 目标与边界
 

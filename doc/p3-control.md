@@ -1,5 +1,7 @@
 # P3 群聊管理与任务监督
 
+当前内置命令接纳版本为 `shell-gate-v8`：除既有 Agent、Job、Memory、Bot 维护、组件事件、组件持久任务、审计和 Context 控制外，已增加 Bot 全局的模块 list/status/reload。reload 复用组件配置的 plan/apply 和同一 config head CAS，只推进 desired revision；实际 lifecycle publication 继续由 Host 协调器负责。完整协议见 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)。
+
 本文描述当前代码提供的 Shell 与后台监督入口；完整管理命令、运维进程和账号治理仍以 [09](09-group-shell-command-system.md)、[12](12-webui-administration.md) 为目标契约。
 
 ## 1. 群聊中的实际操作
@@ -50,7 +52,7 @@ Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原�
 
 这次接线没有改变 `shell-gate-v2` 的 `shlex.split(..., posix=True)` 词法、别名或参数边界；后续 gate 继续使用相同词法，新的 Windows 路径词法、`--key=value` 和 `--` 扩展尚未实现。排队后直接使用已冻结的 `gate_version/command_name/arguments/priority`，不重新解析原消息或套用新 schema。数据库持久保存接纳 gate 版本；导出的 command/schema 摘要还不是逐请求持久的动态 registry snapshot，插件命令注册、热替换命令所有者和多版本动态快照恢复仍属后续工作。
 
-`ShellControl` 使用宿主内部的不透明 admission，而非伪造 Web 登录或 QQ 用户。它在目标事务中锁定当前 Binding、Bot/Host 与原命令领取记录，复验所有权、期限、当前管理员、冻结 gate、原参数、实际动作和目标会话，再复用 `AgentStore`、`JobStore`、`MemoryAdministration`、`EventStore`、`ComponentJobStore` 和 `BotAuditStore` 的管理方法。记忆计划按原群筛选来源，提交再次验证计划的主体、issuer、来源主干、删除 epoch、目标闭包和影响数。共同的操作账本保持稳定 `shell-action:<command_id>`；提交后丢失本地确认可以读取原结果，不能再次取消、删除或创建任务。审计读取不创建新操作回执，避免递归日志。Web 使用自己的主体与短效签名票据调用相同方法。
+`ShellControl` 使用宿主内部的不透明 admission，而非伪造 Web 登录或 QQ 用户。它在目标事务中锁定当前 Binding、Bot/Host 与原命令领取记录，复验所有权、期限、当前管理员、冻结 gate、原参数、实际动作和目标会话，再复用 `AgentStore`、`JobStore`、`MemoryAdministration`、`EventStore`、`ComponentJobStore`、`ModuleAdministration` 和 `BotAuditStore` 的管理方法。记忆计划按原群筛选来源，提交再次验证计划的主体、issuer、来源主干、删除 epoch、目标闭包和影响数。模块重载的进程内不透明委托只能调用该命令固定的 `config.plan/config.apply` 子操作，配置值由 Host 从预期不可变修订读取，用户参数不能指定值或替换 action。共同的操作账本保持稳定 `shell-action:<command_id>`；提交后丢失本地确认可以读取原结果，不能再次取消、删除或创建任务。审计读取不创建新操作回执，避免递归日志。Web 使用自己的主体与短效签名票据调用相同方法。
 
 Shell 参数、结果与 CONTROL 回复的正文治理、遗忘终止和锁序见 [P4 Shell 参数与结果载荷](p4-shell-payloads.md)。该协议保持这里的命令语义与优先级不变。
 

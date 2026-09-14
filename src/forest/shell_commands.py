@@ -6,10 +6,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry_v7 import (
+from forest.shell_registry_v8 import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V7,
-    SIMPLE_COMMANDS_V7,
+    DOMAIN_ALIASES_V8,
+    SIMPLE_COMMANDS_V8,
     get_command_spec,
 )
 
@@ -82,11 +82,22 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V7:
-        return _command(SIMPLE_COMMANDS_V7[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V8:
+        return _command(SIMPLE_COMMANDS_V8[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V7.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V8.get(words[0], words[0]), words[1]
+    if (domain, verb) == ("module", "list") and len(words) == 2:
+        return _command("module.read")
+    if (domain, verb) == ("module", "status") and len(words) == 3:
+        return _command("module.read", {"component_id": _identity(words[2])})
+    if (domain, verb) == ("module", "reload") and len(words) >= 3:
+        options = _options(words[3:], {"--expect-revision"})
+        expected = _positive_revision(options["--expect-revision"])
+        return _command("module.reload", {
+            "component_id": _identity(words[2]),
+            "expected_revision": expected,
+        })
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:

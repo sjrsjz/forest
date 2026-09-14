@@ -187,7 +187,8 @@ $('apply').addEventListener('click', () => busy($('apply'), async () => {
 }));
 $('reload').addEventListener('click', () => busy($('reload'), readConfiguration));
 let botRows = [], selectedBot = null, botConfig = null, botRuntime = null, packageRows = [];
-let botPlan = null, botApplyKey = null, createKey = null, invokeKey = null, renameKey = null, retryKey = null;
+let botPlan = null, botApplyKey = null, componentReload = null;
+let createKey = null, invokeKey = null, renameKey = null, retryKey = null;
 let maintenanceKey = null;
 const maintenanceWrites = new Map();
 let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0, runtimeReadSeq = 0;
@@ -226,6 +227,8 @@ function invalidateControl(scope) {
 }
 function resetComponent() {
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
+  componentReload = null;
+  $('restart-bot-component').disabled = true;
   componentReplacementRequired = false; componentReplacementDraft = false;
   componentSourceRevision = null;
   replaceComponent.classList.add('hidden'); $('bot-grants').checked = false;
@@ -355,6 +358,8 @@ async function readBotConfig() {
   } else {
     renderComponent(state.desired_values?.config, state.desired_values?.grants);
   }
+  $('restart-bot-component').disabled = componentReplacementRequired ||
+    state.desired_revision < 1 || state.desired_values_payload_state !== 'ACTIVE';
   $('bot-history').replaceChildren(); historyBefore = null;
 }
 async function selectBot(id) {
@@ -484,6 +489,40 @@ $('bot-package').addEventListener('change', () => {
   busy($('reload-bot-config'), readBotConfig);
 });
 $('reload-bot-config').addEventListener('click', () => busy($('reload-bot-config'), readBotConfig));
+$('restart-bot-component').addEventListener('click', () => busy($('restart-bot-component'), async () => {
+  if (!botConfig || botConfig.desired_revision < 1 ||
+      botConfig.desired_values_payload_state !== 'ACTIVE' || !botConfig.desired_values) return;
+  const epoch = selectionEpoch;
+  componentReload ||= {
+    revision: botConfig.desired_revision,
+    values: structuredClone(botConfig.desired_values),
+    planKey: crypto.randomUUID(), applyKey: crypto.randomUUID(), plan: null,
+  };
+  const request = componentReload;
+  try {
+    request.plan ||= await api(`${componentPath()}/change-plans`, {
+      expected_revision: request.revision,
+      source_revision: request.revision,
+      values: request.values,
+    }, {'Idempotency-Key': request.planKey});
+    if (epoch !== selectionEpoch || componentReload !== request) return;
+    const plan = request.plan;
+    await api(`${componentPath()}/management-requests`, {
+      plan_id: plan.plan_id, plan_digest: plan.plan_digest,
+      expected_revision: plan.expected_revision,
+    }, {'Idempotency-Key': request.applyKey});
+    if (epoch !== selectionEpoch || componentReload !== request) return;
+    componentReload = null;
+    await readBotConfig();
+    notice('组件重载已接纳，正在等待新修订完成生命周期切换。', true);
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT' && componentReload === request) {
+      componentReload = null;
+      if (epoch === selectionEpoch) await readBotConfig();
+    }
+    throw error;
+  }
+}));
 $('bot-config-form').addEventListener('input', clearBotPlan);
 $('bot-config-form').addEventListener('submit', (event) => {
   event.preventDefault(); const form = event.currentTarget;
