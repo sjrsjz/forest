@@ -285,6 +285,12 @@ class BackupManager:
             if updated is None:
                 raise ForestError("BACKUP_LEASE_LOST", "Backup ownership was lost", 409)
 
+    async def _renew_lease(self, job: dict[str, Any]) -> None:
+        interval = max(10.0, self.lease_seconds / 3)
+        while True:
+            await asyncio.sleep(interval)
+            await self._heartbeat(job)
+
     async def run_once(self) -> dict[str, Any] | None:
         job = await self._claim()
         if job is None:
@@ -341,6 +347,24 @@ class BackupManager:
         return result, anchor, anchor_digest
 
     async def _capture(self, job: dict[str, Any]) -> dict[str, Any]:
+        capture = asyncio.create_task(self._capture_owned(job), name="backup-capture-owned")
+        renewal = asyncio.create_task(self._renew_lease(job), name="backup-capture-lease")
+        try:
+            done, _ = await asyncio.wait({capture, renewal}, return_when=asyncio.FIRST_COMPLETED)
+            if capture in done:
+                return await capture
+            error = renewal.exception()
+            capture.cancel()
+            await asyncio.gather(capture, return_exceptions=True)
+            if error is not None:
+                raise error
+            raise ForestError("BACKUP_LEASE_LOST", "Backup ownership was lost", 409)
+        finally:
+            capture.cancel()
+            renewal.cancel()
+            await asyncio.gather(capture, renewal, return_exceptions=True)
+
+    async def _capture_owned(self, job: dict[str, Any]) -> dict[str, Any]:
         roster, roster_start, roster_start_digest = await self._roster()
         if len(roster) > 1024:
             raise ForestError("BACKUP_DATABASE_CAPACITY", "Backup database limit was exceeded", 429)
@@ -358,10 +382,12 @@ class BackupManager:
         job_root = self.backup_dir / (
             ".job-" + job["backup_id"] + "-" + str(job["owner_epoch"])
         )
-        await asyncio.to_thread(self._reset_job_root, job_root)
+        await self._run_blocking(self._reset_job_root, job_root)
         plain = job_root / "payload.zip"
         encrypted = job_root / "sealed.tmp"
-        final = self.backup_dir / (job["backup_id"] + ".forest-backup")
+        final = self.backup_dir / (
+            job["backup_id"] + "." + str(job["owner_epoch"]) + ".forest-backup"
+        )
         members: list[dict[str, Any]] = []
         databases: list[dict[str, Any]] = []
         try:
@@ -412,9 +438,9 @@ class BackupManager:
                     (job["backup_id"], job["owner_epoch"]),
                 )
             key = base64.urlsafe_b64decode(self.vault.decrypt(job["archive_key_ciphertext"]))
-            sealed = await asyncio.to_thread(encrypt_file, plain, encrypted, job["archive_header"], key)
-            await asyncio.to_thread(os.replace, encrypted, final)
-            await asyncio.to_thread(self._sync_directory, self.backup_dir)
+            sealed = await self._run_blocking(
+                encrypt_file, plain, encrypted, job["archive_header"], key
+            )
             cuts = [self._cut_row(job["backup_id"], database) for database in databases]
             async with self.store.pool.connection() as conn, conn.transaction():
                 current = await (await conn.execute(
@@ -426,6 +452,10 @@ class BackupManager:
                     or current["owner_epoch"] != job["owner_epoch"]
                     or current["lease_expires_at"] <= await self._now(conn)
                 ):
+                    raise ForestError("BACKUP_LEASE_LOST", "Backup ownership was lost", 409)
+                await self._run_blocking(os.replace, encrypted, final)
+                await self._run_blocking(self._sync_directory, self.backup_dir)
+                if current["lease_expires_at"] <= await self._now(conn):
                     raise ForestError("BACKUP_LEASE_LOST", "Backup ownership was lost", 409)
                 for values in cuts:
                     await conn.execute(
@@ -460,7 +490,7 @@ class BackupManager:
             return _public({**ready, **sealed, "manifest_digest": manifest_digest,
                             "expires_at": expires, "relative_path": final.name})
         finally:
-            await asyncio.to_thread(self._remove_job_root, job_root)
+            await self._run_blocking(self._remove_job_root, job_root)
 
     @staticmethod
     async def _now(conn):
@@ -680,7 +710,7 @@ class BackupManager:
             )).fetchall()
         for row in rows:
             digest = row["package_digest"]
-            data = await asyncio.to_thread(self.artifacts.export_archive, digest)
+            data = await self._run_blocking(self.artifacts.export_archive, digest)
             name = "artifacts/" + digest.removeprefix("sha256:") + ".zip"
             if (
                 len(data) > MAX_MEMBER
@@ -689,8 +719,25 @@ class BackupManager:
                 raise ForestError("BACKUP_TOO_LARGE", "Backup archive exceeds its size limit", 413)
             if len(members) >= MAX_MEMBERS:
                 raise ForestError("BACKUP_MEMBER_CAPACITY", "Backup member limit was exceeded", 429)
-            archive.writestr(name, data)
+            await self._run_blocking(archive.writestr, name, data)
             members.append({
                 "name": name, "size": len(data),
                 "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
             })
+
+    @staticmethod
+    async def _run_blocking(function, *arguments):
+        task = asyncio.create_task(asyncio.to_thread(function, *arguments))
+        try:
+            return await asyncio.shield(task)
+        except BaseException:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled():
+                task.exception()
+            raise

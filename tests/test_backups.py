@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 
 import psycopg
 import pytest
@@ -68,6 +69,7 @@ async def test_encrypted_backup_captures_deployment_and_bot_consistent_cuts(
     path, metadata = await manager.artifact(
         backup_id=queued["backup_id"], **fixture.auth
     )
+    assert path.name == queued["backup_id"] + ".1.forest-backup"
     restored = tmp_path / "restored.zip"
     header = decrypt_file(path, restored, request["passphrase"])
     manifest = inspect_zip(restored)
@@ -153,6 +155,70 @@ async def test_backup_job_rechecks_current_session_before_admission(fixture, tmp
             idempotency_key="revoked",
         )
     assert rejected.value.code == "SESSION_INVALID"
+
+
+async def test_backup_cancels_capture_when_lease_renewal_fails(
+    fixture, tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "vault"
+    manager = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked_capture(job):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    async def lose_lease(job):
+        await started.wait()
+        raise ForestError("BACKUP_LEASE_LOST", "lease lost", 409)
+
+    monkeypatch.setattr(manager, "_capture_owned", blocked_capture)
+    monkeypatch.setattr(manager, "_renew_lease", lose_lease)
+    try:
+        with pytest.raises(ForestError) as lost:
+            await manager._capture({"backup_id": "test", "owner_epoch": 1})
+        assert lost.value.code == "BACKUP_LEASE_LOST"
+        assert cancelled.is_set()
+    finally:
+        await manager.close()
+
+
+async def test_backup_joins_owned_thread_io_before_propagating_cancellation(
+    fixture, tmp_path
+):
+    data_dir = tmp_path / "vault"
+    manager = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_io():
+        entered.set()
+        assert release.wait(10)
+        return "done"
+
+    task = asyncio.create_task(manager._run_blocking(blocked_io))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await manager.close()
 
 
 async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot(

@@ -62,9 +62,9 @@ QUEUED -> VERIFYING -> RESTORING -> VALIDATING -> STAGED
 
 单个目标严格按 `PLANNED → CREATING → CREATED → VALIDATED → STAGED` 推进；`VALIDATED` 重试可以回到 `CREATED`，任一非终态可以进入 `FAILED`。`CREATING` 在 DDL 前持久提交，数据库以 `ALLOW_CONNECTIONS=false` 创建；只有写入任务 marker 并撤销 `PUBLIC` 全部数据库权限后才允许恢复连接。这样 CREATE 与后续配置之间没有公开连接窗口，接管者也能区分本任务的未完成 DDL 和同名外部数据库。
 
-接纳事务验证当前 admin 会话、恢复口令强度、范围和容量，生成稳定 `backup_id`、随机数据密钥、口令包装和 SecretVault 包装，保存输入摘要后提交。后台执行者通过 owner epoch/lease 领取；同一 deployment 同时最多一个 CAPTURING，每个 Bot 按稳定 `bot_id` 顺序捕获。任务持有自己的文件临时目录，不持部署事务等待 Bot 数据库或文件 I/O。
+接纳事务验证当前 admin 会话、恢复口令强度、范围和容量，生成稳定 `backup_id`、随机数据密钥、口令包装和 SecretVault 包装，保存输入摘要后提交。后台执行者通过 owner epoch/lease 领取；同一 deployment 同时最多一个 CAPTURING，每个 Bot 按稳定 `bot_id` 顺序捕获。独立续租任务覆盖单库 COPY、包导出和整包加密；续租失败取消主捕获任务。不可取消的线程 I/O 必须先收束，随后才能删除该 owner epoch 的临时目录。任务不持部署事务等待 Bot 数据库或长文件 I/O。
 
-每库捕获步骤先读取身份和迁移账本，在只读快照内导出所有表并生成临时数据库 manifest；文件 fsync 完成后才提交 cut 回执。接管者若发现完整且摘要一致的 cut 可复用，否则删除本 Job 的未封口临时文件并重做该库。最终 SEALING 对 ZIP 成员逐项摘要、流式加密到同目录临时文件、fsync 文件与目录，再以原子 rename 发布。只有已发布路径、字节数和密文摘要写入 `backup_artifacts`；日志与审计只记录这些标量。
+每库捕获步骤先读取身份和迁移账本，在只读快照内导出所有表并生成临时数据库 manifest；文件 fsync 完成后才提交 cut 回执。接管者使用新的 owner epoch 从头建立自己的临时工件，不能复用仍可能被旧线程写入的路径。最终 SEALING 对 ZIP 成员逐项摘要、流式加密到 owner epoch 专属候选文件。发布事务锁定 Job 并复核 owner/lease，执行原子 rename 与目录 fsync 后再次核对租约，再一并提交 cut、`backup_artifacts` 和 READY/INCONSISTENT 状态。每个 epoch 的最终候选名不同，陈旧线程即使迟到也不能覆盖当前权威工件；未进入 `backup_artifacts` 的候选没有下载权威，交给后续孤儿清理。日志与审计只记录已发布的标量。
 
 遗忘、消息写入和备份读快照按 PostgreSQL 正常 MVCC 先后线性化。manifest 中的 deletion epoch 是该数据库 cut 的一部分。备份读取不会阻塞长事务之外的业务写，也不添加 retention pin；正在 scrub 的正文可能在该快照内仍有 body，但对应 header/suppression 已使其在恢复时不可读。捕获后发生的删除不在旧工件中，因此开放恢复前必须提供后续删除屏障。
 
