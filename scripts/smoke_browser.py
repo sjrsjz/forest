@@ -24,6 +24,8 @@ from uuid import uuid4
 
 from playwright.sync_api import expect, sync_playwright
 
+from forest.backup_artifact import decrypt_file, inspect_zip
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -170,6 +172,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(viewer_page.locator("#role")).to_have_text("查看者")
             expect(viewer_page.locator("#nav-accounts")).to_be_hidden()
             expect(viewer_page.locator("#nav-audit")).to_be_hidden()
+            expect(viewer_page.locator("#nav-backups")).to_be_hidden()
             expect(viewer_page.locator('#config-form button[type="submit"]')).to_be_hidden()
             denied = viewer_page.evaluate("""async () => {
               const csrf = document.cookie.split('; ').find(v => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -516,6 +519,35 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             page.screenshot(path=str(artifacts / 'packages-mobile.png'), full_page=True)
             page.set_viewport_size({"width": 1360, "height": 1000})
             page.screenshot(path=str(artifacts / 'packages-desktop.png'), full_page=True)
+            recovery_passphrase = secrets.token_urlsafe(32)
+            page.locator('#nav-backups').click()
+            expect(page.locator('#backups')).to_be_visible()
+            backup_form = page.locator('#backup-create-form')
+            backup_form.locator('[name="recovery_passphrase"]').fill(recovery_passphrase)
+            backup_form.locator('[name="recovery_confirmation"]').fill(recovery_passphrase)
+            backup_form.locator('[name="current_password"]').fill(password)
+            backup_form.locator('button[type="submit"]').click()
+            expect(page.locator('#backup-list')).to_contain_text('可下载', timeout=60000)
+            expect(backup_form.locator('[name="recovery_passphrase"]')).to_have_value('')
+            with page.expect_download(timeout=30000) as download_info:
+                page.locator('#backup-list .button-link').first.click()
+            encrypted_backup = artifacts / 'browser-backup.forest-backup'
+            restored_backup = artifacts / 'browser-backup.zip'
+            download_info.value.save_as(encrypted_backup)
+            backup_header = decrypt_file(
+                encrypted_backup, restored_backup, recovery_passphrase
+            )
+            backup_manifest = inspect_zip(restored_backup)
+            assert backup_header['backup_id'] == backup_manifest['backup_id']
+            assert backup_manifest['roster']['consistent'] is True
+            assert {item['scope'] for item in backup_manifest['databases']} == {
+                'deployment', 'bot'
+            }
+            assert any(
+                item['name'].startswith('artifacts/')
+                for item in backup_manifest['members']
+            )
+            page.screenshot(path=str(artifacts / 'backups-desktop.png'), full_page=True)
             page.locator("#logout").click()
             expect(page.locator("#login")).to_be_visible()
             rival.reload()
@@ -545,6 +577,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
+                        "Web encrypted deployment and two-Bot backup, package inclusion, download and local verification",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

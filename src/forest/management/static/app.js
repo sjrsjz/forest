@@ -10,6 +10,7 @@ import { replacementButton } from './configuration-forms.js';
 import { accountsPanel } from './accounts-panel.js';
 import { auditPanel } from './audit-panel.js';
 import { botAuditPanel } from './bot-audit-panel.js';
+import { backupPanel as createBackupPanel } from './backup-panel.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -27,8 +28,8 @@ function notice(text, success = false) {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'audit', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'audit', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'audit', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'audit', 'backups', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
@@ -59,6 +60,7 @@ function setIdentity(user) {
   $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
   $('nav-accounts').classList.toggle('hidden', user?.role !== 'admin');
   $('nav-audit').classList.toggle('hidden', user?.role !== 'admin');
+  $('nav-backups').classList.toggle('hidden', user?.role !== 'admin');
   $('identity').classList.toggle('hidden', !user);
 }
 async function busy(button, work) {
@@ -130,6 +132,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   botAudit.reset();
   accountPanel.reset();
   deploymentAudit.reset();
+  backupsPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
@@ -188,6 +191,7 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
 });
 const deploymentAudit = auditPanel(api, busy);
 const botAudit = botAuditPanel(api, busy);
+const backupsPanel = createBackupPanel(api, busy, notice);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -387,6 +391,9 @@ $('nav-accounts').addEventListener('click', () => busy($('nav-accounts'), async 
 $('nav-audit').addEventListener('click', () => busy($('nav-audit'), async () => {
   show('audit'); await deploymentAudit.load();
 }));
+$('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
+  show('backups'); await backupsPanel.load();
+}));
 $('refresh-bots').addEventListener('click', () => busy($('refresh-bots'), readBots));
 $('create-bot-form').addEventListener('input', () => {
   createKey = null;
@@ -557,4 +564,12 @@ setInterval(async () => {
   } catch (error) { if (activeView === 'bots') notice(error.message); }
   finally { polling = false; }
 }, 2500);
+let backupPolling = false;
+setInterval(async () => {
+  if (activeView !== 'backups' || backupPolling || !backupsPanel.hasRunning()) return;
+  backupPolling = true;
+  try { await backupsPanel.load(); }
+  catch (error) { if (activeView === 'backups') notice(error.message); }
+  finally { backupPolling = false; }
+}, 1000);
 start();

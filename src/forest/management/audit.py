@@ -17,6 +17,7 @@ _DETAIL_FIELDS = {
     "bot.rename": frozenset({"job_id", "revision"}),
     "bot.retry": frozenset({"job_id", "revision"}),
     "binding.reserve": frozenset({"bot_id", "binding_id"}),
+    "backup.create": frozenset({"backup_id", "include_packages"}),
     "account.create": frozenset({"username", "role", "revision"}),
     "account.apply": frozenset({
         "previous_revision", "revision", "role", "disabled", "password_changed",

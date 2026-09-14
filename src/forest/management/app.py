@@ -29,6 +29,8 @@ from forest.management.accounts_api import install_account_routes
 from forest.management.agent_api import install_agent_routes
 from forest.management.audit_api import install_audit_routes
 from forest.management.authority import WebAuthority
+from forest.management.backup_api import install_backup_routes
+from forest.management.backups import BackupManager
 from forest.management.bindings_api import install_binding_routes
 from forest.management.bot_audit_api import install_bot_audit_routes
 from forest.management.bots_api import install_bot_routes
@@ -183,6 +185,7 @@ class ManagementRuntime:
         self.authority: WebAuthority | None = None
         self.fleet: BotFleet | None = None
         self.provisioner: BotProvisioner | None = None
+        self.backups: BackupManager | None = None
         self.service_tasks: list[asyncio.Task] = []
         self.service_errors: dict[str, str] = {}
 
@@ -228,6 +231,9 @@ class ManagementRuntime:
             catalog = BotCatalog(candidate, vault, managed_dsn=self.settings.managed_dsn)
             fleet = BotFleet(catalog, authority, self.settings.data_dir)
             await fleet.initialize()
+            backups = BackupManager(
+                catalog, fleet.artifacts, self.settings.data_dir, plan["dsn"]
+            )
         except BaseException:
             await candidate.close()
             raise
@@ -236,16 +242,20 @@ class ManagementRuntime:
             await self.store.close()
         self.store = candidate
         self.catalog, self.authority, self.fleet = catalog, authority, fleet
+        self.backups = backups
         self.provisioner = BotProvisioner(catalog)
         self.service_tasks = [
             asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
             asyncio.create_task(fleet.run_forever(), name="bot-fleet"),
+            asyncio.create_task(backups.run_forever(), name="backup-jobs"),
         ]
         self.recovery_error = None
 
     async def close_services(self) -> None:
         if self.provisioner is not None:
             await self.provisioner.close()
+        if self.backups is not None:
+            await self.backups.close()
         for task in self.service_tasks:
             task.cancel()
         await asyncio.gather(*self.service_tasks, return_exceptions=True)
@@ -261,6 +271,7 @@ class ManagementRuntime:
                     for index, (name, factory) in enumerate((
                         ("bot-provisioning", self.provisioner.run_forever),
                         ("bot-fleet", self.fleet.run_forever),
+                        ("backup-jobs", self.backups.run_forever),
                     )):
                         task = self.service_tasks[index]
                         if task.done():
@@ -594,6 +605,7 @@ def create_app(settings: WebSettings) -> FastAPI:
 
     install_account_routes(app, runtime)
     install_audit_routes(app, runtime)
+    install_backup_routes(app, runtime)
     install_bot_routes(app, runtime)
     install_binding_routes(app, runtime)
     install_agent_routes(app, runtime)

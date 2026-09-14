@@ -9,7 +9,7 @@
   <main>
     <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><span id="role" class="role-badge"></span><button id="logout" class="subtle">退出登录</button></div></header>
     <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署设置</button><button id="nav-bots" class="subtle">Bot 与组件</button><button id="nav-accounts" class="subtle">账号与权限</button><button id="nav-audit" class="subtle">部署审计</button></nav>
+    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署设置</button><button id="nav-bots" class="subtle">Bot 与组件</button><button id="nav-backups" class="subtle">存储与备份</button><button id="nav-accounts" class="subtle">账号与权限</button><button id="nav-audit" class="subtle">部署审计</button></nav>
     <section id="loading"><p>正在连接管理服务…</p></section>
     <section id="setup" class="hidden card narrow">
       <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库，然后创建各自独立的 Bot。</p>
@@ -64,6 +64,24 @@
         <div class="actions"><button id="audit-refresh" class="subtle" type="button">刷新最新记录</button><button id="audit-more" class="subtle hidden" type="button">更早记录</button></div>
       </div>
       <p id="audit-empty" class="hint hidden">当前筛选条件下没有审计记录。</p><div id="audit-list" aria-live="polite"></div>
+    </section>
+    <section id="backups" class="hidden">
+      <div class="columns"><div class="card"><h2>创建加密备份</h2>
+        <p class="muted">备份部署数据库和当前已就绪的全部 Bot 数据库。各数据库使用独立一致性切片；该工件不是时间点恢复。</p>
+        <form id="backup-create-form">
+          <label>恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
+          <label>再次输入恢复口令<input name="recovery_confirmation" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
+          <label class="check"><input name="include_packages" type="checkbox" checked>包含已注册的插件工件</label>
+          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
+          <button type="submit">创建备份</button>
+        </form>
+        <p class="hint">恢复口令只用于本次请求，不会保存明文。丢失口令后无法解密下载的工件。备份抓取不会启动 Agent，也不会阻塞不同群聊之间的对话。</p>
+      </div><div class="card"><h2>恢复边界</h2>
+        <p class="muted">下载前会重新核对会话与密文摘要。恢复必须先在隔离数据库中校验，不能覆盖当前在线数据库。</p>
+        <p class="hint">Bot 目录若在抓取期间变化，工件会标记为不一致并只允许取证下载。删除屏障、外部效果和 UNKNOWN 发送结果仍需在激活前核对。</p>
+        <button id="backup-refresh" class="subtle" type="button">刷新备份状态</button>
+      </div></div>
+      <p id="backup-empty" class="hint hidden">还没有备份任务。</p><div id="backup-list" aria-live="polite"></div>
     </section>
     <section id="bots" class="hidden">
       <details class="card"><summary>插件包管理</summary><p class="hint">导入可信来源的 Python 插件 ZIP 包。导入后为 Bot 选择版本并预览配置；启用时才启动插件。</p><form id="package-import-form"><label>插件包<input name="archive" type="file" accept=".zip,application/zip" required></label><button type="submit">导入插件包</button></form><div id="package-list"></div></details>
