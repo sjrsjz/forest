@@ -7,7 +7,8 @@ from collections.abc import Callable
 from uuid import uuid4
 
 from forest.errors import ForestError
-from forest.shell_registry import CONTROL_DEADLINE, get_command_spec, render_help
+from forest.shell_registry import CONTROL_DEADLINE
+from forest.shell_registry_v7 import get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore
@@ -228,6 +229,10 @@ class ShellDispatcher:
             from forest.storage.bot_audit import BotAuditStore
 
             repository = BotAuditStore(self.messages.store, control=control)
+        elif spec.execution_target == "context":
+            from forest.storage.context_administration import ContextAdministration
+
+            repository = ContextAdministration(self.messages, control=control)
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         kwargs = {"lease": lease} if (
@@ -350,6 +355,49 @@ class ShellDispatcher:
                 self.on_change()
         elif name == "audit.read":
             text, outcome = self._audit_status(result)
+        elif name == "context.read":
+            active = (
+                f"Run {result['run_id']} / {result['run_phase']} / 检查点 "
+                f"{result['checkpoint_seq']}"
+                if result["run_id"] else "无活跃 Run"
+            )
+            recent = [
+                f"{row['request_id']}：{row['status']}"
+                + (f" → 视图 {row['applied_view_revision']}" if row['applied_view_revision'] is not None else "")
+                + (f"（{row['terminal_reason']}）" if row['terminal_reason'] else "")
+                for row in result["requests"][:4]
+            ]
+            text = (
+                f"本群上下文：内容修订 {result['context_revision']}；视图修订 "
+                f"{result['context_view_revision']}；已接入序号 {result['context_applied_seq']} / "
+                f"已分类 {result['classified_through_seq']}。\n"
+                f"可见 {result['visible_units']} 单元 / {result['visible_tokens']} 估算 token；"
+                f"归档 {result['archived_units']} 单元；预算 {result['token_budget']}。\n"
+                f"待触发 {result['pending_triggers']}；已领取触发 {result['claimed_triggers']}；{active}。"
+                + ("\n最近裁剪请求：\n" + "\n".join(recent) if recent else "")
+            )
+            outcome = {
+                "code": "CONTEXT_STATUS",
+                "context_revision": result["context_revision"],
+                "context_view_revision": result["context_view_revision"],
+                "visible_units": result["visible_units"],
+                "archived_units": result["archived_units"],
+                "pending_triggers": result["pending_triggers"],
+                "run_phase": result["run_phase"],
+            }
+        elif name == "context.compact":
+            text = (
+                f"上下文裁剪请求 {result['request_id']} 已排队；会话 Actor 将在模型调用安全点"
+                f"核对视图 {result['expected_view_revision']} 后执行。该操作不会调用摘要模型。"
+            )
+            outcome = {
+                "code": "CONTEXT_COMPACTION_QUEUED",
+                "request_id": result["request_id"],
+                "status": result["status"],
+                "expected_view_revision": result["expected_view_revision"],
+            }
+            if self.on_change is not None:
+                self.on_change()
         elif name == "memory.read":
             lines = []
             for row in result["sources"][:20]:

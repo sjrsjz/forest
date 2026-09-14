@@ -6,7 +6,7 @@
 
 001–028 保留原 SQL SHA-256。带数据 handler 的 029–035、037–038 使用 UTF-8 JSON 数组 `['forest.bot.migration.v1', SQL, handler 源码, migration_v1.py 源码]` 的 SHA-256，数组使用无额外空格的 JSON 编码；纯 SQL 的 036 仍使用 SQL SHA-256。handler 和 `migration_v1.py` 发布后不得修改；后续算法使用新的版本文件。handler 应包含迁移所需的历史算法，不调用会随运行时变化的业务存储实现。
 
-新连接通过 PostgreSQL 启动参数声明当前 `forest.writer_generation`。029 的基础正文切换使用 generation 1，042 的配置正文切换提升为 generation 2，060 的 Job 正文切换提升为 generation 3，062 的 Shell 正文切换提升为 generation 4。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
+新连接通过 PostgreSQL 启动参数声明当前 `forest.writer_generation`。029 的基础正文切换使用 generation 1，042 的配置正文切换提升为 generation 2，060 的 Job 正文切换提升为 generation 3，062 的 Shell 正文切换提升为 generation 4，064 的 Shell v7 上下文控制协议提升为 generation 5。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
 
 `PayloadStore.import_legacy_json_in()` / `import_legacy_bytes_in()` 只在 dispatcher 绑定的同连接、同任务、同事务内有效，普通业务调用及继承 ContextVar 的子任务会被拒绝。参数为 `owner_kind`、`owner_id`、`value`、`sources`、`parents`，返回 `PayloadRef`。它与正常写入使用一致的稳定身份和摘要：
 
@@ -60,3 +60,9 @@ occurrence 数据库授权使用不获取 memory clock 行锁的不可变可用�
 063 搬运 `bot_shell_requests.arguments/outcome/delivery`。参数使用 `owner_kind=shell.arguments`，Shell 结果使用 `owner_kind=control.result`，内部 delivery receipt 使用 `owner_kind=control.outbox`；迁移完成后原三列只能为 SQL `NULL`。参数继承原群消息 payload；Shell 结果继承原消息、参数、Binding 配置及可证明的类型化管理结果；CONTROL send part 继承 Shell 结果，receipt 再继承结果和各个实际发送 part。无法证明完整旧结果链的终端记录保留 `legacy_result_untracked`，不会伪造一次发送或控制效果。
 
 Shell claim 先锁请求 head，再在同一事务锁定 deletion clock 并 hydrate 参数。业务控制方法缓存冻结参数身份，取得自身业务锁后才在最终 `_time` 安全点重新 hydrate，从而统一为“业务 head → deletion clock”的锁序。遗忘先提交时待执行命令原子终结为 `CANCELLED/CONTROL_CONTENT_REVOKED`；命令完成先提交时永久事实保留，正文随后不可读且不能复活。完整字段、父链和验证见 [Shell 参数与结果载荷](p4-shell-payloads.md)。
+
+## Shell 上下文控制补充（064–065）
+
+064 使用独立的 `migration_v5.py` 把 writer gate 提升到 5；其 checksum 包含 v1–v5 冻结 helper、`shell_payloads_v7.py` 与 `shell_registry_v7.py`。v7 作为新模块继承并解析 v2–v6 的持久命令，不修改 063 已绑定的 `shell_payloads.py` 和 `shell_registry.py` 字节。generation-4 进程在 064 提交后不能重新取得 HostLease，避免它领取无法解释的 v7 请求。
+
+065 增加 `bot_context_management_requests`。请求身份、operation、来源会话、种类、预期视图和登记时间不可变；状态只允许从 `PENDING` 一次终结为 `APPLIED` 或 `CONFLICT`。写操作与 `bot_web_operations` 使用延迟外键同事务提交，Shell 不能留下无来源的上下文请求。Actor 按发令会话加锁，在现有模型/工具安全边界消费请求；裁剪只更新 Context 可见性、视图修订与不可变 manifest，不搬运或生成正文，也不调用模型。

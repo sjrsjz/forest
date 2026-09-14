@@ -21,10 +21,10 @@ from forest.packages import digest_json
 from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
-from forest.storage.shell_payloads import (
+from forest.storage.shell_payloads_v7 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
 )
-from forest.storage.shell_payloads import (
+from forest.storage.shell_payloads_v7 import (
     ShellPayloadStore,
     arguments_metadata,
     delivery_metadata,
@@ -1097,6 +1097,8 @@ class MessageStore:
                 )).fetchone()
                 if registered["phase"] not in {"READY_MODEL", "WAIT_INPUT"} or unfinished:
                     raise ForestError("AGENT_BOUNDARY_REQUIRED", "The previous model and tool group must close", 409)
+        if mode == "SAFE_POINT" or run is None:
+            await self._apply_context_requests_in(conn, actor.conversation_id)
         if run and mode == "IDLE":
             if await self._pending_echo_view(conn, actor.conversation_id):
                 await self._compact(conn, actor.conversation_id)
@@ -1209,7 +1211,12 @@ class MessageStore:
             "SELECT 1 FROM public.bot_conversation_triggers WHERE bot_id=%s AND conversation_id=%s "
             "AND status IN ('PENDING','CLAIMED') LIMIT 1", (self.store.bot_id, conversation["conversation_id"]),
         )).fetchone()
-        if pending or (session and session["active_run_id"]):
+        context_request = await (await conn.execute(
+            "SELECT 1 FROM public.bot_context_management_requests "
+            "WHERE bot_id=%s AND conversation_id=%s AND status='PENDING' LIMIT 1",
+            (self.store.bot_id, conversation["conversation_id"]),
+        )).fetchone()
+        if pending or context_request or (session and session["active_run_id"]):
             return
         if conversation["context_applied_seq"] != conversation["classified_through_seq"]:
             return
@@ -1230,6 +1237,36 @@ class MessageStore:
             "AND u.conversation_id=%s AND a.applied_view_revision IS NULL LIMIT 1",
             (self.store.bot_id, conversation_id),
         )).fetchone() is not None
+
+    async def _apply_context_requests_in(self, conn, conversation_id, *, limit=32) -> int:
+        """Let the current Actor publish queued view changes at a safe boundary."""
+        requests = await (await conn.execute(
+            "SELECT * FROM public.bot_context_management_requests "
+            "WHERE bot_id=%s AND conversation_id=%s AND status='PENDING' "
+            "ORDER BY requested_at,request_id LIMIT %s FOR UPDATE",
+            (self.store.bot_id, conversation_id, limit),
+        )).fetchall()
+        applied = 0
+        for request in requests:
+            conversation = await self._conversation(conn, conversation_id)
+            if conversation["context_view_revision"] != request["expected_view_revision"]:
+                await conn.execute(
+                    "UPDATE public.bot_context_management_requests SET status='CONFLICT',"
+                    "terminal_reason='context_view_revision_changed',completed_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND request_id=%s AND status='PENDING'",
+                    (self.store.bot_id, request["request_id"]),
+                )
+                continue
+            await self._compact(conn, conversation_id)
+            current = await self._conversation(conn, conversation_id)
+            await conn.execute(
+                "UPDATE public.bot_context_management_requests SET status='APPLIED',"
+                "applied_view_revision=%s,completed_at=clock_timestamp() "
+                "WHERE bot_id=%s AND request_id=%s AND status='PENDING'",
+                (current["context_view_revision"], self.store.bot_id, request["request_id"]),
+            )
+            applied += 1
+        return applied
 
     async def _apply_echo_view(self, conn, conversation_id) -> list[str]:
         aliases = await (await conn.execute(

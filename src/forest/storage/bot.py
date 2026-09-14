@@ -33,8 +33,9 @@ from forest.storage.migration_v1 import (
 )
 from forest.storage.migration_v2 import install_writer_gate_in as install_writer_gate_v2_in
 from forest.storage.migration_v3 import install_writer_gate_in as install_writer_gate_v3_in
-from forest.storage.migration_v4 import WRITER_GENERATION
 from forest.storage.migration_v4 import install_writer_gate_in as install_writer_gate_v4_in
+from forest.storage.migration_v5 import WRITER_GENERATION
+from forest.storage.migration_v5 import install_writer_gate_in as install_writer_gate_v5_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -69,10 +70,33 @@ MIGRATION_V2 = frozenset({
 })
 MIGRATION_V3 = frozenset({"060_schema_writer_v3.sql", "061_job_payloads.sql"})
 MIGRATION_V4 = frozenset({"062_schema_writer_v4.sql", "063_shell_payloads.sql"})
+MIGRATION_V5 = frozenset({"064_schema_writer_v5.sql", "065_context_management.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
+    if version in MIGRATION_V5:
+        root = files("forest.storage")
+        forest_root = files("forest")
+        try:
+            helpers = [[name, root.joinpath(name).read_text(encoding="utf-8")]
+                       for name in (
+                           "migration_v1.py", "migration_v2.py", "migration_v3.py",
+                           "migration_v4.py", "migration_v5.py", "shell_payloads_v7.py",
+                       )]
+            helpers.append([
+                "shell_registry_v7.py",
+                forest_root.joinpath("shell_registry_v7.py").read_text(encoding="utf-8"),
+            ])
+        except FileNotFoundError as exc:
+            raise ForestError(
+                "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
+            ) from exc
+        envelope = json.dumps(
+            ["forest.bot.migration.v5", source, None, helpers],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(envelope).hexdigest()
     if version in MIGRATION_V4:
         root = files("forest.storage")
         forest_root = files("forest")
@@ -320,6 +344,7 @@ class BotStore:
             gated_v2 = False
             gated_v3 = False
             gated_v4 = False
+            gated_v5 = False
             for version, source, checksum in plan:
                 handler = MIGRATION_HANDLERS.get(version)
                 if handler and not gated:
@@ -334,6 +359,9 @@ class BotStore:
                 if version in MIGRATION_V4 and not gated_v4:
                     await install_writer_gate_v4_in(conn)
                     gated_v4 = True
+                if version in MIGRATION_V5 and not gated_v5:
+                    await install_writer_gate_v5_in(conn)
+                    gated_v5 = True
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)

@@ -57,6 +57,9 @@ def command(text, *, extras=(), self_message=False):
     ("#forest audit list", "audit.read", {"limit": 12}, 1),
     ("#forest logs list --limit 7 --action agent.cancel --before audit:9", "audit.read",
      {"limit": 7, "action": "agent.cancel", "before": "audit:9"}, 1),
+    ("#forest context inspect", "context.read", {}, 1),
+    ("#forest context compact --expect-view 9", "context.compact",
+     {"expected_view_revision": 9}, 1),
 ])
 def test_typed_commands(text, name, payload, priority):
     parsed = command(text)
@@ -78,6 +81,9 @@ def test_typed_commands(text, name, payload, priority):
     '#forest component-job replay job --expect-revision -1',
     '#forest audit list --limit 0', '#forest audit list --limit 21',
     '#forest audit list --before "bad cursor"', '#forest audit list --unknown value',
+    '#forest context inspect extra', '#forest context compact',
+    '#forest context compact --expect-view -1',
+    '#forest context compact --expect-view 1 --expect-view 2',
     '#forest job run a --expect-revision 1; rm anything', '#forest confirm SECRET',
     '#forest job status ' + 'a' * 129,
     '#forest ' + 'a' * 4096,
@@ -101,9 +107,10 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v6():
-    assert command("#forest status").gate_version == "shell-gate-v6"
-    assert command("#forest memory list").gate_version == "shell-gate-v6"
-    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v6"
-    assert command("#forest component-job list").gate_version == "shell-gate-v6"
-    assert command("#forest audit list").gate_version == "shell-gate-v6"
+def test_new_admissions_are_explicitly_shell_gate_v7():
+    assert command("#forest status").gate_version == "shell-gate-v7"
+    assert command("#forest memory list").gate_version == "shell-gate-v7"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v7"
+    assert command("#forest component-job list").gate_version == "shell-gate-v7"
+    assert command("#forest audit list").gate_version == "shell-gate-v7"
+    assert command("#forest context inspect").gate_version == "shell-gate-v7"

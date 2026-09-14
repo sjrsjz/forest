@@ -100,3 +100,9 @@ flowchart LR
 - generation-3 既有连接在 062 后永久失去 HostLease 写权限；
 - 真实 020/061 非空旧库升级保持原参数/outcome 的逐值内容，正文列清空且迁移可重入；
 - Shell、消息、delivery、控制回执、Job/Agent/Memory/组件管理回归与独立 Compose 浏览器流程继续通过。
+
+## 8. v7 上下文命令兼容层
+
+迁移 064–065 新增 `shell_registry_v7.py` 与 `shell_payloads_v7.py`，继承 v2–v6 已发布契约并加入 `context.read/context.compact`。旧 v6 registry 与 payload helper 仍由 063 checksum 固定，不能为了新命令原地修改。v7 参数、结果和 CONTROL 回复继续使用本页相同的来源父链与三种载荷身份；上下文请求本身只保存视图版本、状态和稳定 ID，不复制群消息正文。
+
+`context compact` 完成 Shell 管理事务时只表示请求已经持久排队。唯一会话 Actor 在安全点提交 `APPLIED` 或 `CONFLICT`，Shell Dispatcher 不取得 ActorLease、不创建 Run，也不调用 Agent 或 Provider。`context inspect` 只投影本群元数据，并显示最近请求终态；它不 hydrate Context unit 的 payload，因此不能成为群消息正文的读取旁路。

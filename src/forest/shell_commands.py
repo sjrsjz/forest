@@ -6,10 +6,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry import (
+from forest.shell_registry_v7 import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V6,
-    SIMPLE_COMMANDS_V6,
+    DOMAIN_ALIASES_V7,
+    SIMPLE_COMMANDS_V7,
     get_command_spec,
 )
 
@@ -82,11 +82,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V6:
-        return _command(SIMPLE_COMMANDS_V6[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V7:
+        return _command(SIMPLE_COMMANDS_V7[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V6.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V7.get(words[0], words[0]), words[1]
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")
     if (domain, verb) == ("job", "status") and len(words) == 3:
@@ -189,6 +189,13 @@ def _parse(words):
                 raise ValueError("limit")
             payload["limit"] = limit
         return _command("audit.read", payload)
+    if (domain, verb) == ("context", "inspect") and len(words) == 2:
+        return _command("context.read")
+    if (domain, verb) == ("context", "compact"):
+        options = _options(words[2:], {"--expect-view"})
+        return _command("context.compact", {
+            "expected_view_revision": _revision(options["--expect-view"]),
+        })
     if (domain, verb) == ("memory", "list") and len(words) == 2:
         return _command("memory.read")
     if (domain, verb) == ("memory", "forget-plan") and len(words) >= 3:

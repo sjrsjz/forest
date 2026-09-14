@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.shell_registry import command_action
+from forest.shell_registry_v7 import command_action
 from forest.storage.control import BotControl
 
 

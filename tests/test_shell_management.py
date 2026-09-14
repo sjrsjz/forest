@@ -188,7 +188,7 @@ async def test_shell_memory_forget_plan_is_bound_to_origin_group(messages):
         number="memory-plan",
         group="group-1",
     )
-    assert plan_claim["gate_version"] == "shell-gate-v6"
+    assert plan_claim["gate_version"] == "shell-gate-v7"
     _, proposal = await controls._typed(lease, plan_claim)
     apply_text = (
         f"#forest memory forget-apply {proposal['plan_id']} --digest {proposal['plan_digest']} "

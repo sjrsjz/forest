@@ -13,7 +13,7 @@ Bot 审计查询是观察接口。它不读取 Agent Context，不创建模型�
 
 ## 2. 授权与范围
 
-ShellGate 把新命令接纳为 `shell-gate-v6/audit.read`，作用域固定为接收事件的 `bot_id`。
+该命令在 `shell-gate-v6/audit.read` 首次发布；当前 v7 完整继承其冻结契约，新命令以 v7 接纳，作用域仍固定为接收事件的 `bot_id`。
 执行事务开始时检查持久命令 claim、gate/action/类型化参数、Host lease、Binding epoch 和原消息
 的可信 principal；返回前再读取当前 Binding 配置并确认作者仍在 `admin_user_ids`。群主、昵称、
 引用内容、OCR 和模型输出都不能授予权限。
