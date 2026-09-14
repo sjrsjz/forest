@@ -209,6 +209,12 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
         runtime_path = f"/management/v1/bots/{created[0]['bot_id']}/runtime"
         runtime = (await client.get(runtime_path)).json()
         assert runtime["data_admission"] and runtime["maintenance_epoch"] == 1
+        ingress = runtime["supervisor"]["ingress"]
+        assert ingress["lanes"] == {
+            lane: {"active": 0, "accepted": 0, "overloaded": 0}
+            for lane in ("ORDINARY", "PRIVILEGED_CONTROL", "REJECTION")
+        }
+        assert ingress["qualification_cache"] == {"hits": 0, "misses": 0, "entries": 0}
         maintenance_path = f"/management/v1/bots/{created[0]['bot_id']}/maintenance"
         paused = await post(client, maintenance_path, {
             "expected_maintenance_epoch": 1, "data_admission": False,

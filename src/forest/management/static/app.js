@@ -301,6 +301,18 @@ function updateBotState(state) {
   $('bot-effective').textContent = state.effective_revision;
   const component = state.runtime.components.find((c) => c.component_id === selectedPackage().component_id);
   const error = component?.error_code || state.runtime.error_code;
+  const ingress = state.runtime.ingress;
+  if (ingress) {
+    const ordinary = ingress.lanes.ORDINARY;
+    const control = ingress.lanes.PRIVILEGED_CONTROL;
+    const rejection = ingress.lanes.REJECTION;
+    $('bot-ingress-status').textContent =
+      `普通 ${ordinary.active} · P0 ${control.active} · 拒绝 ${rejection.active}` +
+      ` · 过载 ${ordinary.overloaded + control.overloaded + rejection.overloaded}` +
+      ` · 限速 ${ingress.rejection_budget.rate_limited}`;
+  } else {
+    $('bot-ingress-status').textContent = '尚未连接';
+  }
   $('bot-runtime-status').textContent = error ? `组件暂未就绪：${error}` :
     state.desired_enabled === false && state.effective_enabled === false ? '组件已停用，路由已排空' :
     state.desired_enabled === false ? '停用已接纳，正在冻结并排空调用…' :

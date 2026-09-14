@@ -18,6 +18,7 @@ from forest.kernel import Kernel
 from forest.management.fleet import BotFleet
 from forest.packages import PackageCatalog
 from forest.platform import BindingRuntime
+from forest.shell_ingress import ShellIngressGuard
 from forest.storage.input_payloads import InputContentStore
 
 pytestmark = pytest.mark.postgres
@@ -455,3 +456,57 @@ async def test_native_worker_group_reply_and_shell_control_continue_independentl
         ).fetchall()
     assert request["status"] == "COMPLETED"
     assert [r["trigger_decision"] for r in inbox] == ["TRIGGER", "CONTROL_COMMAND"]
+
+
+async def test_reserved_shell_ingress_survives_a_broken_reloadable_adapter(
+    platform, monkeypatch
+):
+    p = platform
+    await p.runtime._replace(p.desired)
+
+    async def broken_adapter(*args, **kwargs):
+        raise ForestError("BROKEN_ADAPTER", "synthetic codec failure", 503)
+
+    monkeypatch.setattr(p.kernel, "invoke_control_with_receipt", broken_adapter)
+    assert (await receive(p, 31, message="#forest core status"))["accepted"]
+    with pytest.raises(ForestError) as caught:
+        await receive(p, 32, message="ordinary input")
+    assert caught.value.code == "BROKEN_ADAPTER"
+    async with p.env.store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT platform_message_id,trigger_decision FROM public.bot_message_inbox"
+            )
+        ).fetchall()
+    assert [tuple(row.values()) for row in rows] == [("31", "CONTROL_COMMAND")]
+
+
+async def test_rejection_budget_returns_429_before_raw_payload_or_inbox(platform):
+    p = platform
+    await p.runtime._replace(p.desired)
+    p.runtime.shell_ingress = ShellIngressGuard(
+        p.env.store.bot_id, rejection_burst=1, rejection_refill_seconds=60
+    )
+    outsider = {"user_id": 29999, "nickname": "outsider", "role": "member"}
+    assert (
+        await receive(p, 41, user_id=29999, sender=outsider, message="#forest help")
+    )["accepted"]
+    async with p.env.store.pool.connection() as conn:
+        before_payloads = await (
+            await conn.execute("SELECT count(*) AS n FROM public.bot_payload_headers")
+        ).fetchone()
+    with pytest.raises(ForestError) as caught:
+        await receive(p, 42, user_id=29999, sender=outsider, message="#forest help")
+    assert caught.value.code == "SHELL_REJECTION_OVERLOADED"
+    assert caught.value.status == 429
+    async with p.env.store.pool.connection() as conn:
+        counts = await (
+            await conn.execute(
+                "SELECT (SELECT count(*) FROM public.bot_payload_headers) AS payloads,"
+                "(SELECT count(*) FROM public.bot_message_inbox) AS inbox,"
+                "(SELECT count(*) FROM public.bot_shell_requests) AS shells"
+            )
+        ).fetchone()
+    assert counts == {"payloads": before_payloads["n"], "inbox": 1, "shells": 1}
+    stats = p.runtime.shell_ingress.snapshot()
+    assert stats["rejection_budget"]["rate_limited"] == 1

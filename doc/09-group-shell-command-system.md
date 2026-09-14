@@ -2,7 +2,7 @@
 
 当前实现已经推进到 `shell-gate-v11`。v8 增加的 `module list/status/reload` 继续使用配置 plan/apply 与 Fleet/Kernel 生命周期；v9 增加固定 `core status/cancel/disable/reload`，v10 冻结 `current-binding-admin-v1` 接纳策略，v11 增加 `module validate/enable/disable` 和独立模块状态修订轴。声明 P0 的命令只有在可信发言主体命中当前 Binding 管理员名单时才保持 P0，否则持久降为 P1，执行前仍再次鉴权。Core form 只规范化到既有 Bot runtime、Agent Run 和 module 权威，不建立另一个状态机，也不提供宿主终端。旧 v2–v10 请求继续按各自 gate 与持久 priority 执行。组件协议见 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)，救援语法与优先级见 [P5 Core 救援入口](p5-core-shell.md)。069 将 writer generation 提升到 9，排除不能生成 v11 启停依据的旧 Host。
 
-> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v11` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员预检与最终复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理、脱敏 Bot 审计查询、本群 Context 元数据检查与安全点裁剪请求、组件 list/status/validate/reload/enable/disable，以及 Core status/cancel/disable/reload。独立拒绝预算、接入前资格缓存与其余命令树仍是待实现目标，不能从示例推断为现有能力。
+> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v11` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员预检与最终复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理、脱敏 Bot 审计查询、本群 Context 元数据检查与安全点裁剪请求、组件 list/status/validate/reload/enable/disable，以及 Core status/cancel/disable/reload。Inbox 前的普通/P0/拒绝容量隔离、短期资格缓存和拒绝令牌桶也已接通；其余命令树仍是待实现目标，不能从示例推断为现有能力。接入容量细节见 [P5 Shell 接入容量](p5-shell-ingress-admission.md)。
 
 ## 1. 目标与边界
 
@@ -173,7 +173,7 @@ v7 完整继承 v2–v6，并新增两条只作用于发令会话的命令：
 ### 3.1 ShellGate 不依赖 Agent 或连续分类头
 
 ```text
-可信 Adapter → Inbox 去重/分配 ingress_seq + ShellGate 快速预分类
+固定宿主解析与接入容量门 → Inbox 去重/分配 ingress_seq + ShellGate 分类
   ├─ CONTROL → durable command_requests → P0/P1 控制调度 → 管理服务
   ├─ BUSINESS → 持久业务分类/命令 → P2 调度
   └─ NONE → 普通分类/触发 → P3 Agent 或 P4 静默维护

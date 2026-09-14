@@ -364,6 +364,9 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#conversation-list')).to_contain_text('已推入上下文 1', timeout=15000)
             expect(page.locator('#delivery-list')).to_contain_text('暂无发送记录')
             group_message(2, '#forest core status')
+            page.locator('#reload-bot-config').click()
+            expect(page.locator('#bot-ingress-status')).to_contain_text('P0 0')
+            expect(page.locator('#bot-ingress-status')).to_contain_text('过载 0')
             expect(page.locator('#delivery-list')).to_contain_text('Forest 状态', timeout=20000)
             group_message(3, '/chat 浏览器接入验证')
             expect(page.locator('#delivery-list')).to_contain_text('SENT', timeout=20000)
@@ -718,7 +721,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "component two-tab conflict preserves draft",
                         "Bot configuration and state recover after restart",
                         "OneBot Web configuration and credentials stay private",
-                        "real P0 Core status admission, CONTROL reply and context projection",
+                        "real P0 Core status admission, isolated ingress status, CONTROL reply and context projection",
                         "real HTTP ingress, silent context, template reply and delivery",
                         "Web model configuration, real Agent HTTP reply and credential recovery after restart",
                         "Web Jobs source refresh, preview/apply, idempotent manual Agent reply, delivery, disable and restart persistence",

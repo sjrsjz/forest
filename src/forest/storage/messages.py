@@ -18,8 +18,9 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.shell_authority import qualify_priority
+from forest.shell_authority import P0_PRIORITY_POLICY, qualify_priority
 from forest.shell_commands import parse_command
+from forest.shell_ingress import ShellPriorityProof
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
 from forest.storage.shell_payloads_v11 import (
@@ -234,6 +235,7 @@ class MessageStore:
         self, lease: HostLease, binding_id: str, event: dict, *,
         expected_binding_epoch: int | None = None,
         decision: str | None = None, rule_revision: str = "ingress-v1", reason: str = "",
+        priority_proof: ShellPriorityProof | None = None,
     ) -> dict:
         value = self._normalized(event)
         if decision not in {None, "TRIGGER", "NO_TRIGGER", "CONTROL_COMMAND", "FAILED"}:
@@ -242,6 +244,12 @@ class MessageStore:
             raise ForestError("SELF_TRIGGER", "A binding cannot trigger its own response", 422)
         parsed_command = parse_command(value)
         shell_command = parsed_command.name if parsed_command else None
+        if priority_proof is not None and parsed_command is None:
+            raise ForestError(
+                "SHELL_PRIORITY_PROOF_INVALID",
+                "Shell priority proof does not match this message",
+                409,
+            )
         if shell_command is not None:
             decision, rule_revision, reason = (
                 "CONTROL_COMMAND", parsed_command.gate_version, "reserved_namespace"
@@ -272,19 +280,78 @@ class MessageStore:
                 raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
             priority_admission = None
             if parsed_command is not None:
-                settings = await self.bindings.current_config_in(
-                    conn,
-                    self.store.bot_id,
-                    binding_id,
-                    expected_binding_epoch=binding["binding_epoch"],
-                )
-                priority_admission = {
-                    **qualify_priority(
-                        parsed_command.priority, value["author"], settings["config"]
-                    ),
-                    "priority_basis_binding_epoch": binding["binding_epoch"],
-                    "priority_basis_config_revision": settings["effective_revision"],
-                }
+                if type(priority_proof) is ShellPriorityProof:
+                    expected = (
+                        self.store.bot_id,
+                        binding_id,
+                        binding["binding_epoch"],
+                        binding["effective_revision"],
+                        binding["config_payload_digest"],
+                        value["author"]["principal_ref"],
+                        parsed_command.name,
+                        parsed_command.gate_version,
+                        parsed_command.priority,
+                        P0_PRIORITY_POLICY,
+                    )
+                    actual = (
+                        priority_proof.bot_id,
+                        priority_proof.binding_id,
+                        priority_proof.binding_epoch,
+                        priority_proof.config_revision,
+                        priority_proof.config_payload_digest,
+                        priority_proof.principal_ref,
+                        priority_proof.command_name,
+                        priority_proof.gate_version,
+                        priority_proof.requested_priority,
+                        priority_proof.priority_policy,
+                    )
+                    valid_result = (
+                        type(priority_proof.binding_epoch) is int
+                        and type(priority_proof.config_revision) is int
+                        and type(priority_proof.requested_priority) is int
+                        and type(priority_proof.priority) is int
+                        and 0 <= priority_proof.priority <= 2
+                        and type(priority_proof.priority_eligible) is bool
+                        and priority_proof.priority_eligible
+                        == (
+                            priority_proof.requested_priority == 0
+                            and priority_proof.priority == 0
+                        )
+                        and priority_proof.priority
+                        == (
+                            0
+                            if priority_proof.priority_eligible
+                            and priority_proof.requested_priority == 0
+                            else max(1, priority_proof.requested_priority)
+                        )
+                    )
+                    if actual != expected or not valid_result:
+                        raise ForestError(
+                            "SHELL_PRIORITY_PROOF_INVALID",
+                            "Shell priority proof no longer matches the Binding or command",
+                            409,
+                        )
+                    priority_admission = priority_proof.persistence()
+                elif priority_proof is not None:
+                    raise ForestError(
+                        "SHELL_PRIORITY_PROOF_INVALID",
+                        "Shell priority proof has an invalid type",
+                        409,
+                    )
+                else:
+                    settings = await self.bindings.current_config_in(
+                        conn,
+                        self.store.bot_id,
+                        binding_id,
+                        expected_binding_epoch=binding["binding_epoch"],
+                    )
+                    priority_admission = {
+                        **qualify_priority(
+                            parsed_command.priority, value["author"], settings["config"]
+                        ),
+                        "priority_basis_binding_epoch": binding["binding_epoch"],
+                        "priority_basis_config_revision": settings["effective_revision"],
+                    }
             await conn.execute(
                 "INSERT INTO public.bot_conversations(bot_id,conversation_id,binding_id,platform,"
                 "channel_kind,channel_id,thread_id,group_source_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "

@@ -11,9 +11,16 @@ from uuid import uuid4
 import psycopg
 from psycopg_pool import PoolTimeout
 
-from forest.adapters.onebot import OneBotHTTPClient, PreparedSend, SendResult, verify_signature
+from forest.adapters.onebot import (
+    OneBotHTTPClient,
+    PreparedSend,
+    SendResult,
+    parse_event,
+    verify_signature,
+)
 from forest.delivery import DeliveryWorker, PreparedDelivery
 from forest.errors import ForestError
+from forest.shell_ingress import ShellIngressGuard
 from forest.storage.bindings import BindingStore
 from forest.storage.delivery import DeliveryStore
 from forest.storage.messages import MessageStore
@@ -90,6 +97,7 @@ class BindingRuntime:
         self.module_packages = {} if module_packages is None else module_packages
         self.bindings = BindingStore(bot.store)
         self.messages = MessageStore(bot.store, self.bindings)
+        self.shell_ingress = ShellIngressGuard(bot.store.bot_id)
         self.memory_sources = self.messages._memory_sources()
         self.delivery = DeliveryStore(bot.store, self.bindings)
         self.connections: dict[str, Connection] = {}
@@ -557,74 +565,102 @@ class BindingRuntime:
     async def receive(self, binding_id: str, body: bytes, signature: str | None) -> dict:
         connection = self.connection(binding_id)
         verify_signature(body, connection.webhook_secret, signature)
+        preview = parse_event(body, self_id=connection.row["self_id"])
+        preview_event = (
+            self.messages._normalized(preview.as_dict()) if preview is not None else None
+        )
+        ingress_plan = self.shell_ingress.classify(connection.row, preview_event)
         task = asyncio.current_task()
         connection.tasks.add(task)
         try:
-            await self.ensure_components(("adapter.onebot",))
-            event, origin_payload_id = await self.messages.stage_platform_input(
-                self.kernel._authority(), binding_id, body,
-                expected_binding_epoch=connection.row["binding_epoch"],
-            )
-            if event is None:
-                return {"accepted": True, "kind": "NON_MESSAGE"}
-            # Retrying a failed pure codec call is safe. The durable Inbox, not
-            # this disposable Worker call, owns platform-message deduplication.
-            normalized = await self.kernel.invoke_control_with_receipt(
-                "adapter.onebot",
-                "onebot.normalize",
-                {
-                    "body_b64": base64.b64encode(body).decode("ascii"),
-                    "self_id": connection.row["self_id"],
-                },
-                operation_id="ingress:" + str(uuid4()),
-                timeout=10,
-                input_parent_ids=(origin_payload_id,),
-            )
-            if self.messages._normalized(normalized.value["message"]) != event:
-                raise ForestError("ONEBOT_PROJECTION_CONFLICT", "Codec changed the authenticated platform projection", 409)
-            if event["author"].get("is_self"):
-                echo = await self.delivery.find_echo(
+            async with self.shell_ingress.enter(ingress_plan) as priority_proof:
+                if priority_proof is None:
+                    await self.ensure_components(("adapter.onebot",))
+                event, origin_payload_id = await self.messages.stage_platform_input(
+                    self.kernel._authority(), binding_id, body,
+                    expected_binding_epoch=connection.row["binding_epoch"],
+                )
+                if event != preview_event:
+                    raise ForestError(
+                        "ONEBOT_PROJECTION_CONFLICT",
+                        "Staged input differs from the signed host projection",
+                        409,
+                    )
+                if event is None:
+                    return {"accepted": True, "kind": "NON_MESSAGE"}
+                if priority_proof is None:
+                    # Retrying a failed pure codec call is safe. The durable
+                    # Inbox owns deduplication; reserved Shell syntax stays on
+                    # the fixed host parser so a broken Adapter can be rescued.
+                    normalized = await self.kernel.invoke_control_with_receipt(
+                        "adapter.onebot",
+                        "onebot.normalize",
+                        {
+                            "body_b64": base64.b64encode(body).decode("ascii"),
+                            "self_id": connection.row["self_id"],
+                        },
+                        operation_id="ingress:" + str(uuid4()),
+                        timeout=10,
+                        input_parent_ids=(origin_payload_id,),
+                    )
+                    if self.messages._normalized(normalized.value["message"]) != event:
+                        raise ForestError(
+                            "ONEBOT_PROJECTION_CONFLICT",
+                            "Codec changed the authenticated platform projection",
+                            409,
+                        )
+                if event["author"].get("is_self"):
+                    echo = await self.delivery.find_echo(
+                        self.kernel._authority(),
+                        binding_id,
+                        event["platform_message_id"],
+                        event["channel_kind"],
+                        event["channel_id"],
+                    )
+                    if echo:
+                        return {"accepted": True, "kind": "KNOWN_ECHO"}
+                trigger = False
+                if priority_proof is None:
+                    current = await self.bindings.execution_config(
+                        self.kernel._authority(), binding_id,
+                        expected_binding_epoch=connection.row["binding_epoch"],
+                    )
+                    config = current["config"]
+                    text = "".join(
+                        s.get("text", "") for s in event["segments"] if s["type"] == "text"
+                    )
+                    mention = any(
+                        s["type"] == "mention"
+                        and s.get("external_user_id") == connection.row["self_id"]
+                        for s in event["segments"]
+                    )
+                    trigger = (
+                        config["response_mode"] in {"component", "agent"}
+                        and not event["author"].get("is_self")
+                        and (
+                            (config["trigger_mentions"] and mention)
+                            or (
+                                config["trigger_prefix"]
+                                and text.lstrip().startswith(config["trigger_prefix"])
+                            )
+                            or (
+                                event["channel_kind"] == "private"
+                                and config["private_trigger"]
+                            )
+                        )
+                    )
+                receipt = await self.messages.ingest(
                     self.kernel._authority(),
                     binding_id,
-                    event["platform_message_id"],
-                    event["channel_kind"],
-                    event["channel_id"],
+                    event,
+                    expected_binding_epoch=connection.row["binding_epoch"],
+                    decision="TRIGGER" if trigger else "NO_TRIGGER",
+                    rule_revision="binding:" + str(connection.row["effective_revision"]),
+                    priority_proof=priority_proof,
                 )
-                if echo:
-                    return {"accepted": True, "kind": "KNOWN_ECHO"}
-            current = await self.bindings.execution_config(
-                self.kernel._authority(), binding_id,
-                expected_binding_epoch=connection.row["binding_epoch"],
-            )
-            config = current["config"]
-            text = "".join(s.get("text", "") for s in event["segments"] if s["type"] == "text")
-            mention = any(
-                s["type"] == "mention" and s.get("external_user_id") == connection.row["self_id"]
-                for s in event["segments"]
-            )
-            trigger = (
-                config["response_mode"] in {"component", "agent"}
-                and not event["author"].get("is_self")
-                and (
-                    (config["trigger_mentions"] and mention)
-                    or (
-                        config["trigger_prefix"]
-                        and text.lstrip().startswith(config["trigger_prefix"])
-                    )
-                    or (event["channel_kind"] == "private" and config["private_trigger"])
-                )
-            )
-            receipt = await self.messages.ingest(
-                self.kernel._authority(),
-                binding_id,
-                event,
-                expected_binding_epoch=connection.row["binding_epoch"],
-                decision="TRIGGER" if trigger else "NO_TRIGGER",
-                rule_revision="binding:" + str(connection.row["effective_revision"]),
-            )
-            self.scheduler.notify()
-            self.shell.notify()
-            return {"accepted": True, "event_id": receipt["event_id"]}
+                self.scheduler.notify()
+                self.shell.notify()
+                return {"accepted": True, "event_id": receipt["event_id"]}
         finally:
             connection.tasks.discard(task)
 

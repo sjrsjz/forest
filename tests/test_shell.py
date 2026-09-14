@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from uuid import uuid4
 
 import psycopg
@@ -11,8 +12,10 @@ from test_group_scheduler import row, until
 from test_messages import event, receive
 from test_messages import messages as messages
 
+from forest.errors import ForestError
 from forest.group_scheduler import GroupScheduler
 from forest.shell import ShellDispatcher
+from forest.shell_ingress import ShellIngressGuard
 from forest.storage.delivery import DeliveryStore
 
 pytestmark = pytest.mark.postgres
@@ -209,6 +212,46 @@ async def test_allowlist_replacement_before_complete_prevents_stale_status_recei
     finally:
         resume.set()
         await instance.close()
+
+
+async def test_host_priority_proof_is_bound_to_binding_author_command_and_revision(messages):
+    repository, lease, _ = messages
+    await allow(repository, "trusted")
+    binding = await repository.bindings.current(lease, "binding-a")
+    guard = ShellIngressGuard(repository.store.bot_id)
+    source = event(10, user="trusted", text="#forest core status")
+    normalized = repository._normalized(source)
+    proof = guard.classify(binding, normalized).proof
+    accepted = await repository.ingest(
+        lease, "binding-a", source, priority_proof=proof
+    )
+    saved = await shell_record(repository, accepted["command_id"])
+    assert (
+        saved["priority"],
+        saved["priority_eligible"],
+        saved["priority_basis_binding_epoch"],
+        saved["priority_basis_config_revision"],
+    ) == (0, True, binding["binding_epoch"], binding["effective_revision"])
+
+    invalid = (
+        (event(11, user="other", text="#forest core status"), proof),
+        (event(12, user="trusted", text="#forest help"), proof),
+        (
+            event(13, user="trusted", text="#forest core status"),
+            replace(proof, config_revision=proof.config_revision + 1),
+        ),
+    )
+    for attempted, candidate in invalid:
+        with pytest.raises(ForestError) as caught:
+            await repository.ingest(
+                lease, "binding-a", attempted, priority_proof=candidate
+            )
+        assert caught.value.code == "SHELL_PRIORITY_PROOF_INVALID"
+    async with repository.store.pool.connection() as conn:
+        count = await (
+            await conn.execute("SELECT count(*) AS n FROM public.bot_shell_requests")
+        ).fetchone()
+    assert count["n"] == 1
 
 
 async def test_later_allowlist_grant_does_not_retroactively_promote_persisted_priority(messages):
