@@ -1,6 +1,6 @@
 # P5 多数据库备份、校验与隔离恢复
 
-状态：详细设计；加密工件、持久备份任务、每库切片、目录前后锚点、管理员 Web 创建/下载已实现，校验回执、隔离恢复、激活和保留期清理继续按本文推进。
+状态：详细设计与首个恢复纵向切片；加密工件、持久备份任务、每库切片、目录前后锚点、管理员 Web 创建/下载，以及托管 PostgreSQL 的整套隔离恢复已实现。独立校验回执、恢复激活、外部工件导入和保留期清理继续按本文推进。
 
 ## 1. 范围与不变量
 
@@ -50,6 +50,18 @@ QUEUED -> CAPTURING -> SEALING -> READY
                            +-> INCONSISTENT -> EXPIRED
 ```
 
+隔离恢复使用独立的 `restore_stage_jobs`、`restore_stage_targets` 和不可变事件表。一个恢复任务冻结来源密文摘要、来源备份、目标数据库清单和每库 cut 摘要；恢复口令不落库，接纳时解出的随机数据密钥经当前 SecretVault 重新包装，供进程重启后继续校验同一工件。状态为：
+
+```text
+QUEUED -> VERIFYING -> RESTORING -> VALIDATING -> STAGED
+             |             |             |
+             +-------------+-------------+-> FAILED
+```
+
+执行者用 owner epoch 和 lease 领取任务，同一 deployment 同时只有一个活动恢复任务。独立续租任务覆盖解密和单个大库 COPY；续租失败会取消正在运行的数据库任务并回滚其当前事务。每个目标数据库在迁移、COPY、身份核对和封存期间持有 session advisory lock，取得锁后再次回部署库复核 owner epoch；陈旧 Worker 与接管者不能同时写同一个副本。每个目标状态提交也核对 job owner epoch 和未过期租约。租约过期时新执行者从 `VERIFYING` 重新核验工件；状态已经是 `STAGED` 的目标按不可变回执跳过，其他目标先清空后重做。数据库创建、文件解密和跨库 COPY 不持有部署库事务，目标状态与任务进度分别用受围栏的短事务提交。崩溃最坏留下带本任务 marker 的未注册隔离库，不能留下一个被目录误认成在线 Bot 的半完成目标。
+
+单个目标严格按 `PLANNED → CREATING → CREATED → VALIDATED → STAGED` 推进；`VALIDATED` 重试可以回到 `CREATED`，任一非终态可以进入 `FAILED`。`CREATING` 在 DDL 前持久提交，数据库以 `ALLOW_CONNECTIONS=false` 创建；只有写入任务 marker 并撤销 `PUBLIC` 全部数据库权限后才允许恢复连接。这样 CREATE 与后续配置之间没有公开连接窗口，接管者也能区分本任务的未完成 DDL 和同名外部数据库。
+
 接纳事务验证当前 admin 会话、恢复口令强度、范围和容量，生成稳定 `backup_id`、随机数据密钥、口令包装和 SecretVault 包装，保存输入摘要后提交。后台执行者通过 owner epoch/lease 领取；同一 deployment 同时最多一个 CAPTURING，每个 Bot 按稳定 `bot_id` 顺序捕获。任务持有自己的文件临时目录，不持部署事务等待 Bot 数据库或文件 I/O。
 
 每库捕获步骤先读取身份和迁移账本，在只读快照内导出所有表并生成临时数据库 manifest；文件 fsync 完成后才提交 cut 回执。接管者若发现完整且摘要一致的 cut 可复用，否则删除本 Job 的未封口临时文件并重做该库。最终 SEALING 对 ZIP 成员逐项摘要、流式加密到同目录临时文件、fsync 文件与目录，再以原子 rename 发布。只有已发布路径、字节数和密文摘要写入 `backup_artifacts`；日志与审计只记录这些标量。
@@ -60,9 +72,9 @@ QUEUED -> CAPTURING -> SEALING -> READY
 
 ## 4. Web 和 Shell 管理协议
 
-WebUI 的“存储与备份”页提供：备份范围、是否包含插件工件、恢复口令、预计数据库数、创建按钮、进度、每库切口、最终大小、校验状态、限时下载和失败码。口令输入使用 password 控件，不进入浏览器持久草稿；页面刷新只恢复 `backup_id` 和任务状态。
+WebUI 的“存储与备份”页提供：备份范围、是否包含插件工件、恢复口令、预计数据库数、创建按钮、进度、每库切口、最终大小、下载、隔离恢复创建、每个随机目标库和失败码。口令输入使用 password 控件，不进入浏览器持久草稿；页面刷新只恢复任务标识和持久状态。恢复接纳再次验证管理员当前密码和来源恢复口令，相同幂等键只能指向同一来源与口令摘要。
 
-创建、取消、重新校验和删除工件均使用 plan/apply、当前密码复核、幂等键及部署 admin 权限。下载是短效单次 capability，绑定账号、会话 revision、`backup_id`、密文 digest 和到期时间；HTTP 支持流式下载，禁止缓存和范围越界。查看者只能在授予单独审计能力后读取脱敏状态，当前固定 viewer 不具备备份权限。
+当前已经实现创建、下载和整套隔离恢复；后续的取消、独立重新校验、删除及激活继续使用 plan/apply。创建备份和隔离恢复要求当前密码复核、幂等键及部署 admin 权限。下载会重新核对当前会话与工件状态，响应禁止缓存；查看者不具备备份和恢复权限。页面没有激活按钮，`STAGED` 只表示物理副本通过验证。
 
 群聊 Shell 首版只提供 `backup status <id>` 和 `backup cancel <id>` 的远程救援入口，不接收恢复口令、不上传或下载工件。创建和恢复需要 Web/CLI 的重新认证通道。Shell 命令仍是 CONTROL 路由，不创建产品 Agent，也不占用群会话执行权。
 
@@ -70,10 +82,14 @@ WebUI 的“存储与备份”页提供：备份范围、是否包含插件工�
 
 校验顺序固定为：容器/header 限额 → 口令解包 → AEAD 标签 → ZIP 路径和压缩比 → manifest schema → 每成员大小/摘要 → 数据库身份与迁移兼容 → 表/列/依赖 DAG → 删除屏障 → SecretVault key 与密文抽样解密 → 包工件摘要。任何失败只产生固定错误码，不能回显成员正文、DSN、用户名、表值或底层解密异常。
 
+当前 `restore-stage` 先按持久来源密文摘要重新读取本地工件，认证解密到任务私有临时目录，再要求 manifest 顶层、数据库、表、列、成员和包路径都是精确键集。数据库 roster 必须与创建任务时冻结的 cut 一一对应，目录起止锚点必须相同；`INCONSISTENT`、过期、已删除或被替换的工件不能进入恢复。每个目标使用 `forest_restore_<job-prefix>_<ordinal>` 随机任务名，创建后写入数据库 owner marker 并撤销 `PUBLIC` 权限，且永远不写入 `bot_storage_plans`。
+
+恢复器只运行当前镜像的迁移，不执行备份中的 SQL。它要求 server version、encoding、collation、迁移 checksum、表列、约束和序列定义精确相同，随后在一个目标库事务中关闭触发式约束、清空表、逐表 binary COPY、核对行数、恢复序列并显式扫描所有公共 schema 外键；任一步失败会回滚该库的数据事务。提交后再次核对部署/Bot 身份。Bot 副本在独立事务中提升 storage generation 和 maintenance epoch、撤销 host lease，并设置 `SEALED`、`data_admission=false`、`control_admission=false`。部署副本也保持未注册且不可被 Web 启动计划发现。全部目标成功后才原子发布 Job `STAGED` 与脱敏完成审计。
+
 恢复分为三个不同操作：
 
 1. `verify` 只读工件并生成有期限的验证回执。
-2. `restore-stage` 把选择的数据库恢复到新建或显式提供的空库，使用当前迁移代码建立 schema，再按外键拓扑和稳定表名执行 binary COPY；序列按恢复最大值校正。全部目标保持网络隔离和 `SEALED/ISOLATED`。
+2. `restore-stage` 当前把来源工件的全部数据库恢复到系统新建的未注册空库，使用当前迁移代码建立 schema，再按稳定表名执行 binary COPY；序列按捕获值恢复并扫描外键。全部目标保持网络隔离和 `SEALED/ISOLATED`。选择部分数据库和显式外部目标属于后续扩展。
 3. `restore-activate` 在预览中逐项核对当前目录、Binding 账号归属、包工件、凭据、最新 deletion barrier 与效果账本。Bot 迁移使用旧库 SEALED、新库确认和 deployment storage generation CAS；部署控制面整库恢复由本机恢复命令重建 BootstrapState 后切换，不能由正在被替换的 Web 请求自我覆盖。
 
 同 Bot 恢复不创建第二个 Bot 身份。目录切换前旧库保持权威；切换后新库才可 ACTIVE，旧库永久 SEALED 且运行凭据撤销。部分 Bot 恢复逐项保存结果，不声明全局原子成功。恢复包中已有待发送意图按原状态处理：确定未发送可由原 dispatcher 接续，SENT 不重发，UNKNOWN 保持人工对账；控制 outbox 不因新部署未见其消费者而改写状态。

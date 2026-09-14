@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：初版目标设计，实现进行中。更新日期：2026-09-14。当前已接通独立 Web 管理、固定管理员/查看者账号生命周期、多 Bot 运行、原生 Python Worker、OneBot HTTP、持久单 Agent、定时任务、跨群图文记忆、来源遗忘和审核式跨主干联想召回；QiYu Agentlib 的固定 CorePrompt、PresetContext、原子 ModelTurn 和单 Agent 工具循环已经接入，旧产品子 Agent 已从活动协议退役。完整运维和长期容量治理仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
+状态：初版目标设计，实现进行中。更新日期：2026-09-14。当前已接通独立 Web 管理、固定管理员/查看者账号生命周期、多 Bot 运行、原生 Python Worker、OneBot HTTP、持久单 Agent、定时任务、跨群图文记忆、来源遗忘、审核式跨主干联想召回，以及加密多数据库备份和未注册隔离恢复；QiYu Agentlib 的固定 CorePrompt、PresetContext、原子 ModelTurn 和单 Agent 工具循环已经接入，旧产品子 Agent 已从活动协议退役。恢复激活、完整运维和长期容量治理仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 

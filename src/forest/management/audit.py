@@ -18,6 +18,10 @@ _DETAIL_FIELDS = {
     "bot.retry": frozenset({"job_id", "revision"}),
     "binding.reserve": frozenset({"bot_id", "binding_id"}),
     "backup.create": frozenset({"backup_id", "include_packages"}),
+    "restore.stage.create": frozenset({"restore_id", "backup_id", "database_total"}),
+    "restore.stage.completed": frozenset({
+        "restore_id", "backup_id", "database_total", "manifest_digest",
+    }),
     "account.create": frozenset({"username", "role", "revision"}),
     "account.apply": frozenset({
         "previous_revision", "revision", "role", "disabled", "password_changed",

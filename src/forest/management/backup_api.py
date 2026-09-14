@@ -22,6 +22,11 @@ class CreateBackup(Body):
     include_packages: bool = True
 
 
+class StageRestore(Body):
+    recovery_passphrase: str = Field(min_length=16, max_length=1024)
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
 def install_backup_routes(app, runtime) -> None:
     def manager():
         if runtime.backups is None:
@@ -102,4 +107,45 @@ def install_backup_routes(app, runtime) -> None:
                 "Cache-Control": "no-store",
                 "X-Content-SHA256": metadata["ciphertext_digest"].removeprefix("sha256:"),
             },
+        )
+
+    def restores():
+        if runtime.restores is None:
+            raise ForestError("RESTORE_SERVICE_UNAVAILABLE", "Restore service is unavailable", 503)
+        return runtime.restores
+
+    @app.get("/management/v1/restore-stages")
+    async def restore_stages(request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        rows = await restores().list(
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+        return {"restore_stages": rows}
+
+    @app.post("/management/v1/backups/{backup_id}/restore-stages", status_code=202)
+    async def create_restore_stage(backup_id: str, body: StageRestore, request: Request):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        if runtime.authority is None:
+            raise ForestError("AUTHORITY_UNAVAILABLE", "Web authority is unavailable", 503)
+        return await restores().create(
+            backup_id=backup_id,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash,
+            passphrase=body.recovery_passphrase,
+            passphrase_digest=runtime.authority.secret_digest(
+                "restore.recovery-passphrase", body.recovery_passphrase
+            ),
+            idempotency_key=key(request),
+        )
+
+    @app.get("/management/v1/restore-stages/{restore_id}")
+    async def read_restore_stage(restore_id: str, request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        return await restores().read(
+            restore_id=restore_id,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
         )

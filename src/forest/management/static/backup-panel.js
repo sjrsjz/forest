@@ -3,6 +3,8 @@ const $ = (id) => document.getElementById(id);
 const states = {
   QUEUED: '等待执行', CAPTURING: '正在抓取数据库', SEALING: '正在加密封口',
   READY: '可下载', INCONSISTENT: '目录在抓取期间发生变化', FAILED: '失败', EXPIRED: '已过期',
+  VERIFYING: '正在校验工件', RESTORING: '正在恢复隔离数据库',
+  VALIDATING: '正在验证恢复结果', STAGED: '隔离恢复完成',
 };
 
 function size(value) {
@@ -14,7 +16,22 @@ function size(value) {
 }
 
 export function backupPanel(api, busy, notice) {
-  let rows = [], createKey = null, readSeq = 0;
+  let rows = [], restoreRows = [], createKey = null, restoreKey = null;
+  let selectedBackup = null, readSeq = 0;
+
+  function closeRestoreForm() {
+    selectedBackup = null; restoreKey = null;
+    $('backup-restore-form').reset(); $('backup-restore-form').classList.add('hidden');
+    $('backup-restore-source').textContent = '';
+  }
+
+  function openRestoreForm(backupId) {
+    selectedBackup = backupId; restoreKey = null;
+    $('backup-restore-form').reset();
+    $('backup-restore-source').textContent = `来源备份：${backupId}`;
+    $('backup-restore-form').classList.remove('hidden');
+    $('backup-restore-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
 
   function renderCut(cut) {
     const item = document.createElement('li');
@@ -55,19 +72,53 @@ export function backupPanel(api, busy, notice) {
         link.textContent = '下载加密备份';
         card.append(link);
       }
+      if (row.state === 'READY') {
+        const restore = document.createElement('button'); restore.className = 'subtle';
+        restore.type = 'button'; restore.textContent = '建立隔离恢复副本';
+        restore.addEventListener('click', () => openRestoreForm(row.backup_id));
+        card.append(restore);
+      }
       target.append(card);
+    }
+    const restoreTarget = $('restore-list'); restoreTarget.replaceChildren();
+    $('restore-empty').classList.toggle('hidden', restoreRows.length !== 0);
+    for (const row of restoreRows) {
+      const card = document.createElement('article'); card.className = 'audit-row';
+      const title = document.createElement('h3');
+      title.textContent = `${states[row.state] || row.state} · ${row.restore_id}`;
+      const progress = document.createElement('p'); progress.className = 'muted';
+      progress.textContent = `数据库 ${row.database_completed}/${row.database_total} · 来源 ${row.backup_id}`;
+      const meta = document.createElement('p'); meta.className = 'hint';
+      meta.textContent = `创建 ${row.created_at} · 更新 ${row.updated_at}` +
+        `${row.error_code ? ` · ${row.error_code}` : ''}`;
+      card.append(title, progress, meta);
+      if (row.targets?.length) {
+        const list = document.createElement('ul');
+        for (const target of row.targets) {
+          const item = document.createElement('li');
+          const source = target.database_scope === 'deployment' ? '部署副本' : `Bot ${target.bot_id}`;
+          item.textContent = `${source} · ${target.database_name} · ${states[target.state] || target.state}`;
+          list.append(item);
+        }
+        card.append(list);
+      }
+      restoreTarget.append(card);
     }
   }
 
   async function load() {
     const seq = ++readSeq;
-    const data = await api('/backups');
+    const [data, restoreData] = await Promise.all([api('/backups'), api('/restore-stages')]);
     const detailed = await Promise.all(data.backups.map(async (row) => {
       if (!['READY', 'INCONSISTENT'].includes(row.state)) return row;
       return api(`/backups/${encodeURIComponent(row.backup_id)}`);
     }));
+    const restoreDetails = await Promise.all(restoreData.restore_stages.map(async (row, index) => {
+      if (index >= 20 || !['STAGED', 'FAILED'].includes(row.state)) return row;
+      return api(`/restore-stages/${encodeURIComponent(row.restore_id)}`);
+    }));
     if (seq !== readSeq) return data;
-    rows = detailed; render(); return data;
+    rows = detailed; restoreRows = restoreDetails; render(); return data;
   }
 
   $('backup-refresh').addEventListener('click', () => busy($('backup-refresh'), load));
@@ -96,14 +147,38 @@ export function backupPanel(api, busy, notice) {
       notice('备份任务已接纳。请妥善保存恢复口令；服务端不会保留口令明文。', true);
     });
   });
+  $('backup-restore-cancel').addEventListener('click', closeRestoreForm);
+  $('backup-restore-form').addEventListener('input', () => { restoreKey = null; });
+  $('backup-restore-form').addEventListener('submit', (event) => {
+    event.preventDefault(); const form = event.currentTarget;
+    if (!selectedBackup || !form.reportValidity()) return;
+    busy(form.querySelector('button[type="submit"]'), async () => {
+      restoreKey ||= crypto.randomUUID();
+      const backupId = selectedBackup;
+      try {
+        await api(`/backups/${encodeURIComponent(backupId)}/restore-stages`, {
+          recovery_passphrase: form.elements.recovery_passphrase.value,
+          current_password: form.elements.current_password.value,
+        }, {'Idempotency-Key': restoreKey});
+      } finally {
+        form.elements.recovery_passphrase.value = '';
+        form.elements.current_password.value = '';
+      }
+      closeRestoreForm(); await load();
+      notice('隔离恢复任务已接纳。目标数据库不会登记为在线 Bot。', true);
+    });
+  });
 
   return {
     load,
-    hasRunning: () => rows.some((row) => ['QUEUED', 'CAPTURING', 'SEALING'].includes(row.state)),
+    hasRunning: () => rows.some((row) => ['QUEUED', 'CAPTURING', 'SEALING'].includes(row.state)) ||
+      restoreRows.some((row) => ['QUEUED', 'VERIFYING', 'RESTORING', 'VALIDATING'].includes(row.state)),
     reset() {
-      readSeq++; rows = []; createKey = null;
+      readSeq++; rows = []; restoreRows = []; createKey = null;
+      closeRestoreForm();
       $('backup-create-form').reset(); $('backup-list').replaceChildren();
-      $('backup-empty').classList.remove('hidden');
+      $('restore-list').replaceChildren();
+      $('backup-empty').classList.remove('hidden'); $('restore-empty').classList.remove('hidden');
     },
   };
 }

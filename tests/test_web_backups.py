@@ -37,6 +37,28 @@ async def backup_database():
     try:
         yield uri
     finally:
+        restore_names = []
+        try:
+            async with await psycopg.AsyncConnection.connect(
+                uri, row_factory=psycopg.rows.dict_row
+            ) as deployment:
+                exists = await (await deployment.execute(
+                    "SELECT to_regclass('restore_stage_targets') AS name"
+                )).fetchone()
+                if exists["name"] is not None:
+                    rows = await (await deployment.execute(
+                        "SELECT database_name FROM restore_stage_targets"
+                    )).fetchall()
+                    restore_names = [row["database_name"] for row in rows]
+        except psycopg.Error:
+            pass
+        for restore_name in restore_names:
+            assert restore_name.startswith("forest_restore_") and len(restore_name) == 40
+            await admin.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(restore_name)
+                )
+            )
         assert name.startswith("forest_backup_web_") and len(name) == 50
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
@@ -48,7 +70,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
 ):
     state = tmp_path / "state"
     token = BootstrapState(state).initialize()
-    app = create_app(WebSettings(state, ORIGIN))
+    app = create_app(WebSettings(state, ORIGIN, managed_dsn=os.environ["FOREST_TEST_DSN"]))
     passphrase = "web backup recovery passphrase"
     body = {
         "current_password": PASSWORD,
@@ -119,6 +141,42 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         manifest = inspect_zip(restored)
         assert header["backup_id"] == manifest["backup_id"] == queued["backup_id"]
         assert manifest["roster"]["consistent"] is True
+
+        restore_response = await admin.post(
+            f"/management/v1/backups/{queued['backup_id']}/restore-stages",
+            json={
+                "current_password": PASSWORD,
+                "recovery_passphrase": passphrase,
+            },
+            headers={"idempotency-key": "web-restore-stage"},
+        )
+        assert restore_response.status_code == 202, restore_response.text
+        restore = restore_response.json()
+        for _ in range(160):
+            response = await admin.get(
+                f"/management/v1/restore-stages/{restore['restore_id']}"
+            )
+            assert response.status_code == 200, response.text
+            restore = response.json()
+            if restore["state"] in {"STAGED", "FAILED"}:
+                break
+            await asyncio.sleep(0.05)
+        assert restore["state"] == "STAGED", restore
+        assert restore["database_total"] == restore["database_completed"] == 1
+        assert restore["targets"][0]["database_scope"] == "deployment"
+        assert restore["targets"][0]["state"] == "STAGED"
+
+        restore_audit = await admin.get(
+            "/management/v1/audit?action=restore.stage.completed"
+        )
+        restore_record = restore_audit.json()["records"][0]
+        assert restore_record["details"] == {
+            "restore_id": restore["restore_id"],
+            "backup_id": queued["backup_id"],
+            "database_total": 1,
+            "manifest_digest": restore["manifest_digest"],
+        }
+        assert not restore_record["details_redacted"]
 
         audit = await admin.get("/management/v1/audit?action=backup.create")
         record = audit.json()["records"][0]

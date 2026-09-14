@@ -171,24 +171,41 @@ def _read_header(stream: BinaryIO, file_size: int) -> tuple[dict, bytes, int]:
     return header, encoded, payload_size
 
 
-def decrypt_file(source: Path, destination: Path, passphrase: str) -> dict:
+def _unwrap_data_key(header: dict, passphrase: str) -> bytes:
+    password = _passphrase(passphrase)
+    try:
+        salt = _unb64(header["salt"], 16)
+        wrap_nonce = _unb64(header["wrap_nonce"], 12)
+        wrapped = _unb64(header["wrapped_key"], 48)
+        return AESGCM(_derive(password, salt)).decrypt(
+            wrap_nonce, wrapped, MAGIC + header["backup_id"].encode("utf-8")
+        )
+    except Exception:
+        raise _error(
+            "BACKUP_PASSPHRASE_INVALID", "Recovery passphrase or archive is invalid", 403
+        ) from None
+
+
+def recover_data_key(source: Path, passphrase: str) -> tuple[dict, bytes]:
     source = source.resolve(strict=True)
     file_size = source.stat().st_size
     if file_size > MAX_ARCHIVE + MAX_HEADER + 64:
         raise _error("BACKUP_TOO_LARGE", "Backup archive exceeds its size limit", 413)
-    password = _passphrase(passphrase)
+    with source.open("rb") as incoming:
+        header, _, _ = _read_header(incoming, file_size)
+    return header, _unwrap_data_key(header, passphrase)
+
+
+def decrypt_file_with_key(source: Path, destination: Path, data_key: bytes) -> dict:
+    source = source.resolve(strict=True)
+    file_size = source.stat().st_size
+    if file_size > MAX_ARCHIVE + MAX_HEADER + 64:
+        raise _error("BACKUP_TOO_LARGE", "Backup archive exceeds its size limit", 413)
+    if not isinstance(data_key, bytes) or len(data_key) != 32:
+        raise _error("BACKUP_KEY_INVALID", "Backup data key is invalid", 422)
     with source.open("rb") as incoming:
         header, encoded, payload_size = _read_header(incoming, file_size)
-        try:
-            salt = _unb64(header["salt"], 16)
-            wrap_nonce = _unb64(header["wrap_nonce"], 12)
-            wrapped = _unb64(header["wrapped_key"], 48)
-            nonce = _unb64(header["payload_nonce"], 12)
-            data_key = AESGCM(_derive(password, salt)).decrypt(
-                wrap_nonce, wrapped, MAGIC + header["backup_id"].encode("utf-8")
-            )
-        except Exception:
-            raise _error("BACKUP_PASSPHRASE_INVALID", "Recovery passphrase or archive is invalid", 403) from None
+        nonce = _unb64(header["payload_nonce"], 12)
         incoming.seek(file_size - 16)
         tag = incoming.read(16)
         incoming.seek(len(MAGIC) + 4 + len(encoded))
@@ -211,6 +228,14 @@ def decrypt_file(source: Path, destination: Path, passphrase: str) -> dict:
             destination.unlink(missing_ok=True)
             raise _error("BACKUP_INTEGRITY_FAILED", "Backup authentication failed") from None
     return header
+
+
+def decrypt_file(source: Path, destination: Path, passphrase: str) -> dict:
+    header, data_key = recover_data_key(source, passphrase)
+    opened = decrypt_file_with_key(source, destination, data_key)
+    if opened != header:
+        raise _error("BACKUP_HEADER_CHANGED", "Backup header changed during verification", 409)
+    return opened
 
 
 def inspect_zip(path: Path) -> dict:

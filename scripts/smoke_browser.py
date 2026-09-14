@@ -547,6 +547,17 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                 item['name'].startswith('artifacts/')
                 for item in backup_manifest['members']
             )
+            page.get_by_role('button', name='建立隔离恢复副本').first.click()
+            restore_form = page.locator('#backup-restore-form')
+            expect(restore_form).to_be_visible()
+            restore_form.locator('[name="recovery_passphrase"]').fill(recovery_passphrase)
+            restore_form.locator('[name="current_password"]').fill(password)
+            restore_form.locator('button[type="submit"]').click()
+            expect(page.locator('#restore-list')).to_contain_text(
+                '隔离恢复完成', timeout=120000
+            )
+            expect(page.locator('#restore-list li')).to_have_count(3)
+            expect(restore_form).to_be_hidden()
             page.screenshot(path=str(artifacts / 'backups-desktop.png'), full_page=True)
             page.locator("#logout").click()
             expect(page.locator("#login")).to_be_visible()
@@ -577,7 +588,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
-                        "Web encrypted deployment and two-Bot backup, package inclusion, download and local verification",
+                        "Web encrypted deployment and two-Bot backup, package inclusion, download, local verification and isolated three-database restore",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),
