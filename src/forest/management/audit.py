@@ -32,6 +32,19 @@ _DETAIL_FIELDS = {
     "backup.cleanup.completed": frozenset({"cleanup_id", "reason"}),
     "restore.cleanup.request": frozenset({"cleanup_id", "reason"}),
     "restore.cleanup.completed": frozenset({"cleanup_id", "reason"}),
+    "restore.activation.request": frozenset({
+        "activation_id", "restore_id", "target_ordinal", "from_generation", "to_generation",
+    }),
+    "restore.activation.retry": frozenset({"activation_id"}),
+    "restore.activation.completed": frozenset({
+        "activation_id", "restore_id", "storage_generation",
+    }),
+    "bot.storage-generation.retire.request": frozenset({
+        "cleanup_id", "reason", "storage_generation",
+    }),
+    "bot.storage-generation.retire.completed": frozenset({
+        "cleanup_id", "reason", "storage_generation",
+    }),
     "storage.cleanup.retry": frozenset({"cleanup_id"}),
     "backup.orphan.cleaned": frozenset({"owner_epoch", "path_kind", "byte_size"}),
     "account.create": frozenset({"username", "role", "revision"}),

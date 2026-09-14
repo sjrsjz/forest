@@ -572,6 +572,14 @@ class RestoreActivationManager:
                 "INSERT INTO restore_activation_events(activation_id,owner_epoch,step) "
                 "VALUES (%s,%s,'RETRY_REQUESTED')", (activation_id, row["owner_epoch"])
             )
+            await conn.execute(
+                "INSERT INTO audit_records(audit_id,subject_id,action,resource_key,"
+                "request_id,details) VALUES (%s,%s,'restore.activation.retry',%s,%s,%s)",
+                (
+                    str(uuid4()), subject_id, "bot:" + row["bot_id"], activation_id,
+                    Jsonb({"activation_id": activation_id}),
+                ),
+            )
             return result
 
     async def _claim(self) -> dict[str, Any] | None:

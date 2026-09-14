@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ from forest.packages import digest_json
 
 BACKUP = "BACKUP_ARTIFACT"
 RESTORE = "RESTORE_STAGE"
+GENERATION = "BOT_STORAGE_GENERATION"
 _BACKUP_NAME = re.compile(
     r"^(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\."
     r"(?P<epoch>[1-9][0-9]*)\.forest-backup$"
@@ -53,11 +55,14 @@ class StorageCleanupManager:
 
     def __init__(
         self, catalog, backups, *, lease_seconds: int = 300, orphan_grace_seconds: int = 7200,
+        generation_retention_seconds: int = 604800,
     ):
         if not 60 <= lease_seconds <= 3600:
             raise ValueError("Cleanup lease must be between one minute and one hour")
         if not 60 <= orphan_grace_seconds <= 604800:
             raise ValueError("Orphan grace must be between one minute and seven days")
+        if not 60 <= generation_retention_seconds <= 31536000:
+            raise ValueError("Generation retention must be between one minute and one year")
         self.catalog = catalog
         self.backups = backups
         self.store = catalog.store
@@ -65,6 +70,7 @@ class StorageCleanupManager:
         self.backup_dir = backups.backup_dir
         self.lease_seconds = lease_seconds
         self.orphan_grace_seconds = orphan_grace_seconds
+        self.generation_retention_seconds = generation_retention_seconds
         self.owner_id = "storage-cleanup:" + str(uuid4())
         self.closed = False
 
@@ -113,6 +119,50 @@ class StorageCleanupManager:
             )).fetchall()
             row = {**row, "targets": [list(target.values()) for target in targets]}
             allowed = {"STAGED", "FAILED"}
+        elif kind == GENERATION:
+            lock_clause = " FOR UPDATE OF h" if lock else ""
+            row = await (await conn.execute(
+                "SELECT g.bot_id||':'||g.storage_generation::text AS resource_id,g.bot_id,"
+                "g.storage_generation,g.source_kind,g.source_restore_id,g.source_ordinal,"
+                "g.plan_digest,g.cluster_id,g.database_name,g.role_name,g.created_at,"
+                "b.mode,h.storage_generation AS current_storage_generation,h.revision AS head_revision,"
+                "a.activation_id,a.subject_id,a.completed_at AS superseded_at,"
+                "a.completed_at+(%s*interval '1 second') AS retire_after,"
+                "r.cleanup_id,c.state AS cleanup_state "
+                "FROM bot_storage_generations g JOIN bot_catalog b USING(bot_id) "
+                "JOIN bot_storage_heads h USING(bot_id) "
+                "LEFT JOIN restore_activation_jobs a ON a.bot_id=g.bot_id "
+                "AND a.expected_storage_generation=g.storage_generation AND a.state='COMPLETE' "
+                "LEFT JOIN bot_storage_generation_retirements r ON r.bot_id=g.bot_id "
+                "AND r.storage_generation=g.storage_generation LEFT JOIN storage_cleanup_jobs c "
+                "ON c.cleanup_id=r.cleanup_id WHERE g.bot_id||':'||g.storage_generation::text=%s"
+                + lock_clause,
+                (self.generation_retention_seconds, resource_id),
+            )).fetchone()
+            if row is None:
+                raise ForestError(
+                    "STORAGE_GENERATION_NOT_FOUND", "Bot storage generation does not exist", 404
+                )
+            if row["mode"] != "managed" or row["cluster_id"] is None:
+                raise ForestError(
+                    "STORAGE_GENERATION_EXTERNAL", "External Bot storage is not managed", 409
+                )
+            if row["cleanup_id"] is not None:
+                raise ForestError(
+                    "CLEANUP_STATE_CONFLICT", "Storage generation is already retired", 409,
+                    {"current_state": row["cleanup_state"]},
+                )
+            if (
+                row["storage_generation"] >= row["current_storage_generation"]
+                or row["activation_id"] is None
+            ):
+                raise ForestError(
+                    "STORAGE_GENERATION_CURRENT",
+                    "Only a generation superseded by a completed activation can be cleaned",
+                    409,
+                )
+            row = {**row, "state": "SUPERSEDED"}
+            allowed = {"SUPERSEDED"}
         else:
             raise ForestError("CLEANUP_RESOURCE_INVALID", "Cleanup resource is invalid", 422)
         if row["state"] not in allowed:
@@ -131,11 +181,20 @@ class StorageCleanupManager:
                     "manifest_digest", "expires_at", "deleted_at",
                 )
             }
-        else:
+        elif kind == RESTORE:
             value = {
                 key: _time(row[key]) for key in (
                     "resource_id", "backup_id", "verification_id", "state", "manifest_digest", "database_total",
                     "database_completed", "expires_at", "targets",
+                )
+            }
+        else:
+            value = {
+                key: _time(row[key]) for key in (
+                    "resource_id", "bot_id", "storage_generation", "source_kind",
+                    "source_restore_id", "source_ordinal", "plan_digest", "cluster_id",
+                    "database_name", "role_name", "created_at", "current_storage_generation",
+                    "head_revision", "activation_id", "superseded_at", "retire_after", "state",
                 )
             }
         return digest_json(value)
@@ -163,8 +222,63 @@ class StorageCleanupManager:
                 "plan_id": plan_id, "plan_digest": plan_digest, "resource_kind": kind,
                 "resource_id": resource_id, "expires_at": expires.isoformat(),
                 "before": {"state": row["state"]},
-                "after": {"state": "EXPIRED", "visibility": "REVOKED", "cleanup": "QUEUED"},
+                "after": {
+                    "state": "RETIRED" if kind == GENERATION else "EXPIRED",
+                    "visibility": "REVOKED", "cleanup": "QUEUED",
+                },
             }
+
+    async def list_generations(
+        self, *, subject_id: str, session_token_hash: str,
+    ) -> list[dict[str, Any]]:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._authorize(conn, subject_id, session_token_hash)
+            rows = await (await conn.execute(
+                "SELECT g.bot_id,b.display_name,g.storage_generation,g.source_kind,"
+                "g.source_restore_id,g.source_ordinal,g.created_at,"
+                "h.storage_generation=g.storage_generation AS current,"
+                "a.completed_at AS superseded_at,"
+                "a.completed_at+(%s*interval '1 second') AS retire_after,"
+                "r.retired_at,c.cleanup_id,c.state AS cleanup_state,c.error_code,"
+                "c.completed_at AS cleanup_completed_at,clock_timestamp()>=a.completed_at+"
+                "(%s*interval '1 second') AS retention_due "
+                "FROM bot_storage_generations g JOIN bot_catalog b USING(bot_id) "
+                "JOIN bot_storage_heads h USING(bot_id) "
+                "LEFT JOIN restore_activation_jobs a ON a.bot_id=g.bot_id "
+                "AND a.expected_storage_generation=g.storage_generation AND a.state='COMPLETE' "
+                "LEFT JOIN bot_storage_generation_retirements r ON r.bot_id=g.bot_id "
+                "AND r.storage_generation=g.storage_generation LEFT JOIN storage_cleanup_jobs c "
+                "ON c.cleanup_id=r.cleanup_id WHERE b.mode='managed' "
+                "ORDER BY b.display_name,g.bot_id,g.storage_generation DESC",
+                (self.generation_retention_seconds, self.generation_retention_seconds),
+            )).fetchall()
+        result = []
+        for row in rows:
+            if row["current"]:
+                state = "CURRENT"
+            elif row["cleanup_id"] is not None:
+                state = "RETIRED"
+            elif row["superseded_at"] is not None:
+                state = "SUPERSEDED"
+            else:
+                state = "UNPROVEN"
+            result.append({
+                key: _time(value) for key, value in {
+                    "bot_id": row["bot_id"], "display_name": row["display_name"],
+                    "storage_generation": row["storage_generation"],
+                    "source_kind": row["source_kind"],
+                    "source_restore_id": row["source_restore_id"],
+                    "source_ordinal": row["source_ordinal"], "state": state,
+                    "current": row["current"], "created_at": row["created_at"],
+                    "superseded_at": row["superseded_at"],
+                    "retire_after": row["retire_after"],
+                    "retention_due": bool(row["retention_due"]),
+                    "retired_at": row["retired_at"], "cleanup_id": row["cleanup_id"],
+                    "cleanup_state": row["cleanup_state"], "error_code": row["error_code"],
+                    "cleanup_completed_at": row["cleanup_completed_at"],
+                }.items()
+            })
+        return result
 
     async def apply(
         self, *, plan_id: str, plan_digest: str, subject_id: str, session_token_hash: str,
@@ -213,7 +327,7 @@ class StorageCleanupManager:
                         "BACKUP_RESTORE_ACTIVE",
                         "An active verification or restore still depends on this backup", 409,
                     )
-            else:
+            elif plan["resource_kind"] == RESTORE:
                 activation = await (await conn.execute(
                     "SELECT 1 FROM restore_activation_jobs WHERE restore_id=%s "
                     "AND state<>'COMPLETE' LIMIT 1", (plan["resource_id"],)
@@ -222,6 +336,17 @@ class StorageCleanupManager:
                     raise ForestError(
                         "RESTORE_ACTIVATION_ACTIVE",
                         "An unfinished activation still depends on this restore", 409,
+                    )
+            else:
+                activation = await (await conn.execute(
+                    "SELECT 1 FROM restore_activation_jobs WHERE bot_id=%s "
+                    "AND state<>'COMPLETE' LIMIT 1", (resource["bot_id"],)
+                )).fetchone()
+                if activation is not None:
+                    raise ForestError(
+                        "STORAGE_GENERATION_ACTIVATION_ACTIVE",
+                        "An unfinished activation still depends on this Bot storage history",
+                        409,
                     )
             cleanup_id = str(uuid4())
             result = await self._tombstone(
@@ -265,7 +390,7 @@ class StorageCleanupManager:
                 (Jsonb({"reason": reason, "cleanup_id": cleanup_id}), resource_id),
             )
             action, key = "backup.cleanup.request", "backup:" + resource_id
-        else:
+        elif kind == RESTORE:
             await conn.execute(
                 "UPDATE restore_stage_jobs SET state='EXPIRED',updated_at=clock_timestamp() "
                 "WHERE restore_id=%s", (resource_id,)
@@ -277,6 +402,13 @@ class StorageCleanupManager:
                 (Jsonb({"reason": reason, "cleanup_id": cleanup_id}), resource_id),
             )
             action, key = "restore.cleanup.request", "restore:" + resource_id
+        else:
+            await conn.execute(
+                "INSERT INTO bot_storage_generation_retirements("
+                "bot_id,storage_generation,cleanup_id) VALUES (%s,%s,%s)",
+                (resource["bot_id"], resource["storage_generation"], cleanup_id),
+            )
+            action, key = "bot.storage-generation.retire.request", "bot:" + resource["bot_id"]
         await conn.execute(
             "INSERT INTO storage_cleanup_events(cleanup_id,owner_epoch,step,details) "
             "VALUES (%s,0,'QUEUED',%s)",
@@ -286,7 +418,11 @@ class StorageCleanupManager:
             "INSERT INTO audit_records(audit_id,subject_id,action,resource_key,request_id,details) "
             "VALUES (%s,%s,%s,%s,%s,%s)",
             (str(uuid4()), subject_id, action, key, cleanup_id,
-             Jsonb({"cleanup_id": cleanup_id, "reason": reason})),
+             Jsonb({
+                 "cleanup_id": cleanup_id, "reason": reason,
+                 **({"storage_generation": resource["storage_generation"]}
+                    if kind == GENERATION else {}),
+             })),
         )
         return _public(job)
 
@@ -400,6 +536,35 @@ class StorageCleanupManager:
                     subject_id=restore["subject_id"], reason="RETENTION", input_digest=digest,
                 )
                 return True
+            generation = await (await conn.execute(
+                "SELECT g.bot_id||':'||g.storage_generation::text AS resource_id,g.bot_id,"
+                "g.storage_generation,g.source_kind,g.source_restore_id,g.source_ordinal,"
+                "g.plan_digest,g.cluster_id,g.database_name,g.role_name,g.created_at,"
+                "h.storage_generation AS current_storage_generation,h.revision AS head_revision,"
+                "a.activation_id,a.subject_id,a.completed_at AS superseded_at,"
+                "a.completed_at+(%s*interval '1 second') AS retire_after,'SUPERSEDED' AS state "
+                "FROM bot_storage_generations g JOIN bot_catalog b USING(bot_id) "
+                "JOIN bot_storage_heads h USING(bot_id) JOIN restore_activation_jobs a "
+                "ON a.bot_id=g.bot_id AND a.expected_storage_generation=g.storage_generation "
+                "AND a.state='COMPLETE' LEFT JOIN bot_storage_generation_retirements r "
+                "ON r.bot_id=g.bot_id AND r.storage_generation=g.storage_generation "
+                "WHERE b.mode='managed' "
+                "AND g.storage_generation<h.storage_generation AND r.cleanup_id IS NULL "
+                "AND a.completed_at+(%s*interval '1 second')<=clock_timestamp() "
+                "AND NOT EXISTS(SELECT 1 FROM restore_activation_jobs active "
+                "WHERE active.bot_id=g.bot_id AND active.state<>'COMPLETE') "
+                "ORDER BY a.completed_at,g.bot_id,g.storage_generation "
+                "FOR UPDATE OF h SKIP LOCKED LIMIT 1",
+                (self.generation_retention_seconds, self.generation_retention_seconds),
+            )).fetchone()
+            if generation is not None:
+                digest = self._resource_digest(GENERATION, generation)
+                await self._tombstone(
+                    conn, kind=GENERATION, resource=generation, cleanup_id=str(uuid4()),
+                    subject_id=generation["subject_id"], reason="RETENTION",
+                    input_digest=digest,
+                )
+                return True
             return False
 
     async def _claim(self) -> dict[str, Any] | None:
@@ -467,6 +632,8 @@ class StorageCleanupManager:
             blocked = isinstance(exc, ForestError) and exc.code in {
                 "CLEANUP_RESOURCE_NOT_TOMBSTONED", "BACKUP_CLEANUP_OWNERSHIP_CONFLICT",
                 "RESTORE_CLEANUP_OWNERSHIP_CONFLICT", "RESTORE_DATABASE_REGISTERED",
+                "STORAGE_GENERATION_CURRENT", "STORAGE_GENERATION_OWNERSHIP_CONFLICT",
+                "STORAGE_GENERATION_DATABASE_SHARED", "STORAGE_GENERATION_ACTIVATION_ACTIVE",
             }
             return await self._fail(job, code, blocked or job["attempt_count"] >= 5)
 
@@ -476,6 +643,8 @@ class StorageCleanupManager:
             await self._clean_backup(job)
         elif job["resource_kind"] == RESTORE:
             await self._clean_restore(job)
+        elif job["resource_kind"] == GENERATION:
+            await self._clean_generation(job)
         else:
             raise ForestError("CLEANUP_RESOURCE_INVALID", "Cleanup resource is invalid", 409)
         await self._heartbeat(job)
@@ -548,8 +717,13 @@ class StorageCleanupManager:
             async with self.store.pool.connection() as conn:
                 registered = await (await conn.execute(
                     "SELECT g.source_restore_id,g.source_ordinal,h.storage_generation IS NOT NULL "
-                    "AS current FROM bot_storage_generations g LEFT JOIN bot_storage_heads h "
+                    "AS current,c.state AS retirement_state "
+                    "FROM bot_storage_generations g LEFT JOIN bot_storage_heads h "
                     "ON h.bot_id=g.bot_id AND h.storage_generation=g.storage_generation "
+                    "LEFT JOIN bot_storage_generation_retirements r ON r.bot_id=g.bot_id "
+                    "AND r.storage_generation=g.storage_generation "
+                    "LEFT JOIN storage_cleanup_jobs c "
+                    "ON c.cleanup_id=r.cleanup_id "
                     "WHERE g.database_name=%s LIMIT 1",
                     (expected_name,),
                 )).fetchone()
@@ -560,9 +734,10 @@ class StorageCleanupManager:
                     and registered["current"]
                 ):
                     continue
-                raise ForestError(
-                    "RESTORE_DATABASE_REGISTERED", "A registered database cannot be cleaned", 409
-                )
+                if registered["retirement_state"] != "COMPLETE":
+                    raise ForestError(
+                        "RESTORE_DATABASE_REGISTERED", "A registered database cannot be cleaned", 409
+                    )
             marker = (
                 "forest:restore-stage:" + job["resource_id"] + ":" + target["content_digest"]
             )
@@ -585,6 +760,110 @@ class StorageCleanupManager:
                 )
             await self._heartbeat(job)
 
+    async def _clean_generation(self, job: dict[str, Any]) -> None:
+        if self.managed_dsn is None:
+            raise ForestError(
+                "STORAGE_GENERATION_OWNERSHIP_CONFLICT", "Managed storage is unavailable", 409
+            )
+        async with self.store.pool.connection() as conn:
+            row = await (await conn.execute(
+                "SELECT g.bot_id,g.storage_generation,g.source_kind,g.source_restore_id,"
+                "g.source_ordinal,g.plan_digest,g.cluster_id,g.database_name,g.role_name,"
+                "h.storage_generation AS current_storage_generation,r.cleanup_id,"
+                "p.deployment_id,t.content_digest FROM bot_storage_generation_retirements r "
+                "JOIN bot_storage_generations g USING(bot_id,storage_generation) "
+                "JOIN bot_storage_heads h USING(bot_id) LEFT JOIN bot_storage_plans p "
+                "ON p.bot_id=g.bot_id LEFT JOIN restore_stage_targets t "
+                "ON t.restore_id=g.source_restore_id AND t.ordinal=g.source_ordinal "
+                "WHERE r.cleanup_id=%s", (job["cleanup_id"],)
+            )).fetchone()
+            active = None
+            shared = None
+            if row is not None:
+                active = await (await conn.execute(
+                    "SELECT 1 FROM restore_activation_jobs WHERE bot_id=%s "
+                    "AND state<>'COMPLETE' LIMIT 1", (row["bot_id"],)
+                )).fetchone()
+                shared = await (await conn.execute(
+                    "SELECT 1 FROM bot_storage_generations WHERE cluster_id=%s "
+                    "AND database_name=%s AND (bot_id,storage_generation)<>(%s,%s) LIMIT 1",
+                    (
+                        row["cluster_id"], row["database_name"], row["bot_id"],
+                        row["storage_generation"],
+                    ),
+                )).fetchone()
+        if row is None or (
+            job["resource_id"] != f"{row['bot_id']}:{row['storage_generation']}"
+        ):
+            raise ForestError(
+                "CLEANUP_RESOURCE_NOT_TOMBSTONED",
+                "Storage generation cleanup lacks its retirement fact", 409,
+            )
+        if row["storage_generation"] >= row["current_storage_generation"]:
+            raise ForestError(
+                "STORAGE_GENERATION_CURRENT", "The current storage generation cannot be cleaned", 409
+            )
+        if active is not None:
+            raise ForestError(
+                "STORAGE_GENERATION_ACTIVATION_ACTIVE",
+                "An unfinished activation still depends on this Bot storage history", 409,
+            )
+        if shared is not None:
+            raise ForestError(
+                "STORAGE_GENERATION_DATABASE_SHARED",
+                "More than one storage generation names this database", 409,
+            )
+        if row["source_kind"] == "PROVISIONED":
+            if row["deployment_id"] is None:
+                raise ForestError(
+                    "STORAGE_GENERATION_OWNERSHIP_CONFLICT",
+                    "Provisioned storage ownership proof is missing", 409,
+                )
+            marker = "forest:bot-storage:" + json.dumps({
+                "deployment": row["deployment_id"], "bot": row["bot_id"],
+                "plan": row["plan_digest"],
+            }, sort_keys=True, separators=(",", ":"))
+        elif row["source_kind"] == "RESTORE" and row["content_digest"] is not None:
+            marker = (
+                "forest:restore-stage:" + row["source_restore_id"] + ":" + row["content_digest"]
+            )
+        else:
+            raise ForestError(
+                "STORAGE_GENERATION_OWNERSHIP_CONFLICT",
+                "Restore storage ownership proof is missing", 409,
+            )
+        async with await psycopg.AsyncConnection.connect(
+            self.managed_dsn, autocommit=True, row_factory=dict_row, connect_timeout=10
+        ) as conn:
+            cluster = await (await conn.execute(
+                "SELECT system_identifier::text AS id FROM pg_control_system()"
+            )).fetchone()
+            if cluster is None or cluster["id"] != row["cluster_id"]:
+                raise ForestError(
+                    "STORAGE_GENERATION_OWNERSHIP_CONFLICT",
+                    "Managed cluster differs from the generation record", 409,
+                )
+            database = await (await conn.execute(
+                "SELECT d.datistemplate,r.rolname,shobj_description(d.oid,'pg_database') AS marker "
+                "FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba WHERE d.datname=%s",
+                (row["database_name"],),
+            )).fetchone()
+            if database is None:
+                return
+            if (
+                database["datistemplate"] or database["rolname"] != row["role_name"]
+                or database["marker"] != marker
+            ):
+                raise ForestError(
+                    "STORAGE_GENERATION_OWNERSHIP_CONFLICT",
+                    "Storage generation database ownership is invalid", 409,
+                )
+            await conn.execute(
+                sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
+                    sql.Identifier(row["database_name"])
+                )
+            )
+
     async def _finish(self, job: dict[str, Any]) -> dict[str, Any]:
         async with self.store.pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(
@@ -601,17 +880,22 @@ class StorageCleanupManager:
                 "INSERT INTO storage_cleanup_events(cleanup_id,owner_epoch,step) "
                 "VALUES (%s,%s,'COMPLETE')", (job["cleanup_id"], job["owner_epoch"]),
             )
-            action = (
-                "backup.cleanup.completed" if job["resource_kind"] == BACKUP
-                else "restore.cleanup.completed"
-            )
+            if job["resource_kind"] == BACKUP:
+                action, key = "backup.cleanup.completed", "backup:" + job["resource_id"]
+            elif job["resource_kind"] == RESTORE:
+                action, key = "restore.cleanup.completed", "restore:" + job["resource_id"]
+            else:
+                bot_id, generation = job["resource_id"].rsplit(":", 1)
+                action, key = "bot.storage-generation.retire.completed", "bot:" + bot_id
             await conn.execute(
                 "INSERT INTO audit_records(audit_id,subject_id,action,resource_key,request_id,details) "
                 "VALUES (%s,%s,%s,%s,%s,%s)",
-                (str(uuid4()), job["subject_id"], action,
-                 ("backup:" if job["resource_kind"] == BACKUP else "restore:")
-                 + job["resource_id"], job["cleanup_id"],
-                 Jsonb({"cleanup_id": job["cleanup_id"], "reason": job["reason"]})),
+                (str(uuid4()), job["subject_id"], action, key, job["cleanup_id"],
+                 Jsonb({
+                     "cleanup_id": job["cleanup_id"], "reason": job["reason"],
+                     **({"storage_generation": int(generation)}
+                        if job["resource_kind"] == GENERATION else {}),
+                 })),
             )
             return _public(row)
 

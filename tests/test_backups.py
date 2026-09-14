@@ -708,6 +708,62 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
             ).fetchall()
         }
         assert databases == {bot_target["database_name"]}
+
+        generations = await cleanup.list_generations(**fixture.auth)
+        assert [row["storage_generation"] for row in generations] == [2, 1]
+        assert generations[0]["state"] == "CURRENT"
+        assert generations[1]["state"] == "SUPERSEDED"
+        with pytest.raises(ForestError) as current_generation:
+            await cleanup.plan(
+                kind="BOT_STORAGE_GENERATION",
+                resource_id=f"{bot['bot_id']}:2", **fixture.auth,
+            )
+        assert current_generation.value.code == "STORAGE_GENERATION_CURRENT"
+
+        old_database = current_storage["database_name"]
+        old_marker = await (await fixture.admin.execute(
+            "SELECT shobj_description(oid,'pg_database') AS marker "
+            "FROM pg_database WHERE datname=%s", (old_database,)
+        )).fetchone()
+        generation_plan = await cleanup.plan(
+            kind="BOT_STORAGE_GENERATION", resource_id=f"{bot['bot_id']}:1",
+            **fixture.auth,
+        )
+        generation_cleanup = await cleanup.apply(
+            plan_id=generation_plan["plan_id"], plan_digest=generation_plan["plan_digest"],
+            expected_password_hash="unused-test-hash",
+            idempotency_key="retire-old-storage-generation", **fixture.auth,
+        )
+        await fixture.admin.execute(
+            sql.SQL("COMMENT ON DATABASE {} IS 'foreign-owner'").format(
+                sql.Identifier(old_database)
+            )
+        )
+        generation_blocked = await cleanup.run_once()
+        assert generation_blocked["cleanup_id"] == generation_cleanup["cleanup_id"]
+        assert generation_blocked["state"] == "BLOCKED"
+        assert generation_blocked["error_code"] == "STORAGE_GENERATION_OWNERSHIP_CONFLICT"
+        assert await (await fixture.admin.execute(
+            "SELECT 1 FROM pg_database WHERE datname=%s", (old_database,)
+        )).fetchone()
+        await fixture.admin.execute(
+            sql.SQL("COMMENT ON DATABASE {} IS {}").format(
+                sql.Identifier(old_database), sql.Literal(old_marker["marker"])
+            )
+        )
+        assert (await cleanup.retry(
+            cleanup_id=generation_cleanup["cleanup_id"],
+            expected_password_hash="unused-test-hash",
+            idempotency_key="retry-old-storage-generation", **fixture.auth,
+        ))["state"] == "QUEUED"
+        retired = await cleanup.run_once()
+        assert retired["state"] == "COMPLETE"
+        assert await (await fixture.admin.execute(
+            "SELECT 1 FROM pg_database WHERE datname=%s", (old_database,)
+        )).fetchone() is None
+        generations = await cleanup.list_generations(**fixture.auth)
+        assert generations[1]["state"] == "RETIRED"
+        assert generations[1]["cleanup_state"] == "COMPLETE"
     finally:
         if not target_names:
             async with fixture.store.pool.connection() as conn:

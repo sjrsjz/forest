@@ -10,6 +10,7 @@ const states = {
   VALIDATING: '正在验证恢复结果', STAGED: '隔离恢复完成',
   FENCING: '正在封存旧库', SWITCHING: '正在切换存储目录', ACTIVATING: '正在启用恢复库',
   COMPLETE: '激活完成', BLOCKED: '需要处理后重试',
+  CURRENT: '当前存储', SUPERSEDED: '已被替代', RETIRED: '已退休', UNPROVEN: '缺少替代凭据',
 };
 
 function size(value) {
@@ -22,6 +23,7 @@ function size(value) {
 
 export function backupPanel(api, busy, notice, uploadArtifact) {
   let rows = [], verificationRows = [], restoreRows = [], importRows = [], activationRows = [];
+  let generationRows = [];
   let createKey = null, restoreKey = null, cleanupKey = null;
   let importKey = null, activeImport = null;
   let cleanupPlan = null, cleanupRetry = null;
@@ -98,15 +100,19 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
     $('restore-activation-form').classList.remove('hidden');
   }
 
-  async function openCleanup(kind, resourceId) {
+  async function openCleanup(kind, resourceId, generation = null) {
     closeCleanupForm();
     const base = kind === 'BACKUP_ARTIFACT' ? `/backups/${encodeURIComponent(resourceId)}` :
-      `/restore-stages/${encodeURIComponent(resourceId)}`;
+      kind === 'RESTORE_STAGE' ? `/restore-stages/${encodeURIComponent(resourceId)}` :
+      `/bots/${encodeURIComponent(generation.bot_id)}/storage-generations/${generation.storage_generation}`;
     cleanupPlan = await api(`${base}/cleanup-plan`, {});
-    $('storage-cleanup-resource').textContent = `${kind === 'BACKUP_ARTIFACT' ? '备份' : '隔离恢复'}：${resourceId}`;
+    const label = kind === 'BACKUP_ARTIFACT' ? '备份' :
+      kind === 'RESTORE_STAGE' ? '隔离恢复' : 'Bot 旧存储代际';
+    $('storage-cleanup-resource').textContent = `${label}：${resourceId}`;
     $('storage-cleanup-warning').textContent = kind === 'BACKUP_ARTIFACT' ?
-      '应用后下载立即失效，后台随后删除加密工件。' :
-      '应用后隔离副本立即进入 EXPIRED；后台删除名称和 owner marker 都匹配的未采用数据库，并保留已经成为当前 storage head 的 Bot 数据库。';
+      '应用后下载立即失效，后台随后删除加密工件。' : kind === 'RESTORE_STAGE' ?
+      '应用后隔离副本立即进入 EXPIRED；后台删除名称和 owner marker 都匹配的未采用数据库，并保留已经成为当前 storage head 的 Bot 数据库。' :
+      '应用后写入不可变退休记录；后台复核当前 head、受管集群、数据库 owner 和 Forest marker 后永久删除旧数据库。当前代际不会被接受。';
     $('storage-cleanup-form').querySelector('button[type="submit"]').textContent = '撤销并清理';
     $('storage-cleanup-form').classList.remove('hidden');
     $('storage-cleanup-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
@@ -115,7 +121,7 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
   function openCleanupRetry(row) {
     closeCleanupForm(); cleanupRetry = row.cleanup_id;
     $('storage-cleanup-resource').textContent = `清理任务：${row.cleanup_id}`;
-    $('storage-cleanup-warning').textContent = `上次清理已阻塞：${row.cleanup_error_code || '未知错误'}。确认外部冲突已排除后再重试。`;
+    $('storage-cleanup-warning').textContent = `上次清理已阻塞：${row.cleanup_error_code || row.error_code || '未知错误'}。确认外部冲突已排除后再重试。`;
     $('storage-cleanup-form').querySelector('button[type="submit"]').textContent = '重试清理';
     $('storage-cleanup-form').classList.remove('hidden');
   }
@@ -269,13 +275,46 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
       }
       restoreTarget.append(card);
     }
+    const generationTarget = $('storage-generation-list'); generationTarget.replaceChildren();
+    $('storage-generation-empty').classList.toggle('hidden', generationRows.length !== 0);
+    for (const row of generationRows) {
+      const card = document.createElement('article'); card.className = 'audit-row';
+      const title = document.createElement('h3');
+      title.textContent = `${row.display_name} · 第 ${row.storage_generation} 代 · ` +
+        `${states[row.state] || row.state}`;
+      const progress = document.createElement('p'); progress.className = 'muted';
+      progress.textContent = row.source_kind === 'PROVISIONED' ? '初始供应数据库' :
+        `恢复副本 ${row.source_restore_id} / ${row.source_ordinal}`;
+      const meta = document.createElement('p'); meta.className = 'hint';
+      meta.textContent = `创建 ${row.created_at}` +
+        `${row.superseded_at ? ` · 被替代 ${row.superseded_at}` : ''}` +
+        `${row.retire_after && !row.current ? ` · 自动回收不早于 ${row.retire_after}` : ''}` +
+        `${row.cleanup_state ? ` · 清理 ${row.cleanup_state}${row.error_code ? ` (${row.error_code})` : ''}` : ''}`;
+      card.append(title, progress, meta);
+      if (row.state === 'SUPERSEDED') {
+        const remove = document.createElement('button'); remove.className = 'danger';
+        remove.type = 'button'; remove.textContent = '预览并回收旧数据库';
+        const id = `${row.bot_id}:${row.storage_generation}`;
+        remove.addEventListener('click', () => busy(
+          remove, () => openCleanup('BOT_STORAGE_GENERATION', id, row)
+        ));
+        card.append(remove);
+      } else if (row.cleanup_state === 'BLOCKED') {
+        const retry = document.createElement('button'); retry.className = 'danger';
+        retry.type = 'button'; retry.textContent = '处理冲突后重试回收';
+        retry.addEventListener('click', () => openCleanupRetry(row)); card.append(retry);
+      }
+      generationTarget.append(card);
+    }
   }
 
   async function load() {
     const seq = ++readSeq;
-    const [data, verificationData, restoreData, importData, activationData] = await Promise.all([
+    const [
+      data, verificationData, restoreData, importData, activationData, generationData,
+    ] = await Promise.all([
       api('/backups'), api('/backup-verifications'), api('/restore-stages'),
-      api('/backup-imports'), api('/restore-activations'),
+      api('/backup-imports'), api('/restore-activations'), api('/storage-generations'),
     ]);
     const detailed = await Promise.all(data.backups.map(async (row) => {
       if (!['READY', 'INCONSISTENT'].includes(row.state)) return row;
@@ -288,7 +327,8 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
     if (seq !== readSeq) return data;
     rows = detailed; verificationRows = verificationData.verifications;
     restoreRows = restoreDetails; importRows = importData.imports;
-    activationRows = activationData.restore_activations; render(); return data;
+    activationRows = activationData.restore_activations;
+    generationRows = generationData.storage_generations; render(); return data;
   }
 
   $('backup-refresh').addEventListener('click', () => busy($('backup-refresh'), load));
@@ -440,17 +480,21 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
       importRows.some((row) => ['UPLOADING', 'QUEUED', 'IMPORTING'].includes(row.state)) ||
       activationRows.some((row) =>
         ['QUEUED', 'FENCING', 'SWITCHING', 'ACTIVATING'].includes(row.state)
+      ) || generationRows.some((row) =>
+        ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)
       ),
     reset() {
       readSeq++; rows = []; verificationRows = []; restoreRows = []; importRows = [];
-      activationRows = [];
+      activationRows = []; generationRows = [];
       createKey = null; importKey = null; activeImport = null;
       closeRestoreForm(); closeCleanupForm(); closeActivationForm();
       $('backup-create-form').reset(); $('backup-list').replaceChildren();
       $('backup-import-form').reset(); $('backup-import-list').replaceChildren();
       $('restore-list').replaceChildren();
+      $('storage-generation-list').replaceChildren();
       $('backup-empty').classList.remove('hidden'); $('restore-empty').classList.remove('hidden');
       $('backup-import-empty').classList.remove('hidden');
+      $('storage-generation-empty').classList.remove('hidden');
     },
   };
 }

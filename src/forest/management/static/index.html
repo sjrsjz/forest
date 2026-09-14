@@ -115,6 +115,10 @@
       <h2>外部备份导入任务</h2><p id="backup-import-empty" class="hint hidden">还没有外部备份导入任务。</p><div id="backup-import-list" aria-live="polite"></div>
       <p id="backup-empty" class="hint hidden">还没有备份任务。</p><div id="backup-list" aria-live="polite"></div>
       <h2>隔离恢复任务</h2><p id="restore-empty" class="hint hidden">还没有隔离恢复任务。</p><div id="restore-list" aria-live="polite"></div>
+      <h2>Bot 存储代际</h2>
+      <p class="hint">当前代际始终保留。恢复激活替代的旧代默认保留七天，也可先预览并立即回收；后台只删除受管集群中 owner 与 Forest marker 精确匹配的旧数据库，不删除共享角色和不可变目录历史。</p>
+      <p id="storage-generation-empty" class="hint hidden">还没有托管 Bot 存储代际。</p>
+      <div id="storage-generation-list" aria-live="polite"></div>
     </section>
     <section id="bots" class="hidden">
       <details class="card"><summary>插件包管理</summary><p class="hint">导入可信来源的 Python 插件 ZIP 包。导入后为 Bot 选择版本并预览配置；启用时才启动插件。</p><form id="package-import-form"><label>插件包<input name="archive" type="file" accept=".zip,application/zip" required></label><button type="submit">导入插件包</button></form><div id="package-list"></div></details>

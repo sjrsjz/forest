@@ -616,6 +616,28 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             cleanup_form.locator('[name="current_password"]').fill(password)
             cleanup_form.locator('button[type="submit"]').click()
             expect(page.locator('#restore-list')).to_contain_text('清理 COMPLETE', timeout=60000)
+            old_generation = page.locator('#storage-generation-list article').filter(
+                has_text='Beta 浏览器 Bot · 第 1 代'
+            )
+            expect(old_generation).to_contain_text('已被替代')
+            old_database = compose(
+                "exec", "-T", "postgres", "psql", "-U", "forest", "-d", "forest", "-At",
+                "-c", "SELECT database_name FROM bot_storage_generations "
+                f"WHERE bot_id='{beta}' AND storage_generation=1",
+            ).strip()
+            assert old_database.startswith('forest_b_') and len(old_database) == 41
+            old_generation.get_by_role('button', name='预览并回收旧数据库').click()
+            expect(cleanup_form).to_be_visible()
+            expect(page.locator('#storage-cleanup-warning')).to_contain_text('Forest marker')
+            cleanup_form.locator('[name="current_password"]').fill(password)
+            cleanup_form.locator('button[type="submit"]').click()
+            expect(old_generation).to_contain_text('清理 COMPLETE', timeout=60000)
+            database_count = compose(
+                "exec", "-T", "postgres", "psql", "-U", "forest", "-d", "forest", "-At",
+                "-c", "SELECT count(*) FROM pg_database "
+                f"WHERE datname='{old_database}'",
+            ).strip()
+            assert database_count == '0'
             page.get_by_role('button', name='预览并删除备份').first.click()
             expect(cleanup_form).to_be_visible()
             expect(page.locator('#storage-cleanup-warning')).to_contain_text('下载立即失效')
@@ -653,7 +675,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
-                        "Web encrypted deployment and two-Bot backup, streamed external import, independent read-only verification, isolated three-database restore, one-Bot storage-generation activation, tombstone, and active-head-aware cleanup",
+                        "Web encrypted deployment and two-Bot backup, streamed external import, independent read-only verification, isolated three-database restore, one-Bot storage-generation activation, active-head-aware restore cleanup, and superseded-generation reclamation",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

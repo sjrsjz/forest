@@ -91,15 +91,20 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         script = await admin.get("/static/backup-panel.js")
         assert 'id="nav-backups"' in html.text and 'id="storage-cleanup-form"' in html.text
         assert 'id="restore-activation-form"' in html.text
+        assert 'id="storage-generation-list"' in html.text
         assert 'id="backup-import-form"' in html.text
         assert script.status_code == 200 and "cleanup-plan" in script.text
         assert "/backup-imports" in script.text
         assert "/restore-activations" in script.text
+        assert "/storage-generations" in script.text
         empty = await admin.get("/management/v1/backups")
         assert empty.status_code == 200 and empty.json()["backups"] == []
         empty_activations = await admin.get("/management/v1/restore-activations")
         assert empty_activations.status_code == 200
         assert empty_activations.json()["restore_activations"] == []
+        empty_generations = await admin.get("/management/v1/storage-generations")
+        assert empty_generations.status_code == 200
+        assert empty_generations.json()["storage_generations"] == []
 
         rejected = await admin.post(
             "/management/v1/backups",
@@ -328,6 +333,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
             ).status_code == 403
             assert (await viewer.get("/management/v1/backup-imports")).status_code == 403
             assert (await viewer.get("/management/v1/restore-activations")).status_code == 403
+            assert (await viewer.get("/management/v1/storage-generations")).status_code == 403
             assert (
                 await viewer.get(
                     f"/management/v1/backups/{queued['backup_id']}/download"

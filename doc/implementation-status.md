@@ -16,6 +16,8 @@ Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 A
 
 托管 Bot 恢复激活切片使用部署迁移 065 把初始 `bot_storage_plans` 固化为第 1 代供应事实，增加不可变 `bot_storage_generations`、单调 `bot_storage_heads`、五分钟激活计划，以及可续跑 Job/事件/幂等回执。预览和提交都核对受管集群、受限数据库 owner、恢复 marker、Bot 身份、隔离摘要、备份 deletion epoch，并对 Binding、发送、模型、工具、调用、Shell、Job 和组件效果账本做有界确定性摘要；未决外部效果或任一差异会拒绝激活。执行固定为旧库 runtime 行锁内重验并封存、目录 head CAS 到 N+1、新库重验后开放，Fleet 看到代际变化会完整释放旧宿主再连接新库；请求路径也在复用内存宿主前解析当前 head，并在清理后重验，不能借目录轮询窗口落回旧代。进程或目录故障把任务留在持久边界并保持 Bot 离线，`BLOCKED` 只能由管理员重新认证后续跑；清理会保留精确成为当前 head 的恢复库。真实 PostgreSQL 故障注入覆盖旧库已封存而目录尚未切换的中断与重试，最终扩大回归为 `68 passed`，118.47 秒。`forest:restore-activation` 镜像构建成功；真实 Edge + 隔离 Compose 保持一个 Bot 在线、暂停另一个 Bot 后完成三库备份/导入/校验/隔离恢复，页面把暂停 Bot 从第 1 代切到第 2 代，新代 Worker 就绪后插件状态继续递增，恢复清理保留当前 head 并删除另两个目标；随机容器和卷均已清理。外部 Bot 存储和部署控制面整库激活仍未接入。
 
+旧存储代际回收切片使用部署迁移 066 扩展既有存储清理协议，并以不可变 `bot_storage_generation_retirements` 保留逻辑墓碑，不修改 generation 目录历史。只有小于当前 head、由完成激活明确替代、属于受管集群且没有未完成激活的代际可生成五分钟预览或进入七天自动保留期；后台在删除前重验 head、集群 system identifier、数据库 owner、供应/恢复 marker 和数据库登记唯一性，只删除旧数据库而保留共享受限角色。身份冲突固定 `BLOCKED`，管理员修复后可重新认证续跑同一 Job。迁移、目录/Fleet、备份恢复与 Web 扩大 PostgreSQL 回归为 `68 passed`，125.06 秒；其中真实恢复测试还证明当前 head 被拒绝、篡改 marker 不删除、恢复 marker 后重试完成。`forest:generation-cleanup` 镜像构建成功；真实 Edge + 隔离 Compose 从页面激活 Beta Bot 后保留第 2 代、清理同批其他隔离库，再通过旧代预览/应用删除第 1 代数据库并直接查询 PostgreSQL 确认消失，第 2 代插件继续可用；随机容器和卷均已清理。
+
 本次组件事件管理切片使用迁移 055 增加独立 management revision、replay epoch、不可变回放/退役审计和 RETIRED 终态。事件状态机与权限迁移 `10 passed`，Web 权威、并发回放和退役纵向链路 `2 passed`，四组旧库权限升级 `12 passed`，Kernel/Generation/WebAuthority/维护交叉回归 `58 passed`；真实 Edge 页面验证通过状态筛选、回放、plan/apply 退役、Bot 切换迟到响应隔离和移动布局。这些是分次定向结果，不冒充一次最终全量测试。详细语义见[组件事件管理](p0-component-event-management.md)。
 
 本次 P0 组件持久任务切片使用迁移 056 增加 immutable generation handler 声明、稳定 handler head、Bot 内任务序列和租约执行状态。SDK/PostgreSQL 专项为 `10 passed`，覆盖并发同 operation 合流、正文冲突、延迟、丢 ACK、默认串行、失败后热重载接续、旧 generation 围栏不消耗尝试、schema 身份与隐式删除拒绝；Kernel、事件、调用树、Worker、包和四条旧库升级交叉回归为 `195 passed, 1 skipped`，214.20 秒，跳过项是既有 POSIX 权限测试。实现前的 SDK/manifest/Worker 基线另为 `105 passed, 1 skipped`。这些是分次定向结果，不代表新的全仓库或 Linux 验收。详细语义见[组件持久任务](p0-component-jobs.md)。
@@ -130,7 +132,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
 | P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v4 只管理当前群主干，后台有界 scrub。自动语义联想复用既有多模态向量，以持久 Top-K 投票跨主干合流并在删除后显式撤回；会话 Job settings/delegation 已纳入同一来源遗忘闭包。部署库剩余正文、WAL 治理及大规模检索容量仍待完成 |
-| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、Bot 脱敏审计、群聊运行/任务/维护/组件/审计命令、CorePrompt、PresetContext、加密多库备份、外部工件导入、独立只读校验、隔离恢复、托管 Bot 代际激活与保留期清理已接通，子 Agent 页面已删除；Bot 级账号 scope 与完整角色模板、部署控制面恢复、任务正文日志、WAL 及容量治理尚未完成 |
+| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、Bot 脱敏审计、群聊运行/任务/维护/组件/审计命令、CorePrompt、PresetContext、加密多库备份、外部工件导入、独立只读校验、隔离恢复、托管 Bot 代际激活、保留期清理与旧存储代际回收已接通，子 Agent 页面已删除；Bot 级账号 scope 与完整角色模板、部署控制面恢复、任务正文日志、WAL 及其余容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 
@@ -368,4 +370,4 @@ P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最
 
 ## 5. 下一步
 
-继续补齐宿主资源契约和其余消息契约，推进 P4 剩余载荷迁移、检索容量、WAL 与旧存储代际回收，以及 P5 部署控制面恢复、完整管理和容量治理。已接通的 Web/Fleet、插件运行环境、OneBot/Binding、消息/发送、调用树、持久组件事件、组件持久任务及其管理面、持久单 Agent、会话定时任务和托管 Bot 恢复激活作为后续基础；首版目标仍按 01–12 实施，当前切片可运行不代表整个目标已经完成。
+继续补齐宿主资源契约和其余消息契约，推进 P4 剩余载荷迁移、检索容量与 WAL，以及 P5 部署控制面恢复、完整管理和其余容量治理。已接通的 Web/Fleet、插件运行环境、OneBot/Binding、消息/发送、调用树、持久组件事件、组件持久任务及其管理面、持久单 Agent、会话定时任务、托管 Bot 恢复激活和旧存储代际回收作为后续基础；首版目标仍按 01–12 实施，当前切片可运行不代表整个目标已经完成。

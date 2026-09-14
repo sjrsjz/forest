@@ -290,6 +290,33 @@ def install_backup_routes(app, runtime) -> None:
             session_token_hash=digest_token(request.cookies["forest_session"]),
         )
 
+    @app.get("/management/v1/storage-generations")
+    async def storage_generations(request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        rows = await cleanup().list_generations(
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+        return {"storage_generations": rows}
+
+    @app.post(
+        "/management/v1/bots/{bot_id}/storage-generations/{storage_generation}/cleanup-plan"
+    )
+    async def plan_storage_generation_cleanup(
+        bot_id: str, storage_generation: int, body: CleanupPlan, request: Request
+    ):
+        if storage_generation < 1:
+            raise ForestError(
+                "STORAGE_GENERATION_NOT_FOUND", "Bot storage generation does not exist", 404
+            )
+        session = await runtime.principal(request, write=True)
+        return await cleanup().plan(
+            kind="BOT_STORAGE_GENERATION",
+            resource_id=f"{bot_id}:{storage_generation}",
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
     @app.post("/management/v1/storage-cleanups", status_code=202)
     async def apply_cleanup(body: CleanupApply, request: Request):
         session = await runtime.principal(request, write=True)
