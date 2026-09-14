@@ -100,7 +100,7 @@ class StorageCleanupManager:
             allowed = {"READY", "INCONSISTENT"}
         elif kind == RESTORE:
             row = await (await conn.execute(
-                "SELECT j.restore_id AS resource_id,j.backup_id,j.state,j.manifest_digest,"
+                "SELECT j.restore_id AS resource_id,j.backup_id,j.verification_id,j.state,j.manifest_digest,"
                 "j.database_total,j.database_completed,j.expires_at "
                 "FROM restore_stage_jobs j WHERE j.restore_id=%s" + suffix,
                 (resource_id,),
@@ -134,7 +134,7 @@ class StorageCleanupManager:
         else:
             value = {
                 key: _time(row[key]) for key in (
-                    "resource_id", "backup_id", "state", "manifest_digest", "database_total",
+                    "resource_id", "backup_id", "verification_id", "state", "manifest_digest", "database_total",
                     "database_completed", "expires_at", "targets",
                 )
             }
@@ -203,12 +203,15 @@ class StorageCleanupManager:
             if plan["resource_kind"] == BACKUP:
                 active = await (await conn.execute(
                     "SELECT 1 FROM restore_stage_jobs WHERE backup_id=%s AND state IN "
-                    "('QUEUED','VERIFYING','RESTORING','VALIDATING') LIMIT 1",
-                    (plan["resource_id"],),
+                    "('QUEUED','VERIFYING','RESTORING','VALIDATING') UNION ALL "
+                    "SELECT 1 FROM backup_verification_jobs WHERE backup_id=%s "
+                    "AND state IN ('QUEUED','VERIFYING') LIMIT 1",
+                    (plan["resource_id"], plan["resource_id"]),
                 )).fetchone()
                 if active is not None:
                     raise ForestError(
-                        "BACKUP_RESTORE_ACTIVE", "An active restore still depends on this backup", 409
+                        "BACKUP_RESTORE_ACTIVE",
+                        "An active verification or restore still depends on this backup", 409,
                     )
             cleanup_id = str(uuid4())
             result = await self._tombstone(
@@ -353,7 +356,9 @@ class StorageCleanupManager:
                 "WHERE j.state IN ('READY','INCONSISTENT') AND a.deleted_at IS NULL "
                 "AND a.expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM "
                 "restore_stage_jobs r WHERE r.backup_id=j.backup_id AND r.state IN "
-                "('QUEUED','VERIFYING','RESTORING','VALIDATING')) "
+                "('QUEUED','VERIFYING','RESTORING','VALIDATING')) AND NOT EXISTS(SELECT 1 FROM "
+                "backup_verification_jobs v WHERE v.backup_id=j.backup_id "
+                "AND v.state IN ('QUEUED','VERIFYING')) "
                 "ORDER BY a.expires_at,j.backup_id FOR UPDATE OF j,a SKIP LOCKED LIMIT 1"
             )).fetchone()
             if backup is not None:
@@ -364,7 +369,7 @@ class StorageCleanupManager:
                 )
                 return True
             restore = await (await conn.execute(
-                "SELECT j.restore_id AS resource_id,j.subject_id,j.backup_id,j.state,"
+                "SELECT j.restore_id AS resource_id,j.subject_id,j.backup_id,j.verification_id,j.state,"
                 "j.manifest_digest,j.database_total,j.database_completed,j.expires_at "
                 "FROM restore_stage_jobs j "
                 "WHERE j.state IN ('STAGED','FAILED') AND j.expires_at<=clock_timestamp() "

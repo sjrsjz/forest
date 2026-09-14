@@ -18,11 +18,17 @@ _DETAIL_FIELDS = {
     "bot.retry": frozenset({"job_id", "revision"}),
     "binding.reserve": frozenset({"bot_id", "binding_id"}),
     "backup.create": frozenset({"backup_id", "include_packages"}),
-    "restore.stage.create": frozenset({"restore_id", "backup_id", "database_total"}),
+    "restore.stage.create": frozenset({
+        "restore_id", "backup_id", "verification_id", "database_total",
+    }),
     "restore.stage.completed": frozenset({
-        "restore_id", "backup_id", "database_total", "manifest_digest",
+        "restore_id", "backup_id", "verification_id", "database_total", "manifest_digest",
     }),
     "backup.cleanup.request": frozenset({"cleanup_id", "reason"}),
+    "backup.verify.create": frozenset({"verification_id", "backup_id"}),
+    "backup.verify.completed": frozenset({
+        "verification_id", "backup_id", "manifest_digest", "database_total",
+    }),
     "backup.cleanup.completed": frozenset({"cleanup_id", "reason"}),
     "restore.cleanup.request": frozenset({"cleanup_id", "reason"}),
     "restore.cleanup.completed": frozenset({"cleanup_id", "reason"}),

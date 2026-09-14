@@ -76,16 +76,16 @@
           <button type="submit">创建备份</button>
         </form>
         <p class="hint">恢复口令只用于本次请求，不会保存明文。丢失口令后无法解密下载的工件。备份抓取不会启动 Agent，也不会阻塞不同群聊之间的对话。</p>
-      </div><div class="card"><h2>恢复边界</h2>
-        <p class="muted">下载前会重新核对会话与密文摘要。恢复必须先在隔离数据库中校验，不能覆盖当前在线数据库。</p>
+      </div><div class="card"><h2>校验与恢复边界</h2>
+        <p class="muted">下载前会重新核对会话与密文摘要。恢复前必须生成一份短期有效的只读校验凭据；校验会完整解密并检查清单，但不会创建或连接恢复数据库。</p>
         <p class="hint">Bot 目录若在抓取期间变化，工件会标记为不一致并只允许取证下载。删除屏障、外部效果和 UNKNOWN 发送结果仍需在激活前核对。</p>
         <button id="backup-refresh" class="subtle" type="button">刷新备份状态</button>
         <form id="backup-restore-form" class="hidden">
-          <h3>建立隔离恢复副本</h3><p id="backup-restore-source" class="hint"></p>
-          <label>恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
+          <h3 id="backup-restore-title">只读校验备份</h3><p id="backup-restore-source" class="hint"></p>
+          <label id="backup-recovery-label">恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
           <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
-          <div class="actions"><button type="submit">校验并恢复到隔离数据库</button><button id="backup-restore-cancel" class="subtle" type="button">取消</button></div>
-          <p class="hint">目标使用随机数据库名，不登记到 Fleet；Bot 副本保持 SEALED，页面不会提供在线激活按钮。</p>
+          <div class="actions"><button id="backup-restore-submit" type="submit">开始只读校验</button><button id="backup-restore-cancel" class="subtle" type="button">取消</button></div>
+          <p id="backup-restore-hint" class="hint">凭据绑定精确密文与清单摘要，24 小时内可用于建立隔离恢复副本。</p>
         </form>
         <form id="storage-cleanup-form" class="hidden">
           <h3>清理存储资源</h3><p id="storage-cleanup-resource" class="hint"></p>

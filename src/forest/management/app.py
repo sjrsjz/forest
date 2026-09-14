@@ -43,6 +43,7 @@ from forest.management.jobs_api import install_job_routes
 from forest.management.memory_api import install_memory_routes
 from forest.management.provision import BotProvisioner
 from forest.management.restores import RestoreManager
+from forest.management.verifications import BackupVerificationManager
 from forest.security import SecretVault, digest_token, hash_password, random_token, verify_password
 from forest.storage.postgres import PostgresStore
 
@@ -190,6 +191,7 @@ class ManagementRuntime:
         self.backups: BackupManager | None = None
         self.restores: RestoreManager | None = None
         self.cleanup: StorageCleanupManager | None = None
+        self.verifications: BackupVerificationManager | None = None
         self.service_tasks: list[asyncio.Task] = []
         self.service_errors: dict[str, str] = {}
 
@@ -240,6 +242,9 @@ class ManagementRuntime:
             )
             restores = RestoreManager(catalog, backups, self.settings.data_dir)
             cleanup = StorageCleanupManager(catalog, backups)
+            verifications = BackupVerificationManager(
+                catalog, backups, restores, self.settings.data_dir
+            )
         except BaseException:
             await candidate.close()
             raise
@@ -251,6 +256,7 @@ class ManagementRuntime:
         self.backups = backups
         self.restores = restores
         self.cleanup = cleanup
+        self.verifications = verifications
         self.provisioner = BotProvisioner(catalog)
         self.service_tasks = [
             asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
@@ -258,6 +264,7 @@ class ManagementRuntime:
             asyncio.create_task(backups.run_forever(), name="backup-jobs"),
             asyncio.create_task(restores.run_forever(), name="restore-stage-jobs"),
             asyncio.create_task(cleanup.run_forever(), name="storage-cleanup-jobs"),
+            asyncio.create_task(verifications.run_forever(), name="backup-verification-jobs"),
         ]
         self.recovery_error = None
 
@@ -270,6 +277,8 @@ class ManagementRuntime:
             await self.restores.close()
         if self.cleanup is not None:
             await self.cleanup.close()
+        if self.verifications is not None:
+            await self.verifications.close()
         for task in self.service_tasks:
             task.cancel()
         await asyncio.gather(*self.service_tasks, return_exceptions=True)
@@ -288,6 +297,7 @@ class ManagementRuntime:
                         ("backup-jobs", self.backups.run_forever),
                         ("restore-stage-jobs", self.restores.run_forever),
                         ("storage-cleanup-jobs", self.cleanup.run_forever),
+                        ("backup-verification-jobs", self.verifications.run_forever),
                     )):
                         task = self.service_tasks[index]
                         if task.done():

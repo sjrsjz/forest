@@ -143,11 +143,47 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         assert header["backup_id"] == manifest["backup_id"] == queued["backup_id"]
         assert manifest["roster"]["consistent"] is True
 
+        verification_response = await admin.post(
+            f"/management/v1/backups/{queued['backup_id']}/verifications",
+            json={
+                "current_password": PASSWORD,
+                "recovery_passphrase": passphrase,
+            },
+            headers={"idempotency-key": "web-backup-verification"},
+        )
+        assert verification_response.status_code == 202, verification_response.text
+        verification = verification_response.json()
+        assert verification["state"] == "QUEUED"
+        for _ in range(100):
+            response = await admin.get(
+                f"/management/v1/backup-verifications/{verification['verification_id']}"
+            )
+            assert response.status_code == 200, response.text
+            verification = response.json()
+            if verification["state"] in {"VERIFIED", "FAILED"}:
+                break
+            await asyncio.sleep(0.05)
+        assert verification["state"] == "VERIFIED" and verification["receipt_valid"]
+        listed_verifications = await admin.get("/management/v1/backup-verifications")
+        assert listed_verifications.status_code == 200
+        assert listed_verifications.json()["verifications"][0] == verification
+        verification_audit = await admin.get(
+            "/management/v1/audit?action=backup.verify.completed"
+        )
+        verification_record = verification_audit.json()["records"][0]
+        assert verification_record["details"] == {
+            "verification_id": verification["verification_id"],
+            "backup_id": queued["backup_id"],
+            "manifest_digest": verification["manifest_digest"],
+            "database_total": 1,
+        }
+        assert not verification_record["details_redacted"]
+
         restore_response = await admin.post(
             f"/management/v1/backups/{queued['backup_id']}/restore-stages",
             json={
                 "current_password": PASSWORD,
-                "recovery_passphrase": passphrase,
+                "verification_id": verification["verification_id"],
             },
             headers={"idempotency-key": "web-restore-stage"},
         )
@@ -163,6 +199,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
                 break
             await asyncio.sleep(0.05)
         assert restore["state"] == "STAGED", restore
+        assert restore["verification_id"] == verification["verification_id"]
         assert restore["database_total"] == restore["database_completed"] == 1
         assert restore["targets"][0]["database_scope"] == "deployment"
         assert restore["targets"][0]["state"] == "STAGED"
@@ -174,6 +211,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         assert restore_record["details"] == {
             "restore_id": restore["restore_id"],
             "backup_id": queued["backup_id"],
+            "verification_id": verification["verification_id"],
             "database_total": 1,
             "manifest_digest": restore["manifest_digest"],
         }
@@ -247,6 +285,9 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         ) as viewer:
             assert (await login_as(viewer, "backup-viewer", viewer_password)).status_code == 200
             assert (await viewer.get("/management/v1/backups")).status_code == 403
+            assert (
+                await viewer.get("/management/v1/backup-verifications")
+            ).status_code == 403
             assert (
                 await viewer.get(
                     f"/management/v1/backups/{queued['backup_id']}/download"

@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const states = {
   QUEUED: '等待执行', CAPTURING: '正在抓取数据库', SEALING: '正在加密封口',
   READY: '可下载', INCONSISTENT: '目录在抓取期间发生变化', FAILED: '失败', EXPIRED: '已过期',
+  VERIFIED: '只读校验通过',
   VERIFYING: '正在校验工件', RESTORING: '正在恢复隔离数据库',
   VALIDATING: '正在验证恢复结果', STAGED: '隔离恢复完成',
 };
@@ -16,20 +17,40 @@ function size(value) {
 }
 
 export function backupPanel(api, busy, notice) {
-  let rows = [], restoreRows = [], createKey = null, restoreKey = null, cleanupKey = null;
+  let rows = [], verificationRows = [], restoreRows = [];
+  let createKey = null, restoreKey = null, cleanupKey = null;
   let cleanupPlan = null, cleanupRetry = null;
-  let selectedBackup = null, readSeq = 0;
+  let selectedBackup = null, selectedVerification = null, formMode = null, readSeq = 0;
 
   function closeRestoreForm() {
-    selectedBackup = null; restoreKey = null;
+    selectedBackup = null; selectedVerification = null; formMode = null; restoreKey = null;
     $('backup-restore-form').reset(); $('backup-restore-form').classList.add('hidden');
     $('backup-restore-source').textContent = '';
   }
 
-  function openRestoreForm(backupId) {
-    selectedBackup = backupId; restoreKey = null;
+  function openVerificationForm(backupId) {
+    selectedBackup = backupId; selectedVerification = null; formMode = 'VERIFY'; restoreKey = null;
     $('backup-restore-form').reset();
     $('backup-restore-source').textContent = `来源备份：${backupId}`;
+    $('backup-restore-title').textContent = '只读校验备份';
+    $('backup-recovery-label').classList.remove('hidden');
+    $('backup-restore-form').elements.recovery_passphrase.required = true;
+    $('backup-restore-submit').textContent = '开始只读校验';
+    $('backup-restore-hint').textContent = '校验会完整解密和检查工件，但不会创建或连接恢复数据库。凭据有效期为 24 小时。';
+    $('backup-restore-form').classList.remove('hidden');
+    $('backup-restore-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
+  function openRestoreForm(backupId, verificationId) {
+    selectedBackup = backupId; selectedVerification = verificationId;
+    formMode = 'RESTORE'; restoreKey = null;
+    $('backup-restore-form').reset();
+    $('backup-restore-source').textContent = `来源备份：${backupId} · 校验凭据：${verificationId}`;
+    $('backup-restore-title').textContent = '建立隔离恢复副本';
+    $('backup-recovery-label').classList.add('hidden');
+    $('backup-restore-form').elements.recovery_passphrase.required = false;
+    $('backup-restore-submit').textContent = '恢复到隔离数据库';
+    $('backup-restore-hint').textContent = '目标使用随机数据库名，不登记到 Fleet；Bot 副本保持 SEALED。';
     $('backup-restore-form').classList.remove('hidden');
     $('backup-restore-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   }
@@ -103,10 +124,29 @@ export function backupPanel(api, busy, notice) {
         card.append(link);
       }
       if (row.state === 'READY') {
-        const restore = document.createElement('button'); restore.className = 'subtle';
-        restore.type = 'button'; restore.textContent = '建立隔离恢复副本';
-        restore.addEventListener('click', () => openRestoreForm(row.backup_id));
-        card.append(restore);
+        const latest = verificationRows.find((item) => item.backup_id === row.backup_id);
+        if (latest) {
+          const receipt = document.createElement('p'); receipt.className = 'hint';
+          receipt.textContent = `最近校验：${states[latest.state] || latest.state}` +
+            `${latest.expires_at ? ` · 有效期至 ${latest.expires_at}` : ''}` +
+            `${latest.error_code ? ` · ${latest.error_code}` : ''}`;
+          card.append(receipt);
+        }
+        const verify = document.createElement('button'); verify.className = 'subtle';
+        verify.type = 'button'; verify.textContent = '只读校验备份';
+        verify.addEventListener('click', () => openVerificationForm(row.backup_id));
+        card.append(verify);
+        const valid = verificationRows.find(
+          (item) => item.backup_id === row.backup_id && item.receipt_valid
+        );
+        if (valid) {
+          const restore = document.createElement('button'); restore.className = 'subtle';
+          restore.type = 'button'; restore.textContent = '建立隔离恢复副本';
+          restore.addEventListener('click', () => openRestoreForm(
+            row.backup_id, valid.verification_id
+          ));
+          card.append(restore);
+        }
       }
       if (['READY', 'INCONSISTENT'].includes(row.state)) {
         const remove = document.createElement('button'); remove.className = 'danger';
@@ -159,7 +199,9 @@ export function backupPanel(api, busy, notice) {
 
   async function load() {
     const seq = ++readSeq;
-    const [data, restoreData] = await Promise.all([api('/backups'), api('/restore-stages')]);
+    const [data, verificationData, restoreData] = await Promise.all([
+      api('/backups'), api('/backup-verifications'), api('/restore-stages'),
+    ]);
     const detailed = await Promise.all(data.backups.map(async (row) => {
       if (!['READY', 'INCONSISTENT'].includes(row.state)) return row;
       return api(`/backups/${encodeURIComponent(row.backup_id)}`);
@@ -169,7 +211,8 @@ export function backupPanel(api, busy, notice) {
       return api(`/restore-stages/${encodeURIComponent(row.restore_id)}`);
     }));
     if (seq !== readSeq) return data;
-    rows = detailed; restoreRows = restoreDetails; render(); return data;
+    rows = detailed; verificationRows = verificationData.verifications;
+    restoreRows = restoreDetails; render(); return data;
   }
 
   $('backup-refresh').addEventListener('click', () => busy($('backup-refresh'), load));
@@ -202,21 +245,31 @@ export function backupPanel(api, busy, notice) {
   $('backup-restore-form').addEventListener('input', () => { restoreKey = null; });
   $('backup-restore-form').addEventListener('submit', (event) => {
     event.preventDefault(); const form = event.currentTarget;
-    if (!selectedBackup || !form.reportValidity()) return;
+    if (!selectedBackup || !formMode || !form.reportValidity()) return;
     busy(form.querySelector('button[type="submit"]'), async () => {
       restoreKey ||= crypto.randomUUID();
       const backupId = selectedBackup;
       try {
-        await api(`/backups/${encodeURIComponent(backupId)}/restore-stages`, {
-          recovery_passphrase: form.elements.recovery_passphrase.value,
-          current_password: form.elements.current_password.value,
-        }, {'Idempotency-Key': restoreKey});
+        if (formMode === 'VERIFY') {
+          await api(`/backups/${encodeURIComponent(backupId)}/verifications`, {
+            recovery_passphrase: form.elements.recovery_passphrase.value,
+            current_password: form.elements.current_password.value,
+          }, {'Idempotency-Key': restoreKey});
+        } else {
+          await api(`/backups/${encodeURIComponent(backupId)}/restore-stages`, {
+            verification_id: selectedVerification,
+            current_password: form.elements.current_password.value,
+          }, {'Idempotency-Key': restoreKey});
+        }
       } finally {
         form.elements.recovery_passphrase.value = '';
         form.elements.current_password.value = '';
       }
+      const completedMode = formMode;
       closeRestoreForm(); await load();
-      notice('隔离恢复任务已接纳。目标数据库不会登记为在线 Bot。', true);
+      notice(completedMode === 'VERIFY' ?
+        '只读校验任务已接纳；通过后会显示建立隔离恢复副本按钮。' :
+        '隔离恢复任务已接纳。目标数据库不会登记为在线 Bot。', true);
     });
   });
   $('storage-cleanup-cancel').addEventListener('click', closeCleanupForm);
@@ -250,9 +303,10 @@ export function backupPanel(api, busy, notice) {
     hasRunning: () => rows.some((row) => ['QUEUED', 'CAPTURING', 'SEALING'].includes(row.state) ||
       ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)) ||
       restoreRows.some((row) => ['QUEUED', 'VERIFYING', 'RESTORING', 'VALIDATING'].includes(row.state) ||
-        ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)),
+        ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)) ||
+      verificationRows.some((row) => ['QUEUED', 'VERIFYING'].includes(row.state)),
     reset() {
-      readSeq++; rows = []; restoreRows = []; createKey = null;
+      readSeq++; rows = []; verificationRows = []; restoreRows = []; createKey = null;
       closeRestoreForm(); closeCleanupForm();
       $('backup-create-form').reset(); $('backup-list').replaceChildren();
       $('restore-list').replaceChildren();

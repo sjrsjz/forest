@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import re
 import shutil
 import zipfile
@@ -21,7 +20,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from forest.backup_artifact import decrypt_file_with_key, inspect_zip, recover_data_key
+from forest.backup_artifact import decrypt_file_with_key, inspect_zip
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.security import private_directory
@@ -46,7 +45,7 @@ _JOB_SELECT = (
     "AND c.resource_id=j.restore_id "
 )
 _PUBLIC_KEYS = (
-    "restore_id", "backup_id", "state", "owner_epoch", "database_total",
+    "restore_id", "backup_id", "verification_id", "state", "owner_epoch", "database_total",
     "database_completed", "manifest_digest", "error_code", "expires_at", "created_at", "updated_at",
     "cleanup_id", "cleanup_state", "cleanup_error_code", "cleanup_completed_at",
 )
@@ -115,8 +114,7 @@ class RestoreManager:
 
     async def create(
         self, *, backup_id: str, subject_id: str, session_token_hash: str,
-        expected_password_hash: str, passphrase: str, passphrase_digest: str,
-        idempotency_key: str,
+        expected_password_hash: str, verification_id: str, idempotency_key: str,
     ) -> dict[str, Any]:
         if self.managed_dsn is None:
             raise ForestError(
@@ -126,8 +124,8 @@ class RestoreManager:
         if not 1 <= len(idempotency_key) <= 128:
             raise ForestError("RESTORE_REQUEST_INVALID", "Restore request is invalid", 422)
         semantic = digest_json({
-            "backup_id": backup_id, "passphrase_digest": passphrase_digest,
-            "mode": "isolated-managed-v1",
+            "backup_id": backup_id, "verification_id": verification_id,
+            "mode": "isolated-managed-v2",
         })
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._authorize(conn, subject_id, session_token_hash, expected_password_hash)
@@ -141,25 +139,6 @@ class RestoreManager:
                         "IDEMPOTENCY_CONFLICT", "Restore key was used for different input", 409
                     )
                 return _public(previous)
-
-        path, artifact = await self.backups.artifact(
-            backup_id=backup_id, subject_id=subject_id,
-            session_token_hash=session_token_hash,
-        )
-        header, recovered_key = await asyncio.to_thread(recover_data_key, path, passphrase)
-        if header["backup_id"] != backup_id:
-            raise ForestError("BACKUP_IDENTITY_MISMATCH", "Backup identity is invalid", 409)
-        async with self.store.pool.connection() as conn:
-            source = await (await conn.execute(
-                "SELECT archive_key_ciphertext FROM backup_jobs WHERE backup_id=%s", (backup_id,)
-            )).fetchone()
-        if source is None:
-            raise ForestError("BACKUP_NOT_FOUND", "Backup does not exist", 404)
-        saved_key = base64.urlsafe_b64decode(self.vault.decrypt(source["archive_key_ciphertext"]))
-        if not hmac.compare_digest(recovered_key, saved_key):
-            raise ForestError(
-                "BACKUP_PASSPHRASE_INVALID", "Recovery passphrase or archive is invalid", 403
-            )
 
         restore_id = str(uuid4())
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -175,15 +154,29 @@ class RestoreManager:
                         "IDEMPOTENCY_CONFLICT", "Restore key was used for different input", 409
                     )
                 return _public(previous)
+            verification = await (await conn.execute(
+                "SELECT * FROM backup_verification_jobs WHERE verification_id=%s "
+                "AND backup_id=%s FOR SHARE", (verification_id, backup_id)
+            )).fetchone()
+            if (
+                verification is None or verification["state"] != "VERIFIED"
+                or verification["expires_at"] <= await self._now(conn)
+                or verification["manifest_digest"] is None
+            ):
+                raise ForestError(
+                    "BACKUP_VERIFICATION_REQUIRED",
+                    "A current successful verification receipt is required", 409,
+                )
             current = await (await conn.execute(
-                "SELECT j.state,a.ciphertext_digest,a.deleted_at,a.expires_at "
+                "SELECT j.state,a.ciphertext_digest,a.manifest_digest,a.deleted_at,a.expires_at "
                 "FROM backup_jobs j JOIN backup_artifacts a USING(backup_id) "
                 "WHERE j.backup_id=%s FOR UPDATE OF j,a", (backup_id,)
             )).fetchone()
             if (
                 current is None or current["state"] != "READY" or current["deleted_at"] is not None
                 or current["expires_at"] <= await self._now(conn)
-                or current["ciphertext_digest"] != artifact["ciphertext_digest"]
+                or current["ciphertext_digest"] != verification["artifact_digest"]
+                or current["manifest_digest"] != verification["manifest_digest"]
             ):
                 raise ForestError(
                     "BACKUP_RESTORE_UNAVAILABLE", "Backup cannot enter a restore plan", 409
@@ -195,13 +188,12 @@ class RestoreManager:
             )).fetchall()
             if not 1 <= len(cuts) <= 1024:
                 raise ForestError("BACKUP_MANIFEST_INVALID", "Backup database roster is invalid", 409)
-            encrypted_key = self.vault.encrypt(base64.urlsafe_b64encode(recovered_key).decode("ascii"))
             row = await (await conn.execute(
-                "INSERT INTO restore_stage_jobs(restore_id,backup_id,subject_id,idempotency_key,"
-                "input_digest,artifact_digest,archive_key_ciphertext,database_total) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-                (restore_id, backup_id, subject_id, idempotency_key, semantic,
-                 artifact["ciphertext_digest"], encrypted_key, len(cuts)),
+                "INSERT INTO restore_stage_jobs(restore_id,backup_id,verification_id,subject_id,"
+                "idempotency_key,input_digest,artifact_digest,archive_key_ciphertext,database_total) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (restore_id, backup_id, verification_id, subject_id, idempotency_key, semantic,
+                 verification["artifact_digest"], verification["archive_key_ciphertext"], len(cuts)),
             )).fetchone()
             prefix = restore_id.replace("-", "")[:20]
             for ordinal, cut in enumerate(cuts):
@@ -222,7 +214,7 @@ class RestoreManager:
                 "VALUES (%s,%s,'restore.stage.create',%s,%s,%s)",
                 (str(uuid4()), subject_id, "restore:" + restore_id, restore_id,
                  Jsonb({"restore_id": restore_id, "backup_id": backup_id,
-                        "database_total": len(cuts)})),
+                        "verification_id": verification_id, "database_total": len(cuts)})),
             )
             return _public(row)
 
@@ -392,7 +384,9 @@ class RestoreManager:
         await asyncio.to_thread(self._reset_job_root, job_root)
         archive_path = job_root / "verified.zip"
         try:
-            source_path, artifact_digest, expected_manifest_digest = await self._source(job)
+            source_path, artifact_digest, expected_manifest_digest = await self._source(
+                job, permit_expired=True
+            )
             key = base64.urlsafe_b64decode(self.vault.decrypt(job["archive_key_ciphertext"]))
             header = await asyncio.to_thread(
                 decrypt_file_with_key, source_path, archive_path, key
@@ -477,6 +471,7 @@ class RestoreManager:
                      job["restore_id"], Jsonb({
                          "restore_id": job["restore_id"],
                          "backup_id": job["backup_id"],
+                         "verification_id": job["verification_id"],
                          "database_total": job["database_total"],
                          "manifest_digest": manifest_digest,
                      })),
@@ -485,7 +480,9 @@ class RestoreManager:
         finally:
             await asyncio.to_thread(self._remove_job_root, job_root)
 
-    async def _source(self, job: dict[str, Any]) -> tuple[Path, str, str]:
+    async def _source(
+        self, job: dict[str, Any], *, permit_expired: bool = False,
+    ) -> tuple[Path, str, str]:
         async with self.store.pool.connection() as conn:
             row = await (await conn.execute(
                 "SELECT j.state,a.relative_path,a.ciphertext_digest,a.manifest_digest,"
@@ -495,7 +492,7 @@ class RestoreManager:
             )).fetchone()
         if (
             row is None or row["state"] != "READY" or row["deleted_at"] is not None
-            or row["expires_at"] <= datetime.now(UTC)
+            or not permit_expired and row["expires_at"] <= datetime.now(UTC)
             or row["ciphertext_digest"] != job["artifact_digest"]
         ):
             raise ForestError("BACKUP_RESTORE_UNAVAILABLE", "Backup is no longer restorable", 409)
@@ -510,6 +507,7 @@ class RestoreManager:
     async def _validate_manifest(
         self, job: dict[str, Any], header: dict[str, Any], manifest: dict[str, Any],
         manifest_digest: str, expected_manifest_digest: str, artifact_digest: str,
+        *, targets: list[dict[str, Any]] | None = None, publish_restore: bool = True,
     ) -> list[dict[str, Any]]:
         required = {
             "format", "backup_id", "created_at", "databases", "members", "includes",
@@ -533,11 +531,12 @@ class RestoreManager:
             or digest_json(roster["start"]) != roster["start_digest"]
         ):
             raise ForestError("BACKUP_MANIFEST_INVALID", "Backup roster proof is invalid", 409)
-        async with self.store.pool.connection() as conn:
-            targets = await (await conn.execute(
-                "SELECT * FROM restore_stage_targets WHERE restore_id=%s ORDER BY ordinal",
-                (job["restore_id"],),
-            )).fetchall()
+        if targets is None:
+            async with self.store.pool.connection() as conn:
+                targets = await (await conn.execute(
+                    "SELECT * FROM restore_stage_targets WHERE restore_id=%s ORDER BY ordinal",
+                    (job["restore_id"],),
+                )).fetchall()
         databases = manifest.get("databases")
         members = manifest.get("members")
         includes = manifest.get("includes")
@@ -657,15 +656,16 @@ class RestoreManager:
                 or database.get("deletion_epoch") != target["deletion_epoch"]
             ):
                 raise ForestError("BACKUP_MANIFEST_INVALID", "Backup cut receipt is invalid", 409)
-        async with self.store.pool.connection() as conn, conn.transaction():
-            changed = await (await conn.execute(
-                "UPDATE restore_stage_jobs SET manifest_digest=%s,updated_at=clock_timestamp() "
-                "WHERE restore_id=%s AND owner_id=%s AND owner_epoch=%s AND state='VERIFYING' "
-                "RETURNING 1",
-                (manifest_digest, job["restore_id"], self.owner_id, job["owner_epoch"]),
-            )).fetchone()
-            if changed is None:
-                raise ForestError("RESTORE_LEASE_LOST", "Restore ownership was lost", 409)
+        if publish_restore:
+            async with self.store.pool.connection() as conn, conn.transaction():
+                changed = await (await conn.execute(
+                    "UPDATE restore_stage_jobs SET manifest_digest=%s,updated_at=clock_timestamp() "
+                    "WHERE restore_id=%s AND owner_id=%s AND owner_epoch=%s "
+                    "AND state='VERIFYING' RETURNING 1",
+                    (manifest_digest, job["restore_id"], self.owner_id, job["owner_epoch"]),
+                )).fetchone()
+                if changed is None:
+                    raise ForestError("RESTORE_LEASE_LOST", "Restore ownership was lost", 409)
         return targets
 
     async def _prepare_database(self, job: dict[str, Any], target: dict[str, Any]) -> None:

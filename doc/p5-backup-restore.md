@@ -1,6 +1,6 @@
 # P5 多数据库备份、校验与隔离恢复
 
-状态：详细设计与恢复/清理纵向切片；加密工件、持久备份任务、每库切片、目录前后锚点、管理员 Web 创建/下载、托管 PostgreSQL 的整套隔离恢复，以及备份/隔离副本的保留期清理已实现。独立校验回执、恢复激活和外部工件导入继续按本文推进。
+状态：详细设计与恢复/清理纵向切片；加密工件、持久备份任务、每库切片、目录前后锚点、管理员 Web 创建/下载、独立只读校验回执、托管 PostgreSQL 的整套隔离恢复，以及备份/隔离副本的保留期清理已实现。恢复激活和外部工件导入继续按本文推进。
 
 ## 1. 范围与不变量
 
@@ -50,7 +50,9 @@ QUEUED -> CAPTURING -> SEALING -> READY
                            +-> INCONSISTENT -> EXPIRED
 ```
 
-隔离恢复使用独立的 `restore_stage_jobs`、`restore_stage_targets` 和不可变事件表。一个恢复任务冻结来源密文摘要、来源备份、目标数据库清单和每库 cut 摘要；恢复口令不落库，接纳时解出的随机数据密钥经当前 SecretVault 重新包装，供进程重启后继续校验同一工件。状态为：
+独立校验使用 `backup_verification_jobs` 和不可变事件表。管理员通过恢复口令解包随机数据密钥后，接纳事务冻结来源备份、精确密文摘要、SecretVault 再包装的数据密钥和数据库数量。后台任务只在私有临时目录认证解密并检查 ZIP、清单、成员摘要、roster 和每库 cut 证明；它不创建、不登记也不连接恢复数据库。成功后发布 24 小时有效的 `VERIFIED` 回执，绑定 `backup_id + artifact_digest + manifest_digest`。任务使用 `QUEUED → VERIFYING → VERIFIED|FAILED`，回执到期进入 `EXPIRED`；领取、续租、失败和完成均带 owner epoch。
+
+隔离恢复使用独立的 `restore_stage_jobs`、`restore_stage_targets` 和不可变事件表。一个恢复任务只接受尚未过期的 `VERIFIED` 回执，在接纳事务再次核对来源仍为 READY、未删除、未过期，并要求当前密文与清单摘要都和回执一致。它冻结回执 ID、来源密文摘要、来源备份、目标数据库清单和每库 cut 摘要；数据密钥从回执的 SecretVault 密文复制到恢复任务，Web 请求不再提交恢复口令。状态为：
 
 ```text
 QUEUED -> VERIFYING -> RESTORING -> VALIDATING -> STAGED
@@ -58,7 +60,7 @@ QUEUED -> VERIFYING -> RESTORING -> VALIDATING -> STAGED
              +-------------+-------------+-> FAILED
 ```
 
-恢复副本在 `STAGED/FAILED` 后可以进入 `EXPIRED`。备份和恢复副本共用 `storage_cleanup_plans`、`storage_cleanup_jobs`、幂等请求与不可变事件，但各自保留原生命周期事实。显式清理必须先生成五分钟有效的预览计划，应用时复核管理员当前密码、计划摘要、资源摘要和活动恢复依赖。自动保留期使用相同 tombstone/Job 事务，不伪造浏览器计划。
+恢复副本在 `STAGED/FAILED` 后可以进入 `EXPIRED`。备份和恢复副本共用 `storage_cleanup_plans`、`storage_cleanup_jobs`、幂等请求与不可变事件，但各自保留原生命周期事实。显式清理必须先生成五分钟有效的预览计划，应用时复核管理员当前密码、计划摘要、资源摘要和活动恢复/校验依赖。自动保留期使用相同 tombstone/Job 事务，不伪造浏览器计划。`QUEUED/VERIFYING` 校验任务和活动恢复任务暂时固定来源工件；已完成的回执不阻止显式删除，删除后即使回执尚在有效期也不能建立恢复任务。
 
 清理 Job 为 `QUEUED/RETRY → CLEANING → COMPLETE|BLOCKED`，每次领取递增 owner epoch 并持有 lease。`BLOCKED` 表示路径、目录登记或数据库 marker 冲突，或普通 I/O 在五次有界退避后仍失败；管理员排除外部冲突后可重新认证并将同一 Job 放回队列。重试沿用原资源身份，不会通过换目标继续删除。
 
@@ -76,9 +78,9 @@ QUEUED -> VERIFYING -> RESTORING -> VALIDATING -> STAGED
 
 ## 4. Web 和 Shell 管理协议
 
-WebUI 的“存储与备份”页提供：备份范围、是否包含插件工件、恢复口令、预计数据库数、创建按钮、进度、每库切口、最终大小、下载、隔离恢复创建、每个随机目标库和失败码。口令输入使用 password 控件，不进入浏览器持久草稿；页面刷新只恢复任务标识和持久状态。恢复接纳再次验证管理员当前密码和来源恢复口令，相同幂等键只能指向同一来源与口令摘要。
+WebUI 的“存储与备份”页提供：备份范围、是否包含插件工件、恢复口令、预计数据库数、创建按钮、进度、每库切口、最终大小、下载、只读校验、校验凭据状态、隔离恢复创建、每个随机目标库和失败码。口令输入使用 password 控件，不进入浏览器持久草稿；页面刷新只恢复任务标识和持久状态。校验接纳再次验证管理员当前密码和来源恢复口令，相同幂等键只能指向同一来源与口令摘要。只有当前有效凭据存在时页面才显示隔离恢复按钮；恢复请求只提交凭据 ID 和管理员当前密码。
 
-当前已经实现创建、下载、整套隔离恢复，以及备份/隔离副本删除的 plan/apply；后续的取消、独立重新校验及激活继续使用同一管理模式。创建备份和隔离恢复要求当前密码复核、幂等键及部署 admin 权限；应用清理计划和重试阻塞任务也要求当前密码。下载会重新核对当前会话与工件状态，响应禁止缓存；查看者不具备备份、恢复或清理权限。页面没有激活按钮，`STAGED` 只表示物理副本通过验证。
+当前已经实现创建、下载、独立重新校验、整套隔离恢复，以及备份/隔离副本删除的 plan/apply；后续的取消及激活继续使用同一管理模式。创建备份、校验和隔离恢复要求当前密码复核、幂等键及部署 admin 权限；应用清理计划和重试阻塞任务也要求当前密码。下载会重新核对当前会话与工件状态，响应禁止缓存；查看者不具备备份、校验、恢复或清理权限。页面没有激活按钮，`VERIFIED` 只证明某一精确工件通过只读检查，`STAGED` 只表示物理副本通过验证。
 
 群聊 Shell 首版只提供 `backup status <id>` 和 `backup cancel <id>` 的远程救援入口，不接收恢复口令、不上传或下载工件。创建和恢复需要 Web/CLI 的重新认证通道。Shell 命令仍是 CONTROL 路由，不创建产品 Agent，也不占用群会话执行权。
 
@@ -86,7 +88,7 @@ WebUI 的“存储与备份”页提供：备份范围、是否包含插件工�
 
 校验顺序固定为：容器/header 限额 → 口令解包 → AEAD 标签 → ZIP 路径和压缩比 → manifest schema → 每成员大小/摘要 → 数据库身份与迁移兼容 → 表/列/依赖 DAG → 删除屏障 → SecretVault key 与密文抽样解密 → 包工件摘要。任何失败只产生固定错误码，不能回显成员正文、DSN、用户名、表值或底层解密异常。
 
-当前 `restore-stage` 先按持久来源密文摘要重新读取本地工件，认证解密到任务私有临时目录，再要求 manifest 顶层、数据库、表、列、成员和包路径都是精确键集。数据库 roster 必须与创建任务时冻结的 cut 一一对应，目录起止锚点必须相同；`INCONSISTENT`、过期、已删除或被替换的工件不能进入恢复。每个目标使用 `forest_restore_<job-prefix>_<ordinal>` 随机任务名，创建后写入数据库 owner marker 并撤销 `PUBLIC` 权限，且永远不写入 `bot_storage_plans`。
+当前 `verify` 先按持久来源密文摘要重新读取本地工件，认证解密到任务私有临时目录，再要求 manifest 顶层、数据库、表、列、成员和包路径都是精确键集。数据库 roster 必须与接纳时冻结的 cut 一一对应，目录起止锚点必须相同；完成只发布有期限的验证事实和脱敏审计，不产生 PostgreSQL 目标。`restore-stage` 只接受与当前工件密文/清单摘要仍一致的有效回执，随后重复认证解密和清单检查，防止校验与使用之间发生替换。`INCONSISTENT`、过期、已删除或被替换的工件不能进入恢复。每个目标使用 `forest_restore_<job-prefix>_<ordinal>` 随机任务名，创建后写入数据库 owner marker 并撤销 `PUBLIC` 权限，且永远不写入 `bot_storage_plans`。
 
 恢复器只运行当前镜像的迁移，不执行备份中的 SQL。它要求 server version、encoding、collation、迁移 checksum、表列、约束和序列定义精确相同，随后在一个目标库事务中关闭触发式约束、清空表、逐表 binary COPY、核对行数、恢复序列并显式扫描所有公共 schema 外键；任一步失败会回滚该库的数据事务。提交后再次核对部署/Bot 身份。Bot 副本在独立事务中提升 storage generation 和 maintenance epoch、撤销 host lease，并设置 `SEALED`、`data_admission=false`、`control_admission=false`。部署副本也保持未注册且不可被 Web 启动计划发现。全部目标成功后才原子发布 Job `STAGED` 与脱敏完成审计。
 

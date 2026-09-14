@@ -23,6 +23,11 @@ class CreateBackup(Body):
 
 
 class StageRestore(Body):
+    verification_id: str = Field(min_length=1, max_length=128)
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
+class VerifyBackup(Body):
     recovery_passphrase: str = Field(min_length=16, max_length=1024)
     current_password: str = Field(min_length=12, max_length=1024)
 
@@ -133,6 +138,46 @@ def install_backup_routes(app, runtime) -> None:
             raise ForestError("CLEANUP_SERVICE_UNAVAILABLE", "Cleanup service is unavailable", 503)
         return runtime.cleanup
 
+    def verifications():
+        if runtime.verifications is None:
+            raise ForestError(
+                "VERIFICATION_SERVICE_UNAVAILABLE", "Verification service is unavailable", 503
+            )
+        return runtime.verifications
+
+    @app.get("/management/v1/backup-verifications")
+    async def backup_verifications(request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        rows = await verifications().list(
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+        return {"verifications": rows}
+
+    @app.post("/management/v1/backups/{backup_id}/verifications", status_code=202)
+    async def create_backup_verification(backup_id: str, body: VerifyBackup, request: Request):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        if runtime.authority is None:
+            raise ForestError("AUTHORITY_UNAVAILABLE", "Web authority is unavailable", 503)
+        return await verifications().create(
+            backup_id=backup_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, passphrase=body.recovery_passphrase,
+            passphrase_digest=runtime.authority.secret_digest(
+                "backup.verification-passphrase", body.recovery_passphrase
+            ),
+            idempotency_key=key(request),
+        )
+
+    @app.get("/management/v1/backup-verifications/{verification_id}")
+    async def read_backup_verification(verification_id: str, request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        return await verifications().read(
+            verification_id=verification_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
     @app.post("/management/v1/backups/{backup_id}/cleanup-plan")
     async def plan_backup_cleanup(backup_id: str, body: CleanupPlan, request: Request):
         session = await runtime.principal(request, write=True)
@@ -200,10 +245,7 @@ def install_backup_routes(app, runtime) -> None:
             subject_id=session["account_id"],
             session_token_hash=digest_token(request.cookies["forest_session"]),
             expected_password_hash=expected_hash,
-            passphrase=body.recovery_passphrase,
-            passphrase_digest=runtime.authority.secret_digest(
-                "restore.recovery-passphrase", body.recovery_passphrase
-            ),
+            verification_id=body.verification_id,
             idempotency_key=key(request),
         )
 

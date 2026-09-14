@@ -20,6 +20,7 @@ from forest.management.backups import BackupManager
 from forest.management.cleanup import StorageCleanupManager
 from forest.management.provision import BotProvisioner
 from forest.management.restores import RestoreManager
+from forest.management.verifications import BackupVerificationManager
 from forest.packages import PackageCatalog, digest_json
 
 pytestmark = pytest.mark.postgres
@@ -39,6 +40,21 @@ async def _deployment_backup(fixture, data_dir, *, key):
     ready = await manager.run_once()
     assert ready["state"] == "READY"
     return manager, queued
+
+
+async def _verify_backup(
+    fixture, backups, restores, data_dir, *, backup_id, passphrase, passphrase_digest, key,
+):
+    manager = BackupVerificationManager(fixture.catalog, backups, restores, data_dir)
+    queued = await manager.create(
+        backup_id=backup_id, **fixture.auth,
+        expected_password_hash="unused-test-hash", passphrase=passphrase,
+        passphrase_digest=passphrase_digest, idempotency_key=key,
+    )
+    assert queued["state"] == "QUEUED"
+    verified = await manager.run_once()
+    assert verified["state"] == "VERIFIED" and verified["receipt_valid"]
+    return manager, verified
 
 
 async def test_encrypted_backup_captures_deployment_and_bot_consistent_cuts(
@@ -263,30 +279,63 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
     )
     assert (await backups.run_once())["state"] == "READY"
     restores = RestoreManager(fixture.catalog, backups, data_dir)
+    verifications = BackupVerificationManager(fixture.catalog, backups, restores, data_dir)
     target_names = []
     try:
         with pytest.raises(ForestError) as wrong:
-            await restores.create(
+            await verifications.create(
                 backup_id=backup["backup_id"], **fixture.auth,
                 expected_password_hash="unused-test-hash",
                 passphrase="incorrect restore passphrase",
                 passphrase_digest="wrong-hmac",
-                idempotency_key="wrong-restore",
+                idempotency_key="wrong-verification",
             )
         assert wrong.value.code == "BACKUP_PASSPHRASE_INVALID"
+        before = {
+            row["datname"] for row in await (
+                await fixture.admin.execute("SELECT datname FROM pg_database")
+            ).fetchall()
+        }
+        verification = await verifications.create(
+            backup_id=backup["backup_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash", passphrase=passphrase,
+            passphrase_digest="restore-passphrase-hmac",
+            idempotency_key="verify-restore-source",
+        )
+        assert await verifications.create(
+            backup_id=backup["backup_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash", passphrase=passphrase,
+            passphrase_digest="restore-passphrase-hmac",
+            idempotency_key="verify-restore-source",
+        ) == verification
+        verified = await verifications.run_once()
+        assert verified["state"] == "VERIFIED" and verified["receipt_valid"]
+        after = {
+            row["datname"] for row in await (
+                await fixture.admin.execute("SELECT datname FROM pg_database")
+            ).fetchall()
+        }
+        assert after == before
+        with pytest.raises(ForestError) as unverified:
+            await restores.create(
+                backup_id=backup["backup_id"], **fixture.auth,
+                expected_password_hash="unused-test-hash",
+                verification_id="missing-verification",
+                idempotency_key="unverified-restore",
+            )
+        assert unverified.value.code == "BACKUP_VERIFICATION_REQUIRED"
         queued = await restores.create(
             backup_id=backup["backup_id"], **fixture.auth,
             expected_password_hash="unused-test-hash",
-            passphrase=passphrase,
-            passphrase_digest="restore-passphrase-hmac",
+            verification_id=verified["verification_id"],
             idempotency_key="restore-once",
         )
         assert queued["state"] == "QUEUED"
+        assert queued["verification_id"] == verified["verification_id"]
         assert await restores.create(
             backup_id=backup["backup_id"], **fixture.auth,
             expected_password_hash="unused-test-hash",
-            passphrase=passphrase,
-            passphrase_digest="restore-passphrase-hmac",
+            verification_id=verified["verification_id"],
             idempotency_key="restore-once",
         ) == queued
         with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
@@ -358,6 +407,7 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
             )).fetchone()
         assert registered["n"] == 0
         assert completion_audit["details"]["manifest_digest"] == detail["manifest_digest"]
+        assert completion_audit["details"]["verification_id"] == verified["verification_id"]
     finally:
         if not target_names:
             async with fixture.store.pool.connection() as conn:
@@ -370,6 +420,7 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
             await fixture.admin.execute(
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
             )
+        await verifications.close()
         await restores.close()
         await backups.close()
 
@@ -394,13 +445,17 @@ async def test_restore_stage_resumes_after_completed_target(fixture, tmp_path, m
     assert (await backups.run_once())["state"] == "READY"
     first = RestoreManager(fixture.catalog, backups, data_dir)
     second = RestoreManager(fixture.catalog, backups, data_dir)
+    verifications, verified = await _verify_backup(
+        fixture, backups, first, data_dir, backup_id=backup["backup_id"],
+        passphrase=passphrase, passphrase_digest="resume-passphrase-hmac",
+        key="verify-resume-source",
+    )
     target_names = []
     try:
         queued = await first.create(
             backup_id=backup["backup_id"], **fixture.auth,
             expected_password_hash="unused-test-hash",
-            passphrase=passphrase,
-            passphrase_digest="resume-passphrase-hmac",
+            verification_id=verified["verification_id"],
             idempotency_key="resume-restore",
         )
         claimed = await first._claim()
@@ -443,6 +498,7 @@ async def test_restore_stage_resumes_after_completed_target(fixture, tmp_path, m
             await fixture.admin.execute(
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
             )
+        await verifications.close()
         await first.close()
         await second.close()
         await backups.close()
@@ -479,6 +535,43 @@ async def test_restore_stage_cancels_database_work_when_lease_renewal_fails(
         assert lost.value.code == "RESTORE_LEASE_LOST"
         assert cancelled.is_set()
     finally:
+        await restores.close()
+        await backups.close()
+
+
+async def test_backup_verification_cancels_read_only_work_when_lease_renewal_fails(
+    fixture, tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "vault"
+    backups = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    restores = RestoreManager(fixture.catalog, backups, data_dir)
+    verifications = BackupVerificationManager(fixture.catalog, backups, restores, data_dir)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked_work(job):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    async def lose_lease(job):
+        await started.wait()
+        raise ForestError("VERIFICATION_LEASE_LOST", "lease lost", 409)
+
+    monkeypatch.setattr(verifications, "_verify_owned", blocked_work)
+    monkeypatch.setattr(verifications, "_renew", lose_lease)
+    try:
+        with pytest.raises(ForestError) as lost:
+            await verifications._verify({"verification_id": "test", "owner_epoch": 1})
+        assert lost.value.code == "VERIFICATION_LEASE_LOST"
+        assert cancelled.is_set()
+    finally:
+        await verifications.close()
         await restores.close()
         await backups.close()
 
@@ -522,6 +615,60 @@ async def test_backup_cleanup_tombstones_before_exact_file_deletion(fixture, tmp
         assert replay == applied
     finally:
         await cleanup.close()
+        await backups.close()
+
+
+async def test_backup_cleanup_waits_for_active_read_only_verification(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups, queued = await _deployment_backup(
+        fixture, data_dir, key="cleanup-verification-source"
+    )
+    restores = RestoreManager(fixture.catalog, backups, data_dir)
+    verifications = BackupVerificationManager(fixture.catalog, backups, restores, data_dir)
+    cleanup = StorageCleanupManager(fixture.catalog, backups)
+    try:
+        await verifications.create(
+            backup_id=queued["backup_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash",
+            passphrase="cleanup recovery passphrase for tests",
+            passphrase_digest="cleanup-passphrase-hmac",
+            idempotency_key="active-verification",
+        )
+        plan = await cleanup.plan(
+            kind="BACKUP_ARTIFACT", resource_id=queued["backup_id"], **fixture.auth
+        )
+        with pytest.raises(ForestError) as active:
+            await cleanup.apply(
+                plan_id=plan["plan_id"], plan_digest=plan["plan_digest"], **fixture.auth,
+                expected_password_hash="unused-test-hash",
+                idempotency_key="cleanup-during-verification",
+            )
+        assert active.value.code == "BACKUP_RESTORE_ACTIVE"
+
+        verified = await verifications.run_once()
+        assert verified["state"] == "VERIFIED"
+        applied = await cleanup.apply(
+            plan_id=plan["plan_id"], plan_digest=plan["plan_digest"], **fixture.auth,
+            expected_password_hash="unused-test-hash",
+            idempotency_key="cleanup-after-verification",
+        )
+        assert applied["state"] == "QUEUED"
+        assert (await cleanup.run_once())["state"] == "COMPLETE"
+        receipt = await verifications.read(
+            verification_id=verified["verification_id"], **fixture.auth
+        )
+        assert receipt["state"] == "VERIFIED"
+        with pytest.raises(ForestError) as unavailable:
+            await restores.create(
+                backup_id=queued["backup_id"], verification_id=verified["verification_id"],
+                **fixture.auth, expected_password_hash="unused-test-hash",
+                idempotency_key="restore-after-backup-cleanup",
+            )
+        assert unavailable.value.code == "BACKUP_RESTORE_UNAVAILABLE"
+    finally:
+        await cleanup.close()
+        await verifications.close()
+        await restores.close()
         await backups.close()
 
 
@@ -671,14 +818,18 @@ async def test_restore_cleanup_blocks_foreign_marker_then_retries_safely(fixture
         fixture, data_dir, key="cleanup-restore-source"
     )
     restores = RestoreManager(fixture.catalog, backups, data_dir)
+    verifications, verified = await _verify_backup(
+        fixture, backups, restores, data_dir, backup_id=queued["backup_id"],
+        passphrase="cleanup recovery passphrase for tests",
+        passphrase_digest="cleanup-passphrase-hmac", key="verify-cleanup-source",
+    )
     cleanup = StorageCleanupManager(fixture.catalog, backups)
     target_name = None
     try:
         restore = await restores.create(
             backup_id=queued["backup_id"], **fixture.auth,
             expected_password_hash="unused-test-hash",
-            passphrase="cleanup recovery passphrase for tests",
-            passphrase_digest="cleanup-passphrase-hmac",
+            verification_id=verified["verification_id"],
             idempotency_key="cleanup-restore-stage",
         )
         staged = await restores.run_once()
@@ -748,5 +899,6 @@ async def test_restore_cleanup_blocks_foreign_marker_then_retries_safely(fixture
                     sql.Identifier(target_name)
                 ))
         await cleanup.close()
+        await verifications.close()
         await restores.close()
         await backups.close()
