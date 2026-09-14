@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活、部署控制面离线切换和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 Core 救援 form，v10 把 P0 保留容量绑定到接纳时的当前 Binding 管理员资格，v11 接通模块完整快照校验及独立启停状态轴。剩余部署正文族、裸机恢复身份胶囊、其余管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
+**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP 与正向 Universal WebSocket、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活、部署控制面离线切换和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入与零摘要裁剪。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 Core 救援 form，v10 把 P0 保留容量绑定到接纳时的当前 Binding 管理员资格，v11 接通模块完整快照校验及独立启停状态轴。剩余部署正文族、裸机恢复身份胶囊、其余管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -23,7 +23,7 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 
 「插件包管理」支持导入可信 Python 插件的完整 ZIP，并按版本为 Bot 配置和启用。常见 schema 自动生成字段，复杂配置在页面内编辑 JSON；配置历史可载入草稿并作为新修订应用。坏版本不会替换当前有效实例，重启也优先恢复当前生效版本。详见 [Web 插件管理](doc/p2-web-plugin-management.md)。
 
-在 Bot 页面「QQ 账号连接」登记 OneBot 11 账号，填写 HTTP API 地址、访问令牌、上报签名密钥，预览并应用。将页面提供的上报地址和相同密钥填入所用 OneBot 实现。系统先调用 `get_login_info` 校验账号，再启用连接；密钥不回显。默认仅记录消息，选择「模板回复」后可通过 @、`/chat` 或私聊触发。群聊管理的管理员 QQ 号在同一表单配置，不自动信任平台群管理员身份。
+在 Bot 页面「QQ 账号连接」登记 OneBot 11 账号，并选择 HTTP 上报或正向 Universal WebSocket。HTTP 模式填写 API 地址、访问令牌和上报签名密钥，再把页面提供的上报地址和相同密钥填入 OneBot 实现；WebSocket 模式只需填写以 `/` 结尾的 `ws://` 或 `wss://` Universal 端点及访问令牌，由 Forest 保持唯一长连接并同时收取事件和发送 API action。系统先调用 `get_login_info` 校验账号，再启用连接；密钥和令牌均不回显。默认仅记录消息，选择「模板回复」后可通过 @、`/chat` 或私聊触发。群聊管理的管理员 QQ 号在同一表单配置，不自动信任平台群管理员身份。
 
 使用模型对话时，在「Agent 与模型」设置 Chat Completions 兼容基础地址、模型和密钥，预览并启用，再将账号回复模式设为「Agent 对话」。工具审批、运行取消和未知工具结果核实也在此页面处理。图片来源需明确允许；文本模型调用时只投影文本，原始多模态记录保留。详细语义与能力边界见 [P3 Agent 说明](doc/p3-agent.md)。
 
@@ -31,7 +31,7 @@ Compose 自动创建私网 PostgreSQL 和随机数据库密码，数据库不向
 
 「计划任务」可配置 interval/cron、时区、补跑规则、并发限制和委托期限，预览后保存，也可以立即执行、停用或取消待处理任务。任务按同一群聊触发队列运行，进入该会话唯一的 Agent Session，不另开模型 Agent 或群响应链。群内管理员可用 `#forest status` 读取维护版本，使用 `#forest bot pause --expect-maintenance <版本> --reason "原因"` 或对应的 `bot resume` 命令紧急暂停、恢复本 Bot，也可通过 `run list`、`jobs list` 和 `memory list` 查询并按显示版本取消、审批或遗忘本群来源。固定 `core status/cancel/disable/reload` 在插件故障时复用相同 Run、维护版本和组件配置权威；status/cancel/disable 只有在可信主体于接纳时命中当前 Binding 管理员名单时才占 P0，否则持久降为 P1，执行前仍再次鉴权。Core 不是服务器终端。`context inspect` 只显示发令群的视图、队列和 Agent 元数据；`context compact --expect-view <版本>` 只登记异步请求，由该群唯一 Actor 在下一模型调用安全点按 CAS 执行本地裁剪，不调用摘要模型。`event` 管理组件事件，`component-job` 单独管理插件持久任务；`audit list`（别名 `log/logs list`）按稳定游标读取当前 Bot 的脱敏审计元数据，不打开宿主终端或进入 Agent。实际语法和授权边界见[群聊 Shell 详细设计](doc/09-group-shell-command-system.md)。
 
-Docker 内连接宿主机 OneBot 时，API 地址可使用 `http://host.docker.internal:5700`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。OneBot 上报必须能访问 Forest 的 HTTP 入口。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)。
+Docker 内连接宿主机 OneBot 时，HTTP API 地址可使用 `http://host.docker.internal:5700`，正向 WebSocket 端点可使用 `ws://host.docker.internal:8080/`；Linux Engine 可按本机网络配置显式映射 host gateway，或让 OneBot 加入同一 Docker 网络。HTTP 模式还要求 OneBot 能访问 Forest 的上报入口；WebSocket 模式不需要反向访问 Forest。协议与恢复边界、群聊 Shell 和发送核对详见[接入说明](doc/p1-integration.md)与[正向 WebSocket 详细设计](doc/p5-onebot-forward-websocket.md)。
 
 查看状态或停止服务：
 

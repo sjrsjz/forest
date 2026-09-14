@@ -16,6 +16,7 @@ from test_web_bots import (  # noqa: F401
     setup,
     web_bots_database,
 )
+from websockets.asyncio.server import serve
 
 from forest.bootstrap import BootstrapState
 from forest.errors import ForestError
@@ -72,6 +73,40 @@ async def onebot_server(self_id="10001"):
         for task in tuple(tasks):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@asynccontextmanager
+async def onebot_websocket_server(self_id="10001"):
+    state = {"connections": [], "actions": [], "sends": [], "self_id": self_id}
+
+    async def handle(connection):
+        state["connections"].append(connection)
+        assert connection.request.path == "/"
+        assert connection.request.headers["authorization"] == "Bearer " + TOKEN
+        async for raw in connection:
+            request = json.loads(raw)
+            state["actions"].append(request["action"])
+            if request["action"] == "get_login_info":
+                data = {"user_id": int(state["self_id"]), "nickname": "WS OneBot"}
+            else:
+                assert request["action"] in {"send_group_msg", "send_private_msg"}
+                state["sends"].append(request["params"])
+                data = {"message_id": 9000 + len(state["sends"])}
+            await connection.send(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": data,
+                        "echo": request["echo"],
+                    }
+                )
+            )
+
+    async with serve(handle, "127.0.0.1", 0, compression=None) as server:
+        port = server.sockets[0].getsockname()[1]
+        state["url"] = "ws://127.0.0.1:" + str(port) + "/"
+        yield state
 
 
 async def wait_for(read, condition, timeout=30):
@@ -220,6 +255,110 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
                 assert "answer this" not in json.dumps(status) and len(server["sends"]) == 4
                 while (await payloads.scrub(lease))["remaining"]:
                     pass
+
+
+async def test_websocket_binding_ingress_and_delivery_share_one_owned_connection(
+    tmp_path, web_bots_database  # noqa: F811
+):
+    data = tmp_path / "state"
+    token = BootstrapState(data).initialize()
+    settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
+    async with onebot_websocket_server() as server, running(settings) as (_, client):
+        await setup(client, token)
+        bot = await post(
+            client,
+            "/management/v1/bots",
+            {"display_name": "WebSocket 接入测试"},
+            "ws-bot",
+            status=202,
+        )
+        await ready(client, bot)
+        root = "/management/v1/bots/" + bot["bot_id"]
+        binding = await post(
+            client,
+            root + "/bindings",
+            {"self_id": "10001", "display_name": "WS QQ"},
+            "ws-binding",
+            status=201,
+        )
+        binding_id = binding["binding_id"]
+        base = root + "/bindings/" + binding_id
+        values = {
+            "enabled": True,
+            "transport": "forward-websocket",
+            "api_base_url": "http://127.0.0.1:1",
+            "websocket_url": server["url"],
+            "response_mode": "component",
+            "response_template": "{sender}@{group}:{text}",
+            "trigger_mentions": True,
+            "trigger_prefix": "/chat",
+            "private_trigger": True,
+            "admin_user_ids": ["20001"],
+        }
+        plan = await post(
+            client,
+            base + "/change-plans",
+            {"expected_revision": 0, "values": values, "access_token": TOKEN},
+            "ws-plan",
+        )
+        await post(
+            client,
+            base + "/management-requests",
+            {key: plan[key] for key in ("plan_id", "plan_digest", "expected_revision")},
+            "ws-apply",
+            status=202,
+        )
+        row = await online(client, base)
+        assert row["config"]["transport"] == "forward-websocket"
+        assert len(server["connections"]) == 1
+
+        body = json.dumps(
+            {
+                "time": 1_700_000_001,
+                "self_id": 10001,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 71,
+                "user_id": 20001,
+                "group_id": 933179609,
+                "message": [
+                    {"type": "at", "data": {"qq": "10001"}},
+                    {"type": "text", "data": {"text": "ws trigger"}},
+                ],
+                "sender": {
+                    "user_id": 20001,
+                    "nickname": "在线成员",
+                    "card": "群名片",
+                    "role": "member",
+                },
+            },
+            ensure_ascii=False,
+        )
+        await server["connections"][0].send(body)
+        sent = await wait_for(
+            lambda: get(client, root + "/delivery"),
+            lambda result: result["parts"] and result["parts"][0]["state"] == "SENT",
+        )
+        assert sent["parts"][0]["reply_route"]["channel_id"] == "933179609"
+        assert server["sends"] == [
+            {
+                "group_id": 933179609,
+                "message": [
+                    {"data": {"text": "群名片@933179609:ws trigger"}, "type": "text"}
+                ],
+                "auto_escape": True,
+            }
+        ]
+        assert server["actions"] == ["get_login_info", "send_group_msg"]
+
+        rejected = await client.post(
+            "/adapters/onebot/v11/" + binding_id,
+            content=body.encode(),
+            headers={"x-signature": "sha1=" + "0" * 40},
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["code"] == "ONEBOT_TRANSPORT_MISMATCH"
 
 
 async def test_binding_registration_recovers_cross_database_ack_and_account_isolation(

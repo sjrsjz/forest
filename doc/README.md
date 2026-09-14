@@ -43,6 +43,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P5 Shell 接入容量](p5-shell-ingress-admission.md) | Inbox 前资格缓存、普通/P0/拒绝通道、拒绝令牌桶与无主体运行时统计 |
 | [P5 多数据库备份与隔离恢复](p5-backup-restore.md) | 每库一致切口、加密工件、持久任务、删除屏障、隔离恢复与目录切换 |
 | [P5 部署控制面离线恢复](p5-deployment-recovery.md) | 停服互斥、归档/目标复验、Bootstrap 恢复 head 与原子切换 |
+| [P5 OneBot 正向 WebSocket](p5-onebot-forward-websocket.md) | Universal 单连接、echo 合流、入站 FIFO、Binding 代际与发送不确定性 |
 | [P4 剩余载荷迁移](p4-payload-migration-notes.md) | Kernel、配置等剩余正文副本、来源依赖及完整物理清理边界 |
 | [P4 记忆配置](p4-memory-config.md) | 独立嵌入/媒体/查询配置、Web 表单、修订与预算边界 |
 | [P4 持久图存储](p4-graph-store.md) | 多主干分片、连续邻接、稳定事实、全局修订与 CAS 发布 |

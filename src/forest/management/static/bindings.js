@@ -186,14 +186,15 @@ export function bindingsPanel(api, busy, notice) {
     busy(form.querySelector('button'), async () => {
       const own = epoch, edited = edit, values = {};
       for (const name of ['enabled','trigger_mentions','private_trigger']) values[name] = form.elements[name].checked;
-      for (const name of ['api_base_url','response_mode','response_template','trigger_prefix']) values[name] = form.elements[name].value;
+      for (const name of ['transport','api_base_url','websocket_url','response_mode','response_template','trigger_prefix']) values[name] = form.elements[name].value;
       values.admin_user_ids = form.elements.admin_user_ids.value.split(/[,，\s]+/).filter(Boolean);
       const body = {expected_revision:selected.revision, values};
       for (const name of ['access_token','webhook_secret']) if (form.elements[name].value) body[name] = form.elements[name].value;
       planKey ||= crypto.randomUUID(); const plan = await api(`${path()}/change-plans`, body, {'Idempotency-Key':planKey});
       if (!valid(own) || edited !== edit) return;
       pending = plan; applyKey = crypto.randomUUID();
-      $('binding-diff').textContent = `连接：${values.enabled ? '启用' : '停用'}\nAPI：${values.api_base_url}\n回复：${values.response_mode === 'component' ? '模板回复' : '静默记录'}\n模板：${values.response_template}\n触发：@ ${values.trigger_mentions ? '开启' : '关闭'}；前缀 ${values.trigger_prefix || '关闭'}；私聊 ${values.private_trigger ? '开启' : '关闭'}\n管理员：${values.admin_user_ids.join('、') || '未设置'}\n凭据：${plan.credentials_changed ? '更新' : '保持已有'}`;
+      const endpoint = values.transport === 'forward-websocket' ? values.websocket_url : values.api_base_url;
+      $('binding-diff').textContent = `连接：${values.enabled ? '启用' : '停用'}\n传输：${values.transport === 'forward-websocket' ? '正向 Universal WebSocket' : 'HTTP API + HTTP POST'}\n端点：${endpoint}\n回复：${values.response_mode === 'component' ? '模板回复' : values.response_mode === 'agent' ? 'Agent 对话' : '静默记录'}\n模板：${values.response_template}\n触发：@ ${values.trigger_mentions ? '开启' : '关闭'}；前缀 ${values.trigger_prefix || '关闭'}；私聊 ${values.private_trigger ? '开启' : '关闭'}\n管理员：${values.admin_user_ids.join('、') || '未设置'}\n凭据：${plan.credentials_changed ? '更新' : '保持已有'}`;
       $('binding-preview').classList.remove('hidden');
     });
   });

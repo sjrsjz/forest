@@ -1,4 +1,4 @@
-"""OneBot v11 HTTP codec and a bounded, single-attempt effect transport.
+"""OneBot v11 codec shared by bounded, single-attempt host transports.
 
 The codec does not open sockets or grant user permissions. Its media locators
 must be captured into host-managed references before becoming Context content.
@@ -26,8 +26,8 @@ from forest.errors import ForestError
 
 PLATFORM = "onebot-v11"
 CAPABILITIES = {
-    "event_transport": "http-post",
-    "api_transport": "http",
+    "event_transport": ["http-post", "forward-websocket"],
+    "api_transport": ["http", "forward-websocket"],
     "event_replay": False,
     "send_idempotency": False,
     "send_result_reconciliation": False,

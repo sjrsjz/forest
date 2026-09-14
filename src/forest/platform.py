@@ -13,6 +13,7 @@ from psycopg_pool import PoolTimeout
 
 from forest.adapters.onebot import (
     OneBotHTTPClient,
+    OneBotWebSocketClient,
     PreparedSend,
     SendResult,
     parse_event,
@@ -36,8 +37,9 @@ def _observe(task):
 @dataclass
 class Connection:
     row: dict
-    client: OneBotHTTPClient
+    client: OneBotHTTPClient | OneBotWebSocketClient
     webhook_secret: str
+    transport: str = "http-post"
     accepting: bool = True
     tasks: set[asyncio.Task] = field(default_factory=set)
     _close_task: asyncio.Task | None = field(default=None, init=False)
@@ -84,8 +86,9 @@ class PendingActivation:
     revision: int
     client_incarnation: str
     expected_binding_epoch: int
-    client: OneBotHTTPClient | None
+    client: OneBotHTTPClient | OneBotWebSocketClient | None
     webhook_secret: str
+    transport: str
 
 
 class BindingRuntime:
@@ -107,7 +110,7 @@ class BindingRuntime:
         self._jobs: dict[str, asyncio.Task] = {}
         self._component_jobs: dict[str, asyncio.Task] = {}
         self._component_locks: dict[str, asyncio.Lock] = {}
-        self._clients: set[OneBotHTTPClient] = set()
+        self._clients: set[OneBotHTTPClient | OneBotWebSocketClient] = set()
         self._pending: dict[str, PendingActivation] = {}
         self._connect_slots = asyncio.Semaphore(4)
         self._closed = asyncio.Event()
@@ -349,10 +352,11 @@ class BindingRuntime:
     def _adopt(self, pending, row):
         # No await between publication/reconciliation and ownership registration.
         if pending.client is not None:
-            self.connections[pending.binding_id] = Connection(
+            connection = Connection(
                 row,
                 pending.client,
                 pending.webhook_secret,
+                pending.transport,
                 accepting=(
                     not self._closed.is_set()
                     and row["state"] == "ONLINE"
@@ -360,6 +364,11 @@ class BindingRuntime:
                     and row["receive_enabled"]
                 ),
             )
+            self.connections[pending.binding_id] = connection
+            if isinstance(pending.client, OneBotWebSocketClient):
+                pending.client.activate_events(
+                    lambda body, owned=connection: self._receive_websocket(owned, body)
+                )
         self._applied[pending.binding_id] = (pending.revision, pending.client_incarnation)
         self._pending.pop(pending.client_incarnation, None)
         self._retries.pop(pending.binding_id, None)
@@ -380,13 +389,30 @@ class BindingRuntime:
                 )
                 values = saved["values"]
                 secrets = json.loads(self.vault.decrypt(saved["secret_ciphertext"]))
-                webhook = secrets["webhook_secret"]
+                transport = values.get("transport", "http-post")
+                websocket_url = values.get("websocket_url", "ws://127.0.0.1:8080")
+                webhook = secrets.get("webhook_secret", "")
                 if values["enabled"]:
-                    if not isinstance(webhook, str) or not 1 <= len(webhook) <= 4096:
+                    if transport not in {"http-post", "forward-websocket"}:
+                        raise ForestError(
+                            "BINDING_CONFIG_INVALID", "Unsupported OneBot transport", 422
+                        )
+                    if (
+                        transport == "http-post"
+                        and (not isinstance(webhook, str) or not 1 <= len(webhook) <= 4096)
+                    ):
                         raise ForestError("BINDING_SECRET_INVALID", "Invalid webhook secret", 422)
-                    webhook.encode("utf-8")
+                    if webhook:
+                        webhook.encode("utf-8")
                     await self.ensure_components(("adapter.onebot",))
-                    candidate = OneBotHTTPClient(values["api_base_url"], secrets["access_token"])
+                    if transport == "forward-websocket":
+                        candidate = await OneBotWebSocketClient.create(
+                            websocket_url, secrets["access_token"]
+                        )
+                    else:
+                        candidate = OneBotHTTPClient(
+                            values["api_base_url"], secrets["access_token"]
+                        )
                     self._clients.add(candidate)
                     identity = await candidate.get_login_info(timeout=5)
                     if identity["self_id"] != desired["self_id"]:
@@ -404,7 +430,13 @@ class BindingRuntime:
                 if self._closed.is_set():
                     return
                 pending = PendingActivation(
-                    binding_id, revision, str(uuid4()), drained["binding_epoch"], candidate, webhook
+                    binding_id,
+                    revision,
+                    str(uuid4()),
+                    drained["binding_epoch"],
+                    candidate,
+                    webhook,
+                    transport,
                 )
                 self._pending[pending.client_incarnation] = pending
                 row = await self.bindings.activate(
@@ -540,7 +572,7 @@ class BindingRuntime:
         return (
             connection is not None
             and connection.accepting
-            and not connection.client._client.is_closed
+            and not connection.client.is_closed
             and row["state"] == "ONLINE"
             and all(
                 connection.row[key] == row[key]
@@ -564,7 +596,25 @@ class BindingRuntime:
 
     async def receive(self, binding_id: str, body: bytes, signature: str | None) -> dict:
         connection = self.connection(binding_id)
+        if connection.transport != "http-post":
+            raise ForestError(
+                "ONEBOT_TRANSPORT_MISMATCH",
+                "This Binding receives events through its WebSocket",
+                409,
+            )
         verify_signature(body, connection.webhook_secret, signature)
+        return await self._receive_connection(connection, body)
+
+    async def _receive_websocket(self, connection: Connection, body: bytes) -> dict:
+        current = self.connections.get(connection.row["binding_id"])
+        if current is not connection or not connection.accepting:
+            raise ForestError("STALE_BINDING", "WebSocket connection was retired", 409)
+        if connection.transport != "forward-websocket":
+            raise ForestError("ONEBOT_TRANSPORT_MISMATCH", "Unexpected WebSocket event", 409)
+        return await self._receive_connection(connection, body)
+
+    async def _receive_connection(self, connection: Connection, body: bytes) -> dict:
+        binding_id = connection.row["binding_id"]
         preview = parse_event(body, self_id=connection.row["self_id"])
         preview_event = (
             self.messages._normalized(preview.as_dict()) if preview is not None else None

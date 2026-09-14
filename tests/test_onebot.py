@@ -539,8 +539,8 @@ def test_fixed_api_origin_rejects_credentials_paths_and_nonhttp(origin):
 
 def test_capabilities_do_not_claim_platform_dedup_or_replay():
     assert CAPABILITIES == {
-        "event_transport": "http-post",
-        "api_transport": "http",
+        "event_transport": ["http-post", "forward-websocket"],
+        "api_transport": ["http", "forward-websocket"],
         "event_replay": False,
         "send_idempotency": False,
         "send_result_reconciliation": False,

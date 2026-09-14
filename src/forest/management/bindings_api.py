@@ -29,7 +29,9 @@ class Registration(Body):
 
 class BindingValues(Body):
     enabled: bool = False
+    transport: Literal["http-post", "forward-websocket"] = "http-post"
     api_base_url: str = Field(default="http://127.0.0.1:5700", max_length=2048)
+    websocket_url: str = Field(default="ws://127.0.0.1:8080/", max_length=2048)
     response_mode: Literal["disabled", "component", "agent"] = "disabled"
     response_template: str = Field(default="{sender}，收到：{text}", min_length=1, max_length=2000)
     trigger_mentions: bool = True
@@ -51,6 +53,32 @@ class BindingValues(Body):
         except ValueError:
             raise ValueError("Use an HTTP API origin without credentials, path or query") from None
         return value.rstrip("/")
+
+    @field_validator("websocket_url")
+    @classmethod
+    def websocket_endpoint(cls, value):
+        try:
+            parts = urlsplit(value)
+            if (
+                parts.scheme not in {"ws", "wss"}
+                or not parts.hostname
+                or parts.username
+                or parts.password
+                or parts.query
+                or parts.fragment
+                or parts.path not in {"", "/"}
+                or any(ord(c) <= 32 or ord(c) == 127 for c in value)
+                or "\\" in value
+            ):
+                raise ValueError()
+            if parts.port is not None and not 1 <= parts.port <= 65535:
+                raise ValueError()
+            parts.hostname.encode("idna")
+        except (ValueError, UnicodeError):
+            raise ValueError(
+                "Use a Universal ws:// or wss:// endpoint without credentials or query"
+            ) from None
+        return value.rstrip("/") + "/"
 
     @field_validator("admin_user_ids")
     @classmethod
@@ -189,8 +217,17 @@ def install_binding_routes(app: FastAPI, runtime: Any):
             secret["access_token"] = body.access_token
         if body.webhook_secret is not None:
             secret["webhook_secret"] = body.webhook_secret
-        if body.values.enabled and (not secret.get("access_token") or not secret.get("webhook_secret")):
-            raise ForestError("BINDING_CREDENTIALS_REQUIRED", "Set both the API token and webhook signing secret", 422)
+        missing_access = not secret.get("access_token")
+        missing_webhook = (
+            body.values.transport == "http-post" and not secret.get("webhook_secret")
+        )
+        if body.values.enabled and (missing_access or missing_webhook):
+            detail = (
+                "Set the API token and webhook signing secret"
+                if body.values.transport == "http-post"
+                else "Set the API token"
+            )
+            raise ForestError("BINDING_CREDENTIALS_REQUIRED", detail, 422)
         candidate = runtime.catalog.vault.encrypt(json.dumps(secret, sort_keys=True))
         credential_input = {"expected_revision": body.expected_revision,
                             "access_token": body.access_token, "webhook_secret": body.webhook_secret}
