@@ -32,7 +32,7 @@ SQL 准备、固定版本的 Python 数据搬运、旧列清空及最终约束�
 
 已删除或缺失正文的历史 Reply 不再复制成新的 SourceUnit，后台回填仍推进持久游标，避免每次重启卡在同一记录。
 
-同一 Inbox event_id 的重复接收可返回已经存在的元数据收据。**同一来源在另一个 Binding/Conversation 晚到、需要新增 occurrence，但该来源已经 suppression 时，当前接纳会以 SOURCE_SUPPRESSED 拒绝，不能宣称已 durable ACK。** 后续若要保留这类新观察的元数据，需要新增受控的 metadata-only 输入接纳协议；不能复用仅供升级使用的 legacy importer，也不能恢复旧明文列。
+同一 Inbox event_id 的重复接收可返回已经存在的元数据收据。同一来源在另一个 Binding/Conversation 晚到、需要新增 occurrence 且该来源已经 suppression 时，使用独立的受控 metadata-only 输入接纳协议；它不复用仅供升级使用的 legacy importer，也不恢复旧明文列。详细线性化与收据边界见[已遗忘来源的迟到观察接纳](p5-suppressed-occurrence-ack.md)。
 
 ## 已验证边界
 

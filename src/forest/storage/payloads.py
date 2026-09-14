@@ -97,24 +97,37 @@ class PayloadStore:
             raise ForestError("INVALID_SOURCE_MANIFEST", "Invalid source dependency set", 422)
         return tuple(sorted(set(values)))
 
-    async def _check_sources_in(self, conn, sources: tuple[SourceRef, ...]):
+    async def suppression_basis_in(self, conn, sources) -> dict | None:
+        """Return one deterministic permanent suppression blocking these sources."""
+        sources = self._sources(sources)
         if not sources:
-            return
+            return None
         # Exact platform aliases discovered after body publication live in a
         # separate immutable ledger. Reading or writing an old manifest must
         # still consult their transitive prerequisites; the manifest is not edited.
         sources = await self.source_dependency_closure_in(conn, sources)
-        rows = await (await conn.execute(
-            "SELECT source_unit_id,part_id FROM public.bot_payload_suppression "
-            "WHERE bot_id=%s AND source_unit_id=ANY(%s)",
-            (self.store.bot_id, sorted({s.source_unit_id for s in sources})),
-        )).fetchall()
-        targets = {(row["source_unit_id"], row["part_id"]) for row in rows}
+        rows = await (
+            await conn.execute(
+                "SELECT source_unit_id,part_id,operation_id,deletion_epoch "
+                "FROM public.bot_payload_suppression "
+                "WHERE bot_id=%s AND source_unit_id=ANY(%s) "
+                "ORDER BY deletion_epoch,source_unit_id,part_id,operation_id",
+                (self.store.bot_id, sorted({s.source_unit_id for s in sources})),
+            )
+        ).fetchall()
         for source in sources:
-            if any(unit == source.source_unit_id and
-                   (part == "*" or source.part_id == "*" or part == source.part_id)
-                   for unit, part in targets):
-                raise ForestError("SOURCE_SUPPRESSED", "A source dependency was removed", 409)
+            for row in rows:
+                if row["source_unit_id"] == source.source_unit_id and (
+                    row["part_id"] == "*"
+                    or source.part_id == "*"
+                    or row["part_id"] == source.part_id
+                ):
+                    return row
+        return None
+
+    async def _check_sources_in(self, conn, sources: tuple[SourceRef, ...]):
+        if await self.suppression_basis_in(conn, sources) is not None:
+            raise ForestError("SOURCE_SUPPRESSED", "A source dependency was removed", 409)
 
     async def source_dependency_closure_in(
         self, conn, sources, *, maximum=None, fail_on_limit=True

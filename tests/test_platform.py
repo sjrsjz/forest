@@ -103,7 +103,9 @@ async def test_signed_all_message_ingress_keeps_authors_and_pending_image_refere
     p = platform
     await p.runtime._replace(p.desired)
     first = await receive(p, 1)
-    assert await receive(p, 1) == first
+    duplicate = await receive(p, 1)
+    assert duplicate["accepted"] and duplicate["kind"] == "DUPLICATE"
+    assert duplicate["event_id"] == first["event_id"]
     await receive(
         p,
         2,
@@ -153,7 +155,9 @@ async def test_empty_protocol_message_is_durably_retained_with_author(platform, 
     p = platform
     await p.runtime._replace(p.desired)
     accepted = await receive(p, 1, message=empty_message)
-    assert accepted["accepted"] and await receive(p, 1, message=empty_message) == accepted
+    duplicate = await receive(p, 1, message=empty_message)
+    assert accepted["accepted"] and duplicate["kind"] == "DUPLICATE"
+    assert duplicate["event_id"] == accepted["event_id"]
     async with p.env.store.pool.connection() as conn, conn.transaction():
         rows = await (await conn.execute("SELECT * FROM public.bot_message_inbox")).fetchall()
         assert len(rows) == 1 and rows[0]["segments"] is None and rows[0]["payload_id"]
@@ -202,7 +206,9 @@ async def test_failed_codec_attempt_and_lost_ingress_ack_do_not_poison_retries(
         await receive(p)
     monkeypatch.setattr(p.runtime.messages, "ingest", ingest)
     assert (await receive(p))["accepted"]
-    assert len(attempts) == len(set(attempts)) == 3
+    # The retry after a committed Inbox result uses its durable metadata ACK;
+    # it no longer calls the reloadable codec for an already accepted event.
+    assert len(attempts) == len(set(attempts)) == 2
     async with p.env.store.pool.connection() as conn:
         assert (
             await (
@@ -210,7 +216,7 @@ async def test_failed_codec_attempt_and_lost_ingress_ack_do_not_poison_retries(
             ).fetchone()
         )["n"] == 1
     calls = [await p.env.store.read_call(operation) for operation in attempts]
-    assert [call["status"] for call in calls] == ["FAILED", "COMPLETED", "COMPLETED"]
+    assert [call["status"] for call in calls] == ["FAILED", "COMPLETED"]
 
 
 async def test_preparation_uses_actual_completed_worker_generation_after_reload(

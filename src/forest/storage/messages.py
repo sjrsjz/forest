@@ -48,6 +48,14 @@ class ActorLease:
     storage_generation: int
 
 
+@dataclass(frozen=True)
+class StagedPlatformInput:
+    kind: str
+    event: dict[str, Any] | None = None
+    origin_payload_id: str | None = None
+    receipt: dict[str, Any] | None = None
+
+
 def _text(value: Any, name: str, maximum: int = 256, *, empty: bool = False) -> str:
     if not isinstance(value, str) or len(value) > maximum or (not value and not empty):
         raise ForestError("INVALID_MESSAGE", f"Invalid {name}", 422)
@@ -198,6 +206,111 @@ class MessageStore:
             group_source, value["self_id"], value["platform_message_id"],
         ])
 
+    def _platform_ids(self, binding_id, value):
+        conversation_id = "conversation:" + digest_json([
+            self.store.bot_id,
+            binding_id,
+            value["platform"],
+            value["channel_kind"],
+            value["channel_id"],
+            value["thread_id"],
+        ])
+        group_source_id = "source:" + digest_json([
+            self.store.bot_id,
+            value["platform"],
+            "qq-global",
+            value["channel_kind"],
+            value["channel_id"],
+            1,
+        ])
+        source_event_id = self.platform_source_event_id(value)
+        event_id = "event:" + digest_json([conversation_id, value["platform_message_id"]])
+        occurrence_id = "source-occurrence:" + digest_json(
+            [self.store.bot_id, "INPUT", event_id]
+        )
+        return {
+            "conversation_id": conversation_id,
+            "group_source_id": group_source_id,
+            "source_event_id": source_event_id,
+            "source_unit_id": self._memory_sources().unit_id(source_event_id),
+            "event_id": event_id,
+            "occurrence_id": occurrence_id,
+            "input_digest": digest_json(value),
+        }
+
+    async def _suppressed_receipt_in(self, conn, binding, value, identifiers, basis):
+        receipt_id = "suppressed-input:" + digest_json(
+            [self.store.bot_id, "SUPPRESSED_OCCURRENCE", identifiers["occurrence_id"]]
+        )
+        observed_at = datetime.fromisoformat(value["sent_at"].replace("Z", "+00:00"))
+        fields = {
+            "receipt_id": receipt_id,
+            "event_id": identifiers["event_id"],
+            "occurrence_id": identifiers["occurrence_id"],
+            "source_event_id": identifiers["source_event_id"],
+            "source_unit_id": identifiers["source_unit_id"],
+            "conversation_id": identifiers["conversation_id"],
+            "binding_id": binding["binding_id"],
+            "platform": value["platform"],
+            "channel_kind": value["channel_kind"],
+            "channel_id": value["channel_id"],
+            "thread_id": value["thread_id"],
+            "platform_message_id": value["platform_message_id"],
+            "input_digest": identifiers["input_digest"],
+            "observed_at": observed_at,
+        }
+        inserted = await (
+            await conn.execute(
+                "INSERT INTO public.bot_suppressed_input_occurrences("
+                "bot_id,receipt_id,event_id,occurrence_id,source_event_id,source_unit_id,"
+                "conversation_id,binding_id,first_binding_epoch,platform,channel_kind,channel_id,"
+                "thread_id,platform_message_id,input_digest,observed_at,"
+                "suppression_source_unit_id,suppression_part_id,suppression_operation_id,"
+                "suppression_deletion_epoch) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT DO NOTHING RETURNING *",
+                (
+                    self.store.bot_id,
+                    receipt_id,
+                    identifiers["event_id"],
+                    identifiers["occurrence_id"],
+                    identifiers["source_event_id"],
+                    identifiers["source_unit_id"],
+                    identifiers["conversation_id"],
+                    binding["binding_id"],
+                    binding["binding_epoch"],
+                    value["platform"],
+                    value["channel_kind"],
+                    value["channel_id"],
+                    value["thread_id"],
+                    value["platform_message_id"],
+                    identifiers["input_digest"],
+                    observed_at,
+                    basis["source_unit_id"],
+                    basis["part_id"],
+                    basis["operation_id"],
+                    basis["deletion_epoch"],
+                ),
+            )
+        ).fetchone()
+        row = inserted or await (
+            await conn.execute(
+                "SELECT * FROM public.bot_suppressed_input_occurrences "
+                "WHERE bot_id=%s AND event_id=%s",
+                (self.store.bot_id, identifiers["event_id"]),
+            )
+        ).fetchone()
+        if row is None or any(row[key] != expected for key, expected in fields.items()):
+            raise ForestError("INGEST_CONFLICT", "Platform message identity was reused", 409)
+        return {
+            "kind": "SUPPRESSED_OCCURRENCE",
+            "receipt_id": row["receipt_id"],
+            "event_id": row["event_id"],
+            "occurrence_id": row["occurrence_id"],
+            "duplicate": inserted is None,
+            "suppression_deletion_epoch": row["suppression_deletion_epoch"],
+        }
+
     async def stage_platform_input(self, lease, binding_id, body, *, expected_binding_epoch):
         """Bind authenticated platform bytes to their real source before Worker IPC.
 
@@ -214,22 +327,68 @@ class MessageStore:
             parsed = parse_event(body, self_id=binding["self_id"])
             if parsed is None:
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
-                return None, None
+                return StagedPlatformInput("NON_MESSAGE")
             event = self._normalized(parsed.as_dict())
-            source_event = self.platform_source_event_id(event)
+            identifiers = self._platform_ids(binding_id, event)
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+                    (self.store.bot_id, identifiers["event_id"]),
+                )
+            ).fetchone()
+            if existing is not None:
+                if existing["input_digest"] != identifiers["input_digest"]:
+                    raise ForestError("INGEST_CONFLICT", "Platform message identity was reused", 409)
+                conversation = await self._conversation(conn, identifiers["conversation_id"])
+                if event["author"].get("is_self"):
+                    await self._reconcile_exact_echo_in(
+                        conn, lease, binding, conversation, identifiers["event_id"]
+                    )
+                await self.bindings._final_guard(
+                    conn, lease, binding, data=False, require_receive=True
+                )
+                return StagedPlatformInput(
+                    "DUPLICATE",
+                    receipt={
+                        "conversation_id": identifiers["conversation_id"],
+                        "event_id": identifiers["event_id"],
+                        "ingress_seq": existing["ingress_seq"],
+                        "duplicate": True,
+                        "command_id": (
+                            "command:" + digest_json(identifiers["event_id"])
+                            if parse_command(event) is not None
+                            else None
+                        ),
+                        "trigger_decision": existing["trigger_decision"],
+                    },
+                )
             contents = InputContentStore(self.store)
             clock = await contents.payloads.lock_in(conn)
+            source_ref = contents.source_ref(identifiers["source_event_id"])
+            basis = await contents.payloads.suppression_basis_in(conn, (source_ref,))
+            if basis is not None:
+                receipt = await self._suppressed_receipt_in(
+                    conn, binding, event, identifiers, basis
+                )
+                await self.bindings._final_guard(
+                    conn, lease, binding, data=False, require_receive=True
+                )
+                return StagedPlatformInput("SUPPRESSED_OCCURRENCE", receipt=receipt)
             ref = await contents.payloads.put_bytes_in(
                 conn, owner_kind="context.parts",
-                owner_id="ingress:" + digest_json([source_event, hashlib.sha256(body).hexdigest()]),
-                value=body, sources=(contents.source_ref(source_event),),
+                owner_id="ingress:"
+                + digest_json(
+                    [identifiers["source_event_id"], hashlib.sha256(body).hexdigest()]
+                ),
+                value=body,
+                sources=(source_ref,),
                 expected_deletion_epoch=clock["deletion_epoch"],
             )
             await contents.payloads.require_available_in(
                 conn, [ref.payload_id], expected_deletion_epoch=clock["deletion_epoch"],
             )
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
-            return event, ref.payload_id
+            return StagedPlatformInput("NEW", event=event, origin_payload_id=ref.payload_id)
 
     async def ingest(
         self, lease: HostLease, binding_id: str, event: dict, *,
@@ -257,19 +416,12 @@ class MessageStore:
         if decision is not None:
             _text(rule_revision, "rule_revision")
             _text(reason, "reason", 1024, empty=True)
-        conversation_id = "conversation:" + digest_json([
-            self.store.bot_id, binding_id, value["platform"], value["channel_kind"],
-            value["channel_id"], value["thread_id"],
-        ])
-        # OneBot QQ IDs use a globally scoped platform realm. Neither binding
-        # nor thread creates another memory trunk for the same actual group.
-        group_source_id = "source:" + digest_json([
-            self.store.bot_id, value["platform"], "qq-global", value["channel_kind"],
-            value["channel_id"], 1,
-        ])
-        source_event_id = self.platform_source_event_id(value)
-        input_digest = digest_json(value)
-        event_id = "event:" + digest_json([conversation_id, value["platform_message_id"]])
+        identifiers = self._platform_ids(binding_id, value)
+        conversation_id = identifiers["conversation_id"]
+        group_source_id = identifiers["group_source_id"]
+        source_event_id = identifiers["source_event_id"]
+        input_digest = identifiers["input_digest"]
+        event_id = identifiers["event_id"]
         command_id = "command:" + digest_json(event_id) if shell_command is not None else None
         async with self.store.pool.connection() as conn, conn.transaction():
             binding = await self.bindings._guard(
@@ -352,13 +504,24 @@ class MessageStore:
                         "priority_basis_binding_epoch": binding["binding_epoch"],
                         "priority_basis_config_revision": settings["effective_revision"],
                     }
-            await conn.execute(
-                "INSERT INTO public.bot_conversations(bot_id,conversation_id,binding_id,platform,"
-                "channel_kind,channel_id,thread_id,group_source_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT DO NOTHING",
-                (self.store.bot_id, conversation_id, binding_id, value["platform"],
-                 value["channel_kind"], value["channel_id"], value["thread_id"], group_source_id),
-            )
+            created = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_conversations(bot_id,conversation_id,binding_id,platform,"
+                    "channel_kind,channel_id,thread_id,group_source_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING "
+                    "RETURNING conversation_id",
+                    (
+                        self.store.bot_id,
+                        conversation_id,
+                        binding_id,
+                        value["platform"],
+                        value["channel_kind"],
+                        value["channel_id"],
+                        value["thread_id"],
+                        group_source_id,
+                    ),
+                )
+            ).fetchone()
             conversation = await self._conversation(conn, conversation_id)
             existing = await (await conn.execute(
                 "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
@@ -367,13 +530,50 @@ class MessageStore:
             if existing:
                 if existing["input_digest"] != input_digest:
                     raise ForestError("INGEST_CONFLICT", "Platform message identity was reused", 409)
-                await self._register_memory_input(conn, conversation, event_id, reconstructed=True)
+                registered = await (
+                    await conn.execute(
+                        "SELECT 1 FROM public.bot_memory_source_occurrences "
+                        "WHERE bot_id=%s AND event_id=%s",
+                        (self.store.bot_id, event_id),
+                    )
+                ).fetchone()
+                if registered is None:
+                    contents = InputContentStore(self.store)
+                    await contents.payloads.lock_in(conn)
+                    basis = await contents.payloads.suppression_basis_in(
+                        conn, (contents.source_ref(source_event_id),)
+                    )
+                else:
+                    basis = None
+                if registered is None and basis is None:
+                    await self._register_memory_input(
+                        conn, conversation, event_id, reconstructed=True
+                    )
                 if value["author"].get("is_self"):
                     await self._reconcile_exact_echo_in(conn, lease, binding, conversation, event_id)
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
                 return {"conversation_id": conversation_id, "event_id": event_id,
                         "ingress_seq": existing["ingress_seq"], "duplicate": True,
                         "command_id": command_id, "trigger_decision": existing["trigger_decision"]}
+            contents = InputContentStore(self.store)
+            clock = await contents.payloads.lock_in(conn)
+            basis = await contents.payloads.suppression_basis_in(
+                conn, (contents.source_ref(source_event_id),)
+            )
+            if basis is not None:
+                receipt = await self._suppressed_receipt_in(
+                    conn, binding, value, identifiers, basis
+                )
+                if created is not None:
+                    await conn.execute(
+                        "DELETE FROM public.bot_conversations "
+                        "WHERE bot_id=%s AND conversation_id=%s",
+                        (self.store.bot_id, conversation_id),
+                    )
+                await self.bindings._final_guard(
+                    conn, lease, binding, data=False, require_receive=True
+                )
+                return receipt
             if conversation["next_ingress_seq"] - conversation["context_applied_seq"] > 10000:
                 raise ForestError("INBOX_BACKPRESSURE", "Conversation input backlog is full", 429)
             segments, media = [], []
@@ -395,8 +595,6 @@ class MessageStore:
                 else:
                     segments.append(part)
             seq = conversation["next_ingress_seq"]
-            contents = InputContentStore(self.store)
-            clock = await contents.payloads.lock_in(conn)
             payload = await contents.put_input_in(conn, event_id=event_id, source_event_id=source_event_id,
                 author=value["author"], segments=segments, expected_deletion_epoch=clock["deletion_epoch"])
             await conn.execute(

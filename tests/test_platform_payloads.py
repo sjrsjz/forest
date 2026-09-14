@@ -6,11 +6,12 @@ import json
 from dataclasses import replace
 
 import pytest
+from test_onebot import encoded, event, signature
 from test_platform import platform as platform
 from test_platform import receive
 from test_web_authority import environment as environment
 
-from forest.adapters.onebot import prepare_send
+from forest.adapters.onebot import parse_event, prepare_send
 from forest.errors import ForestError
 from forest.storage.input_payloads import InputContentStore
 from forest.storage.payloads import PayloadStore
@@ -151,3 +152,52 @@ async def test_completed_codec_result_cannot_substitute_another_message(platform
     async with p.env.store.pool.connection() as conn:
         assert not await (await conn.execute("SELECT 1 FROM public.bot_send_attempts")).fetchall()
     assert all("send_group_msg" not in request[0] for request in p.requests)
+
+
+async def test_http_and_websocket_suppressed_observations_skip_all_reloadable_work(platform):
+    p = platform
+    await p.runtime._replace(p.desired)
+    body = encoded(
+        event(
+            message_id=404,
+            message=[{"type": "text", "data": {"text": "#forest core status"}}],
+        )
+    )
+    normalized = p.runtime.messages._normalized(
+        parse_event(body, self_id=p.runtime.connection(p.binding.binding_id).row["self_id"])
+        .as_dict()
+    )
+    payloads = PayloadStore(p.env.store)
+    source = InputContentStore(p.env.store).source_ref(
+        p.runtime.messages.platform_source_event_id(normalized)
+    )
+    await payloads.forget_sources(
+        p.kernel._authority(),
+        "suppress-platform-observation",
+        (source,),
+        expected_deletion_epoch=await payloads.epoch(p.kernel._authority()),
+    )
+
+    first = await p.runtime.receive(
+        p.binding.binding_id, body, signature(body, "webhook-test-secret")
+    )
+    assert first["accepted"] and first["kind"] == "SUPPRESSED_OCCURRENCE"
+    assert not first["duplicate"]
+
+    connection = p.runtime.connection(p.binding.binding_id)
+    websocket = replace(connection, transport="forward-websocket")
+    p.runtime.connections[p.binding.binding_id] = websocket
+    replay = await p.runtime._receive_websocket(websocket, body)
+    assert replay["kind"] == "SUPPRESSED_OCCURRENCE" and replay["duplicate"]
+    assert replay["receipt_id"] == first["receipt_id"]
+
+    async with p.env.store.pool.connection() as conn:
+        for table in (
+            "bot_conversations",
+            "bot_message_inbox",
+            "bot_shell_requests",
+            "bot_calls",
+        ):
+            assert not await (
+                await conn.execute(f"SELECT 1 FROM public.{table} LIMIT 1")
+            ).fetchone()

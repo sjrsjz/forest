@@ -624,21 +624,23 @@ class BindingRuntime:
         connection.tasks.add(task)
         try:
             async with self.shell_ingress.enter(ingress_plan) as priority_proof:
-                if priority_proof is None:
-                    await self.ensure_components(("adapter.onebot",))
-                event, origin_payload_id = await self.messages.stage_platform_input(
+                staged = await self.messages.stage_platform_input(
                     self.kernel._authority(), binding_id, body,
                     expected_binding_epoch=connection.row["binding_epoch"],
                 )
+                if staged.kind == "NON_MESSAGE":
+                    return {"accepted": True, "kind": "NON_MESSAGE"}
+                if staged.kind in {"DUPLICATE", "SUPPRESSED_OCCURRENCE"}:
+                    return {"accepted": True, "kind": staged.kind, **staged.receipt}
+                event = staged.event
                 if event != preview_event:
                     raise ForestError(
                         "ONEBOT_PROJECTION_CONFLICT",
                         "Staged input differs from the signed host projection",
                         409,
                     )
-                if event is None:
-                    return {"accepted": True, "kind": "NON_MESSAGE"}
                 if priority_proof is None:
+                    await self.ensure_components(("adapter.onebot",))
                     # Retrying a failed pure codec call is safe. The durable
                     # Inbox owns deduplication; reserved Shell syntax stays on
                     # the fixed host parser so a broken Adapter can be rescued.
@@ -651,7 +653,7 @@ class BindingRuntime:
                         },
                         operation_id="ingress:" + str(uuid4()),
                         timeout=10,
-                        input_parent_ids=(origin_payload_id,),
+                        input_parent_ids=(staged.origin_payload_id,),
                     )
                     if self.messages._normalized(normalized.value["message"]) != event:
                         raise ForestError(
@@ -708,6 +710,8 @@ class BindingRuntime:
                     rule_revision="binding:" + str(connection.row["effective_revision"]),
                     priority_proof=priority_proof,
                 )
+                if receipt.get("kind") == "SUPPRESSED_OCCURRENCE":
+                    return {"accepted": True, **receipt}
                 self.scheduler.notify()
                 self.shell.notify()
                 return {"accepted": True, "event_id": receipt["event_id"]}
