@@ -32,6 +32,16 @@ class VerifyBackup(Body):
     current_password: str = Field(min_length=12, max_length=1024)
 
 
+class ReserveBackupImport(Body):
+    expected_size: int = Field(ge=1, le=68719493184, strict=True)
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
+class FinalizeBackupImport(Body):
+    recovery_passphrase: str = Field(min_length=16, max_length=1024)
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
 class CleanupPlan(Body):
     pass
 
@@ -144,6 +154,69 @@ def install_backup_routes(app, runtime) -> None:
                 "VERIFICATION_SERVICE_UNAVAILABLE", "Verification service is unavailable", 503
             )
         return runtime.verifications
+
+    def imports():
+        if runtime.backup_imports is None:
+            raise ForestError(
+                "BACKUP_IMPORT_SERVICE_UNAVAILABLE", "Backup import service is unavailable", 503
+            )
+        return runtime.backup_imports
+
+    @app.get("/management/v1/backup-imports")
+    async def backup_imports(request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        rows = await imports().list(
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+        return {"imports": rows, "format": "forest.backup.v1"}
+
+    @app.post("/management/v1/backup-imports", status_code=201)
+    async def reserve_backup_import(body: ReserveBackupImport, request: Request):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        return await imports().reserve(
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, expected_size=body.expected_size,
+            idempotency_key=key(request),
+        )
+
+    @app.get("/management/v1/backup-imports/{import_id}")
+    async def read_backup_import(import_id: str, request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        return await imports().read(
+            import_id=import_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.put("/management/v1/backup-imports/{import_id}/artifact")
+    async def upload_backup_import(import_id: str, request: Request):
+        session = await runtime.principal(
+            request, write=True, content_type="application/vnd.forest.backup"
+        )
+        return await imports().upload(
+            import_id=import_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            chunks=request.stream(),
+        )
+
+    @app.post("/management/v1/backup-imports/{import_id}/finalize", status_code=202)
+    async def finalize_backup_import(
+        import_id: str, body: FinalizeBackupImport, request: Request
+    ):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        if runtime.authority is None:
+            raise ForestError("AUTHORITY_UNAVAILABLE", "Web authority is unavailable", 503)
+        return await imports().queue(
+            import_id=import_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, passphrase=body.recovery_passphrase,
+            passphrase_digest=runtime.authority.secret_digest(
+                "backup.import-passphrase", body.recovery_passphrase
+            ),
+        )
 
     @app.get("/management/v1/backup-verifications")
     async def backup_verifications(request: Request):

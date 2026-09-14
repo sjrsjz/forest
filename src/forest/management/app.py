@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -30,6 +31,7 @@ from forest.management.agent_api import install_agent_routes
 from forest.management.audit_api import install_audit_routes
 from forest.management.authority import WebAuthority
 from forest.management.backup_api import install_backup_routes
+from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
 from forest.management.bindings_api import install_binding_routes
 from forest.management.bot_audit_api import install_bot_audit_routes
@@ -111,6 +113,7 @@ class BodyLimit:
     def __init__(self, app: Any, limit: int = 65536, runtime: Any = None) -> None:
         self.app, self.limit, self.runtime = app, limit, runtime
         self.archive_slots = asyncio.Semaphore(2)
+        self.backup_import_slots = asyncio.Semaphore(2)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -127,6 +130,25 @@ class BodyLimit:
                 return
             async with self.archive_slots:
                 await self._bounded(scope, receive, send, 32 * 1024 * 1024)
+            return
+        if (
+            scope["method"] == "PUT"
+            and re.fullmatch(r"/management/v1/backup-imports/[^/]+/artifact", scope["path"])
+        ):
+            try:
+                await self.runtime.principal(
+                    Request(scope), write=True, content_type="application/vnd.forest.backup"
+                )
+            except ForestError as error:
+                await JSONResponse(
+                    {"code": error.code, "message": error.message}, error.status
+                )(scope, receive, send)
+                return
+            if self.backup_import_slots.locked():
+                await JSONResponse({"code": "BACKUP_IMPORT_BUSY"}, 429)(scope, receive, send)
+                return
+            async with self.backup_import_slots:
+                await self.app(scope, receive, send)
             return
         await self._bounded(scope, receive, send, self.limit)
 
@@ -192,6 +214,7 @@ class ManagementRuntime:
         self.restores: RestoreManager | None = None
         self.cleanup: StorageCleanupManager | None = None
         self.verifications: BackupVerificationManager | None = None
+        self.backup_imports: BackupImportManager | None = None
         self.service_tasks: list[asyncio.Task] = []
         self.service_errors: dict[str, str] = {}
 
@@ -245,6 +268,9 @@ class ManagementRuntime:
             verifications = BackupVerificationManager(
                 catalog, backups, restores, self.settings.data_dir
             )
+            backup_imports = BackupImportManager(
+                catalog, backups, restores, self.settings.data_dir
+            )
         except BaseException:
             await candidate.close()
             raise
@@ -257,6 +283,7 @@ class ManagementRuntime:
         self.restores = restores
         self.cleanup = cleanup
         self.verifications = verifications
+        self.backup_imports = backup_imports
         self.provisioner = BotProvisioner(catalog)
         self.service_tasks = [
             asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
@@ -265,6 +292,7 @@ class ManagementRuntime:
             asyncio.create_task(restores.run_forever(), name="restore-stage-jobs"),
             asyncio.create_task(cleanup.run_forever(), name="storage-cleanup-jobs"),
             asyncio.create_task(verifications.run_forever(), name="backup-verification-jobs"),
+            asyncio.create_task(backup_imports.run_forever(), name="backup-import-jobs"),
         ]
         self.recovery_error = None
 
@@ -279,6 +307,8 @@ class ManagementRuntime:
             await self.cleanup.close()
         if self.verifications is not None:
             await self.verifications.close()
+        if self.backup_imports is not None:
+            await self.backup_imports.close()
         for task in self.service_tasks:
             task.cancel()
         await asyncio.gather(*self.service_tasks, return_exceptions=True)
@@ -298,6 +328,7 @@ class ManagementRuntime:
                         ("restore-stage-jobs", self.restores.run_forever),
                         ("storage-cleanup-jobs", self.cleanup.run_forever),
                         ("backup-verification-jobs", self.verifications.run_forever),
+                        ("backup-import-jobs", self.backup_imports.run_forever),
                     )):
                         task = self.service_tasks[index]
                         if task.done():

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import threading
+import zipfile
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -14,8 +15,14 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Jsonb
 from test_bot_catalog import fixture as fixture
 
-from forest.backup_artifact import decrypt_file, inspect_zip
+from forest.backup_artifact import (
+    decrypt_file,
+    encrypt_file,
+    inspect_zip,
+    prepare_header,
+)
 from forest.errors import ForestError
+from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
 from forest.management.cleanup import StorageCleanupManager
 from forest.management.provision import BotProvisioner
@@ -24,6 +31,12 @@ from forest.management.verifications import BackupVerificationManager
 from forest.packages import PackageCatalog, digest_json
 
 pytestmark = pytest.mark.postgres
+
+
+async def _file_chunks(path, size=65536):
+    with path.open("rb") as stream:
+        while chunk := stream.read(size):
+            yield chunk
 
 
 async def _deployment_backup(fixture, data_dir, *, key):
@@ -55,6 +68,185 @@ async def _verify_backup(
     verified = await manager.run_once()
     assert verified["state"] == "VERIFIED" and verified["receipt_valid"]
     return manager, verified
+
+
+async def test_external_backup_import_streams_validates_and_deduplicates(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups, queued = await _deployment_backup(
+        fixture, data_dir, key="backup-import-source"
+    )
+    restores = RestoreManager(fixture.catalog, backups, data_dir)
+    imports = BackupImportManager(fixture.catalog, backups, restores, data_dir)
+    path, metadata = await backups.artifact(backup_id=queued["backup_id"], **fixture.auth)
+    try:
+        reserved = await imports.reserve(
+            **fixture.auth, expected_password_hash="unused-test-hash",
+            expected_size=path.stat().st_size, idempotency_key="external-import-once",
+        )
+        assert reserved["state"] == "RESERVED" and reserved["upload_available"]
+        uploaded = await imports.upload(
+            import_id=reserved["import_id"], **fixture.auth, chunks=_file_chunks(path)
+        )
+        assert uploaded["state"] == "UPLOADED"
+        assert uploaded["ciphertext_digest"] == metadata["ciphertext_digest"]
+        with pytest.raises(ForestError) as invalid:
+            await imports.queue(
+                import_id=reserved["import_id"], **fixture.auth,
+                expected_password_hash="unused-test-hash",
+                passphrase="wrong recovery passphrase for import",
+                passphrase_digest="wrong-import-passphrase-digest",
+            )
+        assert invalid.value.code == "BACKUP_PASSPHRASE_INVALID"
+        assert (await imports.read(import_id=reserved["import_id"], **fixture.auth))["state"] == "UPLOADED"
+
+        finalized = await imports.queue(
+            import_id=reserved["import_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash",
+            passphrase="cleanup recovery passphrase for tests",
+            passphrase_digest="correct-import-passphrase-digest",
+        )
+        assert finalized["state"] == "QUEUED" and "archive_key_ciphertext" not in finalized
+        imported = await imports.run_once()
+        assert imported["state"] == "IMPORTED"
+        assert imported["backup_id"] == queued["backup_id"]
+        assert imported["database_total"] == 1
+        assert not (imports.import_dir / f".job-{reserved['import_id']}-1.forest-backup-upload").exists()
+        async with fixture.store.pool.connection() as conn:
+            audit = await (await conn.execute(
+                "SELECT details FROM audit_records WHERE action='backup.import.completed' "
+                "AND request_id=%s", (reserved["import_id"],)
+            )).fetchone()
+            cleanup_receipt = await (await conn.execute(
+                "SELECT details FROM backup_import_cleanup_receipts WHERE import_id=%s",
+                (reserved["import_id"],),
+            )).fetchone()
+        assert audit["details"]["deduplicated"] is True
+        assert cleanup_receipt["details"]["upload_result"] in {"DELETED", "ABSENT"}
+    finally:
+        await imports.close()
+        await restores.close()
+        await backups.close()
+
+
+async def test_external_backup_import_publishes_new_standard_backup(fixture, tmp_path):
+    data_dir = tmp_path / "vault"
+    backups, queued = await _deployment_backup(
+        fixture, data_dir, key="backup-import-new-source"
+    )
+    source, _ = await backups.artifact(backup_id=queued["backup_id"], **fixture.auth)
+    old_plain = tmp_path / "old.zip"
+    decrypt_file(source, old_plain, "cleanup recovery passphrase for tests")
+    new_id = str(uuid4())
+    new_plain = tmp_path / "new.zip"
+    with zipfile.ZipFile(old_plain) as incoming, zipfile.ZipFile(
+        new_plain, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+    ) as outgoing:
+        for info in incoming.infolist():
+            value = incoming.read(info)
+            if info.filename == "manifest.json":
+                manifest = json.loads(value)
+                manifest["backup_id"] = new_id
+                value = json.dumps(
+                    manifest, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")
+            outgoing.writestr(info.filename, value)
+    passphrase = "external import recovery passphrase"
+    header, data_key = prepare_header(new_id, passphrase)
+    external = tmp_path / "external.forest-backup"
+    encrypt_file(new_plain, external, header, data_key)
+
+    restores = RestoreManager(fixture.catalog, backups, data_dir)
+    imports = BackupImportManager(fixture.catalog, backups, restores, data_dir)
+    verification = None
+    try:
+        reserved = await imports.reserve(
+            **fixture.auth, expected_password_hash="unused-test-hash",
+            expected_size=external.stat().st_size, idempotency_key="external-import-new",
+        )
+        await imports.upload(
+            import_id=reserved["import_id"], **fixture.auth, chunks=_file_chunks(external)
+        )
+        await imports.queue(
+            import_id=reserved["import_id"], **fixture.auth,
+            expected_password_hash="unused-test-hash", passphrase=passphrase,
+            passphrase_digest="external-import-passphrase-digest",
+        )
+        imported = await imports.run_once()
+        assert imported["state"] == "IMPORTED" and imported["backup_id"] == new_id
+        detail = await backups.read(backup_id=new_id, **fixture.auth)
+        assert detail["state"] == "READY" and detail["download_available"]
+        assert len(detail["databases"]) == 1
+        verification, receipt = await _verify_backup(
+            fixture, backups, restores, data_dir, backup_id=new_id,
+            passphrase=passphrase, passphrase_digest="external-verification-passphrase",
+            key="verify-external-import",
+        )
+        assert receipt["backup_id"] == new_id and receipt["receipt_valid"]
+    finally:
+        if verification is not None:
+            await verification.close()
+        await imports.close()
+        await restores.close()
+        await backups.close()
+
+
+async def test_backup_import_rejects_partial_upload_and_cancels_on_lease_loss(
+    fixture, tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "vault"
+    backups = BackupManager(
+        fixture.catalog, PackageCatalog(data_dir / "artifacts"), data_dir,
+        fixture.catalog.managed_dsn,
+    )
+    restores = RestoreManager(fixture.catalog, backups, data_dir)
+    imports = BackupImportManager(fixture.catalog, backups, restores, data_dir)
+
+    async def short_body():
+        yield b"short"
+
+    try:
+        first = await imports.reserve(
+            **fixture.auth, expected_password_hash="unused-test-hash",
+            expected_size=10, idempotency_key="partial-import",
+        )
+        with pytest.raises(ForestError) as mismatch:
+            await imports.upload(
+                import_id=first["import_id"], **fixture.auth, chunks=short_body()
+            )
+        assert mismatch.value.code == "BACKUP_UPLOAD_SIZE_MISMATCH"
+        assert (await imports.read(import_id=first["import_id"], **fixture.auth))["state"] == "RESERVED"
+
+        second = await imports.reserve(
+            **fixture.auth, expected_password_hash="unused-test-hash",
+            expected_size=10, idempotency_key="lease-loss-import",
+        )
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked_body():
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+            yield b"unreachable"
+
+        async def lose_lease(job):
+            await started.wait()
+            raise ForestError("BACKUP_IMPORT_LEASE_LOST", "lease lost", 409)
+
+        monkeypatch.setattr(imports, "_renew_lease", lose_lease)
+        with pytest.raises(ForestError) as lost:
+            await imports.upload(
+                import_id=second["import_id"], **fixture.auth, chunks=blocked_body()
+            )
+        assert lost.value.code == "BACKUP_IMPORT_LEASE_LOST" and cancelled.is_set()
+        assert (await imports.read(import_id=second["import_id"], **fixture.auth))["state"] == "RESERVED"
+        assert list(imports.import_dir.iterdir()) == []
+    finally:
+        await imports.close()
+        await restores.close()
+        await backups.close()
 
 
 async def test_encrypted_backup_captures_deployment_and_bot_consistent_cuts(

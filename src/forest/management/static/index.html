@@ -95,6 +95,17 @@
           <p class="hint">提交后会先撤销下载或隔离副本的可见性，再由可续跑后台任务删除 Forest 精确拥有的文件或数据库。普通磁盘不提供不可恢复证明。</p>
         </form>
       </div></div>
+      <div class="card"><h2>导入外部加密备份</h2>
+        <p class="muted">把从另一套 Forest 部署下载的原始加密工件重新纳入本部署。服务端先按声明大小流式暂存，再完整解密、核对清单和所有成员；校验成功后才发布为标准备份。</p>
+        <form id="backup-import-form">
+          <label>加密备份文件<input name="artifact" type="file" accept=".bin,.forest-backup,application/vnd.forest.backup" required></label>
+          <label>恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
+          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
+          <button type="submit">上传并校验导入</button>
+        </form>
+        <p class="hint">上传受持久租约和精确大小上限约束，可在进程中断后重新提交。同一备份 ID 只有密文与清单摘要完全一致时才会去重；恢复口令明文不会保存。</p>
+      </div>
+      <h2>外部备份导入任务</h2><p id="backup-import-empty" class="hint hidden">还没有外部备份导入任务。</p><div id="backup-import-list" aria-live="polite"></div>
       <p id="backup-empty" class="hint hidden">还没有备份任务。</p><div id="backup-list" aria-live="polite"></div>
       <h2>隔离恢复任务</h2><p id="restore-empty" class="hint hidden">还没有隔离恢复任务。</p><div id="restore-list" aria-live="polite"></div>
     </section>

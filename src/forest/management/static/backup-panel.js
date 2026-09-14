@@ -4,6 +4,8 @@ const states = {
   QUEUED: '等待执行', CAPTURING: '正在抓取数据库', SEALING: '正在加密封口',
   READY: '可下载', INCONSISTENT: '目录在抓取期间发生变化', FAILED: '失败', EXPIRED: '已过期',
   VERIFIED: '只读校验通过',
+  RESERVED: '等待上传', UPLOADING: '正在流式上传', UPLOADED: '等待口令确认',
+  IMPORTING: '正在解密校验并发布', IMPORTED: '导入完成',
   VERIFYING: '正在校验工件', RESTORING: '正在恢复隔离数据库',
   VALIDATING: '正在验证恢复结果', STAGED: '隔离恢复完成',
 };
@@ -16,9 +18,10 @@ function size(value) {
   return `${amount.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
-export function backupPanel(api, busy, notice) {
-  let rows = [], verificationRows = [], restoreRows = [];
+export function backupPanel(api, busy, notice, uploadArtifact) {
+  let rows = [], verificationRows = [], restoreRows = [], importRows = [];
   let createKey = null, restoreKey = null, cleanupKey = null;
+  let importKey = null, activeImport = null;
   let cleanupPlan = null, cleanupRetry = null;
   let selectedBackup = null, selectedVerification = null, formMode = null, readSeq = 0;
 
@@ -160,6 +163,21 @@ export function backupPanel(api, busy, notice) {
       }
       target.append(card);
     }
+    const importTarget = $('backup-import-list'); importTarget.replaceChildren();
+    $('backup-import-empty').classList.toggle('hidden', importRows.length !== 0);
+    for (const row of importRows) {
+      const card = document.createElement('article'); card.className = 'audit-row';
+      const title = document.createElement('h3');
+      title.textContent = `${states[row.state] || row.state} · ${row.import_id}`;
+      const progress = document.createElement('p'); progress.className = 'muted';
+      progress.textContent = `${size(row.byte_size ?? 0)} / ${size(row.expected_size)}` +
+        `${row.backup_id ? ` · 备份 ${row.backup_id}` : ''}` +
+        `${row.database_total ? ` · ${row.database_total} 个数据库` : ''}`;
+      const meta = document.createElement('p'); meta.className = 'hint';
+      meta.textContent = `创建 ${row.created_at} · 更新 ${row.updated_at}` +
+        `${row.error_code ? ` · ${row.error_code}` : ''}`;
+      card.append(title, progress, meta); importTarget.append(card);
+    }
     const restoreTarget = $('restore-list'); restoreTarget.replaceChildren();
     $('restore-empty').classList.toggle('hidden', restoreRows.length !== 0);
     for (const row of restoreRows) {
@@ -199,8 +217,9 @@ export function backupPanel(api, busy, notice) {
 
   async function load() {
     const seq = ++readSeq;
-    const [data, verificationData, restoreData] = await Promise.all([
+    const [data, verificationData, restoreData, importData] = await Promise.all([
       api('/backups'), api('/backup-verifications'), api('/restore-stages'),
+      api('/backup-imports'),
     ]);
     const detailed = await Promise.all(data.backups.map(async (row) => {
       if (!['READY', 'INCONSISTENT'].includes(row.state)) return row;
@@ -212,7 +231,7 @@ export function backupPanel(api, busy, notice) {
     }));
     if (seq !== readSeq) return data;
     rows = detailed; verificationRows = verificationData.verifications;
-    restoreRows = restoreDetails; render(); return data;
+    restoreRows = restoreDetails; importRows = importData.imports; render(); return data;
   }
 
   $('backup-refresh').addEventListener('click', () => busy($('backup-refresh'), load));
@@ -239,6 +258,37 @@ export function backupPanel(api, busy, notice) {
       }
       createKey = null; await load();
       notice('备份任务已接纳。请妥善保存恢复口令；服务端不会保留口令明文。', true);
+    });
+  });
+  $('backup-import-form').addEventListener('change', (event) => {
+    if (event.target.name === 'artifact') { importKey = null; activeImport = null; }
+  });
+  $('backup-import-form').addEventListener('submit', (event) => {
+    event.preventDefault(); const form = event.currentTarget;
+    if (!form.reportValidity()) return;
+    busy(form.querySelector('button'), async () => {
+      const artifact = form.elements.artifact.files[0];
+      if (!artifact || artifact.size < 1) throw new Error('请选择非空的加密备份文件。');
+      importKey ||= crypto.randomUUID();
+      if (!activeImport) {
+        activeImport = await api('/backup-imports', {
+          expected_size: artifact.size,
+          current_password: form.elements.current_password.value,
+        }, {'Idempotency-Key': importKey});
+      }
+      if (activeImport.upload_available) {
+        activeImport = await uploadArtifact(
+          `/backup-imports/${encodeURIComponent(activeImport.import_id)}/artifact`, artifact
+        );
+      }
+      activeImport = await api(
+        `/backup-imports/${encodeURIComponent(activeImport.import_id)}/finalize`, {
+          recovery_passphrase: form.elements.recovery_passphrase.value,
+          current_password: form.elements.current_password.value,
+        }
+      );
+      form.reset(); importKey = null; activeImport = null; await load();
+      notice('外部备份已接纳；后台正在完整解密校验，成功后会出现在标准备份列表。', true);
     });
   });
   $('backup-restore-cancel').addEventListener('click', closeRestoreForm);
@@ -304,13 +354,17 @@ export function backupPanel(api, busy, notice) {
       ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)) ||
       restoreRows.some((row) => ['QUEUED', 'VERIFYING', 'RESTORING', 'VALIDATING'].includes(row.state) ||
         ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)) ||
-      verificationRows.some((row) => ['QUEUED', 'VERIFYING'].includes(row.state)),
+      verificationRows.some((row) => ['QUEUED', 'VERIFYING'].includes(row.state)) ||
+      importRows.some((row) => ['UPLOADING', 'QUEUED', 'IMPORTING'].includes(row.state)),
     reset() {
-      readSeq++; rows = []; verificationRows = []; restoreRows = []; createKey = null;
+      readSeq++; rows = []; verificationRows = []; restoreRows = []; importRows = [];
+      createKey = null; importKey = null; activeImport = null;
       closeRestoreForm(); closeCleanupForm();
       $('backup-create-form').reset(); $('backup-list').replaceChildren();
+      $('backup-import-form').reset(); $('backup-import-list').replaceChildren();
       $('restore-list').replaceChildren();
       $('backup-empty').classList.remove('hidden'); $('restore-empty').classList.remove('hidden');
+      $('backup-import-empty').classList.remove('hidden');
     },
   };
 }

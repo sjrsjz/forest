@@ -547,6 +547,18 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                 item['name'].startswith('artifacts/')
                 for item in backup_manifest['members']
             )
+            import_form = page.locator('#backup-import-form')
+            import_form.locator('[name="artifact"]').set_input_files(encrypted_backup)
+            import_form.locator('[name="recovery_passphrase"]').fill(recovery_passphrase)
+            import_form.locator('[name="current_password"]').fill(password)
+            import_form.locator('button[type="submit"]').click()
+            expect(page.locator('#backup-import-list')).to_contain_text(
+                '导入完成', timeout=60000
+            )
+            expect(page.locator('#backup-import-list')).to_contain_text(
+                backup_header['backup_id']
+            )
+            expect(import_form.locator('[name="recovery_passphrase"]')).to_have_value('')
             restore_form = page.locator('#backup-restore-form')
             expect(page.get_by_role('button', name='建立隔离恢复副本')).to_have_count(0)
             page.get_by_role('button', name='只读校验备份').first.click()
@@ -613,7 +625,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
-                        "Web encrypted deployment and two-Bot backup, independent read-only verification, isolated three-database restore, tombstone, and verified cleanup",
+                        "Web encrypted deployment and two-Bot backup, streamed external import, independent read-only verification, isolated three-database restore, tombstone, and verified cleanup",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

@@ -90,7 +90,9 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         html = await admin.get("/")
         script = await admin.get("/static/backup-panel.js")
         assert 'id="nav-backups"' in html.text and 'id="storage-cleanup-form"' in html.text
+        assert 'id="backup-import-form"' in html.text
         assert script.status_code == 200 and "cleanup-plan" in script.text
+        assert "/backup-imports" in script.text
         empty = await admin.get("/management/v1/backups")
         assert empty.status_code == 200 and empty.json()["backups"] == []
 
@@ -142,6 +144,37 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         manifest = inspect_zip(restored)
         assert header["backup_id"] == manifest["backup_id"] == queued["backup_id"]
         assert manifest["roster"]["consistent"] is True
+
+        import_reservation = await admin.post(
+            "/management/v1/backup-imports",
+            json={"expected_size": len(download.content), "current_password": PASSWORD},
+            headers={"idempotency-key": "web-external-import"},
+        )
+        assert import_reservation.status_code == 201, import_reservation.text
+        import_job = import_reservation.json()
+        uploaded = await admin.put(
+            f"/management/v1/backup-imports/{import_job['import_id']}/artifact",
+            content=download.content,
+            headers={"content-type": "application/vnd.forest.backup"},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        assert uploaded.json()["state"] == "UPLOADED"
+        finalized = await admin.post(
+            f"/management/v1/backup-imports/{import_job['import_id']}/finalize",
+            json={"recovery_passphrase": passphrase, "current_password": PASSWORD},
+        )
+        assert finalized.status_code == 202, finalized.text
+        for _ in range(100):
+            imported = await admin.get(
+                f"/management/v1/backup-imports/{import_job['import_id']}"
+            )
+            assert imported.status_code == 200, imported.text
+            import_job = imported.json()
+            if import_job["state"] in {"IMPORTED", "FAILED"}:
+                break
+            await asyncio.sleep(0.05)
+        assert import_job["state"] == "IMPORTED" and import_job["backup_id"] == queued["backup_id"]
+        assert "archive_key_ciphertext" not in import_job and passphrase not in imported.text
 
         verification_response = await admin.post(
             f"/management/v1/backups/{queued['backup_id']}/verifications",
@@ -288,6 +321,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
             assert (
                 await viewer.get("/management/v1/backup-verifications")
             ).status_code == 403
+            assert (await viewer.get("/management/v1/backup-imports")).status_code == 403
             assert (
                 await viewer.get(
                     f"/management/v1/backups/{queued['backup_id']}/download"

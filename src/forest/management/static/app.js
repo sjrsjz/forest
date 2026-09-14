@@ -53,6 +53,27 @@ async function fetchApi(path, body, extraHeaders) {
   }
   return data;
 }
+async function uploadBackupArtifact(path, artifact) {
+  if (currentUser?.role === 'viewer') {
+    const error = new Error('当前账号不能导入备份。(PERMISSION_DENIED)');
+    error.code = 'PERMISSION_DENIED'; throw error;
+  }
+  const response = await fetch(`/management/v1${path}`, {
+    method: 'PUT', credentials: 'same-origin', body: artifact,
+    headers: {
+      'Content-Type': 'application/vnd.forest.backup',
+      'X-CSRF-Token': csrf(),
+    },
+  });
+  const data = await response.json().catch(() => ({
+    code: 'INVALID_RESPONSE', message: '服务暂时无法响应，请稍后重试。',
+  }));
+  if (!response.ok || data?.code === 'INVALID_RESPONSE') {
+    const error = new Error(`${data?.message || '上传未完成'} (${data?.code || response.status})`);
+    error.code = data?.code; throw error;
+  }
+  return data;
+}
 function setIdentity(user) {
   currentUser = user;
   document.body.classList.toggle('viewer', user?.role === 'viewer');
@@ -191,7 +212,7 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
 });
 const deploymentAudit = auditPanel(api, busy);
 const botAudit = botAuditPanel(api, busy);
-const backupsPanel = createBackupPanel(api, busy, notice);
+const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
