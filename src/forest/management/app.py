@@ -27,6 +27,7 @@ from starlette.staticfiles import StaticFiles
 from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
 from forest.management.accounts_api import install_account_routes
+from forest.management.activations import RestoreActivationManager
 from forest.management.agent_api import install_agent_routes
 from forest.management.audit_api import install_audit_routes
 from forest.management.authority import WebAuthority
@@ -212,6 +213,7 @@ class ManagementRuntime:
         self.provisioner: BotProvisioner | None = None
         self.backups: BackupManager | None = None
         self.restores: RestoreManager | None = None
+        self.activations: RestoreActivationManager | None = None
         self.cleanup: StorageCleanupManager | None = None
         self.verifications: BackupVerificationManager | None = None
         self.backup_imports: BackupImportManager | None = None
@@ -264,6 +266,7 @@ class ManagementRuntime:
                 catalog, fleet.artifacts, self.settings.data_dir, plan["dsn"]
             )
             restores = RestoreManager(catalog, backups, self.settings.data_dir)
+            activations = RestoreActivationManager(catalog)
             cleanup = StorageCleanupManager(catalog, backups)
             verifications = BackupVerificationManager(
                 catalog, backups, restores, self.settings.data_dir
@@ -281,6 +284,7 @@ class ManagementRuntime:
         self.catalog, self.authority, self.fleet = catalog, authority, fleet
         self.backups = backups
         self.restores = restores
+        self.activations = activations
         self.cleanup = cleanup
         self.verifications = verifications
         self.backup_imports = backup_imports
@@ -290,6 +294,7 @@ class ManagementRuntime:
             asyncio.create_task(fleet.run_forever(), name="bot-fleet"),
             asyncio.create_task(backups.run_forever(), name="backup-jobs"),
             asyncio.create_task(restores.run_forever(), name="restore-stage-jobs"),
+            asyncio.create_task(activations.run_forever(), name="restore-activation-jobs"),
             asyncio.create_task(cleanup.run_forever(), name="storage-cleanup-jobs"),
             asyncio.create_task(verifications.run_forever(), name="backup-verification-jobs"),
             asyncio.create_task(backup_imports.run_forever(), name="backup-import-jobs"),
@@ -303,6 +308,8 @@ class ManagementRuntime:
             await self.backups.close()
         if self.restores is not None:
             await self.restores.close()
+        if self.activations is not None:
+            await self.activations.close()
         if self.cleanup is not None:
             await self.cleanup.close()
         if self.verifications is not None:
@@ -326,6 +333,7 @@ class ManagementRuntime:
                         ("bot-fleet", self.fleet.run_forever),
                         ("backup-jobs", self.backups.run_forever),
                         ("restore-stage-jobs", self.restores.run_forever),
+                        ("restore-activation-jobs", self.activations.run_forever),
                         ("storage-cleanup-jobs", self.cleanup.run_forever),
                         ("backup-verification-jobs", self.verifications.run_forever),
                         ("backup-import-jobs", self.backup_imports.run_forever),

@@ -35,6 +35,7 @@ class ManagedBot:
     ready: bool = False
     retries: dict[str, tuple[int, int, float]] = field(default_factory=dict)
     platform: BindingRuntime | None = None
+    directory_generation: int = 1
 
 
 class BotFleet:
@@ -198,7 +199,13 @@ class BotFleet:
                 "CAPABILITY_DENIED", "Explicitly grant the package's required capabilities", 403
             )
 
-    async def attach(self, bot_id: str) -> ManagedBot:
+    async def _resolve_storage(self, bot_id: str) -> dict:
+        resolver = getattr(self.catalog, "resolve_storage", None)
+        if resolver is not None:
+            return await resolver(bot_id)
+        return {"dsn": await self.catalog.resolve_dsn(bot_id), "storage_generation": 1}
+
+    async def attach(self, bot_id: str, expected_generation: int | None = None) -> ManagedBot:
         if not isinstance(bot_id, str) or not 1 <= len(bot_id) <= 128:
             raise ForestError("INVALID_BOT", "A bounded Bot identity is required", 422)
         if bot_id not in self._attach_locks:
@@ -211,8 +218,22 @@ class BotFleet:
             async with asyncio.timeout(self.attach_timeout), self._attach_locks[bot_id]:
                 if self._closed:
                     raise ForestError("RUNTIME_STOPPING", "Bot supervisor is stopping", 503)
+                # Request paths may arrive after the directory head changed but
+                # before the background roster poll. Resolve the head before
+                # reusing an apparently healthy in-memory owner; the old database
+                # fence is authoritative, but serving its stale host is needless.
+                pinned_generation = expected_generation is not None
+                if not pinned_generation:
+                    async with self._attach_slots:
+                        current = await self._resolve_storage(bot_id)
+                    expected_generation = current["storage_generation"]
                 existing = self.bots.get(bot_id)
-                if existing is not None and self._usable(existing):
+                if (
+                    existing is not None
+                    and self._usable(existing)
+                    and (expected_generation is None
+                         or existing.directory_generation == expected_generation)
+                ):
                     if existing.task is None or existing.task.done():
                         existing.task = asyncio.create_task(
                             self._reconcile(existing), name=f"bot-config-{bot_id}"
@@ -222,10 +243,24 @@ class BotFleet:
                     if existing is not None:
                         await self._cleanup(existing)
                         self.bots.pop(bot_id, None)
-                    dsn = await self.catalog.resolve_dsn(bot_id)
-                    store = BotStore(dsn, bot_id)
+                    # Re-read after any potentially long cleanup. Unpinned request
+                    # paths follow the newest monotonic head; roster-driven attaches
+                    # must still match the generation they were scheduled for.
+                    storage = await self._resolve_storage(bot_id)
+                    if (
+                        pinned_generation
+                        and storage["storage_generation"] != expected_generation
+                    ):
+                        raise ForestError(
+                            "STORAGE_HEAD_CHANGED", "Bot storage generation changed", 409,
+                            details={"current_generation": storage["storage_generation"]},
+                        )
+                    store = BotStore(storage["dsn"], bot_id)
                     kernel = Kernel(store, host_id="web-fleet")
-                    managed = ManagedBot(store, kernel, BotControl(store))
+                    managed = ManagedBot(
+                        store, kernel, BotControl(store),
+                        directory_generation=storage["storage_generation"],
+                    )
                     self.bots[bot_id] = managed
                     try:
                         await store.open()
@@ -343,9 +378,9 @@ class BotFleet:
                 )
             await asyncio.sleep(self.reconcile_interval)
 
-    async def _attach_background(self, bot_id: str) -> None:
+    async def _attach_background(self, bot_id: str, expected_generation: int | None = None) -> None:
         try:
-            await self.attach(bot_id)
+            await self.attach(bot_id, expected_generation)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -373,9 +408,11 @@ class BotFleet:
                     ):
                         continue
                     existing = self.bots.get(bot_id)
+                    expected_generation = row.get("storage_generation", 1)
                     if (
                         existing is not None
                         and self._usable(existing)
+                        and existing.directory_generation == expected_generation
                         and existing.task
                         and not existing.task.done()
                     ):
@@ -388,7 +425,8 @@ class BotFleet:
                     ):
                         continue
                     self._attach_jobs[bot_id] = asyncio.create_task(
-                        self._attach_background(bot_id), name=f"bot-attach-{bot_id}"
+                        self._attach_background(bot_id, expected_generation),
+                        name=f"bot-attach-{bot_id}"
                     )
             except asyncio.CancelledError:
                 raise
@@ -402,6 +440,7 @@ class BotFleet:
         attached = bot is not None and self._usable(bot)
         return {
             "attached": attached,
+            "storage_generation": bot.directory_generation if bot is not None else None,
             "error_code": self.errors.get(bot_id)
             or ("BOT_RECOVERING" if bot is not None and not attached else None),
             "components": []

@@ -233,6 +233,11 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                 return page.locator("#bot-list button").filter(has_text=name).get_attribute("data-bot-id")
 
             def select_bot(page, bot_id: str) -> None:
+                # A same-Bot re-selection can otherwise satisfy the assertion
+                # with text left by its previous storage generation.
+                page.locator("#bot-runtime-status").evaluate(
+                    "node => { node.textContent = '正在读取当前存储代际…'; }"
+                )
                 page.locator(f'#bot-list button[data-bot-id="{bot_id}"]').click()
                 expect(page.locator("#bot-runtime-status")).to_have_text("组件已生效并运行中", timeout=30000)
 
@@ -519,6 +524,13 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             page.screenshot(path=str(artifacts / 'packages-mobile.png'), full_page=True)
             page.set_viewport_size({"width": 1360, "height": 1000})
             page.screenshot(path=str(artifacts / 'packages-desktop.png'), full_page=True)
+            # Freeze the Bot chosen for activation before its online backup cut.
+            # This preserves the exact external-effect ledger required for a safe
+            # rollback while the other Bot remains live and independently usable.
+            maintenance_form = page.locator('#bot-maintenance-form')
+            maintenance_form.locator('[name="reason"]').fill('浏览器恢复激活验收')
+            page.locator('#bot-maintenance-toggle').click()
+            expect(page.locator('#bot-maintenance-status')).to_contain_text('业务已暂停')
             recovery_passphrase = secrets.token_urlsafe(32)
             page.locator('#nav-backups').click()
             expect(page.locator('#backups')).to_be_visible()
@@ -581,6 +593,22 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#restore-list li')).to_have_count(3)
             expect(restore_form).to_be_hidden()
             page.screenshot(path=str(artifacts / 'backups-desktop.png'), full_page=True)
+            beta_restore = page.locator('#restore-list li').filter(has_text=f'Bot {beta}')
+            expect(beta_restore.get_by_role('button', name='预览并激活此 Bot 副本')).to_have_count(1)
+            beta_restore.get_by_role('button', name='预览并激活此 Bot 副本').click()
+            activation_form = page.locator('#restore-activation-form')
+            expect(activation_form).to_be_visible()
+            expect(page.locator('#restore-activation-warning')).to_contain_text('存储代际 1 → 2')
+            activation_form.locator('[name="current_password"]').fill(password)
+            activation_form.locator('button[type="submit"]').click()
+            expect(page.locator('#restore-list')).to_contain_text('激活 激活完成', timeout=60000)
+            expect(activation_form).to_be_hidden()
+            page.screenshot(path=str(artifacts / 'restore-activation-desktop.png'), full_page=True)
+            page.locator('#nav-bots').click()
+            select_bot(page, beta)
+            invoke(1, '：13（状态修订 4）')
+            page.locator('#nav-backups').click()
+            expect(page.locator('#backups')).to_be_visible()
             page.get_by_role('button', name='预览并删除隔离副本').first.click()
             cleanup_form = page.locator('#storage-cleanup-form')
             expect(cleanup_form).to_be_visible()
@@ -625,7 +653,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "Disabled multimodal Memory form preview/apply, independent Bot budgets and keys, restart persistence and no inference requests",
                         "UNKNOWN operator reconciliation and restart connection recovery",
                         "Web ZIP import, generic forms, version upgrade and history restore preserve live state",
-                        "Web encrypted deployment and two-Bot backup, streamed external import, independent read-only verification, isolated three-database restore, tombstone, and verified cleanup",
+                        "Web encrypted deployment and two-Bot backup, streamed external import, independent read-only verification, isolated three-database restore, one-Bot storage-generation activation, tombstone, and active-head-aware cleanup",
                         "logout revocation",
                     ],
                     "artifacts": str(artifacts),

@@ -8,6 +8,8 @@ const states = {
   IMPORTING: '正在解密校验并发布', IMPORTED: '导入完成',
   VERIFYING: '正在校验工件', RESTORING: '正在恢复隔离数据库',
   VALIDATING: '正在验证恢复结果', STAGED: '隔离恢复完成',
+  FENCING: '正在封存旧库', SWITCHING: '正在切换存储目录', ACTIVATING: '正在启用恢复库',
+  COMPLETE: '激活完成', BLOCKED: '需要处理后重试',
 };
 
 function size(value) {
@@ -19,10 +21,11 @@ function size(value) {
 }
 
 export function backupPanel(api, busy, notice, uploadArtifact) {
-  let rows = [], verificationRows = [], restoreRows = [], importRows = [];
+  let rows = [], verificationRows = [], restoreRows = [], importRows = [], activationRows = [];
   let createKey = null, restoreKey = null, cleanupKey = null;
   let importKey = null, activeImport = null;
   let cleanupPlan = null, cleanupRetry = null;
+  let activationPlan = null, activationRetry = null, activationKey = null;
   let selectedBackup = null, selectedVerification = null, formMode = null, readSeq = 0;
 
   function closeRestoreForm() {
@@ -64,6 +67,37 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
     $('storage-cleanup-resource').textContent = '';
   }
 
+  function closeActivationForm() {
+    activationPlan = null; activationRetry = null; activationKey = null;
+    $('restore-activation-form').reset();
+    $('restore-activation-form').classList.add('hidden');
+    $('restore-activation-target').textContent = '';
+  }
+
+  async function openActivation(restoreId, target) {
+    closeActivationForm();
+    activationPlan = await api(
+      `/restore-stages/${encodeURIComponent(restoreId)}/activation-plans`,
+      {target_ordinal: target.ordinal},
+    );
+    $('restore-activation-target').textContent =
+      `Bot ${target.bot_id} · ${activationPlan.before.database_name} → ${activationPlan.after.database_name}`;
+    $('restore-activation-warning').textContent =
+      `存储代际 ${activationPlan.before.storage_generation} → ${activationPlan.after.storage_generation}。旧库会先停止接纳；切换期间 Bot 可能短暂离线。`;
+    $('restore-activation-form').querySelector('button[type="submit"]').textContent = '封存旧库并切换';
+    $('restore-activation-form').classList.remove('hidden');
+    $('restore-activation-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
+  function openActivationRetry(row) {
+    closeActivationForm(); activationRetry = row.activation_id;
+    $('restore-activation-target').textContent = `激活任务 ${row.activation_id} · Bot ${row.bot_id}`;
+    $('restore-activation-warning').textContent =
+      `任务在 ${states[row.state] || row.state} 阶段阻断：${row.error_code || '未知错误'}。排除外部故障后可从持久边界继续。`;
+    $('restore-activation-form').querySelector('button[type="submit"]').textContent = '重试激活';
+    $('restore-activation-form').classList.remove('hidden');
+  }
+
   async function openCleanup(kind, resourceId) {
     closeCleanupForm();
     const base = kind === 'BACKUP_ARTIFACT' ? `/backups/${encodeURIComponent(resourceId)}` :
@@ -72,7 +106,7 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
     $('storage-cleanup-resource').textContent = `${kind === 'BACKUP_ARTIFACT' ? '备份' : '隔离恢复'}：${resourceId}`;
     $('storage-cleanup-warning').textContent = kind === 'BACKUP_ARTIFACT' ?
       '应用后下载立即失效，后台随后删除加密工件。' :
-      '应用后隔离副本立即进入 EXPIRED，后台只删除名称和 owner marker 都匹配的数据库。';
+      '应用后隔离副本立即进入 EXPIRED；后台删除名称和 owner marker 都匹配的未采用数据库，并保留已经成为当前 storage head 的 Bot 数据库。';
     $('storage-cleanup-form').querySelector('button[type="submit"]').textContent = '撤销并清理';
     $('storage-cleanup-form').classList.remove('hidden');
     $('storage-cleanup-form').scrollIntoView({behavior: 'smooth', block: 'nearest'});
@@ -197,6 +231,28 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
           const item = document.createElement('li');
           const source = target.database_scope === 'deployment' ? '部署副本' : `Bot ${target.bot_id}`;
           item.textContent = `${source} · ${target.database_name} · ${states[target.state] || target.state}`;
+          if (target.database_scope === 'bot' && target.state === 'STAGED') {
+            const activation = activationRows.find((candidate) =>
+              candidate.restore_id === row.restore_id && candidate.target_ordinal === target.ordinal
+            );
+            if (!activation) {
+              const activate = document.createElement('button'); activate.className = 'danger';
+              activate.type = 'button'; activate.textContent = '预览并激活此 Bot 副本';
+              activate.addEventListener('click', () => busy(
+                activate, () => openActivation(row.restore_id, target)
+              ));
+              item.append(document.createTextNode(' '), activate);
+            } else if (activation.state === 'BLOCKED') {
+              const retry = document.createElement('button'); retry.className = 'danger';
+              retry.type = 'button'; retry.textContent = '处理问题后重试激活';
+              retry.addEventListener('click', () => openActivationRetry(activation));
+              item.append(document.createTextNode(' '), retry);
+            } else {
+              item.append(document.createTextNode(
+                ` · 激活 ${states[activation.state] || activation.state}`
+              ));
+            }
+          }
           list.append(item);
         }
         card.append(list);
@@ -217,9 +273,9 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
 
   async function load() {
     const seq = ++readSeq;
-    const [data, verificationData, restoreData, importData] = await Promise.all([
+    const [data, verificationData, restoreData, importData, activationData] = await Promise.all([
       api('/backups'), api('/backup-verifications'), api('/restore-stages'),
-      api('/backup-imports'),
+      api('/backup-imports'), api('/restore-activations'),
     ]);
     const detailed = await Promise.all(data.backups.map(async (row) => {
       if (!['READY', 'INCONSISTENT'].includes(row.state)) return row;
@@ -231,7 +287,8 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
     }));
     if (seq !== readSeq) return data;
     rows = detailed; verificationRows = verificationData.verifications;
-    restoreRows = restoreDetails; importRows = importData.imports; render(); return data;
+    restoreRows = restoreDetails; importRows = importData.imports;
+    activationRows = activationData.restore_activations; render(); return data;
   }
 
   $('backup-refresh').addEventListener('click', () => busy($('backup-refresh'), load));
@@ -347,6 +404,31 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
       notice('资源可见性已撤销；物理清理状态会在列表中继续更新。', true);
     });
   });
+  $('restore-activation-cancel').addEventListener('click', closeActivationForm);
+  $('restore-activation-form').addEventListener('input', () => { activationKey = null; });
+  $('restore-activation-form').addEventListener('submit', (event) => {
+    event.preventDefault(); const form = event.currentTarget;
+    if ((!activationPlan && !activationRetry) || !form.reportValidity()) return;
+    busy(form.querySelector('button[type="submit"]'), async () => {
+      activationKey ||= crypto.randomUUID();
+      try {
+        if (activationRetry) {
+          await api(`/restore-activations/${encodeURIComponent(activationRetry)}/retry`, {
+            current_password: form.elements.current_password.value,
+          }, {'Idempotency-Key': activationKey});
+        } else {
+          await api('/restore-activations', {
+            plan_id: activationPlan.plan_id, plan_digest: activationPlan.plan_digest,
+            current_password: form.elements.current_password.value,
+          }, {'Idempotency-Key': activationKey});
+        }
+      } finally {
+        form.elements.current_password.value = '';
+      }
+      closeActivationForm(); await load();
+      notice('恢复激活任务已接纳；页面会持续显示封存、目录切换与重新接入状态。', true);
+    });
+  });
 
   return {
     load,
@@ -355,11 +437,15 @@ export function backupPanel(api, busy, notice, uploadArtifact) {
       restoreRows.some((row) => ['QUEUED', 'VERIFYING', 'RESTORING', 'VALIDATING'].includes(row.state) ||
         ['QUEUED', 'CLEANING', 'RETRY'].includes(row.cleanup_state)) ||
       verificationRows.some((row) => ['QUEUED', 'VERIFYING'].includes(row.state)) ||
-      importRows.some((row) => ['UPLOADING', 'QUEUED', 'IMPORTING'].includes(row.state)),
+      importRows.some((row) => ['UPLOADING', 'QUEUED', 'IMPORTING'].includes(row.state)) ||
+      activationRows.some((row) =>
+        ['QUEUED', 'FENCING', 'SWITCHING', 'ACTIVATING'].includes(row.state)
+      ),
     reset() {
       readSeq++; rows = []; verificationRows = []; restoreRows = []; importRows = [];
+      activationRows = [];
       createKey = null; importKey = null; activeImport = null;
-      closeRestoreForm(); closeCleanupForm();
+      closeRestoreForm(); closeCleanupForm(); closeActivationForm();
       $('backup-create-form').reset(); $('backup-list').replaceChildren();
       $('backup-import-form').reset(); $('backup-import-list').replaceChildren();
       $('restore-list').replaceChildren();

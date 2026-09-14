@@ -145,6 +145,17 @@ class BotCatalog:
                  plan["database_name"], plan["role_name"], plan["secret_ciphertext"]),
             )
             await conn.execute(
+                "INSERT INTO bot_storage_generations(bot_id,storage_generation,source_kind,"
+                "plan_digest,cluster_id,database_name,role_name,secret_ciphertext) "
+                "VALUES (%s,1,'PROVISIONED',%s,%s,%s,%s,%s)",
+                (bot_id, plan["plan_digest"], plan["cluster_id"], plan["database_name"],
+                 plan["role_name"], plan["secret_ciphertext"]),
+            )
+            await conn.execute(
+                "INSERT INTO bot_storage_heads(bot_id,storage_generation) VALUES (%s,1)",
+                (bot_id,),
+            )
+            await conn.execute(
                 "INSERT INTO bot_provision_jobs(job_id,bot_id,subject_id,stage) "
                 "VALUES (%s,%s,%s,'PENDING')", (job_id, bot_id, subject_id),
             )
@@ -287,17 +298,37 @@ class BotCatalog:
         """Trusted Fleet directory projection; this grants no Bot write authority."""
         async with self.store.pool.connection() as conn:
             rows = await (await conn.execute(
-                "SELECT * FROM bot_catalog WHERE stage='READY' ORDER BY bot_id"
+                "SELECT b.*,h.storage_generation FROM bot_catalog b "
+                "JOIN bot_storage_heads h USING(bot_id) WHERE b.stage='READY' ORDER BY bot_id"
             )).fetchall()
-            return [_public(row, _BOT_KEYS) for row in rows]
+            return [
+                {**_public(row, _BOT_KEYS), "storage_generation": row["storage_generation"]}
+                for row in rows
+            ]
 
-    async def resolve_dsn(self, bot_id: str) -> str:
-        """Trusted host only. Never expose through a management response."""
+    async def resolve_storage(self, bot_id: str) -> dict[str, Any]:
+        """Trusted host projection for the current generation; never expose publicly."""
         async with self.store.pool.connection() as conn:
             row = await (await conn.execute(
-                "SELECT p.secret_ciphertext FROM bot_catalog b JOIN bot_storage_plans p USING(bot_id) "
-                "WHERE bot_id=%s AND b.stage='READY'", (bot_id,),
+                "SELECT b.mode,g.storage_generation,g.database_name,g.role_name,g.cluster_id,"
+                "g.plan_digest,g.secret_ciphertext FROM bot_catalog b "
+                "JOIN bot_storage_heads h USING(bot_id) "
+                "JOIN bot_storage_generations g USING(bot_id,storage_generation) "
+                "WHERE b.bot_id=%s AND b.stage='READY'", (bot_id,),
             )).fetchone()
             if row is None:
                 raise ForestError("BOT_NOT_READY", "Bot storage is not ready")
-            return json.loads(self.vault.decrypt(row["secret_ciphertext"]))["dsn"]
+            secret = json.loads(self.vault.decrypt(row["secret_ciphertext"]))
+            return {
+                "dsn": secret["dsn"],
+                "mode": row["mode"],
+                "storage_generation": row["storage_generation"],
+                "database_name": row["database_name"],
+                "role_name": row["role_name"],
+                "cluster_id": row["cluster_id"],
+                "plan_digest": row["plan_digest"],
+            }
+
+    async def resolve_dsn(self, bot_id: str) -> str:
+        """Trusted host only. Never expose through a management response."""
+        return (await self.resolve_storage(bot_id))["dsn"]

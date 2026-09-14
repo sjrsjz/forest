@@ -257,6 +257,63 @@ async def test_background_attach_recovers_without_directory_head_of_line_blockin
         await fleet.close()
 
 
+async def test_directory_generation_change_disposes_old_owner_before_reconnect(
+    tmp_path, fake_runtime
+):
+    generation = 1
+
+    async def resolve_storage(bot_id):
+        return {"dsn": f"synthetic-{generation}", "storage_generation": generation}
+
+    async def ready():
+        return [{"bot_id": "moving", "storage_generation": generation}]
+
+    fleet = BotFleet(
+        fake_catalog(resolve_storage=resolve_storage, list_ready=ready),
+        fake_runtime,
+        tmp_path,
+        reconcile_interval=0.01,
+    )
+    monitor = asyncio.create_task(fleet.run_forever())
+    try:
+        await wait_for(lambda: fleet.status("moving")["attached"])
+        old = fleet.bots["moving"]
+        assert old.directory_generation == 1
+        generation = 2
+        await wait_for(
+            lambda: fleet.bots.get("moving") is not old
+            and fleet.status("moving")["storage_generation"] == 2
+        )
+        assert old.kernel.closed and old.store.closed
+        assert fleet.bots["moving"].store.dsn == "synthetic-2"
+    finally:
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
+        await fleet.close()
+
+
+async def test_request_attach_resolves_directory_head_before_reusing_owner(
+    tmp_path, fake_runtime
+):
+    generation = 1
+
+    async def resolve_storage(bot_id):
+        return {"dsn": f"synthetic-{generation}", "storage_generation": generation}
+
+    fleet = BotFleet(
+        fake_catalog(resolve_storage=resolve_storage), fake_runtime, tmp_path
+    )
+    try:
+        old = await fleet.attach("moving")
+        generation = 2
+        current = await fleet.attach("moving")
+        assert current is not old and current.directory_generation == 2
+        assert old.kernel.closed and old.store.closed
+        assert current.store.dsn == "synthetic-2"
+    finally:
+        await fleet.close()
+
+
 async def test_failed_configuration_backs_off_but_new_revision_retries_immediately(
     tmp_path, fake_runtime
 ):

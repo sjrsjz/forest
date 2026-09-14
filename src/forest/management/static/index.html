@@ -92,7 +92,14 @@
           <p id="storage-cleanup-warning" class="notice"></p>
           <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
           <div class="actions"><button type="submit">撤销并清理</button><button id="storage-cleanup-cancel" class="subtle" type="button">取消</button></div>
-          <p class="hint">提交后会先撤销下载或隔离副本的可见性，再由可续跑后台任务删除 Forest 精确拥有的文件或数据库。普通磁盘不提供不可恢复证明。</p>
+          <p class="hint">提交后会先撤销下载或隔离副本的可见性，再由可续跑后台任务删除 Forest 精确拥有的文件或未采用数据库；已经成为当前 storage head 的 Bot 数据库会保留。普通磁盘不提供不可恢复证明。</p>
+        </form>
+        <form id="restore-activation-form" class="hidden">
+          <h3>激活 Bot 恢复副本</h3><p id="restore-activation-target" class="hint"></p>
+          <p id="restore-activation-warning" class="notice"></p>
+          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
+          <div class="actions"><button type="submit">封存旧库并切换</button><button id="restore-activation-cancel" class="subtle" type="button">取消</button></div>
+          <p class="hint">服务端会再次核对删除代际、Binding 与外部副作用账本。执行顺序固定为封存旧库、切换目录 head、启用恢复库；中断后保持离线并可安全重试。</p>
         </form>
       </div></div>
       <div class="card"><h2>导入外部加密备份</h2>

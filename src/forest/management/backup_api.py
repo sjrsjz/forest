@@ -56,6 +56,20 @@ class CleanupRetry(Body):
     current_password: str = Field(min_length=12, max_length=1024)
 
 
+class ActivationPlan(Body):
+    target_ordinal: int = Field(ge=0, le=1023, strict=True)
+
+
+class ActivationApply(Body):
+    plan_id: str = Field(min_length=1, max_length=128)
+    plan_digest: str = Field(min_length=1, max_length=128)
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
+class ActivationRetry(Body):
+    current_password: str = Field(min_length=12, max_length=1024)
+
+
 def install_backup_routes(app, runtime) -> None:
     def manager():
         if runtime.backups is None:
@@ -147,6 +161,13 @@ def install_backup_routes(app, runtime) -> None:
         if runtime.cleanup is None:
             raise ForestError("CLEANUP_SERVICE_UNAVAILABLE", "Cleanup service is unavailable", 503)
         return runtime.cleanup
+
+    def activations():
+        if runtime.activations is None:
+            raise ForestError(
+                "ACTIVATION_SERVICE_UNAVAILABLE", "Restore activation service is unavailable", 503
+            )
+        return runtime.activations
 
     def verifications():
         if runtime.verifications is None:
@@ -329,4 +350,57 @@ def install_backup_routes(app, runtime) -> None:
             restore_id=restore_id,
             subject_id=session["account_id"],
             session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.post("/management/v1/restore-stages/{restore_id}/activation-plans")
+    async def plan_restore_activation(
+        restore_id: str, body: ActivationPlan, request: Request
+    ):
+        session = await runtime.principal(request, write=True)
+        return await activations().plan(
+            restore_id=restore_id, target_ordinal=body.target_ordinal,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.get("/management/v1/restore-activations")
+    async def restore_activations(request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        rows = await activations().list(
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+        return {"restore_activations": rows}
+
+    @app.post("/management/v1/restore-activations", status_code=202)
+    async def apply_restore_activation(body: ActivationApply, request: Request):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        return await activations().apply(
+            plan_id=body.plan_id, plan_digest=body.plan_digest,
+            subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, idempotency_key=key(request),
+        )
+
+    @app.get("/management/v1/restore-activations/{activation_id}")
+    async def read_restore_activation(activation_id: str, request: Request):
+        session = await runtime.principal(request, require_admin=True)
+        return await activations().read(
+            activation_id=activation_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+        )
+
+    @app.post(
+        "/management/v1/restore-activations/{activation_id}/retry", status_code=202
+    )
+    async def retry_restore_activation(
+        activation_id: str, body: ActivationRetry, request: Request
+    ):
+        session = await runtime.principal(request, write=True)
+        expected_hash = await reauthenticate(session, body.current_password)
+        return await activations().retry(
+            activation_id=activation_id, subject_id=session["account_id"],
+            session_token_hash=digest_token(request.cookies["forest_session"]),
+            expected_password_hash=expected_hash, idempotency_key=key(request),
         )

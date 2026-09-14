@@ -213,6 +213,16 @@ class StorageCleanupManager:
                         "BACKUP_RESTORE_ACTIVE",
                         "An active verification or restore still depends on this backup", 409,
                     )
+            else:
+                activation = await (await conn.execute(
+                    "SELECT 1 FROM restore_activation_jobs WHERE restore_id=%s "
+                    "AND state<>'COMPLETE' LIMIT 1", (plan["resource_id"],)
+                )).fetchone()
+                if activation is not None:
+                    raise ForestError(
+                        "RESTORE_ACTIVATION_ACTIVE",
+                        "An unfinished activation still depends on this restore", 409,
+                    )
             cleanup_id = str(uuid4())
             result = await self._tombstone(
                 conn, kind=plan["resource_kind"], resource=resource,
@@ -373,6 +383,8 @@ class StorageCleanupManager:
                 "j.manifest_digest,j.database_total,j.database_completed,j.expires_at "
                 "FROM restore_stage_jobs j "
                 "WHERE j.state IN ('STAGED','FAILED') AND j.expires_at<=clock_timestamp() "
+                "AND NOT EXISTS(SELECT 1 FROM restore_activation_jobs a "
+                "WHERE a.restore_id=j.restore_id AND a.state<>'COMPLETE') "
                 "ORDER BY j.expires_at,j.restore_id "
                 "FOR UPDATE OF j SKIP LOCKED LIMIT 1"
             )).fetchone()
@@ -535,10 +547,19 @@ class StorageCleanupManager:
                 )
             async with self.store.pool.connection() as conn:
                 registered = await (await conn.execute(
-                    "SELECT 1 FROM bot_storage_plans WHERE database_name=%s LIMIT 1",
+                    "SELECT g.source_restore_id,g.source_ordinal,h.storage_generation IS NOT NULL "
+                    "AS current FROM bot_storage_generations g LEFT JOIN bot_storage_heads h "
+                    "ON h.bot_id=g.bot_id AND h.storage_generation=g.storage_generation "
+                    "WHERE g.database_name=%s LIMIT 1",
                     (expected_name,),
                 )).fetchone()
             if registered is not None:
+                if (
+                    registered["source_restore_id"] == job["resource_id"]
+                    and registered["source_ordinal"] == target["ordinal"]
+                    and registered["current"]
+                ):
+                    continue
                 raise ForestError(
                     "RESTORE_DATABASE_REGISTERED", "A registered database cannot be cleaned", 409
                 )

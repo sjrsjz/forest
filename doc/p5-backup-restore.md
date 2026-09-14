@@ -1,6 +1,6 @@
 # P5 多数据库备份、校验与隔离恢复
 
-状态：详细设计与恢复/清理纵向切片；加密工件、持久备份任务、每库切片、目录前后锚点、管理员 Web 创建/下载、外部工件流式导入、独立只读校验回执、托管 PostgreSQL 的整套隔离恢复，以及备份/隔离副本的保留期清理已实现。恢复激活继续按本文推进。
+状态：详细设计与可运行纵向切片；加密工件、持久备份任务、每库切片、目录前后锚点、管理员 Web 创建/下载、外部工件流式导入、独立只读校验回执、托管 PostgreSQL 的整套隔离恢复、托管 Bot 逐项代际激活，以及备份/隔离副本的保留期清理已实现。部署控制面整库激活仍需离线恢复入口。
 
 ## 1. 范围与不变量
 
@@ -92,7 +92,7 @@ RESERVED -> UPLOADING -> UPLOADED -> QUEUED -> IMPORTING -> IMPORTED
 
 WebUI 的“存储与备份”页提供：备份范围、是否包含插件工件、恢复口令、预计数据库数、创建按钮、进度、每库切口、最终大小、下载、外部文件上传与导入状态、只读校验、校验凭据状态、隔离恢复创建、每个随机目标库和失败码。口令输入使用 password 控件，不进入浏览器持久草稿；页面刷新只恢复任务标识和持久状态。校验接纳再次验证管理员当前密码和来源恢复口令，相同幂等键只能指向同一来源与口令摘要。只有当前有效凭据存在时页面才显示隔离恢复按钮；恢复请求只提交凭据 ID 和管理员当前密码。
 
-当前已经实现创建、下载、外部导入、独立重新校验、整套隔离恢复，以及备份/隔离副本删除的 plan/apply；后续的取消及激活继续使用同一管理模式。创建备份、预留/完成导入、校验和隔离恢复要求当前密码复核、幂等键及部署 admin 权限；流式上传本身要求同一 admin 会话、Origin 与 CSRF。应用清理计划和重试阻塞任务也要求当前密码。下载会重新核对当前会话与工件状态，响应禁止缓存；查看者不具备备份、导入、校验、恢复或清理权限。页面没有激活按钮，`IMPORTED` 只表示外部密文已成为标准备份，`VERIFIED` 只证明某一精确工件通过只读检查，`STAGED` 只表示物理副本通过验证。
+当前已经实现创建、下载、外部导入、独立重新校验、整套隔离恢复、托管 Bot 逐项激活，以及备份/隔离副本删除的 plan/apply。创建备份、预留/完成导入、校验和隔离恢复要求当前密码复核、幂等键及部署 admin 权限；流式上传本身要求同一 admin 会话、Origin 与 CSRF。激活先生成五分钟有效的服务端预览，提交与阻断重试要求当前密码和幂等键；页面持续显示 `FENCING/SWITCHING/ACTIVATING/COMPLETE/BLOCKED`。应用清理计划和重试阻塞任务也要求当前密码。下载会重新核对当前会话与工件状态，响应禁止缓存；查看者不具备备份、导入、校验、恢复、激活或清理权限。`IMPORTED` 只表示外部密文已成为标准备份，`VERIFIED` 只证明某一精确工件通过只读检查，`STAGED` 只表示物理副本通过验证。
 
 群聊 Shell 首版只提供 `backup status <id>` 和 `backup cancel <id>` 的远程救援入口，不接收恢复口令、不上传或下载工件。创建和恢复需要 Web/CLI 的重新认证通道。Shell 命令仍是 CONTROL 路由，不创建产品 Agent，也不占用群会话执行权。
 
@@ -100,7 +100,7 @@ WebUI 的“存储与备份”页提供：备份范围、是否包含插件工�
 
 校验顺序固定为：容器/header 限额 → 口令解包 → AEAD 标签 → ZIP 路径和压缩比 → manifest schema → 每成员大小/摘要 → 数据库身份与迁移兼容 → 表/列/依赖 DAG → 删除屏障 → SecretVault key 与密文抽样解密 → 包工件摘要。任何失败只产生固定错误码，不能回显成员正文、DSN、用户名、表值或底层解密异常。
 
-当前 `verify` 先按持久来源密文摘要重新读取本地工件，认证解密到任务私有临时目录，再要求 manifest 顶层、数据库、表、列、成员和包路径都是精确键集。数据库 roster 必须与接纳时冻结的 cut 一一对应，目录起止锚点必须相同；完成只发布有期限的验证事实和脱敏审计，不产生 PostgreSQL 目标。`restore-stage` 只接受与当前工件密文/清单摘要仍一致的有效回执，随后重复认证解密和清单检查，防止校验与使用之间发生替换。`INCONSISTENT`、过期、已删除或被替换的工件不能进入恢复。每个目标使用 `forest_restore_<job-prefix>_<ordinal>` 随机任务名，创建后写入数据库 owner marker 并撤销 `PUBLIC` 权限，且永远不写入 `bot_storage_plans`。
+当前 `verify` 先按持久来源密文摘要重新读取本地工件，认证解密到任务私有临时目录，再要求 manifest 顶层、数据库、表、列、成员和包路径都是精确键集。数据库 roster 必须与接纳时冻结的 cut 一一对应，目录起止锚点必须相同；完成只发布有期限的验证事实和脱敏审计，不产生 PostgreSQL 目标。`restore-stage` 只接受与当前工件密文/清单摘要仍一致的有效回执，随后重复认证解密和清单检查，防止校验与使用之间发生替换。`INCONSISTENT`、过期、已删除或被替换的工件不能进入恢复。每个目标使用 `forest_restore_<job-prefix>_<ordinal>` 随机任务名，创建后写入数据库 owner marker 并撤销 `PUBLIC` 权限；staging 不写 `bot_storage_plans`、`bot_storage_generations` 或 head。只有激活接纳事务才追加不可变 generation，运行目录仍指向旧代。
 
 恢复器只运行当前镜像的迁移，不执行备份中的 SQL。它要求 server version、encoding、collation、迁移 checksum、表列、约束和序列定义精确相同，随后在一个目标库事务中关闭触发式约束、清空表、逐表 binary COPY、核对行数、恢复序列并显式扫描所有公共 schema 外键；任一步失败会回滚该库的数据事务。提交后再次核对部署/Bot 身份。Bot 副本在独立事务中提升 storage generation 和 maintenance epoch、撤销 host lease，并设置 `SEALED`、`data_admission=false`、`control_admission=false`。部署副本也保持未注册且不可被 Web 启动计划发现。全部目标成功后才原子发布 Job `STAGED` 与脱敏完成审计。
 
@@ -108,9 +108,13 @@ WebUI 的“存储与备份”页提供：备份范围、是否包含插件工�
 
 1. `verify` 只读工件并生成有期限的验证回执。
 2. `restore-stage` 当前把来源工件的全部数据库恢复到系统新建的未注册空库，使用当前迁移代码建立 schema，再按稳定表名执行 binary COPY；序列按捕获值恢复并扫描外键。全部目标保持网络隔离和 `SEALED/ISOLATED`。选择部分数据库和显式外部目标属于后续扩展。
-3. `restore-activate` 在预览中逐项核对当前目录、Binding 账号归属、包工件、凭据、最新 deletion barrier 与效果账本。Bot 迁移使用旧库 SEALED、新库确认和 deployment storage generation CAS；部署控制面整库恢复由本机恢复命令重建 BootstrapState 后切换，不能由正在被替换的 Web 请求自我覆盖。
+3. `restore-activate` 已支持托管 Bot 目标。预览核对当前目录 head、托管集群与受限 owner、恢复 marker、Bot 身份、SEALED 隔离状态、精确 deletion epoch，以及当前库和恢复库的 Binding、发送、调用、模型、工具、Shell、Job 与组件事件关键效果账本。任一 `DISPATCHING/UNKNOWN` 等未决效果或账本差异都拒绝计划；当前实现只接受 deletion epoch 与备份 cut 完全相同的保守情形，不推断增量删除日志。外部 Bot 存储和部署控制面整库恢复仍保持隔离；部署控制面由后续本机恢复命令重建 BootstrapState 后切换，不能由正在被替换的 Web 请求自我覆盖。
 
 同 Bot 恢复不创建第二个 Bot 身份。目录切换前旧库保持权威；切换后新库才可 ACTIVE，旧库永久 SEALED 且运行凭据撤销。部分 Bot 恢复逐项保存结果，不声明全局原子成功。恢复包中已有待发送意图按原状态处理：确定未发送可由原 dispatcher 接续，SENT 不重发，UNKNOWN 保持人工对账；控制 outbox 不因新部署未见其消费者而改写状态。
+
+部署目录把原 `bot_storage_plans` 保留为第 1 代供应事实，并新增不可变 `bot_storage_generations` 与单行 `bot_storage_heads`。head 只允许从 N 以 revision CAS 推进到 N+1；`BotCatalog.resolve_storage`、备份 roster 和 Fleet 都读取当前 head。Fleet 发现目录代际变化后先完整关闭旧 Adapter、Kernel、Worker 与连接池，再以新 DSN 建立宿主；它不会让两个代际同时成为可用运行实例。
+
+激活 Job 固定执行 `QUEUED → FENCING → SWITCHING → ACTIVATING → COMPLETE`。`FENCING` 在旧库锁住 runtime fence 后再次计算删除代际和效果摘要，再设置 `SEALED`、关闭 data/control admission、提升存储与维护代际并撤销 host lease；该行锁与正常调用的 runtime 守卫排空在途许可并阻止新许可。随后部署事务把 head 推进到已预登记的新 generation，最后在恢复库再次核对隔离事实和效果摘要，设置精确目标代际、恢复 admission 并撤销任何历史 host lease。崩溃在旧库封存后使 Bot 离线；崩溃在 head 切换后仍不会先启用旧库。每步均可识别已经提交的前一步并从同一 Job 接续。无法确认的错误进入 `BLOCKED`，不会自动猜测回滚；管理员排除基础设施问题并重新认证后重试。
 
 删除屏障有三种合法来源：同一备份链中不早于 base 的增量删除日志、仍在线当前权威库导出的签名 suppression 集，或灾难恢复策略中明确保存的外部 WORM 删除日志。缺少任一来源时可以完成物理 staging 与取证查询，但禁止开放正常读取和派生。恢复器把屏障先于正文可见性应用，随后运行 scrub 和投影重建；不得先启用 Agent/Embedding 再补删除。
 
@@ -120,7 +124,7 @@ WebUI 的“存储与备份”页提供：备份范围、是否包含插件工�
 
 备份默认保留 30 天，隔离恢复副本默认保留 7 天。到期扫描与显式操作都先在一个事务中建立清理 Job、把原资源推进到 `EXPIRED`、写事件和审计；备份同时设置不可逆 `deleted_at`。从该提交点起不再签发下载或恢复能力，物理删除可以稍后重试。
 
-备份密文删除只接受 `backup_id.owner_epoch.forest-backup` 的直属普通文件，并在删除前复核权威 `relative_path`、密文 SHA-256 和字节数。隔离数据库删除逐个复核固定随机名称、`forest:restore-stage:<restore_id>:<content_digest>` owner marker、非模板属性，以及它没有出现在 `bot_storage_plans`；缺失目标按已删除收敛，任一身份冲突转为 `BLOCKED`。因此崩溃可以留下已失效但尚未物理回收的资源，不能把不明数据库误删成成功。
+备份密文删除只接受 `backup_id.owner_epoch.forest-backup` 的直属普通文件，并在删除前复核权威 `relative_path`、密文 SHA-256 和字节数。隔离数据库删除逐个复核固定随机名称、`forest:restore-stage:<restore_id>:<content_digest>` owner marker、非模板属性，以及 generation/head 登记。正在激活或阻断等待重试的恢复任务不能进入清理；激活完成后，清理保留与该 restore/ordinal 精确对应且仍为当前 head 的数据库，只删除其余隔离目标。其他已登记数据库一律 `BLOCKED`。缺失目标按已删除收敛，任一身份冲突转为 `BLOCKED`。因此崩溃可以留下已失效但尚未物理回收的资源，不能把不明数据库误删成成功。
 
 未进入 `backup_artifacts` 的 epoch 候选和 `.job-<backup_id>-<epoch>` 临时目录没有下载权威。孤儿扫描只清理超过两小时宽限、存在对应 Job 且路径 epoch 不大于 Job owner epoch、未被 artifact 引用、也不属于有效活动租约的直属普通路径；拒绝符号链接、reparse point 和特殊文件，并保存不可变孤儿清理回执。普通磁盘无法证明物理不可恢复，界面只报告 Forest 托管文件或数据库已删除。备份中可能含已删除前的用户正文，因此恢复激活仍受删除屏障约束。
 
@@ -135,4 +139,6 @@ WebUI 的“存储与备份”页提供：备份范围、是否包含插件工�
 - staging 不启动 Adapter、Agent、Job、发送或 Embedding；激活缺少当前删除屏障时明确失败。
 - Compose 中可从全新部署创建加密备份、下载、独立校验并恢复到隔离数据库；重启后任务和下载元数据可恢复。
 - 下载工件可在另一部署按精确大小流式导入；错口令保持可重试，传输中断或 lease 丢失不发布备份，同 ID 不同内容被拒绝，成功工件继续走标准校验/恢复链路。
+- 托管 Bot 激活在旧库封存后、目录切换后及新库开放前分别注入故障；旧、新库不会同时接纳，同一 Job 可从持久边界续跑，Fleet 最终只持有目录 head 指向的代际。
 - 清理计划应用后即使 Worker 尚未执行，旧下载和恢复入口也已失效；崩溃后继续同一 Job，marker 或目录登记不符时保留数据库并显示 `BLOCKED`。
+- 激活完成后的恢复清理保留当前 head 数据库，只删除同一恢复任务中其余精确匹配 owner marker 的隔离目标。

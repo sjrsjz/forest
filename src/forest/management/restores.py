@@ -671,6 +671,7 @@ class RestoreManager:
     async def _prepare_database(self, job: dict[str, Any], target: dict[str, Any]) -> None:
         assert self.managed_dsn is not None
         marker = "forest:restore-stage:" + job["restore_id"] + ":" + target["content_digest"]
+        runtime_storage = await self._runtime_storage(target)
         async with self.store.pool.connection() as conn, conn.transaction():
             current = await (await conn.execute(
                 "SELECT t.state FROM restore_stage_targets t JOIN restore_stage_jobs j "
@@ -697,9 +698,19 @@ class RestoreManager:
         async with await psycopg.AsyncConnection.connect(
             self.managed_dsn, autocommit=True, row_factory=dict_row, connect_timeout=10
         ) as conn:
+            expected_owner = None
+            if runtime_storage is not None:
+                owner = await (await conn.execute(
+                    "SELECT oid FROM pg_roles WHERE rolname=%s", (runtime_storage["role_name"],)
+                )).fetchone()
+                if owner is None:
+                    raise ForestError(
+                        "RESTORE_TARGET_ROLE_MISSING", "Current Bot storage role is unavailable", 409
+                    )
+                expected_owner = owner["oid"]
             row = await (await conn.execute(
-                "SELECT shobj_description(oid,'pg_database') AS marker,datistemplate,datallowconn "
-                "FROM pg_database WHERE datname=%s", (target["database_name"],)
+                "SELECT shobj_description(oid,'pg_database') AS marker,datistemplate,"
+                "datallowconn,datdba FROM pg_database WHERE datname=%s", (target["database_name"],)
             )).fetchone()
             if row is None:
                 if prior_state != "CREATING":
@@ -707,13 +718,22 @@ class RestoreManager:
                         "RESTORE_TARGET_OWNERSHIP_CONFLICT",
                         "Restore target database disappeared", 409,
                     )
-                await conn.execute(
-                    sql.SQL("CREATE DATABASE {} TEMPLATE template0 ALLOW_CONNECTIONS false").format(
-                        sql.Identifier(target["database_name"])
-                    )
+                create = sql.SQL("CREATE DATABASE {} TEMPLATE template0 ALLOW_CONNECTIONS false").format(
+                    sql.Identifier(target["database_name"])
                 )
-                row = {"marker": None, "datistemplate": False, "datallowconn": False}
-            if row["datistemplate"] or row["marker"] not in {None, marker}:
+                if runtime_storage is not None:
+                    create = sql.SQL("{} OWNER {}").format(
+                        create, sql.Identifier(runtime_storage["role_name"])
+                    )
+                await conn.execute(create)
+                row = {
+                    "marker": None, "datistemplate": False, "datallowconn": False,
+                    "datdba": expected_owner,
+                }
+            if (
+                row["datistemplate"] or row["marker"] not in {None, marker}
+                or expected_owner is not None and row["datdba"] != expected_owner
+            ):
                 raise ForestError(
                     "RESTORE_TARGET_OWNERSHIP_CONFLICT", "Restore target ownership is invalid", 409
                 )
@@ -754,20 +774,28 @@ class RestoreManager:
         job: dict[str, Any],
     ) -> tuple[int, str | None]:
         target_dsn = self._target_dsn(target["database_name"])
+        runtime_storage = await self._runtime_storage(target)
+        schema_dsn = target_dsn
+        if runtime_storage is not None:
+            schema_dsn = make_conninfo(
+                runtime_storage["dsn"], dbname=target["database_name"], options=None
+            )
         async with await psycopg.AsyncConnection.connect(
             target_dsn, autocommit=True, connect_timeout=10,
         ) as guard:
             await guard.execute("SELECT pg_advisory_lock(679330170792)")
             await self._heartbeat(job)
             return await self._restore_database_locked(
-                archive, database, target, job, target_dsn
+                archive, database, target, job, target_dsn, schema_dsn
             )
 
     async def _restore_database_locked(
         self, archive: zipfile.ZipFile, database: dict[str, Any], target: dict[str, Any],
-        job: dict[str, Any], target_dsn: str,
+        job: dict[str, Any], target_dsn: str, schema_dsn: str,
     ) -> tuple[int, str | None]:
-        await self._migrate(database, target_dsn)
+        # Schema ownership belongs to the restricted Bot role, while the managed
+        # administrator performs COPY with trigger suppression during isolation.
+        await self._migrate(database, schema_dsn)
         async with await psycopg.AsyncConnection.connect(
             target_dsn, autocommit=True, row_factory=dict_row, connect_timeout=10,
             options=f"-cforest.writer_generation={WRITER_GENERATION}",
@@ -1046,6 +1074,19 @@ class RestoreManager:
         values["dbname"] = database_name
         values.pop("options", None)
         return make_conninfo(**values)
+
+    async def _runtime_storage(self, target: dict[str, Any]) -> dict[str, Any] | None:
+        if target["database_scope"] != "bot":
+            return None
+        try:
+            storage = await self.catalog.resolve_storage(target["bot_id"])
+        except ForestError as exc:
+            if exc.code == "BOT_NOT_READY":
+                return None
+            raise
+        # An external Bot may live on another cluster and its role is not managed
+        # by this restore service. It remains an isolated, administrator-owned copy.
+        return storage if storage["mode"] == "managed" else None
 
     @staticmethod
     def _manifest_digest(path: Path) -> str:

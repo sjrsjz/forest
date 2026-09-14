@@ -22,6 +22,7 @@ from forest.backup_artifact import (
     prepare_header,
 )
 from forest.errors import ForestError
+from forest.management.activations import RestoreActivationManager
 from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
 from forest.management.cleanup import StorageCleanupManager
@@ -451,7 +452,7 @@ async def test_backup_joins_owned_thread_io_before_propagating_cancellation(
 
 
 async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot(
-    fixture, tmp_path
+    fixture, tmp_path, monkeypatch
 ):
     bot = await fixture.create()
     assert (await BotProvisioner(fixture.catalog).run_once())["stage"] == "READY"
@@ -471,6 +472,8 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
     )
     assert (await backups.run_once())["state"] == "READY"
     restores = RestoreManager(fixture.catalog, backups, data_dir)
+    activations = RestoreActivationManager(fixture.catalog)
+    cleanup = StorageCleanupManager(fixture.catalog, backups)
     verifications = BackupVerificationManager(fixture.catalog, backups, restores, data_dir)
     target_names = []
     try:
@@ -544,6 +547,7 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
         assert all(target["state"] == "STAGED" for target in detail["targets"])
         target_names = [target["database_name"] for target in detail["targets"]]
         admin_parts = conninfo_to_dict(fixture.admin_dsn)
+        current_storage = await fixture.catalog.resolve_storage(bot["bot_id"])
         for target in detail["targets"]:
             target_dsn = make_conninfo(**{**admin_parts, "dbname": target["database_name"]})
             async with await psycopg.AsyncConnection.connect(
@@ -564,12 +568,92 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
                         "bot_id": bot["bot_id"], "status": "SEALED",
                         "data_admission": False, "control_admission": False,
                     }
+                    owner = await (await conn.execute(
+                        "SELECT r.rolname FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba "
+                        "WHERE d.datname=current_database()"
+                    )).fetchone()
+                    assert owner["rolname"] == current_storage["role_name"]
+                    restricted_dsn = make_conninfo(
+                        current_storage["dsn"], dbname=target["database_name"]
+                    )
+                    async with await psycopg.AsyncConnection.connect(restricted_dsn) as restricted:
+                        assert await (await restricted.execute(
+                            "SELECT bot_id FROM forest_bot_identity"
+                        )).fetchone()
             public_access = await (await fixture.admin.execute(
                 "SELECT EXISTS(SELECT 1 FROM pg_database d,aclexplode(d.datacl) a "
                 "WHERE d.datname=%s AND a.grantee=0 AND a.privilege_type='CONNECT') AS access",
                 (target["database_name"],),
             )).fetchone()
             assert not public_access["access"]
+        bot_target = next(
+            target for target in detail["targets"] if target["database_scope"] == "bot"
+        )
+        activation_plan = await activations.plan(
+            restore_id=queued["restore_id"], target_ordinal=bot_target["ordinal"],
+            **fixture.auth,
+        )
+        assert activation_plan["before"]["storage_generation"] == 1
+        assert activation_plan["after"] == {
+            "storage_generation": 2,
+            "database_name": bot_target["database_name"],
+            "status": "ACTIVE",
+        }
+        activation = await activations.apply(
+            plan_id=activation_plan["plan_id"],
+            plan_digest=activation_plan["plan_digest"],
+            expected_password_hash="unused-test-hash",
+            idempotency_key="activate-restore-once", **fixture.auth,
+        )
+        assert activation["state"] == "QUEUED"
+        switch = activations._switch_head
+
+        async def fail_after_fence(job):
+            raise OSError("synthetic directory outage after durable fence")
+
+        monkeypatch.setattr(activations, "_switch_head", fail_after_fence)
+        blocked = await activations.run_once()
+        assert blocked["state"] == "BLOCKED" and blocked["error_code"] == "ACTIVATION_FAILED"
+        async with fixture.store.pool.connection() as conn:
+            unchanged_head = await (await conn.execute(
+                "SELECT storage_generation FROM bot_storage_heads WHERE bot_id=%s",
+                (bot["bot_id"],),
+            )).fetchone()
+        assert unchanged_head["storage_generation"] == 1
+        monkeypatch.setattr(activations, "_switch_head", switch)
+        retried = await activations.retry(
+            activation_id=activation["activation_id"],
+            expected_password_hash="unused-test-hash",
+            idempotency_key="retry-activation-after-fence", **fixture.auth,
+        )
+        assert retried["state"] == "QUEUED"
+        activated = await activations.run_once()
+        assert activated["state"] == "COMPLETE" and activated["error_code"] is None, activated
+        selected = await fixture.catalog.resolve_storage(bot["bot_id"])
+        assert selected["storage_generation"] == 2
+        assert selected["database_name"] == bot_target["database_name"]
+        async with await psycopg.AsyncConnection.connect(
+            current_storage["dsn"], row_factory=psycopg.rows.dict_row
+        ) as old_conn:
+            old_runtime = await (await old_conn.execute(
+                "SELECT status,storage_generation,data_admission,control_admission "
+                "FROM bot_runtime_state"
+            )).fetchone()
+        assert old_runtime == {
+            "status": "SEALED", "storage_generation": 2,
+            "data_admission": False, "control_admission": False,
+        }
+        async with await psycopg.AsyncConnection.connect(
+            selected["dsn"], row_factory=psycopg.rows.dict_row
+        ) as new_conn:
+            new_runtime = await (await new_conn.execute(
+                "SELECT status,storage_generation,data_admission,control_admission "
+                "FROM bot_runtime_state"
+            )).fetchone()
+        assert new_runtime == {
+            "status": "ACTIVE", "storage_generation": 2,
+            "data_admission": True, "control_admission": True,
+        }
         deployment_target = next(
             target for target in detail["targets"] if target["database_scope"] == "deployment"
         )
@@ -597,9 +681,33 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
                 "SELECT details FROM audit_records WHERE action='restore.stage.completed' "
                 "AND request_id=%s", (queued["restore_id"],)
             )).fetchone()
+            registered_generation = await (await conn.execute(
+                "SELECT count(*) AS n FROM bot_storage_generations "
+                "WHERE database_name=ANY(%s)", (target_names,)
+            )).fetchone()
         assert registered["n"] == 0
+        assert registered_generation["n"] == 1
         assert completion_audit["details"]["manifest_digest"] == detail["manifest_digest"]
         assert completion_audit["details"]["verification_id"] == verified["verification_id"]
+        cleanup_plan = await cleanup.plan(
+            kind="RESTORE_STAGE", resource_id=queued["restore_id"], **fixture.auth
+        )
+        cleanup_job = await cleanup.apply(
+            plan_id=cleanup_plan["plan_id"], plan_digest=cleanup_plan["plan_digest"],
+            expected_password_hash="unused-test-hash", idempotency_key="cleanup-activated-stage",
+            **fixture.auth,
+        )
+        assert cleanup_job["state"] == "QUEUED"
+        cleaned = await cleanup.run_once()
+        assert cleaned["state"] == "COMPLETE"
+        databases = {
+            row["datname"] for row in await (
+                await fixture.admin.execute(
+                    "SELECT datname FROM pg_database WHERE datname=ANY(%s)", (target_names,)
+                )
+            ).fetchall()
+        }
+        assert databases == {bot_target["database_name"]}
     finally:
         if not target_names:
             async with fixture.store.pool.connection() as conn:
@@ -613,6 +721,8 @@ async def test_restore_stage_rebuilds_unregistered_databases_and_quarantines_bot
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
             )
         await verifications.close()
+        await cleanup.close()
+        await activations.close()
         await restores.close()
         await backups.close()
 

@@ -337,8 +337,10 @@ class BackupManager:
     async def _roster_anchor(self) -> tuple[list[dict[str, Any]], str]:
         async with self.store.pool.connection() as conn:
             rows = await (await conn.execute(
-                "SELECT b.bot_id,b.revision,b.job_id,p.plan_digest FROM bot_catalog b "
-                "JOIN bot_storage_plans p USING(bot_id) WHERE b.stage='READY' ORDER BY b.bot_id"
+                "SELECT b.bot_id,b.revision,b.job_id,h.storage_generation,g.plan_digest "
+                "FROM bot_catalog b JOIN bot_storage_heads h USING(bot_id) "
+                "JOIN bot_storage_generations g USING(bot_id,storage_generation) "
+                "WHERE b.stage='READY' ORDER BY b.bot_id"
             )).fetchall()
         anchor = _json_value(rows)
         return anchor, digest_json(anchor)
