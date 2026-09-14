@@ -6,7 +6,7 @@
 
 001–028 保留原 SQL SHA-256。带数据 handler 的 029–035、037–038 使用 UTF-8 JSON 数组 `['forest.bot.migration.v1', SQL, handler 源码, migration_v1.py 源码]` 的 SHA-256，数组使用无额外空格的 JSON 编码；纯 SQL 的 036 仍使用 SQL SHA-256。handler 和 `migration_v1.py` 发布后不得修改；后续算法使用新的版本文件。handler 应包含迁移所需的历史算法，不调用会随运行时变化的业务存储实现。
 
-新连接通过 PostgreSQL 启动参数声明当前 `forest.writer_generation`。029 的基础正文切换使用 generation 1，042 的配置正文切换提升为 generation 2，060 的 Job 正文切换提升为 generation 3。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
+新连接通过 PostgreSQL 启动参数声明当前 `forest.writer_generation`。029 的基础正文切换使用 generation 1，042 的配置正文切换提升为 generation 2，060 的 Job 正文切换提升为 generation 3，062 的 Shell 正文切换提升为 generation 4。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
 
 `PayloadStore.import_legacy_json_in()` / `import_legacy_bytes_in()` 只在 dispatcher 绑定的同连接、同任务、同事务内有效，普通业务调用及继承 ContextVar 的子任务会被拒绝。参数为 `owner_kind`、`owner_id`、`value`、`sources`、`parents`，返回 `PayloadRef`。它与正常写入使用一致的稳定身份和摘要：
 
@@ -52,3 +52,11 @@
 061 搬运 `bot_job_plans.values`、`bot_job_revisions.values` 和 `bot_job_revisions.delegation`。settings 使用 `family=job`，delegation 使用 `family=job.delegation`；两者按 `job_id` 与 plan/revision 身份独立寻址。迁移完成后原三列只能为 SQL `NULL`，运行元数据不含 prompt、name 或管理员主体。新 apply 的 settings/delegation 同时继承真实计划值和 apply 输入，结果回执同时继承两个 payload；旧行继承确切 041 来源或可证明的 apply 结果，已删除父项不会恢复正文。
 
 occurrence 数据库授权使用不获取 memory clock 行锁的不可变可用性快照，业务 hydrate 则在 Job head 之后锁定 deletion epoch。该分工保持 `Job head → deletion clock` 的写入锁序，也允许遗忘与领取按先后提交线性化。具体字段、失效行为和专项验证见 [Job 定义载荷](p4-job-payloads.md)。
+
+## Shell 正文补充（062–063）
+
+062 使用独立的 `migration_v4.py` 把 writer gate 提升到 4；其 checksum 包含 v1–v4 四代冻结 helper。063 的 checksum 还包含 Shell 数据 handler、`shell_payloads.py` 和冻结 registry，发布后不得修改这些历史字节。
+
+063 搬运 `bot_shell_requests.arguments/outcome/delivery`。参数使用 `owner_kind=shell.arguments`，Shell 结果使用 `owner_kind=control.result`，内部 delivery receipt 使用 `owner_kind=control.outbox`；迁移完成后原三列只能为 SQL `NULL`。参数继承原群消息 payload；Shell 结果继承原消息、参数、Binding 配置及可证明的类型化管理结果；CONTROL send part 继承 Shell 结果，receipt 再继承结果和各个实际发送 part。无法证明完整旧结果链的终端记录保留 `legacy_result_untracked`，不会伪造一次发送或控制效果。
+
+Shell claim 先锁请求 head，再在同一事务锁定 deletion clock 并 hydrate 参数。业务控制方法缓存冻结参数身份，取得自身业务锁后才在最终 `_time` 安全点重新 hydrate，从而统一为“业务 head → deletion clock”的锁序。遗忘先提交时待执行命令原子终结为 `CANCELLED/CONTROL_CONTENT_REVOKED`；命令完成先提交时永久事实保留，正文随后不可读且不能复活。完整字段、父链和验证见 [Shell 参数与结果载荷](p4-shell-payloads.md)。

@@ -21,6 +21,9 @@ class ShellControl(BotControl):
         self.messages, self.lease = messages, lease
         self.command_id, self.owner_id = claim["command_id"], claim["owner_id"]
         self.claim_epoch, self.binding_id = claim["claim_epoch"], claim["binding_id"]
+        self.arguments = claim.get("arguments")
+        self.arguments_payload_id = claim.get("arguments_payload_id")
+        self.arguments_payload_digest = claim.get("arguments_payload_digest")
         self.admission = object()
         self.binding = None
         self.author = None
@@ -43,7 +46,9 @@ class ShellControl(BotControl):
                 or request["binding_epoch"] != self.binding["binding_epoch"]
                 or request["policy_revision"] != self.binding["_runtime"]["policy_revision"]
                 or command_action(request["command_name"], request["gate_version"]) != action
-                or request["arguments"] != payload
+                or request["arguments_payload_id"] != self.arguments_payload_id
+                or request["arguments_payload_digest"] != self.arguments_payload_digest
+                or self.arguments != payload
                 or plan_digest != payload.get("plan_digest", "")):
             raise ForestError("SHELL_AUTHORITY_REJECTED", "Command claim changed or expired", 403)
         source = await (await conn.execute(
@@ -70,7 +75,7 @@ class ShellControl(BotControl):
             "origin_kind": "shell", "source_binding_id": self.binding_id,
             "source_principal": author["principal_ref"], "source_event_id": request["event_id"],
             "source_conversation_id": request["conversation_id"], "command_id": self.command_id,
-        }, payload, parents=(source["payload_id"], config_ref))
+        }, payload, parents=(source["payload_id"], request["arguments_payload_id"], config_ref))
 
     async def _scope(self, conn, conversation_id, action, payload):
         target = None
@@ -99,6 +104,20 @@ class ShellControl(BotControl):
         await super()._time(conn, claims)
         if self.binding is None:
             raise ForestError("SHELL_AUTHORITY_REJECTED", "No command admission", 403)
+        request = await (await conn.execute(
+            "SELECT * FROM public.bot_shell_requests WHERE bot_id=%s AND command_id=%s",
+            (self.store.bot_id, self.command_id),
+        )).fetchone()
+        epoch = (await self.messages.shell_payloads.payloads.lock_in(conn))["deletion_epoch"]
+        hydrated = await self.messages.shell_payloads.hydrate_arguments_in(
+            conn, request, epoch=epoch
+        )
+        if (
+            hydrated["arguments"] != self.arguments
+            or hydrated["arguments_payload_id"] != self.arguments_payload_id
+            or hydrated["arguments_payload_digest"] != self.arguments_payload_digest
+        ):
+            raise ForestError("SHELL_AUTHORITY_REJECTED", "Shell arguments changed", 403)
         settings = await self.messages.bindings.current_config_in(
             conn, self.store.bot_id, self.binding_id,
             expected_binding_epoch=self.binding["binding_epoch"],

@@ -7,7 +7,7 @@ from test_agent_store import start
 from test_group_scheduler import row
 from test_messages import messages as messages
 from test_messages import receive
-from test_shell import allow, dispatcher
+from test_shell import allow, dispatcher, shell_record
 
 from forest import shell_commands
 from forest.shell_registry import CURRENT_GATE_VERSION, registry_manifest, render_help
@@ -38,7 +38,7 @@ async def test_durable_help_is_generated_from_unchangeable_contract_and_sent_on_
     try:
         await controls._process(incoming["command_id"])
         assert not controls.errors
-        record = await row(repository, "SELECT * FROM public.bot_shell_requests")
+        record = await shell_record(repository)
         assert record["gate_version"] == CURRENT_GATE_VERSION and record["arguments"] == {}
         assert record["outcome"]["code"] == "HELP" and record["delivery"]["send_lane"] == "CONTROL"
         assert await delivered_text(repository) == render_help(CURRENT_GATE_VERSION)
@@ -60,7 +60,7 @@ async def test_accepted_cancel_survives_dispatcher_restart_without_reparsing(mes
     incoming = await receive(repository, lease, "cancel", text=
         f'#forest runs cancel {head["run_id"]} --reason "原参数" --expect-checkpoint {head["checkpoint_seq"]}')
     monkeypatch.setattr(message_module, "parse_command", current_parser)
-    accepted = await row(repository, "SELECT * FROM public.bot_shell_requests")
+    accepted = await shell_record(repository)
     assert accepted["status"] == "PENDING" and accepted["gate_version"] == "shell-gate-v2"
     assert accepted["priority"] == 0 and accepted["arguments"]["reason"] == "原参数"
     before = dispatcher(repository, lease)
@@ -79,7 +79,7 @@ async def test_accepted_cancel_survives_dispatcher_restart_without_reparsing(mes
         await after._process(incoming["command_id"])
         await after._process(incoming["command_id"])
         assert not after.errors and not entered
-        record = await row(repository, "SELECT * FROM public.bot_shell_requests")
+        record = await shell_record(repository)
         assert record["arguments"] == accepted["arguments"] and record["priority"] == accepted["priority"]
         assert record["status"] == "COMPLETED" and record["outcome"]["phase"] == "CANCELLED"
         assert (await row(repository, "SELECT phase FROM public.bot_agent_runs WHERE run_id=%s",

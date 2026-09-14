@@ -21,6 +21,15 @@ from forest.packages import digest_json
 from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
+from forest.storage.shell_payloads import (
+    UNAVAILABLE as SHELL_UNAVAILABLE,
+)
+from forest.storage.shell_payloads import (
+    ShellPayloadStore,
+    arguments_metadata,
+    delivery_metadata,
+    outcome_metadata,
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,7 @@ class MessageStore:
             raise ValueError("Context budget must be between 512 and 1048576")
         self.store = store
         self.bindings = bindings
+        self.shell_payloads = ShellPayloadStore(store)
         self.context_token_budget = context_token_budget
 
     def _memory_sources(self):
@@ -324,13 +334,26 @@ class MessageStore:
                     (self.store.bot_id, media_ref, event_id, index, source_payload.payload_id),
                 )
             if command_id is not None:
+                arguments_ref = await self.shell_payloads.put_arguments_in(
+                    conn,
+                    command_id=command_id,
+                    command_name=shell_command,
+                    gate_version=parsed_command.gate_version,
+                    arguments=parsed_command.payload,
+                    parent=payload.payload_id,
+                    epoch=clock["deletion_epoch"],
+                )
                 await conn.execute(
                     "INSERT INTO public.bot_shell_requests(bot_id,command_id,event_id,conversation_id,"
-                    "binding_id,command_name,raw_digest,arguments,priority,gate_version) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "binding_id,command_name,raw_digest,arguments,arguments_payload_id,"
+                    "arguments_payload_digest,arguments_metadata,priority,gate_version) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s)",
                     (self.store.bot_id, command_id, event_id, conversation_id, binding_id,
                      shell_command, digest_json(value["segments"]),
-                     Jsonb(parsed_command.payload), parsed_command.priority,
+                     arguments_ref.payload_id, arguments_ref.digest,
+                     Jsonb(arguments_metadata(
+                         shell_command, parsed_command.gate_version, parsed_command.payload
+                     )), parsed_command.priority,
                      parsed_command.gate_version),
                 )
             await conn.execute(
@@ -577,7 +600,8 @@ class MessageStore:
                 "AND (EXISTS (SELECT 1 FROM public.bot_conversation_replies r WHERE r.bot_id=s.bot_id "
                 "AND r.delivery->>'intent_id'=s.intent_id) OR EXISTS "
                 "(SELECT 1 FROM public.bot_shell_requests q WHERE q.bot_id=s.bot_id "
-                "AND q.command_id=s.command_id AND q.delivery->>'intent_id'=s.intent_id AND q.status='COMPLETED')) "
+                "AND q.command_id=s.command_id AND q.delivery_metadata->>'intent_id'=s.intent_id "
+                "AND q.status='COMPLETED')) "
                 "ORDER BY i.event_id LIMIT %s", (self.store.bot_id, limit),
             )).fetchall()
         count = 0
@@ -631,7 +655,7 @@ class MessageStore:
             "ON a.bot_id=s.bot_id AND a.intent_id=s.intent_id "
             "LEFT JOIN public.bot_conversation_replies r ON r.bot_id=s.bot_id AND r.delivery->>'intent_id'=s.intent_id "
             "LEFT JOIN public.bot_shell_requests q ON q.bot_id=s.bot_id AND q.command_id=s.command_id "
-            "AND q.delivery->>'intent_id'=s.intent_id AND q.status='COMPLETED' "
+            "AND q.delivery_metadata->>'intent_id'=s.intent_id AND q.status='COMPLETED' "
             "WHERE s.bot_id=%s AND s.binding_id=%s AND s.conversation_id=%s "
             "AND s.reply_route->>'channel_kind'=%s AND s.reply_route->>'channel_id'=%s "
             "AND COALESCE(s.reply_route->>'thread_id','')=%s "
@@ -696,8 +720,31 @@ class MessageStore:
                 (self.store.bot_id, command_id),
             )).fetchone()
             if current["status"] == "COMPLETED":
+                epoch = (await self.shell_payloads.payloads.lock_in(conn))["deletion_epoch"]
+                current = await self.shell_payloads.hydrate_result_in(
+                    conn, current, epoch=epoch, required=False
+                )
                 await self.bindings._final_guard(conn, lease, binding, data=False)
                 return current
+            if current["status"] == "CANCELLED":
+                await self.bindings._final_guard(conn, lease, binding, data=False)
+                return current
+            epoch = (await self.shell_payloads.payloads.lock_in(conn))["deletion_epoch"]
+            try:
+                current = await self.shell_payloads.hydrate_arguments_in(
+                    conn, current, epoch=epoch
+                )
+            except ForestError as exc:
+                if exc.code != "CONTROL_CONTENT_REVOKED":
+                    raise
+                cancelled = await (await conn.execute(
+                    "UPDATE public.bot_shell_requests SET status='CANCELLED',owner_id=NULL,"
+                    "host_incarnation=NULL,expires_at=NULL,terminal_reason='CONTROL_CONTENT_REVOKED',"
+                    "completed_at=clock_timestamp() WHERE bot_id=%s AND command_id=%s RETURNING *",
+                    (self.store.bot_id, command_id),
+                )).fetchone()
+                await self.bindings._final_guard(conn, lease, binding, data=False)
+                return {**cancelled, "arguments": None, "arguments_payload_state": "UNAVAILABLE"}
             live = (
                 current["status"] == "CLAIMED" and current["expires_at"] > await self.store._now(conn)
                 and current["host_incarnation"] == lease.incarnation
@@ -722,7 +769,12 @@ class MessageStore:
                 (self.store.bot_id, claimed["event_id"]),
             )).fetchone()
             await self.bindings._final_guard(conn, lease, binding, data=False)
-            return {**claimed, "source": source}
+            return {
+                **claimed,
+                "arguments": current["arguments"],
+                "arguments_payload_state": current["arguments_payload_state"],
+                "source": source,
+            }
 
     async def complete_control(self, lease: HostLease, claim: dict, operation_id: str, *,
                                reply_parts: list[list[dict]], outcome: dict, delivery) -> dict:
@@ -749,14 +801,20 @@ class MessageStore:
             if current["status"] == "COMPLETED":
                 if current["operation_id"] != operation_id or current["result_digest"] != digest:
                     raise ForestError("COMMAND_RESULT_CONFLICT", "Control result is already committed", 409)
+                epoch = (await self.shell_payloads.payloads.lock_in(conn))["deletion_epoch"]
+                saved = await self.shell_payloads.hydrate_result_in(
+                    conn, current, epoch=epoch, required=False
+                )
                 await self.bindings._final_guard(conn, lease, binding, data=False)
-                return current
+                return saved
             if (current["status"] != "CLAIMED" or current["owner_id"] != claim["owner_id"]
                     or current["claim_epoch"] != claim["claim_epoch"]
                     or current["host_incarnation"] != lease.incarnation
                     or current["policy_revision"] != binding["_runtime"]["policy_revision"]
                     or current["expires_at"] <= await self.store._now(conn)):
                 raise ForestError("STALE_COMMAND", "Control command claim expired or was replaced", 409)
+            epoch = (await self.shell_payloads.payloads.lock_in(conn))["deletion_epoch"]
+            await self.shell_payloads.hydrate_arguments_in(conn, current, epoch=epoch)
             source = await (await conn.execute(
                 "SELECT * FROM public.bot_conversations WHERE bot_id=%s AND conversation_id=%s",
                 (self.store.bot_id, current["conversation_id"]),
@@ -772,24 +830,88 @@ class MessageStore:
             )).fetchone()
             if not command_input or not command_input["payload_id"]:
                 raise ForestError("INPUT_PAYLOAD_MIGRATION_REQUIRED", "Control origin has no payload", 409)
+            if not binding["config_payload_id"]:
+                raise ForestError("CONTROL_CONTENT_REVOKED", "Binding configuration is unavailable", 409)
+            outcome_parents = [
+                command_input["payload_id"],
+                current["arguments_payload_id"],
+                binding["config_payload_id"],
+            ]
+            operation = await (await conn.execute(
+                "SELECT result_payload_id FROM public.bot_web_operations WHERE bot_id=%s "
+                "AND operation_id=%s",
+                (self.store.bot_id, "shell-action:" + current["command_id"]),
+            )).fetchone()
+            if operation and operation["result_payload_id"]:
+                try:
+                    await self.shell_payloads.payloads.require_available_in(
+                        conn, (operation["result_payload_id"],),
+                        expected_deletion_epoch=epoch,
+                    )
+                except ForestError as exc:
+                    if exc.code not in SHELL_UNAVAILABLE or result.get("code") != "RECORDED_UNAVAILABLE":
+                        raise ForestError(
+                            "CONTROL_CONTENT_REVOKED", "Shell operation result is unavailable", 409
+                        ) from None
+                else:
+                    outcome_parents.append(operation["result_payload_id"])
+            outcome_ref = await self.shell_payloads.put_outcome_in(
+                conn,
+                command_id=current["command_id"],
+                outcome=result,
+                parents=outcome_parents,
+                epoch=epoch,
+            )
             receipt = await delivery.enqueue_in(
                 conn, lease, operation_id="control:" + current["command_id"], route=route, parts=parts,
                 conversation_id=current["conversation_id"], lane="CONTROL", command_id=current["command_id"],
                 control_seq=1, root_operation_id=current["command_id"],
                 expected_policy_revision=current["policy_revision"],
-                parents=(command_input["payload_id"], binding["config_payload_id"]),
+                parents=(outcome_ref.payload_id, binding["config_payload_id"]),
+            )
+            part_rows = await (await conn.execute(
+                "SELECT payload_id FROM public.bot_send_parts WHERE bot_id=%s AND intent_id=%s "
+                "ORDER BY part_index",
+                (self.store.bot_id, receipt["intent_id"]),
+            )).fetchall()
+            delivery_ref = await self.shell_payloads.put_delivery_in(
+                conn,
+                command_id=current["command_id"],
+                delivery=receipt,
+                parents=(outcome_ref.payload_id, *(row["payload_id"] for row in part_rows)),
+                epoch=epoch,
             )
             if current["expires_at"] <= await self.store._now(conn):
                 raise ForestError("STALE_COMMAND", "Control claim expired before commit", 409)
             updated = await (await conn.execute(
                 "UPDATE public.bot_shell_requests SET status='COMPLETED',operation_id=%s,result_digest=%s,"
-                "outcome=%s,delivery=%s,completed_at=clock_timestamp() WHERE bot_id=%s AND command_id=%s RETURNING *",
-                (operation_id, digest, Jsonb(result), Jsonb(receipt), self.store.bot_id, current["command_id"]),
+                "outcome=NULL,delivery=NULL,outcome_payload_id=%s,outcome_payload_digest=%s,"
+                "outcome_metadata=%s,delivery_payload_id=%s,delivery_payload_digest=%s,"
+                "delivery_metadata=%s,completed_at=clock_timestamp() "
+                "WHERE bot_id=%s AND command_id=%s RETURNING *",
+                (
+                    operation_id,
+                    digest,
+                    outcome_ref.payload_id,
+                    outcome_ref.digest,
+                    Jsonb(outcome_metadata(result)),
+                    delivery_ref.payload_id,
+                    delivery_ref.digest,
+                    Jsonb(delivery_metadata(receipt)),
+                    self.store.bot_id,
+                    current["command_id"],
+                ),
             )).fetchone()
             await self.store._event(conn, "shell.completed", operation_id,
                                     {"command_id": current["command_id"], "conversation_id": current["conversation_id"]})
             await self.bindings._final_guard(conn, lease, binding, data=False, require_config=True)
-            return updated
+            return {
+                **updated,
+                "outcome": result,
+                "delivery": receipt,
+                "outcome_payload_state": "ACTIVE",
+                "delivery_payload_state": "ACTIVE",
+            }
 
     async def acquire_actor(self, lease: HostLease, conversation_id: str, actor_id: str,
                             *, ttl_seconds: float = 30) -> ActorLease:

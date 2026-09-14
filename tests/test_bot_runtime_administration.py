@@ -9,7 +9,7 @@ from test_config_writer_fence import resources
 from test_group_scheduler import row, until
 from test_messages import fails, owner, receive
 from test_messages import messages as messages
-from test_shell import allow, completed, dispatcher
+from test_shell import allow, completed, dispatcher, shell_record
 from test_upgrade import upgrade_database as upgrade_database
 
 from forest.errors import ForestError
@@ -90,10 +90,7 @@ async def test_group_shell_pause_and_resume_keep_intake_and_control_available(me
         )
         await controls.start()
         await until(lambda: completed(repository, 1))
-        paused = await row(
-            repository, "SELECT outcome FROM public.bot_shell_requests WHERE command_id=%s",
-            (pause["command_id"],),
-        )
+        paused = await shell_record(repository, pause["command_id"])
         assert paused["outcome"] == {
             "code": "BOT_MAINTENANCE", "maintenance_epoch": 2, "data_admission": False,
         }
@@ -105,10 +102,7 @@ async def test_group_shell_pause_and_resume_keep_intake_and_control_available(me
         )
         controls.notify()
         await until(lambda: completed(repository, 2))
-        restored = await row(
-            repository, "SELECT outcome FROM public.bot_shell_requests WHERE command_id=%s",
-            (resume["command_id"],),
-        )
+        restored = await shell_record(repository, resume["command_id"])
         assert restored["outcome"] == {
             "code": "BOT_MAINTENANCE", "maintenance_epoch": 3, "data_admission": True,
         }

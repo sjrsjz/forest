@@ -53,6 +53,18 @@ async def configuration_identity(conn, row, reference, expected_digest, owner):
     assert reference == "payload:" + digest([row["bot_id"], "control.config", owner])
 
 
+async def payload_identity(conn, row, reference, expected_digest, owner_kind, owner):
+    header = await (await conn.execute(
+        "SELECT owner_kind,owner_id,encoding,digest FROM public.bot_payload_headers "
+        "WHERE bot_id=%s AND payload_id=%s", (row["bot_id"], reference),
+    )).fetchone()
+    assert header == {
+        "owner_kind": owner_kind, "owner_id": owner, "encoding": "json",
+        "digest": expected_digest,
+    }
+    assert reference == "payload:" + digest([row["bot_id"], owner_kind, owner])
+
+
 async def content(conn, bot_id, payload_id):
     row = await (await conn.execute(
         "SELECT h.*,b.content FROM public.bot_payload_headers h JOIN public.bot_payload_bodies b "
@@ -130,6 +142,36 @@ the monotonic memory clock, whose independently allocated fact counter may grow.
                     ),
                 )
                 value["delegation"] = body["values"]
+            if table == "bot_shell_requests" and "arguments_payload_id" in row:
+                assert row["arguments"] is None and row["arguments_payload_id"]
+                body = await content(conn, row["bot_id"], row["arguments_payload_id"])
+                assert set(body) == {
+                    "gate_version", "command_name", "schema_digest", "arguments",
+                }
+                assert (body["gate_version"], body["command_name"]) == (
+                    row["gate_version"], row["command_name"],
+                )
+                owner = "shell-arguments-v1:" + digest([row["command_id"]])
+                await payload_identity(
+                    conn, row, row["arguments_payload_id"], row["arguments_payload_digest"],
+                    "shell.arguments", owner,
+                )
+                value["arguments"] = body["arguments"]
+                if row["status"] == "COMPLETED":
+                    assert row["outcome"] is None and row["delivery"] is None
+                    outcome_body = await content(conn, row["bot_id"], row["outcome_payload_id"])
+                    delivery_body = await content(conn, row["bot_id"], row["delivery_payload_id"])
+                    assert outcome_body["command_id"] == delivery_body["command_id"] == row["command_id"]
+                    await payload_identity(
+                        conn, row, row["outcome_payload_id"], row["outcome_payload_digest"],
+                        "control.result", "shell-outcome-v1:" + digest([row["command_id"]]),
+                    )
+                    await payload_identity(
+                        conn, row, row["delivery_payload_id"], row["delivery_payload_digest"],
+                        "control.outbox", "shell-delivery-v1:" + digest([row["command_id"]]),
+                    )
+                    value["outcome"] = outcome_body["outcome"]
+                    value["delivery"] = delivery_body["delivery"]
             if table == "bot_message_inbox" and "payload_id" in row:
                 assert row["segments"] is None
                 body = await content(conn, row["bot_id"], row["payload_id"])

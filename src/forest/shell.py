@@ -123,7 +123,7 @@ class ShellDispatcher:
                 claim = await self.messages.claim_control(
                     lease, command_id, self.owner_id, ttl_seconds=self.command_timeout + 1,
                 )
-                if claim["status"] == "COMPLETED":
+                if claim["status"] in {"COMPLETED", "CANCELLED"}:
                     return
                 spec = get_command_spec(claim["command_name"], claim["gate_version"])
                 builtin_method = spec.execution_method if spec and spec.execution_target == "builtin" else None

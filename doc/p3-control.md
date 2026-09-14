@@ -52,6 +52,8 @@ Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原�
 
 `ShellControl` 使用宿主内部的不透明 admission，而非伪造 Web 登录或 QQ 用户。它在目标事务中锁定当前 Binding、Bot/Host 与原命令领取记录，复验所有权、期限、当前管理员、冻结 gate、原参数、实际动作和目标会话，再复用 `AgentStore`、`JobStore`、`MemoryAdministration`、`EventStore`、`ComponentJobStore` 和 `BotAuditStore` 的管理方法。记忆计划按原群筛选来源，提交再次验证计划的主体、issuer、来源主干、删除 epoch、目标闭包和影响数。共同的操作账本保持稳定 `shell-action:<command_id>`；提交后丢失本地确认可以读取原结果，不能再次取消、删除或创建任务。审计读取不创建新操作回执，避免递归日志。Web 使用自己的主体与短效签名票据调用相同方法。
 
+Shell 参数、结果与 CONTROL 回复的正文治理、遗忘终止和锁序见 [P4 Shell 参数与结果载荷](p4-shell-payloads.md)。该协议保持这里的命令语义与优先级不变。
+
 ## 3. 控制优先级与资源归属
 
 Shell 不占群 Actor 或模型槽。默认最多 4 个控制操作，取消/审批/遗忘提交 priority 0，查询与遗忘预览 priority 1，手动执行/重放 priority 2。普通操作最多占 3 槽，为 P0 操作预留 1 槽。持久扫描以 command ID 作稳定分页，页内按 priority 排序；页游标取原 ID 最大值，避免改变排序后漏掉命令。

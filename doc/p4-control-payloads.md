@@ -1,6 +1,6 @@
 # 管理输入、操作回执与来源引用
 
-本切片已接入并通过 Windows、Linux 与浏览器验证。它延续 [Kernel 载荷](p4-kernel-payloads.md)的永久事实与可清理正文分离，覆盖 Bot 管理操作及其直接关联的审计/outbox 副本。配置正文、Agent frozen spec、Job 定义、Shell 参数等尚未完成全部迁移；本文不将局部来源桥接等同全链路遗忘。
+本切片已接入并通过 Windows、Linux 与浏览器验证。它延续 [Kernel 载荷](p4-kernel-payloads.md)的永久事实与可清理正文分离，覆盖 Bot 管理操作及其直接关联的审计/outbox 副本。后续迁移已补齐配置正文、Agent frozen spec、Job 定义和 Shell 参数/结果；本文不将局部来源桥接等同全链路遗忘。
 
 ## 1. 同一请求的三个不同对象
 
@@ -75,4 +75,4 @@ UI 资源粒度是 Bot + 组件 ID，或该 Bot 的 Agent、Memory、Job、Bindi
 
 基础载荷与旧库升级见 [control payload 测试](../tests/test_control_payloads.py)和 [040 升级测试](../tests/test_control_results_upgrade.py)。组件页面的真实浏览器反例见 [组件表单冒烟脚本](../scripts/smoke_components_panel.py)，覆盖回执失效、延迟配置/历史响应及不自动重做。[管理回执浏览器脚本](../scripts/smoke_control_receipts.py)已通过 14 个 Edge 场景，包括五类面板失效、同面板重新加载、任务取消提示、跨 Bot 的迟到错误，以及注销后记忆配置和密钥清空。这些场景使用受控 HTTP fixture，不替代 PostgreSQL、真实平台或模型服务验收。最终 Windows 和非 root Linux 各通过 482 项综合测试；当前候选也通过完整 Edge/独立 Compose 流程，实际证据及边界见[实现状态](implementation-status.md)。
 
-本片之后，042–049 已完成 Agent、Memory、Binding、组件和 Watch 配置正文、Agent frozen spec 及其实际运行父链，060–061 又完成会话 Job settings/delegation 到 occurrence 的撤权链，详见[配置正文与独立替换](p5-configuration-payloads.md)和[Job 定义载荷](p4-job-payloads.md)。Shell 参数/结果、自由取消原因与部分 checkpoint、副本不确定的其他事件，以及部署库、WAL 和备份仍未完成。已有外部效果不因删除回执而变成“未执行”。
+本片之后，042–049 已完成 Agent、Memory、Binding、组件和 Watch 配置正文、Agent frozen spec 及其实际运行父链，060–061 完成会话 Job settings/delegation 到 occurrence 的撤权链，062–063 完成 Shell 参数、结果与 CONTROL 回复链，详见[配置正文与独立替换](p5-configuration-payloads.md)、[Job 定义载荷](p4-job-payloads.md)和[Shell 参数与结果载荷](p4-shell-payloads.md)。自由取消原因与部分 checkpoint、副本不确定的其他事件，以及部署库、WAL 和备份仍未完成。已有外部效果不因删除回执而变成“未执行”。

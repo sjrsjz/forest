@@ -12,9 +12,8 @@ from binding_seed import create_online_binding
 from psycopg import sql
 from test_component_jobs import component_job_package, wait_jobs
 from test_events import event_package, install_spec, wait_deliveries
-from test_group_scheduler import row
 from test_messages import receive
-from test_shell import allow, dispatcher
+from test_shell import allow, dispatcher, shell_record
 from test_shell_management import claim_command
 from test_shell_registry_runtime import delivered_text
 
@@ -89,11 +88,7 @@ async def test_shell_replays_and_retires_component_jobs_without_agent_semantics(
     complete = dispatcher(messages, kernel.lease)
     try:
         await complete._process(incoming["command_id"])
-        record = await row(
-            messages,
-            "SELECT outcome,delivery FROM public.bot_shell_requests WHERE command_id=%s",
-            (incoming["command_id"],),
-        )
+        record = await shell_record(messages, incoming["command_id"])
         text, outcome = await delivered_text(messages), record["outcome"]
         assert record["delivery"]["send_lane"] == "CONTROL"
     finally:

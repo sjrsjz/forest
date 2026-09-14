@@ -43,6 +43,32 @@ def dispatcher(repository, lease):
                            lease, poll_interval=0.02, command_timeout=1)
 
 
+async def shell_records(repository):
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        rows = await (await conn.execute(
+            "SELECT * FROM public.bot_shell_requests ORDER BY created_at,command_id"
+        )).fetchall()
+        epoch = (await repository.shell_payloads.payloads.lock_in(conn))["deletion_epoch"]
+        result = []
+        for saved in rows:
+            saved = await repository.shell_payloads.hydrate_arguments_in(
+                conn, saved, epoch=epoch, required=False
+            )
+            if saved["status"] == "COMPLETED":
+                saved = await repository.shell_payloads.hydrate_result_in(
+                    conn, saved, epoch=epoch, required=False
+                )
+            result.append(saved)
+        return result
+
+
+async def shell_record(repository, command_id=None):
+    rows = await shell_records(repository)
+    selected = [item for item in rows if command_id is None or item["command_id"] == command_id]
+    assert len(selected) == 1
+    return selected[0]
+
+
 async def completed(repository, number):
     return (await row(repository, "SELECT count(*) AS n FROM public.bot_shell_requests WHERE status='COMPLETED'"))["n"] == number
 
@@ -61,8 +87,7 @@ async def test_unauthorized_platform_admin_and_anonymous_cannot_use_control_allo
     try:
         await instance.start()
         await until(lambda: completed(repository, 3))
-        async with repository.store.pool.connection() as conn:
-            outcomes = await (await conn.execute("SELECT outcome FROM public.bot_shell_requests ORDER BY created_at")).fetchall()
+        outcomes = await shell_records(repository)
         assert [r["outcome"]["code"] for r in outcomes] == ["DENIED", "DENIED", "HELP"]
         assert not instance.failure
     finally:
@@ -88,7 +113,7 @@ async def test_control_status_works_while_chat_execution_slot_is_occupied_and_bo
         await receive(repository, lease, 2, text="#forest status")
         await controls.start()
         await until(lambda: completed(repository, 1))
-        result = await row(repository, "SELECT outcome,delivery FROM public.bot_shell_requests")
+        result = await shell_record(repository)
         assert result["outcome"]["code"] == "STATUS" and result["outcome"]["paused"]
         assert result["outcome"]["maintenance_epoch"] == 2
         assert result["delivery"]["send_lane"] == "CONTROL"
@@ -105,7 +130,7 @@ async def test_unknown_sensitive_command_produces_only_fixed_safe_reply(messages
     try:
         await instance.start()
         await until(lambda: completed(repository, 1))
-        outcome = await row(repository, "SELECT * FROM public.bot_shell_requests")
+        outcome = await shell_record(repository)
         assert outcome["outcome"]["code"] == "UNSUPPORTED"
         async with repository.store.pool.connection() as conn:
             parts = await (await conn.execute("SELECT payload FROM public.bot_send_parts")).fetchall()
@@ -138,7 +163,7 @@ async def test_allowlist_replacement_before_complete_prevents_stale_status_recei
         await allow(repository)
         resume.set()
         await until(lambda: completed(repository, 1))
-        result = await row(repository, "SELECT outcome FROM public.bot_shell_requests WHERE command_id=%s", (command["command_id"],))
+        result = await shell_record(repository, command["command_id"])
         assert result["outcome"]["code"] == "DENIED"
         assert (await row(repository, "SELECT count(*) AS n FROM public.bot_send_intents"))["n"] == 1
     finally:

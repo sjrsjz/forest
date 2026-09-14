@@ -7,7 +7,7 @@ from test_agent_store import prepare, start
 from test_group_scheduler import row, until
 from test_messages import event, receive
 from test_messages import messages as messages
-from test_shell import allow, completed, dispatcher
+from test_shell import allow, completed, dispatcher, shell_record
 
 from forest.errors import ForestError
 from forest.storage.agent import AgentStore
@@ -101,7 +101,7 @@ async def test_typed_query_publishes_only_current_group_metadata_on_control_lane
     try:
         await controls.start()
         await until(lambda: completed(repository, 1))
-        receipt = await row(repository, "SELECT outcome,delivery FROM public.bot_shell_requests")
+        receipt = await shell_record(repository)
         assert receipt["outcome"]["code"] == "RUN_STATUS"
         assert receipt["delivery"]["send_lane"] == "CONTROL"
         async with repository.store.pool.connection() as conn, conn.transaction():
@@ -127,7 +127,7 @@ async def test_empty_anonymous_identity_cannot_use_admin_commands(messages):
     try:
         await controls.start()
         await until(lambda: completed(repository, 1))
-        assert (await row(repository, "SELECT outcome FROM public.bot_shell_requests"))["outcome"]["code"] == "DENIED"
+        assert (await shell_record(repository))["outcome"]["code"] == "DENIED"
     finally:
         await controls.close()
 
