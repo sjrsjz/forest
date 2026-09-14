@@ -26,7 +26,7 @@ from forest.shell_registry import (
     registry_manifest,
     render_help,
 )
-from forest.shell_registry_v10 import get_command_spec as get_current_command_spec
+from forest.shell_registry_v11 import get_command_spec as get_current_command_spec
 
 
 def test_contract_export_is_detached_and_cannot_change_execution_or_help():

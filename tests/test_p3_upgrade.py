@@ -246,7 +246,8 @@ async def test_upgrade_keeps_preexisting_web_issuer_usable_for_agent_configurati
         if scope == "readonly":
             assert set(issuer["actions"]) == {
                 "config.read", "config.history", "agent.config.read", "memory.config.read",
-                "event.read", "component_job.read", "audit.read",
+                "event.read", "component_job.read", "audit.read", "module.read",
+                "module.validate",
             }
         elif scope == "empty":
             assert issuer["actions"] == []

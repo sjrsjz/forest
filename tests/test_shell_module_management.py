@@ -1,6 +1,7 @@
 """Group Shell module metadata and reload use the ordinary config authority."""
 
 import asyncio
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -141,6 +142,62 @@ async def test_shell_lists_metadata_and_reload_creates_an_ordinary_config_revisi
     assert completed["outcome"]["effective_revision"] == 0
 
 
+async def test_shell_module_state_is_a_separate_cas_and_replays_exactly(messages):
+    repository, lease, _ = messages
+    await allow(repository, "user-1")
+    await configure(repository, lease)
+    controls = dispatcher(repository, lease)
+
+    claim = await claim_command(
+        repository,
+        lease,
+        f'#forest module disable {COMPONENT} --expect-state-revision 0 --reason "故障隔离"',
+        number="module-disable",
+    )
+    first = await controls._typed(lease, claim)
+    assert await controls._typed(lease, claim) == first
+    text, outcome = first
+    assert outcome["code"] == "MODULE_STATE_ACCEPTED"
+    assert not outcome["enabled"]
+    assert outcome["desired_state_revision"] == 1
+    assert outcome["effective_state_revision"] == 0
+    assert "发布后才算生效" in text
+
+    stale = await claim_command(
+        repository,
+        lease,
+        f'#forest module enable {COMPONENT} --expect-state-revision 0 --reason "过期请求"',
+        number="module-enable-stale",
+    )
+    with pytest.raises(ForestError) as conflict:
+        await controls._typed(lease, stale)
+    assert conflict.value.code == "REVISION_CONFLICT"
+
+    status = await claim_command(
+        repository, lease, f"#forest module status {COMPONENT}", number="module-state-status"
+    )
+    status_text, _ = await controls._typed(lease, status)
+    assert "PENDING_DISABLE" in status_text
+    async with repository.store.pool.connection() as conn:
+        head = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_module_state_heads WHERE bot_id=%s AND component_id=%s",
+                (repository.store.bot_id, COMPONENT),
+            )
+        ).fetchone()
+        revisions = await (
+            await conn.execute(
+                "SELECT revision,previous_revision,enabled,reason FROM "
+                "public.bot_module_state_revisions WHERE bot_id=%s AND component_id=%s",
+                (repository.store.bot_id, COMPONENT),
+            )
+        ).fetchall()
+    assert head["desired_revision"] == 1 and head["effective_revision"] == 0
+    assert revisions == [{
+        "revision": 1, "previous_revision": 0, "enabled": False, "reason": "故障隔离"
+    }]
+
+
 async def test_web_apply_and_shell_reload_converge_through_one_config_head_cas(messages):
     repository, lease, _ = messages
     await allow(repository, "user-1")
@@ -203,6 +260,62 @@ async def test_web_apply_and_shell_reload_converge_through_one_config_head_cas(m
     assert head == {"desired_revision": 2, "effective_revision": 0}
     assert revision["values"] in (VALUES, changed)
     assert wrappers["count"] == (1 if revision["values"] == VALUES else 0)
+
+
+async def test_validate_holds_config_and_state_snapshot_until_result(
+    messages, monkeypatch,
+):
+    repository, lease, _ = messages
+    control, ticket = await configure(repository, lease)
+    module = ModuleAdministration(repository.store, control=control)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_revision = control.config_revision_in
+
+    async def paused_revision(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original_revision(*args, **kwargs)
+
+    monkeypatch.setattr(control, "config_revision_in", paused_revision)
+    monkeypatch.setattr(
+        "forest.storage.module_administration.validate_desired_snapshot",
+        lambda *args, **kwargs: (
+            SimpleNamespace(closures={COMPONENT: ()}),
+            {COMPONENT: SimpleNamespace(digest=VALUES["package_digest"])},
+        ),
+    )
+    validate_operation = "module-validate-race:" + uuid4().hex
+    validate_payload = {
+        "component_id": COMPONENT,
+        "expected_config_revision": 1,
+        "expected_state_revision": 0,
+    }
+    validating = asyncio.create_task(module.validate(
+        await ticket("module.validate", validate_operation, validate_payload),
+        validate_operation,
+        validate_payload,
+    ))
+    await entered.wait()
+
+    state_operation = "module-state-race:" + uuid4().hex
+    state_payload = {
+        "component_id": COMPONENT,
+        "expected_state_revision": 0,
+        "enabled": False,
+        "reason": "snapshot race",
+    }
+    changing = asyncio.create_task(module.set_state(
+        await ticket("module.disable", state_operation, state_payload),
+        state_operation,
+        state_payload,
+    ))
+    await asyncio.sleep(0.05)
+    assert not changing.done()
+
+    release.set()
+    validated, changed = await asyncio.gather(validating, changing)
+    assert validated["state_revision"] == 0
+    assert changed["desired_state_revision"] == 1
 
 
 async def test_reload_recovers_when_apply_committed_before_wrapper_receipt(

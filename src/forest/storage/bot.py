@@ -37,8 +37,9 @@ from forest.storage.migration_v4 import install_writer_gate_in as install_writer
 from forest.storage.migration_v5 import install_writer_gate_in as install_writer_gate_v5_in
 from forest.storage.migration_v6 import install_writer_gate_in as install_writer_gate_v6_in
 from forest.storage.migration_v7 import install_writer_gate_in as install_writer_gate_v7_in
-from forest.storage.migration_v8 import WRITER_GENERATION
 from forest.storage.migration_v8 import install_writer_gate_in as install_writer_gate_v8_in
+from forest.storage.migration_v9 import WRITER_GENERATION
+from forest.storage.migration_v9 import install_writer_gate_in as install_writer_gate_v9_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -77,10 +78,35 @@ MIGRATION_V5 = frozenset({"064_schema_writer_v5.sql", "065_context_management.sq
 MIGRATION_V6 = frozenset({"066_schema_writer_v6.sql"})
 MIGRATION_V7 = frozenset({"067_schema_writer_v7.sql"})
 MIGRATION_V8 = frozenset({"068_shell_priority_qualification.sql"})
+MIGRATION_V9 = frozenset({"069_module_lifecycle.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
+    if version in MIGRATION_V9:
+        root = files("forest.storage")
+        forest_root = files("forest")
+        try:
+            helpers = [[name, root.joinpath(name).read_text(encoding="utf-8")]
+                       for name in (
+                           "migration_v1.py", "migration_v2.py", "migration_v3.py",
+                           "migration_v4.py", "migration_v5.py", "migration_v6.py",
+                           "migration_v7.py", "migration_v8.py", "migration_v9.py",
+                           "shell_payloads_v11.py",
+                       )]
+            helpers.append([
+                "shell_registry_v11.py",
+                forest_root.joinpath("shell_registry_v11.py").read_text(encoding="utf-8"),
+            ])
+        except FileNotFoundError as exc:
+            raise ForestError(
+                "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
+            ) from exc
+        envelope = json.dumps(
+            ["forest.bot.migration.v9", source, None, helpers],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(envelope).hexdigest()
     if version in MIGRATION_V8:
         root = files("forest.storage")
         forest_root = files("forest")
@@ -427,6 +453,7 @@ class BotStore:
             gated_v6 = False
             gated_v7 = False
             gated_v8 = False
+            gated_v9 = False
             for version, source, checksum in plan:
                 handler = MIGRATION_HANDLERS.get(version)
                 if handler and not gated:
@@ -453,6 +480,9 @@ class BotStore:
                 if version in MIGRATION_V8 and not gated_v8:
                     await install_writer_gate_v8_in(conn)
                     gated_v8 = True
+                if version in MIGRATION_V9 and not gated_v9:
+                    await install_writer_gate_v9_in(conn)
+                    gated_v9 = True
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)
@@ -1230,17 +1260,26 @@ class BotStore:
         component_id: str,
         operation_id: str,
         input_digest: str,
-        candidate_generation_id: str,
+        candidate_generation_id: str | None,
         expected_route_epoch: int,
         ttl_seconds: float = 30,
+        *,
+        operation_kind: str = "INSTALL",
     ) -> dict:
+        if operation_kind not in {"INSTALL", "DISABLE"} or (
+            (operation_kind == "INSTALL") != (candidate_generation_id is not None)
+        ):
+            raise ForestError("LIFECYCLE_PLAN_INVALID", "Lifecycle operation shape is invalid", 422)
         self._ttl(ttl_seconds)
         async with self.pool.connection() as conn, conn.transaction():
             resource = await self._resource(conn, component_id)
             route = await self._route(conn, component_id)
             await self._host(conn, lease)
-            candidate = await self._generation(conn, candidate_generation_id)
-            if candidate["component_id"] != component_id:
+            candidate = (
+                await self._generation(conn, candidate_generation_id)
+                if candidate_generation_id is not None else None
+            )
+            if candidate is not None and candidate["component_id"] != component_id:
                 raise ForestError("GENERATION_CONFLICT", "Candidate belongs to another component")
             existing = await (
                 await conn.execute(
@@ -1254,6 +1293,7 @@ class BotStore:
                     "input_digest": input_digest,
                     "candidate_generation_id": candidate_generation_id,
                     "expected_route_epoch": expected_route_epoch,
+                    "operation_kind": operation_kind,
                 }
                 if any(existing[key] != value for key, value in fixed.items()):
                     raise ForestError(
@@ -1283,7 +1323,7 @@ class BotStore:
                 # the longer component operation lease has not elapsed yet.
             if route["route_epoch"] != expected_route_epoch:
                 raise ForestError("ROUTE_CONFLICT", "Component route changed")
-            if (
+            if candidate is not None and (
                 candidate["host_incarnation"] != lease.incarnation
                 or candidate["host_owner_epoch"] != lease.owner_epoch
             ):
@@ -1316,8 +1356,8 @@ class BotStore:
                     await conn.execute(
                         "INSERT INTO public.bot_lifecycle_operations(bot_id,operation_id,component_id,input_digest,"
                         "candidate_generation_id,old_generation_id,expected_route_epoch,phase,host_incarnation,"
-                        "host_owner_epoch,op_epoch,lease_until) VALUES (%s,%s,%s,%s,%s,%s,%s,'PLAN',%s,%s,%s,"
-                        "clock_timestamp()+%s*interval '1 second') RETURNING *",
+                        "host_owner_epoch,op_epoch,lease_until,operation_kind) VALUES (%s,%s,%s,%s,%s,%s,%s,'PLAN',%s,%s,%s,"
+                        "clock_timestamp()+%s*interval '1 second',%s) RETURNING *",
                         (
                             self.bot_id,
                             operation_id,
@@ -1330,6 +1370,7 @@ class BotStore:
                             lease.owner_epoch,
                             epoch,
                             ttl_seconds,
+                            operation_kind,
                         ),
                     )
                 ).fetchone()
@@ -1530,6 +1571,8 @@ class BotStore:
     async def publish(self, lease: HostLease, operation_id: str, op_epoch: int) -> dict:
         async with self.pool.connection() as conn, conn.transaction():
             operation, route, runtime = await self._lifecycle(conn, lease, operation_id, op_epoch)
+            if operation["operation_kind"] != "INSTALL":
+                raise ForestError("INVALID_OPERATION_KIND", "Install publication requires a candidate")
             if operation["phase"] == "COMMITTED":
                 if route["generation_id"] != operation["candidate_generation_id"]:
                     raise ForestError(
@@ -1613,6 +1656,68 @@ class BotStore:
             await self._host(conn, lease, runtime)
             if operation["lease_until"] <= await self._now(conn):
                 raise ForestError("STALE_OPERATION", "Lifecycle lease expired during publication")
+            assert result is not None
+            return result
+
+    async def publish_disable(
+        self, lease: HostLease, operation_id: str, op_epoch: int
+    ) -> dict:
+        """Atomically retire the current route and publish an explicit empty route."""
+        async with self.pool.connection() as conn, conn.transaction():
+            operation, route, runtime = await self._lifecycle(
+                conn, lease, operation_id, op_epoch
+            )
+            if operation["operation_kind"] != "DISABLE":
+                raise ForestError("INVALID_OPERATION_KIND", "Disable publication has a candidate")
+            if operation["phase"] == "COMMITTED":
+                if route["generation_id"] is not None:
+                    raise ForestError(
+                        "ROUTE_CONFLICT", "The disabled route was subsequently replaced"
+                    )
+                return route
+            if operation["phase"] not in {"FROZEN", "QUIESCENT"}:
+                raise ForestError(
+                    "INVALID_OPERATION_PHASE", "Disable publication requires frozen admission"
+                )
+            if route["route_epoch"] != operation["expected_route_epoch"]:
+                raise ForestError("ROUTE_CONFLICT", "Component route changed before disable")
+            operation = await self._quiesce_locked(conn, lease, operation, route, runtime)
+            await self._host(conn, lease, runtime)
+            if operation["lease_until"] <= await self._now(conn):
+                raise ForestError("STALE_OPERATION", "Lifecycle lease expired before disable")
+            if route["generation_id"] is not None:
+                await conn.execute(
+                    "UPDATE public.bot_generations SET status='RETIRED' "
+                    "WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",
+                    (self.bot_id, route["generation_id"]),
+                )
+            result = await (
+                await conn.execute(
+                    "UPDATE public.bot_component_routes SET generation_id=NULL,"
+                    "route_epoch=route_epoch+1,admission=false,control_admission=false "
+                    "WHERE bot_id=%s AND component_id=%s RETURNING *",
+                    (self.bot_id, operation["component_id"]),
+                )
+            ).fetchone()
+            await conn.execute(
+                "UPDATE public.bot_lifecycle_operations SET phase='COMMITTED' "
+                "WHERE bot_id=%s AND operation_id=%s",
+                (self.bot_id, operation_id),
+            )
+            await conn.execute(
+                "UPDATE public.bot_component_resources SET operation_id=NULL,"
+                "lease_until=clock_timestamp() WHERE bot_id=%s AND component_id=%s",
+                (self.bot_id, operation["component_id"]),
+            )
+            await self._event(
+                conn,
+                "lifecycle.committed",
+                operation_id,
+                {"generation_id": None, "route_epoch": result["route_epoch"]},
+            )
+            await self._host(conn, lease, runtime)
+            if operation["lease_until"] <= await self._now(conn):
+                raise ForestError("STALE_OPERATION", "Lifecycle lease expired during disable")
             assert result is not None
             return result
 

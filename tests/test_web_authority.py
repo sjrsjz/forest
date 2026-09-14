@@ -165,7 +165,8 @@ async def rejected(code, action):
 
 
 async def wait_for_lock(store, fragment):
-    for _ in range(200):
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
         async with store.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -176,8 +177,18 @@ async def wait_for_lock(store, fragment):
             ).fetchone()
         if row["waiting"]:
             return
-        await asyncio.sleep(0.005)
-    pytest.fail("Expected authority operation did not reach its database row lock")
+        await asyncio.sleep(0.01)
+    async with store.pool.connection() as conn:
+        activity = await (
+            await conn.execute(
+                "SELECT state,wait_event_type,wait_event,query FROM pg_stat_activity "
+                "WHERE datname=current_database() AND pid<>pg_backend_pid() ORDER BY pid"
+            )
+        ).fetchall()
+    pytest.fail(
+        "Expected authority operation did not reach its database row lock; "
+        f"activity={activity!r}"
+    )
 
 
 async def test_issuer_key_and_signed_receipts_survive_restart(environment):

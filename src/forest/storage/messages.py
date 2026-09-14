@@ -22,10 +22,10 @@ from forest.shell_authority import qualify_priority
 from forest.shell_commands import parse_command
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
-from forest.storage.shell_payloads_v10 import (
+from forest.storage.shell_payloads_v11 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
 )
-from forest.storage.shell_payloads_v10 import (
+from forest.storage.shell_payloads_v11 import (
     ShellPayloadStore,
     arguments_metadata,
     delivery_metadata,

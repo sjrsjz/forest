@@ -65,6 +65,15 @@ def command(text, *, extras=(), self_message=False):
      {"component_id": "forest.weather"}, 1),
     ("#forest module reload forest.weather --expect-revision 18", "module.reload",
      {"component_id": "forest.weather", "expected_revision": 18}, 1),
+    ("#forest module validate forest.weather --expect-config-revision 18 --expect-state-revision 3",
+     "module.validate", {"component_id": "forest.weather", "expected_config_revision": 18,
+                         "expected_state_revision": 3}, 1),
+    ('#forest module enable forest.weather --expect-state-revision 3 --reason "恢复服务"',
+     "module.enable", {"component_id": "forest.weather", "expected_state_revision": 3,
+                       "enabled": True, "reason": "恢复服务"}, 1),
+    ('#forest module disable forest.weather --expect-state-revision 3 --reason "故障隔离"',
+     "module.disable", {"component_id": "forest.weather", "expected_state_revision": 3,
+                        "enabled": False, "reason": "故障隔离"}, 0),
     ("#forest core status", "core.status", {}, 0),
     ('#forest core cancel run:1 --reason "紧急停止" --expect-checkpoint 7', "run.cancel",
      {"run_id": "run:1", "expected_checkpoint_seq": 7, "reason": "紧急停止"}, 0),
@@ -100,6 +109,9 @@ def test_typed_commands(text, name, payload, priority):
     '#forest module reload component',
     '#forest module reload component --expect-revision 0',
     '#forest module reload component --expect-revision 1 --expect-revision 2',
+    '#forest module validate component --expect-config-revision 1',
+    '#forest module enable component --expect-state-revision 0 --reason ""',
+    '#forest module disable component --expect-state-revision -1 --reason stop',
     '#forest core status extra', '#forest core cancel run --expect-checkpoint 1',
     '#forest core cancel run --expect-checkpoint 1 --reason ""',
     '#forest core disable --expect-maintenance -1 --reason stop',
@@ -127,11 +139,11 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v10():
-    assert command("#forest status").gate_version == "shell-gate-v10"
-    assert command("#forest memory list").gate_version == "shell-gate-v10"
-    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v10"
-    assert command("#forest component-job list").gate_version == "shell-gate-v10"
-    assert command("#forest audit list").gate_version == "shell-gate-v10"
-    assert command("#forest context inspect").gate_version == "shell-gate-v10"
-    assert command("#forest module status forest.weather").gate_version == "shell-gate-v10"
+def test_new_admissions_are_explicitly_shell_gate_v11():
+    assert command("#forest status").gate_version == "shell-gate-v11"
+    assert command("#forest memory list").gate_version == "shell-gate-v11"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v11"
+    assert command("#forest component-job list").gate_version == "shell-gate-v11"
+    assert command("#forest audit list").gate_version == "shell-gate-v11"
+    assert command("#forest context inspect").gate_version == "shell-gate-v11"
+    assert command("#forest module status forest.weather").gate_version == "shell-gate-v11"

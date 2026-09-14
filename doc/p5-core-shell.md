@@ -2,7 +2,7 @@
 
 ## 1. 当前命令
 
-`shell-gate-v9` 在 Host 内首次固定、当前 `shell-gate-v10` 完整继承以下最小救援语法：
+`shell-gate-v9` 在 Host 内首次固定、当前 `shell-gate-v11` 完整继承以下最小救援语法：
 
 ```text
 #forest core status
@@ -11,7 +11,7 @@
 #forest core reload <component_id> --expect-revision <desired_revision>
 ```
 
-`core status/cancel/disable` 声明 P0；`core reload` 是 P1。v10 只有在可信发言主体命中当前 Binding 管理员名单时才保留声明的 P0，否则实际持久为 P1。旧 v2–v9 请求继续使用接纳时持久保存的 gate 和 priority，其中 v2–v8 的旧 `core status` 仍是 P1，不会因升级被重新排队。迁移 067 把 writer generation 提升为 7，排除不认识 v9 grammar 的 generation-6 Host；迁移 068 再提升为 8，排除不会生成 v10 优先级依据的 generation-7 Host。
+`core status/cancel/disable` 声明 P0；`core reload` 是 P1。v10 起只有在可信发言主体命中当前 Binding 管理员名单时才保留声明的 P0，否则实际持久为 P1。旧 v2–v10 请求继续使用接纳时持久保存的 gate 和 priority，其中 v2–v8 的旧 `core status` 仍是 P1，不会因升级被重新排队。迁移 067 把 writer generation 提升为 7，排除不认识 v9 grammar 的 generation-6 Host；迁移 068 再提升为 8，排除不会生成 v10 优先级依据的 generation-7 Host。v11 原样继承 Core form 和资格策略。
 
 Core 不是服务器终端、交互式 Shell 或第二套管理框架。它不接受自由 argv、脚本、路径、环境变量、密钥、跨 Bot 目标或插件注册命令。解析只依赖发行版内的冻结 token、封闭参数 schema 和固定动作映射；业务插件及其 Worker 不能覆盖这些 form。
 

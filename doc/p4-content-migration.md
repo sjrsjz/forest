@@ -6,7 +6,7 @@
 
 001–028 保留原 SQL SHA-256。带数据 handler 的 029–035、037–038 使用 UTF-8 JSON 数组 `['forest.bot.migration.v1', SQL, handler 源码, migration_v1.py 源码]` 的 SHA-256，数组使用无额外空格的 JSON 编码；纯 SQL 的 036 仍使用 SQL SHA-256。handler 和 `migration_v1.py` 发布后不得修改；后续算法使用新的版本文件。handler 应包含迁移所需的历史算法，不调用会随运行时变化的业务存储实现。
 
-新连接通过 PostgreSQL 启动参数声明当前 `forest.writer_generation`。029 的基础正文切换使用 generation 1，042 的配置正文切换提升为 generation 2，060 的 Job 正文切换提升为 generation 3，062 的 Shell 正文切换提升为 generation 4，064 的 Shell v7 上下文控制协议提升为 generation 5，066 的模块 Shell 提升为 generation 6，067 的固定 Core form 提升为 generation 7，068 的 Shell P0 资格依据提升为 generation 8。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
+新连接通过 PostgreSQL 启动参数声明当前 `forest.writer_generation`。029 的基础正文切换使用 generation 1，042 的配置正文切换提升为 generation 2，060 的 Job 正文切换提升为 generation 3，062 的 Shell 正文切换提升为 generation 4，064 的 Shell v7 上下文控制协议提升为 generation 5，066 的模块 Shell 提升为 generation 6，067 的固定 Core form 提升为 generation 7，068 的 Shell P0 资格依据提升为 generation 8，069 的模块启停生命周期提升为 generation 9。数据库的 `bot_schema_writer_gate` 和 HostLease INSERT/UPDATE/DELETE trigger 拒绝缺少版本或版本过旧的连接，所以旧进程即使更换 incarnation，也无法重新取得或续签宿主租约。这是版本兼容协议，数据库所有者权限仍只属于受信任宿主。无待执行迁移的重复启动不会改变当前宿主租约。
 
 `PayloadStore.import_legacy_json_in()` / `import_legacy_bytes_in()` 只在 dispatcher 绑定的同连接、同任务、同事务内有效，普通业务调用及继承 ContextVar 的子任务会被拒绝。参数为 `owner_kind`、`owner_id`、`value`、`sources`、`parents`，返回 `PayloadRef`。它与正常写入使用一致的稳定身份和摘要：
 

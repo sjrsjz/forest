@@ -467,6 +467,10 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
                 "component_job.replay",
                 "component_job.retire.plan",
                 "audit.read",
+                "module.read",
+                "module.validate",
+                "module.reload",
+                "module.enable",
             }
             for table in (
                 "bot_memory_config_revisions",
@@ -564,6 +568,14 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
                 if {"config.apply", "message.cancel"} <= set(row["actions"]):
                     expected.add("component_job.retire.apply")
                 expected.add("audit.read")
+            if "config.read" in row["actions"]:
+                expected.update({"module.read", "module.validate"})
+            if {"config.plan", "config.apply"} <= set(row["actions"]):
+                expected.add("module.reload")
+            if "config.apply" in row["actions"]:
+                expected.add("module.enable")
+            if {"config.apply", "message.cancel"} <= set(row["actions"]):
+                expected.add("module.disable")
             after = actual[row["issuer_id"]]
             assert set(after["actions"]) == expected
             assert {k: v for k, v in after.items() if k != "actions"} == {

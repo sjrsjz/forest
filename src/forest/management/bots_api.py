@@ -57,6 +57,19 @@ class Maintenance(Body):
     )
 
 
+class ModuleValidate(Body):
+    expected_config_revision: int = Field(ge=1, le=2**63 - 1, strict=True)
+    expected_state_revision: int = Field(ge=0, le=2**63 - 1, strict=True)
+
+
+class ModuleState(Body):
+    expected_state_revision: int = Field(ge=0, le=2**63 - 1, strict=True)
+    enabled: bool = Field(strict=True)
+    reason: str = Field(
+        min_length=1, max_length=256, pattern=r"^[^\x00-\x1f]*[^\s\x00-\x1f][^\x00-\x1f]*$"
+    )
+
+
 def install_bot_routes(app: FastAPI, runtime: Any) -> None:
     def services():
         if runtime.catalog is None or runtime.fleet is None or runtime.authority is None:
@@ -204,6 +217,51 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
         payload = {"component_id": component_id, "before": before}
         bot, operation, signed = await ticket(request, bot_id, "config.history", payload, write=False)
         return await bot.control.history(signed, operation, payload)
+
+    @app.get("/management/v1/bots/{bot_id}/components/{component_id}/module")
+    async def module_status(bot_id: str, component_id: str, request: Request):
+        from forest.storage.module_administration import ModuleAdministration
+
+        payload = {"component_id": component_id}
+        bot, operation, signed = await ticket(
+            request, bot_id, "module.read", payload, write=False
+        )
+        return await ModuleAdministration(
+            bot.store, control=bot.control, packages=services()[1].packages
+        ).read(signed, operation, payload)
+
+    @app.post("/management/v1/bots/{bot_id}/components/{component_id}/module/validate")
+    async def module_validate(
+        bot_id: str, component_id: str, body: ModuleValidate, request: Request
+    ):
+        from forest.storage.module_administration import ModuleAdministration
+
+        payload = {"component_id": component_id, **body.model_dump()}
+        bot, operation, signed = await ticket(
+            request, bot_id, "module.validate", payload, write=False
+        )
+        return await ModuleAdministration(
+            bot.store, control=bot.control, packages=services()[1].packages
+        ).validate(signed, operation, payload)
+
+    @app.post(
+        "/management/v1/bots/{bot_id}/components/{component_id}/module/state",
+        status_code=202,
+    )
+    async def module_state(
+        bot_id: str, component_id: str, body: ModuleState, request: Request
+    ):
+        from forest.storage.module_administration import ModuleAdministration
+
+        payload = {"component_id": component_id, **body.model_dump()}
+        action = "module.enable" if body.enabled else "module.disable"
+        bot, operation, signed = await ticket(request, bot_id, action, payload)
+        result = await ModuleAdministration(
+            bot.store, control=bot.control, packages=services()[1].packages
+        ).set_state(signed, operation, payload)
+        if bot.platform is not None and not bot.control.is_unavailable(result):
+            bot.platform.notify()
+        return result
 
     @app.post("/management/v1/bots/{bot_id}/components/{component_id}/change-plans")
     async def config_plan(bot_id: str, component_id: str, body: ConfigPlan, request: Request):

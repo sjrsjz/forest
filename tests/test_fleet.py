@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from psycopg import sql
 
 import forest.management.fleet as fleet_module
+import forest.storage.module_administration as module_administration_module
 from forest.errors import ForestError
 from forest.management.fleet import BotFleet, ManagedBot
 from forest.security import SecretVault
@@ -346,11 +347,124 @@ async def test_failed_configuration_backs_off_but_new_revision_retries_immediate
     for _ in range(5):
         await fleet._reconcile_once(bot)
     assert calls == ["bind", "install"]
-    assert bot.retries["counter"][:2] == (1, 1)
+    assert bot.retries["counter"][:2] == ((1, 0, True), 1)
     current["revision"] = 2
     await fleet._reconcile_once(bot)
     assert calls == ["bind", "install", "bind", "install"]
     assert bot.errors["counter"] == "PLUGIN_FAILED"
+
+
+async def test_disable_does_not_require_the_retired_package_to_remain_available(
+    tmp_path, fake_runtime, monkeypatch
+):
+    fleet = BotFleet(fake_catalog(), fake_runtime, tmp_path)
+    store = FakeStore("synthetic", "test")
+    kernel = FakeKernel(store)
+    calls = []
+    revision = {
+        "component_id": "retired",
+        "revision": 4,
+        "values": {"package_digest": "missing", "config": {}, "grants": []},
+        "effective_revision": 3,
+        "effective_values": {
+            "package_digest": "also-missing", "config": {}, "grants": []
+        },
+        "desired_state_revision": 1,
+        "effective_state_revision": 0,
+        "desired_enabled": False,
+        "effective_enabled": True,
+    }
+
+    async def desired(*args):
+        return [dict(revision)]
+
+    async def disable(component, *, operation_id):
+        calls.append(("disable", component, operation_id))
+
+    class FakeModuleAdministration:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def bind_activation(
+            self, lease, component, state_revision, operation_id, *, enabled
+        ):
+            calls.append(("bind", component, state_revision, enabled, operation_id))
+
+    monkeypatch.setattr(
+        module_administration_module, "ModuleAdministration", FakeModuleAdministration
+    )
+    kernel.disable = disable
+    bot = ManagedBot(store, kernel, SimpleNamespace(desired=desired), ready=True)
+    await fleet._reconcile_once(bot)
+
+    assert [call[0] for call in calls] == ["bind", "disable"]
+    assert calls[0][1:4] == ("retired", 1, False)
+    assert calls[0][4] == calls[1][2]
+    assert bot.applied_states == {"retired": 1}
+    assert not bot.errors
+
+
+async def test_incomplete_enabled_dependency_graph_blocks_pending_disable(
+    tmp_path, fake_runtime, monkeypatch
+):
+    fleet = BotFleet(fake_catalog(), fake_runtime, tmp_path)
+    store = FakeStore("synthetic", "test")
+    kernel = FakeKernel(store)
+    calls = []
+    provider_values = {"package_digest": "provider", "config": {}, "grants": []}
+    broken_values = {"package_digest": "broken", "config": {}, "grants": []}
+    revisions = [
+        {
+            "component_id": "provider",
+            "revision": 2,
+            "values": provider_values,
+            "effective_revision": 1,
+            "effective_values": provider_values,
+            "desired_state_revision": 1,
+            "effective_state_revision": 0,
+            "desired_enabled": False,
+            "effective_enabled": True,
+        },
+        {
+            "component_id": "broken",
+            "revision": 1,
+            "values": broken_values,
+            "desired_state_revision": 0,
+            "effective_state_revision": 0,
+            "desired_enabled": True,
+            "effective_enabled": False,
+        },
+    ]
+
+    async def desired(*args):
+        return [dict(row) for row in revisions]
+
+    def validate(component, values):
+        if component == "broken":
+            raise ForestError("PACKAGE_UNAVAILABLE", "Synthetic package is absent", 409)
+
+    async def disable(*args, **kwargs):
+        calls.append("disable")
+
+    class FakeModuleAdministration:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def bind_activation(self, *args, **kwargs):
+            calls.append("bind")
+
+    monkeypatch.setattr(
+        module_administration_module, "ModuleAdministration", FakeModuleAdministration
+    )
+    fleet.validate = validate
+    fleet.packages["provider"] = object()
+    kernel.disable = disable
+    bot = ManagedBot(store, kernel, SimpleNamespace(desired=desired), ready=True)
+    await fleet._reconcile_once(bot)
+
+    assert calls == []
+    assert bot.errors["provider"] == "DEPENDENCY_GRAPH_INCOMPLETE"
+    assert bot.errors["broken"] == "PACKAGE_UNAVAILABLE"
 
 
 @pytest_asyncio.fixture

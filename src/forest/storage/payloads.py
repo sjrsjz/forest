@@ -188,6 +188,8 @@ class PayloadStore:
         identities = tuple(sorted(set(ids)))
         for payload_id in identities:
             _identifier(payload_id)
+        if not identities:
+            return
         legacy = {
             row["payload_id"]
             for row in await (

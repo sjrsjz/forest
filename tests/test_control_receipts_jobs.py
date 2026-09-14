@@ -6,8 +6,6 @@ from test_jobs import configure, request
 from test_jobs import jobs as jobs
 from test_web_authority import environment as environment
 
-from forest.errors import ForestError
-
 pytestmark = pytest.mark.postgres
 
 
@@ -21,9 +19,10 @@ async def test_job_management_read_uses_definition_revision_source_and_keeps_can
         )
     )[0]["operation_id"]
     await forget(env, plan_op)
-    with pytest.raises(ForestError) as caught:
-        await request(env, store, "read", "read", {})
-    assert caught.value.code == "CONTROL_CONTENT_REVOKED"
+    unavailable = (await request(env, store, "read", "read", {}))["jobs"][0]
+    assert unavailable["values"] is None and unavailable["delegation"] is None
+    assert unavailable["values_payload_state"] == "UNAVAILABLE"
+    assert unavailable["delegation_payload_state"] == "UNAVAILABLE"
     # Metadata-only future cancellation remains available for accepted work.
     cancelled = await request(
         env,

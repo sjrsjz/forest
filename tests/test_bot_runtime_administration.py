@@ -194,11 +194,11 @@ async def test_053_upgrade_adds_only_implied_runtime_rights_and_keeps_disabled_i
             "audit.read",
         }
         assert upgraded["cancel-only"] == {"message.cancel"}
-        assert upgraded["apply-only"] == {"config.apply"}
+        assert upgraded["apply-only"] == {"config.apply", "module.enable"}
         assert upgraded["operator"] == {
             "message.read", "message.cancel", "config.apply", "bot.runtime.read", "bot.maintenance",
             "event.read", "event.retire.apply", "component_job.read",
-            "component_job.retire.apply", "audit.read",
+            "component_job.retire.apply", "audit.read", "module.enable", "module.disable",
         }
         assert upgraded["disabled"] == upgraded["operator"]
         assert not next(item for item in rows if item["issuer_id"] == "disabled")["enabled"]

@@ -9,14 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from jsonschema import Draft202012Validator
 from psycopg.errors import RaiseException
 
 from forest.errors import ForestError
-from forest.kernel import Kernel
+from forest.kernel import DependencyPlan, Kernel, resolve_dependencies
 from forest.management.authority import WebAuthority
 from forest.management.catalog import BotCatalog
 from forest.management.packages import PackageRegistry
+from forest.module_validation import validate_component_values
 from forest.packages import PackageCatalog, PackageSnapshot
 from forest.platform import BindingRuntime
 from forest.storage.bot import BotStore
@@ -29,6 +29,7 @@ class ManagedBot:
     kernel: Kernel
     control: BotControl
     applied: dict[str, int] = field(default_factory=dict)
+    applied_states: dict[str, int] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     task: asyncio.Task | None = None
     cleanup_task: asyncio.Task | None = None
@@ -176,28 +177,7 @@ class BotFleet:
         return copy.deepcopy(list(self.package_metadata.values()))
 
     def validate(self, component_id: str, values: dict) -> None:
-        if set(values) != {"package_digest", "config", "grants"}:
-            raise ForestError("CONFIG_INVALID", "Configuration fields do not match", 422)
-        if not isinstance(values["package_digest"], str):
-            raise ForestError("CONFIG_INVALID", "Package digest must be text", 422)
-        snapshot = self.packages.get(values["package_digest"])
-        if snapshot is None or snapshot.component["id"] != component_id:
-            raise ForestError("PACKAGE_UNAVAILABLE", "Select an available component package", 422)
-        if not Draft202012Validator(self.package_metadata[snapshot.digest]["config_schema"]).is_valid(
-            values["config"]
-        ):
-            raise ForestError(
-                "CONFIG_INVALID", "Component configuration does not match its schema", 422
-            )
-        requested = snapshot.component.get("capabilities", {}).get("requests", [])
-        if (
-            not isinstance(values["grants"], list)
-            or not all(isinstance(grant, str) for grant in values["grants"])
-            or sorted(values["grants"]) != sorted(requested)
-        ):
-            raise ForestError(
-                "CAPABILITY_DENIED", "Explicitly grant the package's required capabilities", 403
-            )
+        validate_component_values(self.packages, component_id, values)
 
     async def _resolve_storage(self, bot_id: str) -> dict:
         resolver = getattr(self.catalog, "resolve_storage", None)
@@ -277,6 +257,7 @@ class BotFleet:
                             global_slots=self.group_slots,
                             job_authority=self.authority,
                             global_model_slots=self.model_slots,
+                            module_packages=self.packages,
                         )
                         await managed.platform.start()
                         if self._closed:
@@ -306,36 +287,186 @@ class BotFleet:
             self._attaching.discard(task)
 
     async def _reconcile_once(self, bot: ManagedBot) -> None:
+        if not hasattr(bot, "applied_states"):
+            bot.applied_states = {}
         desired = await bot.control.desired(bot.kernel._authority())
         for revision in desired:
+            revision.setdefault("values_payload_state", "ACTIVE")
+            revision.setdefault("effective_values", None)
+            revision.setdefault("effective_values_payload_state", "UNCONFIGURED")
+            revision.setdefault("effective_revision", 0)
+            revision.setdefault("desired_state_revision", 0)
+            revision.setdefault("effective_state_revision", 0)
+            revision.setdefault("desired_enabled", True)
+            revision.setdefault("effective_enabled", True)
+        by_component = {row["component_id"]: row for row in desired}
+        snapshots = {}
+        synthetic_order = []
+        graph_complete = True
+
+        def add_to_plan(component, values):
+            self.validate(component, values)
+            snapshot = self.packages[values["package_digest"]]
+            if isinstance(snapshot, PackageSnapshot):
+                snapshots[component] = snapshot
+            elif component not in synthetic_order:
+                synthetic_order.append(component)
+
+        for revision in desired:
+            component = revision["component_id"]
+            if revision["desired_enabled"]:
+                try:
+                    if revision.get("values_payload_state") == "UNAVAILABLE":
+                        raise ForestError(
+                            "CONTROL_CONTENT_REVOKED", "Desired module content is unavailable", 409
+                        )
+                    add_to_plan(component, revision["values"])
+                except Exception as exc:
+                    graph_complete = False
+                    bot.errors[component] = self._code(exc, "VALIDATION_FAILED")
+                    effective_values = revision.get("effective_values")
+                    if effective_values is not None:
+                        try:
+                            add_to_plan(component, effective_values)
+                        except Exception:
+                            if component not in synthetic_order:
+                                synthetic_order.append(component)
+                    elif component not in synthetic_order:
+                        synthetic_order.append(component)
+                continue
+
+            if not revision["effective_enabled"]:
+                if component not in synthetic_order:
+                    synthetic_order.append(component)
+                continue
+            effective_values = revision.get("effective_values")
+            if effective_values is not None:
+                try:
+                    add_to_plan(component, effective_values)
+                    continue
+                except Exception:
+                    pass
+            if component not in synthetic_order:
+                synthetic_order.append(component)
+        try:
+            dependency_plan = resolve_dependencies(snapshots)
+            if synthetic_order:
+                dependency_plan = DependencyPlan(
+                    order=dependency_plan.order + synthetic_order,
+                    bindings={**dependency_plan.bindings, **{key: {} for key in synthetic_order}},
+                    closures={**dependency_plan.closures, **{key: () for key in synthetic_order}},
+                    degraded={**dependency_plan.degraded, **{key: [] for key in synthetic_order}},
+                )
+        except Exception as exc:
+            code = self._code(exc, "DEPENDENCY_INVALID")
+            for component in snapshots:
+                bot.errors[component] = code
+            self.errors.pop(bot.store.bot_id, None)
+            return
+
+        enabled = {
+            component for component, revision in by_component.items()
+            if revision["desired_enabled"]
+        }
+        from forest.storage.module_administration import ModuleAdministration
+
+        module = ModuleAdministration(bot.store, control=bot.control, packages=self.packages)
+        for component in reversed(dependency_plan.order):
+            revision = by_component[component]
+            if revision["desired_enabled"]:
+                continue
+            state_number = revision["desired_state_revision"]
+            if (
+                revision["effective_state_revision"] == state_number
+                and not revision["effective_enabled"]
+                and bot.kernel.components.get(component) is None
+            ):
+                bot.applied_states[component] = state_number
+                bot.errors.pop(component, None)
+                continue
+            if not graph_complete:
+                bot.errors[component] = "DEPENDENCY_GRAPH_INCOMPLETE"
+                continue
+            blockers = sorted(
+                caller for caller in enabled
+                if caller != component
+                and component in dependency_plan.closures.get(caller, ())
+            )
+            if blockers:
+                bot.errors[component] = "DEPENDENCY_IN_USE"
+                continue
+            token = (revision["revision"], state_number, False)
+            previous = bot.retries.get(component)
+            now = asyncio.get_running_loop().time()
+            if previous and previous[0] == token and now < previous[2]:
+                continue
+            try:
+                operation_id = "module-disable:" + str(uuid4())
+                await module.bind_activation(
+                    bot.kernel._authority(), component, state_number, operation_id,
+                    enabled=False,
+                )
+                await bot.kernel.disable(component, operation_id=operation_id)
+                bot.applied.pop(component, None)
+                bot.applied_states[component] = state_number
+                bot.errors.pop(component, None)
+                bot.retries.pop(component, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                bot.errors[component] = self._code(
+                    exc,
+                    "MODULE_STATE_SUPERSEDED"
+                    if isinstance(exc, RaiseException) else "DISABLE_FAILED",
+                )
+                failures = previous[1] + 1 if previous and previous[0] == token else 1
+                bot.retries[component] = (
+                    token, failures,
+                    asyncio.get_running_loop().time() + self._delay(failures),
+                )
+
+        for component in dependency_plan.order:
+            revision = by_component[component]
+            if not revision["desired_enabled"]:
+                continue
             component, number = revision["component_id"], revision["revision"]
+            state_number = revision["desired_state_revision"]
             loaded = bot.kernel.components.get(component)
-            if (loaded is None or not loaded.worker.alive) and revision.get("effective_values") and revision["effective_revision"] != number:
+            if (
+                (loaded is None or not loaded.worker.alive)
+                and revision.get("effective_values")
+                and revision["effective_revision"] != number
+                and revision["effective_enabled"]
+                and revision["effective_state_revision"] == state_number
+            ):
                 try:
                     await self._activate(bot, component, revision["effective_revision"],
-                                         revision["effective_values"], recover_effective=True)
+                                         revision["effective_values"], state_number,
+                                         recover_effective=True)
                     loaded = bot.kernel.components.get(component)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     bot.errors[component] = self._code(exc, "RECOVERY_FAILED")
+            if revision.get("values_payload_state") == "UNAVAILABLE":
+                bot.errors[component] = "CONTROL_CONTENT_REVOKED"
+                continue
             if (
                 bot.applied.get(component) == number
+                and bot.applied_states.get(component, 0) == state_number
                 and loaded is not None
                 and loaded.worker.alive
                 and loaded.worker.state == "ACTIVE"
             ):
                 continue
+            token = (number, state_number, True)
             previous = bot.retries.get(component)
-            if revision.get("values_payload_state") == "UNAVAILABLE":
-                bot.errors[component] = "CONTROL_CONTENT_REVOKED"
-                continue
             now = asyncio.get_running_loop().time()
-            if previous and previous[0] == number and now < previous[2]:
+            if previous and previous[0] == token and now < previous[2]:
                 continue
             try:
                 values = revision["values"]
-                await self._activate(bot, component, number, values)
+                await self._activate(bot, component, number, values, state_number)
                 bot.errors.pop(component, None)
                 bot.retries.pop(component, None)
             except asyncio.CancelledError:
@@ -347,24 +478,32 @@ class BotFleet:
                     if isinstance(exc, RaiseException)
                     else "ACTIVATION_FAILED",
                 )
-                failures = previous[1] + 1 if previous and previous[0] == number else 1
+                failures = previous[1] + 1 if previous and previous[0] == token else 1
                 bot.retries[component] = (
-                    number,
+                    token,
                     failures,
                     asyncio.get_running_loop().time() + self._delay(failures),
                 )
         self.errors.pop(bot.store.bot_id, None)
 
-    async def _activate(self, bot, component, revision, values, *, recover_effective=False):
+    async def _activate(
+        self, bot, component, revision, values, state_revision, *, recover_effective=False
+    ):
         self.validate(component, values)
         operation_id = "config-activate:" + str(uuid4())
         await bot.control.bind_activation(
             bot.kernel._authority(), component, revision, operation_id,
             **({"recover_effective": True} if recover_effective else {}),
         )
+        from forest.storage.module_administration import ModuleAdministration
+
+        await ModuleAdministration(bot.store).bind_activation(
+            bot.kernel._authority(), component, state_revision, operation_id, enabled=True
+        )
         await bot.kernel.install(self.packages[values["package_digest"]],
             config=values["config"], grants=frozenset(values["grants"]), operation_id=operation_id)
         bot.applied[component] = revision
+        bot.applied_states[component] = state_revision
 
     async def _reconcile(self, bot: ManagedBot) -> None:
         while not self._closed:

@@ -10,7 +10,7 @@ from test_messages import receive
 from test_shell import allow, dispatcher, shell_record
 
 from forest import shell_commands
-from forest.shell_registry_v10 import CURRENT_GATE_VERSION, registry_manifest, render_help
+from forest.shell_registry_v11 import CURRENT_GATE_VERSION, registry_manifest, render_help
 from forest.storage import messages as message_module
 from forest.storage.delivery_payloads import DeliveryContentStore
 

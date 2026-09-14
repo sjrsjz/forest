@@ -6,10 +6,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry_v10 import (
+from forest.shell_registry_v11 import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V10,
-    SIMPLE_COMMANDS_V10,
+    DOMAIN_ALIASES_V11,
+    SIMPLE_COMMANDS_V11,
     get_command_spec,
 )
 
@@ -82,11 +82,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V10:
-        return _command(SIMPLE_COMMANDS_V10[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V11:
+        return _command(SIMPLE_COMMANDS_V11[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V10.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V11.get(words[0], words[0]), words[1]
     if (domain, verb) == ("core", "cancel") and len(words) >= 3:
         options = _options(words[3:], {"--expect-checkpoint", "--reason"})
         return _command("run.cancel", {
@@ -117,6 +117,26 @@ def _parse(words):
         return _command("module.reload", {
             "component_id": _identity(words[2]),
             "expected_revision": expected,
+        })
+    if (domain, verb) == ("module", "validate") and len(words) >= 3:
+        options = _options(
+            words[3:], {"--expect-config-revision", "--expect-state-revision"}
+        )
+        return _command("module.validate", {
+            "component_id": _identity(words[2]),
+            "expected_config_revision": _positive_revision(
+                options["--expect-config-revision"]
+            ),
+            "expected_state_revision": _revision(options["--expect-state-revision"]),
+        })
+    if (domain, verb) in {("module", "enable"), ("module", "disable")} and len(words) >= 3:
+        options = _options(words[3:], {"--expect-state-revision", "--reason"})
+        enabled = verb == "enable"
+        return _command("module.enable" if enabled else "module.disable", {
+            "component_id": _identity(words[2]),
+            "expected_state_revision": _revision(options["--expect-state-revision"]),
+            "enabled": enabled,
+            "reason": _reason(options["--reason"]),
         })
     if (domain, verb) in {("job", "list"), ("run", "list")} and len(words) == 2:
         return _command(domain + ".read")

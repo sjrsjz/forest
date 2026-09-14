@@ -83,10 +83,11 @@ class PendingActivation:
 
 class BindingRuntime:
     def __init__(self, bot, vault, packages: dict, *, global_slots=None, job_authority=None,
-                 global_model_slots=None):
+                 global_model_slots=None, module_packages=None):
         self.bot, self.kernel, self.vault = bot, bot.kernel, vault
         self.global_model_slots = global_model_slots
         self.packages = dict(packages)
+        self.module_packages = {} if module_packages is None else module_packages
         self.bindings = BindingStore(bot.store)
         self.messages = MessageStore(bot.store, self.bindings)
         self.memory_sources = self.messages._memory_sources()
@@ -131,7 +132,7 @@ class BindingRuntime:
         )
         self.shell = ShellDispatcher(
             self.messages, self.bindings, self.delivery, self.kernel._authority,
-            on_change=self._notify_work,
+            on_change=self._notify_work, module_packages=self.module_packages,
         )
         self.job_store = JobStore(self.messages)
         self.job_authority = job_authority

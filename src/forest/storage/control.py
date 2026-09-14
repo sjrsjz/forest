@@ -71,7 +71,9 @@ ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "serv
            "component_job.retire.apply",
            "audit.read",
            "binding.create", "binding.read", "binding.plan", "binding.apply",
-           "message.read", "message.cancel", "delivery.reconcile")
+           "message.read", "message.cancel", "delivery.reconcile",
+           "module.read", "module.validate", "module.reload", "module.enable",
+           "module.disable")
 _REVISION_CLAIMS = frozenset(
     {"key_revision", "account_revision", "session_revision", "policy_revision"}
 )
@@ -325,8 +327,38 @@ class BotControl:
                 result[kind + "_revision"] = revision
                 result[kind + "_values"] = saved["values"] if saved else None
                 result[kind + "_values_payload_state"] = saved["values_payload_state"] if saved else "UNCONFIGURED"
+            state_head = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_module_state_heads WHERE bot_id=%s "
+                    "AND component_id=%s FOR SHARE",
+                    (self.store.bot_id, component_id),
+                )
+            ).fetchone()
+            result["desired_state_revision"] = state_head["desired_revision"] if state_head else 0
+            result["effective_state_revision"] = (
+                state_head["effective_revision"] if state_head else 0
+            )
+            for kind in ("desired", "effective"):
+                revision = result[kind + "_state_revision"]
+                state = (
+                    {"enabled": True}
+                    if revision == 0
+                    else await (
+                        await conn.execute(
+                            "SELECT enabled FROM public.bot_module_state_revisions "
+                            "WHERE bot_id=%s AND component_id=%s AND revision=%s",
+                            (self.store.bot_id, component_id, revision),
+                        )
+                    ).fetchone()
+                )
+                if state is None:
+                    raise ForestError(
+                        "MODULE_STATE_CONFLICT", "Module state revision is absent", 409
+                    )
+                result[kind + "_enabled"] = state["enabled"]
             operations = await (await conn.execute(
-                "SELECT operation_id,phase,error_code,created_at,op_epoch,candidate_generation_id "
+                "SELECT operation_id,phase,error_code,created_at,op_epoch,candidate_generation_id,"
+                "operation_kind "
                 "FROM public.bot_lifecycle_operations WHERE bot_id=%s AND component_id=%s "
                 "ORDER BY created_at DESC,operation_id DESC LIMIT 10",
                 (self.store.bot_id, component_id),
@@ -542,9 +574,49 @@ class BotControl:
             for head in heads:
                 desired = await self.config_revision_in(conn, head["component_id"], head["desired_revision"], required=False)
                 effective = await self.config_revision_in(conn, head["component_id"], head["effective_revision"], required=False)
+                state_head = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_module_state_heads WHERE bot_id=%s "
+                        "AND component_id=%s FOR SHARE",
+                        (self.store.bot_id, head["component_id"]),
+                    )
+                ).fetchone()
+                desired_state_revision = state_head["desired_revision"] if state_head else 0
+                effective_state_revision = state_head["effective_revision"] if state_head else 0
+                desired_state = (
+                    {"enabled": True}
+                    if desired_state_revision == 0
+                    else await (
+                        await conn.execute(
+                            "SELECT enabled FROM public.bot_module_state_revisions "
+                            "WHERE bot_id=%s AND component_id=%s AND revision=%s",
+                            (self.store.bot_id, head["component_id"], desired_state_revision),
+                        )
+                    ).fetchone()
+                )
+                effective_state = (
+                    {"enabled": True}
+                    if effective_state_revision == 0
+                    else await (
+                        await conn.execute(
+                            "SELECT enabled FROM public.bot_module_state_revisions "
+                            "WHERE bot_id=%s AND component_id=%s AND revision=%s",
+                            (self.store.bot_id, head["component_id"], effective_state_revision),
+                        )
+                    ).fetchone()
+                )
+                if desired_state is None or effective_state is None:
+                    raise ForestError(
+                        "MODULE_STATE_CONFLICT", "Module state revision is absent", 409
+                    )
                 result.append({**desired, "effective_revision": head["effective_revision"],
                     "effective_values": effective["values"] if effective else None,
-                    "effective_values_payload_state": effective["values_payload_state"] if effective else "UNCONFIGURED"})
+                    "effective_values_payload_state": effective["values_payload_state"] if effective else "UNCONFIGURED",
+                    "desired_state_revision": desired_state_revision,
+                    "effective_state_revision": effective_state_revision,
+                    "desired_enabled": desired_state["enabled"],
+                    "effective_enabled": effective_state["enabled"],
+                })
             await self.store._host(conn, lease)
             return result
 

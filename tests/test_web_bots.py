@@ -116,6 +116,32 @@ async def effective(client, base, revision):
         pytest.fail(f"Configuration did not become effective: {result}")
 
 
+async def module_effective(client, base, state_revision, enabled, config_revision):
+    result = None
+    try:
+        async with asyncio.timeout(40):
+            while True:
+                response = await client.get(base + "/configuration")
+                assert response.status_code == 200, response.text
+                result = response.json()
+                loaded = any(
+                    row["component_id"] == "forest.counter" and not row["error_code"]
+                    for row in result["runtime"]["components"]
+                )
+                if (
+                    result["desired_state_revision"] == state_revision
+                    and result["effective_state_revision"] == state_revision
+                    and result["desired_enabled"] is enabled
+                    and result["effective_enabled"] is enabled
+                    and result["effective_revision"] == config_revision
+                    and loaded is enabled
+                ):
+                    return result
+                await asyncio.sleep(0.1)
+    except TimeoutError:
+        pytest.fail(f"Module state did not become effective: {result}")
+
+
 async def make_plan(client, base, package, label, multiplier, revision, key):
     return await post(client, base + "/change-plans", {
         "expected_revision": revision,
@@ -243,6 +269,82 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
         values = [await invoke(client, base, 1, "after-restart") for base in bases]
         assert values[0]["result"] == {"value": 26, "revision": 3, "label": "Alpha v2"}
         assert values[1]["result"] == {"value": 15, "revision": 3, "label": "Beta"}
+
+
+@pytest.mark.postgres
+async def test_web_module_validate_disable_edit_and_enable_is_atomic(
+    tmp_path, web_bots_database
+):
+    data = tmp_path / "module-state"
+    token = BootstrapState(data).initialize()
+    settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
+    async with running(settings) as (_, client):
+        await setup(client, token)
+        bot = await post(
+            client, "/management/v1/bots", {"display_name": "Module lifecycle"},
+            "module-create", status=202,
+        )
+        await ready(client, bot)
+        package = next(
+            row for row in (await client.get("/management/v1/packages")).json()["packages"]
+            if row["component_id"] == "forest.counter"
+        )
+        base = f"/management/v1/bots/{bot['bot_id']}/components/forest.counter"
+        plan = await make_plan(client, base, package, "Before disable", 1, 0, "module-plan")
+        await apply(client, base, plan, "module-apply")
+        await effective(client, base, 1)
+        assert (await invoke(client, base, 2, "module-before"))["result"]["value"] == 2
+
+        module = (await client.get(base + "/module")).json()["modules"][0]
+        assert module["state"] == "ACTIVE" and module["admission"]
+        runtime_path = f"/management/v1/bots/{bot['bot_id']}/runtime"
+        maintenance_path = f"/management/v1/bots/{bot['bot_id']}/maintenance"
+        runtime = (await client.get(runtime_path)).json()
+        await post(client, maintenance_path, {
+            "expected_maintenance_epoch": runtime["maintenance_epoch"],
+            "data_admission": False,
+            "reason": "module projection check",
+        }, "module-pause", status=202)
+        paused_module = (await client.get(base + "/module")).json()["modules"][0]
+        assert paused_module["state"] == "ACTIVE" and paused_module["admission"], paused_module
+        paused_runtime = (await client.get(runtime_path)).json()
+        await post(client, maintenance_path, {
+            "expected_maintenance_epoch": paused_runtime["maintenance_epoch"],
+            "data_admission": True,
+            "reason": "module projection check complete",
+        }, "module-resume", status=202)
+
+        validated = await post(client, base + "/module/validate", {
+            "expected_config_revision": 1, "expected_state_revision": 0,
+        }, "ignored-read-key")
+        assert validated["status"] == "VALID" and validated["required_components"] == []
+
+        disabled = await post(client, base + "/module/state", {
+            "expected_state_revision": 0, "enabled": False, "reason": "isolate failure",
+        }, "module-disable", status=202)
+        assert await post(client, base + "/module/state", {
+            "expected_state_revision": 0, "enabled": False, "reason": "isolate failure",
+        }, "module-disable", status=202) == disabled
+        assert disabled["desired_state_revision"] == 1
+        await module_effective(client, base, 1, False, 1)
+
+        next_plan = await make_plan(
+            client, base, package, "While disabled", 2, 1, "disabled-config-plan"
+        )
+        await apply(client, base, next_plan, "disabled-config-apply")
+        await asyncio.sleep(0.25)
+        pending = (await client.get(base + "/configuration")).json()
+        assert pending["desired_revision"] == 2 and pending["effective_revision"] == 1
+        assert not pending["effective_enabled"]
+
+        enabled = await post(client, base + "/module/state", {
+            "expected_state_revision": 1, "enabled": True, "reason": "validated recovery",
+        }, "module-enable", status=202)
+        assert enabled["desired_state_revision"] == 2
+        final = await module_effective(client, base, 2, True, 2)
+        assert final["effective_values"]["config"]["label"] == "While disabled"
+        after = await invoke(client, base, 1, "module-after")
+        assert after["result"] == {"value": 4, "revision": 2, "label": "While disabled"}
 
 
 @pytest.mark.postgres

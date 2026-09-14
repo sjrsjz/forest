@@ -2,7 +2,7 @@
 
 ## 1. 范围
 
-`shell-gate-v8` 首次提供、当前 v10 完整继承：
+`shell-gate-v8` 首次提供、当前 v11 完整继承：
 
 ```text
 #forest module list
@@ -10,7 +10,17 @@
 #forest module reload <component_id> --expect-revision <desired_revision>
 ```
 
-`modules` 是 `module` 的确定性别名。v8 首次发布这些 form；新请求现由 v10 接纳，已经排队的 v2–v9 请求继续按各自 gate 解释，不会被新语法重新解析。v9 的固定 `core reload` 复用这里的同一 reload 权威；`module validate/enable/disable` 仍未实现，不能用本协议冒充。
+`modules` 是 `module` 的确定性别名。v8 首次发布 list/status/reload，v11 增加 validate/enable/disable；已经排队的 v2–v10 请求继续按各自 gate 解释，不会被新语法重新解析。v9 的固定 `core reload` 复用这里的同一 reload 权威。
+
+`shell-gate-v11` 增加：
+
+```text
+#forest module validate <component_id> --expect-config-revision <desired_revision> --expect-state-revision <module_revision>
+#forest module enable <component_id> --expect-state-revision <module_revision> --reason "..."
+#forest module disable <component_id> --expect-state-revision <module_revision> --reason "..."
+```
+
+这里的 `Agent` 仍然只指每个 `(bot_id, conversation_id)` 的唯一会话 Agent。模块命令属于独立 CONTROL 通道，不创建 Agent、子 Agent 或会话运行。
 
 ## 2. 查询投影
 
@@ -21,7 +31,7 @@ list/status 从 Bot 事实库关联 `bot_config_heads`、当前路由、当前 g
 - generation、route epoch、data/control admission；
 - generation/lifecycle phase 和错误码。
 
-查询不 hydrate 组件配置正文，不向群里输出 capability grants、主体、密钥或 operation 详情。状态按持久事实投影为 `UNCONFIGURED/PENDING/ACTIVE/INACTIVE`；进程内 Worker 的瞬时存活信息仍由 Web runtime 面板显示。
+查询不 hydrate 组件配置正文，不向群里输出 capability grants、主体、密钥或 operation 详情。状态按持久事实投影为 `UNCONFIGURED/PENDING_ENABLE/ACTIVE/PENDING_DISABLE/DISABLED/DEGRADED`；Bot 维护暂停由 Bot 全局 admission 门执行，不改写健康组件的 route，因而不会把已发布组件误报为故障。进程内 Worker 的瞬时存活信息仍由 Web runtime 面板显示。
 
 ## 3. reload 的权威路径
 
@@ -58,10 +68,84 @@ Host 在 plan 前从 revision N 读取值，但 `config.plan` 会再次检查 he
 
 ## 5. WebUI
 
-组件配置卡片增加“重载当前组件”。页面冻结当前 desired revision 和值，使用稳定的 plan/apply 幂等键提交同一两阶段配置协议；网络确认丢失时可以读取原回执。修订冲突会丢弃过期重载草稿并刷新配置。页面同样只把“接纳”显示为等待生命周期切换，最终状态仍以 effective revision 和 runtime 组件状态为准。
+组件配置卡片提供“验证”“启用”“停用”“重载”。页面冻结当前 config/state revision；重载使用稳定的 plan/apply 幂等键，启停使用独立 state CAS 与稳定幂等键。网络确认丢失时可以读取原回执，修订冲突会丢弃过期草稿并刷新配置。页面只把“接纳”显示为等待生命周期切换，最终状态仍以 effective revision、route 和 runtime 组件状态为准。
 
 ## 6. 版本围栏与验证
 
-Bot 迁移 066 把 writer generation 提升为 6。generation-5 Host 不认识 v8 命令，迁移提交后不能重新取得 Host lease；066 checksum 绑定 `migration_v6.py`、`shell_registry_v8.py` 和 `shell_payloads_v8.py`，同时不改变 064/065 已发布 checksum。
+Bot 迁移 066 把 writer generation 提升为 6。generation-5 Host 不认识 v8 命令，迁移提交后不能重新取得 Host lease；066 checksum 绑定 `migration_v6.py`、`shell_registry_v8.py` 和 `shell_payloads_v8.py`，同时不改变 064/065 已发布 checksum。迁移 069 将 generation 提升为 9；checksum 绑定 `migration_v9.py`、`shell_registry_v11.py` 和 `shell_payloads_v11.py`，generation-8 Host 在提交后永久失去 Host 写权。
 
-专项验证覆盖 v8 schema/解析、v2–v7 兼容、真实 PostgreSQL reload/幂等重放、Shell 完整 CONTROL 回执、Web 与 Shell 同 revision 竞争、正文不进入群输出，以及 generation-5 writer 永久失权。
+专项验证覆盖 v8/v11 schema 与旧 gate 兼容、真实 PostgreSQL reload/validate/enable/disable、双 CAS 幂等重放、Shell 完整 CONTROL 回执、Web 与 Shell 同 revision 竞争、正文不进入群输出、暂停态投影、旧 issuer 最小权限映射，以及 generation-5 和 generation-8 writer 永久失权。
+
+## 7. 配置修订与启停修订分离
+
+组件配置历史的不可变正文固定为 `package_digest/config/grants`。启停状态不能向旧配置 payload 追加字段，也不能借一次 reload 暗示“启用”。Bot 库为每个组件维护独立的模块状态头和不可变修订：
+
+- `desired_state_revision`：管理员最后接纳的启停意图；
+- `effective_state_revision`：Kernel 已完成生命周期发布的启停意图；
+- 修订正文只有 `enabled`、`reason`、提交主体、策略版本和来源 operation；
+- 尚无模块状态修订时，已配置组件按兼容默认值 `enabled=true, revision=0` 处理。
+
+因此配置和启停形成两个正交的 CAS 轴。禁用期间仍可编辑或 reload 配置，Fleet 不会加载新 Worker；再次启用时，Fleet 使用最新 desired 配置和最新 desired 启停修订共同创建 activation。一次成功的 INSTALL 发布同时推进配置 effective 和模块 effective；一次 DISABLE 发布只推进模块 effective，保留最后成功的配置 effective 作为重新启用失败时的已知可运行版本。
+
+命令接纳只修改 desired facts，不直接创建 generation、冻结 route 或等待 Worker。回执必须明确显示 `ACCEPTED`，并同时返回 desired/effective 配置修订与 desired/effective 启停修订。只有 effective 启停修订追上且 route 已空，状态才是 `DISABLED`。
+
+## 8. validate 的确定性快照
+
+`module validate` 验证目标 Bot 当前的完整 desired 快照，不接收群聊提供的路径、包正文、配置 JSON 或 capability grants。命令在同一事务中冻结并复核：
+
+- 目标 `desired_config_revision` 及其不可变 payload；
+- `desired_state_revision` 和 enabled 值；
+- package digest 是否在 Host 已验证的 artifact registry 中；
+- 配置 schema 与请求能力是否完全匹配；
+- 所有 desired-enabled 组件形成的服务提供者、契约版本、必需依赖、环和重复服务；目标即使当前 disabled，也按一次 prospective enable 纳入快照。
+
+验证器返回包摘要、配置/状态修订、`VALID` 或稳定错误码，以及必需依赖组件 ID；不返回配置正文或 grants。读取完成后再次检查两个 head，任一 head 变化均返回 `REVISION_CONFLICT`，不会把混合时刻的结果描述成一个快照。validate 不导入代码、不启动 Worker、不访问网络。
+
+## 9. 禁用生命周期
+
+Fleet 只有在全局 desired 依赖图允许后才调和 DISABLE。仍启用的组件若有必需依赖最终指向目标，目标保持原 effective Worker，错误记录为 `DEPENDENCY_IN_USE`。可选依赖不阻止禁用；依赖者下一次重载后以 degraded dependency 运行。`adapter.onebot` 不能从它承载的群 Shell 禁用，避免在成功回执发出前切断控制通道；WebUI 可在具有其它恢复入口时提交。
+
+DISABLE 使用与 INSTALL 相同的组件 resource lease、route epoch、Host lease 和阶段机，但 lifecycle operation 的 kind 为 `DISABLE` 且没有 candidate generation：
+
+```text
+bind module activation(state_revision=S, enabled=false)
+  -> begin DISABLE(expected_route_epoch=E)
+  -> route data/control admission=false；旧 generation ACTIVE->QUIESCING
+  -> 等待直接调用和预留依赖调用全部排空
+  -> Worker.quiesce；数据库阶段 FROZEN->QUIESCENT
+  -> 单事务发布：旧 generation RETIRED；route generation_id=NULL；route_epoch=E+1
+     -> lifecycle COMMITTED
+     -> module effective_state_revision=S
+  -> 停止并 dispose 已退役 Worker
+```
+
+发布事务在改变 route 前复核 module desired head、activation、Host incarnation、operation lease 和无存活调用。空 route 是明确的停用事实，不复用“Worker 崩溃后 admission=false”的含糊状态。组件持久 state、事件订阅、待处理事件和持久任务均保留；调度器在组件停用期间不消费该组件的新投递，重新启用并发布 generation 后继续。
+
+冻结后、提交前失败时，abort 只在 resource token、Host 和 route epoch 仍匹配时恢复旧 generation 的 ACTIVE/admission，并保留旧 effective 启停修订。提交确认丢失时先读 lifecycle operation；若已 COMMITTED，Host 必须按停用完成清理，不能恢复旧 Worker。Host 崩溃后，新 Host 可以接管过期 operation；若 desired 仍为 disabled，它从数据库 route 和 live-call facts 继续禁用，若意图已改变则遗弃旧 operation 并按最新 revision 调和。
+
+## 10. 启用生命周期
+
+enable 只接纳 `false -> true` 的模块状态修订。Fleet 以最新 desired 配置执行完整 package/config/capability/依赖验证，绑定配置 activation 与模块 activation，然后调用普通 `Kernel.install`。候选准备失败、状态迁移失败、健康检查失败或依赖计划变化时，空 route 和旧 effective disabled 状态保持不变。INSTALL 提交时同一事务把 route 指向 READY candidate，并同时推进两个 effective head；随后才开放 Worker transport admission。
+
+已处于相同 desired 状态的重复 enable/disable 返回 `MODULE_STATE_UNCHANGED`，要求调用者先刷新，而同一个 operation identity 的重投只读取原回执。两个群、WebUI 与后台自动化基于相同 state revision 竞争时最多一个修订成功，其他请求返回 `REVISION_CONFLICT`。
+
+## 11. 调和顺序与可观察状态
+
+Fleet 每轮先读取全部配置和模块状态，构建一次不可变 desired 快照，再按依赖拓扑执行：启用/安装按 provider 到 caller，禁用按 caller 到 provider。读取方先对全部配置 head 取得共享锁，再读取模块状态 head；启停写方必须先取得对应配置 head 的排他锁，因此不能在快照中途插入或改写模块状态。若轮次执行期间任一相关 head 改变，activation 绑定或最终发布会以 `CONFIGURATION_SUPERSEDED` / `MODULE_STATE_SUPERSEDED` 失败，下一轮从新快照开始。任何 desired-enabled 组件的包、配置或依赖无法验证时，本轮依赖图标记为不完整：仍可恢复或尝试启用已知组件，但所有尚未生效的停用保持原 Worker 与 route，记录 `DEPENDENCY_GRAPH_INCOMPLETE`，直到完整图可重建。已经 effective disabled 的幂等收敛不受此限制；待停用组件的旧包工件若已经丢失，Kernel 仍以当前加载依赖和 route 作为最终安全屏障完成停用。
+
+模块状态投影扩展为：
+
+- `PENDING_ENABLE`：desired enabled，effective disabled 或 route 尚未发布；
+- `ACTIVE`：两个 desired/effective head 一致，route 指向当前 ACTIVE generation 且 admission 符合 Bot maintenance；
+- `PENDING_DISABLE`：desired disabled，effective 仍 enabled；
+- `DISABLED`：desired/effective disabled 且 route generation 为空；
+- `DEGRADED`：事实与预期不一致，例如 effective enabled 但 generation 已故障；
+- `UNCONFIGURED`：没有配置修订。
+
+Shell status、WebUI 和审计均显示两个 revision 轴、最近 lifecycle kind/phase/error。进程内 `worker_state` 只是附加观测值，不能覆盖持久状态结论。
+
+## 12. WebUI 与验证矩阵
+
+WebUI 的组件卡片提供“验证”“启用”“停用”“重载”。按钮冻结当前 config/state revision；停用必须填写原因并显示依赖影响。提交后页面显示“已接纳，等待生命周期发布”，轮询到 effective state、route 和 generation 一致才显示完成。冲突会清除旧草稿并重新读取；网络确认丢失使用同一幂等键读取原回执。
+
+实现验证至少覆盖：双 CAS 竞争、禁用中的迟到父调用、冻结后的依赖调用、依赖者阻止 provider 禁用、可选依赖、禁用期间编辑配置、启用同时推进两个 effective head、发布确认丢失、冻结后 abort、Host 接管、Shell/Web 竞争、旧 gate 重放、旧 writer 永久失权、正文遗忘、停用期间事件/任务不丢失，以及浏览器端完整启停往返。

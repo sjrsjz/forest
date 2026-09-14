@@ -21,6 +21,7 @@ READ_ACTIONS = frozenset({
     "agent.config.read", "agent.read", "memory.config.read", "memory.read",
     "memory.forget.read", "memory.association.read", "event.read", "component_job.read",
     "audit.read", "binding.read", "message.read",
+    "module.read", "module.validate",
 })
 
 

@@ -509,6 +509,45 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
             expect(page.locator('#bot-config-preview')).to_be_visible()
             page.locator('#bot-config-apply').click()
             expect(page.locator('#bot-effective')).to_have_text('1', timeout=30000)
+            notice_box = page.locator('#notice')
+            notice_box.evaluate("node => { node.textContent = ''; }")
+            page.locator('#validate-bot-component').click()
+            expect(notice_box).not_to_have_text('', timeout=15000)
+            expect(notice_box).to_have_attribute('class', 'notice success')
+            page.locator('#bot-module-reason').fill('browser lifecycle disable')
+            page.locator('#disable-bot-component').click()
+            page.wait_for_function(
+                """async botId => {
+                    const response = await fetch(`/management/v1/bots/${encodeURIComponent(botId)}/components/demo.browser/configuration`);
+                    if (!response.ok) return false;
+                    const state = await response.json();
+                    return state.desired_enabled === false && state.effective_enabled === false;
+                }""",
+                arg=beta,
+                timeout=30000,
+            )
+            page.locator('#reload-bot-config').click()
+            expect(page.locator('#disable-bot-component')).to_be_disabled(timeout=15000)
+            expect(page.locator('#enable-bot-component')).to_be_enabled()
+            notice_box.evaluate("node => { node.textContent = ''; }")
+            page.locator('#validate-bot-component').click()
+            expect(notice_box).not_to_have_text('', timeout=15000)
+            expect(notice_box).to_have_attribute('class', 'notice success')
+            page.locator('#bot-module-reason').fill('browser lifecycle enable')
+            page.locator('#enable-bot-component').click()
+            page.wait_for_function(
+                """async botId => {
+                    const response = await fetch(`/management/v1/bots/${encodeURIComponent(botId)}/components/demo.browser/configuration`);
+                    if (!response.ok) return false;
+                    const state = await response.json();
+                    return state.desired_enabled === true && state.effective_enabled === true;
+                }""",
+                arg=beta,
+                timeout=30000,
+            )
+            page.locator('#reload-bot-config').click()
+            expect(page.locator('#enable-bot-component')).to_be_disabled(timeout=15000)
+            expect(page.locator('#disable-bot-component')).to_be_enabled()
             expect(page.locator('#bot-runtime-status')).to_have_text('组件已生效并运行中', timeout=30000)
             invoke(2, '：4（状态修订 1）')
             page.locator('#bot-package').select_option(label='demo.browser · 2.0.0')
@@ -675,6 +714,7 @@ HTTPServer(('127.0.0.1',5900),Handler).serve_forever()
                         "restart persistence",
                         "two isolated Bot databases and Workers",
                         "component preview/apply and hot reload",
+                        "component validate, disable, validate while disabled, and re-enable",
                         "component two-tab conflict preserves draft",
                         "Bot configuration and state recover after restart",
                         "OneBot Web configuration and credentials stay private",

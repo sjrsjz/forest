@@ -505,9 +505,8 @@ async def test_ticket_expiring_after_outbox_lock_rolls_back_every_management_fac
             "plan_digest": plan["plan_digest"],
         }
     ticket = await b.ticket("binding." + operation_kind, operation, payload)
-    ticket = b.env.sign(
-        dict(ticket["claims"], expires_at=(datetime.now(UTC) + timedelta(seconds=0.4)).isoformat())
-    )
+    expires_at = datetime.now(UTC) + timedelta(seconds=10)
+    ticket = b.env.sign(dict(ticket["claims"], expires_at=expires_at.isoformat()))
     async with b.env.store.pool.connection() as blocker:
         async with blocker.transaction():
             await blocker.execute("LOCK TABLE public.bot_outbox_events IN ACCESS EXCLUSIVE MODE")
@@ -518,7 +517,9 @@ async def test_ticket_expiring_after_outbox_lock_rolls_back_every_management_fac
             )
             task = asyncio.create_task(action)
             await wait_for_lock(b.env.store, "INSERT INTO public.bot_outbox_events%")
-            await asyncio.sleep(0.45)
+            await asyncio.sleep(
+                max(0, (expires_at - datetime.now(UTC)).total_seconds()) + 0.05
+            )
         await rejected("WEB_AUTHORITY_REJECTED", task)
     async with b.env.store.pool.connection() as conn:
         result = await (

@@ -876,6 +876,138 @@ class Kernel:
             finally:
                 self._operations.pop(operation_id, None)
 
+    async def disable(self, component_id: str, *, operation_id: str | None = None) -> dict:
+        """Drain a component and publish an explicit empty route."""
+        if not isinstance(component_id, str) or not 1 <= len(component_id) <= 128:
+            raise ForestError("INVALID_COMPONENT", "A bounded component identity is required", 422)
+        async with self._plan_lock, self._deployment_lock:
+            authority = self._authority()
+            blockers = sorted(
+                key for key, component in self.components.items()
+                if key != component_id and component_id in component.dependencies
+            )
+            if blockers:
+                raise ForestError(
+                    "DEPENDENCY_IN_USE",
+                    "Enabled components still require this provider",
+                    409,
+                    {"dependent_components": blockers},
+                )
+            old = self.components.get(component_id)
+            if old is not None and old.worker.identity.generation_id in self._retiring:
+                raise ForestError("COMPONENT_RETIRING", "Previous Worker is still being reaped", 409)
+            route = await self.store.get_route(component_id)
+            epoch = route["route_epoch"] if route else 0
+            operation_id = operation_id or str(uuid4())
+            previous = await self.store.read_operation(operation_id)
+            expected_digest = digest_json({
+                "component_id": component_id,
+                "operation_kind": "DISABLE",
+                "route_epoch": previous["expected_route_epoch"] if previous else epoch,
+            })
+            if previous is not None:
+                if (
+                    previous["operation_kind"] != "DISABLE"
+                    or previous["component_id"] != component_id
+                    or previous["input_digest"] != expected_digest
+                ):
+                    raise ForestError(
+                        "IDEMPOTENCY_CONFLICT", "Lifecycle operation has different input"
+                    )
+                if previous["phase"] == "COMMITTED":
+                    current = await self.store.get_route(component_id)
+                    if current is None or current["generation_id"] is not None:
+                        raise ForestError(
+                            "ROUTE_CONFLICT", "The disabled route was subsequently replaced"
+                        )
+                    return self._route_receipt(current)
+                raise ForestError(
+                    "OPERATION_PENDING"
+                    if previous["phase"] in {"PLAN", "FROZEN", "QUIESCENT"}
+                    else "OPERATION_FAILED",
+                    "Lifecycle operation already exists",
+                )
+            operation = None
+            frozen = published = False
+            timeout = (
+                old.snapshot.component.get("lifecycle", {}).get("drain_timeout_s", 30)
+                if old is not None else 30
+            )
+            try:
+                operation = await self.store.begin_operation(
+                    authority,
+                    component_id,
+                    operation_id,
+                    expected_digest,
+                    None,
+                    epoch,
+                    ttl_seconds=120,
+                    operation_kind="DISABLE",
+                )
+                self._operations[operation_id] = operation["op_epoch"]
+                await self.store.freeze(authority, operation_id, operation["op_epoch"])
+                frozen = True
+                async with asyncio.timeout(timeout):
+                    async with self._calls_changed:
+                        await self._calls_changed.wait_for(
+                            lambda: not any(
+                                entry[1].component_id == component_id
+                                or component_id in entry[1].dependency_components
+                                for entry in self._calls.values()
+                            )
+                        )
+                if old is not None and old.worker.state == "ACTIVE":
+                    await old.worker.quiesce(timeout=timeout)
+                await self.store.quiesce_operation(
+                    self._authority(), operation_id, operation["op_epoch"]
+                )
+                result = await self.store.publish_disable(
+                    self._authority(), operation_id, operation["op_epoch"]
+                )
+                published = True
+                self.components.pop(component_id, None)
+                if self.components:
+                    self._apply_dependencies(self._dependency_plan())
+                self._event_wake.set()
+                self._component_job_wake.set()
+                if old is not None:
+                    await self._retire(old, reason="disabled", revoke=False)
+                return self._route_receipt(result)
+            except BaseException:
+                if not published and operation is not None:
+                    try:
+                        committed = await self.store.read_operation(operation_id)
+                        published = committed is not None and committed["phase"] == "COMMITTED"
+                    except Exception:
+                        published = True
+                if published:
+                    self.components.pop(component_id, None)
+                    if old is not None:
+                        await self._retire(old, reason="disabled", revoke=False)
+                else:
+                    if operation is not None:
+                        with suppress(Exception):
+                            await self.store.abort_operation(
+                                authority, operation_id, operation["op_epoch"]
+                            )
+                    if frozen and old is not None and old.worker.alive and not self._closing:
+                        try:
+                            if old.worker.state == "QUIESCENT":
+                                await self.store.authorize_generation_dispatch(
+                                    self._authority(), old.worker.identity.generation_id
+                                )
+                                await old.worker.resume()
+                            elif old.worker.state != "ACTIVE":
+                                raise ForestError(
+                                    "RESUME_UNSAFE", "Old generation cannot resume"
+                                )
+                        except Exception:
+                            await self._retire(old, reason="resume_failed", revoke=True)
+                            self.components.pop(component_id, None)
+                raise
+            finally:
+                self._operations.pop(operation_id, None)
+
     async def _retire(self, component: LoadedComponent, *, reason: str, revoke: bool) -> None:
         worker = component.worker
         if revoke and self.lease is not None and self.failure is None:

@@ -187,7 +187,7 @@ $('apply').addEventListener('click', () => busy($('apply'), async () => {
 }));
 $('reload').addEventListener('click', () => busy($('reload'), readConfiguration));
 let botRows = [], selectedBot = null, botConfig = null, botRuntime = null, packageRows = [];
-let botPlan = null, botApplyKey = null, componentReload = null;
+let botPlan = null, botApplyKey = null, componentReload = null, moduleStateRequest = null;
 let createKey = null, invokeKey = null, renameKey = null, retryKey = null;
 let maintenanceKey = null;
 const maintenanceWrites = new Map();
@@ -228,6 +228,7 @@ function invalidateControl(scope) {
 function resetComponent() {
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
   componentReload = null;
+  moduleStateRequest = null;
   $('restart-bot-component').disabled = true;
   componentReplacementRequired = false; componentReplacementDraft = false;
   componentSourceRevision = null;
@@ -301,6 +302,9 @@ function updateBotState(state) {
   const component = state.runtime.components.find((c) => c.component_id === selectedPackage().component_id);
   const error = component?.error_code || state.runtime.error_code;
   $('bot-runtime-status').textContent = error ? `组件暂未就绪：${error}` :
+    state.desired_enabled === false && state.effective_enabled === false ? '组件已停用，路由已排空' :
+    state.desired_enabled === false ? '停用已接纳，正在冻结并排空调用…' :
+    state.effective_enabled === false ? '启用已接纳，正在验证并启动组件…' :
     component?.worker_state === 'ACTIVE' && component.loaded_revision === state.desired_revision ? '组件已生效并运行中' :
     state.desired_revision ? '已保存，等待组件启动或切换…' : '保存组件配置后即可启动';
   const unavailable = [];
@@ -311,7 +315,7 @@ function updateBotState(state) {
   $('bot-operations').replaceChildren();
   for (const op of state.operations || []) {
     const row = document.createElement('li');
-    row.textContent = `${op.created_at} · ${op.phase}${op.error_code ? ` · ${op.error_code}` : ''}`;
+    row.textContent = `${op.created_at} · ${op.operation_kind || 'INSTALL'} · ${op.phase}${op.error_code ? ` · ${op.error_code}` : ''}`;
     $('bot-operations').append(row);
   }
 }
@@ -360,6 +364,10 @@ async function readBotConfig() {
   }
   $('restart-bot-component').disabled = componentReplacementRequired ||
     state.desired_revision < 1 || state.desired_values_payload_state !== 'ACTIVE';
+  $('validate-bot-component').disabled = componentReplacementRequired ||
+    state.desired_revision < 1 || state.desired_values_payload_state !== 'ACTIVE';
+  $('enable-bot-component').disabled = state.desired_revision < 1 || state.desired_enabled !== false;
+  $('disable-bot-component').disabled = state.desired_revision < 1 || state.desired_enabled !== true;
   $('bot-history').replaceChildren(); historyBefore = null;
 }
 async function selectBot(id) {
@@ -523,6 +531,43 @@ $('restart-bot-component').addEventListener('click', () => busy($('restart-bot-c
     throw error;
   }
 }));
+$('validate-bot-component').addEventListener('click', () => busy($('validate-bot-component'), async () => {
+  if (!botConfig || botConfig.desired_revision < 1) return;
+  const result = await api(`${componentPath()}/module/validate`, {
+    expected_config_revision: botConfig.desired_revision,
+    expected_state_revision: botConfig.desired_state_revision,
+  });
+  notice(`组件验证通过。必需依赖：${result.required_components.join('、') || '无'}。`, true);
+}));
+async function changeModuleState(enabled) {
+  if (!botConfig || botConfig.desired_revision < 1) return;
+  const reason = $('bot-module-reason').value.trim();
+  if (!reason) { $('bot-module-reason').focus(); notice('启用或停用组件必须填写原因。'); return; }
+  const expected = botConfig.desired_state_revision;
+  if (!moduleStateRequest || moduleStateRequest.enabled !== enabled ||
+      moduleStateRequest.expected !== expected || moduleStateRequest.reason !== reason) {
+    moduleStateRequest = {enabled, expected, reason, key: crypto.randomUUID()};
+  }
+  const request = moduleStateRequest;
+  try {
+    await api(`${componentPath()}/module/state`, {
+      expected_state_revision: request.expected, enabled: request.enabled, reason: request.reason,
+    }, {'Idempotency-Key': request.key});
+    if (moduleStateRequest !== request) return;
+    moduleStateRequest = null; $('bot-module-reason').value = '';
+    await readBotConfig();
+    notice(enabled ? '组件启用已接纳，正在等待 Worker 发布。' : '组件停用已接纳，正在排空调用。', true);
+  } catch (error) {
+    if (error.code === 'REVISION_CONFLICT' && moduleStateRequest === request) {
+      moduleStateRequest = null; await readBotConfig();
+    }
+    throw error;
+  }
+}
+$('enable-bot-component').addEventListener('click', () =>
+  busy($('enable-bot-component'), () => changeModuleState(true)));
+$('disable-bot-component').addEventListener('click', () =>
+  busy($('disable-bot-component'), () => changeModuleState(false)));
 $('bot-config-form').addEventListener('input', clearBotPlan);
 $('bot-config-form').addEventListener('submit', (event) => {
   event.preventDefault(); const form = event.currentTarget;

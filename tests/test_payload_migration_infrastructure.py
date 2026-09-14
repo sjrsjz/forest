@@ -93,6 +93,20 @@ async def upgrade(database, tmp_path, monkeypatch, request):
             (root / "migration_v2.py").write_text(
                 released.joinpath("migration_v2.py").read_text(encoding="utf-8"), encoding="utf-8"
             )
+            for path in released.iterdir():
+                if path.name.startswith("migration_v") or path.name.startswith("shell_payload"):
+                    if path.name.endswith(".py"):
+                        (root / path.name).write_text(
+                            path.read_text(encoding="utf-8"), encoding="utf-8"
+                        )
+            for path in released.parent.iterdir():
+                if (
+                    path.name.startswith("shell_registry")
+                    or path.name == "shell_authority.py"
+                ) and path.name.endswith(".py"):
+                    (root / path.name).write_text(
+                        path.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
             monkeypatch.setattr(bot_module, "import_module", actual_import)
 
         yield SimpleNamespace(

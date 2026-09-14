@@ -259,6 +259,85 @@ async def test_batch_preflight_and_optional_degradation_leave_running_worker(
 
 
 @pytest.mark.postgres
+async def test_disable_publishes_empty_route_after_worker_quiescence(tmp_path, running_kernel):
+    kernel = running_kernel
+    target = package(tmp_path, "disable-target")
+    await kernel.install(target)
+    old = kernel.components["disable-target"].worker
+    before = await kernel.store.get_route("disable-target")
+    result = await kernel.disable("disable-target", operation_id="disable-target-op")
+    operation = await kernel.store.read_operation("disable-target-op")
+    route = await kernel.store.get_route("disable-target")
+    assert before["generation_id"] is not None
+    assert result["generation_id"] is None and route["generation_id"] is None
+    assert route["route_epoch"] == before["route_epoch"] + 1
+    assert not route["admission"] and not old.alive
+    assert operation["operation_kind"] == "DISABLE" and operation["phase"] == "COMMITTED"
+
+
+@pytest.mark.postgres
+async def test_disable_waits_for_inflight_and_closes_new_admission(tmp_path, running_kernel):
+    kernel = running_kernel
+    target = package(tmp_path, "disable-busy")
+    await kernel.install(target)
+    worker = kernel.components["disable-busy"].worker
+    entered, proceed, frozen = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    actual_invoke, actual_freeze = worker.invoke, kernel.store.freeze
+
+    async def delayed(*args, **kwargs):
+        entered.set()
+        await proceed.wait()
+        return await actual_invoke(*args, **kwargs)
+
+    async def freeze(*args, **kwargs):
+        result = await actual_freeze(*args, **kwargs)
+        frozen.set()
+        return result
+
+    worker.invoke = delayed
+    kernel.store.freeze = freeze
+    running = asyncio.create_task(invoke(kernel, "disable-busy", operation="before-disable"))
+    disabling = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        disabling = asyncio.create_task(
+            kernel.disable("disable-busy", operation_id="disable-busy-op")
+        )
+        await asyncio.wait_for(frozen.wait(), 5)
+        assert not disabling.done()
+        with pytest.raises(ForestError) as closed:
+            await invoke(kernel, "disable-busy", operation="after-disable-freeze")
+        assert closed.value.code == "ADMISSION_CLOSED"
+        proceed.set()
+        await running
+        assert (await disabling)["generation_id"] is None
+    finally:
+        proceed.set()
+        await asyncio.gather(
+            running, *([disabling] if disabling is not None else []),
+            return_exceptions=True,
+        )
+        kernel.store.freeze = actual_freeze
+
+
+@pytest.mark.postgres
+async def test_enabled_dependent_blocks_provider_disable(tmp_path, running_kernel):
+    kernel = running_kernel
+    target = package(tmp_path, "disable-provider")
+    caller = package(tmp_path, "disable-caller", requires=[(
+        "disable-provider", ">=1.0,<2.0", True
+    )])
+    await kernel.install_many([spec(caller), spec(target)])
+    route = await kernel.store.get_route("disable-provider")
+    with pytest.raises(ForestError) as blocked:
+        await kernel.disable("disable-provider", operation_id="blocked-disable")
+    assert blocked.value.code == "DEPENDENCY_IN_USE"
+    assert blocked.value.details["dependent_components"] == ["disable-caller"]
+    current = await kernel.store.get_route("disable-provider")
+    assert current["generation_id"] == route["generation_id"] and current["admission"]
+
+
+@pytest.mark.postgres
 @pytest.mark.parametrize("failure", ["capability", "major", "input", "output"])
 async def test_service_capabilities_and_schema_at_host_boundary(tmp_path, running_kernel, failure):
     kernel = running_kernel

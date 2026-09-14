@@ -9,7 +9,7 @@ from uuid import uuid4
 from forest.errors import ForestError
 from forest.shell_authority import is_shell_admin
 from forest.shell_registry import CONTROL_DEADLINE
-from forest.shell_registry_v10 import get_command_spec, render_help
+from forest.shell_registry_v11 import get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore
@@ -30,6 +30,7 @@ class ShellDispatcher:
         command_timeout: float = CONTROL_DEADLINE.default_seconds,
         scan_page_size: int = 64,
         on_change: Callable[[], None] | None = None,
+        module_packages=None,
     ):
         if not (type(max_concurrency) is int and 1 <= max_concurrency <= 16
                 and 0.01 <= poll_interval <= 60
@@ -42,6 +43,7 @@ class ShellDispatcher:
         self.max_concurrency, self.poll_interval = max_concurrency, poll_interval
         self.command_timeout, self.scan_page_size = command_timeout, scan_page_size
         self.on_change = on_change
+        self.module_packages = {} if module_packages is None else module_packages
         self.owner_id = "shell:" + str(uuid4())
         self.task: asyncio.Task | None = None
         self._jobs: dict[str, asyncio.Task] = {}
@@ -230,7 +232,9 @@ class ShellDispatcher:
         elif spec.execution_target == "module":
             from forest.storage.module_administration import ModuleAdministration
 
-            repository = ModuleAdministration(self.messages.store, control=control)
+            repository = ModuleAdministration(
+                self.messages.store, control=control, packages=self.module_packages
+            )
         else:
             raise ForestError("SHELL_UNSUPPORTED", "Unknown typed command", 422)
         kwargs = {"lease": lease} if (
@@ -411,7 +415,9 @@ class ShellDispatcher:
             outcome = {
                 "code": "MODULE_STATUS",
                 "count": len(lines),
-                "pending": sum(row["state"] == "PENDING" for row in result["modules"][:20]),
+                "pending": sum(
+                    row["state"].startswith("PENDING") for row in result["modules"][:20]
+                ),
             }
         elif name == "module.reload":
             text = (
@@ -428,6 +434,37 @@ class ShellDispatcher:
                 "desired_revision": result["desired_revision"],
                 "effective_revision": result["effective_revision"],
                 "status": result["status"],
+            }
+            if self.on_change is not None:
+                self.on_change()
+        elif name == "module.validate":
+            text = (
+                f"组件 {result['component_id']} 验证通过：config "
+                f"{result['config_revision']}，state {result['state_revision']}；"
+                f"必需依赖 {', '.join(result['required_components']) or '无'}。"
+            )
+            outcome = {
+                "code": "MODULE_VALID",
+                "component_id": result["component_id"],
+                "package_digest": result["package_digest"],
+                "config_revision": result["config_revision"],
+                "state_revision": result["state_revision"],
+                "required_components": result["required_components"],
+            }
+        elif name in {"module.enable", "module.disable"}:
+            state = "启用" if result["enabled"] else "停用"
+            text = (
+                f"组件 {result['component_id']} 的{state}请求已接纳：desired state "
+                f"{result['desired_state_revision']} / effective state "
+                f"{result['effective_state_revision']}。生命周期发布后才算生效。"
+            )
+            outcome = {
+                "code": "MODULE_STATE_ACCEPTED",
+                **{key: result[key] for key in (
+                    "operation_id", "component_id", "desired_config_revision",
+                    "effective_config_revision", "desired_state_revision",
+                    "effective_state_revision", "enabled", "status",
+                )},
             }
             if self.on_change is not None:
                 self.on_change()

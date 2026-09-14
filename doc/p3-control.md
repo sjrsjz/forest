@@ -1,6 +1,6 @@
 # P3 群聊管理与任务监督
 
-当前内置命令接纳版本为 `shell-gate-v10`：除既有 Agent、Job、Memory、Bot 维护、组件事件、组件持久任务、审计、Context 和模块 list/status/reload 外，v9 已增加固定 Core status/cancel/disable/reload。Core 只为既有权威提供无插件依赖的稳定 form；status/cancel/disable 声明 P0，只有接纳时通过当前 Binding 管理员预检才实际保持 P0，否则持久降为 P1；reload 是 P1。执行前仍按当前名单最终授权。完整协议见 [P5 Core 救援入口](p5-core-shell.md)与 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)。
+当前内置命令接纳版本为 `shell-gate-v11`：除既有 Agent、Job、Memory、Bot 维护、组件事件、组件持久任务、审计、Context 和模块 list/status/reload 外，v9 已增加固定 Core status/cancel/disable/reload，v11 增加模块 validate/enable/disable。Core 只为既有权威提供无插件依赖的稳定 form；status/cancel/disable 和 module disable 声明 P0，只有接纳时通过当前 Binding 管理员预检才实际保持 P0，否则持久降为 P1；其余模块变更是 P1。执行前仍按当前名单最终授权。完整协议见 [P5 Core 救援入口](p5-core-shell.md)与 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)。
 
 本文描述当前代码提供的 Shell 与后台监督入口；完整管理命令、运维进程和账号治理仍以 [09](09-group-shell-command-system.md)、[12](12-webui-administration.md) 为目标契约。
 
@@ -46,9 +46,9 @@ Binding 的 Web 连接设置维护 `admin_user_ids`。Shell 每次操作以原�
 
 `shell_commands.parse_command` 是有界确定性解析器：只识别直接开头的 `#forest`，允许前置空白及一次对当前 Bot 的 mention。后续含图片、转发等其他内容则保留控制命名空间，但不执行成合法命令；引号按固定语法处理，不使用 `eval` 或系统 shell。命令长度、标识、数值和公开原因均有限制。
 
-007 既有来源记录继续保留原 gate v1；020 追加 `arguments`、`priority` 不可变列。gate v2 把成功解析的类型化参数独立保存，未知/坏语法只保存空参数和原始内容摘要。`shell-gate-v3` 复制 v2 的全部冻结契约并增加三条记忆命令，v4 增加 Bot 暂停/恢复，v5 增加组件事件和组件持久任务管理，v6 增加 Bot 审计元数据查询，v7 增加 Context inspect/compact，v8 增加 module list/status/reload，v9 增加固定 Core form 与 P0 status，v10 增加接纳时 P0 管理员预检和不可变依据。新接纳命令持久保存 v10，既有 v2–v9 请求仍由各自原表解析。原参数从首次接收起不进入 Context；群历史仍保留原作者、ingress 位置和固定控制消息投影。既有请求不会按新语法重新解释。
+007 既有来源记录继续保留原 gate v1；020 追加 `arguments`、`priority` 不可变列。gate v2 把成功解析的类型化参数独立保存，未知/坏语法只保存空参数和原始内容摘要。`shell-gate-v3` 复制 v2 的全部冻结契约并增加三条记忆命令，v4 增加 Bot 暂停/恢复，v5 增加组件事件和组件持久任务管理，v6 增加 Bot 审计元数据查询，v7 增加 Context inspect/compact，v8 增加 module list/status/reload，v9 增加固定 Core form 与 P0 status，v10 增加接纳时 P0 管理员预检和不可变依据，v11 增加 module validate/enable/disable。新接纳命令持久保存 v11，既有 v2–v10 请求仍由各自原表解析。原参数从首次接收起不进入 Context；群历史仍保留原作者、ingress 位置和固定控制消息投影。既有请求不会按新语法重新解释。
 
-`shell_registry.BUILTIN_GATE_V2` 固定 11 个旧命令键；v3、v4、v5、v6、v7、v8 依次复制旧表并增加 3、2、8、1、2、2 个命令键，v9 不增加 action/key，只为三项既有权威增加 Core form 并把新接纳的 Core status 声明为 P0；v10 不改命令表，manifest 另行冻结 `current-binding-admin-v1` 接纳策略。每个 `CommandSpec` 给出版本、参数 schema 与摘要、目标 action/方法、当前管理员要求、会话/群主干/Bot 组件作用域、声明优先级、执行种类、群输出范围和 Host 期限策略引用；帮助按请求 gate 从对应 schema 与命令形式生成。注册表不可修改，导出的 schema/manifest 是独立副本。期限仍由 Host 的 `command_timeout` 决定，默认 5 秒、允许 0.1–30 秒；这不是所有已领取命令的固定 deadline，领取记录及最终事务守卫保持原语义。
+`shell_registry.BUILTIN_GATE_V2` 固定 11 个旧命令键；v3、v4、v5、v6、v7、v8 依次复制旧表并增加 3、2、8、1、2、2 个命令键，v9 不增加 action/key，只为三项既有权威增加 Core form 并把新接纳的 Core status 声明为 P0；v10 不改命令表，manifest 另行冻结 `current-binding-admin-v1` 接纳策略；v11 再增加 3 个模块生命周期命令。每个 `CommandSpec` 给出版本、参数 schema 与摘要、目标 action/方法、当前管理员要求、会话/群主干/Bot 组件作用域、声明优先级、执行种类、群输出范围和 Host 期限策略引用；帮助按请求 gate 从对应 schema 与命令形式生成。注册表不可修改，导出的 schema/manifest 是独立副本。期限仍由 Host 的 `command_timeout` 决定，默认 5 秒、允许 0.1–30 秒；这不是所有已领取命令的固定 deadline，领取记录及最终事务守卫保持原语义。
 
 这次接线没有改变 `shell-gate-v2` 的 `shlex.split(..., posix=True)` 词法、别名或参数边界；后续 gate 继续使用相同词法，新的 Windows 路径词法、`--key=value` 和 `--` 扩展尚未实现。排队后直接使用已冻结的 `gate_version/command_name/arguments/priority`，不重新解析原消息或套用新 schema。数据库持久保存接纳 gate 版本；导出的 command/schema 摘要还不是逐请求持久的动态 registry snapshot，插件命令注册、热替换命令所有者和多版本动态快照恢复仍属后续工作。
 
@@ -77,7 +77,7 @@ Web 创建定义时保存有明确期限的长期委托。后台 `WebAuthority.i
 ## 5. 验证入口与当前范围
 
 - `tests/test_shell_commands.py`：语法、边界、未知参数丢弃和来源识别。
-- `tests/test_shell_registry.py`、`test_shell_registry_v7.py`–`v10.py`：固定契约、不可变导出、帮助形式与 schema/别名一致、既有词法边界、Core form 和 P0 预检 manifest。
+- `tests/test_shell_registry.py`、`test_shell_registry_v7.py`–`v11.py`：固定契约、不可变导出、帮助形式与 schema/别名一致、既有词法边界、Core form、P0 预检 manifest 和模块生命周期 form。
 - `tests/test_shell_registry_runtime.py`：真实持久帮助回执，以及 Dispatcher 重建后不重解析已接纳参数、不重复业务操作和发送意图。
 - `tests/test_shell_management.py`：忙时取消、费用 UNKNOWN 保留、同操作重放、当前撤权、跨群目标拒绝、安全输出及预留控制槽。
 - `tests/test_job_authority.py`：注销后的有效委托、停用/角色/修订撤销、目的绑定和签名检查。
