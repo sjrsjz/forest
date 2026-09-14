@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.storage.migration_v10 import WRITER_GENERATION
+from forest.storage.migration_v11 import WRITER_GENERATION
 
 _ACTIVE = ("FENCING", "SWITCHING", "ACTIVATING")
 _PUBLIC_KEYS = (

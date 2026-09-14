@@ -9,7 +9,7 @@ from uuid import uuid4
 from forest.errors import ForestError
 from forest.shell_authority import is_shell_admin
 from forest.shell_registry import CONTROL_DEADLINE
-from forest.shell_registry_v11 import get_command_spec, render_help
+from forest.shell_registry_v12 import get_command_spec, render_help
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.delivery import DeliveryStore
@@ -397,6 +397,21 @@ class ShellDispatcher:
                 "request_id": result["request_id"],
                 "status": result["status"],
                 "expected_view_revision": result["expected_view_revision"],
+            }
+            if self.on_change is not None:
+                self.on_change()
+        elif name == "context.reset":
+            text = (
+                f"上下文重置请求 {result['request_id']} 已排队；会话 Actor 将在模型调用安全点"
+                f"核对视图 {result['expected_view_revision']} 后发布新视图。"
+                "当前未闭合因果组会保留；消息不会被删除，也不会调用摘要模型。"
+            )
+            outcome = {
+                "code": "CONTEXT_RESET_QUEUED",
+                "request_id": result["request_id"],
+                "status": result["status"],
+                "expected_view_revision": result["expected_view_revision"],
+                "mode": result["mode"],
             }
             if self.on_change is not None:
                 self.on_change()

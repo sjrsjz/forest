@@ -1,8 +1,8 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-当前实现已经推进到 `shell-gate-v11`。v8 增加的 `module list/status/reload` 继续使用配置 plan/apply 与 Fleet/Kernel 生命周期；v9 增加固定 `core status/cancel/disable/reload`，v10 冻结 `current-binding-admin-v1` 接纳策略，v11 增加 `module validate/enable/disable` 和独立模块状态修订轴。声明 P0 的命令只有在可信发言主体命中当前 Binding 管理员名单时才保持 P0，否则持久降为 P1，执行前仍再次鉴权。Core form 只规范化到既有 Bot runtime、Agent Run 和 module 权威，不建立另一个状态机，也不提供宿主终端。旧 v2–v10 请求继续按各自 gate 与持久 priority 执行。组件协议见 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)，救援语法与优先级见 [P5 Core 救援入口](p5-core-shell.md)。069 将 writer generation 提升到 9，排除不能生成 v11 启停依据的旧 Host。
+当前实现已经推进到 `shell-gate-v12`。v8 增加的 `module list/status/reload` 继续使用配置 plan/apply 与 Fleet/Kernel 生命周期；v9 增加固定 `core status/cancel/disable/reload`，v10 冻结 `current-binding-admin-v1` 接纳策略，v11 增加 `module validate/enable/disable` 和独立模块状态修订轴，v12 增加本群安全点 `context reset`。声明 P0 的命令只有在可信发言主体命中当前 Binding 管理员名单时才保持 P0，否则持久降为 P1，执行前仍再次鉴权。Core form 只规范化到既有 Bot runtime、Agent Run 和 module 权威，不建立另一个状态机，也不提供宿主终端。旧 v2–v11 请求继续按各自 gate 与持久 priority 执行。组件协议见 [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md)，救援语法与优先级见 [P5 Core 救援入口](p5-core-shell.md)。071 将 writer generation 提升到 11，排除会把 RESET 误执行为普通裁剪的 generation-10 Host。
 
-> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v11` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员预检与最终复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理、脱敏 Bot 审计查询、本群 Context 元数据检查与安全点裁剪请求、组件 list/status/validate/reload/enable/disable，以及 Core status/cancel/disable/reload。Inbox 前的普通/P0/拒绝容量隔离、短期资格缓存和拒绝令牌桶也已接通；其余命令树仍是待实现目标，不能从示例推断为现有能力。接入容量细节见 [P5 Shell 接入容量](p5-shell-ingress-admission.md)。
+> 状态：首版目标与分阶段实现契约。当前已有 `shell-gate-v12` 的独立 CONTROL 接入、固定命令注册、当前 Binding 管理员预检与最终复核、P0 保留执行槽、Run/会话 Job 控制、本群记忆来源遗忘、Bot 维护、Bot 全局组件事件和组件持久任务管理、脱敏 Bot 审计查询、本群 Context 元数据检查、安全点裁剪与安全点重置请求、组件 list/status/validate/reload/enable/disable，以及 Core status/cancel/disable/reload。Inbox 前的普通/P0/拒绝容量隔离、短期资格缓存和拒绝令牌桶也已接通；其余命令树仍是待实现目标，不能从示例推断为现有能力。接入容量细节见 [P5 Shell 接入容量](p5-shell-ingress-admission.md)。
 
 ## 1. 目标与边界
 
@@ -103,6 +103,16 @@ v7 完整继承 v2–v6，并新增两条只作用于发令会话的命令：
 
 `context inspect` 是 P1 元数据读取，不接受跨群目标或正文筛选。`context compact` 是 P1 异步视图请求；Shell 只登记预期版本、提升 mailbox revision 并返回 request ID。实际裁剪由该会话唯一 Actor 在 `IDLE` 或 Agent 的下一次模型调用 `SAFE_POINT` 执行。它不等待当前流或工具组，不抢占 ActorLease，也不生成新的 Run、ModelTurn 或模型 transport attempt。Actor 发布后请求为 `APPLIED`；若已有自动裁剪或另一请求先推进视图，则为 `CONFLICT`。v7 的 registry 和 payload helper 独立冻结，旧 v2–v6 请求仍按持久 gate 解释。
 
+### 1.5 `shell-gate-v12`：安全点上下文重置
+
+```text
+#forest context reset --expect-view <context_view_revision>
+```
+
+`context reset` 是 P1 异步视图请求，固定为 `safe-point` 模式。Shell 只写不可变 `RESET` 请求；当前会话 Actor 在没有未闭合模型/工具步骤的下一次调用边界比较视图 CAS。应用时归档全部已闭合可见单元，并按 `input_batch_id → RUNNING run` 保留活动 Run 的完整已接入消息批次，包括最后触发之前的普通群消息，同时保留该 Run 的模型/工具因果单元，然后发布 `explicit-safe-point-reset-v1` 不可变视图 manifest。无活动 Run 时会归档全部当前可见单元；下一批排队消息随后按普通输入切口进入新视图。该路径不读取正文来生成摘要，不调用模型，不删除 Inbox、触发或 payload。
+
+重置本身不取消 Run。需要终止卡住的模型/工具组时，管理员先用 `run cancel <run_id> --expect-checkpoint <checkpoint> --reason <原因>` 走既有 P0 取消守卫，再读取最新视图并提交 reset。这样 Context P1 命令不能隐式取得 P0 取消权，也不能绕过 checkpoint CAS。若 Run 已进入 `FINAL_READY`，合法最终提交先完成；重置在随后无活动 Run 的 Actor 边界应用。
+
 ## 2. 用户交互与命令树
 
 ### 2.1 典型操作
@@ -148,11 +158,11 @@ v7 完整继承 v2–v6，并新增两条只作用于发令会话的命令：
 | `ext <plugin> ...` | 部署批准的扩展管理命令；仍使用 CONTROL 与管理参数保护 | P1，不允许插件自行升为 P0 |
 | 独立业务前缀 | 普通插件命令，例如 `/hello`；无隐式管理能力 | P2 |
 
-`context reset` 默认以 `--mode safe-point` 登记持久意图，由会话所有者在模型/工具因果组闭合后，以预期 `context_view_revision` 发布新视图；忙时立即返回操作引用。若已有 FINAL_READY，先按原输入完成合法最终提交，再执行重置；若还需继续推理，先 checkpoint 并按新视图修订重新构造后续请求。旧视图的迟到最终候选不得跨过重置提交。工具等待尚未闭合时可继续等或显式选择 `--mode cancel-run`，后者先通过 Run 取消守卫终结旧执行权，再按同一状态所有者协议发布视图。
+`context reset` 默认且当前仅支持 `safe-point`。它由会话所有者在模型/工具因果组闭合后，以预期 `context_view_revision` 发布新视图；忙时立即返回操作引用。若已有 `FINAL_READY`，先按原输入完成合法最终提交，再执行重置；若还需继续推理，当前步骤闭合后按新视图修订重新构造后续请求。已经在外部发送中的旧模型候选不满足安全点条件，不能跨过重置提交。
 
 重置不删除 Inbox、触发账本、旧工具事实或回退输入游标；仍保留/重新关联所有未终结触发的必要原文与主体，不把“已从活动视图折叠”当作已回答。需要真正遗忘使用 `memory forget` 删除屏障。Shell 不直接改活跃 Prompt，也不凭管理服务等级取得并行 Context 写权。
 
-当前 `shell-gate-v7` 已实现 `context inspect` 与 `context compact --expect-view <context_view_revision>`。inspect 只返回发令群的修订、水位、可见/归档计数、token 估算、触发计数、当前 Run 阶段及最近请求终态，不读取消息正文。compact 的 Shell 事务只写 `PENDING` 请求和控制回执并提升 mailbox revision；该群唯一 Actor 在 `IDLE` 接纳或 Agent `SAFE_POINT` 边界比较预期视图，匹配时复用本地预算裁剪发布不可变 compaction manifest，不匹配时终结为 `CONFLICT/context_view_revision_changed`。两条相同旧版本请求竞争时至多一条推进视图。命令回执中的“已排队”不表示裁剪已经完成，管理员通过后续 inspect 查看 `APPLIED` 及实际视图版本。`context reset` 仍是后续能力，不能用 compact 或直接 SQL 冒充。
+当前 `shell-gate-v7` 的 inspect/compact 和 `shell-gate-v12` 的 reset 均已实现。inspect 只返回发令群的修订、水位、可见/归档计数、token 估算、触发计数、当前 Run 阶段及最近请求终态，不读取消息正文。compact/reset 的 Shell 事务只写 `PENDING` 请求和控制回执并提升 mailbox revision；该群唯一 Actor 在 `IDLE` 接纳或 Agent `SAFE_POINT` 边界比较预期视图。compact 复用本地预算裁剪；reset 归档已闭合历史并保留活动 Run 的完整输入批次与因果组。版本不匹配时统一终结为 `CONFLICT/context_view_revision_changed`。两条相同旧版本请求竞争时至多一条推进视图。命令回执中的“已排队”不表示视图已经发布，管理员通过后续 inspect 查看 `APPLIED` 及实际视图版本。
 
 ### 2.2 参数与注册契约
 

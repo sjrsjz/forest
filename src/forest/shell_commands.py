@@ -6,10 +6,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from forest.shell_registry_v11 import (
+from forest.shell_registry_v12 import (
     CURRENT_GATE_VERSION,
-    DOMAIN_ALIASES_V11,
-    SIMPLE_COMMANDS_V11,
+    DOMAIN_ALIASES_V12,
+    SIMPLE_COMMANDS_V12,
     get_command_spec,
 )
 
@@ -82,11 +82,11 @@ def _reason(value):
 
 
 def _parse(words):
-    if tuple(words) in SIMPLE_COMMANDS_V11:
-        return _command(SIMPLE_COMMANDS_V11[tuple(words)])
+    if tuple(words) in SIMPLE_COMMANDS_V12:
+        return _command(SIMPLE_COMMANDS_V12[tuple(words)])
     if len(words) < 2:
         raise ValueError("command")
-    domain, verb = DOMAIN_ALIASES_V11.get(words[0], words[0]), words[1]
+    domain, verb = DOMAIN_ALIASES_V12.get(words[0], words[0]), words[1]
     if (domain, verb) == ("core", "cancel") and len(words) >= 3:
         options = _options(words[3:], {"--expect-checkpoint", "--reason"})
         return _command("run.cancel", {
@@ -246,6 +246,12 @@ def _parse(words):
         options = _options(words[2:], {"--expect-view"})
         return _command("context.compact", {
             "expected_view_revision": _revision(options["--expect-view"]),
+        })
+    if (domain, verb) == ("context", "reset"):
+        options = _options(words[2:], {"--expect-view"})
+        return _command("context.reset", {
+            "expected_view_revision": _revision(options["--expect-view"]),
+            "mode": "safe-point",
         })
     if (domain, verb) == ("memory", "list") and len(words) == 2:
         return _command("memory.read")

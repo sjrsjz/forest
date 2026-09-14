@@ -64,7 +64,7 @@ class ContextAdministration:
             ).fetchone()
             requests = await (
                 await conn.execute(
-                    "SELECT request_id,kind,expected_view_revision,status,applied_view_revision,"
+                    "SELECT request_id,kind,mode,expected_view_revision,status,applied_view_revision,"
                     "terminal_reason,requested_at,completed_at "
                     "FROM public.bot_context_management_requests "
                     "WHERE bot_id=%s AND conversation_id=%s "
@@ -92,7 +92,7 @@ class ContextAdministration:
                 "requests": [
                     {
                         **{key: row[key] for key in (
-                            "request_id", "kind", "expected_view_revision", "status",
+                            "request_id", "kind", "mode", "expected_view_revision", "status",
                             "applied_view_revision", "terminal_reason",
                         )},
                         "requested_at": row["requested_at"].isoformat(),
@@ -114,9 +114,31 @@ class ContextAdministration:
             raise ForestError(
                 "CONTEXT_CONTROL_INVALID", "Compaction requires an expected view revision", 422
             )
+        return await self._request(
+            ticket, operation_id, payload, action="context.compact", kind="COMPACT"
+        )
+
+    async def reset(self, ticket, operation_id, payload):
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"expected_view_revision", "mode"}
+            or type(payload["expected_view_revision"]) is not int
+            or payload["expected_view_revision"] < 0
+            or payload["mode"] != "safe-point"
+        ):
+            raise ForestError(
+                "CONTEXT_CONTROL_INVALID",
+                "Reset requires an expected view revision and safe-point mode",
+                422,
+            )
+        return await self._request(
+            ticket, operation_id, payload, action="context.reset", kind="RESET"
+        )
+
+    async def _request(self, ticket, operation_id, payload, *, action, kind):
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(
-                conn, ticket, "context.compact", operation_id, payload
+                conn, ticket, action, operation_id, payload
             )
             replay = await self.control._replay(conn, claims)
             if self.control.is_replay(replay):
@@ -129,17 +151,18 @@ class ContextAdministration:
                     "CONTEXT_VIEW_CONFLICT", "Context view revision changed", 409
                 )
             request_id = "context-request:" + digest_json([
-                self.store.bot_id, conversation_id, operation_id, "COMPACT"
+                self.store.bot_id, conversation_id, operation_id, kind
             ])
             await conn.execute(
                 "INSERT INTO public.bot_context_management_requests("
-                "bot_id,request_id,operation_id,conversation_id,kind,expected_view_revision) "
-                "VALUES (%s,%s,%s,%s,'COMPACT',%s)",
+                "bot_id,request_id,operation_id,conversation_id,kind,mode,expected_view_revision) "
+                "VALUES (%s,%s,%s,%s,%s,'SAFE_POINT',%s)",
                 (
                     self.store.bot_id,
                     request_id,
                     operation_id,
                     conversation_id,
+                    kind,
                     payload["expected_view_revision"],
                 ),
             )
@@ -151,7 +174,8 @@ class ContextAdministration:
             result = {
                 "request_id": request_id,
                 "conversation_id": conversation_id,
-                "kind": "COMPACT",
+                "kind": kind,
+                "mode": "safe-point",
                 "status": "PENDING",
                 "expected_view_revision": payload["expected_view_revision"],
             }

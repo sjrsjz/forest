@@ -1,11 +1,13 @@
 """Shell Context controls queue view work without owning the group Agent."""
 
 import pytest
-from test_agent_store import start
+from test_agent_store import specification, start
 from test_messages import messages as messages
 from test_messages import owner, receive
 from test_shell import allow, dispatcher
 from test_shell_management import claim_command
+
+from forest.storage.agent import AgentStore
 
 pytestmark = pytest.mark.postgres
 
@@ -148,3 +150,99 @@ async def test_idle_agent_recovery_does_not_cross_the_model_tool_boundary(messag
             (queued["request_id"],),
         )).fetchone()
     assert applied == {"status": "APPLIED", "applied_view_revision": expected + 1}
+
+
+async def test_context_reset_archives_closed_history_but_keeps_active_input_batch(messages):
+    repository, lease, _ = messages
+    await allow(repository, "user-1")
+    old = await receive(
+        repository, lease, "reset-old-trigger", trigger=True, text="OLD-CLOSED-CONTEXT"
+    )
+    actor = await owner(repository, lease, old["conversation_id"])
+    old_batch = await repository.select_input(actor, "context-reset-old-input")
+    await repository.end_run(
+        actor, run_id=old_batch["run_id"], reason="OLD_RUN_CLOSED", status="FAILED"
+    )
+    leading = await receive(
+        repository,
+        lease,
+        "reset-current-observation",
+        trigger=False,
+        text="CURRENT-LEADING-OBSERVATION",
+    )
+    trigger = await receive(
+        repository, lease, "reset-current-trigger", trigger=True, text="CURRENT-TRIGGER"
+    )
+    batch = await repository.select_input(actor, "context-reset-input")
+    state = AgentStore(repository)
+    head = await state.ensure_run(actor, batch["run_id"], specification())
+    expected = (await repository.context(actor, run_id=head["run_id"]))[
+        "context_view_revision"
+    ]
+
+    claim = await claim_command(
+        repository,
+        lease,
+        f"#forest context reset --expect-view {expected}",
+        number="context-reset",
+    )
+    text, queued = await dispatcher(repository, lease)._typed(lease, claim)
+    assert queued == {
+        "code": "CONTEXT_RESET_QUEUED",
+        "request_id": queued["request_id"],
+        "status": "PENDING",
+        "expected_view_revision": expected,
+        "mode": "safe-point",
+    }
+    assert "不会调用摘要模型" in text
+
+    resumed = await repository.select_input(actor, "context-reset-idle", mode="IDLE")
+    assert resumed["status"] == "RESUME"
+    async with repository.store.pool.connection() as conn:
+        still_pending = await (await conn.execute(
+            "SELECT status FROM public.bot_context_management_requests WHERE request_id=%s",
+            (queued["request_id"],),
+        )).fetchone()
+    assert still_pending["status"] == "PENDING"
+
+    boundary = await state.boundary(actor, head["run_id"], "context-reset-boundary")
+    assert boundary["phase"] == "READY_MODEL"
+    async with repository.store.pool.connection() as conn:
+        units = await (await conn.execute(
+            "SELECT event_id,visible FROM public.bot_context_units "
+            "WHERE bot_id=%s AND conversation_id=%s AND event_id=ANY(%s) ORDER BY event_id",
+            (
+                repository.store.bot_id,
+                trigger["conversation_id"],
+                [old["event_id"], leading["event_id"], trigger["event_id"]],
+            ),
+        )).fetchall()
+        request = await (await conn.execute(
+            "SELECT kind,mode,status,applied_view_revision FROM "
+            "public.bot_context_management_requests WHERE request_id=%s",
+            (queued["request_id"],),
+        )).fetchone()
+        publication = await (await conn.execute(
+            "SELECT policy_revision,removed_unit_ids,retained_unit_ids "
+            "FROM public.bot_context_compactions WHERE bot_id=%s AND conversation_id=%s "
+            "AND view_revision=%s",
+            (repository.store.bot_id, trigger["conversation_id"], expected + 1),
+        )).fetchone()
+        model_attempts = await (await conn.execute(
+            "SELECT count(*) AS count FROM public.bot_model_transport_attempts"
+        )).fetchone()
+    by_event = {row["event_id"]: row["visible"] for row in units}
+    assert by_event == {
+        old["event_id"]: False,
+        leading["event_id"]: True,
+        trigger["event_id"]: True,
+    }
+    assert request == {
+        "kind": "RESET",
+        "mode": "SAFE_POINT",
+        "status": "APPLIED",
+        "applied_view_revision": expected + 1,
+    }
+    assert publication["policy_revision"] == "explicit-safe-point-reset-v1"
+    assert publication["removed_unit_ids"] and publication["retained_unit_ids"]
+    assert model_attempts["count"] == 0

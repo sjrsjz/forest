@@ -23,10 +23,10 @@ from forest.shell_commands import parse_command
 from forest.shell_ingress import ShellPriorityProof
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.input_payloads import InputContentStore, identity
-from forest.storage.shell_payloads_v11 import (
+from forest.storage.shell_payloads_v12 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
 )
-from forest.storage.shell_payloads_v11 import (
+from forest.storage.shell_payloads_v12 import (
     ShellPayloadStore,
     arguments_metadata,
     delivery_metadata,
@@ -1544,7 +1544,16 @@ class MessageStore:
                     (self.store.bot_id, request["request_id"]),
                 )
                 continue
-            await self._compact(conn, conversation_id)
+            if request["kind"] == "COMPACT":
+                await self._compact(conn, conversation_id)
+            elif request["kind"] == "RESET" and request["mode"] == "SAFE_POINT":
+                await self._reset_context(conn, conversation_id)
+            else:
+                raise ForestError(
+                    "CONTEXT_REQUEST_UNSUPPORTED",
+                    "The current writer cannot interpret this Context request",
+                    409,
+                )
             current = await self._conversation(conn, conversation_id)
             await conn.execute(
                 "UPDATE public.bot_context_management_requests SET status='APPLIED',"
@@ -1653,6 +1662,9 @@ class MessageStore:
         rows = await (await conn.execute(
             "SELECT u.*, EXISTS(SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=u.bot_id "
             "AND t.event_id=u.event_id AND t.status IN ('PENDING','CLAIMED')) OR EXISTS "
+            "(SELECT 1 FROM public.bot_context_input_batches b JOIN public.bot_conversation_runs r "
+            "ON r.bot_id=b.bot_id AND r.run_id=b.run_id WHERE b.bot_id=u.bot_id "
+            "AND b.input_batch_id=u.input_batch_id AND r.status='RUNNING') OR EXISTS "
             "(SELECT 1 FROM public.bot_agent_steps s JOIN public.bot_conversation_runs r "
             "ON r.bot_id=s.bot_id AND r.run_id=s.run_id WHERE s.bot_id=u.bot_id "
             "AND s.logical_step_id=u.logical_step_id AND r.status='RUNNING') AS pinned "
@@ -1689,6 +1701,63 @@ class MessageStore:
             (view_revision, self.store.bot_id, conversation_id),
         )
         return total <= self.context_token_budget
+
+    async def _reset_context(self, conn, conversation_id) -> None:
+        """Archive every closed unit while retaining the active causal group."""
+        echo_units = await self._apply_echo_view(conn, conversation_id)
+        conversation = await self._conversation(conn, conversation_id)
+        rows = await (await conn.execute(
+            "SELECT u.*, EXISTS(SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=u.bot_id "
+            "AND t.event_id=u.event_id AND t.status IN ('PENDING','CLAIMED')) OR EXISTS "
+            "(SELECT 1 FROM public.bot_context_input_batches b JOIN public.bot_conversation_runs r "
+            "ON r.bot_id=b.bot_id AND r.run_id=b.run_id WHERE b.bot_id=u.bot_id "
+            "AND b.input_batch_id=u.input_batch_id AND r.status='RUNNING') OR EXISTS "
+            "(SELECT 1 FROM public.bot_agent_steps s JOIN public.bot_conversation_runs r "
+            "ON r.bot_id=s.bot_id AND r.run_id=s.run_id WHERE s.bot_id=u.bot_id "
+            "AND s.logical_step_id=u.logical_step_id AND r.status='RUNNING') AS pinned "
+            "FROM public.bot_context_units u WHERE u.bot_id=%s AND u.conversation_id=%s AND u.visible "
+            "ORDER BY u.context_revision,u.unit_index",
+            (self.store.bot_id, conversation_id),
+        )).fetchall()
+        removed = sorted(set(echo_units) | {
+            row["unit_id"] for row in rows if not row["pinned"]
+        })
+        retained = sorted(row["unit_id"] for row in rows if row["pinned"])
+        if removed:
+            await conn.execute(
+                "UPDATE public.bot_context_units SET visible=false "
+                "WHERE bot_id=%s AND unit_id=ANY(%s)",
+                (self.store.bot_id, removed),
+            )
+        view_revision = conversation["context_view_revision"] + 1
+        manifest = {
+            "kind": "RESET",
+            "mode": "SAFE_POINT",
+            "removed": removed,
+            "retained": retained,
+        }
+        await conn.execute(
+            "INSERT INTO public.bot_context_compactions(bot_id,conversation_id,view_revision,context_revision,"
+            "policy_revision,token_budget,archive_through_seq,source_manifest_digest,removed_unit_ids,"
+            "retained_unit_ids) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                self.store.bot_id,
+                conversation_id,
+                view_revision,
+                conversation["context_revision"],
+                "explicit-safe-point-reset-v1",
+                self.context_token_budget,
+                conversation["context_applied_seq"],
+                digest_json(manifest),
+                Jsonb(removed),
+                Jsonb(retained),
+            ),
+        )
+        await conn.execute(
+            "UPDATE public.bot_conversations SET context_view_revision=%s "
+            "WHERE bot_id=%s AND conversation_id=%s",
+            (view_revision, self.store.bot_id, conversation_id),
+        )
 
     async def context(self, actor: ActorLease, *, run_id: str | None = None) -> dict:
         """Read canonical visible history with explicit source and author boundaries."""

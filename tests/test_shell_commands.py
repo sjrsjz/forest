@@ -60,6 +60,8 @@ def command(text, *, extras=(), self_message=False):
     ("#forest context inspect", "context.read", {}, 1),
     ("#forest context compact --expect-view 9", "context.compact",
      {"expected_view_revision": 9}, 1),
+    ("#forest context reset --expect-view 10", "context.reset",
+     {"expected_view_revision": 10, "mode": "safe-point"}, 1),
     ("#forest modules list", "module.read", {}, 1),
     ("#forest module status forest.weather", "module.read",
      {"component_id": "forest.weather"}, 1),
@@ -105,6 +107,8 @@ def test_typed_commands(text, name, payload, priority):
     '#forest context inspect extra', '#forest context compact',
     '#forest context compact --expect-view -1',
     '#forest context compact --expect-view 1 --expect-view 2',
+    '#forest context reset', '#forest context reset --expect-view -1',
+    '#forest context reset --expect-view 1 --mode cancel-run',
     '#forest module status', '#forest module status bad/name',
     '#forest module reload component',
     '#forest module reload component --expect-revision 0',
@@ -139,11 +143,11 @@ def test_quotes_media_echo_and_nonleading_namespace_are_not_executable():
     assert parse_command(value) is None
 
 
-def test_new_admissions_are_explicitly_shell_gate_v11():
-    assert command("#forest status").gate_version == "shell-gate-v11"
-    assert command("#forest memory list").gate_version == "shell-gate-v11"
-    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v11"
-    assert command("#forest component-job list").gate_version == "shell-gate-v11"
-    assert command("#forest audit list").gate_version == "shell-gate-v11"
-    assert command("#forest context inspect").gate_version == "shell-gate-v11"
-    assert command("#forest module status forest.weather").gate_version == "shell-gate-v11"
+def test_new_admissions_are_explicitly_shell_gate_v12():
+    assert command("#forest status").gate_version == "shell-gate-v12"
+    assert command("#forest memory list").gate_version == "shell-gate-v12"
+    assert command("#forest bot pause --expect-maintenance 1 --reason test").gate_version == "shell-gate-v12"
+    assert command("#forest component-job list").gate_version == "shell-gate-v12"
+    assert command("#forest audit list").gate_version == "shell-gate-v12"
+    assert command("#forest context inspect").gate_version == "shell-gate-v12"
+    assert command("#forest module status forest.weather").gate_version == "shell-gate-v12"
