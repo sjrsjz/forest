@@ -1213,7 +1213,11 @@ class MessageStore:
                 "AND (r.status='PENDING' OR r.next_attempt_at<=clock_timestamp() "
                 "OR r.execution_deadline_at<=clock_timestamp())) "
                 "OR EXISTS (SELECT 1 FROM public.bot_conversation_notices n WHERE n.bot_id=c.bot_id "
-                "AND n.conversation_id=c.conversation_id AND n.status IN ('PENDING','CLAIMED'))) "
+                "AND n.conversation_id=c.conversation_id AND n.status IN ('PENDING','CLAIMED')) "
+                "OR EXISTS (SELECT 1 FROM public.bot_message_handler_chains h WHERE h.bot_id=c.bot_id "
+                "AND h.conversation_id=c.conversation_id AND h.status='PENDING' "
+                "AND (h.claim_actor_id IS NOT NULL OR h.next_attempt_at<=clock_timestamp() "
+                "OR h.deadline_at<=clock_timestamp()))) "
                 "ORDER BY c.conversation_id LIMIT %s",
                 (self.store.bot_id, after_conversation_id, after_conversation_id, limit),
             )).fetchall()
@@ -2388,6 +2392,290 @@ class MessageStore:
         await self._actor_final(conn, actor, binding)
         return self._notice_selection(actor, notice, batch, replayed=False)
 
+    async def _message_handler_authorized_in(self, conn, binding, chain, item) -> bool:
+        """Recheck the current policy without changing the frozen execution route."""
+        head = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_message_handler_policy_heads WHERE bot_id=%s "
+                "AND binding_id=%s AND component_id=%s AND handler_id=%s FOR SHARE",
+                (
+                    self.store.bot_id,
+                    chain["binding_id"],
+                    item["component_id"],
+                    item["handler_id"],
+                ),
+            )
+        ).fetchone()
+        if head is None or head["revision"] < 1:
+            return False
+        policy = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_message_handler_policy_revisions WHERE bot_id=%s "
+                "AND binding_id=%s AND component_id=%s AND handler_id=%s AND revision=%s",
+                (
+                    self.store.bot_id,
+                    chain["binding_id"],
+                    item["component_id"],
+                    item["handler_id"],
+                    head["revision"],
+                ),
+            )
+        ).fetchone()
+        saved = await self.handler_chains.policies._hydrate_in(
+            conn, policy, kind="REVISION", required=False
+        )
+        if saved is None or saved["values_payload_state"] != "ACTIVE":
+            return False
+        values = saved["values"]
+        if values["mode"] == "DISABLED":
+            return False
+        if values["mode"] == "EVERYONE":
+            return True
+        if values["mode"] == "USER_SET":
+            return chain["external_user_id"] in values["user_ids"]
+        current = await self.bindings.current_config_in(
+            conn,
+            self.store.bot_id,
+            binding["binding_id"],
+            expected_binding_epoch=binding["binding_epoch"],
+        )
+        return chain["external_user_id"] in current["config"]["admin_user_ids"]
+
+    async def _message_handler_selection_in(
+        self, conn, actor, conversation, chain, item, attempt, *, replayed
+    ) -> dict:
+        from forest.storage.payloads import PayloadStore
+
+        clock = await PayloadStore(self.store).lock_in(conn)
+        source = await InputContentStore(self.store).read_input_in(
+            conn,
+            chain["event_id"],
+            expected_deletion_epoch=clock["deletion_epoch"],
+            required=False,
+        )
+        event = {
+            "event_id": chain["event_id"],
+            "source_event_id": source["source_event_id"],
+            "ingress_seq": source["ingress_seq"],
+            "platform_message_id": source["platform_message_id"],
+            "sent_at": source["sent_at"].isoformat(),
+            "received_at": source["received_at"].isoformat(),
+            "origin": source["origin"],
+            "payload_state": source["payload_state"],
+            "conversation": {
+                key: conversation[key]
+                for key in (
+                    "conversation_id",
+                    "group_source_id",
+                    "platform",
+                    "channel_kind",
+                    "channel_id",
+                    "thread_id",
+                )
+            },
+            "author": source["author"],
+            "segments": source["segments"],
+        }
+        request = {
+            **dict(item),
+            "item_id": "message-handler-item:"
+            + digest_json([chain["chain_id"], item["route_index"]]),
+            "status": "CLAIMED",
+            "handler_spec_digest": item["spec_digest"],
+        }
+        return {
+            "status": "MESSAGE_HANDLER",
+            "kind": "MESSAGE_HANDLER_INPUT",
+            "conversation_id": actor.conversation_id,
+            "chain": dict(chain),
+            "request": request,
+            "attempt": dict(attempt),
+            "event": event,
+            "input_parent_ids": sorted(
+                {chain["input_payload_id"], item["policy_payload_id"]}
+            ),
+            "preflight_error": (
+                None
+                if source["payload_state"] == "ACTIVE"
+                else source.get("content_error", "MESSAGE_HANDLER_INPUT_UNAVAILABLE")
+            ),
+            "replayed": replayed,
+        }
+
+    async def _claim_message_handler_in(
+        self, conn, actor, binding, conversation, chain, operation_id
+    ) -> dict:
+        item = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_message_handler_chain_items WHERE bot_id=%s "
+                "AND chain_id=%s AND route_index=%s FOR SHARE",
+                (self.store.bot_id, chain["chain_id"], chain["current_index"]),
+            )
+        ).fetchone()
+        if item is None:
+            raise ForestError(
+                "MESSAGE_HANDLER_CHAIN_INCOMPLETE", "Frozen handler item is unavailable", 409
+            )
+        if not await self._message_handler_authorized_in(conn, binding, chain, item):
+            chain = await self.handler_chains.cancel_in(
+                conn, chain["event_id"], "POLICY_REVOKED"
+            )
+            await self._classify_in(
+                conn,
+                actor.conversation_id,
+                chain["event_id"],
+                "NO_TRIGGER",
+                "message-handler-policy-v1",
+                "POLICY_REVOKED",
+            )
+            await self.store._event(
+                conn,
+                "message_handler.cancelled",
+                chain["chain_id"],
+                {"conversation_id": actor.conversation_id, "reason": "POLICY_REVOKED"},
+            )
+            await self._actor_final(conn, actor, binding)
+            return {
+                "status": "IDLE",
+                "kind": "MESSAGE_HANDLER_POLICY_REVOKED",
+                "conversation_id": actor.conversation_id,
+            }
+        replayed = chain["claim_actor_id"] is not None
+        if replayed:
+            attempt = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_attempts WHERE bot_id=%s "
+                    "AND chain_id=%s AND attempt_no=%s",
+                    (self.store.bot_id, chain["chain_id"], chain["attempt_count"]),
+                )
+            ).fetchone()
+            if attempt is None or attempt["route_index"] != chain["current_index"]:
+                raise ForestError(
+                    "MESSAGE_HANDLER_ATTEMPT_INVALID", "Claimed handler has no attempt proof", 409
+                )
+            if (
+                chain["claim_actor_id"],
+                chain["claim_actor_epoch"],
+                chain["claim_host_incarnation"],
+            ) != (actor.actor_id, actor.actor_epoch, actor.host.incarnation):
+                chain = await (
+                    await conn.execute(
+                        "UPDATE public.bot_message_handler_chains SET claim_actor_id=%s,"
+                        "claim_actor_epoch=%s,claim_host_incarnation=%s,revision=revision+1 "
+                        "WHERE bot_id=%s AND chain_id=%s AND status='PENDING' RETURNING *",
+                        (
+                            actor.actor_id,
+                            actor.actor_epoch,
+                            actor.host.incarnation,
+                            self.store.bot_id,
+                            chain["chain_id"],
+                        ),
+                    )
+                ).fetchone()
+        else:
+            attempt_no = chain["attempt_count"] + 1
+            attempt_operation_id = "message-handler-attempt:" + digest_json(
+                [chain["chain_id"], chain["current_index"], attempt_no]
+            )
+            call_operation_id = "message-handler-call:" + digest_json(
+                [chain["chain_id"], chain["current_index"], attempt_no]
+            )
+            attempt = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_message_handler_attempts("
+                    "bot_id,chain_id,attempt_no,route_index,operation_id,call_operation_id,"
+                    "actor_id,actor_epoch,host_incarnation) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        self.store.bot_id,
+                        chain["chain_id"],
+                        attempt_no,
+                        chain["current_index"],
+                        attempt_operation_id,
+                        call_operation_id,
+                        actor.actor_id,
+                        actor.actor_epoch,
+                        actor.host.incarnation,
+                    ),
+                )
+            ).fetchone()
+            chain = await (
+                await conn.execute(
+                    "UPDATE public.bot_message_handler_chains SET claim_actor_id=%s,"
+                    "claim_actor_epoch=%s,claim_host_incarnation=%s,attempt_count=%s,"
+                    "revision=revision+1 WHERE bot_id=%s AND chain_id=%s "
+                    "AND status='PENDING' AND claim_actor_id IS NULL RETURNING *",
+                    (
+                        actor.actor_id,
+                        actor.actor_epoch,
+                        actor.host.incarnation,
+                        attempt_no,
+                        self.store.bot_id,
+                        chain["chain_id"],
+                    ),
+                )
+            ).fetchone()
+            if chain is None:
+                raise ForestError(
+                    "MESSAGE_HANDLER_CLAIM_LOST", "Handler claim changed", 409
+                )
+            await self.store._event(
+                conn,
+                "message_handler.claimed",
+                attempt["operation_id"],
+                {
+                    "conversation_id": actor.conversation_id,
+                    "chain_id": chain["chain_id"],
+                    "route_index": chain["current_index"],
+                    "attempt_no": attempt_no,
+                },
+            )
+        selected = await self._message_handler_selection_in(
+            conn, actor, conversation, chain, item, attempt, replayed=replayed
+        )
+        await self._actor_final(conn, actor, binding)
+        return selected
+
+    async def _message_handler_outputs_in(
+        self, conn, conversation_id: str, start_seq: int, end_seq: int
+    ) -> list[dict]:
+        if end_seq <= start_seq:
+            return []
+        return await (
+            await conn.execute(
+                "SELECT q.* FROM ("
+                "SELECT h.ingress_seq,h.chain_id,r.result_id AS output_id,"
+                "r.context_payload_id,r.context_payload_digest,r.estimated_tokens,"
+                "'RESULT' AS output_kind "
+                "FROM public.bot_message_handler_chains h "
+                "JOIN public.bot_message_handler_results r ON "
+                "(r.bot_id,r.chain_id)=(h.bot_id,h.chain_id) "
+                "WHERE h.bot_id=%s AND h.conversation_id=%s AND h.status='REPLIED' "
+                "AND r.context_payload_id IS NOT NULL UNION ALL "
+                "SELECT h.ingress_seq,h.chain_id,f.failure_id AS output_id,"
+                "f.context_payload_id,f.context_payload_digest,f.estimated_tokens,"
+                "'FAILURE' AS output_kind "
+                "FROM public.bot_message_handler_chains h "
+                "JOIN public.bot_message_handler_failures f ON "
+                "(f.bot_id,f.chain_id)=(h.bot_id,h.chain_id) "
+                "WHERE h.bot_id=%s AND h.conversation_id=%s AND h.status='FAILED' "
+                "AND f.context_payload_id IS NOT NULL) q "
+                "LEFT JOIN public.bot_context_units u ON u.bot_id=%s "
+                "AND u.message_handler_chain_id=q.chain_id "
+                "WHERE q.ingress_seq>%s AND q.ingress_seq<=%s AND u.unit_id IS NULL "
+                "ORDER BY q.ingress_seq",
+                (
+                    self.store.bot_id,
+                    conversation_id,
+                    self.store.bot_id,
+                    conversation_id,
+                    self.store.bot_id,
+                    start_seq,
+                    end_seq,
+                ),
+            )
+        ).fetchall()
+
     async def select_input(self, actor: ActorLease, operation_id: str, *, mode: str = "IDLE") -> dict:
         """Select exactly one immutable cut at a host-owned closed execution boundary.
 
@@ -2473,7 +2761,32 @@ class MessageStore:
                     raise ForestError("AGENT_BOUNDARY_REQUIRED", "The previous model and tool group must close", 409)
         if mode == "SAFE_POINT" or run is None:
             await self._apply_context_requests_in(conn, actor.conversation_id)
+        handler_chain = await (
+            await conn.execute(
+                "SELECT h.* FROM public.bot_message_handler_chains h "
+                "JOIN public.bot_message_inbox i ON (i.bot_id,i.event_id)=(h.bot_id,h.event_id) "
+                "WHERE h.bot_id=%s AND h.conversation_id=%s AND h.status='PENDING' "
+                "AND NOT i.business_classification_pending ORDER BY h.ingress_seq LIMIT 1 FOR UPDATE OF h",
+                (self.store.bot_id, actor.conversation_id),
+            )
+        ).fetchone()
+        database_now = await self.store._now(conn)
+        available_handler = (
+            handler_chain
+            if handler_chain is not None
+            and conversation["context_applied_seq"] >= handler_chain["ingress_seq"] - 1
+            and (
+                handler_chain["claim_actor_id"] is not None
+                or handler_chain["next_attempt_at"] <= database_now
+                or handler_chain["deadline_at"] <= database_now
+            )
+            else None
+        )
         if run and mode == "IDLE":
+            if available_handler is not None:
+                return await self._claim_message_handler_in(
+                    conn, actor, binding, conversation, available_handler, operation_id
+                )
             if await self._pending_echo_view(conn, actor.conversation_id):
                 await self._compact(conn, actor.conversation_id)
             await self._actor_final(conn, actor, binding)
@@ -2494,7 +2807,6 @@ class MessageStore:
                 (self.store.bot_id, actor.conversation_id),
             )
         ).fetchone()
-        database_now = await self.store._now(conn)
         available_command = (
             command
             if command is not None
@@ -2521,12 +2833,20 @@ class MessageStore:
             else None
         )
         business_work = min(
-            (item for item in (available_command, available_notice) if item is not None),
+            (
+                item
+                for item in (available_command, available_notice, available_handler)
+                if item is not None
+            ),
             key=lambda item: item["ingress_seq"],
             default=None,
         )
         business_barrier = min(
-            (item for item in (command, available_notice) if item is not None),
+            (
+                item
+                for item in (command, available_notice, available_handler)
+                if item is not None
+            ),
             key=lambda item: item["ingress_seq"],
             default=None,
         )
@@ -2539,6 +2859,19 @@ class MessageStore:
                 or trigger["ingress_seq"] < business_barrier["ingress_seq"]
             )
         ]
+        if (
+            run is not None
+            and mode == "SAFE_POINT"
+            and not selected
+            and business_barrier is not None
+            and business_barrier.get("chain_id") is not None
+        ):
+            await self._actor_final(conn, actor, binding)
+            return {
+                "status": "WAIT_INPUT",
+                "conversation_id": actor.conversation_id,
+                "run_id": run["run_id"],
+            }
         if business_barrier is not None and not selected and run is None:
             if business_work is None or (
                 business_work.get("notice_id") != business_barrier.get("notice_id")
@@ -2557,6 +2890,17 @@ class MessageStore:
                 }
             if business_barrier.get("notice_id") is not None:
                 return await self._claim_notice_in(
+                    conn, actor, binding, conversation, business_barrier, operation_id
+                )
+            if business_barrier.get("chain_id") is not None:
+                if mode == "SAFE_POINT":
+                    await self._actor_final(conn, actor, binding)
+                    return {
+                        "status": "WAIT_INPUT",
+                        "conversation_id": actor.conversation_id,
+                        "run_id": run["run_id"] if run else None,
+                    }
+                return await self._claim_message_handler_in(
                     conn, actor, binding, conversation, business_barrier, operation_id
                 )
             return await self._claim_business_command_in(
@@ -2578,15 +2922,20 @@ class MessageStore:
             return {**run, "status": "CONTINUE"}
         applied = conversation["context_applied_seq"]
         if selected:
+            end = max(applied, selected[-1]["ingress_seq"])
+        else:
+            # Bounded silent maintenance never drags a frozen cut forward.
+            end = min(conversation["classified_through_seq"], applied + 256)
+        handler_outputs = await self._message_handler_outputs_in(
+            conn, actor.conversation_id, applied, end
+        )
+        if selected:
             cut = selected[-1]["ingress_seq"]
-            end = max(applied, cut)
             if run is None:
                 session, run = await self._new_run(conn, conversation, session)
             kind = "TRIGGER_INPUT" if end > applied else "RECOVERY_CLAIM"
         else:
             cut = None
-            # Bounded silent maintenance never drags a frozen cut forward.
-            end = min(conversation["classified_through_seq"], applied + 256)
             kind = "SILENT_DRAIN"
         if end == applied and not selected:
             if await self._pending_echo_view(conn, actor.conversation_id):
@@ -2611,7 +2960,12 @@ class MessageStore:
             await conn.execute(
                 "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,context_revision,unit_index,"
                 "kind,event_id,input_batch_id,estimated_tokens) SELECT bot_id,conversation_id,event_id,%s,"
-                "ingress_seq,'INPUT',event_id,%s,estimated_tokens FROM public.bot_message_inbox "
+                + (
+                    "ingress_seq*2,'INPUT',event_id,%s,estimated_tokens "
+                    if handler_outputs
+                    else "ingress_seq,'INPUT',event_id,%s,estimated_tokens "
+                )
+                + "FROM public.bot_message_inbox "
                 "WHERE bot_id=%s AND conversation_id=%s AND ingress_seq>%s AND ingress_seq<=%s "
                 "ORDER BY ingress_seq",
                 (revision, batch_id, self.store.bot_id, actor.conversation_id, applied, end),
@@ -2633,6 +2987,23 @@ class MessageStore:
                 "UPDATE public.bot_conversation_runs SET input_revision=%s,selected_input_end_seq=%s "
                 "WHERE bot_id=%s AND run_id=%s",
                 (input_revision, end, self.store.bot_id, run["run_id"]),
+            )
+        for handler_output in handler_outputs:
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,"
+                "context_revision,unit_index,kind,payload_id,estimated_tokens,"
+                "message_handler_chain_id) VALUES "
+                "(%s,%s,%s,%s,%s,'MESSAGE_HANDLER_RESULT',%s,%s,%s)",
+                (
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    handler_output["output_id"],
+                    revision,
+                    handler_output["ingress_seq"] * 2 + 1,
+                    handler_output["context_payload_id"],
+                    handler_output["estimated_tokens"],
+                    handler_output["chain_id"],
+                ),
             )
         await conn.execute(
             "UPDATE public.bot_conversations SET context_applied_seq=%s,context_revision=%s,"
@@ -2679,7 +3050,14 @@ class MessageStore:
                 (self.store.bot_id, conversation["conversation_id"]),
             )
         ).fetchone()
-        if pending or command or notice or context_request or (session and session["active_run_id"]):
+        handler = await (
+            await conn.execute(
+                "SELECT 1 FROM public.bot_message_handler_chains WHERE bot_id=%s "
+                "AND conversation_id=%s AND status='PENDING' LIMIT 1",
+                (self.store.bot_id, conversation["conversation_id"]),
+            )
+        ).fetchone()
+        if pending or command or notice or handler or context_request or (session and session["active_run_id"]):
             return
         if conversation["context_applied_seq"] != conversation["classified_through_seq"]:
             return
@@ -2953,6 +3331,7 @@ class MessageStore:
         units = await (await conn.execute(
             "SELECT u.unit_id,u.kind,u.context_revision,u.unit_index,u.estimated_tokens,"
             "u.control_command_id,u.logical_step_id,u.business_request_id,u.business_notice_id,"
+            "u.message_handler_chain_id,"
             "u.payload_id,"
             "s.run_id AS step_run_id,cr.disposition AS command_disposition,"
             "i.event_id,i.ingress_seq,i.platform_message_id,i.source_event_id,i.author,i.segments,"
@@ -2978,7 +3357,10 @@ class MessageStore:
         clock = await content.payloads.lock_in(conn)
         payload_ids = set()
         initial = await self.bindings.initial_in(conn, binding) if any(
-            u["kind"] in {"CONTROL", "COMMAND_RESULT", "SYSTEM_NOTICE"} for u in units
+            u["kind"] in {
+                "CONTROL", "COMMAND_RESULT", "SYSTEM_NOTICE", "MESSAGE_HANDLER_RESULT"
+            }
+            for u in units
         ) else None
         for unit in units:
             unit["step_parts"] = unit["reply_parts"] = None
@@ -3006,7 +3388,10 @@ class MessageStore:
             unit["source"] = source.copy()
             unit["context_role"] = (
                 "assistant"
-                if unit["kind"] in {"REPLY", "RUN_STEP", "COMMAND_RESULT", "SYSTEM_NOTICE"}
+                if unit["kind"] in {
+                    "REPLY", "RUN_STEP", "COMMAND_RESULT", "SYSTEM_NOTICE",
+                    "MESSAGE_HANDLER_RESULT",
+                }
                 else
                 "control_data" if unit["kind"] == "CONTROL" or unit["trigger_decision"] == "CONTROL_COMMAND" else "user"
             )
@@ -3029,6 +3414,18 @@ class MessageStore:
                     if initial["display_name_payload_state"] == "ACTIVE"
                     else binding["self_id"],
                     "identity_origin": "host_command_output",
+                    "is_self": True,
+                }
+                if initial["display_name_payload_state"] == "ACTIVE":
+                    payload_ids.add(initial["initial_payload_id"])
+            if unit["kind"] == "MESSAGE_HANDLER_RESULT":
+                unit["origin"] = "message_handler_output"
+                unit["author"] = {
+                    "external_user_id": binding["self_id"],
+                    "display_name": initial["display_name"]
+                    if initial["display_name_payload_state"] == "ACTIVE"
+                    else binding["self_id"],
+                    "identity_origin": "host_handler_output",
                     "is_self": True,
                 }
                 if initial["display_name_payload_state"] == "ACTIVE":
@@ -3394,6 +3791,496 @@ class MessageStore:
                     "notice_id": notice_id,
                     "kind": notice["kind"],
                     "response_seq": response_seq,
+                },
+            )
+            await self._actor_final(conn, actor, binding)
+            return row
+
+    async def finalize_message_handler(
+        self,
+        actor: ActorLease,
+        operation_id: str,
+        *,
+        chain_id: str,
+        call_operation_id: str,
+        result: dict,
+        result_payload_id: str,
+        result_payload_digest: str,
+        delivery,
+    ) -> dict:
+        """Commit one frozen route result; one Pass consumes one fair quantum."""
+        for value, name in (
+            (operation_id, "operation_id"),
+            (chain_id, "chain_id"),
+            (call_operation_id, "call_operation_id"),
+            (result_payload_id, "result_payload_id"),
+            (result_payload_digest, "result_payload_digest"),
+        ):
+            _text(value, name)
+        value = _json(result, 262144)
+        if not isinstance(value, dict) or value.get("kind") not in {
+            "REPLY", "CONSUMED", "PASS"
+        }:
+            raise ForestError(
+                "INVALID_MESSAGE_HANDLER_RESULT",
+                "Handler result is not a typed SDK value",
+                422,
+            )
+        if value["kind"] == "REPLY":
+            parts = value.get("parts")
+            if (
+                set(value) != {"kind", "parts"}
+                or not isinstance(parts, list)
+                or not parts
+                or any(not isinstance(part, list) or not part for part in parts)
+            ):
+                raise ForestError(
+                    "INVALID_MESSAGE_HANDLER_RESULT", "Handler reply is malformed", 422
+                )
+        elif set(value) != {"kind"}:
+            raise ForestError(
+                "INVALID_MESSAGE_HANDLER_RESULT", "Handler disposition has extra fields", 422
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_results WHERE bot_id=%s "
+                    "AND conversation_id=%s AND operation_id=%s "
+                    "ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+                    (self.store.bot_id, actor.conversation_id, operation_id),
+                )
+            ).fetchone()
+            semantic_digest = digest_json(
+                [chain_id, call_operation_id, result_payload_id, result_payload_digest, value]
+            )
+            if existing is not None:
+                if (
+                    existing["chain_id"] != chain_id
+                    or existing["operation_id"] != operation_id
+                    or existing["result_digest"] != semantic_digest
+                ):
+                    raise ForestError(
+                        "MESSAGE_HANDLER_RESULT_CONFLICT",
+                        "Handler result operation was already used",
+                        409,
+                    )
+                await self._actor_final(conn, actor, binding)
+                return existing
+            chain = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_chains WHERE bot_id=%s "
+                    "AND chain_id=%s FOR UPDATE",
+                    (self.store.bot_id, chain_id),
+                )
+            ).fetchone()
+            if (
+                chain is None
+                or chain["conversation_id"] != actor.conversation_id
+                or chain["status"] != "PENDING"
+                or (
+                    chain["claim_actor_id"],
+                    chain["claim_actor_epoch"],
+                    chain["claim_host_incarnation"],
+                )
+                != (actor.actor_id, actor.actor_epoch, actor.host.incarnation)
+            ):
+                raise ForestError(
+                    "MESSAGE_HANDLER_NOT_CLAIMED",
+                    "Handler result does not own the current Conversation Actor",
+                    409,
+                )
+            item = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_chain_items WHERE bot_id=%s "
+                    "AND chain_id=%s AND route_index=%s FOR SHARE",
+                    (self.store.bot_id, chain_id, chain["current_index"]),
+                )
+            ).fetchone()
+            attempt = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_attempts WHERE bot_id=%s "
+                    "AND chain_id=%s AND attempt_no=%s FOR SHARE",
+                    (self.store.bot_id, chain_id, chain["attempt_count"]),
+                )
+            ).fetchone()
+            if attempt is None or attempt["call_operation_id"] != call_operation_id:
+                raise ForestError(
+                    "MESSAGE_HANDLER_ATTEMPT_INVALID", "Handler call does not match its attempt", 409
+                )
+            if not await self._message_handler_authorized_in(conn, binding, chain, item):
+                raise ForestError(
+                    "MESSAGE_HANDLER_POLICY_REVOKED",
+                    "Handler reply authorization changed before commit",
+                    403,
+                )
+            call = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s FOR SHARE",
+                    (self.store.bot_id, call_operation_id),
+                )
+            ).fetchone()
+            if (
+                call is None
+                or call["status"] != "COMPLETED"
+                or call["component_id"] != item["component_id"]
+                or call["generation_id"] != item["generation_id"]
+                or call["route_epoch"] != item["route_epoch"]
+                or call["result_payload_id"] != result_payload_id
+                or call["result_digest"] != result_payload_digest
+            ):
+                raise ForestError(
+                    "MESSAGE_HANDLER_CALL_INVALID",
+                    "Handler result has no matching durable Kernel receipt",
+                    409,
+                )
+            from forest.storage.context_payloads import ContextPayloadStore
+
+            content = ContextPayloadStore(self.store)
+            clock = await content.payloads.lock_in(conn)
+            await content.payloads.require_available_in(
+                conn,
+                (result_payload_id,),
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            result_id = "message-handler-result:" + digest_json(
+                [self.store.bot_id, chain_id, chain["current_index"]]
+            )
+            body = None
+            response_seq = delivery_receipt = None
+            if value["kind"] == "REPLY":
+                body = await content.put_control_in(
+                    conn,
+                    result_id,
+                    value["parts"],
+                    parents=(result_payload_id,),
+                    expected_deletion_epoch=clock["deletion_epoch"],
+                )
+                response_seq = conversation["next_response_seq"]
+                route = {
+                    "bot_id": self.store.bot_id,
+                    "binding_id": conversation["binding_id"],
+                    "platform": conversation["platform"],
+                    "self_id": binding["self_id"],
+                    "channel_kind": conversation["channel_kind"],
+                    "channel_id": conversation["channel_id"],
+                    "thread_id": conversation["thread_id"],
+                    "binding_epoch": binding["binding_epoch"],
+                    "visibility": conversation["channel_kind"],
+                }
+                delivery_receipt = await delivery.enqueue_in(
+                    conn,
+                    actor.host,
+                    operation_id="message-handler-reply:" + chain_id,
+                    route=route,
+                    parts=value["parts"],
+                    conversation_id=actor.conversation_id,
+                    lane="CHAT",
+                    response_seq=response_seq,
+                    root_operation_id=chain_id,
+                    expected_policy_revision=actor.policy_revision,
+                    parents=(body.payload_id,),
+                )
+            row = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_message_handler_results("
+                    "bot_id,result_id,operation_id,chain_id,route_index,attempt_no,"
+                    "conversation_id,disposition,call_operation_id,call_result_payload_id,"
+                    "call_result_digest,context_payload_id,context_payload_digest,estimated_tokens,"
+                    "result_digest,response_seq,delivery) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        self.store.bot_id,
+                        result_id,
+                        operation_id,
+                        chain_id,
+                        chain["current_index"],
+                        chain["attempt_count"],
+                        actor.conversation_id,
+                        value["kind"],
+                        call_operation_id,
+                        result_payload_id,
+                        result_payload_digest,
+                        body.payload_id if body else None,
+                        body.digest if body else None,
+                        _tokens(value["parts"]) if body else 0,
+                        semantic_digest,
+                        response_seq,
+                        Jsonb(delivery_receipt) if delivery_receipt is not None else None,
+                    ),
+                )
+            ).fetchone()
+            next_index = chain["current_index"] + 1
+            if value["kind"] == "PASS":
+                final = next_index == chain["route_count"]
+                chain = await (
+                    await conn.execute(
+                        "UPDATE public.bot_message_handler_chains SET status=%s,current_index=%s,"
+                        "claim_actor_id=NULL,claim_actor_epoch=NULL,claim_host_incarnation=NULL,"
+                        "last_error_code=NULL,completed_at=CASE WHEN %s THEN clock_timestamp() END,"
+                        "terminal_reason=CASE WHEN %s THEN 'ALL_PASSED' END,revision=revision+1 "
+                        "WHERE bot_id=%s AND chain_id=%s RETURNING *",
+                        (
+                            "PASSED" if final else "PENDING",
+                            next_index,
+                            final,
+                            final,
+                            self.store.bot_id,
+                            chain_id,
+                        ),
+                    )
+                ).fetchone()
+                if final and chain["fallback_decision"] != "PENDING":
+                    await self._classify_in(
+                        conn,
+                        actor.conversation_id,
+                        chain["event_id"],
+                        chain["fallback_decision"],
+                        chain["fallback_rule_revision"],
+                        chain["fallback_reason"],
+                    )
+            else:
+                chain = await (
+                    await conn.execute(
+                        "UPDATE public.bot_message_handler_chains SET status=%s,current_index=%s,"
+                        "claim_actor_id=NULL,claim_actor_epoch=NULL,claim_host_incarnation=NULL,"
+                        "last_error_code=NULL,terminal_reason=%s,completed_at=clock_timestamp(),"
+                        "revision=revision+1 WHERE bot_id=%s AND chain_id=%s RETURNING *",
+                        (
+                            "REPLIED" if value["kind"] == "REPLY" else "CONSUMED",
+                            next_index,
+                            value["kind"],
+                            self.store.bot_id,
+                            chain_id,
+                        ),
+                    )
+                ).fetchone()
+                await self._classify_in(
+                    conn,
+                    actor.conversation_id,
+                    chain["event_id"],
+                    "NO_TRIGGER",
+                    "message-handler-terminal-v1",
+                    value["kind"],
+                )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET next_response_seq=next_response_seq+%s,"
+                "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s",
+                (1 if response_seq is not None else 0, self.store.bot_id, actor.conversation_id),
+            )
+            await self.store._event(
+                conn,
+                "message_handler.completed",
+                operation_id,
+                {
+                    "conversation_id": actor.conversation_id,
+                    "chain_id": chain_id,
+                    "route_index": row["route_index"],
+                    "disposition": value["kind"],
+                    "response_seq": response_seq,
+                },
+            )
+            await self._actor_final(conn, actor, binding)
+            return row
+
+    async def record_message_handler_failure(
+        self,
+        actor: ActorLease,
+        operation_id: str,
+        *,
+        chain_id: str,
+        error_code: str,
+        retryable: bool,
+        retry_delay_seconds: float,
+        max_attempts: int,
+        delivery,
+    ) -> dict:
+        _text(operation_id, "operation_id")
+        _text(chain_id, "chain_id")
+        _text(error_code, "error_code", 96)
+        if (
+            not error_code.isascii()
+            or not error_code.replace("_", "A").isalnum()
+            or not error_code[0].isalpha()
+            or error_code.upper() != error_code
+            or type(retryable) is not bool
+            or isinstance(retry_delay_seconds, bool)
+            or not isinstance(retry_delay_seconds, (int, float))
+            or not 0 <= retry_delay_seconds <= 300
+            or type(max_attempts) is not int
+            or not 1 <= max_attempts <= 32
+        ):
+            raise ForestError(
+                "MESSAGE_HANDLER_FAILURE_INVALID", "Handler failure fields are invalid", 422
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_failures WHERE bot_id=%s "
+                    "AND operation_id=%s FOR UPDATE",
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if existing is not None:
+                await self._actor_final(conn, actor, binding)
+                return existing
+            chain = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_chains WHERE bot_id=%s "
+                    "AND chain_id=%s FOR UPDATE",
+                    (self.store.bot_id, chain_id),
+                )
+            ).fetchone()
+            if (
+                chain is None
+                or chain["conversation_id"] != actor.conversation_id
+                or chain["status"] != "PENDING"
+                or (
+                    chain["claim_actor_id"],
+                    chain["claim_actor_epoch"],
+                    chain["claim_host_incarnation"],
+                )
+                != (actor.actor_id, actor.actor_epoch, actor.host.incarnation)
+            ):
+                raise ForestError(
+                    "MESSAGE_HANDLER_NOT_CLAIMED", "Handler failure has no current claim", 409
+                )
+            attempt = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_handler_attempts WHERE bot_id=%s "
+                    "AND chain_id=%s AND attempt_no=%s FOR SHARE",
+                    (self.store.bot_id, chain_id, chain["attempt_count"]),
+                )
+            ).fetchone()
+            call = await (
+                await conn.execute(
+                    "SELECT status FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s",
+                    (self.store.bot_id, attempt["call_operation_id"]),
+                )
+            ).fetchone()
+            if call is not None and call["status"] in {"ADMITTED", "COMPLETED"}:
+                raise ForestError(
+                    "MESSAGE_HANDLER_RECOVERY_REQUIRED",
+                    "A durable handler call must be replayed before failure can be recorded",
+                    503,
+                )
+            database_now = await self.store._now(conn)
+            retry_at = database_now + timedelta(seconds=float(retry_delay_seconds))
+            retry = bool(
+                retryable
+                and chain["attempt_count"] < max_attempts
+                and retry_at < chain["deadline_at"]
+            )
+            from forest.storage.context_payloads import ContextPayloadStore
+
+            failure_id = "message-handler-failure:" + digest_json(
+                [self.store.bot_id, chain_id, chain["attempt_count"]]
+            )
+            body = None
+            response_seq = delivery_receipt = None
+            if not retry:
+                parts = [[{"type": "text", "text": "消息处理器暂时无法完成请求，请稍后重试。"}]]
+                content = ContextPayloadStore(self.store)
+                clock = await content.payloads.lock_in(conn)
+                body = await content.put_control_in(
+                    conn,
+                    failure_id,
+                    parts,
+                    parents=(chain["input_payload_id"],),
+                    expected_deletion_epoch=clock["deletion_epoch"],
+                )
+                response_seq = conversation["next_response_seq"]
+                route = {
+                    "bot_id": self.store.bot_id,
+                    "binding_id": conversation["binding_id"],
+                    "platform": conversation["platform"],
+                    "self_id": binding["self_id"],
+                    "channel_kind": conversation["channel_kind"],
+                    "channel_id": conversation["channel_id"],
+                    "thread_id": conversation["thread_id"],
+                    "binding_epoch": binding["binding_epoch"],
+                    "visibility": conversation["channel_kind"],
+                }
+                delivery_receipt = await delivery.enqueue_in(
+                    conn,
+                    actor.host,
+                    operation_id="message-handler-failure-reply:" + chain_id,
+                    route=route,
+                    parts=parts,
+                    conversation_id=actor.conversation_id,
+                    lane="CHAT",
+                    response_seq=response_seq,
+                    root_operation_id=chain_id,
+                    expected_policy_revision=actor.policy_revision,
+                    parents=(body.payload_id,),
+                )
+            row = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_message_handler_failures("
+                    "bot_id,failure_id,operation_id,chain_id,route_index,attempt_no,"
+                    "conversation_id,error_code,retryable,retry_at,context_payload_id,"
+                    "context_payload_digest,estimated_tokens,response_seq,delivery) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        self.store.bot_id,
+                        failure_id,
+                        operation_id,
+                        chain_id,
+                        chain["current_index"],
+                        chain["attempt_count"],
+                        actor.conversation_id,
+                        error_code,
+                        retry,
+                        retry_at if retry else None,
+                        body.payload_id if body else None,
+                        body.digest if body else None,
+                        _tokens(parts) if body else 0,
+                        response_seq,
+                        Jsonb(delivery_receipt) if delivery_receipt is not None else None,
+                    ),
+                )
+            ).fetchone()
+            if retry:
+                await conn.execute(
+                    "UPDATE public.bot_message_handler_chains SET claim_actor_id=NULL,"
+                    "claim_actor_epoch=NULL,claim_host_incarnation=NULL,next_attempt_at=%s,"
+                    "last_error_code=%s,revision=revision+1 WHERE bot_id=%s AND chain_id=%s",
+                    (retry_at, error_code, self.store.bot_id, chain_id),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE public.bot_message_handler_chains SET status='FAILED',"
+                    "claim_actor_id=NULL,claim_actor_epoch=NULL,claim_host_incarnation=NULL,"
+                    "last_error_code=%s,terminal_reason=%s,completed_at=clock_timestamp(),"
+                    "revision=revision+1 WHERE bot_id=%s AND chain_id=%s",
+                    (error_code, error_code, self.store.bot_id, chain_id),
+                )
+                await self._classify_in(
+                    conn,
+                    actor.conversation_id,
+                    chain["event_id"],
+                    "FAILED",
+                    "message-handler-failure-v1",
+                    error_code,
+                )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET next_response_seq=next_response_seq+%s,"
+                "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s",
+                (1 if response_seq is not None else 0, self.store.bot_id, actor.conversation_id),
+            )
+            await self.store._event(
+                conn,
+                "message_handler.failed",
+                operation_id,
+                {
+                    "conversation_id": actor.conversation_id,
+                    "chain_id": chain_id,
+                    "attempt_no": chain["attempt_count"],
+                    "error_code": error_code,
+                    "retryable": retry,
                 },
             )
             await self._actor_final(conn, actor, binding)

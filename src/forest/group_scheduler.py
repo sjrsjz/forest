@@ -36,9 +36,23 @@ class BusinessCommandExecution:
     result_payload_digest: str
 
 
+@dataclass(frozen=True)
+class MessageHandlerExecution:
+    call_operation_id: str
+    result: dict
+    result_payload_id: str
+    result_payload_digest: str
+
+
 Execute = Callable[
     [ActorLease, dict, dict | None],
-    Awaitable[list[list[dict]] | ComponentReply | BusinessCommandExecution | RunDisposition],
+    Awaitable[
+        list[list[dict]]
+        | ComponentReply
+        | BusinessCommandExecution
+        | MessageHandlerExecution
+        | RunDisposition
+    ],
 ]
 FinalizeAgent = Callable[[ActorLease, RunDisposition, DeliveryStore], Awaitable[dict]]
 
@@ -181,6 +195,45 @@ class GroupScheduler:
             retryable=retryable,
             retry_delay_seconds=delay,
             max_attempts=self.business_command_max_attempts,
+        )
+        self._error(actor.conversation_id, error)
+        return result
+
+    @staticmethod
+    def _message_handler_error(error: BaseException) -> tuple[str, bool]:
+        if isinstance(error, TimeoutError):
+            return "MESSAGE_HANDLER_TIMEOUT", True
+        code = error.code if isinstance(error, ForestError) else "MESSAGE_HANDLER_EXECUTION_FAILED"
+        return code, code in {
+            "BACKPRESSURE",
+            "KERNEL_UNAVAILABLE",
+            "OPERATION_PENDING",
+            "OVERLOADED",
+            "SERVICE_RELOADING",
+            "SERVICE_UNAVAILABLE",
+            "WORKER_DIED",
+            "WORKER_TIMEOUT",
+            "WORKER_UNAVAILABLE",
+        }
+
+    async def _record_message_handler_failure(
+        self, actor: ActorLease, batch: dict, error: BaseException
+    ) -> dict:
+        code, retryable = self._message_handler_error(error)
+        prior_attempts = batch["chain"]["attempt_count"] - 1
+        delay = min(
+            self.business_command_retry_max,
+            self.business_command_retry_base * (2**prior_attempts),
+        )
+        result = await self.messages.record_message_handler_failure(
+            actor,
+            "message-handler-failure:" + batch["attempt"]["operation_id"],
+            chain_id=batch["chain"]["chain_id"],
+            error_code=code,
+            retryable=retryable,
+            retry_delay_seconds=delay,
+            max_attempts=self.business_command_max_attempts,
+            delivery=self.delivery,
         )
         self._error(actor.conversation_id, error)
         return result
@@ -345,16 +398,18 @@ class GroupScheduler:
                 self.errors.pop(conversation_id, None)
                 return
             business_command = batch["status"] == "BUSINESS_COMMAND"
+            message_handler = batch["status"] == "MESSAGE_HANDLER"
             if batch["status"] not in {
                 "INPUT",
                 "INPUT_BUDGET_EXCEEDED",
                 "RESUME",
                 "BUSINESS_COMMAND",
+                "MESSAGE_HANDLER",
             }:
                 raise ForestError(
                     "SCHEDULER_STATE", "Unexpected conversation preparation result", 409
                 )
-            run_id = None if business_command else batch["run_id"]
+            run_id = None if business_command or message_handler else batch["run_id"]
             if business_command and batch["request"]["execution_deadline_at"] <= datetime.now(UTC):
                 await self._record_business_failure(
                     actor_box[0],
@@ -366,12 +421,26 @@ class GroupScheduler:
                     ),
                 )
                 return
+            if message_handler and (
+                batch["preflight_error"] is not None
+                or batch["chain"]["deadline_at"] <= datetime.now(UTC)
+            ):
+                await self._record_message_handler_failure(
+                    actor_box[0],
+                    batch,
+                    ForestError(
+                        batch["preflight_error"] or "MESSAGE_HANDLER_DEADLINE_EXCEEDED",
+                        "Handler input or execution deadline is unavailable",
+                        504,
+                    ),
+                )
+                return
             context = (
                 None
-                if business_command
+                if business_command or message_handler
                 else await self.messages.context(actor_box[0], run_id=run_id)
             )
-            if not business_command and (
+            if not business_command and not message_handler and (
                 batch["status"] == "INPUT_BUDGET_EXCEEDED" or context["budget_exceeded"]
             ) and not batch.get("agent_phase"):
                 # Once attached, the Agent owns its preparation and terminal
@@ -396,14 +465,18 @@ class GroupScheduler:
             # guarded canonical context after the wait; no queued tail enters it.
             context = (
                 None
-                if business_command
+                if business_command or message_handler
                 else await self.messages.context(actor_box[0], run_id=run_id)
             )
             execution = asyncio.create_task(
                 self.execute(actor_box[0], batch, context),
-                name=("execute-command:" + batch["request"]["request_id"])
-                if business_command
-                else "execute:" + run_id,
+                name=(
+                    "execute-command:" + batch["request"]["request_id"]
+                    if business_command
+                    else "execute-handler:" + batch["chain"]["chain_id"]
+                    if message_handler
+                    else "execute:" + run_id
+                ),
             )
             try:
                 parts = await asyncio.wait_for(
@@ -425,7 +498,10 @@ class GroupScheduler:
                 if business_command:
                     await self._record_business_failure(actor_box[0], batch, exc)
                     return
-                if not business_command:
+                if message_handler:
+                    await self._record_message_handler_failure(actor_box[0], batch, exc)
+                    return
+                if not business_command and not message_handler:
                     await self.messages.end_run(
                         actor_box[0], run_id=run_id, reason=self._code(exc), delivery=self.delivery
                     )
@@ -455,6 +531,29 @@ class GroupScheduler:
                     )
                 except Exception as exc:
                     await self._record_business_failure(actor_box[0], batch, exc)
+                    return
+                self.errors.pop(conversation_id, None)
+                return
+            if message_handler:
+                try:
+                    if not isinstance(parts, MessageHandlerExecution):
+                        raise ForestError(
+                            "MESSAGE_HANDLER_RESULT_INVALID",
+                            "Handler execution did not return a durable Kernel receipt",
+                            409,
+                        )
+                    await self.messages.finalize_message_handler(
+                        actor_box[0],
+                        "message-handler-final:" + batch["attempt"]["operation_id"],
+                        chain_id=batch["chain"]["chain_id"],
+                        call_operation_id=parts.call_operation_id,
+                        result=parts.result,
+                        result_payload_id=parts.result_payload_id,
+                        result_payload_digest=parts.result_payload_digest,
+                        delivery=self.delivery,
+                    )
+                except Exception as exc:
+                    await self._record_message_handler_failure(actor_box[0], batch, exc)
                     return
                 self.errors.pop(conversation_id, None)
                 return
