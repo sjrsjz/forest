@@ -46,7 +46,7 @@ class Hello:
 
 handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Consumed` 表示已完成且无需默认回复；两者都不能阻止这条正常群消息进入历史。抛出的异常进入统一错误契约。命令路由冲突在启用时检查，不按文件枚举顺序偶然挑选一个处理器。
 
-以上是 P2 业务命令接口。`#forest` 由核心 ShellGate 保留，普通 handler 无论 priority 多高都不能覆盖或提前消费它；命中保留命名空间后的错误、拒绝和 `Pass` 均不能回落到 Agent。业务命令的 `handler.priority` 只决定允许阶段内的匹配顺序，不等于宿主 `service_class`。管理扩展通过[09 的版本化 CommandSpec](09-group-shell-command-system.md)登记到显式扩展命名空间，接受部署授权和固定参数 schema，默认 P1，不能自行申请成为核心 P0 救援命令。
+以上是 P2 业务命令接口；持久注册、用户策略、分类、同群 Actor 与原子回复的实现协议见 [P2 业务命令与普通消息插件链](p2-business-commands.md)。`#forest` 由核心 ShellGate 保留，普通 handler 无论 priority 多高都不能覆盖或提前消费它；命中保留命名空间后的错误、拒绝和 `Pass` 均不能回落到 Agent。业务命令的 `handler.priority` 只决定允许阶段内的匹配顺序，不等于宿主 `service_class`。管理扩展通过[09 的版本化 CommandSpec](09-group-shell-command-system.md)登记到显式扩展命名空间，接受部署授权和固定参数 schema，默认 P1，不能自行申请成为核心 P0 救援命令。
 
 群消息上下文收集由框架统一完成，不要求每个插件重复 push 用户消息。触发分类只产生结构化决策与原始事件引用，不能直接 `Agent.run()` 或自行 `create_task` 开启回复；待触发由唯一 ConversationSession 在模型安全点按最后触发记录选择前缀。没有触发也照常静默保存/裁剪，详见[08](08-group-context-interaction.md)。命令插件若需要长期模型对话，同样申请该会话的调度资格。
 
