@@ -1,5 +1,7 @@
 # Forest 实现状态与验证记录
 
+业务命令 Web 运维 6a 切片新增 writer generation 17 与迁移 078。后台可按 Bot 或 Binding 查看待执行/已领取/失败命令、分类重试、不可变 attempt 和 Actor 有序安全通知，只返回稳定身份、状态、次数、时间与错误码，不读取群消息、命令参数、作者账号、插件异常或凭据。管理员恢复动作使用稳定幂等 operation，调用现有 `FOR UPDATE SKIP LOCKED` 分类重试与 deadline 终结；并发或响应丢失重放同一回执，完成后唤醒本群 Actor。viewer 获得精确 read action，旧 issuer 仅按原 `message.read/command.policy.read` 与 `message.cancel/command.policy.apply` 能力派生 read/recover。真实 Web → 托管 Bot → OneBot Binding → 命令策略 → 失败命令/待分类 → 诊断/恢复纵向测试以及迁移围栏组合为 `9 passed`；恢复实际完成一条待分类消息，响应不含测试私密参数和作者账号。真实浏览器与许可群的业务命令收发、主体/队列限额仍在 6b。
+
 业务命令 Actor 5b 切片新增 writer generation 14 与迁移 075。每个命令 claim 绑定当前 `(actor_id, actor_epoch, host_incarnation)` 和不可变 `BUSINESS_COMMAND_INPUT` 边界；失效 Actor 可换代接管同一 request/input batch，旧 Actor 不能提交。无活跃 Run 时，Actor 以 ingress 顺序在 Agent trigger 与业务命令之间选择；已有 Agent 在 IDLE 恢复和下一模型安全点都不会被后到命令抢断。`Reply/Consumed/Pass` 均产生 `COMMAND_RESULT` Context 单元，只有 Reply 原子取得本群 `response_seq` 并创建 CHAT Delivery，Pass 固定终结为 `COMMAND_NOT_HANDLED` 且不回落 Agent。Kernel Call 结果、request 终态、Context payload/unit、序号与 Delivery 位于同一可恢复链；Delivery 入队后事务失败不会留下半个结果，下一 Actor 用同一 Call 回执完成。恢复安全摘要现覆盖命令结果账本。真实 PostgreSQL 专项为 `6 passed`，Actor/调度/Kernel/writer-fence/隔离恢复组合回归为 `33 passed`，此前消息与调度扩大回归除两项旧代际常量外为 `62 passed`；常量已升级并由 writer-14 专项 `5 passed` 复验。Ruff、定向编译和补丁空白检查通过。执行故障的 attempt/退避/deadline/安全回复与分类拒绝回执仍待 4b/5c。
 
 业务命令执行协议 5a 切片已接通 SDK、真实 Python Worker 与 Kernel。SDK 的 `Reply` 深度冻结规范消息段并限制消息/段数量，`Consumed` 与 `Pass` 使用封闭类型；Worker 只接受这三种结果，未知命令和任意其他返回值都形成稳定错误。Kernel 从已发布 generation 构造命令定义，逐项复核 request 中冻结的 component、generation、route、name、spec 与 schema，再通过持久 Call 账本调用 Worker；相同 operation ID 重放同一结果，热重载后的旧 request 不能用新 operation 绕过 route fence。非数据库 Worker/SDK/声明回归为 `59 passed, 1 skipped`，真实 PostgreSQL registry/Kernel 回归为 `21 passed`，Ruff、定向编译和补丁空白检查通过。该切片当时尚未让调度器领取命令；上方 5b 记录已补齐 Actor 与原子提交。
@@ -170,12 +172,12 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
-| P0 契约与可靠内核 | 部分实现 | 已有静态插件声明生成、依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK 与管理、调用/代际资源监督和 Web/Fleet 接线；仍缺宿主级资源种类、业务 `@command` 和其余消息契约 |
+| P0 契约与可靠内核 | 主要纵向协议已接通 | 已有静态插件声明生成、依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK 与管理、调用/代际资源监督、业务 `@command` 和 Web/Fleet 接线；仍缺更多宿主级资源种类和其余通用消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
 | P4 多模态多主干记忆 | 图文索引、Agent 召回、来源遗忘与联想扩展已接通 | 多主干持久图、独立原图捕获、来源向量发布、图片/混合查询、固定证据及 Agent 投影、Web 记忆配置与预算已实现；Web 可跨群列出来源，审核建立/解除/恢复联想并查看发布状态，一跳召回保留种子路径、原群和作者；Shell v4 只管理当前群主干，后台有界 scrub。自动语义联想复用既有多模态向量，以持久 Top-K 投票跨主干合流并在删除后显式撤回；会话 Job settings/delegation 已纳入同一来源遗忘闭包。部署库剩余正文、WAL 治理及大规模检索容量仍待完成 |
-| P5 完整管理与容量 | 部分基础已接入 | WebUI 连接/队列/发送对账、Shell 接入三通道与聚合容量统计、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、Bot 脱敏审计、群聊运行/任务/维护/组件/审计命令、固定 Core 救援 form、CorePrompt、PresetContext、加密多库备份、外部工件导入、独立只读校验、隔离恢复、托管 Bot 代际激活、保留期清理与旧存储代际回收已接通，子 Agent 页面已删除；Bot 级账号 scope 与完整角色模板、部署控制面恢复、任务正文日志、WAL 及其余容量治理尚未完成 |
+| P5 完整管理与容量 | 主要日常管理及恢复已接入 | WebUI 连接/队列/发送对账、业务命令诊断/恢复、Shell 接入三通道与聚合容量统计、计划任务、组件事件/持久任务管理、Bot 暂停/恢复、固定 `admin/viewer` 账号生命周期、部署审计、Bot 脱敏审计、群聊运行/任务/维护/组件/审计命令、固定 Core 救援 form、CorePrompt、PresetContext、加密多库备份、外部工件导入、独立只读校验、隔离恢复、托管 Bot 代际激活、部署控制面离线切换、保留期清理与旧存储代际回收已接通，子 Agent 页面已删除；Bot 级账号 scope、完整角色/MFA、任务正文日志、WAL 及其余容量治理尚未完成 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
 

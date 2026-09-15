@@ -25,7 +25,7 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.security import private_directory
 from forest.storage.bot import BotStore
-from forest.storage.migration_v16 import WRITER_GENERATION
+from forest.storage.migration_v17 import WRITER_GENERATION
 from forest.storage.postgres import PostgresStore
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")

@@ -5,6 +5,7 @@ import { jobsPanel } from './jobs-panel.js';
 import { eventsPanel } from './events-panel.js';
 import { componentJobsPanel } from './component-jobs-panel.js';
 import { commandPoliciesPanel } from './command-policies.js';
+import { businessCommandDiagnosticsPanel } from './business-command-diagnostics.js';
 import { schemaForm } from './schema-form.js';
 import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
@@ -152,6 +153,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   componentEventsPanel.reset();
   durableJobsPanel.reset();
   commandPolicyPanel.reset();
+  commandDiagnosticsPanel.reset();
   botAudit.reset();
   accountPanel.reset();
   deploymentAudit.reset();
@@ -210,6 +212,7 @@ const scheduledPanel = jobsPanel(api, busy, notice);
 const componentEventsPanel = eventsPanel(api, busy, notice);
 const durableJobsPanel = componentJobsPanel(api, busy, notice);
 const commandPolicyPanel = commandPoliciesPanel(api, busy, notice);
+const commandDiagnosticsPanel = businessCommandDiagnosticsPanel(api, busy, notice);
 const accountPanel = accountsPanel(api, busy, notice, (message) => {
   accountPanel.reset(); configuration = null; pendingPlan = null;
   setIdentity(null); show('login'); notice(message, true);
@@ -226,7 +229,7 @@ function invalidateControl(scope) {
     $('bot-config-diff').replaceChildren(); $('bot-invoke-result').replaceChildren();
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
-  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, botAudit]) panel.invalidateContent(scope);
+  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
@@ -394,6 +397,7 @@ async function selectBot(id) {
   componentEventsPanel.reset();
   durableJobsPanel.reset();
   commandPolicyPanel.reset();
+  commandDiagnosticsPanel.reset();
   botAudit.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
@@ -429,6 +433,8 @@ async function selectBot(id) {
     await durableJobsPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await commandPolicyPanel.select(row);
+    if (epoch !== selectionEpoch) return;
+    await commandDiagnosticsPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await botAudit.select(row);
     if (epoch !== selectionEpoch) return;

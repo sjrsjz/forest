@@ -1,6 +1,6 @@
 # P2 业务命令与普通消息插件链详细设计
 
-状态：协议与实施切片 1–5 已完成。`@command` 可静态生成正式 manifest/schema，纯命令包可被接纳，候选 Worker 会逐字段核验运行时声明；PostgreSQL effective registry、同名冲突、路由代际原子切换、disable/re-enable 和永久 retirement 原语也已接通。Web 已提供按 Binding 的四种用户策略、重新鉴权、preview/apply、expected revision 和来源 payload。OneBot 普通消息会在 Inbox 接纳事务中冻结命令、路由、策略、作者与可遗忘参数；拒绝不会回落 Agent，策略收紧与来源遗忘会取消尚未开始的请求。SDK 已提供不可变 `Reply/Consumed/Pass`，Worker 与 Kernel 已按冻结 generation/route/schema 执行命令并以稳定 operation ID 重放结果。同群 Actor 按 ingress 在未启动 Agent、命令与安全通知之间选择，活跃 Agent 不被新命令抢断；命令结果或安全通知、Context 单元、回复序号和 CHAT Delivery 原子提交，跨群命令可并行。分类和执行故障均有持久 attempt、有界退避与固定 deadline；终态安全通知不会泄漏异常正文。剩余工作是切片 6 的 Web 诊断、限额、恢复、升级和端到端验收。本文补全 03、07、08、09 中的业务命令路径。它不改变每个 `(bot_id, conversation_id)` 只有一个 Agent 的设计，也不创建产品子 Agent。
+状态：协议与实施切片 1–5 以及切片 6a 已完成。`@command` 可静态生成正式 manifest/schema，纯命令包可被接纳，候选 Worker 会逐字段核验运行时声明；PostgreSQL effective registry、同名冲突、路由代际原子切换、disable/re-enable 和永久 retirement 原语也已接通。Web 已提供按 Binding 的四种用户策略、重新鉴权、preview/apply、expected revision 和来源 payload。OneBot 普通消息会在 Inbox 接纳事务中冻结命令、路由、策略、作者与可遗忘参数；拒绝不会回落 Agent，策略收紧与来源遗忘会取消尚未开始的请求。SDK 已提供不可变 `Reply/Consumed/Pass`，Worker 与 Kernel 已按冻结 generation/route/schema 执行命令并以稳定 operation ID 重放结果。同群 Actor 按 ingress 在未启动 Agent、命令与安全通知之间选择，活跃 Agent 不被新命令抢断；命令结果或安全通知、Context 单元、回复序号和 CHAT Delivery 原子提交，跨群命令可并行。分类和执行故障均有持久 attempt、有界退避与固定 deadline；终态安全通知不会泄漏异常正文。Web 运行诊断只读取积压、attempt、通知和稳定错误码等脱敏元数据；管理员可提交幂等、有界的分类重试/超时扫描，viewer 只能读取。剩余工作是切片 6b 的主体/队列限额、真实浏览器与许可 OneBot 端到端验收。本文补全 03、07、08、09 中的业务命令路径。它不改变每个 `(bot_id, conversation_id)` 只有一个 Agent 的设计，也不创建产品子 Agent。
 
 ## 1. 目标与边界
 
@@ -155,7 +155,7 @@ Worker 不能直接发送 OneBot action。宿主在一个 Bot 事务内完成：
 3. **已完成：** Web policy preview/apply、表单和来源 payload；
 4. **4a 已完成：** OneBot 确定性 token 分类、持久 request、策略拒绝、策略收紧与遗忘/重复事件合流；**4b 已完成：** 分类故障持久重试、冻结 fallback、固定 deadline 占位，以及 Actor 有序的拒绝和分类失败通知；
 5. **5a 已完成：** 不可变 `Reply/Consumed/Pass`、Worker `CommandEvent` 调用、Kernel generation/route/schema 栅栏与稳定 operation 结果重放；**5b 已完成：** Actor P2 领取、领取时当前 Actor/Binding 授权复核，以及 request/result/Context/reply sequence/Delivery 原子提交；**5c 已完成：** 执行故障的不可变 attempt、持久退避/deadline、Actor 接管和安全终态回复；
-6. Web 诊断、限额、恢复、升级和端到端验收。
+6. **6a 已完成：** Web 脱敏诊断、幂等有界恢复、旧 issuer 精确扩权和真实 PostgreSQL/HTTP 纵向验证；**6b 待完成：** 主体/队列限额、真实浏览器及许可 OneBot 端到端验收。
 
 最低验证包括：
 
