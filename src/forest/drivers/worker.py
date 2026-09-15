@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -18,14 +19,39 @@ from forest.drivers.python_worker import WorkerLimits, _error_details, _error_en
 from forest.errors import ForestError
 from forest.sdk import (
     CallScope,
+    Consumed,
+    Pass,
     Plugin,
     PluginContext,
+    Reply,
     _current_call,
     declared_commands,
     declared_jobs,
     declared_services,
     declared_subscriptions,
 )
+
+
+def _plain(value):
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _command_result(value):
+    if isinstance(value, Reply):
+        return {"kind": "REPLY", "parts": _plain(value.parts)}
+    if isinstance(value, Consumed):
+        return {"kind": "CONSUMED"}
+    if isinstance(value, Pass):
+        return {"kind": "PASS"}
+    raise ForestError(
+        "INVALID_COMMAND_RESULT",
+        "Business commands must return Reply, Consumed, or Pass",
+        422,
+    )
 
 
 class WorkerRuntime:
@@ -87,7 +113,7 @@ class WorkerRuntime:
             )
 
     async def execute(self, command: str, payload: dict, deadline: float) -> Any:
-        if command in {"invoke", "invoke_event", "invoke_job"}:
+        if command in {"invoke", "invoke_event", "invoke_job", "invoke_command"}:
             self.require("ACTIVE")
             call_id = payload.get("call_id")
             if command == "invoke":
@@ -98,10 +124,14 @@ class WorkerRuntime:
                 name = payload.get("subscriber_id")
                 handler = self.subscriptions.get(name)
                 missing = "SUBSCRIPTION_NOT_FOUND"
-            else:
+            elif command == "invoke_job":
                 name = payload.get("handler_id")
                 handler = self.jobs.get(name)
                 missing = "JOB_HANDLER_NOT_FOUND"
+            else:
+                name = payload.get("command_id")
+                handler = self.command_handlers.get(name)
+                missing = "BUSINESS_COMMAND_NOT_FOUND"
             if handler is None:
                 raise ForestError(missing, "Requested invocation target is not registered", 404)
             if len(self.calls) >= self.limits.max_inflight or call_id in self.calls:
@@ -114,7 +144,7 @@ class WorkerRuntime:
                 result = await handler(payload.get("payload"), context)
                 await self.ctx._task_owner.finish_call(scope)
                 await self.ctx._resource_owner.finish_call(scope)
-                return result
+                return _command_result(result) if command == "invoke_command" else result
             finally:
                 try:
                     # Tasks may still be using call-owned resources. Cancel and

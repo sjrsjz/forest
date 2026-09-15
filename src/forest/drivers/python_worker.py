@@ -697,6 +697,27 @@ class PythonWorker:
             before_send=before_send,
         )
 
+    async def invoke_command(
+        self,
+        command_id: str,
+        event: dict,
+        *,
+        call_id: str,
+        operation_id: str,
+        timeout: float = 30,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> Any:
+        return await self._invoke(
+            "invoke_command",
+            "command_id",
+            command_id,
+            event,
+            call_id=call_id,
+            operation_id=operation_id,
+            timeout=timeout,
+            before_send=before_send,
+        )
+
     async def _invoke(
         self,
         command: str,
@@ -721,6 +742,8 @@ class PythonWorker:
             else self.subscriptions
             if command == "invoke_event"
             else self.jobs
+            if command == "invoke_job"
+            else self.business_commands
         )
         if target not in available:
             raise ForestError(
@@ -728,7 +751,9 @@ class PythonWorker:
                 if command == "invoke"
                 else "SUBSCRIPTION_NOT_FOUND"
                 if command == "invoke_event"
-                else "JOB_HANDLER_NOT_FOUND",
+                else "JOB_HANDLER_NOT_FOUND"
+                if command == "invoke_job"
+                else "BUSINESS_COMMAND_NOT_FOUND",
                 "Invocation target is not registered by this worker",
                 404,
             )

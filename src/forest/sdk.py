@@ -287,6 +287,37 @@ def _freeze(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True, init=False)
+class Reply:
+    """An immutable business-command proposal for one or more chat messages."""
+
+    parts: tuple
+
+    def __init__(self, parts):
+        if (
+            not isinstance(parts, (list, tuple))
+            or not 1 <= len(parts) <= 64
+            or any(
+                not isinstance(message, (list, tuple))
+                or not 1 <= len(message) <= 256
+                or any(not isinstance(segment, dict) for segment in message)
+                for message in parts
+            )
+        ):
+            raise TypeError("Reply requires one to 64 nonempty message segment sequences")
+        object.__setattr__(self, "parts", _freeze(list(parts)))
+
+
+@dataclass(frozen=True)
+class Consumed:
+    """The command completed without a chat reply."""
+
+
+@dataclass(frozen=True)
+class Pass:
+    """The command declined its handler chain; v1 has no fallback handler."""
+
+
 @dataclass
 class CallScope:
     call_id: str
