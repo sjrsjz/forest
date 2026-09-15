@@ -354,6 +354,48 @@ async def test_failed_configuration_backs_off_but_new_revision_retries_immediate
     assert bot.errors["counter"] == "PLUGIN_FAILED"
 
 
+async def test_component_activation_forwards_handler_takeover_opt_in(
+    tmp_path, fake_runtime, monkeypatch
+):
+    fleet = BotFleet(fake_catalog(), fake_runtime, tmp_path)
+    store = FakeStore("synthetic", "test")
+    kernel = FakeKernel(store)
+    calls = []
+
+    async def bind(*args, **kwargs):
+        calls.append(("config", kwargs))
+
+    async def install(*args, **kwargs):
+        calls.append(("install", kwargs))
+
+    class FakeModuleAdministration:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def bind_activation(self, *args, **kwargs):
+            calls.append(("state", kwargs))
+
+    monkeypatch.setattr(
+        module_administration_module, "ModuleAdministration", FakeModuleAdministration
+    )
+    fleet.validate = lambda *args: None
+    fleet.packages["synthetic"] = object()
+    kernel.install = install
+    bot = ManagedBot(
+        store, kernel, SimpleNamespace(bind_activation=bind), ready=True
+    )
+    values = {
+        "package_digest": "synthetic",
+        "config": {},
+        "grants": [],
+        "message_handler_takeover": True,
+    }
+    await fleet._activate(bot, "counter", 1, values, 0)
+    assert calls[-1][0] == "install"
+    assert calls[-1][1]["message_handler_takeover"] is True
+    assert bot.applied == {"counter": 1}
+
+
 async def test_disable_does_not_require_the_retired_package_to_remain_available(
     tmp_path, fake_runtime, monkeypatch
 ):

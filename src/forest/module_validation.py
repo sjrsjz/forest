@@ -12,7 +12,16 @@ from forest.packages import PackageSnapshot
 def validate_component_values(
     packages: dict[str, PackageSnapshot], component_id: str, values: dict
 ) -> PackageSnapshot:
-    if not isinstance(values, dict) or set(values) != {"package_digest", "config", "grants"}:
+    if (
+        not isinstance(values, dict)
+        or not {"package_digest", "config", "grants"} <= set(values)
+        or set(values)
+        - {"package_digest", "config", "grants", "message_handler_takeover"}
+        or (
+            "message_handler_takeover" in values
+            and type(values["message_handler_takeover"]) is not bool
+        )
+    ):
         raise ForestError("CONFIG_INVALID", "Configuration fields do not match", 422)
     digest = values["package_digest"]
     if not isinstance(digest, str):
@@ -20,6 +29,15 @@ def validate_component_values(
     snapshot = packages.get(digest)
     if snapshot is None or snapshot.component["id"] != component_id:
         raise ForestError("PACKAGE_UNAVAILABLE", "Select an available component package", 422)
+    if (
+        values.get("message_handler_takeover", False)
+        and snapshot.component.get("message_handler_takeover", "none") != "compatible"
+    ):
+        raise ForestError(
+            "CONFIG_INVALID",
+            "The selected package does not declare compatible Handler takeover",
+            422,
+        )
     if not isinstance(values["config"], dict) or not Draft202012Validator(
         snapshot.schema(snapshot.component["config_schema"])
     ).is_valid(values["config"]):

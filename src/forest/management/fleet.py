@@ -165,6 +165,9 @@ class BotFleet:
                 "component_id": p.component["id"],
                 "state_schema": p.component["state_schema"],
                 "state_migrations": p.component.get("state_migrations", []),
+                "message_handler_takeover": p.component.get(
+                    "message_handler_takeover", "none"
+                ),
                 "config_schema": p.schema(p.component["config_schema"]),
                 "grants": p.component.get("capabilities", {}).get("requests", []),
                 "services": [
@@ -501,7 +504,10 @@ class BotFleet:
             bot.kernel._authority(), component, state_revision, operation_id, enabled=True
         )
         await bot.kernel.install(self.packages[values["package_digest"]],
-            config=values["config"], grants=frozenset(values["grants"]), operation_id=operation_id)
+            config=values["config"], grants=frozenset(values["grants"]),
+            operation_id=operation_id,
+            message_handler_takeover=values.get("message_handler_takeover", False),
+        )
         bot.applied[component] = revision
         bot.applied_states[component] = state_revision
 

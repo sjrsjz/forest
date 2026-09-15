@@ -53,8 +53,9 @@ from forest.storage.migration_v20 import install_writer_gate_in as install_write
 from forest.storage.migration_v21 import install_writer_gate_in as install_writer_gate_v21_in
 from forest.storage.migration_v22 import install_writer_gate_in as install_writer_gate_v22_in
 from forest.storage.migration_v23 import install_writer_gate_in as install_writer_gate_v23_in
-from forest.storage.migration_v24 import WRITER_GENERATION
 from forest.storage.migration_v24 import install_writer_gate_in as install_writer_gate_v24_in
+from forest.storage.migration_v25 import WRITER_GENERATION
+from forest.storage.migration_v25 import install_writer_gate_in as install_writer_gate_v25_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -109,6 +110,7 @@ MIGRATION_V21 = frozenset({"082_message_handler_chains.sql"})
 MIGRATION_V22 = frozenset({"083_message_handler_execution.sql"})
 MIGRATION_V23 = frozenset({"084_message_handler_diagnostics.sql"})
 MIGRATION_V24 = frozenset({"085_message_handler_limits.sql"})
+MIGRATION_V25 = frozenset({"086_message_handler_takeovers.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
@@ -127,6 +129,7 @@ def _migration_checksum(version: str, source: str) -> str:
         | MIGRATION_V22
         | MIGRATION_V23
         | MIGRATION_V24
+        | MIGRATION_V25
     ):
         root = files("forest.storage")
         try:
@@ -145,18 +148,19 @@ def _migration_checksum(version: str, source: str) -> str:
                     "migration_v10.py",
                     "migration_v11.py",
                     "migration_v12.py",
-                    *(("migration_v13.py",) if version in (MIGRATION_V13 | MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v14.py",) if version in (MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v15.py",) if version in (MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v16.py",) if version in (MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v17.py",) if version in (MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v18.py",) if version in (MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v19.py",) if version in (MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v20.py",) if version in (MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v21.py",) if version in (MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v22.py",) if version in (MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v23.py",) if version in (MIGRATION_V23 | MIGRATION_V24) else ()),
-                    *(("migration_v24.py",) if version in MIGRATION_V24 else ()),
+                    *(("migration_v13.py",) if version in (MIGRATION_V13 | MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v14.py",) if version in (MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v15.py",) if version in (MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v16.py",) if version in (MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v17.py",) if version in (MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v18.py",) if version in (MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v19.py",) if version in (MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v20.py",) if version in (MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v21.py",) if version in (MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v22.py",) if version in (MIGRATION_V22 | MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v23.py",) if version in (MIGRATION_V23 | MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v24.py",) if version in (MIGRATION_V24 | MIGRATION_V25) else ()),
+                    *(("migration_v25.py",) if version in MIGRATION_V25 else ()),
                 )
             ]
         except FileNotFoundError as exc:
@@ -164,7 +168,8 @@ def _migration_checksum(version: str, source: str) -> str:
                 "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
             ) from exc
         envelope = json.dumps(
-            ["forest.bot.migration.v24" if version in MIGRATION_V24 else
+            ["forest.bot.migration.v25" if version in MIGRATION_V25 else
+             "forest.bot.migration.v24" if version in MIGRATION_V24 else
              "forest.bot.migration.v23" if version in MIGRATION_V23 else
              "forest.bot.migration.v22" if version in MIGRATION_V22 else
              "forest.bot.migration.v21" if version in MIGRATION_V21 else
@@ -680,6 +685,8 @@ class BotStore:
                     await install_writer_gate_v23_in(conn)
                 if version in MIGRATION_V24:
                     await install_writer_gate_v24_in(conn)
+                if version in MIGRATION_V25:
+                    await install_writer_gate_v25_in(conn)
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)
@@ -1005,6 +1012,7 @@ class BotStore:
         job_definitions: list[dict] | None = None,
         command_definitions: list[dict] | None = None,
         message_handler_definitions: list[dict] | None = None,
+        message_handler_takeover_mode: str = "none",
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -1082,6 +1090,9 @@ class BotStore:
                 parents = await ControlReceiptStore(self).generation_parents_in(
                     conn, component_id, configuration_operation_id,
                     config=config, package_digest=package_digest, grants=grants,
+                    message_handler_takeover=(
+                        message_handler_takeover_mode == "compatible"
+                    ),
                 )
                 existing = await self.content.configuration_in(conn, existing)
                 header = await self.content.payloads._header_in(conn, existing["config_payload_id"])
@@ -1126,6 +1137,7 @@ class BotStore:
                     package_digest,
                     message_handler_definitions,
                     existing_generation=True,
+                    takeover_mode=message_handler_takeover_mode,
                 )
                 await self.content.guard_in(conn, [generation_id], phase="admission")
                 await self._host(conn, lease)
@@ -1140,6 +1152,9 @@ class BotStore:
             parents = await ControlReceiptStore(self).generation_parents_in(
                 conn, component_id, configuration_operation_id,
                 config=config, package_digest=package_digest, grants=grants,
+                message_handler_takeover=(
+                    message_handler_takeover_mode == "compatible"
+                ),
             )
             epoch = await self.content.epoch_in(conn)
             source = await SourceDomainStore(self).source_in(conn, "GENERATION_CONFIG", generation_id)
@@ -1194,6 +1209,7 @@ class BotStore:
                 component_id,
                 package_digest,
                 message_handler_definitions,
+                takeover_mode=message_handler_takeover_mode,
             )
             await self._event(
                 conn,
@@ -1862,6 +1878,8 @@ class BotStore:
                 candidate["generation_id"],
                 operation["component_id"],
                 route["route_epoch"] + 1,
+                old_generation_id=route["generation_id"],
+                lifecycle_operation_id=operation_id,
             )
             await conn.execute(
                 "UPDATE public.bot_generations SET status='RETIRED' WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",

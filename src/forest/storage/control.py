@@ -49,14 +49,25 @@ def _ticket_snapshot(ticket):
 
 
 def _component_metadata(values):
-    if (not isinstance(values, dict) or set(values) != {"package_digest", "config", "grants"}
+    if (not isinstance(values, dict)
+            or not {"package_digest", "config", "grants"} <= set(values)
+            or set(values) - {
+                "package_digest", "config", "grants", "message_handler_takeover"
+            }
             or not isinstance(values["package_digest"], str) or not 1 <= len(values["package_digest"]) <= 256
             or not isinstance(values["config"], dict) or not isinstance(values["grants"], list)
             or len(values["grants"]) > 256
             or any(not isinstance(g, str) or not 1 <= len(g) <= 128 for g in values["grants"])
-            or len(set(values["grants"])) != len(values["grants"])):
+            or len(set(values["grants"])) != len(values["grants"])
+            or (
+                "message_handler_takeover" in values
+                and type(values["message_handler_takeover"]) is not bool
+            )):
         raise ForestError("CONFIGURATION_VALUES_INVALID", "Component configuration fields differ", 422)
-    return {key: values[key] for key in ("package_digest", "grants")}
+    metadata = {key: values[key] for key in ("package_digest", "grants")}
+    if "message_handler_takeover" in values:
+        metadata["message_handler_takeover"] = values["message_handler_takeover"]
+    return metadata
 
 ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "service.invoke",
            "bot.runtime.read", "bot.maintenance",
@@ -389,7 +400,7 @@ class BotControl:
         )
         if hydrated["values_payload_state"] == "ACTIVE":
             values = hydrated["values"]
-            if {key: values[key] for key in ("package_digest", "grants")} != row["values_metadata"]:
+            if _component_metadata(values) != row["values_metadata"]:
                 raise ForestError("CONFIGURATION_METADATA_CONFLICT", "Configuration identity metadata differs", 409)
         return {**row, **hydrated}
 

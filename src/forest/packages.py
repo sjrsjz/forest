@@ -105,6 +105,10 @@ MANIFEST_SCHEMA = {
                     },
                     "state_mode": {"const": "durable"},
                     "checkpoint_schema": {"type": "integer", "const": 1},
+                    "message_handler_takeover": {
+                        "type": "string",
+                        "enum": ["none", "compatible"],
+                    },
                     "requires": {
                         "type": "array",
                         "maxItems": 32,
@@ -573,6 +577,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
     services = component.get("provides", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
+    if component.get("message_handler_takeover", "none") == "compatible" and not message_handlers:
+        _fail(
+            "INVALID_MESSAGE_HANDLERS",
+            "Compatible Handler takeover requires at least one message handler",
+        )
     if len(services) > 32 or (not services and not commands and not message_handlers):
         _fail(
             "INVALID_SERVICES",

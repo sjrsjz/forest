@@ -13,6 +13,7 @@ from test_kernel import bot_database as bot_database
 from forest.cli import run_plugin_command
 from forest.errors import ForestError
 from forest.kernel import Kernel
+from forest.module_validation import validate_component_values
 from forest.packages import PackageCatalog, source_fingerprint
 from forest.sdk import Plugin, command, declared_commands, declared_services, plugin, service
 from forest.watch import DevWatcher
@@ -143,6 +144,67 @@ class Commands:
             "priority": 25,
         }
     ]
+
+
+def test_auto_declaration_emits_compatible_message_handler_takeover(tmp_path):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''from forest.sdk import Pass, message_handler, plugin
+
+@plugin(
+    id="example.handlers", version="0.1.0",
+    message_handler_takeover="compatible",
+)
+class Handlers:
+    @message_handler("ordinary", priority=5)
+    async def ordinary(self, event, ctx):
+        return Pass()
+''',
+        encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    assert snapshot.component["message_handler_takeover"] == "compatible"
+    assert snapshot.component["message_handlers"][0]["handler_id"] == "ordinary"
+
+
+@pytest.mark.parametrize("mode", ["compatible", "unsafe"])
+def test_takeover_declaration_requires_handlers_and_known_mode(tmp_path, mode):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        f'''from forest.sdk import plugin, service
+
+@plugin(
+    id="example.handlers", version="0.1.0",
+    message_handler_takeover="{mode}",
+)
+class Handlers:
+    @service("echo.call")
+    async def echo(self, payload, ctx):
+        return payload
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(source)
+    assert caught.value.code in {"INVALID_MANIFEST", "INVALID_MESSAGE_HANDLERS"}
+
+
+def test_component_configuration_cannot_enable_undeclared_takeover(tmp_path):
+    snapshot = PackageCatalog(tmp_path / "catalog").build(auto_source(tmp_path))
+    with pytest.raises(ForestError) as caught:
+        validate_component_values(
+            {snapshot.digest: snapshot},
+            "example.auto",
+            {
+                "package_digest": snapshot.digest,
+                "config": {},
+                "grants": [],
+                "message_handler_takeover": True,
+            },
+        )
+    assert caught.value.code == "CONFIG_INVALID"
 
 
 @pytest.mark.parametrize(

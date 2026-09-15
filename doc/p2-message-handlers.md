@@ -1,6 +1,6 @@
 # P2 普通群消息插件链详细设计
 
-状态：首个执行纵向闭环与 Web 运行诊断已完成。SDK/包声明/Worker/Kernel 类型化调用、持久 effective registry、Binding 策略 Web、接纳事务内冻结链、Conversation Actor 单项执行、attempt/result/failure、Agent fallback、CHAT Delivery 与延迟 Context 物化已经接通。策略在领取和结果提交时复核；领取前收缩会取消链。调用已经形成持久回执后发生收缩时，恢复 Actor 抑制该旧授权结果并终结链；仍为 `ADMITTED` 的调用必须先收敛，不能换 operation 或并发重放。代际兼容接管、容量限制和真实 OneBot 验收仍待完成。
+状态：首个执行纵向闭环、容量治理、显式兼容代际接管与 Web 运行管理已完成。SDK/包声明/Worker/Kernel 类型化调用、持久 effective registry、Binding 策略 Web、接纳事务内冻结链、Conversation Actor 单项执行、attempt/result/failure、Agent fallback、CHAT Delivery 与延迟 Context 物化已经接通。策略在领取和结果提交时复核；领取前收缩会取消链。调用已经形成持久回执后发生收缩时，恢复 Actor 抑制该旧授权结果并终结链；仍为 `ADMITTED` 的调用必须先收敛，不能换 operation 或并发重放。真实浏览器和许可群 OneBot 低频验收仍待完成。
 
 ## 1. 参考实现与目标
 
@@ -74,7 +74,11 @@ Conversation Actor 只在没有活跃 Agent quantum、没有更早业务命令�
 
 ## 5. 热重载和效果
 
-发布新代时先停止向旧路由冻结新链项，再等待已调用项闭合或持久终结。尚未开始的旧项不偷偷改投新代码；只有 manifest 明确保持相同 `handler_id` 与兼容 spec、且管理计划允许接管时，才写可审计的 reroute 事实。否则旧项安全失败。旧 Worker 返回后，最终提交必须重验 Actor lease、chain revision、generation exposure、来源可读性和当前输出授权。
+发布新代时先停止向旧路由冻结新链项，再等待已调用项闭合或持久终结。接管使用双重显式授权：候选包必须声明 `message_handler_takeover="compatible"`，管理员还必须在组件配置中启用 `message_handler_takeover`。缺少任一证明时，新 generation 登记为 `takeover_mode=none`。
+
+冻结的 `bot_message_handler_chain_items` 永不改写。生命周期发布与组件 route、Handler registry 在同一事务内，为可接管项追加 `bot_message_handler_item_takeovers`：该项必须仍为 `PENDING`、未被 Actor 领取、从未创建 attempt，并且候选定义的 `(component_id, handler_id, spec_digest)` 与冻结项完全相同。`spec_digest` 覆盖 handler 方法和 priority，因此任一执行契约变化都不会被当成兼容。数据库触发器同时证明旧代等于生命周期 operation 的 `old_generation_id`、新代等于 candidate、route epoch 与 registry publication 匹配且 operation 已经 `QUIESCENT`；表外伪造会被拒绝。
+
+多次重载继续追加单调 `takeover_no`，每条事实保留 from/to generation、package、route epoch、registry revision 和 lifecycle operation。Actor 在领取与结果提交时解析最新事实，同时把 `frozen_generation_id` 和 `takeover_id` 暴露给受控诊断；冻结 policy、作者、输入来源和链顺序不变。已经领取或有过 attempt 的项永不接管，仍按原 generation 回放或因旧路由撤下而安全失败。旧 Worker 返回后，最终提交必须重验 Actor lease、chain revision、有效 generation/route、来源可读性和当前输出授权。
 
 Worker 不能直接发送 OneBot action。`Reply` 经宿主在一个事务内写 handler result、链终态、Context 单元、reply sequence、payload lineage 和 SendIntent。事务前崩溃可按稳定 operation ID 重试；事务后丢 ACK 读取既有结果；平台发送不确定继续使用 Delivery 的 `UNKNOWN` 对账。
 
@@ -83,6 +87,8 @@ Worker 不能直接发送 OneBot action。`Reply` 经宿主在一个事务内写
 ## 6. Web 管理和容量
 
 WebUI 按 Binding 显示并配置普通 handler 的 `DISABLED / EVERYONE / ADMINS / USER_SET` 策略；默认 `DISABLED`。策略和注册表均使用 preview/apply、expected revision、重新鉴权与来源 payload。接纳时冻结允许执行的路由及策略 revision，撤权可取消尚未开始的项，最终回复前仍重验输出授权。
+
+组件配置页仅在包声明兼容接管时开放管理员复选框。该值进入可遗忘配置 payload 和有界 metadata，经 preview/apply、desired/effective 调和后传给 Kernel；旧配置没有此字段时等价于关闭。重载按钮复用当前已批准值，不会暗中开启接管。
 
 运行诊断按 Bot 或 Binding 返回冻结链、当前路由、attempt、稳定错误码与 Kernel 调用阶段，不返回群消息、用户标识、插件结果正文或异常正文。管理员的有界恢复操作只记录幂等唤醒请求并通知正常调度器：未领取链按原顺序领取，已完成调用复用原 call operation 提交；策略已撤销的已完成结果记录为 `POLICY_REVOKED_AFTER_CALL` 并被抑制，`ADMITTED` 调用保持等待，不能制造第二次副作用。viewer 只有读取权限。
 
@@ -98,9 +104,9 @@ WebUI 按 Binding 显示并配置普通 handler 的 `DISABLED / EVERYONE / ADMIN
 
 1. **已完成：** SDK 装饰器、静态 manifest、包校验和 Worker 全字段对照；
 2. **已完成：** Kernel 载入定义及类型化单 handler 调用；
-3. **3a 已完成：** PostgreSQL generation publication、effective registry、稳定排序、disable/retirement 与 writer 围栏；**3b policy 已完成：** `(binding_id, component_id, handler_id)` 独立 revision、默认禁用、preview/apply、重鉴权、可遗忘正文及 spec 热重载围栏；**3c 冻结已完成：** 接纳事务固定来源、作者、Binding、registry revision、逐项 generation/route/spec/policy 与 Agent fallback，未终结链保持连续分类屏障；**3d 执行已完成：** attempt/result/failure、Actor quantum、策略收缩取消、已完成调用结果抑制与稳定 operation 恢复；兼容 spec 的显式代际接管仍待完成；
+3. **3a 已完成：** PostgreSQL generation publication、effective registry、稳定排序、disable/retirement 与 writer 围栏；**3b policy 已完成：** `(binding_id, component_id, handler_id)` 独立 revision、默认禁用、preview/apply、重鉴权、可遗忘正文及 spec 热重载围栏；**3c 冻结已完成：** 接纳事务固定来源、作者、Binding、registry revision、逐项 generation/route/spec/policy 与 Agent fallback，未终结链保持连续分类屏障；**3d 执行已完成：** attempt/result/failure、Actor quantum、策略收缩取消、已完成调用结果抑制与稳定 operation 恢复；**3e 接管已完成：** manifest 与管理配置双重 opt-in、零 attempt 限制、append-only 多代事实、数据库生命周期证明和有效 generation 结果提交；
 4. **首个闭环已完成：** OneBot 接纳分类和 Conversation Actor 单步执行；
 5. **首个闭环已完成：** Context/Agent fallback、Reply/Delivery 原子提交、稳定 call operation 重放和有界故障恢复；Handler 输出在正常输入切口覆盖其来源时紧随来源物化，不能越过活跃 Agent 的当前快照；
-6. **WebUI 诊断已完成：** 元数据只读、Binding 过滤、幂等有界恢复唤醒及 viewer/admin 分权；容量治理与真实浏览器/低频 OneBot 验收仍待完成。
+6. **WebUI 与容量治理已完成：** 元数据只读、Binding 过滤、幂等有界恢复唤醒、viewer/admin 分权、接管授权复选框以及 Bot/Binding/主体容量和令牌桶；真实浏览器/低频 OneBot 验收仍待完成。
 
 验收必须覆盖 priority 稳定顺序、Pass/Consumed/Reply、异常重试、重启续跑、热重载竞争、同群串行、跨群并行、忙时 Agent 安全边界、多用户作者保持、策略撤权、遗忘与 Delivery UNKNOWN。模拟测试不能替代允许群的低频真实外部验收。

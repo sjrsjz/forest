@@ -127,7 +127,17 @@ class ControlReceiptStore:
             (self.store.bot_id, operation_id, component),
         )
 
-    async def generation_parents_in(self, conn, component, operation_id, *, config, package_digest, grants):
+    async def generation_parents_in(
+        self,
+        conn,
+        component,
+        operation_id,
+        *,
+        config,
+        package_digest,
+        grants,
+        message_handler_takeover=False,
+    ):
         if operation_id is None:
             return ()
         await self.activation_heads_in(conn, component, operation_id)
@@ -150,13 +160,17 @@ class ControlReceiptStore:
                 return ()
             watch = await WatchStore(self.store).hydrate_in(conn, watch)
             if (watch["config"] != config or watch["activated_package"] != package_digest
-                    or sorted(watch["grants"]) != sorted(grants)):
+                    or sorted(watch["grants"]) != sorted(grants)
+                    or message_handler_takeover):
                 raise ForestError("WATCH_SUPERSEDED", "Generation differs from its actual watch activation", 409)
             return (watch["spec_payload_id"],)
         from forest.storage.control import BotControl
         row = await BotControl(self.store).config_values_in(conn, row)
         values = row["values"]
-        if values["config"] != config or values["package_digest"] != package_digest or sorted(values["grants"]) != sorted(grants):
+        if (values["config"] != config or values["package_digest"] != package_digest
+                or sorted(values["grants"]) != sorted(grants)
+                or values.get("message_handler_takeover", False)
+                is not message_handler_takeover):
             raise ForestError("CONFIGURATION_SUPERSEDED", "Generation differs from its actual activation", 409)
         ref = await self.revision_parent_in(conn, "config", row, resource=component)
         return (ref,)

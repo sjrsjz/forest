@@ -2493,7 +2493,11 @@ class MessageStore:
         saved = await self.handler_chains.policies._hydrate_in(
             conn, policy, kind="REVISION", required=False
         )
-        if saved is None or saved["values_payload_state"] != "ACTIVE":
+        if (
+            saved is None
+            or saved["values_payload_state"] != "ACTIVE"
+            or policy["handler_spec_digest"] != item["spec_digest"]
+        ):
             return False
         values = saved["values"]
         if values["mode"] == "DISABLED":
@@ -2509,6 +2513,47 @@ class MessageStore:
             expected_binding_epoch=binding["binding_epoch"],
         )
         return chain["external_user_id"] in current["config"]["admin_user_ids"]
+
+    async def _message_handler_item_in(self, conn, chain_id, route_index) -> dict | None:
+        """Resolve append-only takeover facts without rewriting the frozen route."""
+
+        item = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_message_handler_chain_items WHERE bot_id=%s "
+                "AND chain_id=%s AND route_index=%s FOR SHARE",
+                (self.store.bot_id, chain_id, route_index),
+            )
+        ).fetchone()
+        if item is None:
+            return None
+        takeover = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_message_handler_item_takeovers WHERE bot_id=%s "
+                "AND chain_id=%s AND route_index=%s ORDER BY takeover_no DESC LIMIT 1",
+                (self.store.bot_id, chain_id, route_index),
+            )
+        ).fetchone()
+        result = dict(item)
+        result.update(
+            {
+                "frozen_generation_id": item["generation_id"],
+                "frozen_package_digest": item["package_digest"],
+                "frozen_route_epoch": item["route_epoch"],
+                "frozen_route_registry_revision": item["route_registry_revision"],
+                "takeover_id": takeover["takeover_id"] if takeover else None,
+                "takeover_no": takeover["takeover_no"] if takeover else 0,
+            }
+        )
+        if takeover is not None:
+            result.update(
+                {
+                    "generation_id": takeover["to_generation_id"],
+                    "package_digest": takeover["to_package_digest"],
+                    "route_epoch": takeover["to_route_epoch"],
+                    "route_registry_revision": takeover["to_registry_revision"],
+                }
+            )
+        return result
 
     async def _message_handler_selection_in(
         self, conn, actor, conversation, chain, item, attempt, *, replayed
@@ -2574,13 +2619,9 @@ class MessageStore:
     async def _claim_message_handler_in(
         self, conn, actor, binding, conversation, chain, operation_id
     ) -> dict:
-        item = await (
-            await conn.execute(
-                "SELECT * FROM public.bot_message_handler_chain_items WHERE bot_id=%s "
-                "AND chain_id=%s AND route_index=%s FOR SHARE",
-                (self.store.bot_id, chain["chain_id"], chain["current_index"]),
-            )
-        ).fetchone()
+        item = await self._message_handler_item_in(
+            conn, chain["chain_id"], chain["current_index"]
+        )
         if item is None:
             raise ForestError(
                 "MESSAGE_HANDLER_CHAIN_INCOMPLETE", "Frozen handler item is unavailable", 409
@@ -3960,13 +4001,9 @@ class MessageStore:
                     "Handler result does not own the current Conversation Actor",
                     409,
                 )
-            item = await (
-                await conn.execute(
-                    "SELECT * FROM public.bot_message_handler_chain_items WHERE bot_id=%s "
-                    "AND chain_id=%s AND route_index=%s FOR SHARE",
-                    (self.store.bot_id, chain_id, chain["current_index"]),
-                )
-            ).fetchone()
+            item = await self._message_handler_item_in(
+                conn, chain_id, chain["current_index"]
+            )
             attempt = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_message_handler_attempts WHERE bot_id=%s "

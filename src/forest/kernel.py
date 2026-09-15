@@ -468,10 +468,15 @@ class Kernel:
         config: dict | None = None,
         grants: frozenset[str] = frozenset(),
         operation_id: str | None = None,
+        message_handler_takeover: bool = False,
     ) -> dict:
         async with self._plan_lock:
             return await self._install_one(
-                snapshot, config=config, grants=grants, operation_id=operation_id
+                snapshot,
+                config=config,
+                grants=grants,
+                operation_id=operation_id,
+                message_handler_takeover=message_handler_takeover,
             )
 
     async def install_many(self, specifications: list[dict]) -> list[dict]:
@@ -490,7 +495,14 @@ class Kernel:
             for item in specifications:
                 if (
                     not isinstance(item, dict)
-                    or set(item) - {"snapshot", "config", "grants", "operation_id"}
+                    or set(item)
+                    - {
+                        "snapshot",
+                        "config",
+                        "grants",
+                        "operation_id",
+                        "message_handler_takeover",
+                    }
                     or "snapshot" not in item
                 ):
                     raise ForestError(
@@ -516,6 +528,13 @@ class Kernel:
                     "CONFIG_INVALID",
                 )
                 grants = self._normalize_grants(item.get("grants", ()))
+                takeover = item.get("message_handler_takeover", False)
+                if type(takeover) is not bool:
+                    raise ForestError(
+                        "INVALID_DEPLOYMENT_PLAN",
+                        "Handler takeover approval must be boolean",
+                        422,
+                    )
                 if not set(snapshot.component.get("capabilities", {}).get("requests", [])).issubset(
                     grants
                 ):
@@ -527,6 +546,7 @@ class Kernel:
                     "config": config,
                     "grants": grants,
                     "operation_id": item.get("operation_id") or str(uuid4()),
+                    "message_handler_takeover": takeover,
                 }
             for item in by_component.values():
                 await asyncio.to_thread(item["snapshot"].verify)
@@ -554,11 +574,18 @@ class Kernel:
         config: dict | None = None,
         grants: frozenset[str] = frozenset(),
         operation_id: str | None = None,
+        message_handler_takeover: bool = False,
     ) -> dict:
         """Prepare, drain, migrate an immutable final source, then publish atomically."""
         # Capture caller-owned objects before awaiting I/O; later UI edits must not
         # change a registered generation or the payload associated with a digest.
         config = {} if config is None else config
+        if type(message_handler_takeover) is not bool:
+            raise ForestError(
+                "INVALID_DEPLOYMENT_PLAN",
+                "Handler takeover approval must be boolean",
+                422,
+            )
         self._validate(Draft202012Validator({}), config, "CONFIG_INVALID")
         config = json.loads(json.dumps(config, allow_nan=False))
         snapshot = PackageSnapshot(
@@ -603,6 +630,10 @@ class Kernel:
             command_definitions = []
             message_handlers = {}
             message_handler_definitions = []
+            compatible_handler_takeover = bool(
+                spec.get("message_handler_takeover", "none") == "compatible"
+                and message_handler_takeover
+            )
             for item in spec.get("publishes", []):
                 schema = snapshot.schema(item["schema"])
                 publication = EventPublication(
@@ -702,16 +733,28 @@ class Kernel:
             operation_id = operation_id or str(uuid4())
             previous = await self.store.read_operation(operation_id)
             if previous is not None:
-                expected_digest = digest_json(
-                    {
-                        "package": snapshot.digest,
-                        "config": config,
-                        "route_epoch": previous["expected_route_epoch"],
-                        "grants": sorted(grants),
-                    }
-                )
+                replay_input = {
+                    "package": snapshot.digest,
+                    "config": config,
+                    "route_epoch": previous["expected_route_epoch"],
+                    "grants": sorted(grants),
+                    "message_handler_takeover": compatible_handler_takeover,
+                }
+                expected_digests = {digest_json(replay_input)}
+                if not compatible_handler_takeover:
+                    # A lifecycle operation begun by writer generation 24 has no
+                    # takeover field. It remains replayable after the cutover.
+                    expected_digests.add(
+                        digest_json(
+                            {
+                                key: value
+                                for key, value in replay_input.items()
+                                if key != "message_handler_takeover"
+                            }
+                        )
+                    )
                 if (
-                    previous["input_digest"] != expected_digest
+                    previous["input_digest"] not in expected_digests
                     or previous["component_id"] != component_id
                 ):
                     raise ForestError(
@@ -783,6 +826,9 @@ class Kernel:
                     job_definitions=job_definitions,
                     command_definitions=command_definitions,
                     message_handler_definitions=message_handler_definitions,
+                    message_handler_takeover_mode=(
+                        "compatible" if compatible_handler_takeover else "none"
+                    ),
                 )
                 operation = await self.store.begin_operation(
                     authority,
@@ -794,6 +840,7 @@ class Kernel:
                             "config": config,
                             "route_epoch": epoch,
                             "grants": sorted(grants),
+                            "message_handler_takeover": compatible_handler_takeover,
                         }
                     ),
                     identity.generation_id,

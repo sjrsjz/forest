@@ -207,7 +207,7 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   if (!botConfig?.defaults || !selectedPackage()) return;
   clearBotPlan(); componentReplacementRequired = false; componentReplacementDraft = true;
   componentSourceRevision = null;
-  replaceComponent.classList.add('hidden'); renderComponent(undefined, []); updateBotState(botConfig);
+  replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
 const bindingPanel = bindingsPanel(api, busy, notice);
 const modelPanel = agentPanel(api, busy, notice);
@@ -245,9 +245,11 @@ function resetComponent() {
   componentReplacementRequired = false; componentReplacementDraft = false;
   componentSourceRevision = null;
   replaceComponent.classList.add('hidden'); $('bot-grants').checked = false;
+  $('bot-handler-takeover').checked = false;
   $('bot-config-fields').replaceChildren(); $('bot-invoke-fields').replaceChildren();
   $('bot-service').replaceChildren(); $('bot-history').replaceChildren();
   $('bot-grants').disabled = true;
+  $('bot-handler-takeover').disabled = true;
   $('bot-config-form').querySelector('button[type="submit"]').disabled = true;
   $('bot-invoke-form').querySelector('button[type="submit"]').disabled = true;
 }
@@ -343,7 +345,7 @@ function updateBotState(state) {
     $('bot-operations').append(row);
   }
 }
-function renderComponent(config, grants = []) {
+function renderComponent(config, grants = [], handlerTakeover = false) {
   const pkg = selectedPackage();
   readConfigFields = schemaForm($('bot-config-fields'), pkg.config_schema, config);
   $('bot-grants').required = pkg.grants.length > 0;
@@ -351,6 +353,12 @@ function renderComponent(config, grants = []) {
   $('bot-config-form').querySelector('button[type="submit"]').disabled = false;
   $('bot-grants').checked = pkg.grants.every((g) => grants.includes(g));
   $('bot-grants-label').textContent = pkg.grants.length ? `允许组件使用：${pkg.grants.join('、')}` : '此组件未申请额外能力';
+  const declaresTakeover = pkg.message_handler_takeover === 'compatible';
+  $('bot-handler-takeover').disabled = !declaresTakeover;
+  $('bot-handler-takeover').checked = declaresTakeover && handlerTakeover === true;
+  $('bot-handler-takeover-label').textContent = declaresTakeover
+    ? '允许兼容版本接管尚未开始执行的群消息 Handler'
+    : '此组件包未声明兼容 Handler 接管';
   $('bot-service').replaceChildren();
   for (const service of pkg.services) {
     const option = document.createElement('option'); option.value = service.name; option.textContent = service.name;
@@ -382,9 +390,12 @@ async function readBotConfig() {
   updateBotState(state);
   if (componentReplacementRequired) {
     readConfigFields = null; $('bot-config-fields').replaceChildren(); $('bot-grants').checked = false;
-    $('bot-grants').disabled = true; $('bot-config-form').querySelector('button[type="submit"]').disabled = true;
+    $('bot-handler-takeover').checked = false;
+    $('bot-grants').disabled = true; $('bot-handler-takeover').disabled = true;
+    $('bot-config-form').querySelector('button[type="submit"]').disabled = true;
   } else {
-    renderComponent(state.desired_values?.config, state.desired_values?.grants);
+    renderComponent(state.desired_values?.config, state.desired_values?.grants,
+      state.desired_values?.message_handler_takeover === true);
   }
   $('restart-bot-component').disabled = componentReplacementRequired ||
     state.desired_revision < 1 || state.desired_values_payload_state !== 'ACTIVE';
@@ -612,11 +623,13 @@ $('bot-config-form').addEventListener('submit', (event) => {
     const epoch = selectionEpoch, edit = formEpoch, pkg = selectedPackage(), config = readConfigFields();
     const plan = await api(`${componentPath()}/change-plans`, {expected_revision: botConfig.desired_revision,
       ...(componentSourceRevision === null ? {} : {source_revision: componentSourceRevision}),
-      values: {package_digest: pkg.package_digest, config, grants: [...pkg.grants].sort()}}, {'Idempotency-Key': crypto.randomUUID()});
+      values: {package_digest: pkg.package_digest, config, grants: [...pkg.grants].sort(),
+        message_handler_takeover: $('bot-handler-takeover').checked}}, {'Idempotency-Key': crypto.randomUUID()});
     if (epoch !== selectionEpoch || edit !== formEpoch) return;
     botPlan = plan; botApplyKey = crypto.randomUUID();
     $('bot-config-diff').textContent = JSON.stringify({当前: botConfig.desired_values,
-      待应用: {插件: `${pkg.package_id} ${pkg.version}`, config, grants: pkg.grants},
+      待应用: {插件: `${pkg.package_id} ${pkg.version}`, config, grants: pkg.grants,
+        message_handler_takeover: $('bot-handler-takeover').checked},
       状态格式: pkg.state_schema}, null, 2);
     $('bot-config-preview').classList.remove('hidden');
   });
@@ -678,7 +691,8 @@ async function readHistory(append = false) {
       clearBotPlan(); componentReplacementRequired = false; componentReplacementDraft = true;
       componentSourceRevision = revision.revision;
       replaceComponent.classList.remove('hidden'); replaceComponent.disabled = !botConfig.defaults;
-      renderComponent(revision.values.config, revision.values.grants);
+      renderComponent(revision.values.config, revision.values.grants,
+        revision.values.message_handler_takeover === true);
       updateBotState(botConfig);
       notice(`已载入修订 ${revision.revision}。预览并应用后会创建新的配置修订；持久状态按兼容性迁移。`, true);
     });

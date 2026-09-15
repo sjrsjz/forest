@@ -76,22 +76,154 @@ class Counter(Plugin):
     return source, catalog, catalog.build(source)
 
 
+def takeover_package(tmp_path):
+    source, _, _ = package(tmp_path)
+    manifest = source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'config_schema = "schemas/config.json"',
+            'config_schema = "schemas/config.json"\nmessage_handler_takeover = "compatible"',
+        )
+        + '''
+
+[[components.message_handlers]]
+handler_id = "ordinary"
+handler = "ordinary"
+priority = 10
+''',
+        encoding="utf-8",
+    )
+    code = source / "python" / "counter.py"
+    code.write_text(
+        code.read_text(encoding="utf-8")
+        .replace(
+            "from forest.sdk import Plugin, service",
+            "from forest.sdk import Pass, Plugin, message_handler, service",
+        )
+        .replace(
+            "class Counter(Plugin):",
+            '''class Counter(Plugin):
+    @message_handler("ordinary", priority=10)
+    async def ordinary(self, event, ctx):
+        return Pass()
+''',
+        ),
+        encoding="utf-8",
+    )
+    return PackageCatalog(tmp_path / "takeover-packages").build(source)
+
+
 def values(snapshot, label):
     return {"package_digest": snapshot.digest, "config": {"label": label}, "grants": []}
 
 
-async def activate(env, kernel, snapshot, revision, label, *, recovery=False):
+async def test_handler_takeover_opt_in_is_bounded_component_metadata(environment):
+    env = environment
+    selected = {
+        "package_digest": "fixture-package",
+        "config": {"label": "takeover-enabled"},
+        "grants": [],
+        "message_handler_takeover": True,
+    }
+    await env.apply(await env.plan(values=selected, operation="takeover-metadata"))
+    current = await env.read()
+    assert current["desired_values"] == selected
+    saved = await rows(
+        env,
+        "SELECT values_metadata FROM public.bot_config_revisions WHERE revision=1",
+    )
+    assert saved[0]["values_metadata"] == {
+        "package_digest": "fixture-package",
+        "grants": [],
+        "message_handler_takeover": True,
+    }
+
+    malformed = {**selected, "message_handler_takeover": "yes"}
+    with pytest.raises(ForestError) as caught:
+        await env.plan(values=malformed, operation="takeover-metadata-invalid")
+    assert caught.value.code == "CONFIGURATION_VALUES_INVALID"
+
+
+async def activate(
+    env, kernel, snapshot, revision, label, *, recovery=False, handler_takeover=False
+):
     operation = "component-activation:" + uuid4().hex
     await env.control.bind_activation(
         env.lease, COMPONENT, revision, operation, recover_effective=recovery
     )
-    return await kernel.install(snapshot, config={"label": label}, operation_id=operation)
+    return await kernel.install(
+        snapshot,
+        config={"label": label},
+        operation_id=operation,
+        message_handler_takeover=handler_takeover,
+    )
 
 
 async def invoke(kernel):
     return await kernel.invoke(
         COMPONENT, "counter.increment", {"increment": 1}, operation_id=uuid4().hex
     )
+
+
+async def test_config_activation_is_the_management_proof_for_takeover(
+    environment, tmp_path
+):
+    env = environment
+    snapshot = takeover_package(tmp_path)
+    selected = {
+        **values(snapshot, "takeover-authorized"),
+        "message_handler_takeover": True,
+    }
+    await env.apply(await env.plan(values=selected, operation="takeover-config"))
+    kernel = Kernel(env.store)
+    kernel.lease = env.lease
+    try:
+        route = await activate(
+            env,
+            kernel,
+            snapshot,
+            1,
+            "takeover-authorized",
+            handler_takeover=True,
+        )
+        async with env.store.pool.connection() as conn:
+            registered = await (
+                await conn.execute(
+                    "SELECT takeover_mode FROM public.bot_message_handler_generations "
+                    "WHERE bot_id=%s AND generation_id=%s",
+                    (env.store.bot_id, route["generation_id"]),
+                )
+            ).fetchone()
+        assert registered["takeover_mode"] == "compatible"
+    finally:
+        await kernel.close()
+
+
+async def test_kernel_cannot_invent_takeover_for_a_config_without_opt_in(
+    environment, tmp_path
+):
+    env = environment
+    snapshot = takeover_package(tmp_path)
+    await env.apply(
+        await env.plan(
+            values=values(snapshot, "takeover-denied"), operation="takeover-denied-config"
+        )
+    )
+    kernel = Kernel(env.store)
+    kernel.lease = env.lease
+    try:
+        with pytest.raises(ForestError) as caught:
+            await activate(
+                env,
+                kernel,
+                snapshot,
+                1,
+                "takeover-denied",
+                handler_takeover=True,
+            )
+        assert caught.value.code == "CONFIGURATION_SUPERSEDED"
+    finally:
+        await kernel.close()
 
 
 async def test_independent_full_plan_survives_erased_mixed_preview_and_publishes_real_worker(

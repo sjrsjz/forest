@@ -244,6 +244,10 @@ def _toml(manifest: dict) -> bytes:
             f'config_schema = {_string(component["config_schema"])}',
         )
     )
+    if component.get("message_handler_takeover"):
+        lines.append(
+            f'message_handler_takeover = {_string(component["message_handler_takeover"])}'
+        )
     if not component.get("provides"):
         lines.append("provides = []")
     for key in ("state_value_schema", "state_mode", "checkpoint_schema"):
@@ -319,6 +323,7 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
         "id", "version", "scope", "requests", "kernel_api", "config_schema",
         "state_schema", "state_value_schema", "state_migrations", "reload_mode",
         "requires", "publishes", "resources", "lifecycle", "dependency_lock",
+        "message_handler_takeover",
     }
     unknown = sorted(set(declaration) - allowed)
     if unknown:
@@ -475,6 +480,8 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
     for key in ("resources", "lifecycle"):
         if key in declaration:
             component[key] = declaration[key]
+    if "message_handler_takeover" in declaration:
+        component["message_handler_takeover"] = declaration["message_handler_takeover"]
     for key in ("state_value_schema",):
         if key in declaration:
             component[key] = _schema(files, declaration[key], key.replace("_", "-"), path, class_node)
