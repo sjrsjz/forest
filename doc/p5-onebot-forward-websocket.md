@@ -91,3 +91,5 @@ WebSocket action 使用既有 `PreparedSend` 的精确 `wire_body` 作为 `param
 - 旧 HTTP 配置不迁移也能继续启动，WebUI 可选择两种传输且不回显凭据；
 - 重载、丢 ACK、取消和 runtime close 不泄漏 socket、reader、consumer 或 pending waiter；
 - 使用线上 AliceBot/NapCat 配置完成只读 `get_status`、`get_login_info`、获准群 `get_group_info`；真实发送若执行，只允许群 `933179609` 且保持单次低频。
+
+2026-09-15 的线上验收已完成最后一项：当前 Forest 客户端在树莓派隔离临时目录连接运行中的 NapCat，Bearer 握手、账号身份、状态和许可群查询通过；随后仅发送一条明确标记的测试文本，结果为 `SENT`，message ID 可由 `get_msg` 读回。客户端未重试，临时源码和依赖已清理，在线 AliceBot/NapCat 未重启。真实用户入站和完整 Bot Actor/Agent/Handler 链仍需单独触发验收。

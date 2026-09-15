@@ -25,8 +25,14 @@ const input = {type:'object',additionalProperties:false,required:['query'],prope
 const pkg = (id, component, version) => ({package_digest:id,package_id:component,component_id:component,
   version,state_schema:1,state_migrations:[],config_schema:fields,grants:[],
   services:[{name:component+'.first',input_schema:input},{name:component+'.second',input_schema:input}]});
-const packages = [pkg('pkg-a','fixture.alpha','1.0.0'),pkg('pkg-b','fixture.beta','1.0.0'),pkg('pkg-a-old','fixture.alpha','0.9.0')];
+const packages = [{...pkg('pkg-a','fixture.alpha','1.0.0'),message_handler_takeover:'compatible'},
+  pkg('pkg-b','fixture.beta','1.0.0'),pkg('pkg-a-old','fixture.alpha','0.9.0')];
 const values = label => ({label,enabled:true,mode:'fast',tags:['original']});
+const commandLimits = {max_argument_bytes:16384,max_pending_bot:2048,max_pending_binding:512,
+  max_pending_principal:8,principal_burst:8,principal_refill_seconds:2};
+const handlerLimits = {max_event_bytes:262144,max_pending_bot:2048,max_pending_binding:512,
+  max_pending_principal:8,max_handlers_per_chain:64,principal_burst:8,
+  principal_refill_seconds:2,deadline_seconds:30};
 const state = (component, label, digest) => ({desired_revision:1,effective_revision:1,
   desired_values:{package_digest:digest,config:values(label),grants:[]},effective_values:{package_digest:digest,config:values(label),grants:[]},
   desired_values_payload_state:'ACTIVE',effective_values_payload_state:'ACTIVE',
@@ -58,10 +64,22 @@ function reply(path, method, body) {
   if (path.endsWith('/agent/runs')) return {runs:[],approvals:[]};
   if (path.endsWith('/memory/configuration')) return {revision:0,values:memoryDefaults,has_api_key:false,secret_revision:0};
   if (path.endsWith('/memory/status')) return {configured:false,enabled:false,revision:0,counts:{facets:{},captures:{},attempts:{}},budget:null,errors:{}};
+  if (path.includes('/memory/sources?')) return {deletion_epoch:0,sources:[],next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
+  if (path.includes('/memory/associations?')) return {deletion_epoch:0,graph_revision:0,associations:[]};
   if (path.endsWith('/jobs')) return {jobs:[],occurrences:[]};
   if (path.endsWith('/bindings')) return {bindings:[]};
   if (path.endsWith('/conversations')) return {conversations:[]};
   if (path.endsWith('/delivery')) return {parts:[]};
+  if (path.includes('/events?')) return {subscriptions:[],deliveries:[]};
+  if (path.includes('/component-jobs?')) return {handlers:[],jobs:[]};
+  if (path.endsWith('/message-handler-limits')) return {revision:0,values:handlerLimits,values_payload_state:'ACTIVE'};
+  if (path.includes('/message-handlers/diagnostics?')) return {summary:{pending:0,claimed:0,
+    claimed_call_admitted:0,claimed_call_completed:0,replied:0,failed:0,cancelled:0},chains:[],attempts:[]};
+  if (path.endsWith('/business-command-limits')) return {revision:0,values:commandLimits,values_payload_state:'ACTIVE'};
+  if (path.includes('/business-commands/diagnostics?')) return {summary:{pending_requests:0,
+    claimed_requests:0,failed_requests:0,pending_classifications:0,pending_notices:0,claimed_notices:0},
+    requests:[],classifications:[],notices:[]};
+  if (path.includes('/audit?')) return {records:[],next_before:null};
   const component = path.match(/\/components\/([^/]+)/)?.[1], current=fixture.states[component];
   if (path.endsWith('/configuration')) return current;
   if (path.includes('/configuration/history')) return {next_before:null,revisions:[{revision:1,
@@ -114,9 +132,12 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for name in ("app.js", "schema-form.js", "configuration-forms.js", "control-receipts.js", "bindings.js", "agent-panel.js", "jobs-panel.js", "memory.js", "style.css"):
-                resources["/static/" + name] = ((static / name).read_bytes(),
-                    "text/css" if name.endswith(".css") else "text/javascript")
+            for asset in static.iterdir():
+                if asset.is_file() and asset.suffix in {".js", ".css"}:
+                    resources["/static/" + asset.name] = (
+                        asset.read_bytes(),
+                        "text/css" if asset.suffix == ".css" else "text/javascript",
+                    )
             if self.path not in resources:
                 self.send_error(404)
                 return
@@ -142,12 +163,19 @@ def main():
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(f"http://127.0.0.1:{server.server_port}")
-            page.wait_for_function("window.fixtureReady")
+            try:
+                page.wait_for_function("window.fixtureReady")
+            except Exception as exc:
+                raise AssertionError(f"Component fixture failed to initialize: {errors}") from exc
             expect(page.locator("#configuration")).to_be_visible()
             page.locator("#nav-bots").click()
             page.locator('[data-bot-id="bot-a"]').click()
             label = page.locator('#bot-config-fields [name="label"]')
             expect(label).to_have_value("Alpha")
+            takeover = page.locator('#bot-handler-takeover')
+            expect(takeover).to_be_enabled()
+            expect(takeover).not_to_be_checked()
+            expect(page.locator('#bot-handler-takeover-label')).to_contain_text('允许兼容版本接管')
             # Bot selection must finish all installed panels, not silently stop
             # at a missing fixture endpoint before reaching component race checks.
             expect(page.locator('#memory-config-status')).to_contain_text('配置版本 0')
@@ -203,6 +231,8 @@ def main():
             page.wait_for_function("fixture.pending.some(item=>item.key==='GET /packages')")
             page.locator("#bot-package").select_option("pkg-b")
             expect(label).to_have_value("Beta")
+            expect(takeover).to_be_disabled()
+            expect(takeover).not_to_be_checked()
             label.fill("Beta edited while package list waits")
             release("GET /packages")
             expect(page.locator('#package-import-form button[type="submit"]')).to_be_enabled()
@@ -210,6 +240,7 @@ def main():
             expect(label).to_have_value("Beta edited while package list waits")
             page.locator("#bot-package").select_option("pkg-a")
             expect(label).to_have_value("Alpha")
+            expect(takeover).to_be_enabled()
 
             # Typed values survive an old explicit read and an accepted apply.
             hold("GET " + alpha + "/configuration")
@@ -219,9 +250,11 @@ def main():
             release("GET " + alpha + "/configuration")
             expect(page.locator("#reload-bot-config")).to_be_enabled()
             expect(label).to_have_value("Edited during read")
+            takeover.check()
             page.locator('#bot-config-form button[type="submit"]').click()
             expect(page.locator("#bot-config-preview")).to_be_visible()
             assert page.evaluate("fixture.calls.filter(call=>call.path.endsWith('/change-plans')).at(-1).body.source_revision") == 1
+            assert page.evaluate("fixture.calls.filter(call=>call.path.endsWith('/change-plans')).at(-1).body.values.message_handler_takeover") is True
             hold("POST " + alpha + "/management-requests")
             page.locator("#bot-config-apply").click()
             page.wait_for_function("fixture.pending.length===1")
@@ -323,7 +356,7 @@ def main():
             browser.close()
         print(
             "Component panel browser checks passed: maintenance read/write and reselection races, package refresh "
-            "races, preserved drafts, stale invocation/history fencing, typed forms, and "
+            "races, Handler takeover opt-in, preserved drafts, stale invocation/history fencing, typed forms, and "
             "unavailable recorded receipts without re-execution."
         )
     finally:

@@ -46,4 +46,4 @@ CHAT 按 Conversation/response_seq/part 排序，CONTROL 按独立 command/contr
 
 `test_web_bindings.py` 使用真实 PostgreSQL、受限 Bot 数据库、实际 Python Worker 与真实本地 TCP OneBot 服务器验证接收、静默排空、模板回复、UNKNOWN 对账、重启与跨 Bot 账号隔离。`test_messages.py`、`test_group_scheduler.py`、`test_delivery.py` 分别覆盖事务合流、Actor fencing、并发和恢复。`scripts/smoke_browser.py` 在独立 Compose 部署中用真实浏览器操作连接表单并走 HTTP 收发。
 
-这些验证不需要真实 QQ/LLM 密钥，也不证明已在真实 QQ 服务上验收；完整框架目标持续推进。
+这些本地验证不需要真实 QQ/LLM 密钥。2026-09-15 另使用当前 Forest 正向 WebSocket 客户端连接线上 AliceBot/NapCat：账号身份、服务状态、许可群查询、向群 `933179609` 的单次发送及 `get_msg` 读回均通过，且没有自动重试。该外部证据仍不证明 QQ 用户入站、业务命令、普通 Handler 或完整 Agent 回复链已在真实群中触发；其余边界以[实现状态](implementation-status.md)开头的发布候选快照为准。

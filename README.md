@@ -2,7 +2,7 @@
 
 Forest 正在实现一个采用原生 Python 微内核、支持多 Bot 和完整图文记忆的重型机器人框架。目标架构见[设计文档](doc/README.md)。
 
-**当前已接通多 Bot 管理、原生插件升级、OneBot HTTP 与正向 Universal WebSocket、持久单 Agent、定时任务、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活、部署控制面离线切换和旧存储代际回收；首版框架仍在实现中。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入、零摘要裁剪和显式安全点上下文重置。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 Core 救援 form，v10 把 P0 保留容量绑定到接纳时的当前 Binding 管理员资格，v11 接通模块完整快照校验及独立启停状态轴，v12 接通本群上下文重置。剩余部署正文族、裸机恢复身份胶囊、其余管理 Shell 及容量治理仍需继续实现，边界见[实现状态](doc/implementation-status.md)。
+**当前首版纵向功能已接通多 Bot 管理、原生插件升级、OneBot HTTP 与正向 Universal WebSocket、持久单 Agent、定时任务、普通消息 Handler、跨群图文召回、来源遗忘，以及加密多数据库备份、外部工件导入、独立校验、隔离恢复、托管 Bot 恢复激活、部署控制面离线切换和旧存储代际回收。**Agent 使用宿主内置且不可覆盖的 CorePrompt、Bot 级 PresetContext 和原子 XML ModelTurn；一次模型轮至多执行一个工具，模型或工具步骤后的下一次模型调用可以接入排队触发。旧产品子 Agent 已从运行时、配置和页面删除，迁移 050 只保留被封存的历史事实。后台可配置模型、人格、图文能力、工具授权、嵌入服务与预算，并管理插件、账号、运行审批、任务、发送结果、跨群记忆来源和备份工件。消息持久入库，同群串行、跨群并行；支持模型/工具安全点接入、零摘要裁剪和显式安全点上下文重置。内核支持自动重载、状态迁移、锁定依赖环境及跨 Worker 服务调用。自动跨主干语义联想已复用既有图文向量接通；会话 Job 与群聊 Shell 的正文已进入可遗忘 payload，Shell v7 接通上下文裁剪、v8 接通模块重载、v9 接通固定 Core 救援 form，v10 把 P0 保留容量绑定到接纳时的当前 Binding 管理员资格，v11 接通模块完整快照校验及独立启停状态轴，v12 接通本群上下文重置。当前发布候选已经通过真实 Edge/Compose 管理全流程和许可群单次 OneBot 正向 WebSocket 发送/读回；真实商业 LLM、原生图文 Embedding、QQ 入站触发及长时间压力运行仍是上线验收项。Bot 级账号 scope、MFA、WAL/PITR、自由上传检索和完整图浏览器属于后续增强，边界见[实现状态](doc/implementation-status.md)。
 
 ## 使用 Docker 启动
 
@@ -77,7 +77,7 @@ uv run --frozen forest setup-token --data-dir .forest
 
 ## 原生插件开发切片
 
-当前有两种可运行示例。[examples/counter](examples/counter/python/counter.py) 展示显式 `module.toml`、版本化状态和稳定操作 ID；[examples/auto_echo](examples/auto_echo/src/auto_echo/__init__.py) 展示 `src/` 布局、`@plugin` 以及 service 的内联 JSON Schema。后者无需手写 manifest：构建器只静态读取字面量 AST 与 `pyproject.toml`，在不可变工件中生成 `module.toml`、schema 和覆盖所有文件的 `checksums.json`，构建期间不会导入插件。动态装饰器表达式会带源码位置拒绝。业务 `@command` 与普通 `@message_handler` 已可生成并由候选 Worker 逐字段核验，纯处理组件无需伪造 service；effective registry、代际切换和内部 retirement 原语也已与路由事务接通。WebUI 可按 Binding 分别配置业务命令与普通消息 handler 的 `DISABLED/EVERYONE/ADMINS/USER_SET`，保存采用当前密码复核、preview/apply 和来源 payload；普通 handler 安装后默认不能读取群消息。业务命令的平台分类、同群 Actor 执行、原子回复、故障重试、安全通知及脱敏运行诊断均已接通；普通消息 handler 的消息冻结链和 Actor 执行仍在实现。Bot/Binding/主体待处理上限、主体令牌桶和参数字节限制也已由 WebUI 版本化配置并通过数据库锁跨进程合流；真实平台业务命令验收仍待后续完成。
+当前有两种可运行示例。[examples/counter](examples/counter/python/counter.py) 展示显式 `module.toml`、版本化状态和稳定操作 ID；[examples/auto_echo](examples/auto_echo/src/auto_echo/__init__.py) 展示 `src/` 布局、`@plugin` 以及 service 的内联 JSON Schema。后者无需手写 manifest：构建器只静态读取字面量 AST 与 `pyproject.toml`，在不可变工件中生成 `module.toml`、schema 和覆盖所有文件的 `checksums.json`，构建期间不会导入插件。动态装饰器表达式会带源码位置拒绝。业务 `@command` 与普通 `@message_handler` 已可生成并由候选 Worker 逐字段核验，纯处理组件无需伪造 service；effective registry、代际切换和内部 retirement 原语也已与路由事务接通。WebUI 可按 Binding 分别配置业务命令与普通消息 handler 的 `DISABLED/EVERYONE/ADMINS/USER_SET`，保存采用当前密码复核、preview/apply 和来源 payload；两者安装后默认均不能读取群消息。业务命令与普通消息 Handler 都已接通平台分类、不可变输入冻结、同群 Actor 单步执行、原子回复、故障恢复、安全通知、容量准入和脱敏诊断。Handler 的全 `Pass` 只兑现接纳时冻结的 Agent 决策；兼容代际接管要求包声明与管理员配置双重授权，并且只接管未领取、零 attempt、spec 完全相同的链项。Bot/Binding/主体待处理上限、主体令牌桶、参数/事件字节限制和链 deadline 由 WebUI 版本化配置，并通过数据库锁跨进程合流。当前真实平台证据覆盖 OneBot 身份、许可群查询和单次正向 WebSocket 发送/读回；插件命令与 Handler 的真实 QQ 入站触发仍待上线验收。
 
 以下命令不需要 Bot 数据库：
 
