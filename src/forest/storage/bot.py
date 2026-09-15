@@ -47,8 +47,9 @@ from forest.storage.migration_v14 import install_writer_gate_in as install_write
 from forest.storage.migration_v15 import install_writer_gate_in as install_writer_gate_v15_in
 from forest.storage.migration_v16 import install_writer_gate_in as install_writer_gate_v16_in
 from forest.storage.migration_v17 import install_writer_gate_in as install_writer_gate_v17_in
-from forest.storage.migration_v18 import WRITER_GENERATION
 from forest.storage.migration_v18 import install_writer_gate_in as install_writer_gate_v18_in
+from forest.storage.migration_v19 import WRITER_GENERATION
+from forest.storage.migration_v19 import install_writer_gate_in as install_writer_gate_v19_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -97,11 +98,21 @@ MIGRATION_V15 = frozenset({"076_business_command_failures.sql"})
 MIGRATION_V16 = frozenset({"077_business_command_classification.sql"})
 MIGRATION_V17 = frozenset({"078_business_command_diagnostics.sql"})
 MIGRATION_V18 = frozenset({"079_business_command_limits.sql"})
+MIGRATION_V19 = frozenset({"080_message_handler_registry.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
-    if version in MIGRATION_V12 or version in MIGRATION_V13 or version in MIGRATION_V14 or version in MIGRATION_V15 or version in MIGRATION_V16 or version in MIGRATION_V17 or version in MIGRATION_V18:
+    if version in (
+        MIGRATION_V12
+        | MIGRATION_V13
+        | MIGRATION_V14
+        | MIGRATION_V15
+        | MIGRATION_V16
+        | MIGRATION_V17
+        | MIGRATION_V18
+        | MIGRATION_V19
+    ):
         root = files("forest.storage")
         try:
             helpers = [
@@ -119,12 +130,13 @@ def _migration_checksum(version: str, source: str) -> str:
                     "migration_v10.py",
                     "migration_v11.py",
                     "migration_v12.py",
-                    *(("migration_v13.py",) if version in MIGRATION_V13 or version in MIGRATION_V14 or version in MIGRATION_V15 or version in MIGRATION_V16 or version in MIGRATION_V17 or version in MIGRATION_V18 else ()),
-                    *(("migration_v14.py",) if version in MIGRATION_V14 or version in MIGRATION_V15 or version in MIGRATION_V16 or version in MIGRATION_V17 or version in MIGRATION_V18 else ()),
-                    *(("migration_v15.py",) if version in MIGRATION_V15 or version in MIGRATION_V16 or version in MIGRATION_V17 or version in MIGRATION_V18 else ()),
-                    *(("migration_v16.py",) if version in MIGRATION_V16 or version in MIGRATION_V17 or version in MIGRATION_V18 else ()),
-                    *(("migration_v17.py",) if version in MIGRATION_V17 or version in MIGRATION_V18 else ()),
-                    *(("migration_v18.py",) if version in MIGRATION_V18 else ()),
+                    *(("migration_v13.py",) if version in (MIGRATION_V13 | MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19) else ()),
+                    *(("migration_v14.py",) if version in (MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19) else ()),
+                    *(("migration_v15.py",) if version in (MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19) else ()),
+                    *(("migration_v16.py",) if version in (MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19) else ()),
+                    *(("migration_v17.py",) if version in (MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19) else ()),
+                    *(("migration_v18.py",) if version in (MIGRATION_V18 | MIGRATION_V19) else ()),
+                    *(("migration_v19.py",) if version in MIGRATION_V19 else ()),
                 )
             ]
         except FileNotFoundError as exc:
@@ -132,7 +144,8 @@ def _migration_checksum(version: str, source: str) -> str:
                 "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
             ) from exc
         envelope = json.dumps(
-            ["forest.bot.migration.v18" if version in MIGRATION_V18 else
+            ["forest.bot.migration.v19" if version in MIGRATION_V19 else
+             "forest.bot.migration.v18" if version in MIGRATION_V18 else
              "forest.bot.migration.v17" if version in MIGRATION_V17 else
              "forest.bot.migration.v16" if version in MIGRATION_V16 else
              "forest.bot.migration.v15" if version in MIGRATION_V15 else
@@ -630,6 +643,8 @@ class BotStore:
                     await install_writer_gate_v17_in(conn)
                 if version in MIGRATION_V18:
                     await install_writer_gate_v18_in(conn)
+                if version in MIGRATION_V19:
+                    await install_writer_gate_v19_in(conn)
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)
@@ -954,6 +969,7 @@ class BotStore:
         event_definitions: list[dict] | None = None,
         job_definitions: list[dict] | None = None,
         command_definitions: list[dict] | None = None,
+        message_handler_definitions: list[dict] | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -977,6 +993,9 @@ class BotStore:
         event_definitions = json.loads(json.dumps(event_definitions or [], allow_nan=False))
         job_definitions = json.loads(json.dumps(job_definitions or [], allow_nan=False))
         command_definitions = json.loads(json.dumps(command_definitions or [], allow_nan=False))
+        message_handler_definitions = json.loads(
+            json.dumps(message_handler_definitions or [], allow_nan=False)
+        )
         if not isinstance(state_migrations, list) or len(state_migrations) > 64 or any(
             not isinstance(item, dict) or set(item) != {"from_schema", "to_schema"}
             or type(item["from_schema"]) is not int or item["from_schema"] < 1
@@ -1063,6 +1082,16 @@ class BotStore:
                     command_definitions,
                     existing_generation=True,
                 )
+                from forest.storage.message_handler_registry import MessageHandlerRegistryStore
+
+                await MessageHandlerRegistryStore(self).register_generation_in(
+                    conn,
+                    generation_id,
+                    component_id,
+                    package_digest,
+                    message_handler_definitions,
+                    existing_generation=True,
+                )
                 await self.content.guard_in(conn, [generation_id], phase="admission")
                 await self._host(conn, lease)
                 return existing
@@ -1121,6 +1150,15 @@ class BotStore:
 
             await CommandRegistryStore(self).register_generation_in(
                 conn, generation_id, component_id, package_digest, command_definitions
+            )
+            from forest.storage.message_handler_registry import MessageHandlerRegistryStore
+
+            await MessageHandlerRegistryStore(self).register_generation_in(
+                conn,
+                generation_id,
+                component_id,
+                package_digest,
+                message_handler_definitions,
             )
             await self._event(
                 conn,
@@ -1782,6 +1820,14 @@ class BotStore:
                 operation["component_id"],
                 route["route_epoch"] + 1,
             )
+            from forest.storage.message_handler_registry import MessageHandlerRegistryStore
+
+            await MessageHandlerRegistryStore(self).publish_generation_in(
+                conn,
+                candidate["generation_id"],
+                operation["component_id"],
+                route["route_epoch"] + 1,
+            )
             await conn.execute(
                 "UPDATE public.bot_generations SET status='RETIRED' WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",
                 (self.bot_id, route["generation_id"]),
@@ -1866,6 +1912,11 @@ class BotStore:
             from forest.storage.command_registry import CommandRegistryStore
 
             await CommandRegistryStore(self).disable_component_in(
+                conn, operation["component_id"], route["route_epoch"] + 1
+            )
+            from forest.storage.message_handler_registry import MessageHandlerRegistryStore
+
+            await MessageHandlerRegistryStore(self).disable_component_in(
                 conn, operation["component_id"], route["route_epoch"] + 1
             )
             result = await (

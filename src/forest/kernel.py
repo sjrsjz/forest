@@ -602,6 +602,7 @@ class Kernel:
             commands = {}
             command_definitions = []
             message_handlers = {}
+            message_handler_definitions = []
             for item in spec.get("publishes", []):
                 schema = snapshot.schema(item["schema"])
                 publication = EventPublication(
@@ -668,6 +669,7 @@ class Kernel:
                     "handler": item["handler"],
                     "priority": item["priority"],
                 }
+                message_handler_definitions.append(handler_data)
                 message_handlers[item["handler_id"]] = MessageHandlerDefinition(
                     **handler_data,
                     spec_digest=digest_json(handler_data),
@@ -780,6 +782,7 @@ class Kernel:
                     event_definitions=event_definitions,
                     job_definitions=job_definitions,
                     command_definitions=command_definitions,
+                    message_handler_definitions=message_handler_definitions,
                 )
                 operation = await self.store.begin_operation(
                     authority,

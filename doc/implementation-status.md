@@ -1,4 +1,6 @@
-﻿# Forest 实现状态与验证记录
+# Forest 实现状态与验证记录
+
+普通消息 handler 的持久 effective registry 切片新增 writer generation 19 与迁移 080。每个候选 generation 都登记不可变 handler 集；组件发布在推进 route epoch 的同一事务中切换 handler heads，disable 同步撤下 active 路由。handler 身份固定为 `(component_id, handler_id)`，全 Bot 执行顺序由 `priority DESC, component_id, handler_id` 唯一确定，同优先级不依赖扫描或启动时序。升级删除 handler 必须先写不可变 retirement，已退役身份不能由普通部署复活；disable 后可以用原身份重新启用。Kernel 安装真实声明包会把 Worker 定义与同一 generation/route 发布到数据库。恢复激活关键摘要已覆盖 registry generation、definition、publication、head 与 retirement；旧 generation 18 连接在迁移后永久失去写权。registry/Kernel/writer 专项及失败复验为 `28 passed`，备份、升级、BotStore、Kernel 和部署恢复交叉回归为 `63 passed`；Ruff、编译与 diff check 通过。Binding 策略、消息级冻结链和 Actor 执行仍未接通。
 
 普通群消息插件链的声明与执行边界切片已接通。设计从 AliceBot Plus 的异步 `on_group_message`、priority、继续/停止分发语义中保留易用部分，并把 Adapter 发送、即时内存排序和异常吞掉替换为宿主类型化调用边界。SDK 新增 `@message_handler(handler_id, priority=...)`，静态构建生成正式 `message_handlers` manifest，包接纳允许纯 handler 组件；候选 Worker 对 handler ID、方法和优先级逐字段复核，只接受不可变 `Reply/Consumed/Pass`。Kernel 从当前 generation 构造 handler spec，调用必须携带 claimed 冻结项并核对 component/generation/route/spec；同一 operation 重放持久结果，热重载后的旧路由被 `MESSAGE_HANDLER_FENCED` 拒绝。SDK/声明/包/Worker 扩大非数据库回归为 `138 passed, 2 skipped`，真实 PostgreSQL 的 handler/业务命令/Kernel 组合回归为 `17 passed`；Ruff、compileall 和 diff check 通过。持久 handler registry/policy/冻结链、Conversation Actor 单步执行、Agent fallback/Context 原子提交及 Web 管理仍待后续切片，当前代码不会提前把普通群消息投递给插件。
 

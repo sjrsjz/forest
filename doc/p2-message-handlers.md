@@ -1,6 +1,6 @@
 # P2 普通群消息插件链详细设计
 
-状态：协议冻结，SDK/包声明/Worker/Kernel 类型化单项调用切片已完成；持久路由、Conversation Actor 执行与 Web 策略尚未接通。
+状态：协议冻结，SDK/包声明/Worker/Kernel 类型化单项调用和持久 effective registry 已完成；Binding 策略、消息冻结链、Conversation Actor 执行与 Web 管理尚未接通。
 
 ## 1. 参考实现与目标
 
@@ -90,7 +90,7 @@ WebUI 按 Binding 显示并配置普通 handler 的 `DISABLED / EVERYONE / ADMIN
 
 1. **已完成：** SDK 装饰器、静态 manifest、包校验和 Worker 全字段对照；
 2. **已完成：** Kernel 载入定义及类型化单 handler 调用；
-3. PostgreSQL registry/policy、冻结链、attempt/result 与代际接管；
+3. **3a 已完成：** PostgreSQL generation publication、effective registry、稳定排序、disable/retirement 与 writer 围栏；**3b 待完成：** Binding policy、冻结链、attempt/result 与代际接管；
 4. OneBot 接纳分类和 Conversation Actor 单步执行；
 5. Context/Agent fallback、Reply/Delivery 原子提交和故障恢复；
 6. WebUI 策略、诊断、容量治理，以及真实 PostgreSQL/浏览器/低频 OneBot 验收。
