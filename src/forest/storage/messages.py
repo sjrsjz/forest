@@ -1004,7 +1004,9 @@ class MessageStore:
                 "AND b.enabled AND (c.context_applied_seq<c.classified_through_seq OR "
                 "c.mailbox_revision>c.processed_mailbox_revision OR c.active_session_id IS NOT NULL "
                 "OR EXISTS (SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=c.bot_id "
-                "AND t.conversation_id=c.conversation_id AND t.status IN ('PENDING','CLAIMED'))) "
+                "AND t.conversation_id=c.conversation_id AND t.status IN ('PENDING','CLAIMED')) "
+                "OR EXISTS (SELECT 1 FROM public.bot_business_command_requests r WHERE r.bot_id=c.bot_id "
+                "AND r.conversation_id=c.conversation_id AND r.status IN ('PENDING','CLAIMED'))) "
                 "ORDER BY c.conversation_id LIMIT %s",
                 (self.store.bot_id, after_conversation_id, after_conversation_id, limit),
             )).fetchall()
@@ -1535,6 +1537,202 @@ class MessageStore:
         if registered:
             raise ForestError("AGENT_BOUNDARY_REQUIRED", "Persistent Agent steps own this run boundary", 409)
 
+    async def _business_command_selection_in(
+        self, conn, actor, conversation, request, batch, *, replayed
+    ) -> dict:
+        from forest.storage.payloads import PayloadStore
+
+        payloads = PayloadStore(self.store)
+        clock = await payloads.lock_in(conn)
+        source = await InputContentStore(self.store).read_input_in(
+            conn,
+            request["event_id"],
+            expected_deletion_epoch=clock["deletion_epoch"],
+            required=True,
+        )
+        arguments = await payloads.read_json_in(
+            conn,
+            request["arguments_payload_id"],
+            expected_deletion_epoch=clock["deletion_epoch"],
+        )
+        if (
+            not isinstance(arguments, dict)
+            or arguments.get("request_id") != request["request_id"]
+            or arguments.get("command_id") != request["command_id"]
+            or arguments.get("name") != request["command_name"]
+            or arguments.get("argument_mode") != request["argument_mode"]
+            or not isinstance(arguments.get("argument_text"), str)
+        ):
+            raise ForestError(
+                "BUSINESS_COMMAND_ARGUMENTS_INVALID",
+                "Command arguments no longer match the admitted request",
+                409,
+            )
+        inbox = await (
+            await conn.execute(
+                "SELECT source_event_id FROM public.bot_message_inbox "
+                "WHERE bot_id=%s AND event_id=%s",
+                (self.store.bot_id, request["event_id"]),
+            )
+        ).fetchone()
+        event = {
+            "request_id": request["request_id"],
+            "command_id": request["command_id"],
+            "name": request["command_name"],
+            "argument_text": arguments["argument_text"],
+            "source_event_id": inbox["source_event_id"],
+            "conversation": {
+                key: conversation[key]
+                for key in (
+                    "conversation_id",
+                    "group_source_id",
+                    "platform",
+                    "channel_kind",
+                    "channel_id",
+                    "thread_id",
+                )
+            },
+            "author": source["author"],
+            "segments": source["segments"],
+        }
+        return {
+            "status": "BUSINESS_COMMAND",
+            "kind": "BUSINESS_COMMAND_INPUT",
+            "conversation_id": actor.conversation_id,
+            "input_batch_id": batch["input_batch_id"],
+            "context_revision": batch["context_revision"],
+            "selected_input_end_seq": batch["selected_input_end_seq"],
+            "request": dict(request),
+            "event": event,
+            "input_parent_ids": sorted(
+                {
+                    request["input_payload_id"],
+                    request["arguments_payload_id"],
+                    request["policy_payload_id"],
+                }
+            ),
+            "replayed": replayed,
+        }
+
+    async def _claim_business_command_in(
+        self, conn, actor, binding, conversation, request, operation_id
+    ) -> dict:
+        if request["status"] == "CLAIMED":
+            batch = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_context_input_batches "
+                    "WHERE bot_id=%s AND input_batch_id=%s",
+                    (self.store.bot_id, request["claim_input_batch_id"]),
+                )
+            ).fetchone()
+            if batch is None or batch["kind"] != "BUSINESS_COMMAND_INPUT":
+                raise ForestError(
+                    "BUSINESS_COMMAND_CLAIM_INVALID", "Claimed command has no input boundary", 409
+                )
+            if (
+                request["claim_actor_id"] != actor.actor_id
+                or request["claim_actor_epoch"] != actor.actor_epoch
+                or request["claim_host_incarnation"] != actor.host.incarnation
+            ):
+                request = await (
+                    await conn.execute(
+                        "UPDATE public.bot_business_command_requests SET claim_actor_id=%s,"
+                        "claim_actor_epoch=%s,claim_host_incarnation=%s "
+                        "WHERE bot_id=%s AND request_id=%s AND status='CLAIMED' RETURNING *",
+                        (
+                            actor.actor_id,
+                            actor.actor_epoch,
+                            actor.host.incarnation,
+                            self.store.bot_id,
+                            request["request_id"],
+                        ),
+                    )
+                ).fetchone()
+            selected = await self._business_command_selection_in(
+                conn, actor, conversation, request, batch, replayed=True
+            )
+            await self._actor_final(conn, actor, binding)
+            return selected
+
+        applied = conversation["context_applied_seq"]
+        end = max(applied, request["ingress_seq"])
+        revision = conversation["context_revision"] + 1
+        batch_id = str(uuid4())
+        batch = await (
+            await conn.execute(
+                "INSERT INTO public.bot_context_input_batches(bot_id,input_batch_id,operation_id,"
+                "conversation_id,kind,start_seq,end_seq,selected_input_end_seq,trigger_ids,"
+                "context_revision) VALUES (%s,%s,%s,%s,'BUSINESS_COMMAND_INPUT',%s,%s,%s,'[]',%s) "
+                "RETURNING *",
+                (
+                    self.store.bot_id,
+                    batch_id,
+                    operation_id,
+                    actor.conversation_id,
+                    applied + 1 if end > applied else None,
+                    end if end > applied else None,
+                    end,
+                    revision,
+                ),
+            )
+        ).fetchone()
+        if end > applied:
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,"
+                "context_revision,unit_index,kind,event_id,input_batch_id,estimated_tokens) "
+                "SELECT bot_id,conversation_id,event_id,%s,ingress_seq,'INPUT',event_id,%s,"
+                "estimated_tokens FROM public.bot_message_inbox WHERE bot_id=%s "
+                "AND conversation_id=%s AND ingress_seq>%s AND ingress_seq<=%s ORDER BY ingress_seq",
+                (
+                    revision,
+                    batch_id,
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    applied,
+                    end,
+                ),
+            )
+        request = await (
+            await conn.execute(
+                "UPDATE public.bot_business_command_requests SET status='CLAIMED',claim_actor_id=%s,"
+                "claim_actor_epoch=%s,claim_host_incarnation=%s,claim_input_batch_id=%s "
+                "WHERE bot_id=%s AND request_id=%s AND status='PENDING' RETURNING *",
+                (
+                    actor.actor_id,
+                    actor.actor_epoch,
+                    actor.host.incarnation,
+                    batch_id,
+                    self.store.bot_id,
+                    request["request_id"],
+                ),
+            )
+        ).fetchone()
+        if request is None:
+            raise ForestError("BUSINESS_COMMAND_CLAIM_LOST", "Command claim changed", 409)
+        await conn.execute(
+            "UPDATE public.bot_conversations SET context_applied_seq=%s,context_revision=%s,"
+            "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+            "WHERE bot_id=%s AND conversation_id=%s",
+            (end, revision, self.store.bot_id, actor.conversation_id),
+        )
+        await self._memory_sources().accept_batch_in(conn, conversation, batch)
+        await self._compact(conn, actor.conversation_id)
+        await self.store._event(
+            conn,
+            "business_command.claimed",
+            request["request_id"],
+            {
+                "conversation_id": actor.conversation_id,
+                "request_id": request["request_id"],
+                "input_batch_id": batch_id,
+            },
+        )
+        selected = await self._business_command_selection_in(
+            conn, actor, conversation, request, batch, replayed=False
+        )
+        await self._actor_final(conn, actor, binding)
+        return selected
+
     async def select_input(self, actor: ActorLease, operation_id: str, *, mode: str = "IDLE") -> dict:
         """Select exactly one immutable cut at a host-owned closed execution boundary.
 
@@ -1561,6 +1759,25 @@ class MessageStore:
             "AND operation_id=%s", (self.store.bot_id, actor.conversation_id, operation_id),
         )).fetchone()
         if existing:
+            if existing["kind"] == "BUSINESS_COMMAND_INPUT":
+                request = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_business_command_requests WHERE bot_id=%s "
+                        "AND claim_input_batch_id=%s FOR UPDATE",
+                        (self.store.bot_id, existing["input_batch_id"]),
+                    )
+                ).fetchone()
+                if request is None or request["status"] != "CLAIMED":
+                    raise ForestError(
+                        "BUSINESS_COMMAND_CLAIM_INVALID",
+                        "Command input boundary has no active request",
+                        409,
+                    )
+                selected = await self._business_command_selection_in(
+                    conn, actor, conversation, request, existing, replayed=True
+                )
+                await self._actor_final(conn, actor, binding)
+                return selected
             visible = await (await conn.execute(
                 "SELECT COALESCE(sum(estimated_tokens),0) AS tokens FROM public.bot_context_units "
                 "WHERE bot_id=%s AND conversation_id=%s AND visible",
@@ -1598,8 +1815,34 @@ class MessageStore:
             "SELECT * FROM public.bot_conversation_triggers WHERE bot_id=%s AND conversation_id=%s "
             "AND status='PENDING' ORDER BY ingress_seq", (self.store.bot_id, actor.conversation_id),
         )).fetchall()
-        selected = [t for t in pending if t["ingress_seq"] <= conversation["classified_through_seq"]]
-        if pending and not selected:
+        command = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_business_command_requests WHERE bot_id=%s "
+                "AND conversation_id=%s AND status IN ('PENDING','CLAIMED') "
+                "ORDER BY ingress_seq LIMIT 1 FOR UPDATE",
+                (self.store.bot_id, actor.conversation_id),
+            )
+        ).fetchone()
+        available_command = (
+            command
+            if command is not None
+            and command["ingress_seq"] <= conversation["classified_through_seq"]
+            else None
+        )
+        selected = [
+            trigger
+            for trigger in pending
+            if trigger["ingress_seq"] <= conversation["classified_through_seq"]
+            and (
+                available_command is None
+                or trigger["ingress_seq"] < available_command["ingress_seq"]
+            )
+        ]
+        if available_command is not None and not selected and run is None:
+            return await self._claim_business_command_in(
+                conn, actor, binding, conversation, available_command, operation_id
+            )
+        if pending and not selected and available_command is None:
             if session and not run:
                 await conn.execute(
                     "UPDATE public.bot_conversation_sessions SET status='WAIT_INPUT' "
@@ -1702,7 +1945,14 @@ class MessageStore:
             "WHERE bot_id=%s AND conversation_id=%s AND status='PENDING' LIMIT 1",
             (self.store.bot_id, conversation["conversation_id"]),
         )).fetchone()
-        if pending or context_request or (session and session["active_run_id"]):
+        command = await (
+            await conn.execute(
+                "SELECT 1 FROM public.bot_business_command_requests WHERE bot_id=%s "
+                "AND conversation_id=%s AND status IN ('PENDING','CLAIMED') LIMIT 1",
+                (self.store.bot_id, conversation["conversation_id"]),
+            )
+        ).fetchone()
+        if pending or command or context_request or (session and session["active_run_id"]):
             return
         if conversation["context_applied_seq"] != conversation["classified_through_seq"]:
             return
@@ -1975,7 +2225,8 @@ class MessageStore:
                 raise ForestError("RUN_NOT_ACTIVE", "Run is not active", 409)
         units = await (await conn.execute(
             "SELECT u.unit_id,u.kind,u.context_revision,u.unit_index,u.estimated_tokens,"
-            "u.control_command_id,u.logical_step_id,u.payload_id,s.run_id AS step_run_id,"
+            "u.control_command_id,u.logical_step_id,u.business_request_id,u.payload_id,"
+            "s.run_id AS step_run_id,cr.disposition AS command_disposition,"
             "i.event_id,i.ingress_seq,i.platform_message_id,i.source_event_id,i.author,i.segments,"
             "i.sent_at,i.received_at,i.trigger_decision,i.context_disposition,i.origin,r.reply_id,"
             "t.status AS source_trigger_status "
@@ -1983,7 +2234,10 @@ class MessageStore:
             "ON i.bot_id=u.bot_id AND i.event_id=u.event_id LEFT JOIN public.bot_conversation_replies r "
             "ON r.bot_id=u.bot_id AND r.reply_id=u.reply_id LEFT JOIN public.bot_conversation_triggers t "
             "ON t.bot_id=i.bot_id AND t.event_id=i.event_id LEFT JOIN public.bot_agent_steps s "
-            "ON s.bot_id=u.bot_id AND s.logical_step_id=u.logical_step_id WHERE u.bot_id=%s AND u.conversation_id=%s "
+            "ON s.bot_id=u.bot_id AND s.logical_step_id=u.logical_step_id "
+            "LEFT JOIN public.bot_business_command_results cr ON "
+            "cr.bot_id=u.bot_id AND cr.request_id=u.business_request_id "
+            "WHERE u.bot_id=%s AND u.conversation_id=%s "
             "AND u.visible ORDER BY u.context_revision,u.unit_index", (self.store.bot_id, actor.conversation_id),
         )).fetchall()
         source = {key: conversation[key] for key in
@@ -1995,7 +2249,9 @@ class MessageStore:
         inputs = InputContentStore(self.store)
         clock = await content.payloads.lock_in(conn)
         payload_ids = set()
-        initial = await self.bindings.initial_in(conn, binding) if any(u["kind"] == "CONTROL" for u in units) else None
+        initial = await self.bindings.initial_in(conn, binding) if any(
+            u["kind"] in {"CONTROL", "COMMAND_RESULT"} for u in units
+        ) else None
         for unit in units:
             unit["step_parts"] = unit["reply_parts"] = None
             if unit["kind"] == "INPUT":
@@ -2021,7 +2277,7 @@ class MessageStore:
                 unit["estimated_tokens"] = _tokens(unit["segments"])
             unit["source"] = source.copy()
             unit["context_role"] = (
-                "assistant" if unit["kind"] in {"REPLY", "RUN_STEP"} else
+                "assistant" if unit["kind"] in {"REPLY", "RUN_STEP", "COMMAND_RESULT"} else
                 "control_data" if unit["kind"] == "CONTROL" or unit["trigger_decision"] == "CONTROL_COMMAND" else "user"
             )
             if unit["kind"] == "CONTROL":
@@ -2029,6 +2285,18 @@ class MessageStore:
                 unit["author"] = {"external_user_id": binding["self_id"],
                                   "display_name": initial["display_name"] if initial["display_name_payload_state"] == "ACTIVE" else binding["self_id"],
                                   "identity_origin": "host_output", "is_self": True}
+                if initial["display_name_payload_state"] == "ACTIVE":
+                    payload_ids.add(initial["initial_payload_id"])
+            if unit["kind"] == "COMMAND_RESULT":
+                unit["origin"] = "business_command_output"
+                unit["author"] = {
+                    "external_user_id": binding["self_id"],
+                    "display_name": initial["display_name"]
+                    if initial["display_name_payload_state"] == "ACTIVE"
+                    else binding["self_id"],
+                    "identity_origin": "host_command_output",
+                    "is_self": True,
+                }
                 if initial["display_name_payload_state"] == "ACTIVE":
                     payload_ids.add(initial["initial_payload_id"])
             if unit["origin"] == "job":
@@ -2050,7 +2318,8 @@ class MessageStore:
         )).fetchone()
         # Bounds are descriptive only: pinned trigger holes make a range insufficient.
         archive["units"] = await (await conn.execute(
-            "SELECT u.unit_id,u.kind,u.event_id,u.reply_id,u.logical_step_id,i.ingress_seq,i.source_event_id "
+            "SELECT u.unit_id,u.kind,u.event_id,u.reply_id,u.logical_step_id,u.business_request_id,"
+            "i.ingress_seq,i.source_event_id "
             "FROM public.bot_context_units u LEFT JOIN public.bot_message_inbox i "
             "ON i.bot_id=u.bot_id AND i.event_id=u.event_id WHERE u.bot_id=%s "
             "AND u.conversation_id=%s AND NOT u.visible ORDER BY u.context_revision,u.unit_index",
@@ -2071,6 +2340,245 @@ class MessageStore:
                 "archive": archive, "run": run, "triggers": triggers,
                 "payload_ids": sorted(payload_ids), "deletion_epoch": clock["deletion_epoch"],
                 "budget_exceeded": sum(u["estimated_tokens"] for u in units) > self.context_token_budget}
+
+    async def finalize_business_command(
+        self,
+        actor: ActorLease,
+        operation_id: str,
+        *,
+        request_id: str,
+        call_operation_id: str,
+        result: dict,
+        result_payload_id: str,
+        result_payload_digest: str,
+        delivery,
+    ) -> dict:
+        """Publish one typed command result, Context position and optional CHAT intent."""
+        _text(operation_id, "operation_id")
+        _text(request_id, "request_id")
+        _text(call_operation_id, "call_operation_id")
+        _text(result_payload_id, "result_payload_id")
+        _text(result_payload_digest, "result_payload_digest")
+        value = _json(result, 262144)
+        if not isinstance(value, dict) or value.get("kind") not in {
+            "REPLY",
+            "CONSUMED",
+            "PASS",
+        }:
+            raise ForestError("INVALID_COMMAND_RESULT", "Command result is not a typed SDK value", 422)
+        if value["kind"] == "REPLY":
+            parts = value.get("parts")
+            if (
+                set(value) != {"kind", "parts"}
+                or not isinstance(parts, list)
+                or not parts
+                or any(not isinstance(part, list) or not part for part in parts)
+            ):
+                raise ForestError("INVALID_COMMAND_RESULT", "Command reply is malformed", 422)
+        elif set(value) != {"kind"}:
+            raise ForestError("INVALID_COMMAND_RESULT", "Command disposition has extra fields", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_business_command_results WHERE bot_id=%s "
+                    "AND (request_id=%s OR (conversation_id=%s AND operation_id=%s)) FOR UPDATE",
+                    (self.store.bot_id, request_id, actor.conversation_id, operation_id),
+                )
+            ).fetchone()
+            semantic_digest = digest_json(
+                [request_id, call_operation_id, result_payload_id, result_payload_digest, value]
+            )
+            if existing is not None:
+                if (
+                    existing["request_id"] != request_id
+                    or existing["operation_id"] != operation_id
+                    or existing["result_digest"] != semantic_digest
+                ):
+                    raise ForestError(
+                        "BUSINESS_COMMAND_RESULT_CONFLICT",
+                        "Command result operation was already used",
+                        409,
+                    )
+                await self._actor_final(conn, actor, binding)
+                return existing
+            request = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_business_command_requests WHERE bot_id=%s "
+                    "AND request_id=%s FOR UPDATE",
+                    (self.store.bot_id, request_id),
+                )
+            ).fetchone()
+            if (
+                request is None
+                or request["conversation_id"] != actor.conversation_id
+                or request["status"] != "CLAIMED"
+                or request["claim_actor_id"] != actor.actor_id
+                or request["claim_actor_epoch"] != actor.actor_epoch
+                or request["claim_host_incarnation"] != actor.host.incarnation
+            ):
+                raise ForestError(
+                    "BUSINESS_COMMAND_NOT_CLAIMED",
+                    "Command result does not own the current Conversation Actor",
+                    409,
+                )
+            call = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s FOR SHARE",
+                    (self.store.bot_id, call_operation_id),
+                )
+            ).fetchone()
+            if (
+                call is None
+                or call["status"] != "COMPLETED"
+                or call["component_id"] != request["component_id"]
+                or call["generation_id"] != request["generation_id"]
+                or call["route_epoch"] != request["route_epoch"]
+                or call["result_payload_id"] != result_payload_id
+                or call["result_digest"] != result_payload_digest
+            ):
+                raise ForestError(
+                    "BUSINESS_COMMAND_CALL_INVALID",
+                    "Command result has no matching durable Kernel receipt",
+                    409,
+                )
+            from forest.storage.context_payloads import ContextPayloadStore
+
+            content = ContextPayloadStore(self.store)
+            clock = await content.payloads.lock_in(conn)
+            await content.payloads.require_available_in(
+                conn,
+                (result_payload_id,),
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            marker = {
+                "CONSUMED": "该业务命令已处理，没有产生群聊回复。",
+                "PASS": "该业务命令没有处理器接纳，且不会回落到 Agent。",
+            }
+            context_parts = (
+                value["parts"]
+                if value["kind"] == "REPLY"
+                else [[{"type": "text", "text": marker[value["kind"]]}]]
+            )
+            result_id = "business-command-result:" + digest_json(
+                [self.store.bot_id, request_id]
+            )
+            body = await content.put_control_in(
+                conn,
+                result_id,
+                context_parts,
+                parents=(result_payload_id,),
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            response_seq = delivery_receipt = None
+            if value["kind"] == "REPLY":
+                response_seq = conversation["next_response_seq"]
+                route = {
+                    "bot_id": self.store.bot_id,
+                    "binding_id": conversation["binding_id"],
+                    "platform": conversation["platform"],
+                    "self_id": binding["self_id"],
+                    "channel_kind": conversation["channel_kind"],
+                    "channel_id": conversation["channel_id"],
+                    "thread_id": conversation["thread_id"],
+                    "binding_epoch": binding["binding_epoch"],
+                    "visibility": conversation["channel_kind"],
+                }
+                delivery_receipt = await delivery.enqueue_in(
+                    conn,
+                    actor.host,
+                    operation_id="business-command-reply:" + request_id,
+                    route=route,
+                    parts=value["parts"],
+                    conversation_id=actor.conversation_id,
+                    lane="CHAT",
+                    response_seq=response_seq,
+                    root_operation_id=request_id,
+                    expected_policy_revision=actor.policy_revision,
+                    parents=(body.payload_id,),
+                )
+            terminal_reason = "COMMAND_NOT_HANDLED" if value["kind"] == "PASS" else None
+            row = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_business_command_results(bot_id,result_id,operation_id,"
+                    "request_id,conversation_id,disposition,call_operation_id,call_result_payload_id,"
+                    "call_result_digest,context_payload_id,context_payload_digest,result_digest,"
+                    "response_seq,delivery,terminal_reason) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        self.store.bot_id,
+                        result_id,
+                        operation_id,
+                        request_id,
+                        actor.conversation_id,
+                        value["kind"],
+                        call_operation_id,
+                        result_payload_id,
+                        result_payload_digest,
+                        body.payload_id,
+                        body.digest,
+                        semantic_digest,
+                        response_seq,
+                        Jsonb(delivery_receipt) if delivery_receipt is not None else None,
+                        terminal_reason,
+                    ),
+                )
+            ).fetchone()
+            revision = conversation["context_revision"] + 1
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,"
+                "context_revision,unit_index,kind,payload_id,estimated_tokens,business_request_id) "
+                "VALUES (%s,%s,%s,%s,0,'COMMAND_RESULT',%s,%s,%s)",
+                (
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    result_id,
+                    revision,
+                    body.payload_id,
+                    _tokens(context_parts),
+                    request_id,
+                ),
+            )
+            await conn.execute(
+                "UPDATE public.bot_business_command_requests SET status=%s,terminal_reason=%s,"
+                "completed_at=clock_timestamp() WHERE bot_id=%s AND request_id=%s "
+                "AND status='CLAIMED'",
+                (
+                    "FAILED" if value["kind"] == "PASS" else "COMPLETED",
+                    terminal_reason,
+                    self.store.bot_id,
+                    request_id,
+                ),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET context_revision=%s,"
+                "next_response_seq=next_response_seq+%s,mailbox_revision=mailbox_revision+1,"
+                "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s",
+                (
+                    revision,
+                    1 if response_seq is not None else 0,
+                    self.store.bot_id,
+                    actor.conversation_id,
+                ),
+            )
+            session = await self._session(conn, conversation)
+            current = await self._conversation(conn, actor.conversation_id)
+            await self._close_if_drained(conn, current, session)
+            await self._compact(conn, actor.conversation_id)
+            await self.store._event(
+                conn,
+                "business_command.completed",
+                operation_id,
+                {
+                    "conversation_id": actor.conversation_id,
+                    "request_id": request_id,
+                    "result_id": result_id,
+                    "disposition": value["kind"],
+                    "response_seq": response_seq,
+                },
+            )
+            await self._actor_final(conn, actor, binding)
+            return row
 
     async def finalize_reply(
         self, actor: ActorLease, operation_id: str, *, run_id: str,

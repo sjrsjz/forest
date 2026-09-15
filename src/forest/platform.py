@@ -724,6 +724,24 @@ class BindingRuntime:
         connection = self.connection(actor.binding_id)
         if connection.row["binding_epoch"] != actor.binding_epoch:
             raise ForestError("STALE_BINDING", "Conversation belongs to an old connection", 409)
+        if selected["status"] == "BUSINESS_COMMAND":
+            request = selected["request"]
+            await self.ensure_components((request["component_id"],))
+            call_operation_id = "business-command-call:" + request["request_id"]
+            receipt = await self.kernel.invoke_business_command_with_receipt(
+                request,
+                selected["event"],
+                operation_id=call_operation_id,
+                input_parent_ids=tuple(selected["input_parent_ids"]),
+            )
+            from forest.group_scheduler import BusinessCommandExecution
+
+            return BusinessCommandExecution(
+                call_operation_id,
+                receipt.value,
+                receipt.result_payload_id,
+                receipt.result_digest,
+            )
         current = await self.bindings.execution_config(
             self.kernel._authority(), actor.binding_id, expected_binding_epoch=actor.binding_epoch, data=True,
         )

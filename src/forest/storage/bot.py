@@ -42,8 +42,9 @@ from forest.storage.migration_v9 import install_writer_gate_in as install_writer
 from forest.storage.migration_v10 import install_writer_gate_in as install_writer_gate_v10_in
 from forest.storage.migration_v11 import install_writer_gate_in as install_writer_gate_v11_in
 from forest.storage.migration_v12 import install_writer_gate_in as install_writer_gate_v12_in
-from forest.storage.migration_v13 import WRITER_GENERATION
 from forest.storage.migration_v13 import install_writer_gate_in as install_writer_gate_v13_in
+from forest.storage.migration_v14 import WRITER_GENERATION
+from forest.storage.migration_v14 import install_writer_gate_in as install_writer_gate_v14_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -87,11 +88,12 @@ MIGRATION_V10 = frozenset({"070_suppressed_occurrence_receipts.sql"})
 MIGRATION_V11 = frozenset({"071_context_reset.sql"})
 MIGRATION_V12 = frozenset({"072_business_command_registry.sql"})
 MIGRATION_V13 = frozenset({"074_business_command_requests.sql"})
+MIGRATION_V14 = frozenset({"075_business_command_execution.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
-    if version in MIGRATION_V12 or version in MIGRATION_V13:
+    if version in MIGRATION_V12 or version in MIGRATION_V13 or version in MIGRATION_V14:
         root = files("forest.storage")
         try:
             helpers = [
@@ -109,7 +111,8 @@ def _migration_checksum(version: str, source: str) -> str:
                     "migration_v10.py",
                     "migration_v11.py",
                     "migration_v12.py",
-                    *(("migration_v13.py",) if version in MIGRATION_V13 else ()),
+                    *(("migration_v13.py",) if version in MIGRATION_V13 or version in MIGRATION_V14 else ()),
+                    *(("migration_v14.py",) if version in MIGRATION_V14 else ()),
                 )
             ]
         except FileNotFoundError as exc:
@@ -117,7 +120,8 @@ def _migration_checksum(version: str, source: str) -> str:
                 "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
             ) from exc
         envelope = json.dumps(
-            ["forest.bot.migration.v13" if version in MIGRATION_V13 else "forest.bot.migration.v12",
+            ["forest.bot.migration.v14" if version in MIGRATION_V14 else
+             "forest.bot.migration.v13" if version in MIGRATION_V13 else "forest.bot.migration.v12",
              source, None, helpers],
             ensure_ascii=False,
             separators=(",", ":"),
@@ -600,6 +604,8 @@ class BotStore:
                     gated_v12 = True
                 if version in MIGRATION_V13:
                     await install_writer_gate_v13_in(conn)
+                if version in MIGRATION_V14:
+                    await install_writer_gate_v14_in(conn)
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)

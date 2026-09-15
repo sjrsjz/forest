@@ -61,7 +61,7 @@ async def test_job_plan_and_revision_store_only_closed_operational_metadata(job_
         gate = await (await conn.execute(
             "SELECT minimum_generation FROM public.bot_schema_writer_gate"
         )).fetchone()
-    assert gate["minimum_generation"] == 13
+    assert gate["minimum_generation"] == 14
     assert plan["values"] is revision["values"] is revision["delegation"] is None
     assert plan["values_metadata"] == revision["values_metadata"]
     assert plan["values_metadata"]["max_overlap"] == 3

@@ -27,7 +27,18 @@ class ComponentReply:
     result_parent_ids: tuple[str, ...]
 
 
-Execute = Callable[[ActorLease, dict, dict], Awaitable[list[list[dict]] | ComponentReply | RunDisposition]]
+@dataclass(frozen=True)
+class BusinessCommandExecution:
+    call_operation_id: str
+    result: dict
+    result_payload_id: str
+    result_payload_digest: str
+
+
+Execute = Callable[
+    [ActorLease, dict, dict | None],
+    Awaitable[list[list[dict]] | ComponentReply | BusinessCommandExecution | RunDisposition],
+]
 FinalizeAgent = Callable[[ActorLease, RunDisposition, DeliveryStore], Awaitable[dict]]
 
 
@@ -269,13 +280,23 @@ class GroupScheduler:
             if batch.get("kind") == "SILENT_DRAIN":
                 self.errors.pop(conversation_id, None)
                 return
-            if batch["status"] not in {"INPUT", "INPUT_BUDGET_EXCEEDED", "RESUME"}:
+            business_command = batch["status"] == "BUSINESS_COMMAND"
+            if batch["status"] not in {
+                "INPUT",
+                "INPUT_BUDGET_EXCEEDED",
+                "RESUME",
+                "BUSINESS_COMMAND",
+            }:
                 raise ForestError(
                     "SCHEDULER_STATE", "Unexpected conversation preparation result", 409
                 )
-            run_id = batch["run_id"]
-            context = await self.messages.context(actor_box[0], run_id=run_id)
-            if (
+            run_id = None if business_command else batch["run_id"]
+            context = (
+                None
+                if business_command
+                else await self.messages.context(actor_box[0], run_id=run_id)
+            )
+            if not business_command and (
                 batch["status"] == "INPUT_BUDGET_EXCEEDED" or context["budget_exceeded"]
             ) and not batch.get("agent_phase"):
                 # Once attached, the Agent owns its preparation and terminal
@@ -298,9 +319,16 @@ class GroupScheduler:
                 raise asyncio.CancelledError
             # Waiting for another Bot's slot cannot extend authority. Re-read
             # guarded canonical context after the wait; no queued tail enters it.
-            context = await self.messages.context(actor_box[0], run_id=run_id)
+            context = (
+                None
+                if business_command
+                else await self.messages.context(actor_box[0], run_id=run_id)
+            )
             execution = asyncio.create_task(
-                self.execute(actor_box[0], batch, context), name="execute:" + run_id
+                self.execute(actor_box[0], batch, context),
+                name=("execute-command:" + batch["request"]["request_id"])
+                if business_command
+                else "execute:" + run_id,
             )
             try:
                 parts = await asyncio.wait_for(
@@ -319,15 +347,35 @@ class GroupScheduler:
                     # unrelated callback failure cannot terminalize those facts.
                     self._error(conversation_id, exc)
                     return
-                await self.messages.end_run(
-                    actor_box[0], run_id=run_id, reason=self._code(exc), delivery=self.delivery
-                )
+                if not business_command:
+                    await self.messages.end_run(
+                        actor_box[0], run_id=run_id, reason=self._code(exc), delivery=self.delivery
+                    )
                 self._error(conversation_id, exc)
                 return
             self.global_slots.release()
             slot_acquired = False
             if self._closed or asyncio.current_task().cancelling():
                 raise asyncio.CancelledError
+            if business_command:
+                if not isinstance(parts, BusinessCommandExecution):
+                    raise ForestError(
+                        "BUSINESS_COMMAND_RESULT_INVALID",
+                        "Command execution did not return a durable Kernel receipt",
+                        409,
+                    )
+                await self.messages.finalize_business_command(
+                    actor_box[0],
+                    "business-command-final:" + batch["request"]["request_id"],
+                    request_id=batch["request"]["request_id"],
+                    call_operation_id=parts.call_operation_id,
+                    result=parts.result,
+                    result_payload_id=parts.result_payload_id,
+                    result_payload_digest=parts.result_payload_digest,
+                    delivery=self.delivery,
+                )
+                self.errors.pop(conversation_id, None)
+                return
             if isinstance(parts, RunDisposition):
                 if parts.run_id != run_id:
                     raise ForestError(
