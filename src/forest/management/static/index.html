@@ -262,6 +262,23 @@
           <div id="command-policy-preview" class="hidden"><h3>确认命令策略</h3><pre id="command-policy-diff"></pre><p class="hint">应用前若命令热重载或另一管理员已保存，服务端会拒绝旧预览并要求重新读取。</p><button id="command-policy-apply" type="button">应用命令策略</button></div>
         </section>
         <section id="bot-command-diagnostics" class="card hidden" aria-labelledby="command-diagnostics-title">
+          <details open><summary>业务命令容量与调用者限流</summary>
+            <p class="hint">限制按 Bot 持久生效，多 Host 共用同一准入锁。超限命令仍保留原消息和作者来源，产生有序安全通知，不会转交 Agent。</p>
+            <form id="command-limit-form"><div class="columns"><div>
+              <label>参数 UTF-8 字节上限<input name="max_argument_bytes" type="number" min="1" max="1048576" required></label>
+              <label>Bot 待处理上限<input name="max_pending_bot" type="number" min="1" max="100000" required></label>
+              <label>单 Binding 待处理上限<input name="max_pending_binding" type="number" min="1" max="10000" required></label>
+            </div><div>
+              <label>单调用者待处理上限<input name="max_pending_principal" type="number" min="1" max="1000" required></label>
+              <label>调用者突发令牌<input name="principal_burst" type="number" min="1" max="1000" required></label>
+              <label>每枚令牌补充秒数<input name="principal_refill_seconds" type="number" min="1" max="86400" required></label>
+            </div></div>
+            <label>当前管理账号密码<input id="command-limit-password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" placeholder="预览和应用时重新鉴权"></label>
+            <div class="actions"><button type="submit">预览容量变更</button><button id="command-limit-reload" type="button" class="subtle">读取当前限制</button></div>
+          </form>
+          <p id="command-limit-status" role="status"></p>
+          <div id="command-limit-preview" class="hidden"><h3>确认容量变更</h3><pre id="command-limit-diff"></pre><button id="command-limit-apply" type="button">应用容量变更</button></div>
+          </details>
           <h2 id="command-diagnostics-title">业务命令运行诊断</h2>
           <p class="hint">查看命令积压、稳定错误码、分类重试和安全通知。诊断只读取元数据，不读取群消息、命令参数、插件异常或凭据。恢复扫描在当前 Bot 内有界执行，并复用持久重试、超时和同群 Actor 合流。</p>
           <div class="actions"><label>范围<select id="command-diagnostic-binding"></select></label><button id="command-diagnostic-refresh" type="button" class="subtle">刷新诊断</button><button id="command-diagnostic-recover" type="button">执行有界恢复扫描</button></div>

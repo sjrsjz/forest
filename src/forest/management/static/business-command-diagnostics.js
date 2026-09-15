@@ -2,11 +2,13 @@ const $ = id => document.getElementById(id);
 
 export function businessCommandDiagnosticsPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, recoveryKey = null;
+  let limitRevision = 0, limitPlan = null, limitApplyKey = null, limitReadSeq = 0;
   const valid = own => bot !== null && own === epoch;
   const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
 
   function reset() {
-    epoch++; readSeq++; bot = null; recoveryKey = null;
+    epoch++; readSeq++; limitReadSeq++; bot = null; recoveryKey = null;
+    limitRevision = 0; limitPlan = null; limitApplyKey = null;
     $('bot-command-diagnostics').classList.add('hidden');
     $('command-diagnostic-binding').replaceChildren();
     $('command-diagnostic-summary').replaceChildren();
@@ -14,6 +16,44 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
     $('command-diagnostic-classifications').replaceChildren();
     $('command-diagnostic-notices').replaceChildren();
     $('command-diagnostic-status').textContent = '';
+    $('command-limit-form').reset();
+    $('command-limit-password').value = '';
+    $('command-limit-status').textContent = '';
+    $('command-limit-preview').classList.add('hidden');
+  }
+
+  const limitNames = [
+    'max_argument_bytes', 'max_pending_bot', 'max_pending_binding',
+    'max_pending_principal', 'principal_burst', 'principal_refill_seconds',
+  ];
+
+  function clearLimitPlan() {
+    limitPlan = null; limitApplyKey = null;
+    $('command-limit-preview').classList.add('hidden');
+  }
+
+  function limitValues() {
+    const data = new FormData($('command-limit-form')), values = {};
+    for (const name of limitNames) values[name] = Number(data.get(name));
+    return values;
+  }
+
+  async function loadLimits() {
+    if (!bot) return;
+    const own = epoch, seq = ++limitReadSeq;
+    const data = await api(`${base()}/business-command-limits`);
+    if (!valid(own) || seq !== limitReadSeq) return;
+    limitRevision = data.revision; clearLimitPlan();
+    if (data.values === null) {
+      $('command-limit-status').textContent =
+        `限制正文不可用（${data.values_payload_state}），请先恢复或重新配置。`;
+      return;
+    }
+    for (const name of limitNames) {
+      $('command-limit-form').elements.namedItem(name).value = data.values[name];
+    }
+    $('command-limit-status').textContent =
+      `当前修订 ${data.revision} · ${data.values_payload_state}`;
   }
 
   async function loadBindings() {
@@ -92,7 +132,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
   async function refresh() {
     if (!bot) return;
     const own = epoch, seq = ++readSeq;
-    await loadBindings();
+    await Promise.all([loadBindings(), loadLimits()]);
     if (!valid(own) || seq !== readSeq) return;
     const params = new URLSearchParams({limit: '50'});
     const binding = $('command-diagnostic-binding').value;
@@ -119,6 +159,56 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
         `恢复扫描完成：分类完成 ${result.classification_completed}，超时终结 ${result.classification_expired}。`,
         true,
       );
+    });
+  });
+
+  $('command-limit-reload').addEventListener('click', event =>
+    busy(event.currentTarget, loadLimits));
+  $('command-limit-form').addEventListener('input', () => {
+    limitReadSeq++; clearLimitPlan();
+  });
+  $('command-limit-form').addEventListener('submit', event => {
+    event.preventDefault();
+    busy(event.submitter, async () => {
+      clearLimitPlan();
+      const own = epoch, key = crypto.randomUUID();
+      const values = limitValues(), draft = JSON.stringify(values);
+      const body = {
+        expected_revision: limitRevision,
+        values,
+        current_password: $('command-limit-password').value,
+      };
+      const plan = await api(
+        `${base()}/business-command-limit-change-plans`, body, {'Idempotency-Key': key},
+      );
+      if (!valid(own) || JSON.stringify(limitValues()) !== draft) return;
+      limitPlan = plan; limitApplyKey = crypto.randomUUID();
+      $('command-limit-diff').textContent = JSON.stringify({
+        before: plan.before_values,
+        before_payload_state: plan.before_values_payload_state,
+        after: plan.values,
+      }, null, 2);
+      $('command-limit-preview').classList.remove('hidden');
+    });
+  });
+  $('command-limit-apply').addEventListener('click', event => {
+    if (!limitPlan) return;
+    busy(event.currentTarget, async () => {
+      const own = epoch, plan = limitPlan;
+      const result = await api(
+        `${base()}/business-command-limit-management-requests`,
+        {
+          expected_revision: plan.expected_revision,
+          plan_id: plan.plan_id,
+          plan_digest: plan.plan_digest,
+          current_password: $('command-limit-password').value,
+        },
+        {'Idempotency-Key': limitApplyKey},
+      );
+      if (!valid(own)) return;
+      $('command-limit-password').value = '';
+      clearLimitPlan(); await loadLimits();
+      if (valid(own)) notice(`业务命令限制已应用为修订 ${result.revision}。`, true);
     });
   });
 

@@ -24,6 +24,7 @@ from forest.shell_commands import parse_command
 from forest.shell_ingress import ShellPriorityProof
 from forest.storage.bot import BotStore, HostLease
 from forest.storage.business_command_payloads import BusinessCommandPayloadStore
+from forest.storage.command_limits import CommandLimitStore
 from forest.storage.command_policies import CommandPolicyStore
 from forest.storage.input_payloads import InputContentStore, identity
 from forest.storage.shell_payloads_v12 import (
@@ -255,6 +256,18 @@ class MessageStore:
         )
         status = "PENDING" if business_plan["allowed"] else "DENIED"
         terminal_reason = None if business_plan["allowed"] else "BUSINESS_COMMAND_DENIED"
+        admission_limit_revision = None
+        if business_plan["allowed"]:
+            admission_limit_revision, terminal_reason = await CommandLimitStore(
+                self.store
+            ).admit_in(
+                conn,
+                binding_id=binding_id,
+                principal_ref=author["principal_ref"],
+                argument_bytes=len(business_plan["argument_text"].encode("utf-8")),
+            )
+            if terminal_reason is not None:
+                status = "FAILED"
         request_fact = {
             "event_id": event_id,
             "conversation_id": conversation_id,
@@ -279,6 +292,7 @@ class MessageStore:
             "policy_payload_id": policy["values_payload_id"],
             "policy_payload_digest": policy["values_payload_digest"],
             "binding_config_revision": business_plan["binding_config_revision"],
+            "admission_limit_revision": admission_limit_revision,
             "input_payload_id": input_payload_id,
             "arguments_payload_id": arguments_ref.payload_id,
             "arguments_payload_digest": arguments_ref.digest,
@@ -294,10 +308,12 @@ class MessageStore:
             "generation_id,route_epoch,registry_revision,command_spec_digest,handler,"
             "permission,argument_mode,input_schema,schema_digest,command_policy_revision,"
             "policy_mode,policy_payload_id,policy_payload_digest,binding_config_revision,"
+            "admission_limit_revision,"
             "input_payload_id,arguments_payload_id,arguments_payload_digest,arguments_digest,"
             "request_digest,status,terminal_reason,completed_at) VALUES ("
             "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-            "%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='DENIED' THEN clock_timestamp() END)",
+            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+            "CASE WHEN %s IN ('DENIED','FAILED') THEN clock_timestamp() END)",
             (
                 self.store.bot_id,
                 request_id,
@@ -308,6 +324,7 @@ class MessageStore:
                     "command_spec_digest", "handler", "permission", "argument_mode",
                     "input_schema", "schema_digest", "command_policy_revision", "policy_mode",
                     "policy_payload_id", "policy_payload_digest", "binding_config_revision",
+                    "admission_limit_revision",
                     "input_payload_id", "arguments_payload_id", "arguments_payload_digest",
                     "arguments_digest",
                 )),
@@ -317,7 +334,7 @@ class MessageStore:
                 status,
             ),
         )
-        if status == "DENIED":
+        if status in {"DENIED", "FAILED"}:
             await self._put_notice_in(
                 conn,
                 event_id=event_id,
@@ -325,8 +342,12 @@ class MessageStore:
                 conversation_id=conversation_id,
                 ingress_seq=ingress_seq,
                 input_payload_id=input_payload_id,
-                kind="BUSINESS_COMMAND_DENIED",
-                error_code="BUSINESS_COMMAND_DENIED",
+                kind=(
+                    "BUSINESS_COMMAND_DENIED"
+                    if status == "DENIED"
+                    else "BUSINESS_COMMAND_FAILED"
+                ),
+                error_code=terminal_reason,
             )
         return request_id, request_digest, status
 
