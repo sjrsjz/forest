@@ -11,7 +11,10 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.control_payloads import ControlPayloadStore
 
-PLAN_ACTIONS = frozenset({"config.plan", "agent.config.plan", "memory.config.plan", "binding.plan", "job.plan"})
+PLAN_ACTIONS = frozenset({
+    "config.plan", "agent.config.plan", "memory.config.plan", "binding.plan", "job.plan",
+    "command.policy.plan",
+})
 
 
 class ControlReceiptStore:

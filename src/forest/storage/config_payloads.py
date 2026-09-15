@@ -31,6 +31,7 @@ from forest.storage.payloads import MAX_PARENTS, PayloadRef, PayloadStore, _json
 
 FAMILIES = frozenset({
     "config", "agent.config", "memory.config", "binding", "watch", "job", "job.delegation",
+    "command.policy",
 })
 KINDS = frozenset({"PLAN", "REVISION", "INITIAL"})
 UNAVAILABLE = frozenset({

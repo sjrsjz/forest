@@ -39,6 +39,7 @@ from forest.management.bot_audit_api import install_bot_audit_routes
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
 from forest.management.cleanup import StorageCleanupManager
+from forest.management.command_policies_api import install_command_policy_routes
 from forest.management.component_jobs_api import install_component_job_routes
 from forest.management.events_api import install_event_routes
 from forest.management.fleet import BotFleet
@@ -678,6 +679,7 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_job_routes(app, runtime)
     install_event_routes(app, runtime)
     install_component_job_routes(app, runtime)
+    install_command_policy_routes(app, runtime)
     install_bot_audit_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")

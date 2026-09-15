@@ -127,10 +127,12 @@ class BindingRuntime:
         from forest.job_scheduler import JobDispatcher
         from forest.memory_runtime import MemoryRuntime
         from forest.shell import ShellDispatcher
+        from forest.storage.command_policies import CommandPolicyStore
         from forest.storage.jobs import JobStore
 
         self.memory = MemoryRuntime(self)
         self.agent = AgentRuntime(self)
+        self.command_policies = CommandPolicyStore(bot.store)
 
         self.scheduler = GroupScheduler(
             self.messages,

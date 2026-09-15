@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.storage.migration_v11 import WRITER_GENERATION
+from forest.storage.migration_v12 import WRITER_GENERATION
 
 _ACTIVE = ("FENCING", "SWITCHING", "ACTIVATING")
 _PUBLIC_KEYS = (
@@ -55,6 +55,14 @@ _CRITICAL_TABLES = (
     "bot_agent_tool_approvals",
     "bot_agent_tool_observations",
     "bot_shell_requests",
+    "bot_command_clocks",
+    "bot_command_generations",
+    "bot_generation_command_definitions",
+    "bot_command_publications",
+    "bot_command_heads",
+    "bot_command_retirements",
+    "bot_command_policy_heads",
+    "bot_command_policy_revisions",
     "bot_jobs",
     "bot_job_revisions",
     "bot_job_occurrences",

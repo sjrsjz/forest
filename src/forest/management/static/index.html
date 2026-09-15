@@ -122,7 +122,7 @@
     </section>
     <section id="bots" class="hidden">
       <details class="card"><summary>插件包管理</summary><p class="hint">导入可信来源的 Python 插件 ZIP 包。导入后为 Bot 选择版本并预览配置；启用时才启动插件。</p><form id="package-import-form"><label>插件包<input name="archive" type="file" accept=".zip,application/zip" required></label><button type="submit">导入插件包</button></form><div id="package-list"></div></details>
-      <p class="muted">每个 Bot 使用独立存储。可接入 OneBot HTTP 并启用模板回复；Agent 与长期多模态记忆仍在开发中。</p>
+      <p class="muted">每个 Bot 使用独立存储，可接入 OneBot、Agent、全局多模态记忆和按 Binding 授权的业务命令。</p>
       <div class="columns"><div class="card"><h2>你的 Bot</h2><div id="bot-list" aria-live="polite"></div><button id="refresh-bots" class="subtle">刷新列表</button></div>
       <div class="card"><h2>创建 Bot</h2><form id="create-bot-form"><label>显示名称<input name="display_name" required maxlength="120"></label><label>存储方式<select name="mode"><option value="managed">自动创建独立数据库</option><option value="external">连接已有空数据库</option></select></label><label id="bot-dsn-label" class="hidden">数据库连接地址<input name="dsn" type="password" autocomplete="off" maxlength="4096"></label><p class="hint">自动创建可在服务重启后继续。已有数据库应为空，并使用无超级用户权限的专用账号。</p><button type="submit">创建 Bot</button></form></div></div>
       <div id="bot-detail" class="hidden">
@@ -251,6 +251,15 @@
           <div class="actions"><button type="submit">预览 Agent 变更</button></div></fieldset><div class="actions"><button id="agent-reload" type="button" class="subtle">读取最新配置</button></div></form>
           <div id="agent-preview" class="hidden"><h3>待应用 Agent 配置</h3><pre id="agent-config-diff"></pre><button id="agent-apply">应用 Agent 变更</button></div>
           <h3>运行与工具审批</h3><button id="agent-refresh" class="subtle">刷新运行记录</button><div id="agent-runs"></div>
+        </section>
+        <section id="bot-command-policies" class="card hidden" aria-labelledby="command-policies-title">
+          <h2 id="command-policies-title">业务命令策略</h2>
+          <p class="hint">插件只能声明命令，不能自行开放给群成员。策略按 QQ Binding 与稳定命令身份独立修订；默认禁用。Shell 的 <code>#forest</code> 控制通道不经过这里。</p>
+          <div class="actions"><label>QQ Binding<select id="command-policy-binding"></select></label><button id="command-policy-reload" type="button" class="subtle">读取有效命令与策略</button></div>
+          <label>当前管理账号密码<input id="command-policy-password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" placeholder="预览和应用时重新鉴权"></label>
+          <p id="command-policy-status" role="status"></p>
+          <div id="command-policy-list" aria-live="polite"></div>
+          <div id="command-policy-preview" class="hidden"><h3>确认命令策略</h3><pre id="command-policy-diff"></pre><p class="hint">应用前若命令热重载或另一管理员已保存，服务端会拒绝旧预览并要求重新读取。</p><button id="command-policy-apply" type="button">应用命令策略</button></div>
         </section>
         <section id="bot-bindings" class="hidden">
           <div class="columns"><div class="card"><h2>QQ 账号连接</h2><p class="hint">每个账号只属于一个 Bot，所有群共享该 Bot 的存储。</p><div id="binding-list"></div><button id="refresh-bindings" class="subtle">刷新连接状态</button></div>

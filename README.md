@@ -77,7 +77,7 @@ uv run --frozen forest setup-token --data-dir .forest
 
 ## 原生插件开发切片
 
-当前有两种可运行示例。[examples/counter](examples/counter/python/counter.py) 展示显式 `module.toml`、版本化状态和稳定操作 ID；[examples/auto_echo](examples/auto_echo/src/auto_echo/__init__.py) 展示 `src/` 布局、`@plugin` 以及 service 的内联 JSON Schema。后者无需手写 manifest：构建器只静态读取字面量 AST 与 `pyproject.toml`，在不可变工件中生成 `module.toml`、schema 和覆盖所有文件的 `checksums.json`，构建期间不会导入插件。动态装饰器表达式会带文件及行列拒绝。业务 `@command` 已可生成并由候选 Worker 逐字段核验，纯命令组件无需伪造 service；effective registry、同名冲突、代际切换和内部 retirement 原语也已与路由事务接通。Web 用户策略、平台分类、同群 Actor 执行和回复提交仍未接通。
+当前有两种可运行示例。[examples/counter](examples/counter/python/counter.py) 展示显式 `module.toml`、版本化状态和稳定操作 ID；[examples/auto_echo](examples/auto_echo/src/auto_echo/__init__.py) 展示 `src/` 布局、`@plugin` 以及 service 的内联 JSON Schema。后者无需手写 manifest：构建器只静态读取字面量 AST 与 `pyproject.toml`，在不可变工件中生成 `module.toml`、schema 和覆盖所有文件的 `checksums.json`，构建期间不会导入插件。动态装饰器表达式会带文件及行列拒绝。业务 `@command` 已可生成并由候选 Worker 逐字段核验，纯命令组件无需伪造 service；effective registry、同名冲突、代际切换和内部 retirement 原语也已与路由事务接通。WebUI 可按 Binding 配置 `DISABLED/EVERYONE/ADMINS/USER_SET`，保存采用当前密码复核、preview/apply 和来源 payload；平台分类、同群 Actor 执行和回复提交仍未接通。
 
 以下命令不需要 Bot 数据库：
 

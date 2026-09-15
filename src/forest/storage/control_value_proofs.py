@@ -10,6 +10,7 @@ FAMILIES = {
     "memory.config": ("bot_memory_config", None),
     "binding": ("bot_binding", "binding_id"),
     "job": ("bot_job", "job_id"),
+    "command.policy": ("bot_command_policy", "resource_id"),
 }
 
 

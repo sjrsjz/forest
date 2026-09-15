@@ -71,6 +71,7 @@ ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "serv
            "component_job.retire.apply",
            "audit.read",
            "binding.create", "binding.read", "binding.plan", "binding.apply",
+           "command.policy.read", "command.policy.plan", "command.policy.apply",
            "message.read", "message.cancel", "delivery.reconcile",
            "module.read", "module.validate", "module.reload", "module.enable",
            "module.disable")
