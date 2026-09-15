@@ -191,14 +191,24 @@ async def test_053_upgrade_adds_only_implied_runtime_rights_and_keeps_disabled_i
         upgraded = {item["issuer_id"]: set(item["actions"]) for item in rows}
         assert upgraded["reader"] == {
             "message.read", "bot.runtime.read", "event.read", "component_job.read",
-            "audit.read",
+            "audit.read", "command.policy.read", "command.execution.read",
+            "command.limit.read", "message.handler.policy.read",
+            "message.handler.execution.read", "message.handler.limit.read",
         }
-        assert upgraded["cancel-only"] == {"message.cancel"}
+        assert upgraded["cancel-only"] == {
+            "message.cancel", "command.execution.recover",
+            "message.handler.execution.recover",
+        }
         assert upgraded["apply-only"] == {"config.apply", "module.enable"}
         assert upgraded["operator"] == {
             "message.read", "message.cancel", "config.apply", "bot.runtime.read", "bot.maintenance",
             "event.read", "event.retire.apply", "component_job.read",
             "component_job.retire.apply", "audit.read", "module.enable", "module.disable",
+            "command.policy.read", "command.policy.apply", "command.execution.read",
+            "command.execution.recover", "command.limit.read", "command.limit.apply",
+            "message.handler.policy.read", "message.handler.policy.apply",
+            "message.handler.execution.read", "message.handler.execution.recover",
+            "message.handler.limit.read", "message.handler.limit.apply",
         }
         assert upgraded["disabled"] == upgraded["operator"]
         assert not next(item for item in rows if item["issuer_id"] == "disabled")["enabled"]

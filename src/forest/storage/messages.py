@@ -686,6 +686,15 @@ class MessageStore:
         source_event_id = identifiers["source_event_id"]
         input_digest = identifiers["input_digest"]
         event_id = identifiers["event_id"]
+        event_bytes = len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
         command_id = "command:" + digest_json(event_id) if shell_command is not None else None
         async with self.store.pool.connection() as conn, conn.transaction():
             binding = await self.bindings._guard(
@@ -695,6 +704,7 @@ class MessageStore:
             if binding["self_id"] != value["self_id"] or binding["platform"] != value["platform"]:
                 raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
             handler_snapshot = None
+            handler_limit_snapshot = None
             if parsed_command is None and value["channel_kind"] == "group":
                 # Lifecycle publication locks the command registry before the
                 # ordinary-handler registry. Establish the same order before
@@ -710,6 +720,8 @@ class MessageStore:
                     (self.store.bot_id,),
                 )
                 handler_snapshot = await self.handler_chains.snapshot_in(conn, binding)
+                if handler_snapshot[1]:
+                    handler_limit_snapshot = await self.handler_chains.limits.snapshot_in(conn)
             business_plan = None
             business_classification_error = None
             if parsed_command is None:
@@ -987,8 +999,25 @@ class MessageStore:
                     fallback_decision=fallback_decision,
                     fallback_rule_revision=fallback_rule_revision,
                     fallback_reason=fallback_reason,
+                    event_bytes=event_bytes,
                     snapshot=handler_snapshot,
+                    limit_snapshot=handler_limit_snapshot,
+                    admission_exempt=business_classification_error is not None,
                 )
+                if handler_chain["status"] == "FAILED":
+                    decision = "FAILED"
+                    rule_revision = "message-handler-limit-v1"
+                    reason = handler_chain["terminal_reason"]
+                    await self._put_notice_in(
+                        conn,
+                        event_id=event_id,
+                        request_id=None,
+                        conversation_id=conversation_id,
+                        ingress_seq=seq,
+                        input_payload_id=payload.payload_id,
+                        kind="MESSAGE_HANDLER_REJECTED",
+                        error_code=reason,
+                    )
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
                 "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
@@ -1270,6 +1299,16 @@ class MessageStore:
                     data=False,
                     require_receive=True,
                 )
+                barrier_chain = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_message_handler_chains WHERE bot_id=%s "
+                        "AND event_id=%s FOR UPDATE",
+                        (self.store.bot_id, inbox["event_id"]),
+                    )
+                ).fetchone()
+                handler_limit_snapshot = None
+                if barrier_chain is not None and barrier_chain["admission_exempt"]:
+                    handler_limit_snapshot = await self.handler_chains.limits.snapshot_in(conn)
                 inputs = InputContentStore(self.store)
                 clock = await inputs.payloads.lock_in(conn)
                 source = await inputs.read_input_in(
@@ -1366,6 +1405,28 @@ class MessageStore:
                 rule_revision = inbox["business_fallback_rule_revision"]
                 reason = inbox["business_fallback_reason"]
                 request_id = None
+                if (
+                    plan is None
+                    and barrier_chain is not None
+                    and barrier_chain["admission_exempt"]
+                ):
+                    barrier_chain = await self.handler_chains.admit_deferred_in(
+                        conn, barrier_chain, handler_limit_snapshot
+                    )
+                    if barrier_chain["status"] == "FAILED":
+                        decision = "FAILED"
+                        rule_revision = "message-handler-limit-v1"
+                        reason = barrier_chain["terminal_reason"]
+                        await self._put_notice_in(
+                            conn,
+                            event_id=inbox["event_id"],
+                            request_id=None,
+                            conversation_id=inbox["conversation_id"],
+                            ingress_seq=inbox["ingress_seq"],
+                            input_payload_id=inbox["payload_id"],
+                            kind="MESSAGE_HANDLER_REJECTED",
+                            error_code=reason,
+                        )
                 if plan is not None:
                     request_id, request_digest, _ = await self._persist_business_request_in(
                         conn,
@@ -1399,7 +1460,15 @@ class MessageStore:
                         chain = await self.handler_chains.resolve_fallback_in(
                             conn, chain, decision, rule_revision, reason
                         )
-                    if chain is None or chain["status"] in {"PASSED", "CANCELLED"}:
+                    if (
+                        chain is None
+                        or chain["status"] in {"PASSED", "CANCELLED"}
+                        or (
+                            decision == "FAILED"
+                            and chain["status"] == "FAILED"
+                            and rule_revision == "message-handler-limit-v1"
+                        )
+                    ):
                         await self._classify_in(
                             conn,
                             inbox["conversation_id"],
@@ -3687,6 +3756,7 @@ class MessageStore:
                 "BUSINESS_COMMAND_DENIED": "你没有执行此业务命令的权限。",
                 "BUSINESS_COMMAND_FAILED": "业务命令执行失败，请稍后重试。",
                 "BUSINESS_CLASSIFICATION_FAILED": "业务命令暂时无法处理，请稍后重试。",
+                "MESSAGE_HANDLER_REJECTED": "消息处理器当前繁忙，请稍后再试。",
             }
             parts = [[{"type": "text", "text": texts[notice["kind"]]}]]
             from forest.storage.context_payloads import ContextPayloadStore

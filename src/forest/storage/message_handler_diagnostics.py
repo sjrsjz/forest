@@ -117,6 +117,7 @@ class MessageHandlerDiagnosticsStore:
                     "SELECT h.chain_id,h.event_id,h.conversation_id,h.binding_id,h.ingress_seq,"
                     "h.status,h.current_index,h.route_count,h.attempt_count,h.next_attempt_at,"
                     "h.deadline_at,h.last_error_code,h.terminal_reason,h.fallback_decision,"
+                    "h.admission_limit_revision,h.event_bytes,"
                     "h.created_at,h.completed_at,(h.claim_actor_id IS NOT NULL) AS claimed,"
                     "ci.component_id,ci.handler_id,ci.generation_id,ci.priority,c.status AS call_status "
                     "FROM public.bot_message_handler_chains h "

@@ -90,6 +90,10 @@ WebUI 按 Binding 显示并配置普通 handler 的 `DISABLED / EVERYONE / ADMIN
 
 容量至少包含每 Bot/Binding/主体待处理链上限、每链最大 handler 数、单 event 字节上限、主体令牌桶、handler deadline 和全局 P2 槽。拒绝不得回落 Agent 以绕过治理；原消息仍进入 Context，并由本群 Actor 生成固定的安全通知。
 
+容量配置属于 Bot 级配置族 `message.handler.limit`，使用与其他 Web 配置一致的 preview/apply、expected revision、重鉴权和可遗忘 payload 来源。当前字段为 `max_event_bytes`、`max_pending_bot`、`max_pending_binding`、`max_pending_principal`、`max_handlers_per_chain`、`principal_burst`、`principal_refill_seconds` 与 `deadline_seconds`。接纳顺序固定为 event 大小、冻结路由数量、Bot/Binding/主体待处理计数、主体令牌桶；只有通过前置检查的请求才消耗令牌。计数和令牌更新都在数据库锁内完成，多个群并发接纳同一主体时仍只有一个串行裁决结果。
+
+业务命令分类短暂失败时，已经冻结的普通 Handler 路由是 ingress 连续性的屏障，标记为 `admission_exempt`，不计入待处理容量且不消耗主体令牌。下一次确定性分类若确认业务命令，则取消该屏障；若确认普通消息，则在读取可删除输入 payload 之前锁定当前容量 revision，并在 Actor 可领取前执行推迟准入。数据库链状态机只允许这一次从 exempt 到 governed 的变化，并冻结采用的 limit revision、event bytes 与新 deadline。推迟准入失败与接纳时失败采用相同的终态、固定通知和禁止 Agent fallback 规则。
+
 ## 7. 实施切片
 
 1. **已完成：** SDK 装饰器、静态 manifest、包校验和 Worker 全字段对照；

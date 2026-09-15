@@ -6,6 +6,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.storage.message_handler_limits import MessageHandlerLimitStore
 from forest.storage.message_handler_policies import MessageHandlerPolicyStore
 
 
@@ -14,6 +15,7 @@ class MessageHandlerChainStore:
         self.store = store
         self.bindings = bindings
         self.policies = MessageHandlerPolicyStore(store)
+        self.limits = MessageHandlerLimitStore(store)
 
     @staticmethod
     def _fallback(decision, rule_revision, reason):
@@ -159,7 +161,10 @@ class MessageHandlerChainStore:
         fallback_decision,
         fallback_rule_revision,
         fallback_reason,
+        event_bytes,
         snapshot=None,
+        limit_snapshot=None,
+        admission_exempt=False,
     ):
         existing = await (
             await conn.execute(
@@ -185,17 +190,43 @@ class MessageHandlerChainStore:
         fallback = self._fallback(
             fallback_decision, fallback_rule_revision, fallback_reason
         )
+        admission_exempt = bool(routes) and admission_exempt
+        limit_revision = None
+        deadline_seconds = 30
+        admission_error = None
+        if routes and not admission_exempt:
+            if limit_snapshot is None:
+                # Internal callers must establish the limit-head lock before
+                # removable input/policy payloads are read.
+                raise ForestError(
+                    "MESSAGE_HANDLER_LIMIT_SNAPSHOT_REQUIRED",
+                    "Handler admission has no locked limit snapshot",
+                    409,
+                )
+            limit_revision, deadline_seconds, admission_error = (
+                await self.limits.admit_locked_in(
+                    conn,
+                    snapshot=limit_snapshot,
+                    binding_id=binding["binding_id"],
+                    principal_ref=author["principal_ref"],
+                    event_bytes=event_bytes,
+                    route_count=len(routes),
+                )
+            )
         chain_id = "message-handler-chain:" + digest_json(inbox["event_id"])
+        status = "FAILED" if admission_error else "PENDING" if routes else "PASSED"
         chain = await (
             await conn.execute(
                 "INSERT INTO public.bot_message_handler_chains("
                 "bot_id,chain_id,event_id,conversation_id,binding_id,ingress_seq,"
                 "principal_ref,external_user_id,input_payload_id,registry_revision,"
                 "route_count,route_set_digest,fallback_decision,fallback_rule_revision,"
-                "fallback_reason,fallback_digest,status,deadline_at,completed_at) "
+                "fallback_reason,fallback_digest,status,deadline_at,completed_at,"
+                "admission_limit_revision,event_bytes,admission_exempt,terminal_reason) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                "clock_timestamp()+interval '30 seconds',"
-                "CASE WHEN %s='PASSED' THEN clock_timestamp() END) RETURNING *",
+                "clock_timestamp()+(%s * interval '1 second'),"
+                "CASE WHEN %s IN ('PASSED','FAILED') THEN clock_timestamp() END,%s,%s,%s,%s) "
+                "RETURNING *",
                 (
                     self.store.bot_id,
                     chain_id,
@@ -213,8 +244,13 @@ class MessageHandlerChainStore:
                     fallback["fallback_rule_revision"],
                     fallback["fallback_reason"],
                     fallback["fallback_digest"],
-                    "PENDING" if routes else "PASSED",
-                    "PENDING" if routes else "PASSED",
+                    status,
+                    deadline_seconds,
+                    status,
+                    limit_revision,
+                    event_bytes,
+                    admission_exempt,
+                    admission_error,
                 ),
             )
         ).fetchone()
@@ -258,9 +294,48 @@ class MessageHandlerChainStore:
                 "registry_revision": registry_revision,
                 "route_count": len(routes),
                 "fallback_decision": fallback["fallback_decision"],
+                "admission_limit_revision": limit_revision,
+                "event_bytes": event_bytes,
+                "admission_error_code": admission_error,
+                "admission_exempt": admission_exempt,
             },
         )
         return chain
+
+    async def admit_deferred_in(self, conn, chain, limit_snapshot):
+        """Resolve a classification barrier before it becomes Actor work."""
+        if not chain["admission_exempt"] or chain["status"] != "PENDING":
+            return chain
+        limit_revision, deadline_seconds, admission_error = (
+            await self.limits.admit_locked_in(
+                conn,
+                snapshot=limit_snapshot,
+                binding_id=chain["binding_id"],
+                principal_ref=chain["principal_ref"],
+                event_bytes=chain["event_bytes"],
+                route_count=chain["route_count"],
+            )
+        )
+        status = "FAILED" if admission_error else "PENDING"
+        return await (
+            await conn.execute(
+                "UPDATE public.bot_message_handler_chains SET admission_exempt=false,"
+                "admission_limit_revision=%s,deadline_at=clock_timestamp()+(%s * interval '1 second'),"
+                "status=%s,terminal_reason=%s,"
+                "completed_at=CASE WHEN %s='FAILED' THEN clock_timestamp() END,"
+                "revision=revision+1 WHERE bot_id=%s AND chain_id=%s "
+                "AND admission_exempt=true AND status='PENDING' RETURNING *",
+                (
+                    limit_revision,
+                    deadline_seconds,
+                    status,
+                    admission_error,
+                    status,
+                    self.store.bot_id,
+                    chain["chain_id"],
+                ),
+            )
+        ).fetchone()
 
     async def resolve_fallback_in(self, conn, chain, decision, rule_revision, reason):
         fallback = self._fallback(decision, rule_revision, reason)

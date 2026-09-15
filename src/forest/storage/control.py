@@ -76,6 +76,8 @@ ACTIONS = ("config.read", "config.history", "config.plan", "config.apply", "serv
            "message.handler.policy.read", "message.handler.policy.plan",
            "message.handler.policy.apply",
            "message.handler.execution.read", "message.handler.execution.recover",
+           "message.handler.limit.read", "message.handler.limit.plan",
+           "message.handler.limit.apply",
            "command.execution.read", "command.execution.recover",
            "message.read", "message.cancel", "delivery.reconcile",
            "module.read", "module.validate", "module.reload", "module.enable",

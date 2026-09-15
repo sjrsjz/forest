@@ -144,15 +144,17 @@ def expected_after_memory_permissions(before):
             actions.update({
                 "command.policy.read", "command.execution.read", "command.limit.read",
                 "message.handler.policy.read", "message.handler.execution.read",
+                "message.handler.limit.read",
             })
         if "config.plan" in actions:
             actions.update({
                 "command.policy.plan", "command.limit.plan", "message.handler.policy.plan",
+                "message.handler.limit.plan",
             })
         if {"config.apply", "message.cancel"} <= actions:
             actions.update({
                 "command.policy.apply", "command.limit.apply",
-                "message.handler.policy.apply",
+                "message.handler.policy.apply", "message.handler.limit.apply",
             })
         if "message.cancel" in actions:
             actions.update({

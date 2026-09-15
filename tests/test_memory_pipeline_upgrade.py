@@ -479,6 +479,8 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
                 "message.handler.policy.read",
                 "message.handler.policy.plan",
                 "message.handler.execution.read",
+                "message.handler.limit.read",
+                "message.handler.limit.plan",
             }
             for table in (
                 "bot_memory_config_revisions",
@@ -588,15 +590,17 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
                 expected.update({
                     "command.policy.read", "command.execution.read", "command.limit.read",
                     "message.handler.policy.read", "message.handler.execution.read",
+                    "message.handler.limit.read",
                 })
             if "config.plan" in row["actions"]:
                 expected.update({
                     "command.policy.plan", "command.limit.plan", "message.handler.policy.plan",
+                    "message.handler.limit.plan",
                 })
             if {"config.apply", "message.cancel"} <= set(row["actions"]):
                 expected.update({
                     "command.policy.apply", "command.limit.apply",
-                    "message.handler.policy.apply",
+                    "message.handler.policy.apply", "message.handler.limit.apply",
                 })
             if "message.cancel" in row["actions"]:
                 expected.update({

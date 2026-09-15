@@ -23,6 +23,7 @@ READ_ACTIONS = frozenset({
     "audit.read", "binding.read", "message.read",
     "module.read", "module.validate",
     "command.execution.read", "command.limit.read", "message.handler.execution.read",
+    "message.handler.limit.read",
 })
 
 

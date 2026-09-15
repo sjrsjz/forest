@@ -50,6 +50,7 @@ from forest.management.memory_api import install_memory_routes
 from forest.management.message_handler_diagnostics_api import (
     install_message_handler_diagnostic_routes,
 )
+from forest.management.message_handler_limits_api import install_message_handler_limit_routes
 from forest.management.message_handler_policies_api import install_message_handler_policy_routes
 from forest.management.provision import BotProvisioner
 from forest.management.restores import RestoreManager
@@ -688,6 +689,7 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_command_policy_routes(app, runtime)
     install_message_handler_policy_routes(app, runtime)
     install_message_handler_diagnostic_routes(app, runtime)
+    install_message_handler_limit_routes(app, runtime)
     install_command_limit_routes(app, runtime)
     install_business_command_routes(app, runtime)
     install_bot_audit_routes(app, runtime)

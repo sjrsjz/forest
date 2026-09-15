@@ -13,6 +13,7 @@ FAMILIES = {
     "command.policy": ("bot_command_policy", "resource_id"),
     "command.limit": ("bot_command_limit", None),
     "message.handler.policy": ("bot_message_handler_policy", "resource_id"),
+    "message.handler.limit": ("bot_message_handler_limit", None),
 }
 
 
