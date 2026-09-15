@@ -44,8 +44,9 @@ from forest.storage.migration_v11 import install_writer_gate_in as install_write
 from forest.storage.migration_v12 import install_writer_gate_in as install_writer_gate_v12_in
 from forest.storage.migration_v13 import install_writer_gate_in as install_writer_gate_v13_in
 from forest.storage.migration_v14 import install_writer_gate_in as install_writer_gate_v14_in
-from forest.storage.migration_v15 import WRITER_GENERATION
 from forest.storage.migration_v15 import install_writer_gate_in as install_writer_gate_v15_in
+from forest.storage.migration_v16 import WRITER_GENERATION
+from forest.storage.migration_v16 import install_writer_gate_in as install_writer_gate_v16_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -91,11 +92,12 @@ MIGRATION_V12 = frozenset({"072_business_command_registry.sql"})
 MIGRATION_V13 = frozenset({"074_business_command_requests.sql"})
 MIGRATION_V14 = frozenset({"075_business_command_execution.sql"})
 MIGRATION_V15 = frozenset({"076_business_command_failures.sql"})
+MIGRATION_V16 = frozenset({"077_business_command_classification.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
-    if version in MIGRATION_V12 or version in MIGRATION_V13 or version in MIGRATION_V14 or version in MIGRATION_V15:
+    if version in MIGRATION_V12 or version in MIGRATION_V13 or version in MIGRATION_V14 or version in MIGRATION_V15 or version in MIGRATION_V16:
         root = files("forest.storage")
         try:
             helpers = [
@@ -113,9 +115,10 @@ def _migration_checksum(version: str, source: str) -> str:
                     "migration_v10.py",
                     "migration_v11.py",
                     "migration_v12.py",
-                    *(("migration_v13.py",) if version in MIGRATION_V13 or version in MIGRATION_V14 or version in MIGRATION_V15 else ()),
-                    *(("migration_v14.py",) if version in MIGRATION_V14 or version in MIGRATION_V15 else ()),
-                    *(("migration_v15.py",) if version in MIGRATION_V15 else ()),
+                    *(("migration_v13.py",) if version in MIGRATION_V13 or version in MIGRATION_V14 or version in MIGRATION_V15 or version in MIGRATION_V16 else ()),
+                    *(("migration_v14.py",) if version in MIGRATION_V14 or version in MIGRATION_V15 or version in MIGRATION_V16 else ()),
+                    *(("migration_v15.py",) if version in MIGRATION_V15 or version in MIGRATION_V16 else ()),
+                    *(("migration_v16.py",) if version in MIGRATION_V16 else ()),
                 )
             ]
         except FileNotFoundError as exc:
@@ -123,7 +126,8 @@ def _migration_checksum(version: str, source: str) -> str:
                 "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
             ) from exc
         envelope = json.dumps(
-            ["forest.bot.migration.v15" if version in MIGRATION_V15 else
+            ["forest.bot.migration.v16" if version in MIGRATION_V16 else
+             "forest.bot.migration.v15" if version in MIGRATION_V15 else
              "forest.bot.migration.v14" if version in MIGRATION_V14 else
              "forest.bot.migration.v13" if version in MIGRATION_V13 else "forest.bot.migration.v12",
              source, None, helpers],
@@ -612,6 +616,8 @@ class BotStore:
                     await install_writer_gate_v14_in(conn)
                 if version in MIGRATION_V15:
                     await install_writer_gate_v15_in(conn)
+                if version in MIGRATION_V16:
+                    await install_writer_gate_v16_in(conn)
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)

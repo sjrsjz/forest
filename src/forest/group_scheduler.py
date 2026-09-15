@@ -227,6 +227,9 @@ class GroupScheduler:
                     if not task.cancelling():
                         task.cancel()
                 return 0
+            await self.messages.retry_business_classifications(
+                lease, limit=self.scan_page_size
+            )
             await self.messages.expire_classifications(lease, limit=self.scan_page_size)
             rows = await self.messages.pending(
                 lease,

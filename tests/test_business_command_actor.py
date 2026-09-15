@@ -609,3 +609,160 @@ async def test_scheduler_terminal_command_failure_publishes_safe_notice(command_
         assert "private plugin traceback" not in str(context)
     finally:
         await scheduler.close()
+
+
+async def test_business_classification_retries_then_freezes_command(
+    command_runtime, monkeypatch
+):
+    messages, kernel = command_runtime
+    original = messages._business_plan_in
+    calls = 0
+
+    async def transient(conn, binding, value):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return {"failed": True, "reason": "BUSINESS_COMMAND_POLICY_UNAVAILABLE"}
+        return await original(conn, binding, value)
+
+    monkeypatch.setattr(messages, "_business_plan_in", transient)
+    accepted = await ingest(messages, kernel, 1, "/actor after-retry", trigger=True)
+    assert accepted["trigger_decision"] == "PENDING"
+    assert accepted["business_request_id"] is None
+    assert await messages.retry_business_classifications(kernel.lease) == 0
+    async with messages.store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE public.bot_message_inbox SET "
+            "business_classification_next_attempt_at=clock_timestamp() "
+            "WHERE bot_id=%s AND event_id=%s",
+            (messages.store.bot_id, accepted["event_id"]),
+        )
+    assert await messages.retry_business_classifications(kernel.lease) == 1
+
+    async with messages.store.pool.connection() as conn:
+        inbox = await (
+            await conn.execute(
+                "SELECT trigger_decision,business_classification_pending,"
+                "business_classification_attempt_count,business_fallback_decision "
+                "FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+                (messages.store.bot_id, accepted["event_id"]),
+            )
+        ).fetchone()
+        request = await (
+            await conn.execute(
+                "SELECT status,command_name FROM public.bot_business_command_requests "
+                "WHERE bot_id=%s AND event_id=%s",
+                (messages.store.bot_id, accepted["event_id"]),
+            )
+        ).fetchone()
+        attempts = await (
+            await conn.execute(
+                "SELECT attempt_no,error_code,retry_at IS NOT NULL AS retry_scheduled "
+                "FROM public.bot_business_classification_attempts"
+            )
+        ).fetchall()
+    assert inbox == {
+        "trigger_decision": "BUSINESS_COMMAND",
+        "business_classification_pending": False,
+        "business_classification_attempt_count": 1,
+        "business_fallback_decision": "TRIGGER",
+    }
+    assert request == {"status": "PENDING", "command_name": "/actor"}
+    assert attempts == [
+        {
+            "attempt_no": 1,
+            "error_code": "BUSINESS_COMMAND_POLICY_UNAVAILABLE",
+            "retry_scheduled": True,
+        }
+    ]
+
+
+async def test_business_classification_deadline_publishes_ordered_safe_notice(
+    command_runtime, monkeypatch
+):
+    messages, kernel = command_runtime
+
+    async def unavailable(conn, binding, value):
+        return {"failed": True, "reason": "BUSINESS_COMMAND_POLICY_UNAVAILABLE"}
+
+    monkeypatch.setattr(messages, "_business_plan_in", unavailable)
+    accepted = await ingest(messages, kernel, 1, "/actor unavailable")
+    async with messages.store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE public.bot_message_inbox SET "
+            "classification_deadline=clock_timestamp()-interval '1 second' "
+            "WHERE bot_id=%s AND event_id=%s",
+            (messages.store.bot_id, accepted["event_id"]),
+        )
+    assert await messages.expire_classifications(kernel.lease) == 1
+
+    owner = await actor(messages, kernel, accepted["conversation_id"])
+    selected = await messages.select_input(owner, "classification-failure-notice")
+    assert selected["status"] == "NOTICE"
+    assert selected["notice"]["kind"] == "BUSINESS_CLASSIFICATION_FAILED"
+    await messages.finalize_notice(
+        owner,
+        "classification-failure-final",
+        notice_id=selected["notice"]["notice_id"],
+        delivery=DeliveryStore(messages.store),
+    )
+    context = await messages.context(owner)
+    assert [unit["kind"] for unit in context["units"]] == ["INPUT", "SYSTEM_NOTICE"]
+    assert context["units"][-1]["reply_parts"] == [
+        [{"type": "text", "text": "业务命令暂时无法处理，请稍后重试。"}]
+    ]
+    async with messages.store.pool.connection() as conn:
+        inbox = await (
+            await conn.execute(
+                "SELECT trigger_decision,business_classification_pending,"
+                "business_classification_attempt_count,business_classification_error_code "
+                "FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+                (messages.store.bot_id, accepted["event_id"]),
+            )
+        ).fetchone()
+    assert inbox == {
+        "trigger_decision": "FAILED",
+        "business_classification_pending": False,
+        "business_classification_attempt_count": 1,
+        "business_classification_error_code": "BUSINESS_CLASSIFICATION_DEADLINE_EXCEEDED",
+    }
+
+
+async def test_concurrent_business_classification_retries_converge_once(
+    command_runtime, monkeypatch
+):
+    messages, kernel = command_runtime
+    original = messages._business_plan_in
+    initial = True
+
+    async def transient(conn, binding, value):
+        nonlocal initial
+        if initial:
+            initial = False
+            return {"failed": True, "reason": "BUSINESS_COMMAND_POLICY_UNAVAILABLE"}
+        await asyncio.sleep(0.05)
+        return await original(conn, binding, value)
+
+    monkeypatch.setattr(messages, "_business_plan_in", transient)
+    accepted = await ingest(messages, kernel, 1, "/actor concurrent")
+    outcomes = await asyncio.gather(
+        messages.retry_business_classifications(kernel.lease),
+        messages.retry_business_classifications(kernel.lease),
+    )
+    assert sorted(outcomes) == [0, 1]
+    async with messages.store.pool.connection() as conn:
+        counts = await (
+            await conn.execute(
+                "SELECT (SELECT count(*) FROM public.bot_business_command_requests "
+                "WHERE bot_id=%s AND event_id=%s) requests,"
+                "(SELECT count(*) FROM public.bot_conversation_triggers "
+                "WHERE bot_id=%s AND event_id=%s) triggers",
+                (
+                    messages.store.bot_id,
+                    accepted["event_id"],
+                    messages.store.bot_id,
+                    accepted["event_id"],
+                ),
+            )
+        ).fetchone()
+    assert counts == {"requests": 1, "triggers": 0}

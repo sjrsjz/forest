@@ -160,7 +160,7 @@ class MessageStore:
             conn, policy, kind="REVISION", required=False
         )
         if hydrated["values_payload_state"] != "ACTIVE":
-            return {"failed": True, "reason": "business_command_policy_unavailable"}
+            return {"failed": True, "reason": "BUSINESS_COMMAND_POLICY_UNAVAILABLE"}
         values = hydrated["values"]
         author = value["author"]
         verified = (
@@ -227,6 +227,108 @@ class MessageStore:
                 ),
             )
         ).fetchone()
+
+    async def _persist_business_request_in(
+        self,
+        conn,
+        *,
+        event_id: str,
+        conversation_id: str,
+        binding_id: str,
+        ingress_seq: int,
+        author: dict,
+        input_payload_id: str,
+        deletion_epoch: int,
+        business_plan: dict,
+    ) -> tuple[str, str, str]:
+        request_id = "business-command:" + digest_json(event_id)
+        command, policy = business_plan["command"], business_plan["policy"]
+        arguments_ref, arguments_digest = await self.business_payloads.put_arguments_in(
+            conn,
+            request_id=request_id,
+            command_id=command["command_id"],
+            name=command["name"],
+            argument_mode=command["argument_mode"],
+            argument_text=business_plan["argument_text"],
+            input_payload_id=input_payload_id,
+            epoch=deletion_epoch,
+        )
+        status = "PENDING" if business_plan["allowed"] else "DENIED"
+        terminal_reason = None if business_plan["allowed"] else "BUSINESS_COMMAND_DENIED"
+        request_fact = {
+            "event_id": event_id,
+            "conversation_id": conversation_id,
+            "binding_id": binding_id,
+            "ingress_seq": ingress_seq,
+            "principal_ref": author["principal_ref"],
+            "external_user_id": author["external_user_id"],
+            "command_id": command["command_id"],
+            "command_name": command["name"],
+            "component_id": command["component_id"],
+            "generation_id": command["generation_id"],
+            "route_epoch": command["route_epoch"],
+            "registry_revision": business_plan["registry_revision"],
+            "command_spec_digest": command["spec_digest"],
+            "handler": command["handler"],
+            "permission": command["permission"],
+            "argument_mode": command["argument_mode"],
+            "input_schema": command["input_schema"],
+            "schema_digest": command["schema_digest"],
+            "command_policy_revision": policy["revision"],
+            "policy_mode": policy["policy_mode"],
+            "policy_payload_id": policy["values_payload_id"],
+            "policy_payload_digest": policy["values_payload_digest"],
+            "binding_config_revision": business_plan["binding_config_revision"],
+            "input_payload_id": input_payload_id,
+            "arguments_payload_id": arguments_ref.payload_id,
+            "arguments_payload_digest": arguments_ref.digest,
+            "arguments_digest": arguments_digest,
+            "status": status,
+            "terminal_reason": terminal_reason,
+        }
+        request_digest = digest_json(request_fact)
+        await conn.execute(
+            "INSERT INTO public.bot_business_command_requests("
+            "bot_id,request_id,event_id,conversation_id,binding_id,ingress_seq,"
+            "principal_ref,external_user_id,command_id,command_name,component_id,"
+            "generation_id,route_epoch,registry_revision,command_spec_digest,handler,"
+            "permission,argument_mode,input_schema,schema_digest,command_policy_revision,"
+            "policy_mode,policy_payload_id,policy_payload_digest,binding_config_revision,"
+            "input_payload_id,arguments_payload_id,arguments_payload_digest,arguments_digest,"
+            "request_digest,status,terminal_reason,completed_at) VALUES ("
+            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+            "%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='DENIED' THEN clock_timestamp() END)",
+            (
+                self.store.bot_id,
+                request_id,
+                *(request_fact[key] for key in (
+                    "event_id", "conversation_id", "binding_id", "ingress_seq",
+                    "principal_ref", "external_user_id", "command_id", "command_name",
+                    "component_id", "generation_id", "route_epoch", "registry_revision",
+                    "command_spec_digest", "handler", "permission", "argument_mode",
+                    "input_schema", "schema_digest", "command_policy_revision", "policy_mode",
+                    "policy_payload_id", "policy_payload_digest", "binding_config_revision",
+                    "input_payload_id", "arguments_payload_id", "arguments_payload_digest",
+                    "arguments_digest",
+                )),
+                request_digest,
+                status,
+                terminal_reason,
+                status,
+            ),
+        )
+        if status == "DENIED":
+            await self._put_notice_in(
+                conn,
+                event_id=event_id,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                ingress_seq=ingress_seq,
+                input_payload_id=input_payload_id,
+                kind="BUSINESS_COMMAND_DENIED",
+                error_code="BUSINESS_COMMAND_DENIED",
+            )
+        return request_id, request_digest, status
 
     def _memory_sources(self):
         from forest.storage.memory_sources import MemorySourceStore
@@ -552,6 +654,9 @@ class MessageStore:
         if decision is not None:
             _text(rule_revision, "rule_revision")
             _text(reason, "reason", 1024, empty=True)
+        fallback_decision = decision or "PENDING"
+        fallback_rule_revision = rule_revision
+        fallback_reason = reason
         identifiers = self._platform_ids(binding_id, value)
         conversation_id = identifiers["conversation_id"]
         group_source_id = identifiers["group_source_id"]
@@ -567,13 +672,13 @@ class MessageStore:
             if binding["self_id"] != value["self_id"] or binding["platform"] != value["platform"]:
                 raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
             business_plan = None
+            business_classification_error = None
             if parsed_command is None:
                 business_plan = await self._business_plan_in(conn, binding, value)
                 if business_plan is not None:
                     if business_plan.get("failed"):
-                        decision = "FAILED"
-                        rule_revision = "business-command-v1"
-                        reason = business_plan["reason"]
+                        decision = None
+                        business_classification_error = business_plan["reason"]
                     else:
                         decision = "BUSINESS_COMMAND"
                         rule_revision = "business-command-v1"
@@ -751,11 +856,21 @@ class MessageStore:
                 author=value["author"], segments=segments, expected_deletion_epoch=clock["deletion_epoch"])
             await conn.execute(
                 "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
-                "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,"
+                "business_classification_pending,business_fallback_decision,"
+                "business_fallback_rule_revision,business_fallback_reason,"
+                "business_classification_next_attempt_at,business_classification_error_code) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                "CASE WHEN %s THEN clock_timestamp() END,%s)",
                 (self.store.bot_id, conversation_id, event_id, seq, value["platform_message_id"],
                  source_event_id, input_digest, Jsonb(identity(value["author"])), payload.payload_id,
-                 value["sent_at"], _tokens({"author": value["author"], "segments": segments})),
+                 value["sent_at"], _tokens({"author": value["author"], "segments": segments}),
+                 business_classification_error is not None,
+                 fallback_decision if business_classification_error is not None else None,
+                 fallback_rule_revision if business_classification_error is not None else None,
+                 fallback_reason if business_classification_error is not None else None,
+                 business_classification_error is not None,
+                 business_classification_error),
             )
             for media_ref, index, source in media:
                 source_payload = await contents.put_media_source_in(conn, media_ref=media_ref,
@@ -797,93 +912,19 @@ class MessageStore:
                 )
             business_request_id = None
             if business_plan is not None and not business_plan.get("failed"):
-                business_request_id = "business-command:" + digest_json(event_id)
-                command, policy = business_plan["command"], business_plan["policy"]
-                arguments_ref, arguments_digest = await self.business_payloads.put_arguments_in(
-                    conn,
-                    request_id=business_request_id,
-                    command_id=command["command_id"],
-                    name=command["name"],
-                    argument_mode=command["argument_mode"],
-                    argument_text=business_plan["argument_text"],
-                    input_payload_id=payload.payload_id,
-                    epoch=clock["deletion_epoch"],
-                )
-                status = "PENDING" if business_plan["allowed"] else "DENIED"
-                terminal_reason = None if business_plan["allowed"] else "BUSINESS_COMMAND_DENIED"
-                request_fact = {
-                    "event_id": event_id,
-                    "conversation_id": conversation_id,
-                    "binding_id": binding_id,
-                    "ingress_seq": seq,
-                    "principal_ref": value["author"]["principal_ref"],
-                    "external_user_id": value["author"]["external_user_id"],
-                    "command_id": command["command_id"],
-                    "command_name": command["name"],
-                    "component_id": command["component_id"],
-                    "generation_id": command["generation_id"],
-                    "route_epoch": command["route_epoch"],
-                    "registry_revision": business_plan["registry_revision"],
-                    "command_spec_digest": command["spec_digest"],
-                    "handler": command["handler"],
-                    "permission": command["permission"],
-                    "argument_mode": command["argument_mode"],
-                    "input_schema": command["input_schema"],
-                    "schema_digest": command["schema_digest"],
-                    "command_policy_revision": policy["revision"],
-                    "policy_mode": policy["policy_mode"],
-                    "policy_payload_id": policy["values_payload_id"],
-                    "policy_payload_digest": policy["values_payload_digest"],
-                    "binding_config_revision": business_plan["binding_config_revision"],
-                    "input_payload_id": payload.payload_id,
-                    "arguments_payload_id": arguments_ref.payload_id,
-                    "arguments_payload_digest": arguments_ref.digest,
-                    "arguments_digest": arguments_digest,
-                    "status": status,
-                    "terminal_reason": terminal_reason,
-                }
-                request_digest = digest_json(request_fact)
-                await conn.execute(
-                    "INSERT INTO public.bot_business_command_requests("
-                    "bot_id,request_id,event_id,conversation_id,binding_id,ingress_seq,"
-                    "principal_ref,external_user_id,command_id,command_name,component_id,"
-                    "generation_id,route_epoch,registry_revision,command_spec_digest,handler,"
-                    "permission,argument_mode,input_schema,schema_digest,command_policy_revision,"
-                    "policy_mode,policy_payload_id,policy_payload_digest,binding_config_revision,"
-                    "input_payload_id,arguments_payload_id,arguments_payload_digest,arguments_digest,"
-                    "request_digest,status,terminal_reason,completed_at) VALUES ("
-                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='DENIED' THEN clock_timestamp() END)",
-                    (
-                        self.store.bot_id,
-                        business_request_id,
-                        *(request_fact[key] for key in (
-                            "event_id", "conversation_id", "binding_id", "ingress_seq",
-                            "principal_ref", "external_user_id", "command_id", "command_name",
-                            "component_id", "generation_id", "route_epoch", "registry_revision",
-                            "command_spec_digest", "handler", "permission", "argument_mode",
-                            "input_schema", "schema_digest", "command_policy_revision", "policy_mode",
-                            "policy_payload_id", "policy_payload_digest", "binding_config_revision",
-                            "input_payload_id", "arguments_payload_id", "arguments_payload_digest",
-                            "arguments_digest",
-                        )),
-                        request_digest,
-                        status,
-                        terminal_reason,
-                        status,
-                    ),
-                )
-                if status == "DENIED":
-                    await self._put_notice_in(
+                business_request_id, request_digest, _ = (
+                    await self._persist_business_request_in(
                         conn,
                         event_id=event_id,
-                        request_id=business_request_id,
                         conversation_id=conversation_id,
+                        binding_id=binding_id,
                         ingress_seq=seq,
+                        author=value["author"],
                         input_payload_id=payload.payload_id,
-                        kind="BUSINESS_COMMAND_DENIED",
-                        error_code="BUSINESS_COMMAND_DENIED",
+                        deletion_epoch=clock["deletion_epoch"],
+                        business_plan=business_plan,
                     )
+                )
                 reason = business_request_id + ":" + request_digest
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
@@ -1061,12 +1102,298 @@ class MessageStore:
             await self.store._host(conn, lease)
             return rows
 
+    async def retry_business_classifications(
+        self, lease: HostLease, *, limit: int = 128
+    ) -> int:
+        """Retry deterministic business classification without opening an ingress gap."""
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ValueError("limit")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            rows = await (
+                await conn.execute(
+                    "SELECT event_id FROM public.bot_message_inbox WHERE bot_id=%s "
+                    "AND trigger_decision='PENDING' AND business_classification_pending "
+                    "AND business_classification_next_attempt_at<=clock_timestamp() "
+                    "AND classification_deadline>clock_timestamp() "
+                    "ORDER BY business_classification_next_attempt_at,event_id LIMIT %s",
+                    (self.store.bot_id, limit),
+                )
+            ).fetchall()
+        completed = 0
+        for candidate in rows:
+            async with self.store.pool.connection() as conn, conn.transaction():
+                await self.store._host(conn, lease)
+                inbox = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s "
+                        "FOR UPDATE SKIP LOCKED",
+                        (self.store.bot_id, candidate["event_id"]),
+                    )
+                ).fetchone()
+                if (
+                    inbox is None
+                    or inbox["trigger_decision"] != "PENDING"
+                    or not inbox["business_classification_pending"]
+                ):
+                    continue
+                now = await self.store._now(conn)
+                if inbox["classification_deadline"] <= now:
+                    continue
+                conversation = await self._conversation(conn, inbox["conversation_id"])
+                binding = await self.bindings._guard(
+                    conn,
+                    lease,
+                    conversation["binding_id"],
+                    data=False,
+                    require_receive=True,
+                )
+                inputs = InputContentStore(self.store)
+                clock = await inputs.payloads.lock_in(conn)
+                source = await inputs.read_input_in(
+                    conn,
+                    inbox["event_id"],
+                    expected_deletion_epoch=clock["deletion_epoch"],
+                    required=True,
+                )
+                try:
+                    plan = await self._business_plan_in(
+                        conn,
+                        binding,
+                        {"author": source["author"], "segments": source["segments"]},
+                    )
+                except ForestError as exc:
+                    candidate = exc.code
+                    stable = (
+                        isinstance(candidate, str)
+                        and candidate.isascii()
+                        and 1 <= len(candidate) <= 96
+                        and candidate[0].isalpha()
+                        and candidate == candidate.upper()
+                        and candidate.replace("_", "").isalnum()
+                    )
+                    plan = {
+                        "failed": True,
+                        "reason": candidate
+                        if stable
+                        else "BUSINESS_CLASSIFICATION_UNAVAILABLE",
+                    }
+                if plan is not None and plan.get("failed"):
+                    attempt_no = inbox["business_classification_attempt_count"] + 1
+                    delay = min(5.0, 0.25 * (2 ** min(attempt_no - 1, 8)))
+                    retry_at = min(
+                        now + timedelta(seconds=delay), inbox["classification_deadline"]
+                    )
+                    operation_id = (
+                        "business-classification-attempt:"
+                        + inbox["event_id"]
+                        + ":"
+                        + str(attempt_no)
+                    )
+                    await conn.execute(
+                        "INSERT INTO public.bot_business_classification_attempts("
+                        "bot_id,event_id,attempt_no,operation_id,host_incarnation,host_owner_epoch,"
+                        "error_code,retry_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            self.store.bot_id,
+                            inbox["event_id"],
+                            attempt_no,
+                            operation_id,
+                            lease.incarnation,
+                            lease.owner_epoch,
+                            plan["reason"],
+                            retry_at,
+                        ),
+                    )
+                    await conn.execute(
+                        "UPDATE public.bot_message_inbox SET "
+                        "business_classification_attempt_count=%s,"
+                        "business_classification_next_attempt_at=%s,"
+                        "business_classification_error_code=%s "
+                        "WHERE bot_id=%s AND event_id=%s",
+                        (
+                            attempt_no,
+                            retry_at,
+                            plan["reason"],
+                            self.store.bot_id,
+                            inbox["event_id"],
+                        ),
+                    )
+                    await self.store._event(
+                        conn,
+                        "business_command.classification_retry",
+                        operation_id,
+                        {
+                            "conversation_id": inbox["conversation_id"],
+                            "event_id": inbox["event_id"],
+                            "attempt_no": attempt_no,
+                            "error_code": plan["reason"],
+                            "retry_at": retry_at.isoformat(),
+                        },
+                    )
+                    await self.bindings._final_guard(
+                        conn,
+                        lease,
+                        binding,
+                        data=False,
+                        require_receive=True,
+                        require_config=True,
+                    )
+                    continue
+                decision = inbox["business_fallback_decision"]
+                rule_revision = inbox["business_fallback_rule_revision"]
+                reason = inbox["business_fallback_reason"]
+                request_id = None
+                if plan is not None:
+                    request_id, request_digest, _ = await self._persist_business_request_in(
+                        conn,
+                        event_id=inbox["event_id"],
+                        conversation_id=inbox["conversation_id"],
+                        binding_id=conversation["binding_id"],
+                        ingress_seq=inbox["ingress_seq"],
+                        author=source["author"],
+                        input_payload_id=inbox["payload_id"],
+                        deletion_epoch=clock["deletion_epoch"],
+                        business_plan=plan,
+                    )
+                    decision = "BUSINESS_COMMAND"
+                    rule_revision = "business-command-v1"
+                    reason = request_id + ":" + request_digest
+                await conn.execute(
+                    "UPDATE public.bot_message_inbox SET business_classification_pending=false,"
+                    "business_classification_next_attempt_at=NULL WHERE bot_id=%s AND event_id=%s",
+                    (self.store.bot_id, inbox["event_id"]),
+                )
+                if decision != "PENDING":
+                    await self._classify_in(
+                        conn,
+                        inbox["conversation_id"],
+                        inbox["event_id"],
+                        decision,
+                        rule_revision,
+                        reason,
+                    )
+                await self.store._event(
+                    conn,
+                    "business_command.classification_completed",
+                    inbox["event_id"],
+                    {
+                        "conversation_id": inbox["conversation_id"],
+                        "event_id": inbox["event_id"],
+                        "decision": decision,
+                        "request_id": request_id,
+                    },
+                )
+                await self.bindings._final_guard(
+                    conn,
+                    lease,
+                    binding,
+                    data=False,
+                    require_receive=True,
+                    require_config=True,
+                )
+                completed += 1
+        return completed
+
+    async def _expire_business_classification(
+        self, lease: HostLease, conversation_id: str, event_id: str
+    ) -> bool:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.store._host(conn, lease)
+            conversation = await self._conversation(conn, conversation_id)
+            binding = await self.bindings._guard(
+                conn,
+                lease,
+                conversation["binding_id"],
+                data=False,
+                require_receive=True,
+            )
+            inbox = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s "
+                    "FOR UPDATE",
+                    (self.store.bot_id, event_id),
+                )
+            ).fetchone()
+            if (
+                inbox is None
+                or inbox["conversation_id"] != conversation_id
+                or inbox["trigger_decision"] != "PENDING"
+                or not inbox["business_classification_pending"]
+                or inbox["classification_deadline"] > await self.store._now(conn)
+            ):
+                return False
+            attempt_no = inbox["business_classification_attempt_count"] + 1
+            error_code = "BUSINESS_CLASSIFICATION_DEADLINE_EXCEEDED"
+            operation_id = (
+                "business-classification-attempt:" + event_id + ":" + str(attempt_no)
+            )
+            await conn.execute(
+                "INSERT INTO public.bot_business_classification_attempts("
+                "bot_id,event_id,attempt_no,operation_id,host_incarnation,host_owner_epoch,"
+                "error_code,retry_at) VALUES (%s,%s,%s,%s,%s,%s,%s,NULL)",
+                (
+                    self.store.bot_id,
+                    event_id,
+                    attempt_no,
+                    operation_id,
+                    lease.incarnation,
+                    lease.owner_epoch,
+                    error_code,
+                ),
+            )
+            await self._put_notice_in(
+                conn,
+                event_id=event_id,
+                request_id=None,
+                conversation_id=conversation_id,
+                ingress_seq=inbox["ingress_seq"],
+                input_payload_id=inbox["payload_id"],
+                kind="BUSINESS_CLASSIFICATION_FAILED",
+                error_code=error_code,
+            )
+            await conn.execute(
+                "UPDATE public.bot_message_inbox SET business_classification_pending=false,"
+                "business_classification_attempt_count=%s,business_classification_next_attempt_at=NULL,"
+                "business_classification_error_code=%s WHERE bot_id=%s AND event_id=%s",
+                (attempt_no, error_code, self.store.bot_id, event_id),
+            )
+            await self._classify_in(
+                conn,
+                conversation_id,
+                event_id,
+                "FAILED",
+                "business-command-classification-v1",
+                "deadline_exceeded",
+            )
+            await self.store._event(
+                conn,
+                "business_command.classification_failed",
+                event_id,
+                {
+                    "conversation_id": conversation_id,
+                    "event_id": event_id,
+                    "attempt_no": attempt_no,
+                    "error_code": error_code,
+                },
+            )
+            await self.bindings._final_guard(
+                conn,
+                lease,
+                binding,
+                data=False,
+                require_receive=True,
+                require_config=True,
+            )
+            return True
+
     async def expire_classifications(self, lease: HostLease, *, limit: int = 128) -> int:
         """A dead preprocessing worker cannot leave a permanent ingress gap."""
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._host(conn, lease)
             rows = await (await conn.execute(
-                "SELECT i.conversation_id,i.event_id FROM public.bot_message_inbox i "
+                "SELECT i.conversation_id,i.event_id,i.business_classification_pending "
+                "FROM public.bot_message_inbox i "
                 "JOIN public.bot_conversations c ON c.bot_id=i.bot_id AND c.conversation_id=i.conversation_id "
                 "JOIN public.bot_bindings b ON b.bot_id=c.bot_id AND b.binding_id=c.binding_id "
                 "WHERE i.bot_id=%s AND b.receive_enabled AND b.state IN ('ONLINE','DRAINING') "
@@ -1076,9 +1403,22 @@ class MessageStore:
         count = 0
         for row in rows:
             try:
-                await self.classify(lease, row["conversation_id"], row["event_id"], "FAILED",
-                                    rule_revision="classification-timeout-v1", reason="deadline_exceeded")
-                count += 1
+                if row["business_classification_pending"]:
+                    count += bool(
+                        await self._expire_business_classification(
+                            lease, row["conversation_id"], row["event_id"]
+                        )
+                    )
+                else:
+                    await self.classify(
+                        lease,
+                        row["conversation_id"],
+                        row["event_id"],
+                        "FAILED",
+                        rule_revision="classification-timeout-v1",
+                        reason="deadline_exceeded",
+                    )
+                    count += 1
             except ForestError as exc:
                 if exc.code not in {"CLASSIFICATION_CONFLICT", "BINDING_OFFLINE", "RECEIVE_CLOSED", "STALE_BINDING"}:
                     raise

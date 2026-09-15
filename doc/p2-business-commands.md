@@ -1,6 +1,6 @@
 # P2 业务命令与普通消息插件链详细设计
 
-状态：协议已冻结，实施切片 1–3、4a、4b 的安全拒绝部分及 5a–5c 已完成。`@command` 可静态生成正式 manifest/schema，纯命令包可被接纳，候选 Worker 会逐字段核验运行时声明；PostgreSQL effective registry、同名冲突、路由代际原子切换、disable/re-enable 和永久 retirement 原语也已接通。Web 已提供按 Binding 的四种用户策略、重新鉴权、preview/apply、expected revision 和来源 payload。OneBot 普通消息会在 Inbox 接纳事务中冻结命令、路由、策略、作者与可遗忘参数；拒绝不会回落 Agent，策略收紧与来源遗忘会取消尚未开始的请求。SDK 已提供不可变 `Reply/Consumed/Pass`，Worker 与 Kernel 已按冻结 generation/route/schema 执行命令并以稳定 operation ID 重放结果。同群 Actor 按 ingress 在未启动 Agent、命令与安全通知之间选择，活跃 Agent 不被新命令抢断；命令结果或安全通知、Context 单元、回复序号和 CHAT Delivery 原子提交，跨群命令可并行。执行故障具有持久 attempt、指数退避、固定 deadline 和有界安全终态；分类故障的持久重试与固定 deadline 仍待实现。本文补全 03、07、08、09 中的业务命令路径。它不改变每个 `(bot_id, conversation_id)` 只有一个 Agent 的设计，也不创建产品子 Agent。
+状态：协议与实施切片 1–5 已完成。`@command` 可静态生成正式 manifest/schema，纯命令包可被接纳，候选 Worker 会逐字段核验运行时声明；PostgreSQL effective registry、同名冲突、路由代际原子切换、disable/re-enable 和永久 retirement 原语也已接通。Web 已提供按 Binding 的四种用户策略、重新鉴权、preview/apply、expected revision 和来源 payload。OneBot 普通消息会在 Inbox 接纳事务中冻结命令、路由、策略、作者与可遗忘参数；拒绝不会回落 Agent，策略收紧与来源遗忘会取消尚未开始的请求。SDK 已提供不可变 `Reply/Consumed/Pass`，Worker 与 Kernel 已按冻结 generation/route/schema 执行命令并以稳定 operation ID 重放结果。同群 Actor 按 ingress 在未启动 Agent、命令与安全通知之间选择，活跃 Agent 不被新命令抢断；命令结果或安全通知、Context 单元、回复序号和 CHAT Delivery 原子提交，跨群命令可并行。分类和执行故障均有持久 attempt、有界退避与固定 deadline；终态安全通知不会泄漏异常正文。剩余工作是切片 6 的 Web 诊断、限额、恢复、升级和端到端验收。本文补全 03、07、08、09 中的业务命令路径。它不改变每个 `(bot_id, conversation_id)` 只有一个 Agent 的设计，也不创建产品子 Agent。
 
 ## 1. 目标与边界
 
@@ -86,7 +86,9 @@ Shell 命中时仍走现有 CONTROL 路径，业务注册表不可见该正文�
 
 `bot_message_inbox.trigger_decision` 增加 `BUSINESS_COMMAND`。同一事务写入不可变 `bot_business_command_requests`：event/conversation/ingress、作者 principal、command identity、component generation、route epoch、registry/policy revision、规范参数和输入 payload 引用。正文摘要不复制到表列。
 
-如果 token 命中已注册名称但策略拒绝，写 `BUSINESS_COMMAND_DENIED` 终态，并在同一事务创建 `bot_conversation_notices` 工作项；它不能改判 Agent trigger。该通知只能由本群 Conversation Actor 领取，原消息先按 ingress 进入 Context，随后安全 Bot 回复、`SYSTEM_NOTICE`、CHAT reply sequence 和 Delivery 原子提交。若名称未注册或策略为 DISABLED，则继续现有 Agent trigger 规则。命令注册表读取失败时写可重试分类状态，不能默认为 Agent trigger；到固定 deadline 后写 FAILED 占位以推进连续分类游标。分类重试和超时通知尚未接通。
+如果 token 命中已注册名称但策略拒绝，写 `BUSINESS_COMMAND_DENIED` 终态，并在同一事务创建 `bot_conversation_notices` 工作项；它不能改判 Agent trigger。该通知只能由本群 Conversation Actor 领取，原消息先按 ingress 进入 Context，随后安全 Bot 回复、`SYSTEM_NOTICE`、CHAT reply sequence 和 Delivery 原子提交。若名称未注册或策略为 DISABLED，则继续接入时冻结的 Agent trigger fallback。
+
+命令注册表或策略 payload 暂不可用时，Inbox 保持 `PENDING` 并冻结原始 fallback decision/rule/reason。`business_classification_pending` head 保存 attempt count、下一尝试时间与稳定错误码，每次失败追加不可变 `bot_business_classification_attempts`；两个宿主并发重试同一事件时由 `FOR UPDATE SKIP LOCKED` 合流。恢复后在同一事务冻结 request 并完成 `BUSINESS_COMMAND` 分类；若注册已经消失，则恢复原 fallback。到接入时固定的 classification deadline 后写 `FAILED` 占位、推进连续分类游标，并创建 Actor 有序的 `BUSINESS_CLASSIFICATION_FAILED` 安全通知。
 
 Inbox 重放要求原事件摘要、命令选择和策略证明一致。分类完成后 registry 变化不重解释旧消息。来源遗忘会 scrub 参数 payload，并使尚未执行的请求终结为 `CONTROL_CONTENT_REVOKED`；迟到同源事件继续使用 metadata-only suppression ACK，不能重建参数。
 
@@ -151,7 +153,7 @@ Worker 不能直接发送 OneBot action。宿主在一个 Bot 事务内完成：
 1. **已完成：** manifest/AST/SDK 声明与 Worker 全字段对照，尚不在平台公开命令；
 2. **已完成：** PostgreSQL registry、冲突检查、generation 切换和宿主内部 retirement 原语；
 3. **已完成：** Web policy preview/apply、表单和来源 payload；
-4. **4a 已完成：** OneBot 确定性 token 分类、持久 request、策略拒绝、策略收紧与遗忘/重复事件合流；**4b 部分完成：** 安全拒绝回复已由 Actor 有序提交，分类故障的持久重试、固定 deadline 占位和超时通知仍待完成；
+4. **4a 已完成：** OneBot 确定性 token 分类、持久 request、策略拒绝、策略收紧与遗忘/重复事件合流；**4b 已完成：** 分类故障持久重试、冻结 fallback、固定 deadline 占位，以及 Actor 有序的拒绝和分类失败通知；
 5. **5a 已完成：** 不可变 `Reply/Consumed/Pass`、Worker `CommandEvent` 调用、Kernel generation/route/schema 栅栏与稳定 operation 结果重放；**5b 已完成：** Actor P2 领取、领取时当前 Actor/Binding 授权复核，以及 request/result/Context/reply sequence/Delivery 原子提交；**5c 已完成：** 执行故障的不可变 attempt、持久退避/deadline、Actor 接管和安全终态回复；
 6. Web 诊断、限额、恢复、升级和端到端验收。
 
