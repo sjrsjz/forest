@@ -1,6 +1,6 @@
 # 原生 Python 插件与开发体验详细设计
 
-> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@plugin`、`@service`、`@subscribe`、`@job`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check`、单次 `forest dev` 和自动 watch。缺少显式 `module.toml` 时，构建器已从字面量装饰器和 `pyproject.toml` 静态生成清单、内联 schema 与 `checksums.json`。类方法 `@command` 的静态生成、纯命令包接纳和候选 Worker 全字段核验已经实现，但尚未接入持久 registry、平台分类、同群 Actor 或回复提交。DTO schema/适配入口生成及记忆/回复/通用服务代理仍是目标接口；示例见 [counter](../examples/counter/python/counter.py) 与 [auto_echo](../examples/auto_echo/src/auto_echo/__init__.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
+> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@plugin`、`@service`、`@subscribe`、`@job`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check`、单次 `forest dev` 和自动 watch。缺少显式 `module.toml` 时，构建器已从字面量装饰器和 `pyproject.toml` 静态生成清单、内联 schema 与 `checksums.json`。类方法 `@command` 的静态生成、纯命令包接纳、候选 Worker 全字段核验和 PostgreSQL effective registry 已经实现，但尚未接入 Web 用户策略、平台分类、同群 Actor 或回复提交。DTO schema/适配入口生成及记忆/回复/通用服务代理仍是目标接口；示例见 [counter](../examples/counter/python/counter.py) 与 [auto_echo](../examples/auto_echo/src/auto_echo/__init__.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
 
 ## 1. 插件作者看到的接口
 

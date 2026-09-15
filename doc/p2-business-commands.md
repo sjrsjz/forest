@@ -1,6 +1,6 @@
 # P2 业务命令与普通消息插件链详细设计
 
-状态：协议已冻结，实施切片 1 已完成。`@command` 可静态生成正式 manifest/schema，纯命令包可被接纳，候选 Worker 会逐字段核验运行时声明；第 3–9 节的持久 registry、策略、消息分类、Actor 执行和回复提交仍待实现。本文补全 03、07、08、09 中的业务命令路径。它不改变每个 `(bot_id, conversation_id)` 只有一个 Agent 的设计，也不创建产品子 Agent。
+状态：协议已冻结，实施切片 1–2 已完成。`@command` 可静态生成正式 manifest/schema，纯命令包可被接纳，候选 Worker 会逐字段核验运行时声明；PostgreSQL effective registry、同名冲突、路由代际原子切换、disable/re-enable 和永久 retirement 原语也已接通。Web 用户策略、消息分类、Actor 执行和回复提交仍待实现。本文补全 03、07、08、09 中的业务命令路径。它不改变每个 `(bot_id, conversation_id)` 只有一个 Agent 的设计，也不创建产品子 Agent。
 
 ## 1. 目标与边界
 
@@ -147,7 +147,7 @@ Worker 不能直接发送 OneBot action。宿主在一个 Bot 事务内完成：
 实现按以下顺序提交，每一步必须可执行：
 
 1. **已完成：** manifest/AST/SDK 声明与 Worker 全字段对照，尚不在平台公开命令；
-2. PostgreSQL registry、冲突检查、generation 切换和 retirement；
+2. **已完成：** PostgreSQL registry、冲突检查、generation 切换和宿主内部 retirement 原语；
 3. Web policy preview/apply、表单和来源 payload；
 4. OneBot 接入分类、持久 request、遗忘终结与重放合流；
 5. Actor P2 调度、CommandEvent、Reply/Consumed/Pass 和原子 Delivery；

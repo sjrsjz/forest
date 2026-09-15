@@ -575,6 +575,7 @@ class Kernel:
             event_definitions = []
             jobs = {}
             job_definitions = []
+            command_definitions = []
             for item in spec.get("publishes", []):
                 schema = snapshot.schema(item["schema"])
                 publication = EventPublication(
@@ -617,6 +618,17 @@ class Kernel:
                     "topic": item["topic"], "contract_major": major,
                     "contract_minor": minor, "schema_digest": subscription.schema_digest,
                     "max_attempts": subscription.max_attempts,
+                })
+            for item in spec.get("commands", []):
+                command_definitions.append({
+                    "command_id": item["command_id"],
+                    "name": item["name"],
+                    "handler": item["handler"],
+                    "permission": item["permission"],
+                    "argument_mode": item["argument_mode"],
+                    "input_schema": item["input_schema"],
+                    "schema_digest": digest_json(snapshot.schema(item["input_schema"])),
+                    "priority": item["priority"],
                 })
             component_id = spec["id"]
             old = self.components.get(component_id)
@@ -725,6 +737,7 @@ class Kernel:
                     ),
                     event_definitions=event_definitions,
                     job_definitions=job_definitions,
+                    command_definitions=command_definitions,
                 )
                 operation = await self.store.begin_operation(
                     authority,

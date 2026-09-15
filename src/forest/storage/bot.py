@@ -40,8 +40,9 @@ from forest.storage.migration_v7 import install_writer_gate_in as install_writer
 from forest.storage.migration_v8 import install_writer_gate_in as install_writer_gate_v8_in
 from forest.storage.migration_v9 import install_writer_gate_in as install_writer_gate_v9_in
 from forest.storage.migration_v10 import install_writer_gate_in as install_writer_gate_v10_in
-from forest.storage.migration_v11 import WRITER_GENERATION
 from forest.storage.migration_v11 import install_writer_gate_in as install_writer_gate_v11_in
+from forest.storage.migration_v12 import WRITER_GENERATION
+from forest.storage.migration_v12 import install_writer_gate_in as install_writer_gate_v12_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -83,10 +84,41 @@ MIGRATION_V8 = frozenset({"068_shell_priority_qualification.sql"})
 MIGRATION_V9 = frozenset({"069_module_lifecycle.sql"})
 MIGRATION_V10 = frozenset({"070_suppressed_occurrence_receipts.sql"})
 MIGRATION_V11 = frozenset({"071_context_reset.sql"})
+MIGRATION_V12 = frozenset({"072_business_command_registry.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
     handler = MIGRATION_HANDLERS.get(version)
+    if version in MIGRATION_V12:
+        root = files("forest.storage")
+        try:
+            helpers = [
+                [name, root.joinpath(name).read_text(encoding="utf-8")]
+                for name in (
+                    "migration_v1.py",
+                    "migration_v2.py",
+                    "migration_v3.py",
+                    "migration_v4.py",
+                    "migration_v5.py",
+                    "migration_v6.py",
+                    "migration_v7.py",
+                    "migration_v8.py",
+                    "migration_v9.py",
+                    "migration_v10.py",
+                    "migration_v11.py",
+                    "migration_v12.py",
+                )
+            ]
+        except FileNotFoundError as exc:
+            raise ForestError(
+                "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
+            ) from exc
+        envelope = json.dumps(
+            ["forest.bot.migration.v12", source, None, helpers],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(envelope).hexdigest()
     if version in MIGRATION_V11:
         root = files("forest.storage")
         forest_root = files("forest")
@@ -523,6 +555,7 @@ class BotStore:
             gated_v9 = False
             gated_v10 = False
             gated_v11 = False
+            gated_v12 = False
             for version, source, checksum in plan:
                 handler = MIGRATION_HANDLERS.get(version)
                 if handler and not gated:
@@ -558,6 +591,9 @@ class BotStore:
                 if version in MIGRATION_V11 and not gated_v11:
                     await install_writer_gate_v11_in(conn)
                     gated_v11 = True
+                if version in MIGRATION_V12 and not gated_v12:
+                    await install_writer_gate_v12_in(conn)
+                    gated_v12 = True
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)
@@ -881,6 +917,7 @@ class BotStore:
         configuration_operation_id: str | None = None,
         event_definitions: list[dict] | None = None,
         job_definitions: list[dict] | None = None,
+        command_definitions: list[dict] | None = None,
     ) -> dict:
         self._scope(lease)
         config = config if config is not None else {}
@@ -903,6 +940,7 @@ class BotStore:
         state_migrations = json.loads(json.dumps(state_migrations or [], allow_nan=False))
         event_definitions = json.loads(json.dumps(event_definitions or [], allow_nan=False))
         job_definitions = json.loads(json.dumps(job_definitions or [], allow_nan=False))
+        command_definitions = json.loads(json.dumps(command_definitions or [], allow_nan=False))
         if not isinstance(state_migrations, list) or len(state_migrations) > 64 or any(
             not isinstance(item, dict) or set(item) != {"from_schema", "to_schema"}
             or type(item["from_schema"]) is not int or item["from_schema"] < 1
@@ -979,6 +1017,16 @@ class BotStore:
                     job_definitions,
                     existing_generation=True,
                 )
+                from forest.storage.command_registry import CommandRegistryStore
+
+                await CommandRegistryStore(self).register_generation_in(
+                    conn,
+                    generation_id,
+                    component_id,
+                    package_digest,
+                    command_definitions,
+                    existing_generation=True,
+                )
                 await self.content.guard_in(conn, [generation_id], phase="admission")
                 await self._host(conn, lease)
                 return existing
@@ -1032,6 +1080,11 @@ class BotStore:
 
             await ComponentJobStore(self).register_generation_in(
                 conn, generation_id, component_id, job_definitions
+            )
+            from forest.storage.command_registry import CommandRegistryStore
+
+            await CommandRegistryStore(self).register_generation_in(
+                conn, generation_id, component_id, package_digest, command_definitions
             )
             await self._event(
                 conn,
@@ -1685,6 +1738,14 @@ class BotStore:
             await ComponentJobStore(self).publish_generation_in(
                 conn, candidate["generation_id"], operation["component_id"]
             )
+            from forest.storage.command_registry import CommandRegistryStore
+
+            await CommandRegistryStore(self).publish_generation_in(
+                conn,
+                candidate["generation_id"],
+                operation["component_id"],
+                route["route_epoch"] + 1,
+            )
             await conn.execute(
                 "UPDATE public.bot_generations SET status='RETIRED' WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",
                 (self.bot_id, route["generation_id"]),
@@ -1766,6 +1827,11 @@ class BotStore:
                     "WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",
                     (self.bot_id, route["generation_id"]),
                 )
+            from forest.storage.command_registry import CommandRegistryStore
+
+            await CommandRegistryStore(self).disable_component_in(
+                conn, operation["component_id"], route["route_epoch"] + 1
+            )
             result = await (
                 await conn.execute(
                     "UPDATE public.bot_component_routes SET generation_id=NULL,"
