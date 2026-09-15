@@ -21,7 +21,7 @@ from forest.storage import bot as bot_module
 from forest.storage.bot import BotStore, _migration_checksum
 
 FENCE = "042_schema_writer_v2.sql"
-CURRENT_FENCE = "072_business_command_registry.sql"
+CURRENT_FENCE = "074_business_command_requests.sql"
 OLD_CHAIN = "addb66245fdf6113bf0067bd0c4a5be8fc114f88155ac55545bc93691f8be5ba"
 OLD_WRITER_SHA = "8960f47437997394d2b07aa9f9bdbc2616da4d6a34b741f029ff170d072934dc"
 CANARY = {"config": {"label": "旧配置 CANARY", "optional": None}, "grants": []}
@@ -47,6 +47,7 @@ def resources(path, *, cutoff="042"):
         ("migration_v10.py", "070"),
         ("migration_v11.py", "071"),
         ("migration_v12.py", "072"),
+        ("migration_v13.py", "074"),
     ):
         if cutoff >= introduced:
             (path / name).write_text(source.joinpath(name).read_text(encoding="utf-8"), encoding="utf-8")
@@ -204,7 +205,7 @@ async def test_fresh_database_crosses_all_gates_and_noop_preserves_live_host(upg
         await store.migrate()
         lease = await store.acquire_host("new", "fresh", ttl_seconds=60)
         before = await state(store)
-        assert before["gate"] == 12
+        assert before["gate"] == 13
         assert {FENCE, CURRENT_FENCE} <= {row["version"] for row in before["ledger"]}
         assert before["runtime"]["storage_generation"] == 1
         await store.migrate()

@@ -284,6 +284,34 @@ class CommandPolicyStore:
                 "WHERE bot_id=%s AND binding_id=%s AND command_id=%s",
                 (revision, self.store.bot_id, payload["binding_id"], payload["command_id"]),
             )
+            allowed_users = None
+            if plan["values"]["mode"] == "DISABLED":
+                allowed_users = []
+            elif plan["values"]["mode"] == "USER_SET":
+                allowed_users = plan["values"]["user_ids"]
+            elif plan["values"]["mode"] == "ADMINS":
+                from forest.storage.bindings import BindingStore
+
+                current = await BindingStore.current_config_in(
+                    conn,
+                    self.store.bot_id,
+                    payload["binding_id"],
+                    required=True,
+                )
+                allowed_users = current["config"]["admin_user_ids"]
+            if allowed_users is not None:
+                await conn.execute(
+                    "UPDATE public.bot_business_command_requests SET status='CANCELLED',"
+                    "terminal_reason='COMMAND_POLICY_REVOKED',completed_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND binding_id=%s AND command_id=%s AND status='PENDING' "
+                    "AND NOT (external_user_id=ANY(%s))",
+                    (
+                        self.store.bot_id,
+                        payload["binding_id"],
+                        payload["command_id"],
+                        allowed_users,
+                    ),
+                )
             await self.control._time(conn, claims)
             if plan["expires_at"] <= await self.store._now(conn):
                 raise ForestError("PLAN_EXPIRED", "Command policy expired before publication", 409)

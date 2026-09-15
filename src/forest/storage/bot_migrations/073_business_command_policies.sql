@@ -247,6 +247,7 @@ BEGIN
  );
  resource := CASE NEW.family WHEN 'config' THEN plan->>'component_id'
   WHEN 'binding' THEN plan->>'binding_id'
+  WHEN 'job' THEN plan->>'job_id'
   WHEN 'command.policy' THEN plan->>'resource_id' ELSE '' END;
  IF NEW.family='command.policy' THEN
   actual_values := public.forest_command_policy_payload_values(

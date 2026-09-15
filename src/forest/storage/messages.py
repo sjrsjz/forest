@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,8 @@ from forest.shell_authority import P0_PRIORITY_POLICY, qualify_priority
 from forest.shell_commands import parse_command
 from forest.shell_ingress import ShellPriorityProof
 from forest.storage.bot import BotStore, HostLease
+from forest.storage.business_command_payloads import BusinessCommandPayloadStore
+from forest.storage.command_policies import CommandPolicyStore
 from forest.storage.input_payloads import InputContentStore, identity
 from forest.storage.shell_payloads_v12 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
@@ -95,7 +98,102 @@ class MessageStore:
         self.store = store
         self.bindings = bindings
         self.shell_payloads = ShellPayloadStore(store)
+        self.business_payloads = BusinessCommandPayloadStore(store)
         self.context_token_budget = context_token_budget
+
+    @staticmethod
+    def _business_token(value: dict) -> tuple[str, str] | None:
+        """Read one token from one real text segment; other parts never join it."""
+        for part in value["segments"]:
+            if part["type"] != "text":
+                continue
+            text = part["text"].lstrip()
+            if not text:
+                continue
+            pieces = text.split(maxsplit=1)
+            token = unicodedata.normalize("NFC", pieces[0])
+            if not token.startswith("/"):
+                return None
+            return token, pieces[1].lstrip() if len(pieces) == 2 else ""
+        return None
+
+    async def _business_plan_in(self, conn, binding, value) -> dict | None:
+        token = self._business_token(value)
+        if token is None or value["author"].get("is_self"):
+            return None
+        name, argument_text = token
+        await conn.execute(
+            "INSERT INTO public.bot_command_clocks(bot_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (self.store.bot_id,),
+        )
+        clock = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_command_clocks WHERE bot_id=%s FOR SHARE",
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+        command = await (
+            await conn.execute(
+                "SELECT h.*,g.package_digest FROM public.bot_command_heads h "
+                "JOIN public.bot_command_generations g ON "
+                "(g.bot_id,g.generation_id)=(h.bot_id,h.generation_id) "
+                "WHERE h.bot_id=%s AND h.name=%s AND h.active=true AND h.retired=false",
+                (self.store.bot_id, name),
+            )
+        ).fetchone()
+        if command is None:
+            return None
+        policy = await (
+            await conn.execute(
+                "SELECT r.* FROM public.bot_command_policy_heads p "
+                "JOIN public.bot_command_policy_revisions r ON "
+                "(r.bot_id,r.binding_id,r.command_id,r.revision)="
+                "(p.bot_id,p.binding_id,p.command_id,p.revision) "
+                "WHERE p.bot_id=%s AND p.binding_id=%s AND p.command_id=%s "
+                "FOR SHARE OF p,r",
+                (self.store.bot_id, binding["binding_id"], command["command_id"]),
+            )
+        ).fetchone()
+        if policy is None or policy["policy_mode"] == "DISABLED":
+            return None
+        hydrated = await CommandPolicyStore(self.store)._hydrate_in(
+            conn, policy, kind="REVISION", required=False
+        )
+        if hydrated["values_payload_state"] != "ACTIVE":
+            return {"failed": True, "reason": "business_command_policy_unavailable"}
+        values = hydrated["values"]
+        author = value["author"]
+        verified = (
+            author.get("identity_origin") == "adapter_verified"
+            and author.get("anonymous") is None
+            and isinstance(author.get("external_user_id"), str)
+        )
+        binding_config_revision = None
+        allowed = False
+        if values["mode"] == "EVERYONE":
+            allowed = verified
+        elif values["mode"] == "USER_SET":
+            allowed = verified and author["external_user_id"] in values["user_ids"]
+        elif values["mode"] == "ADMINS":
+            current = await self.bindings.current_config_in(
+                conn,
+                self.store.bot_id,
+                binding["binding_id"],
+                expected_binding_epoch=binding["binding_epoch"],
+            )
+            binding_config_revision = current["effective_revision"]
+            allowed = verified and author["external_user_id"] in current["config"][
+                "admin_user_ids"
+            ]
+        return {
+            "failed": False,
+            "allowed": allowed,
+            "argument_text": argument_text,
+            "registry_revision": clock["revision"],
+            "command": command,
+            "policy": policy,
+            "binding_config_revision": binding_config_revision,
+        }
 
     def _memory_sources(self):
         from forest.storage.memory_sources import MemorySourceStore
@@ -359,6 +457,11 @@ class MessageStore:
                             if parse_command(event) is not None
                             else None
                         ),
+                        "business_request_id": (
+                            "business-command:" + digest_json(identifiers["event_id"])
+                            if existing["trigger_decision"] == "BUSINESS_COMMAND"
+                            else None
+                        ),
                         "trigger_decision": existing["trigger_decision"],
                     },
                 )
@@ -430,6 +533,17 @@ class MessageStore:
             )
             if binding["self_id"] != value["self_id"] or binding["platform"] != value["platform"]:
                 raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
+            business_plan = None
+            if parsed_command is None:
+                business_plan = await self._business_plan_in(conn, binding, value)
+                if business_plan is not None:
+                    if business_plan.get("failed"):
+                        decision = "FAILED"
+                        rule_revision = "business-command-v1"
+                        reason = business_plan["reason"]
+                    else:
+                        decision = "BUSINESS_COMMAND"
+                        rule_revision = "business-command-v1"
             priority_admission = None
             if parsed_command is not None:
                 if type(priority_proof) is ShellPriorityProof:
@@ -554,7 +668,12 @@ class MessageStore:
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
                 return {"conversation_id": conversation_id, "event_id": event_id,
                         "ingress_seq": existing["ingress_seq"], "duplicate": True,
-                        "command_id": command_id, "trigger_decision": existing["trigger_decision"]}
+                        "command_id": command_id,
+                        "business_request_id": (
+                            "business-command:" + digest_json(event_id)
+                            if existing["trigger_decision"] == "BUSINESS_COMMAND" else None
+                        ),
+                        "trigger_decision": existing["trigger_decision"]}
             contents = InputContentStore(self.store)
             clock = await contents.payloads.lock_in(conn)
             basis = await contents.payloads.suppression_basis_in(
@@ -643,6 +762,85 @@ class MessageStore:
                      priority_admission["priority_basis_binding_epoch"],
                      priority_admission["priority_basis_config_revision"]),
                 )
+            business_request_id = None
+            if business_plan is not None and not business_plan.get("failed"):
+                business_request_id = "business-command:" + digest_json(event_id)
+                command, policy = business_plan["command"], business_plan["policy"]
+                arguments_ref, arguments_digest = await self.business_payloads.put_arguments_in(
+                    conn,
+                    request_id=business_request_id,
+                    command_id=command["command_id"],
+                    name=command["name"],
+                    argument_mode=command["argument_mode"],
+                    argument_text=business_plan["argument_text"],
+                    input_payload_id=payload.payload_id,
+                    epoch=clock["deletion_epoch"],
+                )
+                status = "PENDING" if business_plan["allowed"] else "DENIED"
+                terminal_reason = None if business_plan["allowed"] else "BUSINESS_COMMAND_DENIED"
+                request_fact = {
+                    "event_id": event_id,
+                    "conversation_id": conversation_id,
+                    "binding_id": binding_id,
+                    "ingress_seq": seq,
+                    "principal_ref": value["author"]["principal_ref"],
+                    "external_user_id": value["author"]["external_user_id"],
+                    "command_id": command["command_id"],
+                    "command_name": command["name"],
+                    "component_id": command["component_id"],
+                    "generation_id": command["generation_id"],
+                    "route_epoch": command["route_epoch"],
+                    "registry_revision": business_plan["registry_revision"],
+                    "command_spec_digest": command["spec_digest"],
+                    "handler": command["handler"],
+                    "permission": command["permission"],
+                    "argument_mode": command["argument_mode"],
+                    "input_schema": command["input_schema"],
+                    "schema_digest": command["schema_digest"],
+                    "command_policy_revision": policy["revision"],
+                    "policy_mode": policy["policy_mode"],
+                    "policy_payload_id": policy["values_payload_id"],
+                    "policy_payload_digest": policy["values_payload_digest"],
+                    "binding_config_revision": business_plan["binding_config_revision"],
+                    "input_payload_id": payload.payload_id,
+                    "arguments_payload_id": arguments_ref.payload_id,
+                    "arguments_payload_digest": arguments_ref.digest,
+                    "arguments_digest": arguments_digest,
+                    "status": status,
+                    "terminal_reason": terminal_reason,
+                }
+                request_digest = digest_json(request_fact)
+                await conn.execute(
+                    "INSERT INTO public.bot_business_command_requests("
+                    "bot_id,request_id,event_id,conversation_id,binding_id,ingress_seq,"
+                    "principal_ref,external_user_id,command_id,command_name,component_id,"
+                    "generation_id,route_epoch,registry_revision,command_spec_digest,handler,"
+                    "permission,argument_mode,input_schema,schema_digest,command_policy_revision,"
+                    "policy_mode,policy_payload_id,policy_payload_digest,binding_config_revision,"
+                    "input_payload_id,arguments_payload_id,arguments_payload_digest,arguments_digest,"
+                    "request_digest,status,terminal_reason,completed_at) VALUES ("
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='DENIED' THEN clock_timestamp() END)",
+                    (
+                        self.store.bot_id,
+                        business_request_id,
+                        *(request_fact[key] for key in (
+                            "event_id", "conversation_id", "binding_id", "ingress_seq",
+                            "principal_ref", "external_user_id", "command_id", "command_name",
+                            "component_id", "generation_id", "route_epoch", "registry_revision",
+                            "command_spec_digest", "handler", "permission", "argument_mode",
+                            "input_schema", "schema_digest", "command_policy_revision", "policy_mode",
+                            "policy_payload_id", "policy_payload_digest", "binding_config_revision",
+                            "input_payload_id", "arguments_payload_id", "arguments_payload_digest",
+                            "arguments_digest",
+                        )),
+                        request_digest,
+                        status,
+                        terminal_reason,
+                        status,
+                    ),
+                )
+                reason = business_request_id + ":" + request_digest
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
                 "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
@@ -660,6 +858,7 @@ class MessageStore:
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
             return {"conversation_id": conversation_id, "event_id": event_id,
                     "ingress_seq": seq, "duplicate": False, "command_id": command_id,
+                    "business_request_id": business_request_id,
                     "trigger_decision": decision or "PENDING"}
 
     async def enqueue_job_trigger_in(self, conn, lease, occurrence, binding, definition):

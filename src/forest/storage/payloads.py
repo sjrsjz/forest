@@ -32,7 +32,7 @@ OWNER_KINDS = frozenset({
     "context.parts", "reply.parts", "delivery.payload", "delivery.request", "delivery.receipt",
     "kernel.input", "kernel.result", "state.value", "state.migration", "control.input", "control.result", "control.config",
     "control.audit", "control.outbox", "job.definition", "shell.arguments", "component.event",
-    "component.job",
+    "component.job", "command.arguments",
 })
 
 
