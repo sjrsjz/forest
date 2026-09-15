@@ -27,6 +27,7 @@ from forest.storage.business_command_payloads import BusinessCommandPayloadStore
 from forest.storage.command_limits import CommandLimitStore
 from forest.storage.command_policies import CommandPolicyStore
 from forest.storage.input_payloads import InputContentStore, identity
+from forest.storage.message_handler_chains import MessageHandlerChainStore
 from forest.storage.shell_payloads_v12 import (
     UNAVAILABLE as SHELL_UNAVAILABLE,
 )
@@ -100,6 +101,7 @@ class MessageStore:
         self.bindings = bindings
         self.shell_payloads = ShellPayloadStore(store)
         self.business_payloads = BusinessCommandPayloadStore(store)
+        self.handler_chains = MessageHandlerChainStore(store, bindings)
         self.context_token_budget = context_token_budget
 
     @staticmethod
@@ -692,6 +694,22 @@ class MessageStore:
             )
             if binding["self_id"] != value["self_id"] or binding["platform"] != value["platform"]:
                 raise ForestError("BINDING_IDENTITY_MISMATCH", "Message belongs to another account", 403)
+            handler_snapshot = None
+            if parsed_command is None and value["channel_kind"] == "group":
+                # Lifecycle publication locks the command registry before the
+                # ordinary-handler registry. Establish the same order before
+                # either policy family reads removable payload content.
+                await conn.execute(
+                    "INSERT INTO public.bot_command_clocks(bot_id) VALUES (%s) "
+                    "ON CONFLICT DO NOTHING",
+                    (self.store.bot_id,),
+                )
+                await conn.execute(
+                    "SELECT revision FROM public.bot_command_clocks "
+                    "WHERE bot_id=%s FOR SHARE",
+                    (self.store.bot_id,),
+                )
+                handler_snapshot = await self.handler_chains.snapshot_in(conn, binding)
             business_plan = None
             business_classification_error = None
             if parsed_command is None:
@@ -824,6 +842,11 @@ class MessageStore:
                     )
                 if value["author"].get("is_self"):
                     await self._reconcile_exact_echo_in(conn, lease, binding, conversation, event_id)
+                handler_chain = await (await conn.execute(
+                    "SELECT chain_id FROM public.bot_message_handler_chains "
+                    "WHERE bot_id=%s AND event_id=%s",
+                    (self.store.bot_id, event_id),
+                )).fetchone()
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
                 return {"conversation_id": conversation_id, "event_id": event_id,
                         "ingress_seq": existing["ingress_seq"], "duplicate": True,
@@ -831,6 +854,9 @@ class MessageStore:
                         "business_request_id": (
                             "business-command:" + digest_json(event_id)
                             if existing["trigger_decision"] == "BUSINESS_COMMAND" else None
+                        ),
+                        "message_handler_chain_id": (
+                            handler_chain["chain_id"] if handler_chain else None
                         ),
                         "trigger_decision": existing["trigger_decision"]}
             contents = InputContentStore(self.store)
@@ -875,14 +901,14 @@ class MessageStore:
             seq = conversation["next_ingress_seq"]
             payload = await contents.put_input_in(conn, event_id=event_id, source_event_id=source_event_id,
                 author=value["author"], segments=segments, expected_deletion_epoch=clock["deletion_epoch"])
-            await conn.execute(
+            inbox = await (await conn.execute(
                 "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
                 "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,"
                 "business_classification_pending,business_fallback_decision,"
                 "business_fallback_rule_revision,business_fallback_reason,"
                 "business_classification_next_attempt_at,business_classification_error_code) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                "CASE WHEN %s THEN clock_timestamp() END,%s)",
+                "CASE WHEN %s THEN clock_timestamp() END,%s) RETURNING *",
                 (self.store.bot_id, conversation_id, event_id, seq, value["platform_message_id"],
                  source_event_id, input_digest, Jsonb(identity(value["author"])), payload.payload_id,
                  value["sent_at"], _tokens({"author": value["author"], "segments": segments}),
@@ -891,8 +917,8 @@ class MessageStore:
                  fallback_rule_revision if business_classification_error is not None else None,
                  fallback_reason if business_classification_error is not None else None,
                  business_classification_error is not None,
-                 business_classification_error),
-            )
+                business_classification_error),
+            )).fetchone()
             for media_ref, index, source in media:
                 source_payload = await contents.put_media_source_in(conn, media_ref=media_ref,
                     source_event_id=source_event_id, part_index=index, source=source,
@@ -947,13 +973,31 @@ class MessageStore:
                     )
                 )
                 reason = business_request_id + ":" + request_digest
+            handler_chain = None
+            if (
+                shell_command is None
+                and value["channel_kind"] == "group"
+                and (business_plan is None or business_plan.get("failed"))
+            ):
+                handler_chain = await self.handler_chains.freeze_in(
+                    conn,
+                    binding=binding,
+                    inbox=inbox,
+                    author=value["author"],
+                    fallback_decision=fallback_decision,
+                    fallback_rule_revision=fallback_rule_revision,
+                    fallback_reason=fallback_reason,
+                    snapshot=handler_snapshot,
+                )
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
                 "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
                 "WHERE bot_id=%s AND conversation_id=%s",
                 (self.store.bot_id, conversation_id),
             )
-            if decision is not None:
+            if decision is not None and not (
+                handler_chain is not None and handler_chain["status"] == "PENDING"
+            ):
                 await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
             await self._register_memory_input(conn, conversation, event_id,
                 body={"author": value["author"], "segments": segments})
@@ -962,10 +1006,18 @@ class MessageStore:
             await self.store._event(conn, "conversation.input", event_id,
                                     {"conversation_id": conversation_id, "ingress_seq": seq})
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
+            effective_decision = (
+                "PENDING"
+                if handler_chain is not None and handler_chain["status"] == "PENDING"
+                else decision or "PENDING"
+            )
             return {"conversation_id": conversation_id, "event_id": event_id,
                     "ingress_seq": seq, "duplicate": False, "command_id": command_id,
                     "business_request_id": business_request_id,
-                    "trigger_decision": decision or "PENDING"}
+                    "message_handler_chain_id": (
+                        handler_chain["chain_id"] if handler_chain is not None else None
+                    ),
+                    "trigger_decision": effective_decision}
 
     async def enqueue_job_trigger_in(self, conn, lease, occurrence, binding, definition):
         """Host-only, in the caller's authorized Job dispatch transaction.
@@ -1086,9 +1138,54 @@ class MessageStore:
                 require_receive=True,
             )
             await self._conversation(conn, conversation_id)
-            row = await self._classify_in(conn, conversation_id, event_id, decision, rule_revision, reason)
-            await self.store._event(conn, "conversation.classified", event_id,
-                                    {"conversation_id": conversation_id})
+            chain = await (await conn.execute(
+                "SELECT * FROM public.bot_message_handler_chains WHERE bot_id=%s "
+                "AND event_id=%s FOR UPDATE",
+                (self.store.bot_id, event_id),
+            )).fetchone()
+            if chain is not None and decision in {"TRIGGER", "NO_TRIGGER"}:
+                chain = await self.handler_chains.resolve_fallback_in(
+                    conn, chain, decision, rule_revision, reason
+                )
+                if chain["status"] == "PENDING":
+                    row = await (await conn.execute(
+                        "SELECT * FROM public.bot_message_inbox WHERE bot_id=%s AND event_id=%s",
+                        (self.store.bot_id, event_id),
+                    )).fetchone()
+                elif chain["status"] == "PASSED":
+                    row = await self._classify_in(
+                        conn, conversation_id, event_id, decision, rule_revision, reason
+                    )
+                else:
+                    raise ForestError(
+                        "MESSAGE_HANDLER_CHAIN_TERMINAL",
+                        "A terminal handler chain cannot receive a fallback decision",
+                        409,
+                    )
+            elif chain is not None and not (
+                decision == "FAILED"
+                and chain["status"] == "PASSED"
+                and chain["fallback_decision"] == "PENDING"
+            ):
+                raise ForestError(
+                    "MESSAGE_HANDLER_FALLBACK_INVALID",
+                    "This message is governed by its frozen handler fallback",
+                    409,
+                )
+            else:
+                row = await self._classify_in(
+                    conn, conversation_id, event_id, decision, rule_revision, reason
+                )
+            await self.store._event(
+                conn,
+                (
+                    "conversation.classified"
+                    if row["trigger_decision"] != "PENDING"
+                    else "message_handler.fallback_resolved"
+                ),
+                event_id,
+                {"conversation_id": conversation_id},
+            )
             await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True, require_config=True)
             return row
 
@@ -1280,20 +1377,35 @@ class MessageStore:
                     decision = "BUSINESS_COMMAND"
                     rule_revision = "business-command-v1"
                     reason = request_id + ":" + request_digest
+                    await self.handler_chains.cancel_for_business_command_in(
+                        conn, inbox["event_id"]
+                    )
                 await conn.execute(
                     "UPDATE public.bot_message_inbox SET business_classification_pending=false,"
                     "business_classification_next_attempt_at=NULL WHERE bot_id=%s AND event_id=%s",
                     (self.store.bot_id, inbox["event_id"]),
                 )
                 if decision != "PENDING":
-                    await self._classify_in(
-                        conn,
-                        inbox["conversation_id"],
-                        inbox["event_id"],
-                        decision,
-                        rule_revision,
-                        reason,
-                    )
+                    chain = await (await conn.execute(
+                        "SELECT * FROM public.bot_message_handler_chains WHERE bot_id=%s "
+                        "AND event_id=%s FOR UPDATE",
+                        (self.store.bot_id, inbox["event_id"]),
+                    )).fetchone()
+                    if chain is not None and decision in {"TRIGGER", "NO_TRIGGER"}:
+                        chain = await self.handler_chains.resolve_fallback_in(
+                            conn, chain, decision, rule_revision, reason
+                        )
+                    if chain is None or chain["status"] in {"PASSED", "CANCELLED"}:
+                        await self._classify_in(
+                            conn,
+                            inbox["conversation_id"],
+                            inbox["event_id"],
+                            decision,
+                            rule_revision,
+                            reason,
+                        )
+                    else:
+                        decision = "PENDING"
                 await self.store._event(
                     conn,
                     "business_command.classification_completed",
@@ -1373,6 +1485,9 @@ class MessageStore:
                 kind="BUSINESS_CLASSIFICATION_FAILED",
                 error_code=error_code,
             )
+            await self.handler_chains.cancel_in(
+                conn, event_id, "BUSINESS_CLASSIFICATION_FAILED"
+            )
             await conn.execute(
                 "UPDATE public.bot_message_inbox SET business_classification_pending=false,"
                 "business_classification_attempt_count=%s,business_classification_next_attempt_at=NULL,"
@@ -1419,6 +1534,8 @@ class MessageStore:
                 "JOIN public.bot_bindings b ON b.bot_id=c.bot_id AND b.binding_id=c.binding_id "
                 "WHERE i.bot_id=%s AND b.receive_enabled AND b.state IN ('ONLINE','DRAINING') "
                 "AND i.trigger_decision='PENDING' AND i.classification_deadline<=clock_timestamp() "
+                "AND NOT EXISTS(SELECT 1 FROM public.bot_message_handler_chains h "
+                "WHERE h.bot_id=i.bot_id AND h.event_id=i.event_id AND h.status='PENDING') "
                 "ORDER BY i.classification_deadline LIMIT %s", (self.store.bot_id, limit),
             )).fetchall()
         count = 0

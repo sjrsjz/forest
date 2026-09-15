@@ -1,0 +1,13 @@
+"""Writer fence for immutable ordinary-message handler chains, starting at 082."""
+
+from forest.storage.migration_v20 import install_writer_gate_in as install_v20_gate_in
+
+WRITER_GENERATION = 21
+
+
+async def install_writer_gate_in(conn):
+    await install_v20_gate_in(conn)
+    await conn.execute(
+        "UPDATE public.bot_schema_writer_gate "
+        "SET minimum_generation=GREATEST(minimum_generation,21) WHERE singleton"
+    )

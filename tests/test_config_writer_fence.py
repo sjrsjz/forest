@@ -21,7 +21,7 @@ from forest.storage import bot as bot_module
 from forest.storage.bot import BotStore, _migration_checksum
 
 FENCE = "042_schema_writer_v2.sql"
-CURRENT_FENCE = "081_message_handler_policies.sql"
+CURRENT_FENCE = "082_message_handler_chains.sql"
 OLD_CHAIN = "addb66245fdf6113bf0067bd0c4a5be8fc114f88155ac55545bc93691f8be5ba"
 OLD_WRITER_SHA = "8960f47437997394d2b07aa9f9bdbc2616da4d6a34b741f029ff170d072934dc"
 CANARY = {"config": {"label": "旧配置 CANARY", "optional": None}, "grants": []}
@@ -55,6 +55,7 @@ def resources(path, *, cutoff="042"):
         ("migration_v18.py", "079"),
         ("migration_v19.py", "080"),
         ("migration_v20.py", "081"),
+        ("migration_v21.py", "082"),
     ):
         if cutoff >= introduced:
             (path / name).write_text(source.joinpath(name).read_text(encoding="utf-8"), encoding="utf-8")
