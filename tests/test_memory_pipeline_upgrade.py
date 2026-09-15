@@ -471,6 +471,14 @@ async def test_nonempty_022_upgrade_preserves_payloads_eligibility_config_and_ex
                 "module.validate",
                 "module.reload",
                 "module.enable",
+                "command.policy.read",
+                "command.policy.plan",
+                "command.execution.read",
+                "command.limit.read",
+                "command.limit.plan",
+                "message.handler.policy.read",
+                "message.handler.policy.plan",
+                "message.handler.execution.read",
             }
             for table in (
                 "bot_memory_config_revisions",
@@ -576,6 +584,24 @@ async def test_upgrade_maps_each_memory_action_without_elevating_restricted_issu
                 expected.add("module.enable")
             if {"config.apply", "message.cancel"} <= set(row["actions"]):
                 expected.add("module.disable")
+            if "message.read" in row["actions"]:
+                expected.update({
+                    "command.policy.read", "command.execution.read", "command.limit.read",
+                    "message.handler.policy.read", "message.handler.execution.read",
+                })
+            if "config.plan" in row["actions"]:
+                expected.update({
+                    "command.policy.plan", "command.limit.plan", "message.handler.policy.plan",
+                })
+            if {"config.apply", "message.cancel"} <= set(row["actions"]):
+                expected.update({
+                    "command.policy.apply", "command.limit.apply",
+                    "message.handler.policy.apply",
+                })
+            if "message.cancel" in row["actions"]:
+                expected.update({
+                    "command.execution.recover", "message.handler.execution.recover",
+                })
             after = actual[row["issuer_id"]]
             assert set(after["actions"]) == expected
             assert {k: v for k, v in after.items() if k != "actions"} == {

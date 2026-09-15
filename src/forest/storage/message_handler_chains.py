@@ -317,12 +317,57 @@ class MessageHandlerChainStore:
                 "Business command ownership arrived after handler execution",
                 409,
             )
+        terminal_reason = reason
+        clear_claim = chain["claim_actor_id"] is not None
+        if clear_claim:
+            if reason != "POLICY_REVOKED" or chain["status"] != "PENDING":
+                raise ForestError(
+                    "MESSAGE_HANDLER_CHAIN_OWNERSHIP_CONFLICT",
+                    "A claimed handler chain can only be suppressed after policy revocation",
+                    409,
+                )
+            attempt = await (
+                await conn.execute(
+                    "SELECT a.call_operation_id,c.status AS call_status "
+                    "FROM public.bot_message_handler_attempts a LEFT JOIN public.bot_calls c "
+                    "ON c.bot_id=a.bot_id AND c.operation_id=a.call_operation_id "
+                    "WHERE (a.bot_id,a.chain_id,a.attempt_no)=(%s,%s,%s) FOR SHARE OF a",
+                    (self.store.bot_id, chain["chain_id"], chain["attempt_count"]),
+                )
+            ).fetchone()
+            if attempt is None:
+                raise ForestError(
+                    "MESSAGE_HANDLER_ATTEMPT_INVALID",
+                    "Claimed handler has no immutable attempt proof",
+                    409,
+                )
+            if attempt["call_status"] == "ADMITTED":
+                raise ForestError(
+                    "MESSAGE_HANDLER_RECOVERY_REQUIRED",
+                    "An admitted handler call must settle before its revoked result is suppressed",
+                    503,
+                )
+            terminal_reason = (
+                "POLICY_REVOKED_AFTER_CALL"
+                if attempt["call_status"] == "COMPLETED"
+                else "POLICY_REVOKED_AFTER_CLAIM"
+            )
         return await (
             await conn.execute(
                 "UPDATE public.bot_message_handler_chains SET status='CANCELLED',"
                 "terminal_reason=%s,completed_at=clock_timestamp(),"
+                "claim_actor_id=CASE WHEN %s THEN NULL ELSE claim_actor_id END,"
+                "claim_actor_epoch=CASE WHEN %s THEN NULL ELSE claim_actor_epoch END,"
+                "claim_host_incarnation=CASE WHEN %s THEN NULL ELSE claim_host_incarnation END,"
                 "revision=revision+1 WHERE bot_id=%s AND chain_id=%s RETURNING *",
-                (reason, self.store.bot_id, chain["chain_id"]),
+                (
+                    terminal_reason,
+                    clear_claim,
+                    clear_claim,
+                    clear_claim,
+                    self.store.bot_id,
+                    chain["chain_id"],
+                ),
             )
         ).fetchone()
 

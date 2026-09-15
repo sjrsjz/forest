@@ -584,6 +584,72 @@ async def test_policy_contraction_before_claim_cancels_without_agent_fallback(
         await kernel.close()
 
 
+async def test_policy_contraction_after_completed_call_suppresses_result_without_reexecution(
+    bot_database, tmp_path
+):
+    store, lease, kernel = await prepare(bot_database, tmp_path)
+    messages = MessageStore(store, BindingStore(store))
+    actor = None
+    try:
+        accepted = await messages.ingest(
+            lease,
+            "binding-a",
+            event(8110),
+            decision="TRIGGER",
+            rule_revision="binding-trigger-v1",
+        )
+        actor = await messages.acquire_actor(
+            lease, accepted["conversation_id"], "post-call-revocation-owner", ttl_seconds=30
+        )
+        selected = await messages.select_input(actor, "handler-select:" + uuid4().hex)
+        receipt = await kernel.invoke_message_handler_with_receipt(
+            selected["request"],
+            selected["event"],
+            operation_id=selected["attempt"]["call_operation_id"],
+            input_parent_ids=tuple(selected["input_parent_ids"]),
+        )
+        assert receipt.value == {"kind": "PASS"}
+        await replace_policy(
+            store,
+            lease,
+            "first",
+            {"mode": "USER_SET", "user_ids": ["29999"]},
+        )
+
+        cancelled = await messages.select_input(actor, "handler-recover:" + uuid4().hex)
+        assert cancelled["kind"] == "MESSAGE_HANDLER_POLICY_REVOKED"
+        drained = await messages.select_input(actor, "handler-drain:" + uuid4().hex)
+        assert drained["kind"] == "SILENT_DRAIN"
+        async with store.pool.connection() as conn:
+            facts = await (
+                await conn.execute(
+                    "SELECT h.status,h.terminal_reason,i.trigger_decision,c.status AS call_status,"
+                    "count(r.result_id) AS results FROM public.bot_message_handler_chains h "
+                    "JOIN public.bot_message_inbox i ON (i.bot_id,i.event_id)=(h.bot_id,h.event_id) "
+                    "JOIN public.bot_message_handler_attempts a ON "
+                    "(a.bot_id,a.chain_id,a.attempt_no)=(h.bot_id,h.chain_id,h.attempt_count) "
+                    "JOIN public.bot_calls c ON c.bot_id=a.bot_id "
+                    "AND c.operation_id=a.call_operation_id "
+                    "LEFT JOIN public.bot_message_handler_results r ON "
+                    "(r.bot_id,r.chain_id)=(h.bot_id,h.chain_id) "
+                    "WHERE h.bot_id=%s AND h.chain_id=%s "
+                    "GROUP BY h.status,h.terminal_reason,i.trigger_decision,c.status",
+                    (store.bot_id, accepted["message_handler_chain_id"]),
+                )
+            ).fetchone()
+        assert facts == {
+            "status": "CANCELLED",
+            "terminal_reason": "POLICY_REVOKED_AFTER_CALL",
+            "trigger_decision": "NO_TRIGGER",
+            "call_status": "COMPLETED",
+            "results": 0,
+        }
+    finally:
+        if actor is not None:
+            await messages.release_actor(actor)
+        await kernel.close()
+
+
 async def test_active_run_waits_at_safe_point_then_actor_claims_the_handler(
     bot_database, tmp_path
 ):

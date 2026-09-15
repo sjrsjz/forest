@@ -51,8 +51,9 @@ from forest.storage.migration_v18 import install_writer_gate_in as install_write
 from forest.storage.migration_v19 import install_writer_gate_in as install_writer_gate_v19_in
 from forest.storage.migration_v20 import install_writer_gate_in as install_writer_gate_v20_in
 from forest.storage.migration_v21 import install_writer_gate_in as install_writer_gate_v21_in
-from forest.storage.migration_v22 import WRITER_GENERATION
 from forest.storage.migration_v22 import install_writer_gate_in as install_writer_gate_v22_in
+from forest.storage.migration_v23 import WRITER_GENERATION
+from forest.storage.migration_v23 import install_writer_gate_in as install_writer_gate_v23_in
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -105,6 +106,7 @@ MIGRATION_V19 = frozenset({"080_message_handler_registry.sql"})
 MIGRATION_V20 = frozenset({"081_message_handler_policies.sql"})
 MIGRATION_V21 = frozenset({"082_message_handler_chains.sql"})
 MIGRATION_V22 = frozenset({"083_message_handler_execution.sql"})
+MIGRATION_V23 = frozenset({"084_message_handler_diagnostics.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:
@@ -121,6 +123,7 @@ def _migration_checksum(version: str, source: str) -> str:
         | MIGRATION_V20
         | MIGRATION_V21
         | MIGRATION_V22
+        | MIGRATION_V23
     ):
         root = files("forest.storage")
         try:
@@ -139,16 +142,17 @@ def _migration_checksum(version: str, source: str) -> str:
                     "migration_v10.py",
                     "migration_v11.py",
                     "migration_v12.py",
-                    *(("migration_v13.py",) if version in (MIGRATION_V13 | MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v14.py",) if version in (MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v15.py",) if version in (MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v16.py",) if version in (MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v17.py",) if version in (MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v18.py",) if version in (MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v19.py",) if version in (MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v20.py",) if version in (MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v21.py",) if version in (MIGRATION_V21 | MIGRATION_V22) else ()),
-                    *(("migration_v22.py",) if version in MIGRATION_V22 else ()),
+                    *(("migration_v13.py",) if version in (MIGRATION_V13 | MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v14.py",) if version in (MIGRATION_V14 | MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v15.py",) if version in (MIGRATION_V15 | MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v16.py",) if version in (MIGRATION_V16 | MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v17.py",) if version in (MIGRATION_V17 | MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v18.py",) if version in (MIGRATION_V18 | MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v19.py",) if version in (MIGRATION_V19 | MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v20.py",) if version in (MIGRATION_V20 | MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v21.py",) if version in (MIGRATION_V21 | MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v22.py",) if version in (MIGRATION_V22 | MIGRATION_V23) else ()),
+                    *(("migration_v23.py",) if version in MIGRATION_V23 else ()),
                 )
             ]
         except FileNotFoundError as exc:
@@ -156,7 +160,8 @@ def _migration_checksum(version: str, source: str) -> str:
                 "MIGRATION_HANDLER_MISSING", "Bot migration handler is unavailable"
             ) from exc
         envelope = json.dumps(
-            ["forest.bot.migration.v22" if version in MIGRATION_V22 else
+            ["forest.bot.migration.v23" if version in MIGRATION_V23 else
+             "forest.bot.migration.v22" if version in MIGRATION_V22 else
              "forest.bot.migration.v21" if version in MIGRATION_V21 else
              "forest.bot.migration.v20" if version in MIGRATION_V20 else
              "forest.bot.migration.v19" if version in MIGRATION_V19 else
@@ -666,6 +671,8 @@ class BotStore:
                     await install_writer_gate_v21_in(conn)
                 if version in MIGRATION_V22:
                     await install_writer_gate_v22_in(conn)
+                if version in MIGRATION_V23:
+                    await install_writer_gate_v23_in(conn)
                 await conn.execute(source)
                 if handler:
                     module = import_module("forest.storage.data_migrations." + handler)

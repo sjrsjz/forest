@@ -140,6 +140,24 @@ def expected_after_memory_permissions(before):
             actions.add("module.enable")
         if {"config.apply", "message.cancel"} <= actions:
             actions.add("module.disable")
+        if "message.read" in actions:
+            actions.update({
+                "command.policy.read", "command.execution.read", "command.limit.read",
+                "message.handler.policy.read", "message.handler.execution.read",
+            })
+        if "config.plan" in actions:
+            actions.update({
+                "command.policy.plan", "command.limit.plan", "message.handler.policy.plan",
+            })
+        if {"config.apply", "message.cancel"} <= actions:
+            actions.update({
+                "command.policy.apply", "command.limit.apply",
+                "message.handler.policy.apply",
+            })
+        if "message.cancel" in actions:
+            actions.update({
+                "command.execution.recover", "message.handler.execution.recover",
+            })
         issuers.append({**issuer, "actions": sorted(actions)})
     return {**before, "bot_web_issuers": issuers}
 

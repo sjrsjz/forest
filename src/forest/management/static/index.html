@@ -270,6 +270,15 @@
           <div id="handler-policy-list" aria-live="polite"></div>
           <div id="handler-policy-preview" class="hidden"><h3>确认处理器策略</h3><pre id="handler-policy-diff"></pre><p class="hint">应用前若处理器热重载或另一管理员已保存，服务端会拒绝旧预览并要求重新读取。</p><button id="handler-policy-apply" type="button">应用处理器策略</button></div>
         </section>
+        <section id="bot-handler-diagnostics" class="card hidden" aria-labelledby="handler-diagnostics-title">
+          <h2 id="handler-diagnostics-title">普通消息 Handler 运行诊断</h2>
+          <p class="hint">查看冻结链、当前路由、重试和 Kernel 调用阶段。诊断只读取运行元数据，不读取群消息、用户标识、插件结果正文或异常正文。恢复扫描只唤醒正常的 Conversation Actor 路径；已完成调用复用原 operation，策略已撤销的结果会被抑制，仍在 ADMITTED 的调用不会被重复执行。</p>
+          <div class="actions"><label>范围<select id="handler-diagnostic-binding"></select></label><button id="handler-diagnostic-refresh" type="button" class="subtle">刷新诊断</button><button id="handler-diagnostic-recover" type="button">执行有界恢复扫描</button></div>
+          <p id="handler-diagnostic-status" role="status"></p>
+          <div id="handler-diagnostic-summary" class="actions"></div>
+          <h3>执行链</h3><div id="handler-diagnostic-chains" aria-live="polite"></div>
+          <h3>执行尝试</h3><div id="handler-diagnostic-attempts" aria-live="polite"></div>
+        </section>
         <section id="bot-command-diagnostics" class="card hidden" aria-labelledby="command-diagnostics-title">
           <details open><summary>业务命令容量与调用者限流</summary>
             <p class="hint">限制按 Bot 持久生效，多 Host 共用同一准入锁。超限命令仍保留原消息和作者来源，产生有序安全通知，不会转交 Agent。</p>

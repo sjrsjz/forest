@@ -22,7 +22,7 @@ READ_ACTIONS = frozenset({
     "memory.forget.read", "memory.association.read", "event.read", "component_job.read",
     "audit.read", "binding.read", "message.read",
     "module.read", "module.validate",
-    "command.execution.read", "command.limit.read",
+    "command.execution.read", "command.limit.read", "message.handler.execution.read",
 })
 
 
