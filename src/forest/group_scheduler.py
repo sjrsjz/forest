@@ -12,6 +12,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from forest.agent import AgentExecutionError, RunDisposition
@@ -59,6 +60,9 @@ class GroupScheduler:
         cancellation_timeout: float = 5,
         scan_page_size: int = 128,
         max_queued: int = 1024,
+        business_command_max_attempts: int = 3,
+        business_command_retry_base: float = 0.5,
+        business_command_retry_max: float = 30,
     ):
         if not (
             type(max_concurrency) is int
@@ -71,6 +75,14 @@ class GroupScheduler:
             and 1 <= scan_page_size <= 1024
             and type(max_queued) is int
             and max_concurrency <= max_queued <= 4096
+            and type(business_command_max_attempts) is int
+            and 1 <= business_command_max_attempts <= 32
+            and isinstance(business_command_retry_base, (int, float))
+            and not isinstance(business_command_retry_base, bool)
+            and 0 <= business_command_retry_base <= 300
+            and isinstance(business_command_retry_max, (int, float))
+            and not isinstance(business_command_retry_max, bool)
+            and business_command_retry_base <= business_command_retry_max <= 300
         ):
             raise ValueError("Invalid group scheduler resource bounds")
         self.messages = messages
@@ -83,6 +95,9 @@ class GroupScheduler:
         self.poll_interval, self.actor_ttl = poll_interval, actor_ttl
         self.execution_timeout, self.cancellation_timeout = execution_timeout, cancellation_timeout
         self.scan_page_size, self.max_queued = scan_page_size, max_queued
+        self.business_command_max_attempts = business_command_max_attempts
+        self.business_command_retry_base = float(business_command_retry_base)
+        self.business_command_retry_max = float(business_command_retry_max)
         self.owner_id = "group-scheduler:" + str(uuid4())
         self._queue: deque[str] = deque()
         self._queued: set[str] = set()
@@ -132,6 +147,43 @@ class GroupScheduler:
         self._backoff[conversation_id] = asyncio.get_running_loop().time() + max(
             self.poll_interval, 0.25
         )
+
+    @staticmethod
+    def _business_error(error: BaseException) -> tuple[str, bool]:
+        if isinstance(error, TimeoutError):
+            return "BUSINESS_COMMAND_TIMEOUT", True
+        code = error.code if isinstance(error, ForestError) else "BUSINESS_COMMAND_EXECUTION_FAILED"
+        return code, code in {
+            "BACKPRESSURE",
+            "KERNEL_UNAVAILABLE",
+            "OPERATION_PENDING",
+            "SERVICE_RELOADING",
+            "SERVICE_UNAVAILABLE",
+            "WORKER_DIED",
+            "WORKER_TIMEOUT",
+            "WORKER_UNAVAILABLE",
+        }
+
+    async def _record_business_failure(
+        self, actor: ActorLease, batch: dict, error: BaseException
+    ) -> dict:
+        code, retryable = self._business_error(error)
+        prior_attempts = batch["request"]["execution_attempt_count"]
+        delay = min(
+            self.business_command_retry_max,
+            self.business_command_retry_base * (2**prior_attempts),
+        )
+        result = await self.messages.record_business_command_failure(
+            actor,
+            "business-command-attempt:" + str(uuid4()),
+            request_id=batch["request"]["request_id"],
+            error_code=code,
+            retryable=retryable,
+            retry_delay_seconds=delay,
+            max_attempts=self.business_command_max_attempts,
+        )
+        self._error(actor.conversation_id, error)
+        return result
 
     async def start(self) -> None:
         if self._closed:
@@ -280,6 +332,15 @@ class GroupScheduler:
             if batch.get("kind") == "SILENT_DRAIN":
                 self.errors.pop(conversation_id, None)
                 return
+            if batch["status"] == "NOTICE":
+                await self.messages.finalize_notice(
+                    actor_box[0],
+                    "conversation-notice-final:" + batch["notice"]["notice_id"],
+                    notice_id=batch["notice"]["notice_id"],
+                    delivery=self.delivery,
+                )
+                self.errors.pop(conversation_id, None)
+                return
             business_command = batch["status"] == "BUSINESS_COMMAND"
             if batch["status"] not in {
                 "INPUT",
@@ -291,6 +352,17 @@ class GroupScheduler:
                     "SCHEDULER_STATE", "Unexpected conversation preparation result", 409
                 )
             run_id = None if business_command else batch["run_id"]
+            if business_command and batch["request"]["execution_deadline_at"] <= datetime.now(UTC):
+                await self._record_business_failure(
+                    actor_box[0],
+                    batch,
+                    ForestError(
+                        "BUSINESS_COMMAND_DEADLINE_EXCEEDED",
+                        "Command execution deadline elapsed",
+                        504,
+                    ),
+                )
+                return
             context = (
                 None
                 if business_command
@@ -347,6 +419,9 @@ class GroupScheduler:
                     # unrelated callback failure cannot terminalize those facts.
                     self._error(conversation_id, exc)
                     return
+                if business_command:
+                    await self._record_business_failure(actor_box[0], batch, exc)
+                    return
                 if not business_command:
                     await self.messages.end_run(
                         actor_box[0], run_id=run_id, reason=self._code(exc), delivery=self.delivery
@@ -358,22 +433,26 @@ class GroupScheduler:
             if self._closed or asyncio.current_task().cancelling():
                 raise asyncio.CancelledError
             if business_command:
-                if not isinstance(parts, BusinessCommandExecution):
-                    raise ForestError(
-                        "BUSINESS_COMMAND_RESULT_INVALID",
-                        "Command execution did not return a durable Kernel receipt",
-                        409,
+                try:
+                    if not isinstance(parts, BusinessCommandExecution):
+                        raise ForestError(
+                            "BUSINESS_COMMAND_RESULT_INVALID",
+                            "Command execution did not return a durable Kernel receipt",
+                            409,
+                        )
+                    await self.messages.finalize_business_command(
+                        actor_box[0],
+                        "business-command-final:" + batch["request"]["request_id"],
+                        request_id=batch["request"]["request_id"],
+                        call_operation_id=parts.call_operation_id,
+                        result=parts.result,
+                        result_payload_id=parts.result_payload_id,
+                        result_payload_digest=parts.result_payload_digest,
+                        delivery=self.delivery,
                     )
-                await self.messages.finalize_business_command(
-                    actor_box[0],
-                    "business-command-final:" + batch["request"]["request_id"],
-                    request_id=batch["request"]["request_id"],
-                    call_operation_id=parts.call_operation_id,
-                    result=parts.result,
-                    result_payload_id=parts.result_payload_id,
-                    result_payload_digest=parts.result_payload_digest,
-                    delivery=self.delivery,
-                )
+                except Exception as exc:
+                    await self._record_business_failure(actor_box[0], batch, exc)
+                    return
                 self.errors.pop(conversation_id, None)
                 return
             if isinstance(parts, RunDisposition):

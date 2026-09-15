@@ -13,6 +13,7 @@ from binding_seed import _ticket_factory, create_online_binding
 from psycopg import sql
 from test_messages import event
 
+from forest.errors import ForestError
 from forest.group_scheduler import BusinessCommandExecution, GroupScheduler
 from forest.kernel import Kernel
 from forest.packages import PackageCatalog
@@ -52,35 +53,39 @@ class ActorCommand:
     return root
 
 
-async def set_policy(messages, lease):
+async def set_policy(
+    messages, lease, *, expected_revision=0, mode="EVERYONE", user_ids=()
+):
     policies = CommandPolicyStore(messages.store)
     tickets = await _ticket_factory(messages.store)
     proposal = {
         "binding_id": "binding-a",
         "command_id": "actor",
-        "expected_revision": 0,
-        "values": {"mode": "EVERYONE", "user_ids": []},
+        "expected_revision": expected_revision,
+        "values": {"mode": mode, "user_ids": list(user_ids)},
     }
+    suffix = str(expected_revision)
+    plan_operation = "actor-policy-plan-" + suffix
+    apply_operation = "actor-policy-apply-" + suffix
     plan = await policies.plan(
-        await tickets("command.policy.plan", "actor-policy-plan", proposal),
-        "actor-policy-plan",
+        await tickets("command.policy.plan", plan_operation, proposal),
+        plan_operation,
         proposal,
     )
     apply = {
         "binding_id": "binding-a",
         "command_id": "actor",
-        "expected_revision": 0,
+        "expected_revision": expected_revision,
         "plan_id": plan["plan_id"],
         "plan_digest": plan["plan_digest"],
     }
     await policies.apply(
         await tickets(
-            "command.policy.apply",
-            "actor-policy-apply",
+            "command.policy.apply", apply_operation,
             apply,
             plan_digest=plan["plan_digest"],
         ),
-        "actor-policy-apply",
+        apply_operation,
         apply,
     )
 
@@ -317,6 +322,131 @@ async def test_claim_recovery_and_delivery_failure_keep_exactly_one_result(comma
     assert committed["response_seq"] == 1
 
 
+async def test_denial_is_an_actor_ordered_safe_notice_before_later_trigger(command_runtime):
+    messages, kernel = command_runtime
+    await set_policy(
+        messages,
+        kernel.lease,
+        expected_revision=1,
+        mode="USER_SET",
+        user_ids=("99999",),
+    )
+    await ingest(messages, kernel, 1, "ordinary")
+    denied = await ingest(messages, kernel, 2, "/actor forbidden")
+    await ingest(messages, kernel, 3, "trigger", trigger=True)
+    owner = await actor(messages, kernel, denied["conversation_id"])
+
+    selected = await messages.select_input(owner, "select-denial")
+    assert selected["status"] == "NOTICE"
+    assert selected["selected_input_end_seq"] == 2
+    assert selected["notice"]["kind"] == "BUSINESS_COMMAND_DENIED"
+    result = await messages.finalize_notice(
+        owner,
+        "finalize-denial",
+        notice_id=selected["notice"]["notice_id"],
+        delivery=DeliveryStore(messages.store),
+    )
+    assert result["response_seq"] == 1
+    replay = await messages.finalize_notice(
+        owner,
+        "finalize-denial",
+        notice_id=selected["notice"]["notice_id"],
+        delivery=DeliveryStore(messages.store),
+    )
+    assert replay["result_id"] == result["result_id"]
+
+    context = await messages.context(owner)
+    assert [unit["kind"] for unit in context["units"]] == [
+        "INPUT",
+        "INPUT",
+        "SYSTEM_NOTICE",
+    ]
+    assert context["units"][1]["author"]["external_user_id"] == "20001"
+    assert context["units"][2]["context_role"] == "assistant"
+    assert context["units"][2]["reply_parts"] == [
+        [{"type": "text", "text": "你没有执行此业务命令的权限。"}]
+    ]
+    following = await messages.select_input(owner, "trigger-after-denial")
+    assert following["status"] == "INPUT"
+    assert following["trigger_cut_seq"] == 3
+
+
+async def test_failed_attempts_persist_retry_barrier_then_publish_safe_notice(command_runtime):
+    messages, kernel = command_runtime
+    accepted = await ingest(messages, kernel, 1, "/actor retry")
+    await ingest(messages, kernel, 2, "later trigger", trigger=True)
+    first_actor = await actor(messages, kernel, accepted["conversation_id"])
+    await messages.select_input(first_actor, "claim-failing-command")
+    retry = await messages.record_business_command_failure(
+        first_actor,
+        "failed-attempt-1",
+        request_id=accepted["business_request_id"],
+        error_code="WORKER_UNAVAILABLE",
+        retryable=True,
+        retry_delay_seconds=0.5,
+        max_attempts=3,
+    )
+    assert retry["status"] == "RETRY_WAIT"
+    await messages.release_actor(first_actor)
+
+    successor = await actor(messages, kernel, accepted["conversation_id"], "actor-b")
+    waiting = await messages.select_input(successor, "retry-is-an-ingress-barrier")
+    assert waiting["status"] == "WAIT_INPUT"
+    waiting_context = await messages.context(successor)
+    assert [unit["ingress_seq"] for unit in waiting_context["units"] if unit["kind"] == "INPUT"] == [1]
+    await asyncio.sleep(0.55)
+    recovered = await messages.select_input(successor, "recover-retry")
+    assert recovered["status"] == "BUSINESS_COMMAND"
+    assert recovered["replayed"]
+    assert recovered["request"]["execution_attempt_count"] == 1
+    terminal = await messages.record_business_command_failure(
+        successor,
+        "failed-attempt-2",
+        request_id=accepted["business_request_id"],
+        error_code="CALL_FAILED",
+        retryable=False,
+    )
+    assert terminal["status"] == "FAILED"
+
+    notice = await messages.select_input(successor, "claim-failure-notice")
+    assert notice["status"] == "NOTICE"
+    assert notice["notice"]["kind"] == "BUSINESS_COMMAND_FAILED"
+    await messages.finalize_notice(
+        successor,
+        "finalize-failure-notice",
+        notice_id=notice["notice"]["notice_id"],
+        delivery=DeliveryStore(messages.store),
+    )
+    following = await messages.select_input(successor, "trigger-after-failure")
+    assert following["status"] == "INPUT"
+    assert following["trigger_cut_seq"] == 2
+
+    async with messages.store.pool.connection() as conn:
+        attempts = await (
+            await conn.execute(
+                "SELECT attempt_no,error_code,retryable FROM "
+                "public.bot_business_command_attempts ORDER BY attempt_no"
+            )
+        ).fetchall()
+        request = await (
+            await conn.execute(
+                "SELECT status,terminal_reason,execution_attempt_count,last_error_code "
+                "FROM public.bot_business_command_requests WHERE bot_id=%s AND request_id=%s",
+                (messages.store.bot_id, accepted["business_request_id"]),
+            )
+        ).fetchone()
+    assert attempts == [
+        {"attempt_no": 1, "error_code": "WORKER_UNAVAILABLE", "retryable": True},
+        {"attempt_no": 2, "error_code": "CALL_FAILED", "retryable": False},
+    ]
+    assert request == {
+        "status": "FAILED",
+        "terminal_reason": "CALL_FAILED",
+        "execution_attempt_count": 2,
+        "last_error_code": "CALL_FAILED",
+    }
+
+
 async def test_scheduler_serializes_each_group_but_runs_command_groups_in_parallel(
     command_runtime,
 ):
@@ -378,4 +508,104 @@ async def test_scheduler_serializes_each_group_but_runs_command_groups_in_parall
         assert [intent["response_seq"] for intent in intents] == [1, 1]
     finally:
         release.set()
+        await scheduler.close()
+
+
+async def test_scheduler_retries_transient_command_failure_from_durable_attempt(
+    command_runtime,
+):
+    messages, kernel = command_runtime
+    accepted = await ingest(messages, kernel, 1, "/actor eventual")
+    calls = 0
+
+    async def execute(actor_lease, selected, context):
+        nonlocal calls
+        assert context is None
+        calls += 1
+        if calls == 1:
+            raise ForestError("WORKER_UNAVAILABLE", "worker is restarting", 503)
+        operation_id, receipt = await execute_selected(kernel, selected)
+        return BusinessCommandExecution(
+            operation_id,
+            receipt.value,
+            receipt.result_payload_id,
+            receipt.result_digest,
+        )
+
+    scheduler = GroupScheduler(
+        messages,
+        lease=lambda: kernel.lease,
+        execute=execute,
+        poll_interval=0.02,
+        business_command_retry_base=0.01,
+        business_command_retry_max=0.02,
+    )
+    try:
+        await scheduler.start()
+
+        async def completed():
+            async with messages.store.pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT status,execution_attempt_count FROM "
+                        "public.bot_business_command_requests WHERE bot_id=%s AND request_id=%s",
+                        (messages.store.bot_id, accepted["business_request_id"]),
+                    )
+                ).fetchone()
+            return row == {"status": "COMPLETED", "execution_attempt_count": 1}
+
+        await until(completed)
+        assert calls == 2
+        async with messages.store.pool.connection() as conn:
+            facts = await (
+                await conn.execute(
+                    "SELECT (SELECT count(*) FROM public.bot_business_command_attempts) attempts,"
+                    "(SELECT count(*) FROM public.bot_conversation_notices) notices,"
+                    "(SELECT count(*) FROM public.bot_business_command_results) results"
+                )
+            ).fetchone()
+        assert facts == {"attempts": 1, "notices": 0, "results": 1}
+    finally:
+        await scheduler.close()
+
+
+async def test_scheduler_terminal_command_failure_publishes_safe_notice(command_runtime):
+    messages, kernel = command_runtime
+    accepted = await ingest(messages, kernel, 1, "/actor broken")
+
+    async def execute(actor_lease, selected, context):
+        raise ForestError("CALL_FAILED", "private plugin traceback and secret", 500)
+
+    scheduler = GroupScheduler(
+        messages,
+        lease=lambda: kernel.lease,
+        execute=execute,
+        poll_interval=0.02,
+    )
+    try:
+        await scheduler.start()
+
+        async def completed():
+            async with messages.store.pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT n.status,r.response_seq FROM public.bot_conversation_notices n "
+                        "LEFT JOIN public.bot_conversation_notice_results r "
+                        "ON r.bot_id=n.bot_id AND r.notice_id=n.notice_id "
+                        "WHERE n.bot_id=%s AND n.request_id=%s",
+                        (messages.store.bot_id, accepted["business_request_id"]),
+                    )
+                ).fetchone()
+            return row == {"status": "COMPLETED", "response_seq": 1} and not scheduler.active_conversations
+
+        await until(completed)
+        context_owner = await actor(
+            messages, kernel, accepted["conversation_id"], "context-reader"
+        )
+        context = await messages.context(context_owner)
+        assert context["units"][-1]["reply_parts"] == [
+            [{"type": "text", "text": "业务命令执行失败，请稍后重试。"}]
+        ]
+        assert "private plugin traceback" not in str(context)
+    finally:
         await scheduler.close()

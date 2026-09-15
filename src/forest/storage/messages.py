@@ -11,7 +11,7 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -194,6 +194,39 @@ class MessageStore:
             "policy": policy,
             "binding_config_revision": binding_config_revision,
         }
+
+    async def _put_notice_in(
+        self,
+        conn,
+        *,
+        event_id: str,
+        request_id: str | None,
+        conversation_id: str,
+        ingress_seq: int,
+        input_payload_id: str,
+        kind: str,
+        error_code: str,
+    ) -> dict:
+        notice_id = "conversation-notice:" + digest_json([event_id, kind])
+        return await (
+            await conn.execute(
+                "INSERT INTO public.bot_conversation_notices("
+                "bot_id,notice_id,event_id,request_id,conversation_id,ingress_seq,"
+                "input_payload_id,kind,error_code) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "RETURNING *",
+                (
+                    self.store.bot_id,
+                    notice_id,
+                    event_id,
+                    request_id,
+                    conversation_id,
+                    ingress_seq,
+                    input_payload_id,
+                    kind,
+                    error_code,
+                ),
+            )
+        ).fetchone()
 
     def _memory_sources(self):
         from forest.storage.memory_sources import MemorySourceStore
@@ -840,6 +873,17 @@ class MessageStore:
                         status,
                     ),
                 )
+                if status == "DENIED":
+                    await self._put_notice_in(
+                        conn,
+                        event_id=event_id,
+                        request_id=business_request_id,
+                        conversation_id=conversation_id,
+                        ingress_seq=seq,
+                        input_payload_id=payload.payload_id,
+                        kind="BUSINESS_COMMAND_DENIED",
+                        error_code="BUSINESS_COMMAND_DENIED",
+                    )
                 reason = business_request_id + ":" + request_digest
             await conn.execute(
                 "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
@@ -1006,7 +1050,11 @@ class MessageStore:
                 "OR EXISTS (SELECT 1 FROM public.bot_conversation_triggers t WHERE t.bot_id=c.bot_id "
                 "AND t.conversation_id=c.conversation_id AND t.status IN ('PENDING','CLAIMED')) "
                 "OR EXISTS (SELECT 1 FROM public.bot_business_command_requests r WHERE r.bot_id=c.bot_id "
-                "AND r.conversation_id=c.conversation_id AND r.status IN ('PENDING','CLAIMED'))) "
+                "AND r.conversation_id=c.conversation_id AND r.status IN ('PENDING','CLAIMED') "
+                "AND (r.status='PENDING' OR r.next_attempt_at<=clock_timestamp() "
+                "OR r.execution_deadline_at<=clock_timestamp())) "
+                "OR EXISTS (SELECT 1 FROM public.bot_conversation_notices n WHERE n.bot_id=c.bot_id "
+                "AND n.conversation_id=c.conversation_id AND n.status IN ('PENDING','CLAIMED'))) "
                 "ORDER BY c.conversation_id LIMIT %s",
                 (self.store.bot_id, after_conversation_id, after_conversation_id, limit),
             )).fetchall()
@@ -1733,6 +1781,135 @@ class MessageStore:
         await self._actor_final(conn, actor, binding)
         return selected
 
+    @staticmethod
+    def _notice_selection(actor: ActorLease, notice: dict, batch: dict, *, replayed: bool) -> dict:
+        return {
+            "status": "NOTICE",
+            "kind": "CONVERSATION_NOTICE_INPUT",
+            "conversation_id": actor.conversation_id,
+            "input_batch_id": batch["input_batch_id"],
+            "context_revision": batch["context_revision"],
+            "selected_input_end_seq": batch["selected_input_end_seq"],
+            "notice": dict(notice),
+            "replayed": replayed,
+        }
+
+    async def _claim_notice_in(
+        self, conn, actor, binding, conversation, notice, operation_id
+    ) -> dict:
+        if notice["status"] == "CLAIMED":
+            batch = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_context_input_batches "
+                    "WHERE bot_id=%s AND input_batch_id=%s",
+                    (self.store.bot_id, notice["claim_input_batch_id"]),
+                )
+            ).fetchone()
+            if batch is None or batch["kind"] != "CONVERSATION_NOTICE_INPUT":
+                raise ForestError(
+                    "CONVERSATION_NOTICE_CLAIM_INVALID",
+                    "Claimed notice has no input boundary",
+                    409,
+                )
+            if (
+                notice["claim_actor_id"] != actor.actor_id
+                or notice["claim_actor_epoch"] != actor.actor_epoch
+                or notice["claim_host_incarnation"] != actor.host.incarnation
+            ):
+                notice = await (
+                    await conn.execute(
+                        "UPDATE public.bot_conversation_notices SET claim_actor_id=%s,"
+                        "claim_actor_epoch=%s,claim_host_incarnation=%s "
+                        "WHERE bot_id=%s AND notice_id=%s AND status='CLAIMED' RETURNING *",
+                        (
+                            actor.actor_id,
+                            actor.actor_epoch,
+                            actor.host.incarnation,
+                            self.store.bot_id,
+                            notice["notice_id"],
+                        ),
+                    )
+                ).fetchone()
+            await self._actor_final(conn, actor, binding)
+            return self._notice_selection(actor, notice, batch, replayed=True)
+
+        applied = conversation["context_applied_seq"]
+        end = max(applied, notice["ingress_seq"])
+        revision = conversation["context_revision"] + 1
+        batch_id = str(uuid4())
+        batch = await (
+            await conn.execute(
+                "INSERT INTO public.bot_context_input_batches(bot_id,input_batch_id,operation_id,"
+                "conversation_id,kind,start_seq,end_seq,selected_input_end_seq,trigger_ids,"
+                "context_revision) VALUES "
+                "(%s,%s,%s,%s,'CONVERSATION_NOTICE_INPUT',%s,%s,%s,'[]',%s) RETURNING *",
+                (
+                    self.store.bot_id,
+                    batch_id,
+                    operation_id,
+                    actor.conversation_id,
+                    applied + 1 if end > applied else None,
+                    end if end > applied else None,
+                    end,
+                    revision,
+                ),
+            )
+        ).fetchone()
+        if end > applied:
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,"
+                "context_revision,unit_index,kind,event_id,input_batch_id,estimated_tokens) "
+                "SELECT bot_id,conversation_id,event_id,%s,ingress_seq,'INPUT',event_id,%s,"
+                "estimated_tokens FROM public.bot_message_inbox WHERE bot_id=%s "
+                "AND conversation_id=%s AND ingress_seq>%s AND ingress_seq<=%s ORDER BY ingress_seq",
+                (
+                    revision,
+                    batch_id,
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    applied,
+                    end,
+                ),
+            )
+        notice = await (
+            await conn.execute(
+                "UPDATE public.bot_conversation_notices SET status='CLAIMED',claim_actor_id=%s,"
+                "claim_actor_epoch=%s,claim_host_incarnation=%s,claim_input_batch_id=%s "
+                "WHERE bot_id=%s AND notice_id=%s AND status='PENDING' RETURNING *",
+                (
+                    actor.actor_id,
+                    actor.actor_epoch,
+                    actor.host.incarnation,
+                    batch_id,
+                    self.store.bot_id,
+                    notice["notice_id"],
+                ),
+            )
+        ).fetchone()
+        if notice is None:
+            raise ForestError("CONVERSATION_NOTICE_CLAIM_LOST", "Notice claim changed", 409)
+        await conn.execute(
+            "UPDATE public.bot_conversations SET context_applied_seq=%s,context_revision=%s,"
+            "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
+            "WHERE bot_id=%s AND conversation_id=%s",
+            (end, revision, self.store.bot_id, actor.conversation_id),
+        )
+        await self._memory_sources().accept_batch_in(conn, conversation, batch)
+        await self._compact(conn, actor.conversation_id)
+        await self.store._event(
+            conn,
+            "conversation.notice.claimed",
+            notice["notice_id"],
+            {
+                "conversation_id": actor.conversation_id,
+                "notice_id": notice["notice_id"],
+                "kind": notice["kind"],
+                "input_batch_id": batch_id,
+            },
+        )
+        await self._actor_final(conn, actor, binding)
+        return self._notice_selection(actor, notice, batch, replayed=False)
+
     async def select_input(self, actor: ActorLease, operation_id: str, *, mode: str = "IDLE") -> dict:
         """Select exactly one immutable cut at a host-owned closed execution boundary.
 
@@ -1778,6 +1955,22 @@ class MessageStore:
                 )
                 await self._actor_final(conn, actor, binding)
                 return selected
+            if existing["kind"] == "CONVERSATION_NOTICE_INPUT":
+                notice = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_conversation_notices WHERE bot_id=%s "
+                        "AND claim_input_batch_id=%s FOR UPDATE",
+                        (self.store.bot_id, existing["input_batch_id"]),
+                    )
+                ).fetchone()
+                if notice is None or notice["status"] != "CLAIMED":
+                    raise ForestError(
+                        "CONVERSATION_NOTICE_CLAIM_INVALID",
+                        "Notice input boundary has no active notice",
+                        409,
+                    )
+                await self._actor_final(conn, actor, binding)
+                return self._notice_selection(actor, notice, existing, replayed=True)
             visible = await (await conn.execute(
                 "SELECT COALESCE(sum(estimated_tokens),0) AS tokens FROM public.bot_context_units "
                 "WHERE bot_id=%s AND conversation_id=%s AND visible",
@@ -1823,26 +2016,75 @@ class MessageStore:
                 (self.store.bot_id, actor.conversation_id),
             )
         ).fetchone()
+        database_now = await self.store._now(conn)
         available_command = (
             command
             if command is not None
             and command["ingress_seq"] <= conversation["classified_through_seq"]
+            and (
+                command["status"] == "PENDING"
+                or command["next_attempt_at"] <= database_now
+                or command["execution_deadline_at"] <= database_now
+            )
             else None
+        )
+        notice = await (
+            await conn.execute(
+                "SELECT * FROM public.bot_conversation_notices WHERE bot_id=%s "
+                "AND conversation_id=%s AND status IN ('PENDING','CLAIMED') "
+                "ORDER BY ingress_seq LIMIT 1 FOR UPDATE",
+                (self.store.bot_id, actor.conversation_id),
+            )
+        ).fetchone()
+        available_notice = (
+            notice
+            if notice is not None
+            and notice["ingress_seq"] <= conversation["classified_through_seq"]
+            else None
+        )
+        business_work = min(
+            (item for item in (available_command, available_notice) if item is not None),
+            key=lambda item: item["ingress_seq"],
+            default=None,
+        )
+        business_barrier = min(
+            (item for item in (command, available_notice) if item is not None),
+            key=lambda item: item["ingress_seq"],
+            default=None,
         )
         selected = [
             trigger
             for trigger in pending
             if trigger["ingress_seq"] <= conversation["classified_through_seq"]
             and (
-                available_command is None
-                or trigger["ingress_seq"] < available_command["ingress_seq"]
+                business_barrier is None
+                or trigger["ingress_seq"] < business_barrier["ingress_seq"]
             )
         ]
-        if available_command is not None and not selected and run is None:
+        if business_barrier is not None and not selected and run is None:
+            if business_work is None or (
+                business_work.get("notice_id") != business_barrier.get("notice_id")
+                or business_work.get("request_id") != business_barrier.get("request_id")
+            ):
+                await conn.execute(
+                    "UPDATE public.bot_conversations SET processed_mailbox_revision=mailbox_revision,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s",
+                    (self.store.bot_id, actor.conversation_id),
+                )
+                await self._actor_final(conn, actor, binding)
+                return {
+                    "status": "WAIT_INPUT",
+                    "conversation_id": actor.conversation_id,
+                    "run_id": None,
+                }
+            if business_barrier.get("notice_id") is not None:
+                return await self._claim_notice_in(
+                    conn, actor, binding, conversation, business_barrier, operation_id
+                )
             return await self._claim_business_command_in(
-                conn, actor, binding, conversation, available_command, operation_id
+                conn, actor, binding, conversation, business_barrier, operation_id
             )
-        if pending and not selected and available_command is None:
+        if pending and not selected and business_barrier is None:
             if session and not run:
                 await conn.execute(
                     "UPDATE public.bot_conversation_sessions SET status='WAIT_INPUT' "
@@ -1952,7 +2194,14 @@ class MessageStore:
                 (self.store.bot_id, conversation["conversation_id"]),
             )
         ).fetchone()
-        if pending or command or context_request or (session and session["active_run_id"]):
+        notice = await (
+            await conn.execute(
+                "SELECT 1 FROM public.bot_conversation_notices WHERE bot_id=%s "
+                "AND conversation_id=%s AND status IN ('PENDING','CLAIMED') LIMIT 1",
+                (self.store.bot_id, conversation["conversation_id"]),
+            )
+        ).fetchone()
+        if pending or command or notice or context_request or (session and session["active_run_id"]):
             return
         if conversation["context_applied_seq"] != conversation["classified_through_seq"]:
             return
@@ -2225,7 +2474,8 @@ class MessageStore:
                 raise ForestError("RUN_NOT_ACTIVE", "Run is not active", 409)
         units = await (await conn.execute(
             "SELECT u.unit_id,u.kind,u.context_revision,u.unit_index,u.estimated_tokens,"
-            "u.control_command_id,u.logical_step_id,u.business_request_id,u.payload_id,"
+            "u.control_command_id,u.logical_step_id,u.business_request_id,u.business_notice_id,"
+            "u.payload_id,"
             "s.run_id AS step_run_id,cr.disposition AS command_disposition,"
             "i.event_id,i.ingress_seq,i.platform_message_id,i.source_event_id,i.author,i.segments,"
             "i.sent_at,i.received_at,i.trigger_decision,i.context_disposition,i.origin,r.reply_id,"
@@ -2250,7 +2500,7 @@ class MessageStore:
         clock = await content.payloads.lock_in(conn)
         payload_ids = set()
         initial = await self.bindings.initial_in(conn, binding) if any(
-            u["kind"] in {"CONTROL", "COMMAND_RESULT"} for u in units
+            u["kind"] in {"CONTROL", "COMMAND_RESULT", "SYSTEM_NOTICE"} for u in units
         ) else None
         for unit in units:
             unit["step_parts"] = unit["reply_parts"] = None
@@ -2277,7 +2527,9 @@ class MessageStore:
                 unit["estimated_tokens"] = _tokens(unit["segments"])
             unit["source"] = source.copy()
             unit["context_role"] = (
-                "assistant" if unit["kind"] in {"REPLY", "RUN_STEP", "COMMAND_RESULT"} else
+                "assistant"
+                if unit["kind"] in {"REPLY", "RUN_STEP", "COMMAND_RESULT", "SYSTEM_NOTICE"}
+                else
                 "control_data" if unit["kind"] == "CONTROL" or unit["trigger_decision"] == "CONTROL_COMMAND" else "user"
             )
             if unit["kind"] == "CONTROL":
@@ -2287,8 +2539,12 @@ class MessageStore:
                                   "identity_origin": "host_output", "is_self": True}
                 if initial["display_name_payload_state"] == "ACTIVE":
                     payload_ids.add(initial["initial_payload_id"])
-            if unit["kind"] == "COMMAND_RESULT":
-                unit["origin"] = "business_command_output"
+            if unit["kind"] in {"COMMAND_RESULT", "SYSTEM_NOTICE"}:
+                unit["origin"] = (
+                    "business_command_output"
+                    if unit["kind"] == "COMMAND_RESULT"
+                    else "business_command_notice"
+                )
                 unit["author"] = {
                     "external_user_id": binding["self_id"],
                     "display_name": initial["display_name"]
@@ -2340,6 +2596,330 @@ class MessageStore:
                 "archive": archive, "run": run, "triggers": triggers,
                 "payload_ids": sorted(payload_ids), "deletion_epoch": clock["deletion_epoch"],
                 "budget_exceeded": sum(u["estimated_tokens"] for u in units) > self.context_token_budget}
+
+    async def record_business_command_failure(
+        self,
+        actor: ActorLease,
+        operation_id: str,
+        *,
+        request_id: str,
+        error_code: str,
+        retryable: bool,
+        retry_delay_seconds: float = 0.5,
+        max_attempts: int = 3,
+    ) -> dict:
+        """Persist one failed attempt; terminal failure becomes ordered notice work."""
+        _text(operation_id, "operation_id")
+        _text(request_id, "request_id")
+        _text(error_code, "error_code", 96)
+        if (
+            not error_code.isascii()
+            or not error_code.replace("_", "").isalnum()
+            or not error_code[0].isalpha()
+            or error_code != error_code.upper()
+            or type(retryable) is not bool
+            or not isinstance(retry_delay_seconds, (int, float))
+            or isinstance(retry_delay_seconds, bool)
+            or not 0 <= retry_delay_seconds <= 300
+            or type(max_attempts) is not int
+            or not 1 <= max_attempts <= 32
+        ):
+            raise ForestError("INVALID_COMMAND_FAILURE", "Invalid command failure record", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_business_command_attempts WHERE bot_id=%s "
+                    "AND operation_id=%s FOR UPDATE",
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if existing is not None:
+                if existing["request_id"] != request_id or existing["error_code"] != error_code:
+                    raise ForestError(
+                        "BUSINESS_COMMAND_ATTEMPT_CONFLICT",
+                        "Command failure operation was already used",
+                        409,
+                    )
+                request = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_business_command_requests "
+                        "WHERE bot_id=%s AND request_id=%s",
+                        (self.store.bot_id, request_id),
+                    )
+                ).fetchone()
+                await self._actor_final(conn, actor, binding)
+                return {
+                    "request_id": request_id,
+                    "attempt_no": existing["attempt_no"],
+                    "status": request["status"],
+                    "retry_at": existing["retry_at"],
+                    "error_code": error_code,
+                }
+            request = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_business_command_requests WHERE bot_id=%s "
+                    "AND request_id=%s FOR UPDATE",
+                    (self.store.bot_id, request_id),
+                )
+            ).fetchone()
+            if (
+                request is None
+                or request["conversation_id"] != actor.conversation_id
+                or request["status"] != "CLAIMED"
+                or request["claim_actor_id"] != actor.actor_id
+                or request["claim_actor_epoch"] != actor.actor_epoch
+                or request["claim_host_incarnation"] != actor.host.incarnation
+            ):
+                raise ForestError(
+                    "BUSINESS_COMMAND_NOT_CLAIMED",
+                    "Command failure does not own the current Conversation Actor",
+                    409,
+                )
+            now = (await (await conn.execute("SELECT clock_timestamp() AS now")).fetchone())["now"]
+            attempt_no = request["execution_attempt_count"] + 1
+            retry_at = now + timedelta(seconds=retry_delay_seconds)
+            will_retry = (
+                retryable
+                and attempt_no < max_attempts
+                and retry_at < request["execution_deadline_at"]
+            )
+            await conn.execute(
+                "INSERT INTO public.bot_business_command_attempts("
+                "bot_id,request_id,attempt_no,operation_id,actor_id,actor_epoch,"
+                "host_incarnation,error_code,retryable,retry_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    self.store.bot_id,
+                    request_id,
+                    attempt_no,
+                    operation_id,
+                    actor.actor_id,
+                    actor.actor_epoch,
+                    actor.host.incarnation,
+                    error_code,
+                    will_retry,
+                    retry_at if will_retry else None,
+                ),
+            )
+            if will_retry:
+                await conn.execute(
+                    "UPDATE public.bot_business_command_requests SET execution_attempt_count=%s,"
+                    "next_attempt_at=%s,last_error_code=%s WHERE bot_id=%s AND request_id=%s "
+                    "AND status='CLAIMED'",
+                    (attempt_no, retry_at, error_code, self.store.bot_id, request_id),
+                )
+                await conn.execute(
+                    "UPDATE public.bot_conversations SET processed_mailbox_revision=mailbox_revision,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s",
+                    (self.store.bot_id, actor.conversation_id),
+                )
+                status = "RETRY_WAIT"
+            else:
+                await conn.execute(
+                    "UPDATE public.bot_business_command_requests SET status='FAILED',"
+                    "terminal_reason=%s,completed_at=clock_timestamp(),execution_attempt_count=%s,"
+                    "last_error_code=%s WHERE bot_id=%s AND request_id=%s AND status='CLAIMED'",
+                    (error_code, attempt_no, error_code, self.store.bot_id, request_id),
+                )
+                await self._put_notice_in(
+                    conn,
+                    event_id=request["event_id"],
+                    request_id=request_id,
+                    conversation_id=actor.conversation_id,
+                    ingress_seq=request["ingress_seq"],
+                    input_payload_id=request["input_payload_id"],
+                    kind="BUSINESS_COMMAND_FAILED",
+                    error_code=error_code,
+                )
+                await conn.execute(
+                    "UPDATE public.bot_conversations SET mailbox_revision=mailbox_revision+1,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s",
+                    (self.store.bot_id, actor.conversation_id),
+                )
+                status = "FAILED"
+            await self.store._event(
+                conn,
+                "business_command.attempt_failed",
+                operation_id,
+                {
+                    "conversation_id": actor.conversation_id,
+                    "request_id": request_id,
+                    "attempt_no": attempt_no,
+                    "error_code": error_code,
+                    "status": status,
+                },
+            )
+            await self._actor_final(conn, actor, binding)
+            return {
+                "request_id": request_id,
+                "attempt_no": attempt_no,
+                "status": status,
+                "retry_at": retry_at if will_retry else None,
+                "error_code": error_code,
+            }
+
+    async def finalize_notice(
+        self,
+        actor: ActorLease,
+        operation_id: str,
+        *,
+        notice_id: str,
+        delivery,
+    ) -> dict:
+        """Atomically publish a safe Actor-ordered notice and CHAT intent."""
+        _text(operation_id, "operation_id")
+        _text(notice_id, "notice_id")
+        async with self.store.pool.connection() as conn, conn.transaction():
+            binding, conversation = await self._actor(conn, actor)
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_conversation_notice_results WHERE bot_id=%s "
+                    "AND (notice_id=%s OR (conversation_id=%s AND operation_id=%s)) FOR UPDATE",
+                    (self.store.bot_id, notice_id, actor.conversation_id, operation_id),
+                )
+            ).fetchone()
+            if existing is not None:
+                if existing["notice_id"] != notice_id or existing["operation_id"] != operation_id:
+                    raise ForestError(
+                        "CONVERSATION_NOTICE_RESULT_CONFLICT",
+                        "Notice result operation was already used",
+                        409,
+                    )
+                await self._actor_final(conn, actor, binding)
+                return existing
+            notice = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_conversation_notices WHERE bot_id=%s "
+                    "AND notice_id=%s FOR UPDATE",
+                    (self.store.bot_id, notice_id),
+                )
+            ).fetchone()
+            if (
+                notice is None
+                or notice["conversation_id"] != actor.conversation_id
+                or notice["status"] != "CLAIMED"
+                or notice["claim_actor_id"] != actor.actor_id
+                or notice["claim_actor_epoch"] != actor.actor_epoch
+                or notice["claim_host_incarnation"] != actor.host.incarnation
+            ):
+                raise ForestError(
+                    "CONVERSATION_NOTICE_NOT_CLAIMED",
+                    "Notice does not own the current Conversation Actor",
+                    409,
+                )
+            texts = {
+                "BUSINESS_COMMAND_DENIED": "你没有执行此业务命令的权限。",
+                "BUSINESS_COMMAND_FAILED": "业务命令执行失败，请稍后重试。",
+                "BUSINESS_CLASSIFICATION_FAILED": "业务命令暂时无法处理，请稍后重试。",
+            }
+            parts = [[{"type": "text", "text": texts[notice["kind"]]}]]
+            from forest.storage.context_payloads import ContextPayloadStore
+
+            content = ContextPayloadStore(self.store)
+            clock = await content.payloads.lock_in(conn)
+            result_id = "conversation-notice-result:" + digest_json(
+                [self.store.bot_id, notice_id]
+            )
+            body = await content.put_control_in(
+                conn,
+                result_id,
+                parts,
+                parents=(notice["input_payload_id"],),
+                expected_deletion_epoch=clock["deletion_epoch"],
+            )
+            response_seq = conversation["next_response_seq"]
+            route = {
+                "bot_id": self.store.bot_id,
+                "binding_id": conversation["binding_id"],
+                "platform": conversation["platform"],
+                "self_id": binding["self_id"],
+                "channel_kind": conversation["channel_kind"],
+                "channel_id": conversation["channel_id"],
+                "thread_id": conversation["thread_id"],
+                "binding_epoch": binding["binding_epoch"],
+                "visibility": conversation["channel_kind"],
+            }
+            delivery_receipt = await delivery.enqueue_in(
+                conn,
+                actor.host,
+                operation_id="conversation-notice-reply:" + notice_id,
+                route=route,
+                parts=parts,
+                conversation_id=actor.conversation_id,
+                lane="CHAT",
+                response_seq=response_seq,
+                root_operation_id=notice_id,
+                expected_policy_revision=actor.policy_revision,
+                parents=(body.payload_id,),
+            )
+            semantic_digest = digest_json(
+                [notice_id, notice["kind"], notice["error_code"], body.payload_id, parts]
+            )
+            row = await (
+                await conn.execute(
+                    "INSERT INTO public.bot_conversation_notice_results("
+                    "bot_id,result_id,operation_id,notice_id,conversation_id,context_payload_id,"
+                    "context_payload_digest,result_digest,response_seq,delivery) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        self.store.bot_id,
+                        result_id,
+                        operation_id,
+                        notice_id,
+                        actor.conversation_id,
+                        body.payload_id,
+                        body.digest,
+                        semantic_digest,
+                        response_seq,
+                        Jsonb(delivery_receipt),
+                    ),
+                )
+            ).fetchone()
+            revision = conversation["context_revision"] + 1
+            await conn.execute(
+                "INSERT INTO public.bot_context_units(bot_id,conversation_id,unit_id,"
+                "context_revision,unit_index,kind,payload_id,estimated_tokens,business_notice_id) "
+                "VALUES (%s,%s,%s,%s,0,'SYSTEM_NOTICE',%s,%s,%s)",
+                (
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    result_id,
+                    revision,
+                    body.payload_id,
+                    _tokens(parts),
+                    notice_id,
+                ),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversation_notices SET status='COMPLETED',"
+                "completed_at=clock_timestamp() WHERE bot_id=%s AND notice_id=%s "
+                "AND status='CLAIMED'",
+                (self.store.bot_id, notice_id),
+            )
+            await conn.execute(
+                "UPDATE public.bot_conversations SET context_revision=%s,"
+                "next_response_seq=next_response_seq+1,mailbox_revision=mailbox_revision+1,"
+                "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s",
+                (revision, self.store.bot_id, actor.conversation_id),
+            )
+            session = await self._session(conn, conversation)
+            current = await self._conversation(conn, actor.conversation_id)
+            await self._close_if_drained(conn, current, session)
+            await self._compact(conn, actor.conversation_id)
+            await self.store._event(
+                conn,
+                "conversation.notice.completed",
+                operation_id,
+                {
+                    "conversation_id": actor.conversation_id,
+                    "notice_id": notice_id,
+                    "kind": notice["kind"],
+                    "response_seq": response_seq,
+                },
+            )
+            await self._actor_final(conn, actor, binding)
+            return row
 
     async def finalize_business_command(
         self,
