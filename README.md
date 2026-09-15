@@ -77,13 +77,15 @@ uv run --frozen forest setup-token --data-dir .forest
 
 ## 原生插件开发切片
 
-当前可运行示例是 [examples/counter](examples/counter/python/counter.py)：继承 `Plugin`，使用 `@service` 声明异步服务，通过 `ctx.state` 读取和提交版本化状态，通过 `ctx.operations.stable()` 派生重试不变的步骤 ID。示例随包提供 `module.toml` 和输入、输出、配置 schema；开发 watch 已实现，自动生成 manifest 与 `@plugin/@command` 尚未实现。
+当前有两种可运行示例。[examples/counter](examples/counter/python/counter.py) 展示显式 `module.toml`、版本化状态和稳定操作 ID；[examples/auto_echo](examples/auto_echo/src/auto_echo/__init__.py) 展示 `src/` 布局、`@plugin` 以及 service 的内联 JSON Schema。后者无需手写 manifest：构建器只静态读取字面量 AST 与 `pyproject.toml`，在不可变工件中生成 `module.toml`、schema 和覆盖所有文件的 `checksums.json`，构建期间不会导入插件。动态装饰器表达式会带文件及行列拒绝。业务 `@command` 与消息处理链仍未实现。
 
 以下命令不需要 Bot 数据库：
 
 ```sh
 uv run --frozen forest plugin build examples/counter
 uv run --frozen forest plugin check examples/counter
+uv run --frozen forest plugin build examples/auto_echo
+uv run --frozen forest plugin check examples/auto_echo
 ```
 
 `build` 静态校验完整包并保存内容寻址快照，不执行插件代码。`check` 额外启动独立候选 Worker，验证导入、prepare/start/health 后回收；候选没有生产 state RPC 权限。`check/dev` 可通过 `--config-json` 提供经包 schema 校验的配置，默认 `{}`；`build` 不要求这份默认配置满足运行时必填字段。默认缓存目录为 `.forest/packages`，可通过 `--cache-dir` 修改。普通构建修改包内容后需提升 `module.toml` 的版本，同版本不同内容会被拒绝；开发 `--watch` 则按内容自动派生 `+dev.<digest>` 版本。

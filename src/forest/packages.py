@@ -26,6 +26,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
 from forest.errors import ForestError
+from forest.plugin_declarations import synthesize_manifest, verify_checksums, with_checksums
 from forest.security import private_directory
 
 SKIPPED = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
@@ -58,6 +59,7 @@ MANIFEST_SCHEMA = {
             for key in ("runtime", "kernel_api", "package_id", "version", "entrypoint")
         },
         "dependency_lock": {"type": "string"},
+        "module_root": {"type": "string"},
         "components": {
             "type": "array",
             "minItems": 1,
@@ -285,6 +287,18 @@ def source_fingerprint(source: Path) -> str:
     })
 
 
+def _prepared_source(source_files: dict[str, bytes]) -> dict[str, bytes]:
+    files = synthesize_manifest(source_files)
+    if len(files) > MAX_PACKAGE_FILES or sum(map(len, files.values())) > MAX_PACKAGE_BYTES:
+        _fail("PACKAGE_TOO_LARGE", "Generated package exceeds file or byte limits")
+    if any(
+        len(content) > (MAX_WHEEL_BYTES if name.endswith(".whl") else MAX_FILE_BYTES)
+        for name, content in files.items()
+    ):
+        _fail("PACKAGE_TOO_LARGE", "Generated package file exceeds its byte limit")
+    return files
+
+
 def _capture_files(root: Path) -> dict[str, bytes]:
     captured: dict[str, bytes] = {}
     names: set[str] = set()
@@ -404,6 +418,7 @@ def _schema(files: dict[str, bytes], reference: str) -> dict:
 
 
 def _manifest(files: dict[str, bytes]) -> dict:
+    verify_checksums(files)
     try:
         manifest = tomllib.loads(files["module.toml"].decode("utf-8"))
     except (KeyError, ValueError, UnicodeError, RecursionError) as exc:
@@ -428,9 +443,20 @@ def _manifest(files: dict[str, bytes]) -> dict:
     entrypoint = manifest.get("entrypoint", "")
     if not isinstance(entrypoint, str) or not ENTRYPOINT.fullmatch(entrypoint):
         _fail("INVALID_MANIFEST", "Entrypoint must be a Python module:Class")
-    module = "python/" + entrypoint.split(":")[0].replace(".", "/")
+    module_root = manifest.get("module_root", "python")
+    root = PurePosixPath(module_root)
+    if (
+        not isinstance(module_root, str)
+        or not module_root
+        or len(module_root) > 128
+        or root.is_absolute()
+        or module_root != root.as_posix()
+        or any(part in {"", ".", ".."} for part in root.parts)
+    ):
+        _fail("INVALID_MANIFEST", "module_root must be a portable relative directory")
+    module = module_root + "/" + entrypoint.split(":")[0].replace(".", "/")
     if module + ".py" not in files and module + "/__init__.py" not in files:
-        _fail("ENTRYPOINT_MISSING", "Entrypoint is absent from package python/ directory")
+        _fail("ENTRYPOINT_MISSING", "Entrypoint is absent from the declared module_root")
     components = manifest.get("components")
     if not isinstance(components, list) or len(components) != 1:
         _fail(
@@ -541,7 +567,7 @@ class PackageSnapshot:
 
     @property
     def module_root(self) -> Path:
-        return self.root / "python"
+        return self.root / self.manifest.get("module_root", "python")
 
     @property
     def entrypoint(self) -> str:
@@ -580,13 +606,14 @@ class PackageCatalog:
         catalog_root = self.root.resolve()
         if catalog_root == source or catalog_root.is_relative_to(source):
             _fail("INVALID_PACKAGE_PATH", "Artifact catalog cannot be inside the source package")
-        captured = _capture(source)
+        source_files = _capture(source)
+        captured = _prepared_source(source_files)
         _manifest(captured)
-        if captured != _capture(source):
+        if captured != _prepared_source(_capture(source)):
             _fail("PACKAGE_CHANGED", "Package must remain stable throughout capture")
         if development:
             source_digest = digest_json(
-                {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
+                {name: hashlib.sha256(value).hexdigest() for name, value in source_files.items()}
             ).removeprefix("sha256:")
             # The manifest has already passed TOML/schema validation. Replace the
             # top-level version only; no source file is changed by a dev build.
@@ -603,6 +630,8 @@ class PackageCatalog:
             if not replaced:
                 _fail("INVALID_MANIFEST", "Development builds require a top-level version")
             captured["module.toml"] = "".join(lines).encode("utf-8")
+            if "checksums.json" in captured:
+                captured = with_checksums(captured)
         return self._publish(captured)
 
     def import_archive(

@@ -1,6 +1,6 @@
 # 原生 Python 插件与开发体验详细设计
 
-> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@service`、`@subscribe`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check` 和单次 `forest dev`。本文的 `@plugin/@command`、声明自动生成、记忆/回复/通用服务代理与自动 watch 仍是目标接口；真实示例见 [counter](../examples/counter/python/counter.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
+> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@plugin`、`@service`、`@subscribe`、`@job`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check`、单次 `forest dev` 和自动 watch。缺少显式 `module.toml` 时，构建器已从字面量装饰器和 `pyproject.toml` 静态生成清单、内联 schema 与 `checksums.json`。本文的 `@command`、DTO schema/适配入口生成及记忆/回复/通用服务代理仍是目标接口；示例见 [counter](../examples/counter/python/counter.py) 与 [auto_echo](../examples/auto_echo/src/auto_echo/__init__.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
 
 ## 1. 插件作者看到的接口
 
@@ -54,7 +54,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 ## 3. 声明生成与授权
 
-装饰器使用可静态解析的字面量元数据。打包器读取 AST 与 `pyproject.toml`，生成 `module.toml`、契约 schema、SDK 适配入口及 `checksums.json`；使用者不必手写完整 manifest。
+装饰器使用可静态解析的字面量元数据。当前打包器在源码没有显式 `module.toml` 时读取 AST 与 `pyproject.toml` 的 `tool.forest.module-root`，生成 `module.toml`、装饰器内联的契约 schema 及覆盖工件全部文件的 `checksums.json`；字符串 schema 路径继续引用包内文件。生成只发生在捕获快照中，不修改源码，也不导入插件。DTO schema 与 SDK 适配入口生成仍是目标能力。
 
 | 简易声明 | 生成或补全的内容 |
 |---|---|
@@ -62,7 +62,9 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 | `@command(name, permission)` | 命令匹配、输入 schema、终结处理器、用户动作权限 |
 | handler 的 DTO 类型 | 契约 major/minor、输入输出 schema 与摘要 |
 | `requests=[...]` | 组件申请的能力；不自动授予 |
-| `@subscribe(subscriber_id, topic, contract)` | 与显式 manifest 对照的稳定 subscriber ID 与精确事件契约；schema、次数仍由 manifest 声明 |
+| `@service(name, contract, input_schema, output_schema)` | 服务身份、精确契约及包内路径或内联 JSON Schema；缺省 schema 为开放 schema `{}` |
+| `@subscribe(subscriber_id, topic, contract, schema, max_attempts)` | 稳定 subscriber ID、精确事件契约、包内路径或内联 schema 及重试次数 |
+| `@job(handler_id, input_schema, max_attempts, timeout_s, max_concurrency)` | 持久任务身份、输入 schema、尝试预算、单次期限与并发上限 |
 | SDK/项目配置默认值 | API 兼容范围、资源配额、生命周期超时与 `reload_mode=drain` |
 
 动态拼接的装饰器参数无法静态求值时，构建失败并指出位置；作者可改用显式 manifest。正式产物必须包含 02 中要求的完整声明，便利接口不能省略状态 schema、必需依赖或权限边界。

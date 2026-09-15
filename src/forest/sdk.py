@@ -21,7 +21,35 @@ from typing import Any
 from forest.errors import ForestError
 
 
-def service(name: str):
+def plugin(
+    id: str,
+    version: str,
+    scope: str = "bot",
+    *,
+    requests=(),
+    **declaration,
+):
+    """Mark the single package component; build metadata is read statically from its AST."""
+
+    metadata = {"id": id, "version": version, "scope": scope, "requests": requests, **declaration}
+
+    def decorate(candidate):
+        if not inspect.isclass(candidate):
+            raise TypeError("@plugin must decorate a class")
+        selected = candidate
+        if not issubclass(candidate, Plugin):
+            selected = type(
+                candidate.__name__,
+                (candidate, Plugin),
+                {"__module__": candidate.__module__, "__qualname__": candidate.__qualname__},
+            )
+        selected.__forest_plugin__ = metadata
+        return selected
+
+    return decorate
+
+
+def service(name: str, *, contract: str = "1.0", input_schema=None, output_schema=None):
     if not isinstance(name, str) or not name or len(name) > 128:
         raise ValueError("Service name must contain 1 to 128 characters")
 
@@ -29,12 +57,25 @@ def service(name: str):
         if not inspect.iscoroutinefunction(function):
             raise TypeError("A service must be an async method(payload, ctx)")
         function.__forest_service__ = name
+        function.__forest_service_manifest__ = {
+            "name": name,
+            "contract": contract,
+            "input_schema": input_schema,
+            "output_schema": output_schema,
+        }
         return function
 
     return decorate
 
 
-def subscribe(subscriber_id: str, topic: str, contract: str):
+def subscribe(
+    subscriber_id: str,
+    topic: str,
+    contract: str,
+    *,
+    schema=None,
+    max_attempts: int | None = None,
+):
     identifier = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
     if not identifier.fullmatch(subscriber_id) or not identifier.fullmatch(topic):
         raise ValueError("Subscriber ID and topic must be bounded identifiers")
@@ -49,12 +90,24 @@ def subscribe(subscriber_id: str, topic: str, contract: str):
             "topic": topic,
             "contract": contract,
         }
+        function.__forest_subscription_manifest__ = {
+            **function.__forest_subscription__,
+            "schema": schema,
+            "max_attempts": max_attempts,
+        }
         return function
 
     return decorate
 
 
-def job(handler_id: str):
+def job(
+    handler_id: str,
+    *,
+    input_schema=None,
+    max_attempts: int | None = None,
+    timeout_s: float | None = None,
+    max_concurrency: int | None = None,
+):
     identifier = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
     if not isinstance(handler_id, str) or not identifier.fullmatch(handler_id):
         raise ValueError("Job handler ID must be a bounded identifier")
@@ -63,6 +116,13 @@ def job(handler_id: str):
         if not inspect.iscoroutinefunction(function):
             raise TypeError("A component job must be an async method(task, ctx)")
         function.__forest_job__ = handler_id
+        function.__forest_job_manifest__ = {
+            "handler_id": handler_id,
+            "input_schema": input_schema,
+            "max_attempts": max_attempts,
+            "timeout_s": timeout_s,
+            "max_concurrency": max_concurrency,
+        }
         return function
 
     return decorate

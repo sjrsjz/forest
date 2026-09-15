@@ -1,0 +1,331 @@
+import asyncio
+import io
+import json
+import zipfile
+from argparse import Namespace
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from test_kernel import bot_database as bot_database
+
+from forest.cli import run_plugin_command
+from forest.errors import ForestError
+from forest.kernel import Kernel
+from forest.packages import PackageCatalog, source_fingerprint
+from forest.sdk import Plugin, declared_services, plugin, service
+from forest.watch import DevWatcher
+
+
+def auto_source(tmp_path: Path, *, module: str = "demo") -> Path:
+    root = tmp_path / "source"
+    package = root / "src" / module
+    package.mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n'
+        '[tool.forest]\nmodule-root = "src"\n',
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text(
+        '''from forest.sdk import plugin, service
+
+@plugin(id="example.auto", version="0.1.0", requests=[])
+class Echo:
+    @service(
+        "echo.call",
+        contract="1.2",
+        input_schema={"type": "object", "required": ["value"]},
+        output_schema={"type": "object", "required": ["value"]},
+    )
+    async def echo(self, payload, ctx):
+        return {"value": payload["value"]}
+''',
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_auto_declaration_build_is_static_complete_and_deterministic(tmp_path):
+    source = auto_source(tmp_path)
+    marker = tmp_path / "imported"
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n"
+        + module.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    catalog = PackageCatalog(tmp_path / "catalog")
+    first = catalog.build(source)
+    second = catalog.build(source)
+
+    assert first.digest == second.digest
+    assert first.entrypoint == "demo:Echo"
+    assert first.module_root == first.root / "src"
+    assert first.component["provides"] == [
+        {
+            "name": "echo.call",
+            "contract": "1.2",
+            "input_schema": "forest_generated/service-0-input.json",
+            "output_schema": "forest_generated/service-0-output.json",
+        }
+    ]
+    assert not marker.exists()
+    checksums = json.loads((first.root / "checksums.json").read_text(encoding="utf-8"))
+    assert checksums["algorithm"] == "sha256"
+    assert set(checksums["files"]) == {
+        "forest_generated/config.json",
+        "forest_generated/service-0-input.json",
+        "forest_generated/service-0-output.json",
+        "module.toml",
+        "pyproject.toml",
+        "src/demo/__init__.py",
+    }
+    first.verify()
+
+
+async def test_auto_declared_package_passes_real_worker_check(tmp_path, capsys):
+    source = auto_source(tmp_path)
+    await run_plugin_command(
+        Namespace(
+            command="plugin",
+            plugin_command="check",
+            source=source,
+            cache_dir=tmp_path / "catalog",
+            config_json="{}",
+        )
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "checked"
+    PackageCatalog(tmp_path / "catalog").get(result["package_digest"]).verify()
+
+
+async def test_event_and_job_declarations_generate_the_existing_worker_contract(tmp_path, capsys):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''from forest.sdk import job, plugin, service, subscribe
+
+@plugin(
+    id="example.auto", version="0.1.0",
+    requests=["event.publish:event.ready", "job.schedule:work.refresh"],
+    publishes=[{
+        "topic": "event.ready", "contract": "1.0",
+        "schema": {"type": "object", "required": ["value"]},
+    }],
+)
+class Worker:
+    @service("echo.call")
+    async def echo(self, payload, ctx):
+        return payload
+
+    @subscribe(
+        "projection.ready", "event.ready", "1.0",
+        schema={"type": "object"}, max_attempts=4,
+    )
+    async def project(self, event, ctx):
+        return None
+
+    @job(
+        "work.refresh", input_schema={"type": "object"},
+        max_attempts=3, timeout_s=2.5, max_concurrency=2,
+    )
+    async def refresh(self, task, ctx):
+        return None
+''',
+        encoding="utf-8",
+    )
+    await run_plugin_command(
+        Namespace(
+            command="plugin",
+            plugin_command="check",
+            source=source,
+            cache_dir=tmp_path / "catalog",
+            config_json="{}",
+        )
+    )
+    result = json.loads(capsys.readouterr().out)
+    snapshot = PackageCatalog(tmp_path / "catalog").get(result["package_digest"])
+    assert snapshot.component["publishes"][0]["schema"] == (
+        "forest_generated/publication-0.json"
+    )
+    assert snapshot.component["subscribes"][0]["max_attempts"] == 4
+    assert snapshot.component["jobs"][0] == {
+        "handler_id": "work.refresh",
+        "input_schema": "forest_generated/job-0-input.json",
+        "max_attempts": 3,
+        "timeout_s": 2.5,
+        "max_concurrency": 2,
+    }
+
+
+def test_dynamic_declaration_is_rejected_with_source_location(tmp_path):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''from forest.sdk import plugin, service
+VERSION = "0.1.0"
+@plugin(id="example.auto", version=VERSION)
+class Echo:
+    @service("echo.call")
+    async def echo(self, payload, ctx):
+        return payload
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(source)
+    assert caught.value.code == "PLUGIN_DECLARATION_INVALID"
+    assert caught.value.details == {
+        "phase": "declaration",
+        "file": "src/demo/__init__.py",
+        "line": 3,
+        "column": 36,
+    }
+
+
+@pytest.mark.parametrize(
+    "imports,plugin_name,service_name",
+    [
+        ("from forest.sdk import plugin as declare, service as endpoint", "declare", "endpoint"),
+        ("import forest.sdk as sdk", "sdk.plugin", "sdk.service"),
+        ("import forest.sdk", "forest.sdk.plugin", "forest.sdk.service"),
+        ("from forest import sdk", "sdk.plugin", "sdk.service"),
+    ],
+)
+def test_static_declarations_follow_forest_sdk_import_aliases(
+    tmp_path, imports, plugin_name, service_name
+):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        f'''{imports}
+@{plugin_name}(id="example.auto", version="0.1.0")
+class Echo:
+    @{service_name}("echo.call")
+    async def echo(self, payload, ctx):
+        return payload
+''',
+        encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    assert snapshot.entrypoint == "demo:Echo"
+
+
+def test_unrelated_same_named_decorator_is_not_treated_as_sdk_declaration(tmp_path):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''def plugin(**metadata):
+    return lambda candidate: candidate
+@plugin(id="not.forest", version="0.1.0")
+class Unrelated:
+    pass
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(source)
+    assert caught.value.code == "PLUGIN_DECLARATION_INVALID"
+
+
+def test_declared_checksums_reject_modified_archive_before_publication(tmp_path):
+    source = auto_source(tmp_path)
+    catalog = PackageCatalog(tmp_path / "source-catalog")
+    archive = catalog.export_archive(catalog.build(source).digest)
+    source_zip = zipfile.ZipFile(io.BytesIO(archive))
+    output = io.BytesIO()
+    with source_zip, zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for info in source_zip.infolist():
+            value = source_zip.read(info.filename)
+            if info.filename == "src/demo/__init__.py":
+                value += b"\n# modified in transit\n"
+            target.writestr(info, value)
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "destination").import_archive(output.getvalue())
+    assert caught.value.code == "PACKAGE_CHECKSUM_MISMATCH"
+
+
+def test_generated_artifact_namespace_cannot_shadow_source_files(tmp_path):
+    source = auto_source(tmp_path)
+    reserved = source / "forest_generated"
+    reserved.mkdir()
+    (reserved / "config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(source)
+    assert caught.value.code == "PLUGIN_DECLARATION_INVALID"
+
+
+def test_development_version_refreshes_generated_checksums(tmp_path):
+    source = auto_source(tmp_path)
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source, development=True)
+    assert snapshot.manifest["version"] == (
+        "0.1.0+dev." + source_fingerprint(source).removeprefix("sha256:")
+    )
+    snapshot.verify()
+
+
+def test_runtime_plugin_decorator_adapts_plain_class_without_changing_handlers():
+    @plugin(id="example.runtime", version="0.1.0")
+    class Plain:
+        @service("echo.call", contract="1.2", input_schema={}, output_schema={})
+        async def echo(self, payload, ctx):
+            return payload, ctx
+
+    instance = Plain()
+    assert isinstance(instance, Plugin)
+    assert set(declared_services(instance)) == {"echo.call"}
+    assert Plain.__forest_plugin__["id"] == "example.runtime"
+
+
+async def eventually(predicate, *, timeout=15):
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.02)
+
+
+@pytest.mark.postgres
+async def test_auto_declared_package_uses_real_hot_reload_lifecycle(
+    tmp_path, bot_database  # noqa: F811
+):
+    store, _ = bot_database
+    source = auto_source(tmp_path)
+    kernel = Kernel(store, lease_seconds=120)
+    watcher = DevWatcher(
+        kernel,
+        PackageCatalog(tmp_path / "catalog"),
+        source,
+        debounce=0.05,
+        poll_interval=0.025,
+    )
+    try:
+        await kernel.start()
+        await watcher.start()
+        await eventually(lambda: watcher.published_count == 1 or watcher.failure)
+        assert watcher.failure is None
+        first_worker = kernel.components["example.auto"].worker
+        first = await kernel.invoke(
+            "example.auto", "echo.call", {"value": "one"}, operation_id=uuid4().hex
+        )
+        assert first == {"value": "one"}
+
+        module = source / "src" / "demo" / "__init__.py"
+        module.write_text(
+            module.read_text(encoding="utf-8").replace(
+                'return {"value": payload["value"]}',
+                'return {"value": "reloaded:" + payload["value"]}',
+            ),
+            encoding="utf-8",
+        )
+        await eventually(lambda: watcher.published_count == 2 or watcher.failure)
+        assert watcher.failure is None
+        second = await kernel.invoke(
+            "example.auto", "echo.call", {"value": "two"}, operation_id=uuid4().hex
+        )
+        assert second == {"value": "reloaded:two"}
+        assert not first_worker.alive and len(kernel._workers) == 1
+        current = kernel.components["example.auto"].snapshot
+        assert current.module_root == current.root / "src"
+        current.verify()
+    finally:
+        await watcher.close()
+        await kernel.close()

@@ -1,5 +1,7 @@
 # Forest 实现状态与验证记录
 
+原生插件声明生成切片允许源码包只提供 `pyproject.toml`、一个字面量 `@plugin` 类及现有 `@service/@subscribe/@job` handler。构建器根据真实 `forest.sdk` import 及别名读取 AST，不执行插件代码；支持 `src/` 与 `python/` module root，把内联 JSON Schema、完整 `module.toml` 和覆盖工件全部文件的 `checksums.json` 加入不可变快照。动态表达式带源码文件、行、列拒绝；保留显式 manifest 兼容路径。开发派生版本继续绑定原始源码摘要，生成内容则由最终 package digest 和 checksum 双重绑定，因此 `DevWatcher` 的最新编辑围栏没有被便利层改写。新增声明专项为 `13 passed`，相关 package/Worker/watch/SDK 非数据库回归为 `119 passed, 1 skipped, 18 deselected`；全套非 PostgreSQL 回归为 `645 passed, 36 skipped, 1000 deselected`。一次性 PostgreSQL 17 容器中的纵向测试为 `1 passed`，实际完成自动构建、Kernel 安装、服务调用、源码编辑、候选 Worker 启动、drain 热切换、旧 Worker 回收和新实现调用。`examples/auto_echo` 的真实 `plugin build` 与 `plugin check` 均成功；测试容器和临时工件已清理。业务 `@command`、DTO schema/适配入口生成仍未实现。
+
 群聊上下文重置切片将当前接纳门推进到 `shell-gate-v12`。`context reset --expect-view` 只登记 P1、不可变、固定 `safe-point` 的 `RESET` 请求；本群唯一 Actor 在没有未闭合模型/工具步骤的下一次调用边界执行视图 CAS。重置归档旧 Run 的已闭合可见历史，并按 `input_batch_id → RUNNING run` 保留当前 Run 的完整输入批次，所以最后触发之前的普通群消息不会丢失；同一 Run 的模型/工具因果单元也保持可见。无活动 Run 时归档全部当前可见单元。操作只发布 `explicit-safe-point-reset-v1` manifest，不调用摘要/模型，不删除 Inbox、触发或 payload。需要强制结束 Run 时先使用现有带 checkpoint CAS 的 P0 `run cancel`，reset 不隐式取得取消权。迁移 071 将 writer generation 提升到 11，并排除会把 RESET 当成 COMPACT 的 generation-10 Host；v12 registry/payload helper 与迁移 checksum 一起冻结。Shell/reset/writer 专项为 `90 passed`，输入批次修正后的 PostgreSQL 边界复验为 `4 passed`；扩大回归原有 138 项中 137 项通过，唯一失败是仍期望 generation 10 的测试断言，更新为 11 后单项通过；加密备份、隔离恢复与该断言复验为 `3 passed`。随后按用户要求停止高负载回归并关闭本机三个 Forest 容器及 Docker Desktop/WSL，本切片没有调用真实 QQ 发送。
 
 已遗忘来源的迟到观察现在由[持久 metadata-only 接纳协议](p5-suppressed-occurrence-ack.md)闭环。固定 OneBot 解析器在任何可热重载 Worker 前先检查既有 Inbox 与永久 suppression；命中 suppression 时只写不可变 `SUPPRESSED_OCCURRENCE` 收据，不写 raw payload、Inbox、Context、Shell、Agent、媒体或记忆来源。同一事件与规范摘要重放复用原收据，换正文固定冲突；staging 与正式 ingest 分别在 `memory_clock` 上复查，正式路径保持 `Binding → Conversation → memory_clock` 锁序并在命中时撤销事务内候选 Conversation。HTTP 与正向 WebSocket 共用同一结果，普通 Inbox 重试也可在正文 scrub 后直接取得 `DUPLICATE` ACK。迁移 070 将 writer generation 提升为 10，并以数据库 trigger 核验 suppression 证明、拒绝收据更新/删除及 generation-9 Host 回归。相关消息、平台、存储和 writer 回归为 `71 passed`，加密备份/隔离恢复为 `2 passed`，旧非空库升级为 `5 passed`，最终收据证明与竞态专项为 `4 passed`；Ruff、Python 编译和补丁检查通过。`forest:suppressed-occurrence-ack` 镜像摘要为 `sha256:5d8eb109108e1aa255dcea8560b130d222f64276af845f45daae181286acfe8f`。本切片没有调用真实 QQ 发送。
@@ -100,6 +102,7 @@ P1/P3 流程为：登记固定 OneBot 账号 → Web 预览并保存连接配置
 | 最终提交守卫 | 在实际状态读写/调用完成事务核验当前 Bot、宿主、代际、调用、期限、取消、权限与维护修订；CAS 与幂等在同一目标事务裁决 | [BotStore](../src/forest/storage/bot.py)、[内核集成测试](../tests/test_kernel.py) |
 | 生命周期协调 | 候选预热与正式写入分离；freeze/drain 后捕获最终状态，纯迁移双次验证，状态/路由/effective 原子发布；失败回收、受限恢复与宿主接管 | [kernel.py](../src/forest/kernel.py)、[状态迁移说明](p2-state-migration.md) |
 | 开发 CLI | `plugin build` 静态构建，`plugin check` 候选运行检查，`dev` 在专用开发库执行一次指定服务；JSON 可经标准输入提供 | [cli.py](../src/forest/cli.py)、[README 用法](../README.md#原生插件开发切片) |
+| 插件声明生成 | 无显式 manifest 的 `src/`/`python/` 源码包从单个字面量 `@plugin` 及 `@service/@subscribe/@job` 静态生成正式清单、内联 schema 和全文件 checksum；动态表达式带源码位置拒绝，构建不导入插件，生成工件走同一 Worker/热重载路径 | [生成器](../src/forest/plugin_declarations.py)、[纵向测试](../tests/test_plugin_declarations.py)、[auto_echo](../examples/auto_echo/src/auto_echo/__init__.py) |
 | 依赖与服务 | required/optional、契约 major/range、安装前 DAG 校验、依赖先启动；精确 `service.call:<name>`、调用树深度和共享 deadline | [kernel.py](../src/forest/kernel.py)、[服务集成测试](../tests/test_services.py) |
 | 调用树排空 | 持久记录依赖闭包预留；禁止新树进入冻结目标，已接纳树可完成子调用；所有预留与自身调用排空后才 QUIESCENT/发布 | [调用树迁移](../src/forest/storage/bot_migrations/002_call_trees.sql)、[调用树测试](../tests/test_child_calls.py) |
 | Bot 目录与供应 | 独立角色/数据库、加密固定计划、CAS/幂等、逐 DDL 许可、lease/epoch；SCRAM verifier 与 DB owner 对账，不接管陌生资源 | [目录](../src/forest/management/catalog.py)、[供应器](../src/forest/management/provision.py)、[测试](../tests/test_bot_catalog.py) |
@@ -153,7 +156,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 
 | 阶段 | 状态 | 尚未实现的必要内容 |
 |---|---|---|
-| P0 契约与可靠内核 | 部分实现 | 已有依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK 与管理、调用/代际资源监督和 Web/Fleet 接线；仍缺自动声明生成、宿主级资源种类和其余消息契约 |
+| P0 契约与可靠内核 | 部分实现 | 已有静态插件声明生成、依赖 DAG、受监督服务调用树、持久组件事件及 replay/retirement 管理、组件持久 Job SDK 与管理、调用/代际资源监督和 Web/Fleet 接线；仍缺宿主级资源种类、业务 `@command` 和其余消息契约 |
 | P1 群聊与多 Bot | 接入切片可运行 | OneBot HTTP、Web Binding、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪和可靠发送；完整通用消息插件链、平台能力覆盖与持续压力验收仍待补齐 |
 | P2 热重载与恢复 | 原生插件切片已接通 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、操作终结恢复、Web 版本/历史配置与 last-good 恢复已接入；完整 Agent/Job checkpoint、通用状态后端与长期容量治理继续后续阶段 |
 | P3 Agent 与上下文 | 单 Agent 核心协议已接通 | interval/cron 受权队列、非重叠与取消、同群 trigger-cut、持久 attempt、固定 CorePrompt、PresetContext、原子 ModelTurn/一次修复和旧 Child 封存已接入；仍需真实付费 Provider 长时间联调、更多 Provider adapter 和容量验收 |
