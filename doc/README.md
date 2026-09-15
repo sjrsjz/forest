@@ -17,7 +17,8 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P2 插件包与依赖环境](p2-plugin-packages.md) | 完整 ZIP、开发版本、离线锁、平台与 SDK 隔离 |
 | [P2 持久状态迁移](p2-state-migration.md) | 纯迁移接口、双次验证、状态/路由原子发布与故障恢复 |
 | [P2 Web 插件管理](p2-web-plugin-management.md) | 导入与启用、通用表单、版本切换、历史配置与重启恢复 |
-| [P2 业务命令与普通消息插件链](p2-business-commands.md) | `@command` 声明、Web 用户策略、持久分类、同群 Actor、原子回复及热重载边界 |
+| [P2 业务命令](p2-business-commands.md) | `@command` 声明、Web 用户策略、持久分类、同群 Actor、原子回复及热重载边界 |
+| [P2 普通群消息插件链](p2-message-handlers.md) | AliceBot 式异步 handler/priority/停止链、持久路由、Agent 回落、同群串行与热重载边界 |
 | [P3 单 Agent 协议与持久运行](p3-agent.md) | 不可覆盖 CorePrompt、PresetContext、原子 ModelTurn、模型/工具安全点与持久恢复 |
 | [P3 Agent 状态与并发](p3-agent-state.md) | 许可、预算、精确切口、工具观察、取消与最终提交恢复 |
 | [P3 定时任务](p3-jobs.md) | 持久计划、日历与补跑、受权入队、非重叠占用和管理取消 |

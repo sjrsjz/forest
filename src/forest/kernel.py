@@ -66,6 +66,14 @@ class BusinessCommandDefinition:
     validator: Draft202012Validator
 
 
+@dataclass(frozen=True)
+class MessageHandlerDefinition:
+    handler_id: str
+    handler: str
+    priority: int
+    spec_digest: str
+
+
 @dataclass
 class LoadedComponent:
     snapshot: PackageSnapshot
@@ -76,6 +84,7 @@ class LoadedComponent:
     subscriptions: dict[str, EventSubscription]
     jobs: dict[str, ComponentJobDefinition]
     commands: dict[str, BusinessCommandDefinition]
+    message_handlers: dict[str, MessageHandlerDefinition]
     policy_revision: int
     route_epoch: int = 0
     dependencies: tuple[str, ...] = ()
@@ -592,6 +601,7 @@ class Kernel:
             job_definitions = []
             commands = {}
             command_definitions = []
+            message_handlers = {}
             for item in spec.get("publishes", []):
                 schema = snapshot.schema(item["schema"])
                 publication = EventPublication(
@@ -651,6 +661,16 @@ class Kernel:
                     **command_data,
                     spec_digest=digest_json(command_data),
                     validator=Draft202012Validator(snapshot.schema(item["input_schema"])),
+                )
+            for item in spec.get("message_handlers", []):
+                handler_data = {
+                    "handler_id": item["handler_id"],
+                    "handler": item["handler"],
+                    "priority": item["priority"],
+                }
+                message_handlers[item["handler_id"]] = MessageHandlerDefinition(
+                    **handler_data,
+                    spec_digest=digest_json(handler_data),
                 )
             component_id = spec["id"]
             old = self.components.get(component_id)
@@ -732,7 +752,7 @@ class Kernel:
             policy_revision = (await self.store.runtime())["policy_revision"]
             new = LoadedComponent(
                 snapshot, worker, requested & grants, validators,
-                publications, subscriptions, jobs, commands, policy_revision,
+                publications, subscriptions, jobs, commands, message_handlers, policy_revision,
             )
             published = False
             frozen = False
@@ -1457,6 +1477,78 @@ class Kernel:
         finally:
             self._call_count -= 1
 
+    async def invoke_message_handler_with_receipt(
+        self,
+        request: dict,
+        event: dict,
+        *,
+        operation_id: str,
+        timeout: float = 30,
+        input_parent_ids: tuple[str, ...] = (),
+    ) -> InvocationReceipt:
+        """Invoke one Actor-claimed item against its frozen ordinary-message route."""
+
+        self._authority()
+        required = {
+            "chain_id",
+            "item_id",
+            "status",
+            "component_id",
+            "handler_id",
+            "generation_id",
+            "route_epoch",
+            "handler_spec_digest",
+        }
+        if (
+            not isinstance(request, dict)
+            or not required.issubset(request)
+            or request["status"] != "CLAIMED"
+            or any(
+                not isinstance(request[key], str) or not 1 <= len(request[key]) <= 256
+                for key in (
+                    "chain_id",
+                    "item_id",
+                    "component_id",
+                    "handler_id",
+                    "generation_id",
+                    "handler_spec_digest",
+                )
+            )
+            or type(request["route_epoch"]) is not int
+            or request["route_epoch"] < 1
+        ):
+            raise ForestError(
+                "MESSAGE_HANDLER_REQUEST_INVALID",
+                "Message handler invocation requires a claimed frozen route item",
+                422,
+            )
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 0 < timeout <= 120
+        ):
+            raise ForestError("INVALID_CALL", "Handler timeout must be zero to 120 seconds", 422)
+        input_parent_ids = self._input_parents(input_parent_ids)
+        self._validate(Draft202012Validator({}), event, "MESSAGE_EVENT_INVALID")
+        event = json.loads(json.dumps(event, allow_nan=False))
+        if self._call_count >= self.max_calls:
+            raise ForestError("BACKPRESSURE", "Kernel call capacity is exhausted", 429)
+        self._call_count += 1
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._invoke(
+                    request["component_id"],
+                    "@message:" + request["handler_id"],
+                    event,
+                    operation_id=operation_id,
+                    contract_major=1,
+                    timeout=timeout,
+                    input_parent_ids=input_parent_ids,
+                    message_handler=request,
+                )
+        finally:
+            self._call_count -= 1
+
     async def _event_rpc(
         self, identity: WorkerIdentity, parent_call_id: str, request: dict
     ) -> dict:
@@ -1576,6 +1668,7 @@ class Kernel:
         event_delivery: dict | None = None,
         component_job: dict | None = None,
         business_command: dict | None = None,
+        message_handler: dict | None = None,
     ) -> InvocationReceipt:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
@@ -1585,7 +1678,8 @@ class Kernel:
         if component is None:
             raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
         durable_kinds = sum(
-            value is not None for value in (event_delivery, component_job, business_command)
+            value is not None
+            for value in (event_delivery, component_job, business_command, message_handler)
         )
         if durable_kinds > 1:
             raise ForestError("INVALID_DELIVERY", "A call cannot carry two durable work facts", 422)
@@ -1645,6 +1739,10 @@ class Kernel:
                     {"business_command_request_id": business_command["request_id"]}
                     if business_command is not None else {}
                 ),
+                **(
+                    {"message_handler_item_id": message_handler["item_id"]}
+                    if message_handler is not None else {}
+                ),
             }
         )
 
@@ -1670,7 +1768,13 @@ class Kernel:
         subscription = None
         job_definition = None
         command_definition = None
-        if event_delivery is None and component_job is None and business_command is None:
+        message_handler_definition = None
+        if (
+            event_delivery is None
+            and component_job is None
+            and business_command is None
+            and message_handler is None
+        ):
             if service not in component.validators:
                 raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
             input_validator, output_validator, major = component.validators[service]
@@ -1716,7 +1820,7 @@ class Kernel:
                 job_definition.validator, payload.get("payload"), "JOB_PAYLOAD_INVALID"
             )
             output_validator, major = Draft202012Validator({}), 1
-        else:
+        elif business_command is not None:
             command_id = business_command["command_id"]
             if service != "@command:" + command_id:
                 raise ForestError(
@@ -1741,6 +1845,61 @@ class Kernel:
                     409,
                 )
             self._validate(command_definition.validator, payload, "COMMAND_EVENT_INVALID")
+            output_validator = Draft202012Validator(
+                {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "required": ["kind", "parts"],
+                            "additionalProperties": False,
+                            "properties": {
+                                "kind": {"const": "REPLY"},
+                                "parts": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 64,
+                                    "items": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "maxItems": 256,
+                                        "items": {"type": "object"},
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "required": ["kind"],
+                            "additionalProperties": False,
+                            "properties": {"kind": {"enum": ["CONSUMED", "PASS"]}},
+                        },
+                    ]
+                }
+            )
+            major = 1
+        else:
+            handler_id = message_handler["handler_id"]
+            if service != "@message:" + handler_id:
+                raise ForestError(
+                    "MESSAGE_HANDLER_REQUEST_INVALID",
+                    "Message handler target identity differs",
+                    422,
+                )
+            message_handler_definition = component.message_handlers.get(handler_id)
+            if (
+                message_handler_definition is None
+                or message_handler["component_id"] != component_id
+                or message_handler["generation_id"]
+                != component.worker.identity.generation_id
+                or message_handler["route_epoch"] != component.route_epoch
+                or message_handler["handler_spec_digest"]
+                != message_handler_definition.spec_digest
+            ):
+                raise ForestError(
+                    "MESSAGE_HANDLER_FENCED",
+                    "Message handler route or declaration changed",
+                    409,
+                )
             output_validator = Draft202012Validator(
                 {
                     "oneOf": [
@@ -1867,6 +2026,15 @@ class Kernel:
             elif command_definition is not None:
                 result = await component.worker.invoke_command(
                     command_definition.command_id,
+                    payload,
+                    call_id=call_id,
+                    operation_id=operation_id,
+                    timeout=timeout,
+                    before_send=authorize_worker_dispatch,
+                )
+            elif message_handler_definition is not None:
+                result = await component.worker.invoke_message_handler(
+                    message_handler_definition.handler_id,
                     payload,
                     call_id=call_id,
                     operation_id=operation_id,

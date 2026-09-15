@@ -257,6 +257,22 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "message_handlers": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["handler_id", "handler", "priority"],
+                            "properties": {
+                                "handler_id": {"type": "string"},
+                                "handler": {"type": "string"},
+                                "priority": {
+                                    "type": "integer", "minimum": -100, "maximum": 100
+                                },
+                            },
+                        },
+                    },
                 },
             },
         },
@@ -556,8 +572,12 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _schema(files, component.get("config_schema"))
     services = component.get("provides", [])
     commands = component.get("commands", [])
-    if len(services) > 32 or (not services and not commands):
-        _fail("INVALID_SERVICES", "Declare at least one service or business command")
+    message_handlers = component.get("message_handlers", [])
+    if len(services) > 32 or (not services and not commands and not message_handlers):
+        _fail(
+            "INVALID_SERVICES",
+            "Declare at least one service, business command, or message handler",
+        )
     names = set()
     for service in services:
         name = service.get("name", "")
@@ -625,6 +645,28 @@ def _manifest(files: dict[str, bytes]) -> dict:
         command_names.add(normalized)
         command_handlers.add(handler)
         _schema(files, definition.get("input_schema"))
+    message_handler_ids = set()
+    message_handler_methods = set()
+    for definition in message_handlers:
+        handler_id = definition.get("handler_id", "")
+        handler = definition.get("handler", "")
+        priority = definition.get("priority")
+        if (
+            not IDENTIFIER.fullmatch(handler_id)
+            or handler_id in message_handler_ids
+            or not isinstance(handler, str)
+            or not handler.isidentifier()
+            or keyword.iskeyword(handler)
+            or handler in message_handler_methods
+            or type(priority) is not int
+            or not -100 <= priority <= 100
+        ):
+            _fail(
+                "INVALID_MESSAGE_HANDLERS",
+                "Message handler identities, methods, and priorities must be valid and unique",
+            )
+        message_handler_ids.add(handler_id)
+        message_handler_methods.add(handler)
     capabilities = component.get("capabilities", {}).get("requests", [])
     allowed_capabilities = {"state.read", "state.write"} | {
         "service.call:" + name for name in dependency_names

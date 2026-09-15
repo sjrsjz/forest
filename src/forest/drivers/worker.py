@@ -27,6 +27,7 @@ from forest.sdk import (
     _current_call,
     declared_commands,
     declared_jobs,
+    declared_message_handlers,
     declared_services,
     declared_subscriptions,
 )
@@ -54,6 +55,20 @@ def _command_result(value):
     )
 
 
+def _message_handler_result(value):
+    if isinstance(value, Reply):
+        return {"kind": "REPLY", "parts": _plain(value.parts)}
+    if isinstance(value, Consumed):
+        return {"kind": "CONSUMED"}
+    if isinstance(value, Pass):
+        return {"kind": "PASS"}
+    raise ForestError(
+        "INVALID_MESSAGE_HANDLER_RESULT",
+        "Message handlers must return Reply, Consumed, or Pass",
+        422,
+    )
+
+
 class WorkerRuntime:
     def __init__(self, bootstrap: dict, writer: FrameWriter):
         self.bootstrap = bootstrap
@@ -66,6 +81,7 @@ class WorkerRuntime:
         self.subscriptions: dict = {}
         self.jobs: dict = {}
         self.command_handlers: dict = {}
+        self.message_handlers: dict = {}
         self.commands: dict[str, asyncio.Task] = {}
         self.calls: dict[str, asyncio.Task] = {}
         self.state_pending: dict[str, asyncio.Future] = {}
@@ -113,7 +129,9 @@ class WorkerRuntime:
             )
 
     async def execute(self, command: str, payload: dict, deadline: float) -> Any:
-        if command in {"invoke", "invoke_event", "invoke_job", "invoke_command"}:
+        if command in {
+            "invoke", "invoke_event", "invoke_job", "invoke_command", "invoke_message_handler"
+        }:
             self.require("ACTIVE")
             call_id = payload.get("call_id")
             if command == "invoke":
@@ -128,10 +146,14 @@ class WorkerRuntime:
                 name = payload.get("handler_id")
                 handler = self.jobs.get(name)
                 missing = "JOB_HANDLER_NOT_FOUND"
-            else:
+            elif command == "invoke_command":
                 name = payload.get("command_id")
                 handler = self.command_handlers.get(name)
                 missing = "BUSINESS_COMMAND_NOT_FOUND"
+            else:
+                name = payload.get("handler_id")
+                handler = self.message_handlers.get(name)
+                missing = "MESSAGE_HANDLER_NOT_FOUND"
             if handler is None:
                 raise ForestError(missing, "Requested invocation target is not registered", 404)
             if len(self.calls) >= self.limits.max_inflight or call_id in self.calls:
@@ -144,7 +166,11 @@ class WorkerRuntime:
                 result = await handler(payload.get("payload"), context)
                 await self.ctx._task_owner.finish_call(scope)
                 await self.ctx._resource_owner.finish_call(scope)
-                return _command_result(result) if command == "invoke_command" else result
+                if command == "invoke_command":
+                    return _command_result(result)
+                if command == "invoke_message_handler":
+                    return _message_handler_result(result)
+                return result
             finally:
                 try:
                     # Tasks may still be using call-owned resources. Cancel and
@@ -218,6 +244,11 @@ class WorkerRuntime:
                     command_id: method
                     for command_id, (_, method) in declared_command_handlers.items()
                 }
+                declared_handlers = declared_message_handlers(self.plugin)
+                self.message_handlers = {
+                    handler_id: method
+                    for handler_id, (_, method) in declared_handlers.items()
+                }
                 if sorted(self.services) != sorted(self.bootstrap["services"]):
                     raise ForestError(
                         "SERVICE_MANIFEST_MISMATCH",
@@ -265,6 +296,16 @@ class WorkerRuntime:
                         "Decorated commands differ from the immutable manifest",
                         422,
                     )
+                actual_message_handlers = sorted(
+                    (declaration for declaration, _ in declared_handlers.values()),
+                    key=lambda item: item["handler_id"],
+                )
+                if actual_message_handlers != self.bootstrap.get("message_handlers", []):
+                    raise ForestError(
+                        "MESSAGE_HANDLER_MANIFEST_MISMATCH",
+                        "Decorated message handlers differ from the immutable manifest",
+                        422,
+                    )
                 config = payload.get("config", {})
                 if not isinstance(config, dict):
                     raise ForestError(
@@ -287,6 +328,7 @@ class WorkerRuntime:
                     "subscriptions": sorted(self.subscriptions),
                     "jobs": sorted(self.jobs),
                     "commands": sorted(self.command_handlers),
+                    "message_handlers": sorted(self.message_handlers),
                 }
             if command == "start":
                 self.require("PREPARED")
@@ -307,6 +349,7 @@ class WorkerRuntime:
                     "subscriptions": sorted(self.subscriptions),
                     "jobs": sorted(self.jobs),
                     "commands": sorted(self.command_handlers),
+                    "message_handlers": sorted(self.message_handlers),
                     "owned_tasks": len(self.ctx._task_owner.tasks),
                     "task_failures": list(self.ctx._task_owner.background_failures),
                     "owned_resources": len(self.ctx._resource_owner.entries),

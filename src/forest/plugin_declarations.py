@@ -24,13 +24,14 @@ from forest.command_contract import (
 )
 from forest.errors import ForestError
 
-_DECORATORS = {"plugin", "service", "subscribe", "job", "command"}
+_DECORATORS = {"plugin", "service", "subscribe", "job", "command", "message_handler"}
 _PLUGIN_POSITIONAL = ("id", "version", "scope")
 _HANDLER_POSITIONAL = {
     "service": ("name",),
     "subscribe": ("subscriber_id", "topic", "contract"),
     "job": ("handler_id",),
     "command": ("name", "permission"),
+    "message_handler": ("handler_id",),
 }
 _IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 
@@ -259,6 +260,7 @@ def _toml(manifest: dict) -> bytes:
         ("subscribes", component.get("subscribes", [])),
         ("jobs", component.get("jobs", [])),
         ("commands", component.get("commands", [])),
+        ("message_handlers", component.get("message_handlers", [])),
         ("state_migrations", component.get("state_migrations", [])),
     ):
         for item in items:
@@ -329,7 +331,7 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
     if not module:
         _error("The @plugin class must be inside an importable module", path, class_node)
     handlers: dict[str, list[tuple[dict, ast.AST, str]]] = {
-        "service": [], "subscribe": [], "job": [], "command": []
+        "service": [], "subscribe": [], "job": [], "command": [], "message_handler": []
     }
     seen: dict[str, set[str]] = {name: set() for name in handlers}
     for statement in class_node.body:
@@ -345,7 +347,7 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
             identifier_key = (
                 "name" if kind == "service" else
                 "subscriber_id" if kind == "subscribe" else
-                "handler_id" if kind == "job" else "id"
+                "handler_id" if kind in {"job", "message_handler"} else "id"
             )
             if kind == "command":
                 try:
@@ -439,6 +441,25 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
             ),
             "priority": priority,
         })
+    message_handlers = []
+    message_methods = set()
+    for values, node, handler in sorted(
+        handlers["message_handler"], key=lambda item: item[0]["handler_id"]
+    ):
+        unknown = sorted(set(values) - {"handler_id", "priority"})
+        if unknown:
+            _error(f"Unsupported @message_handler arguments: {', '.join(unknown)}", path, node)
+        priority = values.get("priority", 0)
+        if type(priority) is not int or not -100 <= priority <= 100:
+            _error("Message handler priority must be an integer from -100 to 100", path, node)
+        if handler in message_methods:
+            _error(f"Duplicate @message_handler method {handler}", path, node)
+        message_methods.add(handler)
+        message_handlers.append({
+            "handler_id": values["handler_id"],
+            "handler": handler,
+            "priority": priority,
+        })
     config_schema = _schema(
         files, declaration.get("config_schema"), "config", path, class_node
     )
@@ -475,6 +496,8 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
         component["jobs"] = jobs
     if commands:
         component["commands"] = commands
+    if message_handlers:
+        component["message_handlers"] = message_handlers
     manifest = {
         "manifest_version": 1,
         "package_id": declaration["id"],

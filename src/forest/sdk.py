@@ -171,6 +171,28 @@ def command(
     return decorate
 
 
+def message_handler(handler_id: str, *, priority: int = 0):
+    """Declare an ordinary-message handler executed by the conversation Actor."""
+
+    identifier = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
+    if not isinstance(handler_id, str) or not identifier.fullmatch(handler_id):
+        raise ValueError("Message handler ID must be a bounded identifier")
+    if type(priority) is not int or not -100 <= priority <= 100:
+        raise ValueError("Message handler priority must be an integer from -100 to 100")
+
+    def decorate(function):
+        if not inspect.iscoroutinefunction(function):
+            raise TypeError("A message handler must be an async method(event, ctx)")
+        function.__forest_message_handler__ = {
+            "handler_id": handler_id,
+            "handler": function.__name__,
+            "priority": priority,
+        }
+        return function
+
+    return decorate
+
+
 def declared_services(plugin: Plugin) -> dict[str, Callable[..., Awaitable[Any]]]:
     result = {}
     for _, method in inspect.getmembers(plugin, predicate=inspect.ismethod):
@@ -279,6 +301,38 @@ def declared_commands(
     return result
 
 
+def declared_message_handlers(
+    plugin: Plugin,
+) -> dict[str, tuple[dict, Callable[..., Awaitable[Any]]]]:
+    result = {}
+    methods = set()
+    for _, method in inspect.getmembers(plugin, predicate=inspect.ismethod):
+        declaration = getattr(method, "__forest_message_handler__", None)
+        if declaration is None:
+            continue
+        parameters = list(inspect.signature(method).parameters.values())
+        handler_id = declaration["handler_id"]
+        handler = declaration["handler"]
+        if (
+            not inspect.iscoroutinefunction(method)
+            or [parameter.name for parameter in parameters] != ["event", "ctx"]
+            or any(
+                parameter.kind not in {parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}
+                for parameter in parameters
+            )
+            or handler_id in result
+            or handler in methods
+        ):
+            raise ForestError(
+                "MESSAGE_HANDLER_DECLARATION_INVALID",
+                "Message handlers must be unique async methods(event, ctx)",
+                422,
+            )
+        result[handler_id] = (dict(declaration), method)
+        methods.add(handler)
+    return result
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, dict):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
@@ -315,7 +369,7 @@ class Consumed:
 
 @dataclass(frozen=True)
 class Pass:
-    """The command declined its handler chain; v1 has no fallback handler."""
+    """The current command or ordinary-message handler declines the input."""
 
 
 @dataclass

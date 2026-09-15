@@ -127,6 +127,7 @@ class PythonWorker:
         self.subscriptions: list[str] = []
         self.jobs: list[str] = []
         self.business_commands: list[str] = []
+        self.message_handlers: list[str] = []
         self.process: subprocess.Popen | None = None
         self._temporary: tempfile.TemporaryDirectory | None = None
         self._writer: FrameWriter | None = None
@@ -222,6 +223,27 @@ class PythonWorker:
                 for item in commands
             ),
             key=lambda item: item["command_id"],
+        )
+
+    def _expected_message_handlers(self) -> list[dict]:
+        handlers = self.package.manifest["components"][0].get("message_handlers", [])
+        identities = [item["handler_id"] for item in handlers]
+        if len(identities) != len(set(identities)):
+            raise ForestError(
+                "MESSAGE_HANDLER_DECLARATION_INVALID",
+                "Manifest contains duplicate message handlers",
+                422,
+            )
+        return sorted(
+            (
+                {
+                    "handler_id": item["handler_id"],
+                    "handler": item["handler"],
+                    "priority": item["priority"],
+                }
+                for item in handlers
+            ),
+            key=lambda item: item["handler_id"],
         )
 
     async def launch(self, timeout: float = 10) -> None:
@@ -342,6 +364,7 @@ class PythonWorker:
                 "subscriptions": self._expected_subscriptions(),
                 "jobs": self._expected_jobs(),
                 "commands": self._expected_commands(),
+                "message_handlers": self._expected_message_handlers(),
                 "limits": asdict(self.limits),
             }
             encoded = json.dumps(bootstrap, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -631,6 +654,7 @@ class PythonWorker:
             self.subscriptions = result["subscriptions"]
             self.jobs = result["jobs"]
             self.business_commands = result["commands"]
+            self.message_handlers = result["message_handlers"]
             self.state = "PREPARED"
             return result
         except BaseException:
@@ -718,6 +742,27 @@ class PythonWorker:
             before_send=before_send,
         )
 
+    async def invoke_message_handler(
+        self,
+        handler_id: str,
+        event: dict,
+        *,
+        call_id: str,
+        operation_id: str,
+        timeout: float = 30,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> Any:
+        return await self._invoke(
+            "invoke_message_handler",
+            "handler_id",
+            handler_id,
+            event,
+            call_id=call_id,
+            operation_id=operation_id,
+            timeout=timeout,
+            before_send=before_send,
+        )
+
     async def _invoke(
         self,
         command: str,
@@ -736,15 +781,13 @@ class PythonWorker:
             )
         if self._admitted >= self.limits.max_inflight + self.limits.max_queue_items:
             raise ForestError("OVERLOADED", "Worker bounded invocation queue is full", 429)
-        available = (
-            self.services
-            if command == "invoke"
-            else self.subscriptions
-            if command == "invoke_event"
-            else self.jobs
-            if command == "invoke_job"
-            else self.business_commands
-        )
+        available = {
+            "invoke": self.services,
+            "invoke_event": self.subscriptions,
+            "invoke_job": self.jobs,
+            "invoke_command": self.business_commands,
+            "invoke_message_handler": self.message_handlers,
+        }[command]
         if target not in available:
             raise ForestError(
                 "SERVICE_NOT_FOUND"
@@ -753,7 +796,9 @@ class PythonWorker:
                 if command == "invoke_event"
                 else "JOB_HANDLER_NOT_FOUND"
                 if command == "invoke_job"
-                else "BUSINESS_COMMAND_NOT_FOUND",
+                else "BUSINESS_COMMAND_NOT_FOUND"
+                if command == "invoke_command"
+                else "MESSAGE_HANDLER_NOT_FOUND",
                 "Invocation target is not registered by this worker",
                 404,
             )

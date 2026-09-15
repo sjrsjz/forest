@@ -1,4 +1,6 @@
-# Forest 实现状态与验证记录
+﻿# Forest 实现状态与验证记录
+
+普通群消息插件链的声明与执行边界切片已接通。设计从 AliceBot Plus 的异步 `on_group_message`、priority、继续/停止分发语义中保留易用部分，并把 Adapter 发送、即时内存排序和异常吞掉替换为宿主类型化调用边界。SDK 新增 `@message_handler(handler_id, priority=...)`，静态构建生成正式 `message_handlers` manifest，包接纳允许纯 handler 组件；候选 Worker 对 handler ID、方法和优先级逐字段复核，只接受不可变 `Reply/Consumed/Pass`。Kernel 从当前 generation 构造 handler spec，调用必须携带 claimed 冻结项并核对 component/generation/route/spec；同一 operation 重放持久结果，热重载后的旧路由被 `MESSAGE_HANDLER_FENCED` 拒绝。SDK/声明/包/Worker 扩大非数据库回归为 `138 passed, 2 skipped`，真实 PostgreSQL 的 handler/业务命令/Kernel 组合回归为 `17 passed`；Ruff、compileall 和 diff check 通过。持久 handler registry/policy/冻结链、Conversation Actor 单步执行、Agent fallback/Context 原子提交及 Web 管理仍待后续切片，当前代码不会提前把普通群消息投递给插件。
 
 业务命令容量 6b 切片新增 writer generation 18 与迁移 079。Bot 级 `command.limit` 配置通过 Web 当前密码复核、preview/apply、expected revision 和可遗忘来源 payload 管理参数 UTF-8 字节、Bot/Binding/主体三级待处理上限及主体令牌桶。允许策略的请求在原 Inbox 接纳事务中锁定 limit head，多个独立连接池按同一数据库序列统计 `PENDING/CLAIMED` 并消费主体令牌；重复事件、策略拒绝、参数过大不重复或错误扣减。超限请求仍冻结为 `BUSINESS_COMMAND`，保留原消息与作者，终结为稳定错误码并创建同群 Actor 有序安全通知，不回落 Agent。迁移为旧 issuer 按既有命令读写能力精确增加 limit action，并以 generation 18 排除旧写者。真实 PostgreSQL 双连接池竞争、配置并发单赢家、令牌补充、参数边界、消息/来源保留、Web 重鉴权/幂等/CAS/来源证明及 writer 围栏专项为 `8 passed`；业务命令与 Web 扩大回归为 `56 passed`。真实 Edge 使用已发布页面和 JavaScript 通过容量预览/应用、稳定幂等键、同 Bot 草稿保护、跨 Bot 迟到读取隔离及 390 像素移动布局；许可 OneBot 的低频业务命令收发仍待执行。
 
