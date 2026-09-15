@@ -207,6 +207,7 @@ Python 的 reload 不会自动重绑定其他模块持有的旧对象引用，�
 当前原生 Worker 工作流：
 
 ```text
+forest plugin init ./plugins/hello --id example.hello
 forest plugin check ./plugins/hello
 forest dev --bot dev-alice --watch ./plugins/hello
 forest plugin build ./plugins/hello
@@ -223,7 +224,7 @@ watch 按与构建器相同的有界全包捕获规则轮询，默认每 100 ms 
 
 开发控制使用当前本机宿主权限，独立记录 `bot_dev_watch_heads / requests / builds / activations / results`，不伪造 Web ticket。完整快照摘要与操作 ID 冻结后进入普通 `Kernel.install`；watch 无权写路由。`Kernel.publish` 同一事务中的持久触发器锁定 watch head，核对最新请求、组件身份、工件、配置、grants 和宿主，再更新 last-good。拿到最后的业务锁后复查宿主及操作到期时间，过期的候选只能在仍有当前宿主权威时终结并恢复旧代。请求、候选操作、提交结果均持久化；重启先恢复 last-good，再为尚未完成的工作区意图创建新请求，避免复用已 FAILED 或 ABANDONED 的生命周期操作。
 
-CLI 输出逐行 JSON 的 accepted/building/validating/published/failed/restored 状态；语法失败提供文件和行列，插件 hook 失败不回显任意异常正文。Ctrl+C 会停止观察，等待被持有的文件捕获线程与候选收尾，再关闭 Worker、撤销宿主租约和数据库池。原有单次模式仍可用：`forest dev --bot dev-alice --package ./plugins/hello --service hello.echo --input-json '{"text":"hi"}'`。`plugin init` 与 `inprocess-dev` 仍是预留工作流，当前 CLI 不提供。
+`plugin init` 只接受新的目标路径，先在同父目录的临时树中生成并执行与 build 共用的双捕获静态校验，再原子发布源码目录；任何阶段失败或目标已存在都不会覆盖用户文件。CLI 输出逐行 JSON 的 accepted/building/validating/published/failed/restored 状态；语法失败提供文件和行列，插件 hook 失败不回显任意异常正文。Ctrl+C 会停止观察，等待被持有的文件捕获线程与候选收尾，再关闭 Worker、撤销宿主租约和数据库池。原有单次模式仍可用：`forest dev --bot dev-alice --package ./plugins/hello --service hello.echo --input-json '{"text":"hi"}'`。`inprocess-dev` 仍是预留工作流，当前 CLI 不提供。
 
 `plugin lock` 只读取包内已提供的 wheel，验证当前 Python/平台对应的完整依赖闭包，然后原子写入 `dependencies.lock.json`；不会解析联网源或执行安装脚本。作者需在 manifest 顶层显式设置 `dependency_lock = "dependencies.lock.json"`。`plugin export/import` 按完整 ZIP 和内容摘要搬运工件，导入先完成边界及静态验证，同版本不同内容仍被拒绝。
 

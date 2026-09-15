@@ -82,13 +82,14 @@ uv run --frozen forest setup-token --data-dir .forest
 以下命令不需要 Bot 数据库：
 
 ```sh
+uv run --frozen forest plugin init ./plugins/hello --id example.hello
 uv run --frozen forest plugin build examples/counter
 uv run --frozen forest plugin check examples/counter
 uv run --frozen forest plugin build examples/auto_echo
 uv run --frozen forest plugin check examples/auto_echo
 ```
 
-`build` 静态校验完整包并保存内容寻址快照，不执行插件代码。`check` 额外启动独立候选 Worker，验证导入、prepare/start/health 后回收；候选没有生产 state RPC 权限。`check/dev` 可通过 `--config-json` 提供经包 schema 校验的配置，默认 `{}`；`build` 不要求这份默认配置满足运行时必填字段。默认缓存目录为 `.forest/packages`，可通过 `--cache-dir` 修改。普通构建修改包内容后需提升 `module.toml` 的版本，同版本不同内容会被拒绝；开发 `--watch` 则按内容自动派生 `+dev.<digest>` 版本。
+`init` 在目标不存在时原子生成并静态自校验一个 `src/` 布局的 echo 插件，绝不覆盖已有目录。`build` 静态校验完整包并保存内容寻址快照，不执行插件代码。`check` 额外启动独立候选 Worker，验证导入、prepare/start/health 后回收；候选没有生产 state RPC 权限。`check/dev` 可通过 `--config-json` 提供经包 schema 校验的配置，默认 `{}`；`build` 不要求这份默认配置满足运行时必填字段。默认缓存目录为 `.forest/packages`，可通过 `--cache-dir` 修改。普通构建修改包内容后需提升 `module.toml` 的版本，同版本不同内容会被拒绝；开发 `--watch` 则按内容自动派生 `+dev.<digest>` 版本。
 
 `forest dev` 在一个**专用开发 Bot 数据库**中执行一次服务调用，随后关闭 Worker 和宿主租约。首次使用的数据库必须为空，不能复用后台部署库、其他 Bot 库或已有业务库；该库一旦初始化就固定绑定 `--bot`，后续可复用以检查状态持久化。
 

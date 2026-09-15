@@ -299,6 +299,32 @@ def _prepared_source(source_files: dict[str, bytes]) -> dict[str, bytes]:
     return files
 
 
+def _validated_source(source: Path) -> tuple[Path, dict[str, bytes], dict[str, bytes], dict]:
+    try:
+        _reject_link(source.lstat())
+        source = source.resolve(strict=True)
+    except OSError as exc:
+        raise ForestError("INVALID_PACKAGE_PATH", "Package source is unavailable", 422) from exc
+    source_files = _capture(source)
+    captured = _prepared_source(source_files)
+    manifest = _manifest(captured)
+    if captured != _prepared_source(_capture(source)):
+        _fail("PACKAGE_CHANGED", "Package must remain stable throughout capture")
+    return source, source_files, captured, manifest
+
+
+def validate_source_package(source: Path) -> dict:
+    """Validate a stable source capture without publishing an artifact catalog."""
+
+    _, _, captured, manifest = _validated_source(source)
+    return {
+        "manifest": manifest,
+        "digest": digest_json(
+            {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
+        ),
+    }
+
+
 def _capture_files(root: Path) -> dict[str, bytes]:
     captured: dict[str, bytes] = {}
     names: set[str] = set()
@@ -598,19 +624,10 @@ class PackageCatalog:
         self.root = private_directory(root)
 
     def build(self, source: Path, *, development: bool = False) -> PackageSnapshot:
-        try:
-            _reject_link(source.lstat())
-            source = source.resolve(strict=True)
-        except OSError as exc:
-            raise ForestError("INVALID_PACKAGE_PATH", "Package source is unavailable", 422) from exc
+        source, source_files, captured, _ = _validated_source(source)
         catalog_root = self.root.resolve()
         if catalog_root == source or catalog_root.is_relative_to(source):
             _fail("INVALID_PACKAGE_PATH", "Artifact catalog cannot be inside the source package")
-        source_files = _capture(source)
-        captured = _prepared_source(source_files)
-        _manifest(captured)
-        if captured != _prepared_source(_capture(source)):
-            _fail("PACKAGE_CHANGED", "Package must remain stable throughout capture")
         if development:
             source_digest = digest_json(
                 {name: hashlib.sha256(value).hexdigest() for name, value in source_files.items()}

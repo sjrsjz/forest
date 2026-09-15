@@ -90,6 +90,11 @@ def main() -> None:
     recovery_apply.add_argument("--plan-digest", required=True)
     plugin = sub.add_parser("plugin", help="构建或验证普通 Python 插件")
     actions = plugin.add_subparsers(dest="plugin_command", required=True)
+    initialize = actions.add_parser("init", help="创建可直接构建的自动声明 Python 插件")
+    initialize.add_argument("target", type=Path)
+    initialize.add_argument("--id", required=True, dest="package_id")
+    initialize.add_argument("--version", default="0.1.0")
+    initialize.add_argument("--module")
     for name in ("build", "check"):
         command = actions.add_parser(name)
         command.add_argument("source", type=Path)
@@ -227,6 +232,14 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
     from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
     from forest.packages import PackageCatalog
 
+    if args.command == "plugin" and args.plugin_command == "init":
+        from forest.plugin_scaffold import initialize_plugin
+
+        result = await asyncio.to_thread(
+            initialize_plugin, args.target, args.package_id, args.version, args.module
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return
     if args.command == "plugin" and args.plugin_command in {"lock", "import", "export"}:
         await run_artifact_command(args)
         return
