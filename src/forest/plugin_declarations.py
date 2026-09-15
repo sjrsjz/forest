@@ -15,14 +15,22 @@ import tomllib
 from pathlib import PurePosixPath
 from typing import Any
 
+from forest.command_contract import (
+    command_identifier,
+    normalize_command_name,
+    validate_argument_mode,
+    validate_command_permission,
+    validate_command_priority,
+)
 from forest.errors import ForestError
 
-_DECORATORS = {"plugin", "service", "subscribe", "job"}
+_DECORATORS = {"plugin", "service", "subscribe", "job", "command"}
 _PLUGIN_POSITIONAL = ("id", "version", "scope")
 _HANDLER_POSITIONAL = {
     "service": ("name",),
     "subscribe": ("subscriber_id", "topic", "contract"),
     "job": ("handler_id",),
+    "command": ("name", "permission"),
 }
 _IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 
@@ -235,6 +243,8 @@ def _toml(manifest: dict) -> bytes:
             f'config_schema = {_string(component["config_schema"])}',
         )
     )
+    if not component.get("provides"):
+        lines.append("provides = []")
     for key in ("state_value_schema", "state_mode", "checkpoint_schema"):
         if key in component:
             value = component[key]
@@ -248,6 +258,7 @@ def _toml(manifest: dict) -> bytes:
         ("publishes", component.get("publishes", [])),
         ("subscribes", component.get("subscribes", [])),
         ("jobs", component.get("jobs", [])),
+        ("commands", component.get("commands", [])),
         ("state_migrations", component.get("state_migrations", [])),
     ):
         for item in items:
@@ -317,7 +328,9 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
     module = relative.removesuffix("/__init__").replace("/", ".")
     if not module:
         _error("The @plugin class must be inside an importable module", path, class_node)
-    handlers: dict[str, list[dict]] = {"service": [], "subscribe": [], "job": []}
+    handlers: dict[str, list[tuple[dict, ast.AST, str]]] = {
+        "service": [], "subscribe": [], "job": [], "command": []
+    }
     seen: dict[str, set[str]] = {name: set() for name in handlers}
     for statement in class_node.body:
         if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -329,18 +342,28 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
             values = _call(decorator, kind, _HANDLER_POSITIONAL[kind], path)
             if not isinstance(statement, ast.AsyncFunctionDef):
                 _error(f"@{kind} requires an async method", path, statement)
-            identifier_key = "name" if kind == "service" else (
-                "subscriber_id" if kind == "subscribe" else "handler_id"
+            identifier_key = (
+                "name" if kind == "service" else
+                "subscriber_id" if kind == "subscribe" else
+                "handler_id" if kind == "job" else "id"
             )
-            identifier = values.get(identifier_key)
-            if not isinstance(identifier, str) or not _IDENTIFIER.fullmatch(identifier):
-                _error(f"@{kind} requires a bounded {identifier_key}", path, decorator)
+            if kind == "command":
+                try:
+                    identifier = command_identifier(values.get("name"), values.get("id"))
+                except ValueError as exc:
+                    _error(str(exc), path, decorator)
+            else:
+                identifier = values.get(identifier_key)
+                if not isinstance(identifier, str) or not _IDENTIFIER.fullmatch(identifier):
+                    _error(f"@{kind} requires a bounded {identifier_key}", path, decorator)
             if identifier in seen[kind]:
                 _error(f"Duplicate @{kind} declaration {identifier}", path, decorator)
             seen[kind].add(identifier)
-            handlers[kind].append((values, decorator))
+            handlers[kind].append((values, decorator, statement.name))
     services = []
-    for index, (values, node) in enumerate(sorted(handlers["service"], key=lambda item: item[0]["name"])):
+    for index, (values, node, _) in enumerate(
+        sorted(handlers["service"], key=lambda item: item[0]["name"])
+    ):
         unknown = sorted(set(values) - {"name", "contract", "input_schema", "output_schema"})
         if unknown:
             _error(f"Unsupported @service arguments: {', '.join(unknown)}", path, node)
@@ -351,7 +374,9 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
             "output_schema": _schema(files, values.get("output_schema"), f"service-{index}-output", path, node),
         })
     subscriptions = []
-    for index, (values, node) in enumerate(sorted(handlers["subscribe"], key=lambda item: item[0]["subscriber_id"])):
+    for index, (values, node, _) in enumerate(
+        sorted(handlers["subscribe"], key=lambda item: item[0]["subscriber_id"])
+    ):
         unknown = sorted(set(values) - {"subscriber_id", "topic", "contract", "schema", "max_attempts"})
         if unknown:
             _error(f"Unsupported @subscribe arguments: {', '.join(unknown)}", path, node)
@@ -364,7 +389,9 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
             item["max_attempts"] = values["max_attempts"]
         subscriptions.append(item)
     jobs = []
-    for index, (values, node) in enumerate(sorted(handlers["job"], key=lambda item: item[0]["handler_id"])):
+    for index, (values, node, _) in enumerate(
+        sorted(handlers["job"], key=lambda item: item[0]["handler_id"])
+    ):
         unknown = sorted(set(values) - {"handler_id", "input_schema", "max_attempts", "timeout_s", "max_concurrency"})
         if unknown:
             _error(f"Unsupported @job arguments: {', '.join(unknown)}", path, node)
@@ -376,6 +403,42 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
             if key in values:
                 item[key] = values[key]
         jobs.append(item)
+    commands = []
+    command_names = set()
+    command_handlers = set()
+    command_items = sorted(
+        handlers["command"],
+        key=lambda item: command_identifier(item[0].get("name"), item[0].get("id")),
+    )
+    for index, (values, node, handler) in enumerate(command_items):
+        unknown = sorted(set(values) - {"name", "permission", "id", "args", "schema", "priority"})
+        if unknown:
+            _error(f"Unsupported @command arguments: {', '.join(unknown)}", path, node)
+        try:
+            name = normalize_command_name(values.get("name"))
+            command_id = command_identifier(name, values.get("id"))
+            permission = validate_command_permission(values.get("permission"))
+            argument_mode = validate_argument_mode(values.get("args", "none"))
+            priority = validate_command_priority(values.get("priority", 0))
+        except ValueError as exc:
+            _error(str(exc), path, node)
+        if name in command_names:
+            _error(f"Duplicate @command name {name}", path, node)
+        if handler in command_handlers:
+            _error(f"Duplicate @command handler {handler}", path, node)
+        command_names.add(name)
+        command_handlers.add(handler)
+        commands.append({
+            "command_id": command_id,
+            "name": name,
+            "handler": handler,
+            "permission": permission,
+            "argument_mode": argument_mode,
+            "input_schema": _schema(
+                files, values.get("schema"), f"command-{index}-input", path, node
+            ),
+            "priority": priority,
+        })
     config_schema = _schema(
         files, declaration.get("config_schema"), "config", path, class_node
     )
@@ -410,6 +473,8 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
         component["subscribes"] = subscriptions
     if jobs:
         component["jobs"] = jobs
+    if commands:
+        component["commands"] = commands
     manifest = {
         "manifest_version": 1,
         "package_id": declaration["id"],

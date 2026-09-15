@@ -18,6 +18,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from forest.command_contract import (
+    command_identifier,
+    normalize_command_name,
+    validate_argument_mode,
+    validate_command_permission,
+    validate_command_priority,
+)
 from forest.errors import ForestError
 
 
@@ -128,6 +135,42 @@ def job(
     return decorate
 
 
+def command(
+    name: str,
+    permission: str,
+    *,
+    id: str | None = None,
+    args: str = "none",
+    schema=None,
+    priority: int = 0,
+):
+    """Declare a deterministic business command; execution remains host-authorized."""
+
+    normalized_name = normalize_command_name(name)
+    command_id = command_identifier(normalized_name, id)
+    permission = validate_command_permission(permission)
+    argument_mode = validate_argument_mode(args)
+    priority = validate_command_priority(priority)
+    if schema is not None and not isinstance(schema, (str, dict)):
+        raise ValueError("Command schema must be a package path or JSON object")
+
+    def decorate(function):
+        if not inspect.iscoroutinefunction(function):
+            raise TypeError("A command must be an async method(event, ctx)")
+        function.__forest_command__ = {
+            "command_id": command_id,
+            "name": normalized_name,
+            "handler": function.__name__,
+            "permission": permission,
+            "argument_mode": argument_mode,
+            "schema": schema,
+            "priority": priority,
+        }
+        return function
+
+    return decorate
+
+
 def declared_services(plugin: Plugin) -> dict[str, Callable[..., Awaitable[Any]]]:
     result = {}
     for _, method in inspect.getmembers(plugin, predicate=inspect.ismethod):
@@ -201,6 +244,38 @@ def declared_jobs(plugin: Plugin) -> dict[str, Callable[..., Awaitable[Any]]]:
                 422,
             )
         result[handler_id] = method
+    return result
+
+
+def declared_commands(
+    plugin: Plugin,
+) -> dict[str, tuple[dict, Callable[..., Awaitable[Any]]]]:
+    result = {}
+    names = set()
+    for _, method in inspect.getmembers(plugin, predicate=inspect.ismethod):
+        declaration = getattr(method, "__forest_command__", None)
+        if declaration is None:
+            continue
+        parameters = list(inspect.signature(method).parameters.values())
+        command_id = declaration["command_id"]
+        name = declaration["name"]
+        if (
+            not inspect.iscoroutinefunction(method)
+            or [parameter.name for parameter in parameters] != ["event", "ctx"]
+            or any(
+                parameter.kind not in {parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}
+                for parameter in parameters
+            )
+            or command_id in result
+            or name in names
+        ):
+            raise ForestError(
+                "COMMAND_DECLARATION_INVALID",
+                "Commands must be unique async methods(event, ctx)",
+                422,
+            )
+        result[command_id] = (dict(declaration), method)
+        names.add(name)
     return result
 
 

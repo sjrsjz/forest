@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from forest.command_contract import schema_digest
 from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, encode_frame, read_frame
 from forest.errors import ForestError
 
@@ -125,6 +126,7 @@ class PythonWorker:
         self.services: list[str] = []
         self.subscriptions: list[str] = []
         self.jobs: list[str] = []
+        self.business_commands: list[str] = []
         self.process: subprocess.Popen | None = None
         self._temporary: tempfile.TemporaryDirectory | None = None
         self._writer: FrameWriter | None = None
@@ -195,6 +197,32 @@ class PythonWorker:
                 "JOB_DECLARATION_INVALID", "Manifest contains duplicate job handlers", 422
             )
         return sorted(identities)
+
+    def _expected_commands(self) -> list[dict]:
+        commands = self.package.manifest["components"][0].get("commands", [])
+        identities = [item["command_id"] for item in commands]
+        if len(identities) != len(set(identities)):
+            raise ForestError(
+                "COMMAND_DECLARATION_INVALID", "Manifest contains duplicate commands", 422
+            )
+        return sorted(
+            (
+                {
+                    "command_id": item["command_id"],
+                    "name": item["name"],
+                    "handler": item["handler"],
+                    "permission": item["permission"],
+                    "argument_mode": item["argument_mode"],
+                    "input_schema": item["input_schema"],
+                    "schema_digest": schema_digest(
+                        self.package.schema(item["input_schema"])
+                    ),
+                    "priority": item["priority"],
+                }
+                for item in commands
+            ),
+            key=lambda item: item["command_id"],
+        )
 
     async def launch(self, timeout: float = 10) -> None:
         if self.state != "NEW":
@@ -313,6 +341,7 @@ class PythonWorker:
                 "services": expected_services,
                 "subscriptions": self._expected_subscriptions(),
                 "jobs": self._expected_jobs(),
+                "commands": self._expected_commands(),
                 "limits": asdict(self.limits),
             }
             encoded = json.dumps(bootstrap, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -601,6 +630,7 @@ class PythonWorker:
             self.services = result["services"]
             self.subscriptions = result["subscriptions"]
             self.jobs = result["jobs"]
+            self.business_commands = result["commands"]
             self.state = "PREPARED"
             return result
         except BaseException:

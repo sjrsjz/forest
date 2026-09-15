@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import shutil
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -13,7 +14,7 @@ from forest.cli import run_plugin_command
 from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.packages import PackageCatalog, source_fingerprint
-from forest.sdk import Plugin, declared_services, plugin, service
+from forest.sdk import Plugin, command, declared_commands, declared_services, plugin, service
 from forest.watch import DevWatcher
 
 
@@ -99,6 +100,106 @@ async def test_auto_declared_package_passes_real_worker_check(tmp_path, capsys):
     PackageCatalog(tmp_path / "catalog").get(result["package_digest"]).verify()
 
 
+async def test_command_only_auto_package_passes_real_worker_full_contract_check(
+    tmp_path, capsys
+):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''from forest.sdk import command, plugin
+
+@plugin(id="example.commands", version="0.1.0")
+class Commands:
+    @command(
+        "/记住", "command.remember", id="remember",
+        args="tail_text", schema={"type": "object", "required": ["argument_text"]},
+        priority=25,
+    )
+    async def remember(self, event, ctx):
+        return None
+''',
+        encoding="utf-8",
+    )
+    await run_plugin_command(
+        Namespace(
+            command="plugin",
+            plugin_command="check",
+            source=source,
+            cache_dir=tmp_path / "catalog",
+            config_json="{}",
+        )
+    )
+    result = json.loads(capsys.readouterr().out)
+    snapshot = PackageCatalog(tmp_path / "catalog").get(result["package_digest"])
+    assert snapshot.component["provides"] == []
+    assert snapshot.component["commands"] == [
+        {
+            "command_id": "remember",
+            "name": "/记住",
+            "handler": "remember",
+            "permission": "command.remember",
+            "argument_mode": "tail_text",
+            "input_schema": "forest_generated/command-0-input.json",
+            "priority": 25,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [
+        ("command_id", ('command_id = "hello"', 'command_id = "changed"')),
+        ("name", ('name = "/hello"', 'name = "/changed"')),
+        ("handler", ('handler = "hello"', 'handler = "changed"')),
+        ("permission", ('permission = "command.hello"', 'permission = "command.changed"')),
+        ("argument_mode", ('argument_mode = "none"', 'argument_mode = "tail_text"')),
+        ("priority", ("priority = 0", "priority = 1")),
+        ("schema", None),
+    ],
+)
+async def test_command_manifest_runtime_field_mismatch_reaps_candidate(
+    tmp_path, field, replacement
+):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''from forest.sdk import command, plugin
+@plugin(id="example.commands", version="0.1.0")
+class Commands:
+    @command("/hello", "command.hello", schema={"type": "object"})
+    async def hello(self, event, ctx):
+        return None
+''',
+        encoding="utf-8",
+    )
+    first = PackageCatalog(tmp_path / "first-catalog").build(source)
+    explicit = tmp_path / "explicit"
+    shutil.copytree(first.root, explicit)
+    (explicit / "checksums.json").unlink()
+    if field == "schema":
+        (explicit / "forest_generated" / "command-0-input.json").write_text(
+            '{"type":"string"}\n', encoding="utf-8"
+        )
+    else:
+        manifest = explicit / "module.toml"
+        old, new = replacement
+        text = manifest.read_text(encoding="utf-8")
+        assert old in text
+        manifest.write_text(text.replace(old, new), encoding="utf-8")
+    snapshot = PackageCatalog(tmp_path / "second-catalog").build(explicit)
+    from forest.drivers import PythonWorker, WorkerIdentity
+
+    worker = PythonWorker(
+        snapshot,
+        WorkerIdentity(uuid4().hex, uuid4().hex, uuid4().hex, "bot-test"),
+    )
+    await worker.launch()
+    with pytest.raises(ForestError) as caught:
+        await worker.prepare({})
+    assert caught.value.code == "COMMAND_MANIFEST_MISMATCH"
+    assert not worker.alive
+
+
 async def test_event_and_job_declarations_generate_the_existing_worker_contract(tmp_path, capsys):
     source = auto_source(tmp_path)
     module = source / "src" / "demo" / "__init__.py"
@@ -181,6 +282,48 @@ class Echo:
         "line": 3,
         "column": 36,
     }
+
+
+def test_dynamic_command_argument_is_rejected_with_source_location(tmp_path):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''from forest.sdk import command, plugin
+PERMISSION = "command.hello"
+@plugin(id="example.auto", version="0.1.0")
+class Commands:
+    @command("/hello", PERMISSION)
+    async def hello(self, event, ctx):
+        return None
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(source)
+    assert caught.value.code == "PLUGIN_DECLARATION_INVALID"
+    assert caught.value.details == {
+        "phase": "declaration",
+        "file": "src/demo/__init__.py",
+        "line": 5,
+        "column": 24,
+    }
+
+
+def test_static_command_declaration_follows_sdk_module_alias(tmp_path):
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    module.write_text(
+        '''import forest.sdk as sdk
+@sdk.plugin(id="example.alias-command", version="0.1.0")
+class Commands:
+    @sdk.command("/hello", "command.hello")
+    async def hello(self, event, ctx):
+        return None
+''',
+        encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    assert snapshot.component["commands"][0]["command_id"] == "hello"
 
 
 @pytest.mark.parametrize(
@@ -275,6 +418,17 @@ def test_runtime_plugin_decorator_adapts_plain_class_without_changing_handlers()
     assert isinstance(instance, Plugin)
     assert set(declared_services(instance)) == {"echo.call"}
     assert Plain.__forest_plugin__["id"] == "example.runtime"
+
+
+def test_runtime_plugin_decorator_preserves_command_declaration():
+    @plugin(id="example.command-runtime", version="0.1.0")
+    class Plain:
+        @command("/hello", "command.hello")
+        async def hello(self, event, ctx):
+            return event, ctx
+
+    instance = Plain()
+    assert set(declared_commands(instance)) == {"hello"}
 
 
 async def eventually(predicate, *, timeout=15):

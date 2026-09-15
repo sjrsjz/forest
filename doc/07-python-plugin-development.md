@@ -1,6 +1,6 @@
 # 原生 Python 插件与开发体验详细设计
 
-> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@plugin`、`@service`、`@subscribe`、`@job`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check`、单次 `forest dev` 和自动 watch。缺少显式 `module.toml` 时，构建器已从字面量装饰器和 `pyproject.toml` 静态生成清单、内联 schema 与 `checksums.json`。本文的 `@command`、DTO schema/适配入口生成及记忆/回复/通用服务代理仍是目标接口；示例见 [counter](../examples/counter/python/counter.py) 与 [auto_echo](../examples/auto_echo/src/auto_echo/__init__.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
+> 状态：目标 SDK 与工具链设计，部分已实现。当前可运行 `Plugin`、`@plugin`、`@service`、`@subscribe`、`@job`、state/tasks/resources/operations/events SDK、不可变单组件包、独立 Worker，以及 `forest plugin build/check`、单次 `forest dev` 和自动 watch。缺少显式 `module.toml` 时，构建器已从字面量装饰器和 `pyproject.toml` 静态生成清单、内联 schema 与 `checksums.json`。类方法 `@command` 的静态生成、纯命令包接纳和候选 Worker 全字段核验已经实现，但尚未接入持久 registry、平台分类、同群 Actor 或回复提交。DTO schema/适配入口生成及记忆/回复/通用服务代理仍是目标接口；示例见 [counter](../examples/counter/python/counter.py) 与 [auto_echo](../examples/auto_echo/src/auto_echo/__init__.py)，用法与边界见[实现状态](implementation-status.md)及[项目 README](../README.md#原生插件开发切片)。以下目标契约不因当前实现范围缩减。
 
 ## 1. 插件作者看到的接口
 
@@ -50,7 +50,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 群消息上下文收集由框架统一完成，不要求每个插件重复 push 用户消息。触发分类只产生结构化决策与原始事件引用，不能直接 `Agent.run()` 或自行 `create_task` 开启回复；待触发由唯一 ConversationSession 在模型安全点按最后触发记录选择前缀。没有触发也照常静默保存/裁剪，详见[08](08-group-context-interaction.md)。命令插件若需要长期模型对话，同样申请该会话的调度资格。
 
-无状态小插件也可使用模块级 `@command` 函数；打包器为它生成无状态 Component 适配层。只定义 handler 的作者不必实现生命周期方法，默认资源关闭仍由框架负责。
+当前首版实现只接纳 `@plugin` 类中的 `@command` 方法；只定义 handler 的类无需继承 `Plugin` 或实现生命周期方法，装饰器会提供默认生命周期。模块级函数适配层仍待实现，在此之前构建器不会把模块级装饰器生成成不可执行清单。
 
 ## 3. 声明生成与授权
 
@@ -121,7 +121,7 @@ from forest.sdk import Assert, Reply, command, plugin
 @plugin(id="example.notes", version="0.1.0", scope="bot",
         requests=["memory.assert", "memory.share", "reply.propose"])
 class Notes:
-    @command("/记住", permission="command.notes.share", args="text")
+    @command("/记住", permission="command.notes.share", args="tail_text")
     async def handle(self, event, ctx):
         operation = Assert(
             subject_id=ctx.principal.subject_id,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import keyword
 import os
 import re
 import shutil
@@ -25,6 +26,15 @@ from uuid import uuid4
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from forest.command_contract import (
+    IDENTIFIER as COMMAND_IDENTIFIER,
+)
+from forest.command_contract import (
+    normalize_command_name,
+    validate_argument_mode,
+    validate_command_permission,
+    validate_command_priority,
+)
 from forest.errors import ForestError
 from forest.plugin_declarations import synthesize_manifest, verify_checksums, with_checksums
 from forest.security import private_directory
@@ -210,6 +220,39 @@ MANIFEST_SCHEMA = {
                                 },
                                 "max_concurrency": {
                                     "type": "integer", "minimum": 1, "maximum": 16
+                                },
+                            },
+                        },
+                    },
+                    "commands": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "command_id",
+                                "name",
+                                "handler",
+                                "permission",
+                                "argument_mode",
+                                "input_schema",
+                                "priority",
+                            ],
+                            "properties": {
+                                **{
+                                    key: {"type": "string"}
+                                    for key in (
+                                        "command_id",
+                                        "name",
+                                        "handler",
+                                        "permission",
+                                        "argument_mode",
+                                        "input_schema",
+                                    )
+                                },
+                                "priority": {
+                                    "type": "integer", "minimum": -100, "maximum": 100
                                 },
                             },
                         },
@@ -512,8 +555,9 @@ def _manifest(files: dict[str, bytes]) -> dict:
         dependency_names.add(name)
     _schema(files, component.get("config_schema"))
     services = component.get("provides", [])
-    if not services or len(services) > 32:
-        _fail("INVALID_SERVICES", "Declare between one and 32 versioned services")
+    commands = component.get("commands", [])
+    if len(services) > 32 or (not services and not commands):
+        _fail("INVALID_SERVICES", "Declare at least one service or business command")
     names = set()
     for service in services:
         name = service.get("name", "")
@@ -552,6 +596,34 @@ def _manifest(files: dict[str, bytes]) -> dict:
         if not IDENTIFIER.fullmatch(handler_id) or handler_id in job_ids:
             _fail("INVALID_JOBS", "Durable job handler identities must be valid and unique")
         job_ids.add(handler_id)
+        _schema(files, definition.get("input_schema"))
+    command_ids = set()
+    command_names = set()
+    command_handlers = set()
+    for definition in commands:
+        command_id = definition.get("command_id", "")
+        name = definition.get("name", "")
+        handler = definition.get("handler", "")
+        try:
+            normalized = normalize_command_name(name, require_normalized=True)
+            validate_command_permission(definition.get("permission"))
+            validate_argument_mode(definition.get("argument_mode"))
+            validate_command_priority(definition.get("priority"))
+        except ValueError as exc:
+            _fail("INVALID_COMMANDS", str(exc))
+        if (
+            not COMMAND_IDENTIFIER.fullmatch(command_id)
+            or command_id in command_ids
+            or normalized in command_names
+            or not isinstance(handler, str)
+            or not handler.isidentifier()
+            or keyword.iskeyword(handler)
+            or handler in command_handlers
+        ):
+            _fail("INVALID_COMMANDS", "Command identities, names, and handlers must be unique")
+        command_ids.add(command_id)
+        command_names.add(normalized)
+        command_handlers.add(handler)
         _schema(files, definition.get("input_schema"))
     capabilities = component.get("capabilities", {}).get("requests", [])
     allowed_capabilities = {"state.read", "state.write"} | {

@@ -12,6 +12,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from forest.command_contract import schema_digest
 from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, read_frame, validate_json
 from forest.drivers.python_worker import WorkerLimits, _error_details, _error_envelope
 from forest.errors import ForestError
@@ -20,6 +21,7 @@ from forest.sdk import (
     Plugin,
     PluginContext,
     _current_call,
+    declared_commands,
     declared_jobs,
     declared_services,
     declared_subscriptions,
@@ -37,6 +39,7 @@ class WorkerRuntime:
         self.services: dict = {}
         self.subscriptions: dict = {}
         self.jobs: dict = {}
+        self.command_handlers: dict = {}
         self.commands: dict[str, asyncio.Task] = {}
         self.calls: dict[str, asyncio.Task] = {}
         self.state_pending: dict[str, asyncio.Future] = {}
@@ -180,6 +183,11 @@ class WorkerRuntime:
                     for subscriber_id, (_, method) in declared.items()
                 }
                 self.jobs = declared_jobs(self.plugin)
+                declared_command_handlers = declared_commands(self.plugin)
+                self.command_handlers = {
+                    command_id: method
+                    for command_id, (_, method) in declared_command_handlers.items()
+                }
                 if sorted(self.services) != sorted(self.bootstrap["services"]):
                     raise ForestError(
                         "SERVICE_MANIFEST_MISMATCH",
@@ -200,6 +208,31 @@ class WorkerRuntime:
                     raise ForestError(
                         "JOB_MANIFEST_MISMATCH",
                         "Decorated jobs differ from the immutable manifest",
+                        422,
+                    )
+                expected_commands = self.bootstrap.get("commands", [])
+                expected_by_id = {
+                    item["command_id"]: item for item in expected_commands
+                }
+                actual_commands = []
+                for command_id, (declaration, _) in declared_command_handlers.items():
+                    schema = declaration.pop("schema")
+                    expected = expected_by_id.get(command_id)
+                    if expected is None:
+                        actual_commands.append(declaration)
+                        continue
+                    declaration["input_schema"] = expected["input_schema"]
+                    declaration["schema_digest"] = (
+                        expected["schema_digest"]
+                        if isinstance(schema, str) and schema == expected["input_schema"]
+                        else schema_digest({} if schema is None else schema)
+                    )
+                    actual_commands.append(declaration)
+                actual_commands.sort(key=lambda item: item["command_id"])
+                if actual_commands != expected_commands:
+                    raise ForestError(
+                        "COMMAND_MANIFEST_MISMATCH",
+                        "Decorated commands differ from the immutable manifest",
                         422,
                     )
                 config = payload.get("config", {})
@@ -223,6 +256,7 @@ class WorkerRuntime:
                     "services": sorted(self.services),
                     "subscriptions": sorted(self.subscriptions),
                     "jobs": sorted(self.jobs),
+                    "commands": sorted(self.command_handlers),
                 }
             if command == "start":
                 self.require("PREPARED")
@@ -242,6 +276,7 @@ class WorkerRuntime:
                     "services": sorted(self.services),
                     "subscriptions": sorted(self.subscriptions),
                     "jobs": sorted(self.jobs),
+                    "commands": sorted(self.command_handlers),
                     "owned_tasks": len(self.ctx._task_owner.tasks),
                     "task_failures": list(self.ctx._task_owner.background_failures),
                     "owned_resources": len(self.ctx._resource_owner.entries),
