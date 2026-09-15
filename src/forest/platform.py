@@ -130,11 +130,13 @@ class BindingRuntime:
         from forest.storage.command_limits import CommandLimitStore
         from forest.storage.command_policies import CommandPolicyStore
         from forest.storage.jobs import JobStore
+        from forest.storage.message_handler_policies import MessageHandlerPolicyStore
 
         self.memory = MemoryRuntime(self)
         self.agent = AgentRuntime(self)
         self.command_policies = CommandPolicyStore(bot.store)
         self.command_limits = CommandLimitStore(bot.store)
+        self.message_handler_policies = MessageHandlerPolicyStore(bot.store)
 
         self.scheduler = GroupScheduler(
             self.messages,

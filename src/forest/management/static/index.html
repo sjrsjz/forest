@@ -261,6 +261,15 @@
           <div id="command-policy-list" aria-live="polite"></div>
           <div id="command-policy-preview" class="hidden"><h3>确认命令策略</h3><pre id="command-policy-diff"></pre><p class="hint">应用前若命令热重载或另一管理员已保存，服务端会拒绝旧预览并要求重新读取。</p><button id="command-policy-apply" type="button">应用命令策略</button></div>
         </section>
+        <section id="bot-handler-policies" class="card hidden" aria-labelledby="handler-policies-title">
+          <h2 id="handler-policies-title">普通群消息处理策略</h2>
+          <p class="hint">普通消息处理器可以观察完整群消息，因此每个处理器按 QQ Binding 独立授权并默认禁用。处理器按优先级依次运行；此处只配置可观察的发送者范围。</p>
+          <div class="actions"><label>QQ Binding<select id="handler-policy-binding"></select></label><button id="handler-policy-reload" type="button" class="subtle">读取有效处理器与策略</button></div>
+          <label>当前管理账号密码<input id="handler-policy-password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" placeholder="预览和应用时重新鉴权"></label>
+          <p id="handler-policy-status" role="status"></p>
+          <div id="handler-policy-list" aria-live="polite"></div>
+          <div id="handler-policy-preview" class="hidden"><h3>确认处理器策略</h3><pre id="handler-policy-diff"></pre><p class="hint">应用前若处理器热重载或另一管理员已保存，服务端会拒绝旧预览并要求重新读取。</p><button id="handler-policy-apply" type="button">应用处理器策略</button></div>
+        </section>
         <section id="bot-command-diagnostics" class="card hidden" aria-labelledby="command-diagnostics-title">
           <details open><summary>业务命令容量与调用者限流</summary>
             <p class="hint">限制按 Bot 持久生效，多 Host 共用同一准入锁。超限命令仍保留原消息和作者来源，产生有序安全通知，不会转交 Agent。</p>
