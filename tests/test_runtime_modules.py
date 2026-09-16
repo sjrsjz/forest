@@ -79,6 +79,7 @@ def test_official_management_views_are_declared_by_module_descriptors():
     descriptors = {item.component_id: item for item in OFFICIAL_MODULES}
     agent = descriptors["agent.runtime"].management_view
     memory = descriptors["memory.graph"].management_view
+    routing = descriptors["routing.graph"].management_view
     assert (agent.label, agent.template, agent.module) == (
         "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js"
     )
@@ -87,10 +88,14 @@ def test_official_management_views_are_declared_by_module_descriptors():
         "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js"
     )
     assert memory.style == "/static/modules/memory.graph.css"
+    assert (routing.label, routing.template, routing.module) == (
+        "路由与执行图", "/static/modules/routing.graph.html", "/static/routing-graph.js"
+    )
+    assert routing.style == "/static/modules/routing.graph.css"
     assert all(
         item.management_view is None
         for component_id, item in descriptors.items()
-        if component_id not in {"agent.runtime", "memory.graph"}
+        if component_id not in {"agent.runtime", "memory.graph", "routing.graph"}
     )
 
 

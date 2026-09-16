@@ -8,7 +8,7 @@ Forest 的 Agent 是一个 Bot 在一个群会话中的模型—工具执行状�
 
 Agent 内部允许连续执行多个模型步骤和工具步骤，但不会创建另一个模型 Agent。原 `forest_analyze`、`ChildScheduler`、Child model attempt、children 配置和“父/子 Agent 接纳”从产品协议中删除。Kernel 服务调用仍可形成嵌套 component RPC call tree；这里的 child call 只表示一个组件调用发起另一个组件调用，不具有 Prompt、Context、记忆或群回复身份。
 
-旧数据库的 `bot_agent_children`、`bot_child_model_attempts` 等迁移历史不能重写。升级迁移将它们设为遗留、禁止创建新记录，并把尚未终结记录收敛到取消/失败终态。运行时、WebUI 和配置 schema 不再读取或写入这些表。
+Forest 尚未发布，因此最终数据库基线不承诺升级旧 Child 数据。`bot_agent_children`、`bot_child_model_attempts`、Child 专用迁移、数据搬运器、存储 API 和测试夹具都必须直接删除；开发数据库从干净基线重建。禁止用“只读历史”“结算兼容”或写入 fence 把错误的产品语义继续留在目标 schema 中。需要长期保留的费用与外部效果事实只能迁入通用模型调用/效果账本，且不得保留 Child 运行身份。
 
 ## 2. Prompt 的三层结构
 
@@ -287,7 +287,7 @@ protocol_repair_feedback_byte_limit
 | 同群同时触发 | 一条 Session 串行推进，无并发 Agent 回复 |
 | 不同群同时触发 | 可以并行模型调用；共享记忆写通过 revision/outbox 合流 |
 | text-only LLM + 图片消息/记忆 | 图片仍可嵌入召回；chat wire 无图片 bytes/URI并有省略标记 |
-| 旧 children 数据库升级 | 记录终结且表不可新写；运行时/UI 无子 Agent 入口 |
+| 干净数据库基线 | 不存在 Child 表、迁移、配置列、存储 API、运行时/UI 或测试入口 |
 
 ## 11. 落地记录与剩余验收
 
@@ -295,6 +295,6 @@ protocol_repair_feedback_byte_limit
 2. 旧 `system_prompt` 已迁为 PresetContext，WebUI 已增加 CorePrompt 只读面板和 PresetContext 表单。
 3. 模型 attempt 已按原子 ModelTurn 完成解析与持久化，每轮至多执行一个工具；非法输出只进行一次有界修复。
 4. 模型、工具和 repair 步骤已接入既有持久 checkpoint、恢复与晚到回执路径。
-5. 产品子 Agent 运行时、工具、配置、UI 和测试已删除；迁移 `050_single_agent_protocol.sql` 终结遗留活动记录并安装写入 fence。
+5. 产品子 Agent 的在线调度与 UI 已退役，但当前源码仍残留 Child 表、迁移、数据搬运器、Kernel child-call 命名和升级测试；这些残留是必须直接删除的阻断项，不能作为兼容能力保留。
 6. trigger-cut、静默排空、多主干图文召回和 text-only 投影已有定向回归。
 7. 仍需使用真实 QQ、付费 LLM/Embedding 凭据做长时间联调，并在发布候选上执行完整 Compose 浏览器流程和持续容量压测。

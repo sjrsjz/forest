@@ -255,4 +255,4 @@ InputBatch = (context_applied_seq, cut]
 9. 多用户消息和跨群 RAG 节点在实际 wire 中都有稳定作者/来源群；模型不能把来源群误当当前群。
 10. 图片 query 可以召回图片或文本；text-only LLM wire 不含被移除媒体 URI/bytes，且含明确不可见标记。
 11. 两个群并行调用模型，但各自只有一条响应链；它们向 Bot 全局记忆并发写入时通过事实操作、幂等键、revision/outbox 合流。
-12. `forest_analyze`、ChildScheduler、children 配置和任何模型驱动的产品子 Agent 均不存在。旧数据库子 Agent 表只能作为不可写的兼容遗留物，不能重新调度。
+12. `forest_analyze`、ChildScheduler、children 配置和任何模型驱动的产品子 Agent 均不存在。由于 Forest 尚未发布，旧 Child 表、迁移、存储 API、升级夹具和写入 fence 也从最终基线删除，不建立兼容遗留层。

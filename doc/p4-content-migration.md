@@ -1,5 +1,7 @@
 # 正文迁移的事务与版本边界
 
+状态：**已发布数据库升级机制的历史设计，不是当前未发布基线的兼容要求。** Forest 当前允许压平迁移并重建开发数据库。本文仍约束真正发布后的升级事务；其中 019/032/050 Child 链及其兼容结算不进入最终基线，详见[产品子 Agent 删除](p3-children.md)。
+
 029 起的正文迁移在原 Bot 专属数据库内执行。升级前先停止并排空宿主；仍持有有效 HostLease 时返回 `MIGRATION_HOST_ACTIVE`。升级不调用模型、嵌入服务或媒体下载，也不使用第二条数据库连接。
 
 `BotStore.migrate()` 先检查数据库身份、未知迁移和全部历史 checksum，再按 runtime → host 的锁序阻止旧宿主提交。事务内使旧 owner epoch 失效，然后依次执行 SQL prepare、`storage.data_migrations.<family>_v1.migrate_in(conn, store)`、handler 内的最终约束和迁移回执。任何一步失败都会撤销本次全部 DDL、数据搬运、host 失效和回执。数据库锁等待上限为 3 秒；发生锁竞争时整次升级失败，可在停止占用连接后重试。
@@ -20,16 +22,14 @@
 
 若首次删除早于迁移、当时尚不存在保守标记，则未知来源的旧派生物在导入时额外继承最早的实际 suppressed source，直接按原删除回执登记为 `REVOKED`，不写正文。选择顺序固定为 deletion epoch、operation ID、source unit、part；原删除决策仍不可变。
 
-032 是升级前产品 Child 实现的历史正文迁移：它把 Child snapshot、冻结 spec、候选结果及模型 request/manifest/result 改为载荷指针，原正文列强制为空。该版本中，Child 的 snapshot/spec 继承父 step 的 snapshot、output、BOUND EvidenceBundle 和工具参数；模型请求和结果继续传递这些父引用。050 已禁止创建或调度新 Child，032 只继续承担旧数据审计、遗忘和费用结算，详见[产品子 Agent 退役](p3-children.md)。
-
-在退役迁移前，子 Agent 还复验父 Run 已绑定记忆的当前配置、来源可见性、资格、切口和运行时权限。退役后这些校验仅保护遗留记录的终结与结算；任何新 Child HTTP、候选正文或父 Agent 接纳都被禁止。数据库原有完整性约束继续保护历史 snapshot、request wire digest 和载荷 header，不能因产品入口删除而削弱遗忘闭包。
+032 与 050 曾为错误的产品 Child 语义搬运正文并安装退役 fence。它们只说明旧实现曾经保存过哪些敏感副本，不构成升级承诺。当前重构直接从迁移链、最终 schema、数据 handler、存储 API 和测试中删除这条分支；通用 Agent、模型调用、费用和效果事实分别由各自账本承担。
 
 | 迁移 | 搬运对象 |
 | --- | --- |
 | 029 | Inbox 作者/消息正文、旧媒体来源、capture bytes 和来源 manifest |
 | 030 | Context 非输入单元、回复正文和相应载荷指针 |
 | 031 | Agent snapshot/output、精确模型请求/manifest/result、工具参数/结果/观察 |
-| 032 | 升级前遗留 Child snapshot/spec/result、精确模型请求/manifest/result；仅作清理与审计 |
+| 032 | 历史 Child 迁移，最终未发布基线删除，不执行 |
 | 033 | Delivery 发送内容、精确请求和回执正文 |
 | 034 | 升级前已发生遗忘，但旧不完整 SourcePayload 仍为 ACTIVE 的补偿删除决策 |
 | 035 | 为平台成功回执精确确认的自身回声登记不可变来源依赖，协调先回声、后确认或先遗忘的顺序 |

@@ -27,7 +27,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 组件 manifest、依赖 DAG、代际发布、配置 plan/apply、持久事件和 Job；
 - 可靠发送、管理票据、审计、备份与隔离恢复的若干纵向协议。
 
-这些实现中仍有宿主直接持有业务对象、旧 Child 遗留结构和固定页面入口。它们是重构输入，不是最终结构。
+这些实现中仍有宿主直接持有业务对象、旧 Child 表/迁移/存储 API 和固定页面入口。它们是必须删除或迁移的重构输入，不是兼容资产，也不是最终结构。
 
 ## 本轮已经完成的重构切片
 
@@ -39,20 +39,24 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - `BindingRuntime` 的若干 Agent/Memory/Scheduler/Shell 便利属性已删除，调用方开始按组件 ID 取能力。
 - `BotModuleRegistry` 已拥有严格生命周期状态；失败模块会清理自身，已启动依赖按逆序排空，关闭失败可重试，控制面不再采用模块自报 `state`。
 - `adapter.onebot` 已拥有 Binding/Inbox/Shell ingress/Delivery 端口、连接集合、候选切换、网络接纳、发送 Worker 与连接监督任务；`memory.graph` 已拥有来源回填；`command.router` 与 `message.router` 已拥有各自策略和容量存储。`BindingRuntime` 对应便利属性及 OneBot 私有状态已删除。
+- 可安装组件的 service 声明与依赖要求已成为不可变 Generation 事实；service head 与组件 route、command、message handler、event、job 在同一发布事务切换，普通 service 调用会核对持久 head、Generation 和 route epoch。
+- `routing.graph` 已作为官方模块注册，通过通用 management contract 输出 `REPEATABLE READ` 的确定性 RouteGraph；WebUI 视图由模块描述符装载，可筛选节点并查看依赖/事件边及缺失、不兼容、歧义状态。
 
-这只是控制面所有权和传输收口。运行时组合根、完整生命周期切换、路由图与资源归属尚未全部迁完。
+这只是控制面所有权、传输和可安装组件路由的收口。官方模块的持久生命周期、运行时组合根、dispatch trace 与资源归属尚未全部迁完。
 
 本次 Memory 管理切片在 PostgreSQL 17 上完成 109 项组合回归，覆盖来源授权、媒体、图归约/存储、组合筛选、游标绑定、主干统计、关系投影、实际 Web 管理路由和模块描述符；定向 Web 回归为 3 项。真实 Edge 在 1440×1100 PC 视口验证默认只展开“来源、主干与遗忘”，页面高度小于 2500 px，配置、状态、人工关系和发布图按需折叠，同时保留配置草稿、联想变更、延迟响应与 Bot 切换保护。该证据不包含十万至百万来源容量压测、真实图片查询入口或关系图布局。
 
 本次 OneBot 所有权切片把连接集合、候选发布/恢复、HTTP/WebSocket 接入、Delivery 准备与两个根监督任务迁入 `adapter.onebot`。PostgreSQL 定向回归包括运行时/接入/关闭 44 项、记忆运行时 4 项、Agent 记忆 2 项、控制发送 3 项以及 Web Binding/Fleet 18 项；无数据库全套为 803 通过、1069 跳过。尚未执行完整 PostgreSQL 全套、真实 QQ 低频验收或长时连接抖动测试，因此这些结果不构成发布结论。
+
+本次持久 RouteGraph 切片完成 service Generation 事实、原子 service head 发布、调用前路由核对和模块化只读图视图。PostgreSQL 验证分别为 RouteGraph 定向 2 项、干净数据库门禁 1 项、Kernel/service 36 项、平台与 Web 20 项、跨注册表存储 61 项、writer fence 9 项；压平基线后的 `test_web_packages.py` 复跑 4 项通过。无数据库全套为 803 通过、1071 跳过；这些集合有重叠，不能相加。Ruff、Python compileall、RouteGraph JavaScript 语法检查和 `git diff --check` 通过。尚未完成官方运行时模块的持久图统一、消息入场 `graph_digest`、dispatch trace 和完整 PostgreSQL 全套。
 
 ## 阻断项
 
 ### P0 微内核
 
 - `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
-- 瞬时生命周期状态机及失败清理已落实；仍需接入持久代际发布、健康检查、Contract Router 原子切换、按依赖边故障隔离和进程恢复；
-- command、message handler、service、event、job 必须统一编译进可解释 RouteGraph；
+- 官方模块瞬时生命周期状态机及失败清理已落实，但尚未与可安装包的持久 Generation/Route 状态机合并；仍需统一健康检查、按依赖边故障隔离和进程恢复；
+- 可安装包的 command、message handler、service、event、job 已进入同一可解释 RouteGraph；仍需把官方运行时模块纳入持久图，并让消息入场保存精确的 `graph_digest`；
 - dispatch trace 必须按消息、组件、代际和结果查询，且与可编辑业务配置分离；
 - 模块资源所有权仍需继续清理，宿主不得越过契约持有 JobStore、AgentStore 或 Memory 内部对象。
 
@@ -66,7 +70,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 ### P3 Agent 模块
 
 - Agent 必须忠实采用 QiYu Agentlib 的单执行链语义：核心提示词、上下文投影、模型调用、工具调用、checkpoint 和恢复属于同一个 Agent；
-- 旧 `forest_analyze`、ChildScheduler、Child 配置、表、路由、UI 和新写入能力应从最终基线直接删除；现存历史清理代码不得被解释为现行功能；
+- 旧 `forest_analyze`、ChildScheduler、Child 配置、表、迁移、数据搬运器、Kernel/Store API、路由、UI 和测试夹具必须从最终基线直接删除；不得保留只读遗留表、升级兼容、写入 fence 或“历史清理”运行路径；
 - Agent 只是 `conversation.scheduler` 的消费者以及 Memory/Tool/Delivery 契约的调用者，不能承担框架调度或模块管理。
 
 ### P4 多模态多主干记忆

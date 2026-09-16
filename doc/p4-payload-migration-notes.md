@@ -1,6 +1,6 @@
 # P4 准备：正文分离、物理清理与不可复活的删除闭包
 
-状态：**迁移依据与剩余族设计，全链路遗忘尚未完成。** 第 1–9 节保留最初针对 `001_kernel.sql` 至 `020_shell_commands.sql` 的副本调查、约束和验收要求；其中的旧字段用于说明迁移来源，不表示它们现在仍全部保存明文。021–035 接通载荷、图文召回及消息/Agent/发送正文，036–038 接通 Kernel/状态/代际暴露，039–049 接通管理回执及 Agent、Memory、Binding、组件和 Watch 配置正文，060–061 接通会话 Job settings/delegation，062–063 接通 Shell 参数、结果与 CONTROL 回复。实际协议分别见[迁移协议](p4-content-migration.md)、[Kernel 正文](p4-kernel-payloads.md)、[控制回执](p4-control-payloads.md)、[配置正文](p5-configuration-payloads.md)、[Job 定义载荷](p4-job-payloads.md)和[Shell 参数与结果载荷](p4-shell-payloads.md)。产品子 Agent 已从目标架构退役；下文所有 Child 入口、表和测试仅描述历史实现、迁移来源与遗忘/结算兼容，不构成现行运行许可，详见[退役设计](p3-children.md)。第 10–11 节保留各阶段设计演进，当前剩余范围以本页开头和实现状态为准。此文不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
+状态：**历史副本调查，不是当前目标 schema 或兼容计划。** 第 1–11 节保留旧实现曾产生正文副本的位置，供提取通用遗忘不变量；其中的 Child 入口、表、迁移、handler 和测试不得被后续实现恢复或保留。Forest 尚未发布，最终基线直接删除整条 Child 分支并重建开发数据库，不承担 019/032/050 的升级兼容。当前协议以[单 Agent 协议](p3-agent.md)、[产品子 Agent 删除](p3-children.md)和[实现状态](implementation-status.md)为准。其余通用 Payload、Kernel、配置、Job 与 Shell 载荷边界仍需按各自现行文档复核；本页不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
 
 “永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆和上述正文族。新 Agent Reply 从最终步骤的显式父载荷登记；旧回复和不能证明来源闭包的内容继续保持 `lineage_complete=false`。Kernel 状态读取和 Worker 跨调用缓存仍需要补齐真实依赖，不能把局部来源传递称为全链路保证。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
 

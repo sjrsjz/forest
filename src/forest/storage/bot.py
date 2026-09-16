@@ -1019,6 +1019,8 @@ class BotStore:
         job_definitions: list[dict] | None = None,
         command_definitions: list[dict] | None = None,
         message_handler_definitions: list[dict] | None = None,
+        service_definitions: list[dict] | None = None,
+        service_requirements: list[dict] | None = None,
         message_handler_takeover_mode: str = "none",
     ) -> dict:
         self._scope(lease)
@@ -1046,6 +1048,8 @@ class BotStore:
         message_handler_definitions = json.loads(
             json.dumps(message_handler_definitions or [], allow_nan=False)
         )
+        service_definitions = json.loads(json.dumps(service_definitions or [], allow_nan=False))
+        service_requirements = json.loads(json.dumps(service_requirements or [], allow_nan=False))
         if not isinstance(state_migrations, list) or len(state_migrations) > 64 or any(
             not isinstance(item, dict) or set(item) != {"from_schema", "to_schema"}
             or type(item["from_schema"]) is not int or item["from_schema"] < 1
@@ -1146,6 +1150,16 @@ class BotStore:
                     existing_generation=True,
                     takeover_mode=message_handler_takeover_mode,
                 )
+                from forest.storage.service_registry import ServiceRegistryStore
+
+                await ServiceRegistryStore(self).register_generation_in(
+                    conn,
+                    generation_id,
+                    component_id,
+                    service_definitions,
+                    service_requirements,
+                    existing_generation=True,
+                )
                 await self.content.guard_in(conn, [generation_id], phase="admission")
                 await self._host(conn, lease)
                 return existing
@@ -1217,6 +1231,11 @@ class BotStore:
                 package_digest,
                 message_handler_definitions,
                 takeover_mode=message_handler_takeover_mode,
+            )
+            from forest.storage.service_registry import ServiceRegistryStore
+
+            await ServiceRegistryStore(self).register_generation_in(
+                conn, generation_id, component_id, service_definitions, service_requirements
             )
             await self._event(
                 conn,
@@ -1888,6 +1907,14 @@ class BotStore:
                 old_generation_id=route["generation_id"],
                 lifecycle_operation_id=operation_id,
             )
+            from forest.storage.service_registry import ServiceRegistryStore
+
+            await ServiceRegistryStore(self).publish_generation_in(
+                conn,
+                candidate["generation_id"],
+                operation["component_id"],
+                route["route_epoch"] + 1,
+            )
             await conn.execute(
                 "UPDATE public.bot_generations SET status='RETIRED' WHERE bot_id=%s AND generation_id=%s AND status<>'DISPOSED'",
                 (self.bot_id, route["generation_id"]),
@@ -1977,6 +2004,11 @@ class BotStore:
             from forest.storage.message_handler_registry import MessageHandlerRegistryStore
 
             await MessageHandlerRegistryStore(self).disable_component_in(
+                conn, operation["component_id"], route["route_epoch"] + 1
+            )
+            from forest.storage.service_registry import ServiceRegistryStore
+
+            await ServiceRegistryStore(self).disable_component_in(
                 conn, operation["component_id"], route["route_epoch"] + 1
             )
             result = await (

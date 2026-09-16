@@ -56,9 +56,9 @@ flowchart LR
 
 依赖图必须无环。生命周期协调器拓扑准备和启动，反向排空和停止。Contract Router 只向 ACTIVE 代际发布路由；候选代际完成 schema、依赖、能力、状态迁移和健康检查后一次切换。任何组件失败都按依赖边影响实例，不以“平台子任务失败”笼统拖停无关模块。
 
-当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。启动失败会先清理失败模块自身，再按逆依赖序排空已启动模块；关闭失败保留 FAILED 并允许后续关闭重试。下一步仍需把这些瞬时状态接入持久代际发布、健康检查、Contract Router 原子切换和按依赖边隔离的故障策略。
+当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。启动失败会先清理失败模块自身，再按逆依赖序排空已启动模块；关闭失败保留 FAILED 并允许后续关闭重试。可安装包已有独立的持久 Generation/Route 状态机；两套状态机尚未合并，不能把官方模块的进程内 `ACTIVE` 当作已经持久发布的 Generation。后续仍需统一健康检查、恢复和按依赖边隔离的故障策略。
 
-官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`command.router`、`message.router` 分别拥有业务命令和普通消息 Handler 的策略/容量存储。Agent、Memory、Conversation Scheduler、Shell 和 Job 只从依赖图取得这些对象，`BindingRuntime` 不再暴露 OneBot 状态、消息/发送端口、记忆来源或策略存储便利属性。`BindingRuntime` 当前只保留跨模块会话执行、组件 Worker 确保与模块健康汇总；这些能力仍需继续收口到 Contract Router 和通用 supervisor。
+官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询契约和管理视图；`command.router`、`message.router` 依赖它并分别拥有业务命令和普通消息 Handler 的策略/容量存储。Agent、Memory、Conversation Scheduler、Shell 和 Job 只从依赖图取得这些对象，`BindingRuntime` 不再暴露 OneBot 状态、消息/发送端口、记忆来源或策略存储便利属性。`BindingRuntime` 当前只保留跨模块会话执行、组件 Worker 确保与模块健康汇总；这些能力仍需继续收口到 Contract Router 和通用 supervisor。
 
 ## 4. 控制台信息架构
 
@@ -100,7 +100,11 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 ## 6. 路由、授权和 dispatch trace
 
-注册表把命令、消息处理器、服务、事件和任务统一编译为 RouteGraph。路由节点包含契约、提供组件、代际、优先级、并发预算和所需能力；边表示匹配、调用、事件订阅或副作用出口。
+注册表把命令、消息处理器、服务、事件和任务统一编译为 RouteGraph。路由节点包含契约、提供组件、代际、优先级、并发预算和所需能力；边表示所有权、同步依赖解析和事件投递。
+
+当前实现不再从 Worker 内存拼 service 图。每个 Generation 在注册时固化 `provides` 的精确契约与输入/输出 schema 摘要，以及 `requires` 的版本范围、必需性和启动依赖标记；发布事务同时切换组件 route、service head、command head、message-handler head、event subscription head 和 job head。普通 service 调用在交给 Worker 前核对持久 service head、目标 Generation 和 `route_epoch`，随后由既有调用准入事务决定新根调用或已保留父调用是否可继续。冻结阶段不会因为只读解析提前拒绝已经入场的调用树。
+
+`routing.graph` 在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。缺失、不兼容或歧义依赖作为边的解析状态出现，WebUI 只读呈现这一快照，不能产生另一套可编辑路由。当前图覆盖可安装包；官方运行时模块仍只有进程内生命周期描述，尚未进入同一持久 Generation 图。
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。ShellGate 的保留管理命令先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 

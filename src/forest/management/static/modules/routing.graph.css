@@ -1,0 +1,14 @@
+.route-graph-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.route-graph-heading h2{margin-top:0}
+.route-graph-summary{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.route-graph-summary span{border:1px solid #405747;border-radius:999px;padding:5px 9px;font-size:12px}
+.route-graph-filter{display:grid;grid-template-columns:minmax(150px,220px) minmax(240px,1fr);gap:10px;margin:12px 0}
+.route-graph-filter label{display:grid;gap:5px;color:#a1b2a8;font-size:13px}
+.route-graph-filter input,.route-graph-filter select{width:100%;box-sizing:border-box}
+.route-graph-nodes,.route-graph-edges{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px}
+.route-node,.route-edge{border:1px solid #405747;border-radius:8px;padding:10px;min-width:0;overflow-wrap:anywhere}
+.route-node strong,.route-node small,.route-edge strong,.route-edge small{display:block}
+.route-node small,.route-edge small{color:#a1b2a8;margin-top:4px}
+.route-edge[data-status="MISSING"],.route-edge[data-status="INCOMPATIBLE"],.route-edge[data-status="AMBIGUOUS"]{border-color:#a66b43}
+#bot-route-graph details{margin-top:14px}#bot-route-graph summary{cursor:pointer;font-weight:700;margin-bottom:10px}
+@media(max-width:760px){.route-graph-heading{display:block}.route-graph-filter{grid-template-columns:1fr}}

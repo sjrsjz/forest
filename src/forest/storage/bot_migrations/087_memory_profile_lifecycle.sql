@@ -188,3 +188,109 @@ BEGIN
  END LOOP;
  RETURN NEW;
 END $$;
+
+-- Durable RouteGraph service contracts are part of the unpublished final baseline.
+CREATE TABLE public.bot_service_clock (
+ bot_id text PRIMARY KEY REFERENCES public.forest_bot_identity(bot_id),
+ revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.bot_service_generations (
+ bot_id text NOT NULL,
+ generation_id text NOT NULL,
+ component_id text NOT NULL,
+ spec_set_digest text NOT NULL,
+ service_count integer NOT NULL CHECK(service_count BETWEEN 0 AND 64),
+ requirement_count integer NOT NULL CHECK(requirement_count BETWEEN 0 AND 64),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,generation_id),
+ FOREIGN KEY(bot_id,generation_id) REFERENCES public.bot_generations(bot_id,generation_id)
+);
+
+CREATE TABLE public.bot_generation_service_definitions (
+ bot_id text NOT NULL,
+ generation_id text NOT NULL,
+ component_id text NOT NULL,
+ service_name text NOT NULL,
+ contract_major integer NOT NULL CHECK(contract_major>0),
+ contract_minor integer NOT NULL CHECK(contract_minor>=0),
+ input_schema_digest text NOT NULL,
+ output_schema_digest text NOT NULL,
+ PRIMARY KEY(bot_id,generation_id,service_name,contract_major),
+ FOREIGN KEY(bot_id,generation_id) REFERENCES public.bot_service_generations(bot_id,generation_id)
+);
+
+CREATE TABLE public.bot_generation_service_requirements (
+ bot_id text NOT NULL,
+ generation_id text NOT NULL,
+ component_id text NOT NULL,
+ service_name text NOT NULL,
+ contract_range text NOT NULL,
+ required boolean NOT NULL,
+ startup_dependency boolean NOT NULL,
+ PRIMARY KEY(bot_id,generation_id,service_name),
+ FOREIGN KEY(bot_id,generation_id) REFERENCES public.bot_service_generations(bot_id,generation_id)
+);
+
+CREATE TABLE public.bot_service_publications (
+ bot_id text NOT NULL REFERENCES public.forest_bot_identity(bot_id),
+ registry_revision bigint NOT NULL CHECK(registry_revision>=1),
+ component_id text NOT NULL,
+ generation_id text,
+ route_epoch bigint NOT NULL CHECK(route_epoch>=1),
+ operation_kind text NOT NULL CHECK(operation_kind IN ('INSTALL','DISABLE')),
+ spec_set_digest text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,registry_revision),
+ UNIQUE(bot_id,component_id,route_epoch),
+ FOREIGN KEY(bot_id,generation_id) REFERENCES public.bot_service_generations(bot_id,generation_id)
+);
+
+CREATE TABLE public.bot_service_heads (
+ bot_id text NOT NULL REFERENCES public.forest_bot_identity(bot_id),
+ service_name text NOT NULL,
+ contract_major integer NOT NULL CHECK(contract_major>0),
+ component_id text NOT NULL,
+ generation_id text,
+ route_epoch bigint NOT NULL CHECK(route_epoch>=1),
+ registry_revision bigint NOT NULL CHECK(registry_revision>=1),
+ contract_minor integer NOT NULL CHECK(contract_minor>=0),
+ input_schema_digest text NOT NULL,
+ output_schema_digest text NOT NULL,
+ active boolean NOT NULL,
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,service_name,contract_major),
+ FOREIGN KEY(bot_id,generation_id) REFERENCES public.bot_service_generations(bot_id,generation_id),
+ CHECK((active AND generation_id IS NOT NULL) OR (NOT active AND generation_id IS NULL))
+);
+
+CREATE FUNCTION public.forest_service_registry_fact_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+ RAISE EXCEPTION 'SERVICE_REGISTRY_FACT_IMMUTABLE' USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER bot_service_generation_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_service_generations FOR EACH ROW EXECUTE FUNCTION public.forest_service_registry_fact_immutable();
+CREATE TRIGGER bot_generation_service_definition_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_generation_service_definitions FOR EACH ROW EXECUTE FUNCTION public.forest_service_registry_fact_immutable();
+CREATE TRIGGER bot_generation_service_requirement_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_generation_service_requirements FOR EACH ROW EXECUTE FUNCTION public.forest_service_registry_fact_immutable();
+CREATE TRIGGER bot_service_publication_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_service_publications FOR EACH ROW EXECUTE FUNCTION public.forest_service_registry_fact_immutable();
+
+CREATE FUNCTION public.forest_service_head_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='DELETE' THEN
+  RAISE EXCEPTION 'SERVICE_HEAD_DELETE_FORBIDDEN' USING ERRCODE='55000';
+ END IF;
+ IF ROW(NEW.bot_id,NEW.service_name,NEW.contract_major)
+    IS DISTINCT FROM ROW(OLD.bot_id,OLD.service_name,OLD.contract_major) THEN
+  RAISE EXCEPTION 'SERVICE_IDENTITY_IMMUTABLE' USING ERRCODE='55000';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER bot_service_head_guard BEFORE UPDATE OR DELETE
+ ON public.bot_service_heads FOR EACH ROW EXECUTE FUNCTION public.forest_service_head_guard();

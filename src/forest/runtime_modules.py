@@ -160,6 +160,15 @@ def _onebot(platform, _: dict[str, Any]):
     return OneBotRuntime(platform)
 
 
+def _routing_graph(platform, _: dict[str, Any]):
+    from forest.management.routing_api import RoutingManagementContract
+    from forest.routing_graph import RouteGraphRuntime
+
+    runtime = RouteGraphRuntime(platform)
+    runtime.management_contract = RoutingManagementContract()
+    return runtime
+
+
 def _shell(platform, modules: dict[str, Any]):
     from forest.shell import ShellDispatcher
 
@@ -191,6 +200,17 @@ def _jobs(platform, modules: dict[str, Any]):
 OFFICIAL_MODULES = (
     RuntimeModuleDescriptor("adapter.onebot", (), _onebot),
     RuntimeModuleDescriptor(
+        "routing.graph",
+        (),
+        _routing_graph,
+        RuntimeManagementView(
+            "路由与执行图",
+            "/static/modules/routing.graph.html",
+            "/static/routing-graph.js",
+            style="/static/modules/routing.graph.css",
+        ),
+    ),
+    RuntimeModuleDescriptor(
         "memory.graph",
         ("adapter.onebot",),
         _memory,
@@ -208,8 +228,8 @@ OFFICIAL_MODULES = (
             style="/static/modules/agent.runtime.css",
         ),
     ),
-    RuntimeModuleDescriptor("command.router", (), _command_routing),
-    RuntimeModuleDescriptor("message.router", (), _message_routing),
+    RuntimeModuleDescriptor("command.router", ("routing.graph",), _command_routing),
+    RuntimeModuleDescriptor("message.router", ("routing.graph",), _message_routing),
     RuntimeModuleDescriptor(
         "conversation.scheduler",
         ("adapter.onebot", "agent.runtime", "command.router", "message.router"),

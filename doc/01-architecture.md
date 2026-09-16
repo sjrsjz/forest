@@ -94,7 +94,7 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | Bootstrap、KernelStore 与恢复器 | 启动信任根、读取部署目录和所有权账本；业务 SQL 不进入内核 |
 | 包校验与依赖解析 | 防止不兼容模块被部分启用，形成不可变部署计划 |
 | 生命周期协调器 | 唯一能改变运行实例状态及发布服务路由的主体 |
-| Contract Router | 检查版本、身份、代际和 deadline；不理解聊天内容 |
+| Contract Router | 持久发布 service/命令/消息处理器/事件/job 路由，检查版本、身份、代际、route epoch 和 deadline；不理解聊天内容 |
 | Effect Gateway 与授权执行器 | 模块无法通过换一个调用通道绕过能力检查 |
 | Task/Resource Supervisor | 管理执行者、取消、配额、子进程和故障清理 |
 | 最小遥测、审计与健康接口 | 模块损坏时仍可定位故障并管理宿主 |

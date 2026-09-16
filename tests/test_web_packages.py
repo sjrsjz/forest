@@ -90,6 +90,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             "conversation.scheduler",
             "memory.graph",
             "message.router",
+            "routing.graph",
             "scheduler.jobs",
             "shell.command",
         }
@@ -98,6 +99,11 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         assert modules["conversation.scheduler"]["requires"] == [
             "adapter.onebot", "agent.runtime", "command.router", "message.router"
         ]
+        assert modules["command.router"]["requires"] == ["routing.graph"]
+        assert modules["message.router"]["requires"] == ["routing.graph"]
+        assert modules["routing.graph"]["management_contract"]["operations"] == [{
+            "operation_id": "snapshot", "kind": "query", "authority": "module.read"
+        }]
         assert modules["agent.runtime"]["management_view"]["kind"] == "trusted-module"
         assert modules["agent.runtime"]["management_view"]["protocol"] == (
             "forest.trusted-management-view/1"
@@ -129,6 +135,18 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             await client.get(f"/management/v1/bots/{bot['bot_id']}/memory/configuration")
         ).status_code == 404
         assert (await invoke(client, base, 2, "call-1"))["result"]["value"] == 4
+        graph_response = await client.get(
+            f"/management/v1/bots/{bot['bot_id']}/runtime-modules/routing.graph/queries/snapshot"
+        )
+        assert graph_response.status_code == 200, graph_response.text
+        graph = graph_response.json()
+        assert graph["protocol"] == "forest.route-graph/1"
+        assert any(
+            node["kind"] == "service"
+            and node["component_id"] == "demo.counter"
+            and node["service_name"] == "counter.increment"
+            for node in graph["nodes"]
+        )
         await apply(client, base, await make_plan(client, base, broken, "Broken", 9, 1, "p2"), "a2")
         # A failed candidate must leave the old durable effective revision/Worker live.
         async with asyncio.timeout(30):

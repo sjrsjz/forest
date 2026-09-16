@@ -1,0 +1,14 @@
+<section id="bot-route-graph" class="card hidden">
+  <div class="route-graph-heading">
+    <div><h2>路由与执行图</h2><p class="hint">直接读取内核发布的组件、service、命令、消息处理器、事件和 job 路由。图不可在此拖拽修改；变更必须经过对应模块生命周期发布。</p></div>
+    <button id="route-graph-refresh" class="subtle" type="button">刷新快照</button>
+  </div>
+  <div id="route-graph-summary" class="route-graph-summary"></div>
+  <form id="route-graph-filter" class="route-graph-filter">
+    <label>节点类型<select name="kind"><option value="">全部</option><option value="component">组件</option><option value="service">Service</option><option value="command">命令</option><option value="message_handler">消息处理器</option><option value="event_publisher">事件发布</option><option value="event_subscriber">事件订阅</option><option value="job_handler">Job</option></select></label>
+    <label>组件或标识<input name="query" maxlength="128" placeholder="筛选组件、service、命令…"></label>
+  </form>
+  <p id="route-graph-status" role="status"></p>
+  <div id="route-graph-nodes" class="route-graph-nodes" aria-live="polite"></div>
+  <details><summary>依赖与事件边</summary><div id="route-graph-edges" class="route-graph-edges"></div></details>
+</section>

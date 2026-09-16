@@ -621,6 +621,24 @@ class Kernel:
                 )
                 for svc in spec["provides"]
             }
+            service_definitions = [
+                {
+                    "name": item["name"],
+                    "contract": item["contract"],
+                    "input_schema_digest": digest_json(snapshot.schema(item["input_schema"])),
+                    "output_schema_digest": digest_json(snapshot.schema(item["output_schema"])),
+                }
+                for item in spec["provides"]
+            ]
+            service_requirements = [
+                {
+                    "name": item["name"],
+                    "contract": item["contract"],
+                    "required": item.get("required", True),
+                    "startup_dependency": item.get("startup_dependency", True),
+                }
+                for item in spec.get("requires", [])
+            ]
             publications = {}
             subscriptions = {}
             event_definitions = []
@@ -826,6 +844,8 @@ class Kernel:
                     job_definitions=job_definitions,
                     command_definitions=command_definitions,
                     message_handler_definitions=message_handler_definitions,
+                    service_definitions=service_definitions,
+                    service_requirements=service_requirements,
                     message_handler_takeover_mode=(
                         "compatible" if compatible_handler_takeover else "none"
                     ),
@@ -1825,6 +1845,25 @@ class Kernel:
             and business_command is None
             and message_handler is None
         ):
+            from forest.storage.service_registry import ServiceRegistryStore
+
+            service_route = await ServiceRegistryStore(self.store).resolve(
+                service,
+                contract_major,
+                caller_generation_id=(
+                    parent[1].generation_id if parent is not None else None
+                ),
+            )
+            if (
+                service_route["component_id"] != component_id
+                or service_route["generation_id"] != component.worker.identity.generation_id
+                or service_route["route_epoch"] != component.route_epoch
+            ):
+                raise ForestError(
+                    "SERVICE_ROUTE_CHANGED",
+                    "The durable service route differs from the loaded Worker",
+                    409,
+                )
             if service not in component.validators:
                 raise ForestError("SERVICE_NOT_FOUND", "Service is not loaded", 404)
             input_validator, output_validator, major = component.validators[service]

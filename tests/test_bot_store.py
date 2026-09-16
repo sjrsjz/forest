@@ -14,8 +14,10 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.routing_graph import RouteGraphStore
 from forest.storage.bot import BotStore
 from forest.storage.postgres import PostgresStore
+from forest.storage.service_registry import ServiceRegistryStore
 
 pytestmark = pytest.mark.postgres
 
@@ -98,6 +100,164 @@ async def fails(code, awaitable):
     with pytest.raises(ForestError) as caught:
         await awaitable
     assert caught.value.code == code
+
+
+async def service_candidate(
+    store,
+    lease,
+    *,
+    component,
+    generation,
+    services=(),
+    requirements=(),
+    events=(),
+    jobs=(),
+    commands=(),
+    message_handlers=(),
+    epoch=0,
+):
+    await store.register_generation(
+        lease,
+        component,
+        generation,
+        "package-" + generation,
+        "config-" + generation,
+        "worker-" + generation,
+        service_definitions=list(services),
+        service_requirements=list(requirements),
+        event_definitions=list(events),
+        job_definitions=list(jobs),
+        command_definitions=list(commands),
+        message_handler_definitions=list(message_handlers),
+    )
+    await store.mark_ready(lease, generation)
+    op = await store.begin_operation(
+        lease,
+        component,
+        "activate-" + generation,
+        "plan-" + generation,
+        generation,
+        epoch,
+    )
+    await store.freeze(lease, op["operation_id"], op["op_epoch"])
+    return await store.publish(lease, op["operation_id"], op["op_epoch"])
+
+
+async def test_route_graph_publishes_services_and_resolves_durable_requirements(store):
+    lease = await store.acquire_host("host", "route-graph")
+    schema = "sha256:" + "a" * 64
+    await service_candidate(
+        store,
+        lease,
+        component="provider",
+        generation="provider-1",
+        services=[{
+            "name": "demo.lookup",
+            "contract": "1.1",
+            "input_schema_digest": schema,
+            "output_schema_digest": schema,
+        }],
+        events=[{
+            "direction": "PUBLISH",
+            "definition_id": "demo.changed",
+            "topic": "demo.changed",
+            "contract_major": 1,
+            "contract_minor": 0,
+            "schema_digest": schema,
+        }],
+        jobs=[{
+            "handler_id": "refresh",
+            "schema_digest": schema,
+            "max_attempts": 3,
+            "timeout_seconds": 10,
+            "max_concurrency": 1,
+        }],
+        commands=[{
+            "command_id": "demo.inspect",
+            "name": "/inspect",
+            "handler": "inspect",
+            "permission": "command.inspect",
+            "argument_mode": "none",
+            "input_schema": "schemas/inspect.json",
+            "schema_digest": schema,
+            "priority": 0,
+        }],
+        message_handlers=[{
+            "handler_id": "observe",
+            "handler": "observe",
+            "priority": 0,
+        }],
+    )
+    await service_candidate(
+        store,
+        lease,
+        component="consumer",
+        generation="consumer-1",
+        requirements=[{
+            "name": "demo.lookup",
+            "contract": ">=1.0,<2.0",
+            "required": True,
+            "startup_dependency": True,
+        }],
+        events=[{
+            "direction": "SUBSCRIBE",
+            "definition_id": "consumer.changed",
+            "topic": "demo.changed",
+            "contract_major": 1,
+            "contract_minor": 0,
+            "schema_digest": schema,
+            "max_attempts": 3,
+        }],
+    )
+    resolved = await ServiceRegistryStore(store).resolve(
+        "demo.lookup", 1, caller_generation_id="consumer-1"
+    )
+    assert (resolved["component_id"], resolved["generation_id"], resolved["route_epoch"]) == (
+        "provider", "provider-1", 1
+    )
+    first = await RouteGraphStore(store).snapshot()
+    second = await RouteGraphStore(store).snapshot()
+    assert first == second
+    assert first["protocol"] == "forest.route-graph/1"
+    assert any(node["node_id"] == "service:demo.lookup:v1" for node in first["nodes"])
+    assert {
+        "component", "service", "command", "message_handler", "event_publisher",
+        "event_subscriber", "job_handler",
+    } <= {node["kind"] for node in first["nodes"]}
+    dependency = next(edge for edge in first["edges"] if edge["kind"] == "requires_service")
+    assert dependency["status"] == "RESOLVED"
+    assert dependency["target"] == "service:demo.lookup:v1"
+    assert any(edge["kind"] == "event_delivery" for edge in first["edges"])
+    assert first["graph_digest"].startswith("sha256:")
+
+
+async def test_route_graph_rejects_second_active_provider_for_same_service_major(store):
+    lease = await store.acquire_host("host", "duplicate-service")
+    schema = "sha256:" + "b" * 64
+    definition = [{
+        "name": "demo.lookup",
+        "contract": "1.0",
+        "input_schema_digest": schema,
+        "output_schema_digest": schema,
+    }]
+    await service_candidate(
+        store, lease, component="provider-a", generation="provider-a-1", services=definition
+    )
+    await store.register_generation(
+        lease,
+        "provider-b",
+        "provider-b-1",
+        "package-provider-b-1",
+        "config-provider-b-1",
+        "worker-provider-b-1",
+        service_definitions=definition,
+    )
+    await store.mark_ready(lease, "provider-b-1")
+    op = await store.begin_operation(
+        lease, "provider-b", "activate-provider-b-1", "plan-provider-b-1", "provider-b-1", 0
+    )
+    await store.freeze(lease, op["operation_id"], op["op_epoch"])
+    await fails("DUPLICATE_SERVICE", store.publish(lease, op["operation_id"], op["op_epoch"]))
 
 
 async def test_bot_initialization_rejects_other_bot_and_deployment_without_mutation(
