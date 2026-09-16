@@ -8,7 +8,9 @@
 
 本轮已开始的代码切片包括：官方核心模块的显式依赖注册表、管理 API 按 `component_id` 取模块、包级 `management_ui` 声明/摘要/静态校验、认证工件读取、浏览器二次摘要校验、无同源无网络 iframe 与有界 MessageChannel 草稿协议，以及 `forest.counter` 自带 UI。只有完成 13 文档的退出条件、重新建立数据库基线并重跑全套/真实实例验收后，才能恢复发布候选判断。
 
-当前纠偏切片的固定源码验证为：Ruff、Python 编译、两个管理 JavaScript 语法及补丁空白检查通过；非 PostgreSQL 集合 `695 passed, 36 skipped`；包与运行模块单测 `75 passed, 1 skipped`；受影响的 PostgreSQL 管理链路首轮 `33 passed, 1 failed`，失败是并发策略提交的错误码受内容回收时序影响，按权威 revision 二次判定后该竞争用例连续 5 次通过；旧库权限映射修正后 `15 passed`。一次在源码持续变化期间运行的全量会话得到 `1783 passed, 61 failed, 4 skipped`，其 setup/package 失败混合了进程内旧代码与磁盘新工件，明确作废，不能当成当前失败清单或通过证明。固定当前源码的完整 PostgreSQL/浏览器回归仍待重新执行。
+当前纠偏切片的固定源码验证为：Ruff、Python 编译、两个管理 JavaScript 语法及补丁空白检查通过；非 PostgreSQL 集合 `695 passed, 36 skipped`；包与运行模块单测 `75 passed, 1 skipped`；受影响的 PostgreSQL 管理链路首轮 `33 passed, 1 failed`，失败是并发策略提交的错误码受内容回收时序影响，按权威 revision 二次判定后该竞争用例连续 5 次通过；旧库权限映射修正后 `15 passed`。一次在源码持续变化期间运行的全量会话得到 `1783 passed, 61 failed, 4 skipped`，其 setup/package 失败混合了进程内旧代码与磁盘新工件，明确作废，不能当成当前失败清单或通过证明。
+
+提交 `a8a2b27` 的固定源码全量会话在 85% 前没有失败，随后 Windows 长时单进程在一个独立复跑仅需 24 秒的 Shell 区域累计挂起，主进程 CPU 停止增长后人工中断。由该边界开始的新进程尾段为 `221 passed, 1 failed`；唯一失败是多群 Agent 集成在持续负载下 30 秒等待第二条发送超时，该用例立即独立复跑为 `1 passed`、23.79 秒，并且早先受影响管理组也曾通过。现有证据证明全部收集项分段可通过，但不等同于一次完整单进程全绿；需要先消除 Windows 套件级资源累积/超时抖动，再恢复完整回归声明。真实浏览器中的模块 iframe 流程仍待执行。
 
 ## 0. 已废止的历史发布候选快照（2026-09-16，禁止作为当前结论）
 
