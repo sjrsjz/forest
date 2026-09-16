@@ -81,7 +81,7 @@ export function memoryPanel(api, busy, notice) {
     }
     $('memory-fields').append(section);
   }
-  const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/memory`;
+  const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/memory.graph`;
   const valid = own => bot && own === epoch;
   function clearPlan() {
     edit++; pending = null; planKey = null; applyKey = null;
@@ -161,7 +161,7 @@ export function memoryPanel(api, busy, notice) {
     if (!bot) return;
     const own = epoch, seq = ++sourceSeq, prefix = path();
     const cursor = after ? `&after=${encodeURIComponent(after)}` : '';
-    const result = await api(`${prefix}/sources?limit=50${cursor}`);
+    const result = await api(`${prefix}/queries/sources?limit=50${cursor}`);
     if (!valid(own) || seq !== sourceSeq) return;
     renderSources(result, append);
   }
@@ -197,7 +197,7 @@ export function memoryPanel(api, busy, notice) {
   async function refreshAssociations() {
     if (!bot) return;
     const own = epoch, seq = ++associationSeq, prefix = path();
-    const result = await api(`${prefix}/associations?limit=50`);
+    const result = await api(`${prefix}/queries/associations?limit=50`);
     if (!valid(own) || seq !== associationSeq) return;
     renderAssociations(result);
   }
@@ -207,7 +207,7 @@ export function memoryPanel(api, busy, notice) {
     const own = epoch, seq = sourceSeq, prefix = path();
     associationPlanKey = crypto.randomUUID(); const key = associationPlanKey;
     await busy(button, async () => {
-      const result = await api(`${prefix}/association-plans`, payload, {
+      const result = await api(`${prefix}/actions/association.plan`, payload, {
         'Idempotency-Key':key,
       });
       if (!valid(own) || seq !== sourceSeq || key !== associationPlanKey) return;
@@ -247,7 +247,7 @@ export function memoryPanel(api, busy, notice) {
   async function read() {
     if (!bot) return;
     const own = epoch, seq = ++readSeq, edited = edit;
-    const result = await api(`${path()}/configuration`);
+    const result = await api(`${path()}/queries/configuration`);
     if (!valid(own) || seq !== readSeq) return;
     if (edited !== edit) { notice('读取期间已编辑配置，保留当前草稿。'); return; }
     show(result);
@@ -255,7 +255,7 @@ export function memoryPanel(api, busy, notice) {
   async function refresh() {
     if (!bot) return;
     const own = epoch, seq = ++statusSeq;
-    const result = await api(`${path()}/status`);
+    const result = await api(`${path()}/queries/status`);
     if (!valid(own) || seq !== statusSeq) return;
     $('memory-state').textContent = JSON.stringify(result, null, 2);
   }
@@ -276,7 +276,7 @@ export function memoryPanel(api, busy, notice) {
     if (payload.api_key && payload.clear_api_key) { notice('替换密钥和清除密钥只能选择一项。'); return; }
     planKey ||= crypto.randomUUID(); const key = planKey;
     busy(event.submitter, async () => {
-      const result = await api(`${prefix}/change-plans`, payload, {'Idempotency-Key':key});
+      const result = await api(`${prefix}/actions/configuration.plan`, payload, {'Idempotency-Key':key});
       if (!valid(own) || edited !== edit || planKey !== key) return;
       pending = {...result, has_api_key:result.credentials_changed ? !payload.clear_api_key : configuration.has_api_key};
       applyKey = crypto.randomUUID();
@@ -289,7 +289,7 @@ export function memoryPanel(api, busy, notice) {
     if (!pending) return;
     const own = epoch, edited = edit, plan = pending, key = applyKey, prefix = path();
     busy(event.currentTarget, async () => {
-      const result = await api(`${prefix}/management-requests`, {
+      const result = await api(`${prefix}/actions/configuration.apply`, {
         expected_revision:plan.expected_revision, plan_id:plan.plan_id, plan_digest:plan.plan_digest,
       }, {'Idempotency-Key':key});
       if (!valid(own)) return;
@@ -324,7 +324,7 @@ export function memoryPanel(api, busy, notice) {
     if (!associationPlan) return;
     const own = epoch, plan = associationPlan, key = associationApplyKey, prefix = path();
     busy(event.currentTarget, async () => {
-      const result = await api(`${prefix}/association-requests`, {
+      const result = await api(`${prefix}/actions/association.apply`, {
         expected_deletion_epoch:plan.expected_deletion_epoch,
         plan_id:plan.plan_id,
         plan_digest:plan.plan_digest,
@@ -342,7 +342,7 @@ export function memoryPanel(api, busy, notice) {
     const own = epoch, seq = sourceSeq, deletionEpoch = sourceView.deletion_epoch, prefix = path();
     forgetPlanKey ||= crypto.randomUUID(); const key = forgetPlanKey;
     busy(event.currentTarget, async () => {
-      const result = await api(`${prefix}/forget-plans`, {
+      const result = await api(`${prefix}/actions/forget.plan`, {
         expected_deletion_epoch:deletionEpoch, source_unit_ids:ids,
       }, {'Idempotency-Key':key});
       if (!valid(own) || seq !== sourceSeq || key !== forgetPlanKey) return;
@@ -361,7 +361,7 @@ export function memoryPanel(api, busy, notice) {
     if (!forgetPlan) return;
     const own = epoch, plan = forgetPlan, key = forgetApplyKey, prefix = path();
     busy(event.currentTarget, async () => {
-      const result = await api(`${prefix}/forget-requests`, {
+      const result = await api(`${prefix}/actions/forget.apply`, {
         expected_deletion_epoch:plan.expected_deletion_epoch,
         plan_id:plan.plan_id, plan_digest:plan.plan_digest,
       }, {'Idempotency-Key':key});

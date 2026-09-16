@@ -10,7 +10,7 @@ export function agentPanel(api, busy, notice) {
     if (!configuration?.defaults) return;
     showConfiguration({...configuration, values:structuredClone(configuration.defaults), values_payload_state:'DRAFT'});
   });
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/agent`;
+  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/agent.runtime`;
   const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
   const valid = (own) => bot !== null && own === epoch;
   function clearPlan() {
@@ -55,7 +55,7 @@ export function agentPanel(api, busy, notice) {
   async function read() {
     if (!bot) return;
     const own = epoch, sequence = ++readSeq, edited = edit;
-    const row = await api(`${base()}/configuration`);
+    const row = await api(`${base()}/queries/configuration`);
     if (!valid(own) || sequence !== readSeq) return;
     if (edited !== edit) { notice('读取期间配置已编辑，已保留草稿。'); return; }
     showConfiguration(row);
@@ -84,7 +84,7 @@ export function agentPanel(api, busy, notice) {
       api_key: form.elements.api_key.value || null, clear_api_key: form.elements.clear_api_key.checked};
     planKey ||= crypto.randomUUID(); const key = planKey, prefix = base();
     busy(event.submitter, async () => {
-      const result = await post(`${prefix}/change-plans`, payload, key);
+      const result = await post(`${prefix}/actions/configuration.plan`, payload, key);
       if (!valid(own) || edited !== edit || key !== planKey) return;
       pending = result; applyKey = crypto.randomUUID();
       $('agent-config-diff').textContent = JSON.stringify({before:result.before_values, after:result.values,
@@ -96,7 +96,7 @@ export function agentPanel(api, busy, notice) {
     if (!pending) return;
     const own = epoch, edited = edit, plan = pending, key = applyKey, prefix = base();
     busy(event.currentTarget, async () => {
-      const result = await post(`${prefix}/management-requests`, {
+      const result = await post(`${prefix}/actions/configuration.apply`, {
         expected_revision:plan.expected_revision, plan_id:plan.plan_id, plan_digest:plan.plan_digest}, key);
       if (!valid(own)) return;
       if (edited === edit && pending === plan) {
@@ -113,7 +113,7 @@ export function agentPanel(api, busy, notice) {
   async function refresh() {
     if (!bot) return;
     const own = epoch, sequence = ++statusSeq, prefix = base();
-    const data = await api(`${prefix}/runs`);
+    const data = await api(`${prefix}/queries/runs`);
     if (!valid(own) || sequence !== statusSeq) return;
     const root = $('agent-runs'); root.replaceChildren();
     for (const row of data.runs || []) {
@@ -127,7 +127,7 @@ export function agentPanel(api, busy, notice) {
         let cancelKey = crypto.randomUUID(); reason.addEventListener('input', () => { cancelKey = crypto.randomUUID(); });
         cancel.addEventListener('click', () => busy(cancel, async () => {
           if (!reason.value.trim()) { notice('请填写取消原因。'); return; }
-          await post(`${prefix}/cancellations`, {run_id:row.run_id,
+          await post(`${prefix}/actions/run.cancel`, {run_id:row.run_id,
             expected_checkpoint_seq:row.checkpoint_seq, reason:reason.value.trim()}, cancelKey);
           if (valid(own)) await refresh();
         })); item.append(reason, cancel);
@@ -144,7 +144,7 @@ export function agentPanel(api, busy, notice) {
         for (const field of [state, result]) field.addEventListener('input', () => { key = crypto.randomUUID(); });
         button.addEventListener('click', () => busy(button, async () => {
           let parsed; try { parsed = JSON.parse(result.value); } catch { notice('结果需要合法 JSON。'); return; }
-          await post(`${prefix}/resolutions`, {run_id:row.run_id,
+          await post(`${prefix}/actions/tool.resolve`, {run_id:row.run_id,
             tool_call_id:tool.tool_call_id, expected_checkpoint_seq:row.checkpoint_seq,
             arguments_digest:tool.arguments_digest, status:state.value, result:parsed}, key);
           if (valid(own)) await refresh();
@@ -161,7 +161,7 @@ export function agentPanel(api, busy, notice) {
         const button = document.createElement('button'); button.textContent = label;
         const key = crypto.randomUUID();
         button.addEventListener('click', () => busy(button, async () => {
-          await post(`${prefix}/approvals`, {approval_id:approval.approval_id,
+          await post(`${prefix}/actions/approval.decide`, {approval_id:approval.approval_id,
             arguments_digest:approval.arguments_digest, decision}, key);
           if (valid(own)) await refresh();
         })); item.append(button);

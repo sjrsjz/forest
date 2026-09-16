@@ -27,6 +27,14 @@ const pkg = (id, component, version) => ({package_digest:id,package_id:component
   services:[{name:component+'.first',input_schema:input},{name:component+'.second',input_schema:input}]});
 const packages = [{...pkg('pkg-a','fixture.alpha','1.0.0'),message_handler_takeover:'compatible'},
   pkg('pkg-b','fixture.beta','1.0.0'),pkg('pkg-a-old','fixture.alpha','0.9.0')];
+const runtimeModules = [
+  {component_id:'agent.runtime',requires:['memory.graph'],management_view:{kind:'trusted-module',
+    protocol:'forest.trusted-management-view/1',label:'Agent 与模型',
+    template:'/static/modules/agent.runtime.html',module:'/static/agent-panel.js',style:'/static/modules/agent.runtime.css'}},
+  {component_id:'memory.graph',requires:[],management_view:{kind:'trusted-module',
+    protocol:'forest.trusted-management-view/1',label:'图文记忆',
+    template:'/static/modules/memory.graph.html',module:'/static/memory.js',style:'/static/modules/memory.graph.css'}},
+];
 const values = label => ({label,enabled:true,mode:'fast',tags:['original']});
 const commandLimits = {max_argument_bytes:16384,max_pending_bot:2048,max_pending_binding:512,
   max_pending_principal:8,principal_burst:8,principal_refill_seconds:2};
@@ -37,7 +45,8 @@ const state = (component, label, digest) => ({desired_revision:1,effective_revis
   desired_values:{package_digest:digest,config:values(label),grants:[]},effective_values:{package_digest:digest,config:values(label),grants:[]},
   desired_values_payload_state:'ACTIVE',effective_values_payload_state:'ACTIVE',
   defaults:{package_digest:'',config:{},grants:[]},
-  operations:[],runtime:{components:[{component_id:component,worker_state:'ACTIVE',loaded_revision:1}],error_code:null}});
+  operations:[],runtime:{components:[{component_id:component,worker_state:'ACTIVE',loaded_revision:1}],
+    runtime_modules:runtimeModules,error_code:null}});
 window.fixture = {packages,states:{'fixture.alpha':state('fixture.alpha','Alpha','pkg-a'),
   'fixture.beta':state('fixture.beta','Beta','pkg-b')},hold:[],pending:[],calls:[],plans:{},unavailable:[],poll:null};
 fixture.bot = {bot_id:'bot-a',display_name:'Browser fixture',stage:'READY',revision:1,job_id:'job-a'};
@@ -60,12 +69,12 @@ function reply(path, method, body) {
   }
   if (path==='/provision-jobs/job-a') return {events:[]};
   if (path==='/packages') return method==='POST' ? packages[0] : {packages:fixture.packages,errors:{}};
-  if (path.endsWith('/agent/configuration')) return {revision:0,values:{enabled:false,allowed_tools:[]},has_api_key:false};
-  if (path.endsWith('/agent/runs')) return {runs:[],approvals:[]};
-  if (path.endsWith('/memory/configuration')) return {revision:0,values:memoryDefaults,has_api_key:false,secret_revision:0};
-  if (path.endsWith('/memory/status')) return {configured:false,enabled:false,revision:0,counts:{facets:{},captures:{},attempts:{}},budget:null,errors:{}};
-  if (path.includes('/memory/sources?')) return {deletion_epoch:0,sources:[],next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
-  if (path.includes('/memory/associations?')) return {deletion_epoch:0,graph_revision:0,associations:[]};
+  if (path.endsWith('/runtime-modules/agent.runtime/queries/configuration')) return {revision:0,values:{enabled:false,allowed_tools:[]},has_api_key:false};
+  if (path.endsWith('/runtime-modules/agent.runtime/queries/runs')) return {runs:[],approvals:[]};
+  if (path.endsWith('/runtime-modules/memory.graph/queries/configuration')) return {revision:0,values:memoryDefaults,has_api_key:false,secret_revision:0};
+  if (path.endsWith('/runtime-modules/memory.graph/queries/status')) return {configured:false,enabled:false,revision:0,counts:{facets:{},captures:{},attempts:{}},budget:null,errors:{}};
+  if (path.includes('/runtime-modules/memory.graph/queries/sources?')) return {deletion_epoch:0,sources:[],next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
+  if (path.includes('/runtime-modules/memory.graph/queries/associations?')) return {deletion_epoch:0,graph_revision:0,associations:[]};
   if (path.endsWith('/jobs')) return {jobs:[],occurrences:[]};
   if (path.endsWith('/bindings')) return {bindings:[]};
   if (path.endsWith('/conversations')) return {conversations:[]};
@@ -132,11 +141,13 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for asset in static.iterdir():
-                if asset.is_file() and asset.suffix in {".js", ".css"}:
-                    resources["/static/" + asset.name] = (
+            for asset in static.rglob("*"):
+                if asset.is_file() and asset.suffix in {".js", ".css", ".html"}:
+                    resources["/static/" + asset.relative_to(static).as_posix()] = (
                         asset.read_bytes(),
-                        "text/css" if asset.suffix == ".css" else "text/javascript",
+                        "text/css" if asset.suffix == ".css" else (
+                            "text/html; charset=utf-8" if asset.suffix == ".html" else "text/javascript"
+                        ),
                     )
             if self.path not in resources:
                 self.send_error(404)
@@ -215,16 +226,19 @@ def main():
             page.wait_for_function(
                 "fixture.pending.some(item=>item.key==='POST /bots/bot-a/maintenance')"
             )
+            page.locator("#bot-catalog summary").click()
             page.locator('[data-bot-id="bot-a"]').click()
             release(maintenance_key)
             expect(page.locator("#bot-maintenance-status")).to_contain_text(
                 "业务已暂停 · 维护版本 4"
             )
+            page.locator('button[data-bot-pane="modules"]').click()
+            page.locator('button[data-module-id="package"]').click()
 
             alpha = "/bots/bot-a/components/fixture.alpha"
             # Import's package refresh waits while the user chooses another form.
             hold("GET /packages")
-            page.locator("#bots > details summary").click()
+            page.locator("details:has(#package-import-form) > summary").click()
             page.locator('#package-import-form [name="archive"]').set_input_files(
                 {"name": "fixture.zip", "mimeType": "application/zip", "buffer": b"fixture-bytes"})
             page.locator('#package-import-form button[type="submit"]').click()

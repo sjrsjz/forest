@@ -6,11 +6,13 @@
 
 当前目标增加以下硬约束：项目尚未上线，允许删除错误抽象、API、表和测试，允许重建开发数据库；不为未发布结构编写兼容层或累计迁移。运行时按[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)迁移到模块依赖图，Agent 和 Memory 只是模块；WebUI 按模块注册表生成，模块包可携带沙箱管理 UI。记忆管理按长期运行的十万至百万来源重新实现服务端组合筛选、稳定键集分页、全文/多模态检索入口和完整关系图，不以当前简单来源/人工联想列表作为完成状态。
 
-本轮已开始的代码切片包括：官方核心模块的显式依赖注册表、管理 API 按 `component_id` 取模块、包级 `management_ui` 声明/摘要/静态校验、认证工件读取、浏览器二次摘要校验、无同源无网络 iframe 与有界 MessageChannel 草稿协议，以及 `forest.counter` 自带 UI。只有完成 13 文档的退出条件、重新建立数据库基线并重跑全套/真实实例验收后，才能恢复发布候选判断。
+本轮已开始的代码切片包括：官方核心模块的显式依赖注册表、管理 API 按 `component_id` 取模块、运行时模块的通用 management query/action contract、包级 `management_ui` 声明/摘要/静态校验、认证工件读取、浏览器二次摘要校验、无同源无网络 iframe 与有界 MessageChannel 草稿协议，以及 `forest.counter` 自带 UI。只有完成 13 文档的退出条件、重新建立数据库基线并重跑全套/真实实例验收后，才能恢复发布候选判断。
 
 运行时模块访问现已进一步收紧：`BindingRuntime` 不再生成 `agent`、`memory`、`scheduler`、`shell`、`jobs` 或 `job_store` 兼容属性，平台内部、管理 API 和测试均通过稳定 `component_id` 解析能力；JobStore 由 `scheduler.jobs` 模块所有。该切片的注册表/舰队测试为 `14 passed, 3 skipped`，受影响的 PostgreSQL 文件按独立进程运行得到平台 `15 passed`、Agent/记忆运行时 `2 passed`、记忆索引 `4 passed`、Agent API `5 passed`、任务 API `4 passed`、记忆 API `3 passed`、业务命令 `1 passed`、消息诊断 `1 passed`。聚合长进程曾在记忆索引重启去重断言出现一次图 revision 晚到递增，单例及完整文件复跑均通过；当前将其记录为图发布收敛竞态，尚未把一次复跑通过写成已消除。
 
-控制台模块视图已完成第一段物理拆分：`index.html` 删除 Agent/Memory 专用表单，`app.js` 删除按 `agent.runtime`/`memory.graph` 写死的 surface 映射，全局 `style.css` 也不再包含两者的专用选择器；官方模块描述符现在声明版本化的受信 HTML、CSS 与 ES module 资产，统一 `runtime-module-views.js` 校验资产路径和控制器生命周期后按注册表动态装载。第三方包继续使用摘要绑定、无同源、无网络 iframe，不能声明受信脚本。相关非 PostgreSQL 全量回归为 `703 passed, 36 skipped`；Agent/Memory/Web 包 PostgreSQL 组合为 `9 passed`；真实 Edge 下 Agent 与 Memory 两套动态加载验收均通过。当前模块控制器仍调用各自专用 HTTP API，统一 management query/action contract 尚未完成，因此这只是控制台去硬编码切片，不代表模块化管理协议已完成。
+控制台模块视图和管理调用已完成当前收口切片：`index.html` 删除 Agent/Memory 专用表单，`app.js` 删除按 `agent.runtime`/`memory.graph` 写死的 surface 映射，全局 `style.css` 也不再包含两者的专用选择器；官方模块描述符声明版本化的受信 HTML、CSS 与 ES module 资产，统一 `runtime-module-views.js` 校验资产路径和控制器生命周期后按注册表动态装载。第三方包继续使用摘要绑定、无同源、无网络 iframe，不能声明受信脚本。
+
+Agent 与 Memory 现在各自拥有 `forest.module-management/1` 契约，声明 operation 身份、query/action 类型、输入模型、权限和 handler。Web 宿主只保留 `/runtime-modules/{component_id}/queries/{operation_id}` 与 `/actions/{operation_id}` 两条通用路由，负责认证、Bot 定位、规范化签名、权限票据和 action 幂等；旧 `/agent/*`、`/memory/*` 路由已删除且没有兼容层。配置密钥先投影为变化标志和摘要再签发权限，原始密钥不会进入权限载荷或序列化错误。当前固定源码验证为：Ruff、Python 编译及全部管理 JavaScript 语法通过；非 PostgreSQL 集合 `707 passed, 36 skipped`；Agent/Memory/任务/Web 包目标 PostgreSQL 回归 `13 passed`；真实 Edge 的动态管理、迟到响应、回执失效、Bot 隔离、注销清理和正文恢复共 `22/22` 场景通过。完整 PostgreSQL 全仓回归和真实实例复验尚未重跑，百万级记忆浏览与完整关系图也仍未实现，因此项目状态继续是激进重构中、不可发布。
 
 当前纠偏切片的固定源码验证为：Ruff、Python 编译、两个管理 JavaScript 语法及补丁空白检查通过；非 PostgreSQL 集合 `695 passed, 36 skipped`；包与运行模块单测 `75 passed, 1 skipped`；受影响的 PostgreSQL 管理链路首轮 `33 passed, 1 failed`，失败是并发策略提交的错误码受内容回收时序影响，按权威 revision 二次判定后该竞争用例连续 5 次通过；旧库权限映射修正后 `15 passed`。一次在源码持续变化期间运行的全量会话得到 `1783 passed, 61 failed, 4 skipped`，其 setup/package 失败混合了进程内旧代码与磁盘新工件，明确作废，不能当成当前失败清单或通过证明。
 

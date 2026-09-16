@@ -1,7 +1,7 @@
 // The barrier lives only while requests for this resource are in flight. A
 // response captured before an unavailable receipt must not restore its body.
 export function controlScope(path) {
-  const match = path.match(/^\/bots\/[^/?]+\/(?:components\/[^/?]+|agent|memory|jobs|bindings|delivery)(?=[/?]|$)/);
+  const match = path.match(/^\/bots\/[^/?]+\/(?:components\/[^/?]+|runtime-modules\/[^/?]+|jobs|bindings|delivery)(?=[/?]|$)/);
   return match?.[0] || null;
 }
 

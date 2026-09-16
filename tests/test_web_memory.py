@@ -16,7 +16,7 @@ pytestmark = pytest.mark.postgres
 
 
 async def read(client, root):
-    response = await client.get(root + "/memory/configuration")
+    response = await client.get(root + "/runtime-modules/memory.graph/queries/configuration")
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -24,7 +24,7 @@ async def read(client, root):
 async def preview(client, root, *, revision=0, key="plan", **changes):
     return await post(
         client,
-        root + "/memory/change-plans",
+        root + "/runtime-modules/memory.graph/actions/configuration.plan",
         {
             "expected_revision": revision,
             "values": {"enabled": False, **changes},
@@ -37,7 +37,7 @@ async def preview(client, root, *, revision=0, key="plan", **changes):
 async def apply(client, root, plan, key="apply", status=200):
     return await post(
         client,
-        root + "/memory/management-requests",
+        root + "/runtime-modules/memory.graph/actions/configuration.apply",
         {name: plan[name] for name in ("expected_revision", "plan_id", "plan_digest")},
         key,
         status=status,
@@ -75,7 +75,7 @@ async def test_two_bots_memory_secrets_cas_and_restart(tmp_path, web_bots_databa
         saved = await read(client, roots[0])
         assert saved["revision"] == 2 and saved["values"]["batch_size"] == 12
         assert saved["has_api_key"] and saved["secret_revision"] == 1
-        status = await client.get(roots[0] + "/memory/status")
+        status = await client.get(roots[0] + "/runtime-modules/memory.graph/queries/status")
         assert status.status_code == 200, status.text
         assert (
             "test-private-memory-key" not in status.text and "secret_ciphertext" not in status.text
@@ -94,7 +94,7 @@ async def test_two_bots_memory_secrets_cas_and_restart(tmp_path, web_bots_databa
         assert (await read(client, roots[1]))["revision"] == 0
         clear = await post(
             client,
-            roots[0] + "/memory/change-plans",
+            roots[0] + "/runtime-modules/memory.graph/actions/configuration.plan",
             {
                 "expected_revision": 2,
                 "values": saved["values"],
@@ -123,15 +123,15 @@ async def test_memory_http_requires_session_csrf_exact_schema_and_idempotency(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=ORIGIN
         ) as outsider:
-            result = await outsider.get(root + "/memory/configuration")
+            result = await outsider.get(root + "/runtime-modules/memory.graph/queries/configuration")
             assert result.status_code == 401
         denied = await client.post(
-            root + "/memory/change-plans",
+            root + "/runtime-modules/memory.graph/actions/configuration.plan",
             json=body,
             headers={"x-csrf-token": "invalid", "idempotency-key": "csrf"},
         )
         assert denied.status_code == 403
-        assert (await client.post(root + "/memory/change-plans", json=body)).status_code == 422
+        assert (await client.post(root + "/runtime-modules/memory.graph/actions/configuration.plan", json=body)).status_code == 422
         for extra in (
             {"api_key": "plaintext-invalid\nkey"},
             {"api_key": "replacement", "clear_api_key": True},
@@ -140,7 +140,7 @@ async def test_memory_http_requires_session_csrf_exact_schema_and_idempotency(
             {"values": {"secret": "forbidden"}},
         ):
             rejected = await client.post(
-                root + "/memory/change-plans",
+                root + "/runtime-modules/memory.graph/actions/configuration.plan",
                 json={**body, **extra},
                 headers={"idempotency-key": "invalid"},
             )
@@ -185,7 +185,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 and len(value["conversations"]) == 2
                 and all(row["context_applied_seq"] == 1 for row in value["conversations"]),
             )
-            listed = await get(client, root + "/memory/sources?limit=50")
+            listed = await get(client, root + "/runtime-modules/memory.graph/queries/sources?limit=50")
             assert listed["deletion_epoch"] == 0 and len(listed["sources"]) == 2
             source = next(
                 row for row in listed["sources"] if row["source"]["channel_id"] == "31001"
@@ -197,7 +197,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             assert source["author"]["external_user_id"] == "20001"
             association = await post(
                 client,
-                root + "/memory/association-plans",
+                root + "/runtime-modules/memory.graph/actions/association.plan",
                 {
                     "expected_deletion_epoch": 0,
                     "expected_revision": 0,
@@ -212,18 +212,18 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             }
             associated = await post(
                 client,
-                root + "/memory/association-requests",
+                root + "/runtime-modules/memory.graph/actions/association.apply",
                 association_request,
                 "association-apply",
             )
             assert await post(
                 client,
-                root + "/memory/association-requests",
+                root + "/runtime-modules/memory.graph/actions/association.apply",
                 association_request,
                 "association-apply",
             ) == associated
             current_associations = await wait_for(
-                lambda: get(client, root + "/memory/associations?limit=50"),
+                lambda: get(client, root + "/runtime-modules/memory.graph/queries/associations?limit=50"),
                 lambda value: len(value["associations"]) == 1
                 and value["associations"][0]["projection_state"] == "CURRENT",
             )
@@ -233,7 +233,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             } == {"31001", "31002"}
             proposal = await post(
                 client,
-                root + "/memory/forget-plans",
+                root + "/runtime-modules/memory.graph/actions/forget.plan",
                 {"expected_deletion_epoch": 0, "source_unit_ids": [source["source_unit_id"]]},
                 "forget-plan",
             )
@@ -241,24 +241,24 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 "expected_deletion_epoch", "plan_id", "plan_digest"
             )}
             applied = await post(
-                client, root + "/memory/forget-requests", request, "forget-apply"
+                client, root + "/runtime-modules/memory.graph/actions/forget.apply", request, "forget-apply"
             )
             assert await post(
-                client, root + "/memory/forget-requests", request, "forget-apply"
+                client, root + "/runtime-modules/memory.graph/actions/forget.apply", request, "forget-apply"
             ) == applied
             assert applied["deletion_epoch"] == 1
-            current = await get(client, root + "/memory/sources?limit=50")
+            current = await get(client, root + "/runtime-modules/memory.graph/queries/sources?limit=50")
             assert current["deletion_epoch"] == 1
             assert {row["source"]["channel_id"] for row in current["sources"]} == {"31002"}
-            assert (await get(client, root + "/memory/associations?limit=50"))[
+            assert (await get(client, root + "/runtime-modules/memory.graph/queries/associations?limit=50"))[
                 "associations"
             ] == []
             drained = await wait_for(
-                lambda: get(client, root + "/memory/sources?limit=50"),
+                lambda: get(client, root + "/runtime-modules/memory.graph/queries/sources?limit=50"),
                 lambda value: value["scrub"] == {"revoked_payloads": 0, "pending_links": 0},
             )
             assert drained["deletion_epoch"] == 1
-            bad = await client.get(root + "/memory/sources?unexpected=true")
+            bad = await client.get(root + "/runtime-modules/memory.graph/queries/sources?unexpected=true")
             assert bad.status_code == 422
-            bad = await client.get(root + "/memory/associations?unexpected=true")
+            bad = await client.get(root + "/runtime-modules/memory.graph/queries/associations?unexpected=true")
             assert bad.status_code == 422

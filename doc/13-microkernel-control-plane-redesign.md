@@ -108,7 +108,22 @@ dispatch trace 是观测记录，不是可编辑“执行链”。每次消息�
 
 Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模块提供 session/run/model-turn/tool-call 视图；Adapter 提供连接和协议事件；Scheduler 提供作业与 lease。控制台壳仅呈现模块给出的视图目录和通用状态，不为这些类型写专用顶层页面。
 
-当前纠偏切片已经把 Agent/Memory 的 HTML 和控制器所有权移到模块资产，`index.html` 与 `app.js` 不再含两个模块的页面或 ID 映射。它们现有的 HTTP DTO 仍由 `agent_api.py` 与 `memory_api.py` 分别实现；后续必须把这些查询/动作注册成带权限、分页和审计约束的 management contract，才能让同一宿主协议承载第三方复杂管理视图。
+运行时模块使用 `forest.module-management/1` 声明管理契约。每个 operation 必须由模块固定声明 `operation_id`、`query | action`、权限名、输入模型和 handler；需要签发不同于执行正文的权限证明时，还要声明确定性的 `authorization_payload` 投影。模块描述符只向控制台投影 operation 目录，不把 Python handler 或密钥正文暴露到浏览器。
+
+宿主只提供两条通用传输路由：
+
+```text
+GET  /management/v1/bots/{bot_id}/runtime-modules/{component_id}/queries/{operation_id}
+POST /management/v1/bots/{bot_id}/runtime-modules/{component_id}/actions/{operation_id}
+```
+
+通用路由负责会话、CSRF、Bot 作用域、从 `ModuleRegistry` 解析模块、输入规范化、权限票据和 action 幂等键；业务字段、权限名和执行函数都归模块契约所有。query 拒绝重复查询字段，输入先经模块模型转成规范类型再参与签名。action 必须提供稳定幂等键。浏览器控制器只能使用模块预先声明的 operation，不能提交 URL、HTTP 方法或权限名来扩大能力。
+
+密钥输入在权限签名前投影为“是否变化 + 不可逆摘要”，原始密钥只交给经过校验的模块 handler，并立即进入凭据库加密路径；权限载荷、operation digest、审计参数和错误详情都不能携带密钥正文。输入错误返回稳定 `MODULE_MANAGEMENT_INPUT_INVALID`，未知或 query/action 类型不符返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`，校验详情必须可安全 JSON 序列化。
+
+当前 Agent 模块已注册配置读取/计划/应用、Run 查询/取消、审批和未知工具结果核对；Memory 模块已注册配置读取/计划/应用、状态、来源、联想、遗忘计划/应用和联想计划/应用。旧 `/agent/*`、`/memory/*` 管理端点直接删除，不保留兼容别名。Agent/Memory 的 HTML、CSS、ES module 控制器同样由模块描述符声明，`index.html`、`app.js` 和通用路由均不按这两个组件 ID 分支。
+
+这只完成管理调用的所有权和传输收口。Memory 当前来源/联想页面仍不足以管理长期运行后的十万至百万来源，也没有完整的组合筛选、稳定键集分页、全文/图片召回入口和关系图遍历；这些仍属于本重构的未完成项，不能用通用 contract 已落地来替代。
 
 ## 8. 完成判据
 

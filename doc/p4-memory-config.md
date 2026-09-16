@@ -24,12 +24,12 @@
 
 ## HTTP 接口与界面并发
 
-- `GET /management/v1/bots/{bot_id}/memory/configuration`
-- `POST .../memory/change-plans`
-- `POST .../memory/management-requests`
-- `GET .../memory/status`
+- `GET /management/v1/bots/{bot_id}/runtime-modules/memory.graph/queries/configuration`
+- `POST .../runtime-modules/memory.graph/actions/configuration.plan`
+- `POST .../runtime-modules/memory.graph/actions/configuration.apply`
+- `GET .../runtime-modules/memory.graph/queries/status`
 
-所有接口经过当前会话、Bot 可见性和签名权限；写入另需 CSRF 与稳定 `Idempotency-Key`。签名 ticket 不交给浏览器。运行时状态调用 `bot.platform.memory.inspect`，不拼造后端成功状态。
+这些 operation 由 Memory 模块的 `forest.module-management/1` 契约声明，通用宿主路由不含 Memory 分支。所有调用经过当前会话、Bot 可见性和签名权限；action 另需 CSRF 与稳定 `Idempotency-Key`。签名 ticket 不交给浏览器。运行时状态从 `ModuleRegistry` 解析 `memory.graph` 后调用模块的 `inspect`，不拼造后端成功状态。配置密钥在签名权限载荷中只保留变化标志和不可逆摘要，原文只进入凭据加密路径。
 
 界面分别跟踪 Bot 选择、草稿编辑、读取序号与提交身份。读取、预览、应用的旧响应不能覆盖更新的草稿或另一个 Bot 的表单；密钥草稿也遵循这一规则。版本冲突后需要读取最新配置再预览，不自动把旧草稿应用到新版本。
 

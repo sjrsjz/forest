@@ -44,12 +44,12 @@ async def configured(tmp_path, dsn):
                          "bot", status=202)
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
-        plan = await post(client, root + "/agent/change-plans", {
+        plan = await post(client, root + "/runtime-modules/agent.runtime/actions/configuration.plan", {
             "expected_revision": 0, "api_key": MODEL_KEY,
             "values": {"enabled": True, "endpoint": model["endpoint"],
                        "model": "test-model", "stream": False},
         }, "agent-plan")
-        await post(client, root + "/agent/management-requests", {
+        await post(client, root + "/runtime-modules/agent.runtime/actions/configuration.apply", {
             key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")
         }, "agent-apply")
         binding = await post(client, root + "/bindings", {

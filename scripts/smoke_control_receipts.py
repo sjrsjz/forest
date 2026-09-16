@@ -26,7 +26,8 @@ const fields={type:'object',additionalProperties:false,required:['label'],proper
 const packages=['alpha','beta'].map(name=>({package_digest:'pkg-'+name,package_id:name,component_id:name,
   version:'1.0.0',state_schema:1,grants:[],config_schema:fields,
   services:[{name:name+'.run',input_schema:{type:'object',additionalProperties:false,properties:{query:{type:'string',default:'request'}}}}]}));
-const bindValues={enabled:true,api_base_url:'http://127.0.0.1:5700',response_mode:'component',
+const bindValues={enabled:true,transport:'http-post',api_base_url:'http://127.0.0.1:5700',
+  websocket_url:'ws://127.0.0.1:8080/',response_mode:'component',
   response_template:'Stored binding body',trigger_mentions:true,trigger_prefix:'/chat',private_trigger:true,admin_user_ids:['123']};
 const jobValues={name:'Stored job',enabled:true,kind:'conversation.trigger',conversation_id:'conversation-a',prompt:'Stored job body',
   schedule:{kind:'interval',timezone:'Asia/Shanghai',start_at:'2030-01-01T00:00:00Z',end_at:null,interval_seconds:3600,cron:null,dst_fold:'first'},
@@ -45,6 +46,7 @@ function reply(path,method,body) {
   if (path==='/session') return {username:'fixture-admin'};
   if (path==='/configuration') return {head_revision:1,defaults:{display_name:'Forest fixture',session_ttl_minutes:60}};
   if (path==='/bots') return {bots:fixture.bots,managed_available:true};
+  if (/^\/bots\/[^/]+\/runtime$/.test(path)) return {data_admission:true,maintenance_epoch:1};
   if (/^\/bots\/[^/]+$/.test(path)) return fixture.bots.find(bot=>bot.bot_id===path.split('/')[2]);
   if (path.startsWith('/provision-jobs/')) return {events:[]};
   if (path==='/packages') return {packages,errors:{}};
@@ -53,25 +55,49 @@ function reply(path,method,body) {
   if (clean.endsWith('/bindings')) return {bindings:[binding]};
   if (clean.endsWith('/delivery')) return {parts:[]};
   if (clean.endsWith('/jobs')) return {jobs:[job],occurrences:[],next_occurrences:{}};
-  if (clean.endsWith('/agent/runs')) return {runs:[{run_id:'old-run',conversation_id:'conversation-a',phase:'COMPLETED',text:'Stored run body'}],approvals:[]};
-  if (clean.endsWith('/memory/status')) return {configured:true,enabled:false,revision:1,counts:{},errors:{},note:'Stored memory status'};
+  if (clean.endsWith('/events')) return {subscriptions:[],deliveries:[]};
+  if (clean.endsWith('/component-jobs')) return {handlers:[],jobs:[]};
+  if (clean.endsWith('/command-policies')) return {registry_revision:1,commands:[]};
+  if (clean.endsWith('/message-handler-policies')) return {registry_revision:1,handlers:[]};
+  if (clean.endsWith('/message-handler-limits')) return {revision:1,values_payload_state:'ACTIVE',values:{
+    max_event_bytes:65536,max_pending_bot:1000,max_pending_binding:500,max_pending_principal:100,
+    max_handlers_per_chain:32,principal_burst:20,principal_refill_seconds:1,deadline_seconds:30}};
+  if (clean.endsWith('/business-command-limits')) return {revision:1,values_payload_state:'ACTIVE',values:{
+    max_argument_bytes:65536,max_pending_bot:1000,max_pending_binding:500,max_pending_principal:100,
+    principal_burst:20,principal_refill_seconds:1}};
+  if (clean.endsWith('/message-handlers/diagnostics')) return {summary:{pending:0,claimed:0,
+    claimed_call_admitted:0,claimed_call_completed:0,replied:0,failed:0,cancelled:0},chains:[],attempts:[]};
+  if (clean.endsWith('/business-commands/diagnostics')) return {summary:{pending_requests:0,
+    claimed_requests:0,failed_requests:0,pending_classifications:0,pending_notices:0,claimed_notices:0},
+    requests:[],classifications:[],notices:[]};
+  if (clean.endsWith('/audit')) return {records:[],next_before:null};
+  if (clean.endsWith('/runtime-modules/agent.runtime/queries/runs')) return {runs:[{run_id:'old-run',conversation_id:'conversation-a',phase:'COMPLETED',text:'Stored run body'}],approvals:[]};
+  if (clean.endsWith('/runtime-modules/memory.graph/queries/status')) return {configured:true,enabled:false,revision:1,counts:{},errors:{},note:'Stored memory status'};
+  if (clean.endsWith('/runtime-modules/memory.graph/queries/sources')) return {deletion_epoch:0,sources:[],next_after:null,scrub:{}};
+  if (clean.endsWith('/runtime-modules/memory.graph/queries/associations')) return {deletion_epoch:0,graph_revision:0,associations:[],next_after:null};
   if (clean.endsWith('/configuration')) {
     if (path.includes('/bindings/')) return binding;
-    if (path.includes('/agent/')) return {revision:1,secret_revision:1,has_api_key:true,values:agentDefaults};
-    if (path.includes('/memory/')) return {revision:1,secret_revision:1,has_api_key:true,values:memoryDefaults};
+    if (path.includes('/runtime-modules/agent.runtime/')) return {revision:1,secret_revision:1,has_api_key:true,values:agentDefaults};
+    if (path.includes('/runtime-modules/memory.graph/')) return {revision:1,secret_revision:1,has_api_key:true,values:memoryDefaults};
     const component=path.match(/\/components\/([^/]+)/)[1], value={package_digest:'pkg-'+component,config:{label:'Stored '+component},grants:[]};
     return {desired_revision:1,effective_revision:1,desired_values:value,effective_values:value,
       desired_values_payload_state:'ACTIVE',effective_values_payload_state:'ACTIVE',
-      defaults:{package_digest:'',config:{},grants:[]},operations:[],runtime:{components:[]}};
+      defaults:{package_digest:'',config:{},grants:[]},operations:[],runtime:{components:[],runtime_modules:[
+        {component_id:'agent.runtime',requires:['memory.graph'],management_view:{kind:'trusted-module',
+          protocol:'forest.trusted-management-view/1',label:'Agent 与模型',
+          template:'/static/modules/agent.runtime.html',module:'/static/agent-panel.js',style:'/static/modules/agent.runtime.css'}},
+        {component_id:'memory.graph',requires:[],management_view:{kind:'trusted-module',
+          protocol:'forest.trusted-management-view/1',label:'图文记忆',
+          template:'/static/modules/memory.graph.html',module:'/static/memory.js',style:'/static/modules/memory.graph.css'}}]}};
   }
   if (clean.endsWith('/configuration/history')) return {next_before:null,revisions:[{revision:1,created_at:'2030-01-01T00:00:00Z',
     values:{package_digest:'pkg-alpha',config:{label:'Stored history body'},grants:[]}}]};
-  if (clean.endsWith('/change-plans')) {
+  if (clean.endsWith('/change-plans')||clean.endsWith('/actions/configuration.plan')) {
     const plan={plan_id:'plan-'+fixture.calls.length,plan_digest:'digest-'+fixture.calls.length,expected_revision:body.expected_revision,
       values:body.values,before_values:body.values,credentials_changed:false,next_occurrences:[],job_id:body.job_id};
     fixture.plans[plan.plan_id]=structuredClone(plan); return plan;
   }
-  if (clean.endsWith('/management-requests')) return {revision:2,secret_revision:1};
+  if (clean.endsWith('/management-requests')||clean.endsWith('/actions/configuration.apply')) return {revision:2,secret_revision:1};
   if (clean.endsWith('/invoke')) return {operation_id:'invoke-null',result:null};
   fixture.unexpected.push({path,method}); throw Error('Unexpected fixture API '+method+' '+path);
 }
@@ -101,23 +127,23 @@ window.fixtureReady=true;
 def protocol_checks(page):
     result = page.evaluate("""async()=>{
       const events=[], read=fixture.module.controlReceipts(scope=>events.push(scope));
-      const scope='/bots/bot-a/agent', receipt={...fixture.receipt,unexpected_body:'DO-NOT-RETAIN'};
-      const nullValue=await read(scope+'/configuration',async()=>null);
+      const scope='/bots/bot-a/runtime-modules/agent.runtime', receipt={...fixture.receipt,unexpected_body:'DO-NOT-RETAIN'};
+      const nullValue=await read(scope+'/queries/configuration',async()=>null);
       const caught=promise=>promise.then(value=>({value}),error=>({code:error.code,receipt:error.receipt}));
       let release;
-      const late=caught(read(scope+'/configuration',()=>new Promise(resolve=>{release=resolve;})));
+      const late=caught(read(scope+'/queries/configuration',()=>new Promise(resolve=>{release=resolve;})));
       const releases=[];
-      const independent=[['/bots/bot-b/agent/configuration','bot'],
-        ['/bots/bot-a/memory/configuration','panel'],['/bots/bot-a/components/alpha/configuration','component']];
+      const independent=[['/bots/bot-b/runtime-modules/agent.runtime/queries/configuration','bot'],
+        ['/bots/bot-a/runtime-modules/memory.graph/queries/configuration','panel'],['/bots/bot-a/components/alpha/configuration','component']];
       const separatePending=independent.map(([path,kind])=>read(path,()=>new Promise(resolve=>{
         releases.push(()=>resolve({independent:kind}));})));
-      const unavailable=await caught(read(scope+'/management-requests',async()=>receipt));
+      const unavailable=await caught(read(scope+'/actions/configuration.apply',async()=>receipt));
       releases.forEach(release=>release());const separate=await Promise.all(separatePending);
       release({body:'OLD-AGENT-BODY'});const stale=await late;
-      const fresh=await read(scope+'/configuration',async()=>({fresh:true}));
+      const fresh=await read(scope+'/queries/configuration',async()=>({fresh:true}));
       let releaseHttp;
-      const lateHttp=caught(read(scope+'/runs',()=>new Promise(resolve=>{releaseHttp=resolve;})));
-      const http=await caught(read(scope+'/change-plans',async()=>{const e=Error('HTTP rejected');e.code='CONTROL_CONTENT_REVOKED';throw e;}));
+      const lateHttp=caught(read(scope+'/queries/runs',()=>new Promise(resolve=>{releaseHttp=resolve;})));
+      const http=await caught(read(scope+'/actions/configuration.plan',async()=>{const e=Error('HTTP rejected');e.code='CONTROL_CONTENT_REVOKED';throw e;}));
       releaseHttp({body:'OLD-HTTP-BODY'});const staleHttp=await lateHttp;
       // Different component IDs are different resources, even inside the same Bot.
       let releaseAlpha;
@@ -139,29 +165,54 @@ def protocol_checks(page):
     assert result["fresh"] == {"fresh": True}
     assert result["alpha"] == {"value": {"independent": "component-id"}}
     assert result["events"] == [
-        "/bots/bot-a/agent", "/bots/bot-a/agent", "/bots/bot-a/components/beta"
+        "/bots/bot-a/runtime-modules/agent.runtime",
+        "/bots/bot-a/runtime-modules/agent.runtime", "/bots/bot-a/components/beta"
     ]
 
 
 PANELS = {
     "component": ("components/alpha", "bot-config-form", "bot-config-preview", "bot-config-diff", "bot-config-apply", "reload-bot-config"),
-    "agent": ("agent", "agent-config", "agent-preview", "agent-config-diff", "agent-apply", "agent-reload"),
-    "memory": ("memory", "memory-config", "memory-preview", "memory-diff", "memory-apply", "memory-reload"),
+    "agent": ("runtime-modules/agent.runtime", "agent-config", "agent-preview", "agent-config-diff", "agent-apply", "agent-reload"),
+    "memory": ("runtime-modules/memory.graph", "memory-config", "memory-preview", "memory-diff", "memory-apply", "memory-reload"),
     "binding": ("bindings/binding-a", "binding-config", "binding-preview", "binding-diff", "apply-binding", "reload-binding"),
     "job": ("jobs", "job-config", "job-preview", "job-diff", "job-apply", "job-reload"),
 }
 
 
 def select_bot(page, bot="bot-a"):
+    if page.locator("#bot-catalog").get_attribute("open") is None:
+        page.locator("#bot-catalog summary").click()
+    memory_path = f"/bots/{bot}/runtime-modules/memory.graph/queries/configuration"
+    before = page.evaluate(
+        "path=>fixture.calls.filter(call=>call.path===path).length", memory_path
+    )
     page.locator('[data-bot-id="' + bot + '"]').click()
+    page.wait_for_function(
+        "({path,before})=>fixture.calls.filter(call=>call.path===path).length>before",
+        arg={"path": memory_path, "before": before},
+    )
     expect(page.locator("#memory-config-status")).to_contain_text("配置版本 1")
     expect(page.locator('#bot-config-fields [name="label"]')).to_have_value("Stored alpha")
     expect(page.locator("#job-list button")).to_have_count(1)
 
 
+def open_bot_pane(page, pane, module=None):
+    page.locator(f'button[data-bot-pane="{pane}"]').click()
+    expect(page.locator(f'#bot-workspace-{pane}')).to_be_visible()
+    if module is not None:
+        page.locator(f'button[data-module-id="{module}"]').click()
+
+
 def panel_check(page, name, mode):
     prefix, form_id, preview_id, diff_id, apply_id, reload_id = PANELS[name]
     base = "/bots/bot-a/" + prefix
+    if name in {"component", "agent", "memory"}:
+        module = {"component": "package", "agent": "agent.runtime", "memory": "memory.graph"}[name]
+        open_bot_pane(page, "modules", module)
+    elif name == "binding":
+        open_bot_pane(page, "routes")
+    else:
+        open_bot_pane(page, "tasks")
     if name == "binding":
         page.locator('[data-binding-id="binding-a"]').click()
         expect(page.locator("#binding-detail")).to_be_visible()
@@ -169,9 +220,10 @@ def panel_check(page, name, mode):
         page.locator("#job-list button").click()
         expect(page.locator("#job-form-title")).to_contain_text("Stored job")
     form = page.locator("#" + form_id)
-    field = {"component": "label", "agent": "preset_context", "memory": "deployment_id",
+    field = {"component": "label", "agent": "preset_context", "memory": "endpoint",
              "binding": "response_template", "job": "prompt"}[name]
-    canary = "ERASE-" + name + "-" + mode
+    marker = "ERASE-" + name + "-" + mode
+    canary = f"https://example.invalid/{marker}" if name == "memory" else marker
     form.locator('[name="' + field + '"]').fill(canary)
     if name in {"agent", "memory"}:
         form.locator('[name="api_key"]').fill("fixture-secret-cleared")
@@ -180,12 +232,18 @@ def panel_check(page, name, mode):
     form.locator('button[type="submit"]').click()
     expect(page.locator("#" + preview_id)).to_be_visible()
     expect(page.locator("#" + diff_id)).to_contain_text(canary)
-    get_path = base + ("?job_id=job-a" if name == "job" else "/configuration")
+    get_path = base + (
+        "?job_id=job-a" if name == "job" else
+        "/queries/configuration" if name in {"agent", "memory"} else "/configuration"
+    )
     get_key = "GET " + get_path
     page.evaluate("key=>fixture.hold.push(key)", get_key)
     page.locator("#" + reload_id).click()
     page.wait_for_function("key=>fixture.pending.some(item=>item.key===key)", arg=get_key)
-    post_key = "POST " + base + "/management-requests"
+    post_key = "POST " + base + (
+        "/actions/configuration.apply" if name in {"agent", "memory"}
+        else "/management-requests"
+    )
     page.evaluate("({key,mode})=>{fixture.overrides[key]=mode==='receipt'?{status:200,body:fixture.receipt}:"
                   "{status:409,body:{code:'CONTROL_CONTENT_REVOKED',message:'相关内容已不可用'}};}",
                   {"key": post_key, "mode": mode})
@@ -252,11 +310,12 @@ def panel_check(page, name, mode):
     # Selecting another Bot does not inherit the former resource's invalidation.
     select_bot(page, "bot-b")
     expect(page.locator('#agent-config [name="preset_context"]')).to_be_enabled()
-    expect(page.locator('#memory-config [name="deployment_id"]')).to_be_enabled()
+    expect(page.locator('#memory-config [name="endpoint"]')).to_be_enabled()
     assert not page.evaluate("fixture.unexpected")
 
 
 def cancel_check(page, mode):
+    open_bot_pane(page, "tasks")
     page.locator("#job-list button").click()
     page.evaluate("fixture.overrides['POST /bots/bot-a/jobs/run-requests']={status:200,body:{status:'ENQUEUED'}}")
     page.locator("#job-run").click()
@@ -280,12 +339,14 @@ def cancel_check(page, mode):
     # A response for the previous Bot may invalidate that resource's requests,
     # but must not replace the new Bot's notice, draft, or selected Job.
     select_bot(page)
+    open_bot_pane(page, "tasks")
     page.locator("#job-list button").click()
     page.locator("#job-cancel-reason").fill("Old Bot cancellation receipt")
     page.evaluate("key=>fixture.hold.push(key)", key)
     page.locator("#job-cancel").click()
     page.wait_for_function("key=>fixture.pending.some(item=>item.key===key)", arg=key)
     select_bot(page, "bot-b")
+    open_bot_pane(page, "tasks")
     page.locator("#job-list button").click()
     page.locator('#job-config [name="prompt"]').fill("Keep independent Bot B draft")
     page.evaluate("fixture.overrides['POST /bots/bot-b/jobs/run-requests']={status:200,body:{status:'ENQUEUED'}}")
@@ -302,8 +363,9 @@ def cancel_check(page, mode):
 
 
 def logout_check(page):
+    open_bot_pane(page, "modules", "memory.graph")
     values = {**DEFAULT_MEMORY_SETTINGS, "deployment_id": "PRIVATE-OLD-MEMORY"}
-    key = "GET /bots/bot-a/memory/configuration"
+    key = "GET /bots/bot-a/runtime-modules/memory.graph/queries/configuration"
     page.evaluate("({key,row})=>fixture.overrides[key]={status:200,body:row}", {
         "key": key, "row": {"revision": 1, "values": values, "has_api_key": True, "secret_revision": 1}
     })
@@ -327,12 +389,24 @@ def logout_check(page):
 
 
 def configuration_repair_check(page, name, late_read):
+    if name in {"agent", "memory"}:
+        open_bot_pane(page, "modules", f'{name}.runtime' if name == "agent" else "memory.graph")
+    else:
+        open_bot_pane(page, "routes")
     prefix, form_id, preview_id, _, apply_id, reload_id = PANELS[name]
-    key = "GET /bots/bot-a/" + prefix + "/configuration"
-    post = "/bots/bot-a/" + prefix + "/change-plans"
+    base = "/bots/bot-a/" + prefix
+    if name in {"agent", "memory"}:
+        key = "GET " + base + "/queries/configuration"
+        post = base + "/actions/configuration.plan"
+        apply_post = "POST " + base + "/actions/configuration.apply"
+    else:
+        key = "GET " + base + "/configuration"
+        post = base + "/change-plans"
+        apply_post = "POST " + base + "/management-requests"
     if name == "binding":
         page.locator('[data-binding-id="binding-a"]').click()
-        defaults = {"enabled": True, "api_base_url": "http://127.0.0.1:5700", "response_mode": "component",
+        defaults = {"enabled": True, "transport": "http-post", "api_base_url": "http://127.0.0.1:5700",
+            "websocket_url": "ws://127.0.0.1:8080/", "response_mode": "component",
             "response_template": "New template", "trigger_mentions": True, "trigger_prefix": "",
             "private_trigger": True, "admin_user_ids": []}
         row = {"binding_id": "binding-a", "self_id": "123", "display_name": None, "state": "ONLINE",
@@ -346,7 +420,7 @@ def configuration_repair_check(page, name, late_read):
         row = {"revision": 7, "secret_revision": 4, "has_api_key": True, "values": None,
             "values_payload_state": "UNAVAILABLE", "defaults": defaults}
         field, secret, status = (("preset_context", "api_key", "agent-config-status") if name == "agent"
-                                else ("deployment_id", "api_key", "memory-config-status"))
+                                else ("endpoint", "api_key", "memory-config-status"))
     form = page.locator("#" + form_id)
     form.locator('[name="' + field + '"]').fill("OLD-CONFIGURATION-CANARY")
     form.locator('[name="' + secret + '"]').fill("OLD-SECRET-DRAFT")
@@ -369,7 +443,8 @@ def configuration_repair_check(page, name, late_read):
     page.locator("#" + name + "-replace-configuration").click()
     expect(form.locator('[name="' + field + '"]')).to_be_enabled()
     expect(page.locator("#" + status)).to_contain_text("草稿")
-    canary = "EXPLICIT-NEW-" + name
+    canary = ("https://example.invalid/EXPLICIT-NEW-memory" if name == "memory"
+              else "EXPLICIT-NEW-" + name)
     form.locator('[name="' + field + '"]').fill(canary)
     if late_read:
         page.evaluate("key=>fixture.release(key)", key)
@@ -379,7 +454,8 @@ def configuration_repair_check(page, name, late_read):
     form.locator('button[type="submit"]').click()
     expect(page.locator("#" + preview_id)).to_be_visible()
     submitted = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).at(-1).body", post)
-    assert submitted["expected_revision"] == 7 and submitted["values"][field] == canary
+    expected_value = [canary] if name == "agent" else canary
+    assert submitted["expected_revision"] == 7 and submitted["values"][field] == expected_value
     assert set(submitted["values"]) == set(defaults)
     assert "OLD-CONFIGURATION-CANARY" not in json.dumps(submitted) and "OLD-SECRET-DRAFT" not in json.dumps(submitted)
     saved = {**row, "revision": 8, "values_payload_state": "ACTIVE", "values": submitted["values"]}
@@ -387,7 +463,7 @@ def configuration_repair_check(page, name, late_read):
         saved.update(desired_values=submitted["values"], desired_values_payload_state="ACTIVE")
     page.evaluate("({key,row,post})=>{fixture.overrides[key]={status:200,body:row};"
         "fixture.overrides[post]={status:200,body:{revision:8,secret_revision:4}};}",
-        {"key": key, "row": saved, "post": "POST /bots/bot-a/" + prefix + "/management-requests"})
+        {"key": key, "row": saved, "post": apply_post})
     page.locator("#" + apply_id).click()
     expect(page.locator("#" + preview_id)).to_be_hidden()
     expect(form.locator('[name="' + field + '"]')).to_have_value(canary)
@@ -396,6 +472,7 @@ def configuration_repair_check(page, name, late_read):
 
 
 def component_configuration_repair_check(page, late_read):
+    open_bot_pane(page, "modules", "package")
     prefix = "/bots/bot-a/components/alpha"
     key = "GET " + prefix + "/configuration"
     row = {"desired_revision": 7, "effective_revision": 6, "desired_values": None,
@@ -432,7 +509,7 @@ def component_configuration_repair_check(page, late_read):
     expect(page.locator("#bot-config-preview")).to_be_visible()
     copied = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).at(-1).body", prefix + "/change-plans")
     assert copied == {"expected_revision": 7, "source_revision": 6, "values": {"package_digest": "pkg-alpha",
-        "config": {"label": "EDITED-HISTORY"}, "grants": []}}
+        "config": {"label": "EDITED-HISTORY"}, "grants": [], "message_handler_takeover": False}}
     if late_read:
         page.evaluate("key=>fixture.hold.push(key)", key)
         page.locator("#reload-bot-config").click()
@@ -449,7 +526,7 @@ def component_configuration_repair_check(page, late_read):
     expect(page.locator("#bot-config-preview")).to_be_visible()
     submitted = page.evaluate("path=>fixture.calls.filter(x=>x.method==='POST'&&x.path===path).at(-1).body", prefix + "/change-plans")
     assert submitted == {"expected_revision": 7, "values": {"package_digest": "pkg-alpha",
-        "config": {"label": "EXPLICIT-NEW-COMPONENT"}, "grants": []}}
+        "config": {"label": "EXPLICIT-NEW-COMPONENT"}, "grants": [], "message_handler_takeover": False}}
     saved = {**row, "desired_revision": 8, "desired_values": submitted["values"], "desired_values_payload_state": "ACTIVE"}
     page.evaluate("({key,row,post})=>{fixture.overrides[key]={status:200,body:row};"
         "fixture.overrides[post]={status:200,body:{revision:8}};}",
@@ -477,10 +554,15 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (BOOTSTRAP.encode(), "text/javascript")}
-            for file in static.iterdir():
-                if file.suffix in {".js", ".css"}:
-                    resources["/static/" + file.name] = (
-                        file.read_bytes(), "text/css" if file.suffix == ".css" else "text/javascript"
+            for file in static.rglob("*"):
+                if file.suffix in {".js", ".css", ".html"}:
+                    kind = (
+                        "text/css" if file.suffix == ".css"
+                        else "text/html; charset=utf-8" if file.suffix == ".html"
+                        else "text/javascript"
+                    )
+                    resources["/static/" + file.relative_to(static).as_posix()] = (
+                        file.read_bytes(), kind
                     )
             if self.path not in resources:
                 self.send_error(404)

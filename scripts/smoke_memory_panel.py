@@ -29,7 +29,7 @@ const api = async (path,body,headers) => {
     sources:structuredClone(fixture.sources),next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
   else if(path.includes('/associations?')) result={deletion_epoch:0,fact_revision:2,graph_revision:1,
     associations:structuredClone(fixture.associations),next_after:null};
-  else if(path.endsWith('/association-plans')) {
+  else if(path.endsWith('/actions/association.plan')) {
     const endpoints=body.active ? body.source_unit_ids.map(id=>fixture.sources.find(row=>row.source_unit_id===id))
       : [fixture.associations.find(row=>row.association_id===body.association_id).left,
          fixture.associations.find(row=>row.association_id===body.association_id).right];
@@ -38,7 +38,7 @@ const api = async (path,body,headers) => {
       expected_deletion_epoch:body.expected_deletion_epoch,active:body.active,
       left:structuredClone(endpoints[0]),right:structuredClone(endpoints[1]),expires_at:'2030-01-01T00:00:00Z'};
     fixture.plans[result.plan_id]=structuredClone(result);
-  } else if(path.endsWith('/association-requests')) {
+  } else if(path.endsWith('/actions/association.apply')) {
     const plan=fixture.plans[body.plan_id],key=headers['Idempotency-Key'];
     if(!fixture.receipts[key]) {
       const row={association_id:plan.association_id,revision:plan.expected_revision+1,active:plan.active,
@@ -49,11 +49,11 @@ const api = async (path,body,headers) => {
     }
     result=fixture.receipts[key];
   }
-  else if(path.endsWith('/change-plans')) {
+  else if(path.endsWith('/actions/configuration.plan')) {
     result={plan_id:'plan-'+fixture.calls.length,plan_digest:'digest',expected_revision:body.expected_revision,
       values:body.values,before_values:fixture.row.values,credentials_changed:body.api_key!==null||body.clear_api_key};
     fixture.plans[result.plan_id]=structuredClone(result);
-  } else if(path.endsWith('/management-requests')) {
+  } else if(path.endsWith('/actions/configuration.apply')) {
     const key=headers['Idempotency-Key'];
     if(!fixture.receipts[key]) {
       fixture.row.values=structuredClone(fixture.plans[body.plan_id].values);fixture.row.revision++;
@@ -188,7 +188,7 @@ def main():
             expect(page.locator("#memory-preview")).to_be_visible()
             assert "private-browser-key" not in page.locator("#memory-diff").inner_text()
             sent = page.evaluate(
-                "fixture.calls.filter(c=>c.path.endsWith('/change-plans')).at(-1).body"
+                "fixture.calls.filter(c=>c.path.endsWith('/actions/configuration.plan')).at(-1).body"
             )
             assert sent["values"]["dimensions"] == 512 and sent["values"]["enabled"]
             assert sent["values"]["endpoint"] == "https://embedding.example.com/v1/embeddings"
@@ -196,7 +196,7 @@ def main():
             assert sent["values"]["media_allowed_origins"] == ["https://images.example.com"]
 
             # An old read cannot replace edits made while it was in flight.
-            page.evaluate("fixture.hold.push('/bots/bot-a/memory/configuration')")
+            page.evaluate("fixture.hold.push('/bots/bot-a/runtime-modules/memory.graph/queries/configuration')")
             page.locator("#memory-reload").click()
             page.wait_for_function("fixture.pending.length===1")
             budget.fill("301")
@@ -209,7 +209,7 @@ def main():
             # Preserve new draft and secret input while a previous plan applies.
             page.locator('#memory-config button[type="submit"]').click()
             expect(page.locator("#memory-preview")).to_be_visible()
-            page.evaluate("fixture.hold.push('/bots/bot-a/memory/management-requests')")
+            page.evaluate("fixture.hold.push('/bots/bot-a/runtime-modules/memory.graph/actions/configuration.apply')")
             page.locator("#memory-apply").click()
             page.wait_for_function("fixture.pending.length===1")
             batch.fill("7")
@@ -220,7 +220,7 @@ def main():
             expect(key).to_have_value("new-draft-secret")
 
             # Changing Bot invalidates the old Bot's delayed read.
-            page.evaluate("fixture.hold.push('/bots/bot-a/memory/configuration')")
+            page.evaluate("fixture.hold.push('/bots/bot-a/runtime-modules/memory.graph/queries/configuration')")
             page.locator("#memory-reload").click()
             page.wait_for_function("fixture.pending.length===1")
             page.evaluate(

@@ -102,6 +102,25 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             "/memory.graph.css"
         )
         assert modules["conversation.scheduler"]["management_view"] is None
+        assert modules["agent.runtime"]["management_contract"]["protocol"] == (
+            "forest.module-management/1"
+        )
+        agent_operations = {
+            row["operation_id"]: row
+            for row in modules["agent.runtime"]["management_contract"]["operations"]
+        }
+        assert agent_operations["configuration.plan"] == {
+            "operation_id": "configuration.plan",
+            "kind": "action",
+            "authority": "agent.config.plan",
+        }
+        assert modules["conversation.scheduler"]["management_contract"] is None
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/agent/configuration")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/memory/configuration")
+        ).status_code == 404
         assert (await invoke(client, base, 2, "call-1"))["result"]["value"] == 4
         await apply(client, base, await make_plan(client, base, broken, "Broken", 9, 1, "p2"), "a2")
         # A failed candidate must leave the old durable effective revision/Worker live.

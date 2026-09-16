@@ -24,11 +24,11 @@ function respond(path, options={}) {
   if(path.endsWith('/runs')) return {runs:[{run_id:'run-a',conversation_id:'group-a',phase:'WAIT_APPROVAL',checkpoint_seq:3}],
     approvals:[{approval_id:'approval-a',arguments_digest:'digest-a',tool_name:'counter',arguments:{amount:2}}],
     run_budgets:[{run_id:'run-a',reserved_tokens:100,charged_tokens:30}]};
-  if(path.endsWith('/change-plans')) return {plan_id:'plan-a',plan_digest:'plan-digest',
+  if(path.endsWith('/actions/configuration.plan')) return {plan_id:'plan-a',plan_digest:'plan-digest',
     expected_revision:row.revision,values:options.body.values,before_values:row.values,
     credentials_changed:options.body.api_key!==null||options.body.clear_api_key};
-  if(path.endsWith('/management-requests')) return {revision:++row.revision,secret_revision:2};
-  if(path.endsWith('/approvals')||path.endsWith('/cancellations')||path.endsWith('/resolutions')) return {status:'OK'};
+  if(path.endsWith('/actions/configuration.apply')) return {revision:++row.revision,secret_revision:2};
+  if(path.endsWith('/actions/approval.decide')||path.endsWith('/actions/run.cancel')||path.endsWith('/actions/tool.resolve')) return {status:'OK'};
   throw Error('Unexpected fixture path '+path);
 }
 async function api(path, body, headers={}) {
@@ -122,7 +122,7 @@ def main():
             page.locator('[name="preset_context"]').fill('浏览器测试人格')
             page.get_by_role("button", name="预览 Agent 变更").click()
             expect(page.locator('#agent-preview')).to_be_visible()
-            planned = page.evaluate("fixture.calls.find(c=>c.path.endsWith('/change-plans')).body.values")
+            planned = page.evaluate("fixture.calls.find(c=>c.path.endsWith('/actions/configuration.plan')).body.values")
             assert planned['preset_context'] == ['浏览器测试人格']
             assert planned['max_tool_iterations'] == 6 and planned['run_token_budget'] == 24000
             page.locator('#agent-apply').click()
@@ -132,11 +132,11 @@ def main():
             expect(page.locator('#agent-protocol-version')).to_contain_text('forest-agent-protocol v1')
             expect(page.locator('#agent-core-prompt')).to_contain_text('valid_agent_protocol_content_block')
             page.get_by_role("button", name="批准本次参数").click()
-            page.wait_for_function("fixture.calls.some(c=>c.path.endsWith('/approvals'))")
-            assert page.evaluate("fixture.calls.find(c=>c.path.endsWith('/approvals')).body") == {
+            page.wait_for_function("fixture.calls.some(c=>c.path.endsWith('/actions/approval.decide'))")
+            assert page.evaluate("fixture.calls.find(c=>c.path.endsWith('/actions/approval.decide')).body") == {
                 "approval_id": "approval-a", "arguments_digest": "digest-a", "decision": "APPROVE"}
             # A read started before typing must preserve the newer draft.
-            page.evaluate("fixture.hold.push('/bots/a/agent/configuration')")
+            page.evaluate("fixture.hold.push('/bots/a/runtime-modules/agent.runtime/queries/configuration')")
             page.locator('#agent-reload').click()
             page.wait_for_function("fixture.pending.length===1")
             model.fill("draft-during-read")
@@ -144,14 +144,14 @@ def main():
             expect(model).to_have_value("draft-during-read")
             # Applying a reviewed plan does not overwrite a later local edit.
             page.get_by_role("button", name="预览 Agent 变更").click()
-            page.evaluate("fixture.hold.push('/bots/a/agent/management-requests')")
+            page.evaluate("fixture.hold.push('/bots/a/runtime-modules/agent.runtime/actions/configuration.apply')")
             page.locator('#agent-apply').click()
             page.wait_for_function("fixture.pending.length===1")
             model.fill("draft-during-apply")
             page.evaluate("fixture.pending.shift().resolve();fixture.hold=[]")
             expect(model).to_have_value("draft-during-apply")
             # A late response for Bot A cannot fill Bot B's form.
-            page.evaluate("fixture.hold.push('/bots/a/agent/configuration')")
+            page.evaluate("fixture.hold.push('/bots/a/runtime-modules/agent.runtime/queries/configuration')")
             page.locator('#agent-reload').click()
             page.wait_for_function("fixture.pending.length===1")
             page.evaluate("panel.select({bot_id:'b'})")

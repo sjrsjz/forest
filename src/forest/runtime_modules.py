@@ -56,15 +56,21 @@ class RuntimeModuleDescriptor:
 
 
 def _memory(platform, _: dict[str, Any]):
+    from forest.management.memory_api import MemoryManagementContract
     from forest.memory_runtime import MemoryRuntime
 
-    return MemoryRuntime(platform)
+    runtime = MemoryRuntime(platform)
+    runtime.management_contract = MemoryManagementContract()
+    return runtime
 
 
 def _agent(platform, _: dict[str, Any]):
     from forest.agent_runtime import AgentRuntime
+    from forest.management.agent_api import AgentManagementContract
 
-    return AgentRuntime(platform)
+    runtime = AgentRuntime(platform)
+    runtime.management_contract = AgentManagementContract()
+    return runtime
 
 
 def _conversation(platform, modules: dict[str, Any]):
@@ -232,6 +238,13 @@ class BotModuleRegistry:
                         "style": descriptor.management_view.style,
                     }
                     if descriptor.management_view is not None
+                    else None
+                ),
+                "management_contract": (
+                    contract.describe()
+                    if (contract := getattr(
+                        self.instances[descriptor.component_id], "management_contract", None
+                    )) is not None
                     else None
                 ),
             }
