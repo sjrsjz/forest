@@ -84,13 +84,20 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         runtime = (await client.get(f"/management/v1/bots/{bot['bot_id']}")).json()["runtime"]
         modules = {row["component_id"]: row for row in runtime["runtime_modules"]}
         assert set(modules) == {
+            "adapter.onebot",
             "agent.runtime",
+            "command.router",
             "conversation.scheduler",
             "memory.graph",
+            "message.router",
             "scheduler.jobs",
             "shell.command",
         }
-        assert modules["agent.runtime"]["requires"] == ["memory.graph"]
+        assert modules["memory.graph"]["requires"] == ["adapter.onebot"]
+        assert modules["agent.runtime"]["requires"] == ["adapter.onebot", "memory.graph"]
+        assert modules["conversation.scheduler"]["requires"] == [
+            "adapter.onebot", "agent.runtime", "command.router", "message.router"
+        ]
         assert modules["agent.runtime"]["management_view"]["kind"] == "trusted-module"
         assert modules["agent.runtime"]["management_view"]["protocol"] == (
             "forest.trusted-management-view/1"

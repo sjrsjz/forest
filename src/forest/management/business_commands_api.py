@@ -59,7 +59,7 @@ def install_business_command_routes(app, runtime):
     def store(bot):
         return BusinessCommandDiagnosticsStore(
             bot.store,
-            messages=bot.platform.messages,
+            messages=bot.platform.module("adapter.onebot").messages,
             lease=bot.kernel._authority(),
             control=bot.control,
         )

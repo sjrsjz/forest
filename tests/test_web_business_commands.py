@@ -76,7 +76,7 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             )
             scheduler = managed.platform.module("conversation.scheduler")
             await scheduler._tick_lock.acquire()
-            messages = managed.platform.messages
+            messages = managed.platform.module("adapter.onebot").messages
 
             secret_argument = "private-command-argument"
             accepted = await messages.ingest(

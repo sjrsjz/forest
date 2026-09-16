@@ -50,7 +50,7 @@ async def test_web_unknown_resolution_inherits_administrative_source_and_replays
         )
         part = next(p for p in pending["parts"] if p["state"] == "UNKNOWN")
         bot = app.state.runtime.fleet.bots[created["bot_id"]]
-        content = bot.platform.delivery.contents
+        content = bot.platform.module("adapter.onebot").delivery.contents
         async with bot.store.pool.connection() as conn:
             original_part = await (
                 await conn.execute(

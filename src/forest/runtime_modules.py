@@ -93,20 +93,21 @@ _TRANSITIONS = {
 }
 
 
-def _memory(platform, _: dict[str, Any]):
+def _memory(platform, modules: dict[str, Any]):
     from forest.management.memory_api import MemoryManagementContract
     from forest.memory_runtime import MemoryRuntime
 
-    runtime = MemoryRuntime(platform)
+    adapter = modules["adapter.onebot"]
+    runtime = MemoryRuntime(platform, messages=adapter.messages)
     runtime.management_contract = MemoryManagementContract()
     return runtime
 
 
-def _agent(platform, _: dict[str, Any]):
+def _agent(platform, modules: dict[str, Any]):
     from forest.agent_runtime import AgentRuntime
     from forest.management.agent_api import AgentManagementContract
 
-    runtime = AgentRuntime(platform)
+    runtime = AgentRuntime(platform, messages=modules["adapter.onebot"].messages)
     runtime.management_contract = AgentManagementContract()
     return runtime
 
@@ -115,24 +116,98 @@ def _conversation(platform, modules: dict[str, Any]):
     from forest.group_scheduler import GroupScheduler
 
     agent = modules["agent.runtime"]
+    adapter = modules["adapter.onebot"]
     return GroupScheduler(
-        platform.messages,
+        adapter.messages,
         lease=platform.kernel._authority,
         execute=platform.execute,
-        delivery=platform.delivery,
+        delivery=adapter.delivery,
         global_slots=platform.global_slots,
         finalize_agent=agent.runner.finalize,
         execution_timeout=3600,
     )
 
 
-def _shell(platform, _: dict[str, Any]):
+class _CommandRoutingRuntime:
+    def __init__(self, platform):
+        from forest.storage.command_limits import CommandLimitStore
+        from forest.storage.command_policies import CommandPolicyStore
+
+        self.policies = CommandPolicyStore(platform.bot.store)
+        self.limits = CommandLimitStore(platform.bot.store)
+
+
+class _MessageRoutingRuntime:
+    def __init__(self, platform):
+        from forest.storage.message_handler_limits import MessageHandlerLimitStore
+        from forest.storage.message_handler_policies import MessageHandlerPolicyStore
+
+        self.policies = MessageHandlerPolicyStore(platform.bot.store)
+        self.limits = MessageHandlerLimitStore(platform.bot.store)
+
+
+def _command_routing(platform, _: dict[str, Any]):
+    return _CommandRoutingRuntime(platform)
+
+
+def _message_routing(platform, _: dict[str, Any]):
+    return _MessageRoutingRuntime(platform)
+
+
+class _OneBotRuntime:
+    def __init__(self, platform):
+        from forest.delivery import DeliveryWorker
+        from forest.shell_ingress import ShellIngressGuard
+        from forest.storage.bindings import BindingStore
+        from forest.storage.delivery import DeliveryStore
+        from forest.storage.messages import MessageStore
+
+        self.platform = platform
+        self.bindings = BindingStore(platform.bot.store)
+        self.messages = MessageStore(platform.bot.store, self.bindings)
+        self.shell_ingress = ShellIngressGuard(platform.bot.store.bot_id)
+        self.delivery = DeliveryStore(platform.bot.store, self.bindings)
+        self.worker = DeliveryWorker(
+            self.delivery,
+            platform.kernel._authority,
+            platform.prepare,
+            on_error=platform._delivery_error,
+        )
+        self.task = None
+
+    @property
+    def failure(self):
+        return self.worker.failure
+
+    async def start(self):
+        if self.task is None:
+            import asyncio
+
+            self.task = asyncio.create_task(
+                self.worker.run_forever(), name="binding-delivery"
+            )
+
+    async def quiesce(self):
+        for connection in self.platform.connections.values():
+            connection.accepting = False
+
+    async def close(self):
+        await self.worker.close()
+        await self.platform._close_adapter_resources()
+
+
+def _onebot(platform, _: dict[str, Any]):
+    return _OneBotRuntime(platform)
+
+
+def _shell(platform, modules: dict[str, Any]):
     from forest.shell import ShellDispatcher
 
+    adapter = modules["adapter.onebot"]
     return ShellDispatcher(
-        platform.messages,
-        platform.bindings,
-        platform.delivery,
+        adapter.messages,
+        adapter.bindings,
+        adapter.delivery,
         platform.kernel._authority,
         on_change=platform._notify_work,
         module_packages=platform.module_packages,
@@ -143,7 +218,7 @@ def _jobs(platform, modules: dict[str, Any]):
     from forest.job_scheduler import JobDispatcher
     from forest.storage.jobs import JobStore
 
-    store = JobStore(platform.messages)
+    store = JobStore(modules["adapter.onebot"].messages)
     scheduler = modules["conversation.scheduler"]
     return JobDispatcher(
         store,
@@ -154,9 +229,10 @@ def _jobs(platform, modules: dict[str, Any]):
 
 
 OFFICIAL_MODULES = (
+    RuntimeModuleDescriptor("adapter.onebot", (), _onebot),
     RuntimeModuleDescriptor(
         "memory.graph",
-        (),
+        ("adapter.onebot",),
         _memory,
         RuntimeManagementView(
             "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js",
@@ -165,19 +241,23 @@ OFFICIAL_MODULES = (
     ),
     RuntimeModuleDescriptor(
         "agent.runtime",
-        ("memory.graph",),
+        ("adapter.onebot", "memory.graph"),
         _agent,
         RuntimeManagementView(
             "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js",
             style="/static/modules/agent.runtime.css",
         ),
     ),
+    RuntimeModuleDescriptor("command.router", (), _command_routing),
+    RuntimeModuleDescriptor("message.router", (), _message_routing),
     RuntimeModuleDescriptor(
-        "conversation.scheduler", ("agent.runtime",), _conversation
+        "conversation.scheduler",
+        ("adapter.onebot", "agent.runtime", "command.router", "message.router"),
+        _conversation,
     ),
-    RuntimeModuleDescriptor("shell.command", (), _shell),
+    RuntimeModuleDescriptor("shell.command", ("adapter.onebot",), _shell),
     RuntimeModuleDescriptor(
-        "scheduler.jobs", ("conversation.scheduler",), _jobs
+        "scheduler.jobs", ("adapter.onebot", "conversation.scheduler"), _jobs
     ),
 )
 
@@ -334,11 +414,25 @@ class BotModuleRegistry:
         self._transition(component_id, ModuleLifecycleState.STOPPED)
 
     def tasks(self):
-        return [
-            task for component_id in self.order
-            if self.states[component_id] == ModuleLifecycleState.ACTIVE
-            if (task := getattr(self.instances[component_id], "task", None)) is not None
-        ]
+        result = []
+        for component_id in self.order:
+            if self.states[component_id] != ModuleLifecycleState.ACTIVE:
+                continue
+            instance = self.instances[component_id]
+            owned = getattr(instance, "owned_tasks", None)
+            tasks = tuple(owned()) if owned is not None else (
+                (task,) if (task := getattr(instance, "task", None)) is not None else ()
+            )
+            if any(not isinstance(task, asyncio.Task) for task in tasks):
+                raise ForestError(
+                    "RUNTIME_MODULE_TASK_INVALID", "Runtime module returned an invalid owned task"
+                )
+            result.extend(tasks)
+        if len({id(task) for task in result}) != len(result):
+            raise ForestError(
+                "RUNTIME_MODULE_TASK_DUPLICATE", "Runtime modules cannot share task ownership"
+            )
+        return result
 
     def failures(self):
         result = {}

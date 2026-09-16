@@ -105,7 +105,8 @@ def install_command_limit_routes(app, runtime):
         ticket, operation = await signed(
             request, bot, who, "command.limit.read", {}, write=False
         )
-        return await bot.platform.command_limits.read(ticket, operation)
+        limits = bot.platform.module("command.router").limits
+        return await limits.read(ticket, operation)
 
     @app.post("/management/v1/bots/{bot_id}/business-command-limit-change-plans")
     async def plan(bot_id: str, body: LimitPlan, request: Request):
@@ -116,7 +117,8 @@ def install_command_limit_routes(app, runtime):
             "values": body.values.model_dump(),
         }
         ticket, operation = await signed(request, bot, who, "command.limit.plan", payload)
-        return await bot.platform.command_limits.plan(ticket, operation, payload)
+        limits = bot.platform.module("command.router").limits
+        return await limits.plan(ticket, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/business-command-limit-management-requests")
     async def apply(bot_id: str, body: LimitApply, request: Request):
@@ -128,7 +130,8 @@ def install_command_limit_routes(app, runtime):
             "plan_digest": body.plan_digest,
         }
         ticket, operation = await signed(request, bot, who, "command.limit.apply", payload)
-        result = await bot.platform.command_limits.apply(ticket, operation, payload)
+        limits = bot.platform.module("command.router").limits
+        result = await limits.apply(ticket, operation, payload)
         if result is not None and not bot.control.is_unavailable(result):
             bot.platform.notify()
         return result

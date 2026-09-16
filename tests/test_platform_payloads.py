@@ -43,12 +43,12 @@ async def queued(p):
         "binding_epoch": connection.row["binding_epoch"], "channel_kind": "group",
         "channel_id": "30001", "thread_id": "", "visibility": "group",
     }
-    await p.runtime.delivery.enqueue(
+    await p.runtime.module("adapter.onebot").delivery.enqueue(
         p.kernel._authority(), operation_id="payload-send", route=route,
         parts=[[{"type": "text", "text": "derived reply"}]], response_seq=1,
         conversation_id=item["conversation_id"], parents=(item["payload_id"],),
     )
-    return await p.runtime.delivery.claim(p.kernel._authority(), "test-worker")
+    return await p.runtime.module("adapter.onebot").delivery.claim(p.kernel._authority(), "test-worker")
 
 
 async def test_codec_cannot_replace_authenticated_ingress_projection(platform, monkeypatch):
@@ -102,13 +102,13 @@ async def test_send_permit_requires_actual_codec_result_and_carries_its_sources(
     wire["message"][0]["data"]["text"] = "substituted after Worker"
     forged = json.dumps(wire, separators=(",", ":"), ensure_ascii=False).encode()
     with pytest.raises(ForestError) as exc:
-        await p.runtime.delivery.permit(
+        await p.runtime.module("adapter.onebot").delivery.permit(
             p.kernel._authority(), claim, action=prepared.prepared.action,
             wire_body=forged, wire_digest=hashlib.sha256(forged).hexdigest(),
             executor_ref=prepared.executor_ref, interval_seconds=0,
         )
     assert exc.value.code == "INVALID_WIRE_PAYLOAD"
-    permit = await p.runtime.delivery.permit(
+    permit = await p.runtime.module("adapter.onebot").delivery.permit(
         p.kernel._authority(), claim, action=prepared.prepared.action,
         wire_body=prepared.prepared.wire_body, wire_digest=prepared.prepared.wire_digest,
         executor_ref=prepared.executor_ref, interval_seconds=0,
@@ -120,7 +120,7 @@ async def test_send_permit_requires_actual_codec_result_and_carries_its_sources(
         assert prepared.executor_ref["result_payload_id"] in header["manifest"]["parents"]
     await erase_input(p)
     with pytest.raises(ForestError) as exc:
-        await p.runtime.delivery.mark_started(permit)
+        await p.runtime.module("adapter.onebot").delivery.mark_started(permit)
     assert exc.value.code in {"DELETION_CONFLICT", "PAYLOAD_ERASED"}
     assert all("send_group_msg" not in request[0] for request in p.requests)
 
@@ -144,7 +144,7 @@ async def test_completed_codec_result_cannot_substitute_another_message(platform
         "policy_revision", "admission_lane", "result_payload_id", "result_digest",
     )}
     with pytest.raises(ForestError) as exc:
-        await p.runtime.delivery.permit(
+        await p.runtime.module("adapter.onebot").delivery.permit(
             p.kernel._authority(), claim, action=forged.action, wire_body=forged.wire_body,
             wire_digest=forged.wire_digest, executor_ref=executor, interval_seconds=0,
         )
@@ -163,13 +163,13 @@ async def test_http_and_websocket_suppressed_observations_skip_all_reloadable_wo
             message=[{"type": "text", "data": {"text": "#forest core status"}}],
         )
     )
-    normalized = p.runtime.messages._normalized(
+    normalized = p.runtime.module("adapter.onebot").messages._normalized(
         parse_event(body, self_id=p.runtime.connection(p.binding.binding_id).row["self_id"])
         .as_dict()
     )
     payloads = PayloadStore(p.env.store)
     source = InputContentStore(p.env.store).source_ref(
-        p.runtime.messages.platform_source_event_id(normalized)
+        p.runtime.module("adapter.onebot").messages.platform_source_event_id(normalized)
     )
     await payloads.forget_sources(
         p.kernel._authority(),

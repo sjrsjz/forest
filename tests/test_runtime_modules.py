@@ -94,6 +94,24 @@ def test_official_management_views_are_declared_by_module_descriptors():
     )
 
 
+def test_policy_stores_are_owned_by_routing_modules_not_platform_attributes():
+    class Platform:
+        def __init__(self):
+            self.bot = SimpleNamespace(store=object())
+
+    platform = Platform()
+    command = next(item for item in OFFICIAL_MODULES if item.component_id == "command.router")
+    message = next(item for item in OFFICIAL_MODULES if item.component_id == "message.router")
+    command_runtime = command.factory(platform, {})
+    message_runtime = message.factory(platform, {})
+    assert command_runtime.policies.store is platform.bot.store
+    assert command_runtime.limits.store is platform.bot.store
+    assert message_runtime.policies.store is platform.bot.store
+    assert message_runtime.limits.store is platform.bot.store
+    assert not hasattr(platform, "command_policies")
+    assert not hasattr(platform, "message_handler_policies")
+
+
 @pytest.mark.parametrize(
     ("template", "module", "protocol"),
     [

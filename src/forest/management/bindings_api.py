@@ -166,7 +166,8 @@ def install_binding_routes(app: FastAPI, runtime: Any):
 
     async def finish_registration(who, bot, registry, authority, reserved):
         signed = await ticket(who, bot, authority, reserved["operation_id"], "binding.create", reserved["payload"])
-        result = await bot.platform.bindings.create(signed, reserved["operation_id"], reserved["payload"])
+        bindings = bot.platform.module("adapter.onebot").bindings
+        result = await bindings.create(signed, reserved["operation_id"], reserved["payload"])
         if result is None or bot.control.is_unavailable(result):
             return result
         await registry.registered(bot_id=bot.store.bot_id, binding_id=reserved["binding_id"], **who)
@@ -191,7 +192,7 @@ def install_binding_routes(app: FastAPI, runtime: Any):
         op = operation(request, who, bot_id, "binding.read", write=False)
         signed = await ticket(who, bot, authority, op, "binding.read", {})
         rows = {r["binding_id"]: operational(r, bot.platform)
-                for r in await bot.platform.bindings.list(signed, op)}
+                for r in await bot.platform.module("adapter.onebot").bindings.list(signed, op)}
         reservations = await registry.list(bot_id=bot_id, **who)
         return {"bindings": [{**reserved, **rows.get(reserved["binding_id"], {}),
                               "registration_stage": reserved["stage"]} for reserved in reservations],
@@ -202,7 +203,7 @@ def install_binding_routes(app: FastAPI, runtime: Any):
         who, bot, _, authority = await target(request, bot_id)
         op = operation(request, who, bot_id, "binding.read", write=False)
         signed = await ticket(who, bot, authority, op, "binding.read", {"binding_id": binding_id})
-        row = await bot.platform.bindings.read(signed, op, binding_id)
+        row = await bot.platform.module("adapter.onebot").bindings.read(signed, op, binding_id)
         return {**operational(row, bot.platform), "webhook_url": runtime.settings.public_origin + "/adapters/onebot/v11/" + binding_id,
                 "defaults": BindingValues().model_dump()}
 
@@ -210,7 +211,7 @@ def install_binding_routes(app: FastAPI, runtime: Any):
     async def plan_binding(bot_id: str, binding_id: str, body: BindingPlan, request: Request):
         who, bot, _, authority = await target(request, bot_id, write=True)
         op = operation(request, who, bot_id, "binding.plan")
-        bindings = bot.platform.bindings
+        bindings = bot.platform.module("adapter.onebot").bindings
         previous = await bindings.credentials(bot.kernel._authority(), binding_id)
         secret = json.loads(runtime.catalog.vault.decrypt(previous)) if previous else {}
         if body.access_token is not None:
@@ -246,7 +247,7 @@ def install_binding_routes(app: FastAPI, runtime: Any):
         op = operation(request, who, bot_id, "binding.apply")
         payload = {"binding_id": binding_id, **body.model_dump()}
         signed = await ticket(who, bot, authority, op, "binding.apply", payload, plan_digest=body.plan_digest)
-        return await bot.platform.bindings.apply(signed, op, payload)
+        return await bot.platform.module("adapter.onebot").bindings.apply(signed, op, payload)
 
     @app.post("/adapters/onebot/v11/{binding_id}")
     async def onebot_event(binding_id: str, request: Request):
@@ -322,7 +323,8 @@ def install_binding_routes(app: FastAPI, runtime: Any):
                 await bot.control._time(conn, claims)
                 return previous
             original = await bot.control.admitted_input_in(conn, claims)
-            result = await bot.platform.delivery.reconcile_in(conn, bot.kernel._authority(), intent_id, part_index,
+            delivery = bot.platform.module("adapter.onebot").delivery
+            result = await delivery.reconcile_in(conn, bot.kernel._authority(), intent_id, part_index,
                 operation_id=op, input_parent_ids=(original.payload_id,), **body.model_dump())
             await bot.control._record(conn, claims, result)
             await bot.control._time(conn, claims)

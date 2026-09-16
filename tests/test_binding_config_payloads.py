@@ -287,7 +287,7 @@ async def test_runtime_can_recover_effective_when_newer_desired_body_was_forgott
     p.runtime.connections.pop(p.binding.binding_id)
     p.runtime._clients.discard(before.client)
     p.runtime._applied.pop(p.binding.binding_id)
-    desired = (await p.runtime.bindings.desired(p.kernel._authority()))[0]
+    desired = (await p.runtime.module("adapter.onebot").bindings.desired(p.kernel._authority()))[0]
     await p.runtime._replace(desired)
     after = p.runtime.connection(p.binding.binding_id)
     assert after.row["effective_revision"] == 1 and after.row["revision"] == 2
@@ -308,7 +308,7 @@ async def test_actual_template_worker_result_carries_config_without_tainting_ori
             {"type": "text", "data": {"text": "immutable-user-text"}},
         ],
     )
-    messages = p.runtime.messages
+    messages = p.runtime.module("adapter.onebot").messages
     actor = await messages.acquire_actor(
         p.kernel._authority(),
         (

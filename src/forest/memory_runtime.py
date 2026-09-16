@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 from uuid import uuid4
 
+import psycopg
+from psycopg_pool import PoolTimeout
+
 from forest.embeddings import EmbeddingCancelled, EmbeddingClient, EmbeddingResult
 from forest.errors import ForestError
 from forest.memory_index import profile
@@ -18,22 +21,27 @@ from forest.storage.memory_index import MemoryIndexStore
 from forest.storage.memory_media import MemoryMediaStore
 from forest.storage.memory_queries import MemoryQueryStore
 from forest.storage.memory_semantic import MemorySemanticAssociationStore
+from forest.storage.memory_sources import MemorySourceStore
 from forest.storage.payloads import PayloadStore
+
+_LOST_AUTHORITY = {"STALE_HOST", "STORAGE_SEALED", "KERNEL_UNAVAILABLE", "BOT_SCOPE_MISMATCH"}
 
 
 class MemoryRuntime:
-    def __init__(self, platform):
+    def __init__(self, platform, *, messages):
         self.platform, self.store = platform, platform.bot.store
         self.config = MemoryConfig(self.store, platform.vault)
-        self.media = MemoryMediaStore(platform.messages, config=self.config)
-        self.index = MemoryIndexStore(platform.messages, self.media)
+        self.media = MemoryMediaStore(messages, config=self.config)
+        self.index = MemoryIndexStore(messages, self.media)
         self.queries = MemoryQueryStore(self.index)
-        self.graph = GraphStore(platform.messages)
-        self.administration = MemoryAdministration(platform.messages)
-        self.associations = MemoryAssociationAdministration(platform.messages)
-        self.semantic = MemorySemanticAssociationStore(platform.messages)
+        self.graph = GraphStore(messages)
+        self.administration = MemoryAdministration(messages)
+        self.associations = MemoryAssociationAdministration(messages)
+        self.semantic = MemorySemanticAssociationStore(messages)
+        self.sources = MemorySourceStore(messages)
         self.payloads = PayloadStore(self.store)
         self.task = None
+        self.backfill_task = None
         self.workers, self.errors, self.clients = {}, {}, set()
         self.executions = set()
         self.closed = False
@@ -51,6 +59,36 @@ class MemoryRuntime:
             self.task = asyncio.create_task(
                 self._loop(), name="memory-runtime:" + self.store.bot_id
             )
+        if self.backfill_task is None:
+            self.backfill_task = asyncio.create_task(
+                self._backfill_loop(), name="memory-source-backfill"
+            )
+
+    def owned_tasks(self):
+        return tuple(task for task in (self.task, self.backfill_task) if task is not None)
+
+    async def _backfill_loop(self):
+        """Recover legacy source rows as bounded work owned by this module."""
+        while not self.closed:
+            delay = 10
+            try:
+                async with asyncio.timeout(5):
+                    result = await self.sources.backfill(
+                        self.platform.kernel._authority(), limit=32
+                    )
+                self.errors.pop("memory_sources", None)
+                delay = 0.25 if result["more_possible"] else 5
+            except asyncio.CancelledError:
+                raise
+            except ForestError as exc:
+                if exc.code in _LOST_AUTHORITY:
+                    raise
+                self.errors["memory_sources"] = exc.code[:128]
+            except (TimeoutError, psycopg.Error, PoolTimeout):
+                self.errors["memory_sources"] = "MEMORY_SOURCE_BACKFILL_UNAVAILABLE"
+            except Exception:
+                self.errors["memory_sources"] = "MEMORY_SOURCE_BACKFILL_FAILED"
+            await asyncio.sleep(delay)
 
     def _spawn(self, key, factory):
         if self.closed or key in self.workers:
@@ -458,6 +496,9 @@ class MemoryRuntime:
                 "errors": dict(self.errors),
                 "active_workers": len(self.workers),
                 "running": bool(self.task and not self.task.done()),
+                "backfill_running": bool(
+                    self.backfill_task and not self.backfill_task.done()
+                ),
             }
 
     async def close(self):
@@ -472,9 +513,10 @@ class MemoryRuntime:
 
     async def _close(self):
         # Fence scan results before snapshotting owned workers.
-        if self.task is not None:
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
+        owned = tuple(task for task in (self.task, self.backfill_task) if task is not None)
+        for task in owned:
+            task.cancel()
+        await asyncio.gather(*owned, return_exceptions=True)
         tasks = (*self.workers.values(), *self.executions)
         for task in tasks:
             task.cancel()

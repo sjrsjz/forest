@@ -585,7 +585,11 @@ class BotFleet:
     def status(self, bot_id: str) -> dict:
         bot = self.bots.get(bot_id)
         attached = bot is not None and self._usable(bot)
-        ingress = getattr(bot.platform, "shell_ingress", None) if bot is not None else None
+        ingress = (
+            bot.platform.module("adapter.onebot").shell_ingress
+            if bot is not None and bot.platform is not None
+            else None
+        )
         return {
             "attached": attached,
             "storage_generation": bot.directory_generation if bot is not None else None,

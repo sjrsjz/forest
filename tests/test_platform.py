@@ -70,7 +70,7 @@ async def platform(environment, tmp_path):  # noqa: F811
         runtime = BindingRuntime(
             SimpleNamespace(store=env.store, kernel=kernel), env.vault, packages
         )
-        row = (await runtime.bindings.desired(kernel._authority()))[0]
+        row = (await runtime.module("adapter.onebot").bindings.desired(kernel._authority()))[0]
         try:
             yield SimpleNamespace(
                 env=env,
@@ -88,6 +88,23 @@ async def platform(environment, tmp_path):  # noqa: F811
 async def receive(p, number=1, **changes):
     body = encoded(event(message_id=number, **changes))
     return await p.runtime.receive(p.binding.binding_id, body, signature(body, WEBHOOK))
+
+
+async def test_runtime_business_resources_are_owned_by_registered_modules(platform):
+    p = platform
+    adapter = p.runtime.module("adapter.onebot")
+    assert adapter.bindings.store is p.env.store
+    assert adapter.messages.store is p.env.store
+    assert adapter.delivery.store is p.env.store
+    assert p.runtime.module("memory.graph").sources.messages is adapter.messages
+    assert p.runtime.module("command.router").policies.store is p.env.store
+    assert p.runtime.module("message.router").limits.store is p.env.store
+    for old in (
+        "bindings", "messages", "delivery", "delivery_worker", "shell_ingress",
+        "memory_sources", "command_policies", "command_limits",
+        "message_handler_policies", "message_handler_limits",
+    ):
+        assert not hasattr(p.runtime, old)
 
 
 async def wait_for(predicate, timeout=10):
@@ -168,11 +185,11 @@ async def test_empty_protocol_message_is_durably_retained_with_author(platform, 
     assert len(rows) == 1 and rows[0]["ingress_seq"] == 1
     assert restored["segments"] == [{"type": "text", "text": ""}]
     assert rows[0]["author"]["external_user_id"] == "20001"
-    actor = await p.runtime.messages.acquire_actor(
+    actor = await p.runtime.module("adapter.onebot").messages.acquire_actor(
         p.kernel._authority(), rows[0]["conversation_id"], "empty-message-reader"
     )
-    selected = await p.runtime.messages.select_input(actor, "empty-message-silent-drain")
-    context = await p.runtime.messages.context(actor)
+    selected = await p.runtime.module("adapter.onebot").messages.select_input(actor, "empty-message-silent-drain")
+    context = await p.runtime.module("adapter.onebot").messages.context(actor)
     assert selected["kind"] == "SILENT_DRAIN" and context["context_applied_seq"] == 1
     assert context["units"][0]["segments"] == [{"type": "text", "text": ""}]
     assert context["units"][0]["author"]["external_user_id"] == "20001"
@@ -195,16 +212,16 @@ async def test_failed_codec_attempt_and_lost_ingress_ack_do_not_poison_retries(
     monkeypatch.setattr(p.kernel, "invoke_control_with_receipt", fail_once)
     with pytest.raises(ForestError):
         await receive(p)
-    ingest = p.runtime.messages.ingest
+    ingest = p.runtime.module("adapter.onebot").messages.ingest
 
     async def lost_ack(*args, **kwargs):
         await ingest(*args, **kwargs)
         raise ConnectionError("synthetic lost database acknowledgement")
 
-    monkeypatch.setattr(p.runtime.messages, "ingest", lost_ack)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").messages, "ingest", lost_ack)
     with pytest.raises(ConnectionError):
         await receive(p)
-    monkeypatch.setattr(p.runtime.messages, "ingest", ingest)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").messages, "ingest", ingest)
     assert (await receive(p))["accepted"]
     # The retry after a committed Inbox result uses its durable metadata ACK;
     # it no longer calls the reloadable codec for an already accepted event.
@@ -235,7 +252,7 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
 
     monkeypatch.setattr(p.kernel, "invoke_control_with_receipt", reload_before_call)
     row = p.runtime.connection(p.binding.binding_id).row
-    await p.runtime.delivery.enqueue(
+    await p.runtime.module("adapter.onebot").delivery.enqueue(
         p.kernel._authority(), operation_id="reload-format-source",
         route={"bot_id": p.env.store.bot_id, "binding_id": p.binding.binding_id,
                "platform": "onebot-v11", "self_id": row["self_id"],
@@ -244,7 +261,7 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
         parts=[[{"type": "text", "text": "literal [CQ:at,qq=all]"}]],
         conversation_id="format-conversation", response_seq=1,
     )
-    claim = await p.runtime.delivery.claim(p.kernel._authority(), "format-worker")
+    claim = await p.runtime.module("adapter.onebot").delivery.claim(p.kernel._authority(), "format-worker")
     prepared = await p.runtime.prepare(claim)
     current = p.kernel.components["adapter.onebot"].worker.identity.generation_id
     assert prepared.executor_ref["generation_id"] == current != before
@@ -258,13 +275,13 @@ async def test_activation_lost_ack_adopts_committed_epoch_and_close_disconnects(
     platform, monkeypatch
 ):
     p = platform
-    activate = p.runtime.bindings.activate
+    activate = p.runtime.module("adapter.onebot").bindings.activate
 
     async def lost_ack(*args, **kwargs):
         await activate(*args, **kwargs)
         raise ConnectionError("lost acknowledgement")
 
-    monkeypatch.setattr(p.runtime.bindings, "activate", lost_ack)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "activate", lost_ack)
     await p.runtime._replace(p.desired)
     connection = p.runtime.connection(p.binding.binding_id)
     assert connection.row["connection_epoch"] == 1 and not connection.client._client.is_closed
@@ -278,14 +295,14 @@ async def test_activation_lost_ack_adopts_committed_epoch_and_close_disconnects(
 async def test_cancel_after_publication_keeps_owner_until_runtime_close(platform, monkeypatch):
     p = platform
     published = asyncio.Event()
-    activate = p.runtime.bindings.activate
+    activate = p.runtime.module("adapter.onebot").bindings.activate
 
     async def pause_after_commit(*args, **kwargs):
         await activate(*args, **kwargs)
         published.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(p.runtime.bindings, "activate", pause_after_commit)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "activate", pause_after_commit)
     task = asyncio.create_task(p.runtime._replace(p.desired))
     p.runtime._jobs[p.binding.binding_id] = task
     await asyncio.wait_for(published.wait(), 10)
@@ -299,7 +316,7 @@ async def test_unknown_publication_retains_client_and_cleanup_retries_after_stor
     platform, monkeypatch
 ):
     p = platform
-    activate, current = p.runtime.bindings.activate, p.runtime.bindings.current
+    activate, current = p.runtime.module("adapter.onebot").bindings.activate, p.runtime.module("adapter.onebot").bindings.current
 
     async def lost_ack(*args, **kwargs):
         await activate(*args, **kwargs)
@@ -308,8 +325,8 @@ async def test_unknown_publication_retains_client_and_cleanup_retries_after_stor
     async def unavailable(*args, **kwargs):
         raise ConnectionError("database unavailable")
 
-    monkeypatch.setattr(p.runtime.bindings, "activate", lost_ack)
-    monkeypatch.setattr(p.runtime.bindings, "current", unavailable)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "activate", lost_ack)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "current", unavailable)
     with pytest.raises(ConnectionError):
         await p.runtime._replace(p.desired)
     assert p.runtime.failure.code == "BINDING_PUBLICATION_UNCERTAIN"
@@ -319,7 +336,7 @@ async def test_unknown_publication_retains_client_and_cleanup_retries_after_stor
     with pytest.raises(ForestError, match="remain owned"):
         await p.runtime.close()
     assert client in p.runtime._clients
-    monkeypatch.setattr(p.runtime.bindings, "current", current)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "current", current)
     await p.runtime.close()
     assert client._client.is_closed and not p.runtime._pending
     assert (await p.binding.read())["state"] == "OFFLINE"
@@ -356,7 +373,7 @@ async def test_supervisor_failure_is_visible_to_fleet_and_closes_local_admission
     async def broken(*args):
         raise RuntimeError("synthetic supervisor defect")
 
-    monkeypatch.setattr(p.runtime.bindings, "desired", broken)
+    monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "desired", broken)
     await p.runtime.start()
 
     async def failed():
@@ -490,7 +507,7 @@ async def test_reserved_shell_ingress_survives_a_broken_reloadable_adapter(
 async def test_rejection_budget_returns_429_before_raw_payload_or_inbox(platform):
     p = platform
     await p.runtime._replace(p.desired)
-    p.runtime.shell_ingress = ShellIngressGuard(
+    p.runtime.module("adapter.onebot").shell_ingress = ShellIngressGuard(
         p.env.store.bot_id, rejection_burst=1, rejection_refill_seconds=60
     )
     outsider = {"user_id": 29999, "nickname": "outsider", "role": "member"}
@@ -514,5 +531,5 @@ async def test_rejection_budget_returns_429_before_raw_payload_or_inbox(platform
             )
         ).fetchone()
     assert counts == {"payloads": before_payloads["n"], "inbox": 1, "shells": 1}
-    stats = p.runtime.shell_ingress.snapshot()
+    stats = p.runtime.module("adapter.onebot").shell_ingress.snapshot()
     assert stats["rejection_budget"]["rate_limited"] == 1

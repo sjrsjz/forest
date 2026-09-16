@@ -53,7 +53,7 @@ def install_job_routes(app, runtime):
                "session_token_hash": digest_token(request.cookies["forest_session"])}
         await runtime.catalog.get(bot_id=bot_id, **who)
         bot = await runtime.fleet.attach(bot_id)
-        return who, bot, JobStore(bot.platform.messages)
+        return who, bot, JobStore(bot.platform.module("adapter.onebot").messages)
 
     async def signed(request, bot, who, action, payload, *, write=True):
         key = request.headers.get("idempotency-key", "") if write else str(uuid4())

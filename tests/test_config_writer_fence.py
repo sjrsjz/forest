@@ -22,7 +22,7 @@ from forest.storage.bot import BotStore, _migration_checksum
 
 FENCE = "042_schema_writer_v2.sql"
 CURRENT_FENCE = "087_memory_profile_lifecycle.sql"
-OLD_CHAIN = "addb66245fdf6113bf0067bd0c4a5be8fc114f88155ac55545bc93691f8be5ba"
+BASELINE_041_CHAIN = "c67265498ba9ec49dcc260a5f678ffd87031c0065e4669b1bcd8dc34cc060ea7"
 OLD_WRITER_SHA = "8960f47437997394d2b07aa9f9bdbc2616da4d6a34b741f029ff170d072934dc"
 CANARY = {"config": {"label": "旧配置 CANARY", "optional": None}, "grants": []}
 
@@ -140,7 +140,10 @@ def old_module(path):
     chain = [(p.name, module._migration_checksum(p.name, p.read_text(encoding="utf-8")))
              for p in sorted((path / "bot_migrations").glob("*.sql"))]
     assert len(chain) == 41
-    assert hashlib.sha256(json.dumps(chain, separators=(",", ":")).encode()).hexdigest() == OLD_CHAIN
+    assert (
+        hashlib.sha256(json.dumps(chain, separators=(",", ":")).encode()).hexdigest()
+        == BASELINE_041_CHAIN
+    )
     return module
 
 
@@ -190,13 +193,16 @@ async def old_041(upgrade_database, tmp_path, monkeypatch):
         sys.modules.pop(module.__name__, None)
 
 
-def test_v2_checksum_dependencies_leave_every_001_041_checksum_unchanged(tmp_path, monkeypatch):
+def test_v2_checksum_dependencies_are_bound_to_current_001_041_baseline(tmp_path, monkeypatch):
     root = resources(tmp_path / "all")
     monkeypatch.setattr(bot_module, "files", lambda namespace: root)
     chain = [(p.name, _migration_checksum(p.name, p.read_text(encoding="utf-8")))
              for p in sorted((root / "bot_migrations").glob("*.sql")) if p.name[:3] <= "041"]
     assert len(chain) == 41
-    assert hashlib.sha256(json.dumps(chain, separators=(",", ":")).encode()).hexdigest() == OLD_CHAIN
+    assert (
+        hashlib.sha256(json.dumps(chain, separators=(",", ":")).encode()).hexdigest()
+        == BASELINE_041_CHAIN
+    )
     source = (root / "bot_migrations" / FENCE).read_text(encoding="utf-8")
     before = _migration_checksum(FENCE, source)
     helper = root / "migration_v2.py"

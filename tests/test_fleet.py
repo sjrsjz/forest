@@ -75,8 +75,16 @@ class FakeBindingRuntime:
         self.bot, self.vault, self.packages = bot, vault, packages
         self._tasks = []
         self.module_registry = SimpleNamespace(describe=lambda: [])
+        self._modules = {
+            "adapter.onebot": SimpleNamespace(
+                shell_ingress=SimpleNamespace(snapshot=lambda: {})
+            )
+        }
         self.failure = None
         self.started = self.closed = False
+
+    def module(self, component_id):
+        return self._modules[component_id]
 
     async def start(self):
         self.started = True

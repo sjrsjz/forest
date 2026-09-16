@@ -43,9 +43,9 @@ class _ScopedClient:
 
 
 class AgentRuntime:
-    def __init__(self, platform):
+    def __init__(self, platform, *, messages):
         self.platform = platform
-        self.kernel, self.messages = platform.kernel, platform.messages
+        self.kernel, self.messages = platform.kernel, messages
         self.config = AgentConfig(platform.bot.store, platform.vault)
         self.clients = set()
         self.client_lock = asyncio.Lock()

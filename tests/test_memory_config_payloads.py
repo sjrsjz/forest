@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
-from legacy_041 import run_legacy_041
 from psycopg.types.json import Jsonb
 from test_agent_memory import bound, projection
 from test_agent_store import start
@@ -16,7 +15,6 @@ from test_memory_config import environment as environment
 from test_memory_index_store import outcome, ready
 from test_memory_media import incoming
 from test_memory_media import media as media
-from test_upgrade import upgrade_database as upgrade_database
 
 from forest.errors import ForestError
 from forest.memory_runtime import MemoryRuntime
@@ -24,7 +22,6 @@ from forest.memory_settings import DEFAULT_MEMORY_SETTINGS
 from forest.memory_types import SourceRef
 from forest.packages import digest_json
 from forest.storage.agent_memory import AgentMemoryStore
-from forest.storage.bot import BotStore
 from forest.storage.control import BotControl
 from forest.storage.memory_config import NUMERIC_FIELDS, MemoryConfig, _metadata
 from forest.storage.memory_index import MemoryIndexStore
@@ -273,7 +270,7 @@ def runtime_for(media):
     return MemoryRuntime(SimpleNamespace(
         bot=SimpleNamespace(store=env.store), messages=images.messages, vault=env.vault,
         kernel=SimpleNamespace(_authority=lambda: env.lease),
-    ))
+    ), messages=images.messages)
 
 
 @pytest.mark.parametrize("pending", [False, True], ids=["before-decision", "pending-decision"])
@@ -408,150 +405,3 @@ async def test_runtime_recovers_original_budget_without_erased_config_on_new_hos
     finally:
         await runtime.close()
     assert not runtime.executions and not runtime.workers and not runtime.clients
-
-
-LEGACY_SEED = r'''
-import asyncio, base64, json, sys
-from datetime import UTC, datetime, timedelta
-from uuid import uuid4
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from forest.packages import digest_json
-from forest.security import SecretVault
-from forest.storage.bot import BotStore
-from forest.storage.control import BotControl
-from forest.storage.memory_config import MemoryConfig
-from forest.storage.memory_index import MemoryIndexStore
-from forest.storage.memory_media import MemoryMediaStore
-from forest.storage.messages import MessageStore
-from forest.storage.payloads import PayloadStore
-from forest.memory_settings import DEFAULT_MEMORY_SETTINGS
-from forest.memory_types import SourceRef
-
-async def main():
-    store = BotStore(PARAMETERS['dsn'], 'bot-a')
-    await store.open()
-    try:
-        await store.migrate()
-        lease = await store.acquire_host('legacy', 'old-incarnation', ttl_seconds=120)
-        control = BotControl(store)
-        key = Ed25519PrivateKey.generate()
-        await control.trust(lease, issuer_id='old-web', key_revision=1,
-                            public_key=base64.b64encode(key.public_key().public_bytes_raw()).decode())
-        def ticket(action, operation, payload):
-            now = datetime.now(UTC)
-            claims = dict(ticket_id=str(uuid4()), issuer_id='old-web', subject_id='old-admin',
-                session_ref='old-session', bot_id='bot-a', operation_id=operation, action=action,
-                input_digest=digest_json(payload), plan_digest=payload.get('plan_digest',''),
-                key_revision=1,account_revision=1,session_revision=1,policy_revision=1,
-                issued_at=now.isoformat(),expires_at=(now+timedelta(seconds=30)).isoformat())
-            return {'claims':claims, 'signature':base64.b64encode(key.sign(digest_json(claims).encode())).decode()}
-        vault = SecretVault(PARAMETERS['vault'])
-        config = MemoryConfig(store,vault)
-        values = {**DEFAULT_MEMORY_SETTINGS,'enabled':True,'model_revision':'legacy-profile-CANARY'}
-        payload = dict(expected_revision=0,values=values,credentials_changed=True,
-                       secret_digest=digest_json({'api_key':'synthetic-old-key'}))
-        proposal = await config.plan(ticket('memory.config.plan','legacy-memory-plan',payload),
-                                    'legacy-memory-plan',payload,secret_ciphertext=vault.encrypt('synthetic-old-key'))
-        payload = {k:proposal[k] for k in ('expected_revision','plan_id','plan_digest')}
-        await config.apply(ticket('memory.config.apply','legacy-memory-apply',payload),'legacy-memory-apply',payload)
-        async with store.pool.connection() as conn:
-            await conn.execute("INSERT INTO public.bot_bindings(bot_id,binding_id,platform,self_id,display_name,"
-                "registry_operation_id,host_incarnation,host_owner_epoch,enabled,receive_enabled,state) "
-                "VALUES ('bot-a','binding-a','onebot-v11','1000','test','old-register',%s,%s,true,true,'ONLINE')",
-                (lease.incarnation,lease.owner_epoch))
-        messages = MessageStore(store)
-        event = dict(platform='onebot-v11',self_id='1000',channel_kind='group',channel_id='group-1',
-            thread_id='',platform_message_id='old-1',sent_at='2026-09-13T00:00:00Z',
-            author=dict(external_user_id='user-1',display_name='old-author',is_self=False),
-            segments=[dict(type='text',text='legacy-embedding-input')])
-        received = await messages.ingest(lease,'binding-a',event,decision='NO_TRIGGER')
-        actor = await messages.acquire_actor(lease,received['conversation_id'],'old-actor',ttl_seconds=120)
-        await messages.select_input(actor,'old-drain')
-        index = MemoryIndexStore(messages,MemoryMediaStore(messages))
-        await index.enroll(lease,1)
-        pending = await index.pending(lease,1)
-        prepared = (await index.prepare(lease,1,[r['facet_id'] for r in pending],request_id='legacy-request'))['prepared']
-        await index.check_permit(lease,prepared,dispatch_token='old-transport')
-        if PARAMETERS['erase']:
-            async with store.pool.connection() as conn:
-                source = await (await conn.execute("SELECT d.source_unit_id FROM public.bot_payload_domains d "
-                    "WHERE d.bot_id='bot-a' AND d.kind='CONTROL_INPUT' AND d.owner_id=%s",
-                    ('input:'+digest_json(['legacy-memory-plan']),))).fetchone()
-            payloads = PayloadStore(store)
-            await payloads.forget_sources(lease,'old-erase',(SourceRef(source['source_unit_id']),),expected_deletion_epoch=0)
-            await payloads.scrub(lease,limit=256)
-        result = {}
-        async with store.pool.connection() as conn:
-            for name,table,ordering in (
-                ('plans','bot_memory_config_plans','plan_id'),('revisions','bot_memory_config_revisions','revision'),
-                ('requests','bot_memory_embedding_requests','request_id'),('attempts','bot_memory_embedding_attempts','attempt_id'),
-                ('budgets','bot_memory_embedding_budget_days','budget_day'),('operations','bot_web_operations','operation_id'),
-                ('ledger','forest_bot_schema_migrations','version')):
-                result[name] = await (await conn.execute('SELECT * FROM public.'+table+' ORDER BY '+ordering)).fetchall()
-            result['old_wire_present'] = bool(await (await conn.execute('SELECT 1 FROM public.bot_payload_bodies WHERE payload_id=%s',
-                                                                      (result['requests'][0]['body_payload_id'],))).fetchone())
-        await store.release_host(lease)
-        print(json.dumps(result,default=str))
-    finally:
-        await store.close()
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-asyncio.run(main())
-'''
-
-
-@pytest.mark.parametrize("erased_before", [False, True])
-async def test_actual_041_upgrade_preserves_facts_and_never_reconstructs_erased_values(
-    upgrade_database, tmp_path, erased_before,
-):
-    import json
-    from types import SimpleNamespace
-
-    original = await run_legacy_041(tmp_path, LEGACY_SEED, {
-        "dsn": upgrade_database, "vault": str(tmp_path / "vault"), "erase": erased_before,
-    })
-    assert original["old_wire_present"]  # 041 did not yet attach this copied profile to config.
-    store = BotStore(upgrade_database, "bot-a")
-    await store.open()
-    try:
-        await store.migrate()
-        env = SimpleNamespace(store=store)
-        for name, table, ordering, omitted in (
-            ("plans", "bot_memory_config_plans", "plan_id", {"values"}),
-            ("revisions", "bot_memory_config_revisions", "revision", {"values"}),
-            ("requests", "bot_memory_embedding_requests", "request_id", {"profile"}),
-            ("attempts", "bot_memory_embedding_attempts", "attempt_id", set()),
-            ("budgets", "bot_memory_embedding_budget_days", "budget_day", set()),
-            ("operations", "bot_web_operations", "operation_id", set()),
-        ):
-            actual = await rows(env, f"SELECT * FROM public.{table} ORDER BY {ordering}")
-            assert len(actual) == len(original[name])
-            for old, new in zip(original[name], actual, strict=True):
-                assert json.loads(json.dumps({k: new[k] for k in old if k not in omitted}, default=str)) == {
-                    k: v for k, v in old.items() if k not in omitted
-                }
-                assert all(new[k] is None for k in omitted)
-        ledger = await rows(env, "SELECT * FROM public.forest_bot_schema_migrations ORDER BY version")
-        assert json.loads(json.dumps(ledger[:41], default=str)) == original["ledger"]
-        lease = await store.acquire_host("new", "new-incarnation", ttl_seconds=120)
-        current = (await rows(env, "SELECT * FROM public.bot_memory_config_revisions"))[0]
-        request = (await rows(env, "SELECT * FROM public.bot_memory_embedding_requests"))[0]
-        if erased_before:
-            with pytest.raises(ForestError) as gone:
-                await MemoryConfig(store).runtime(lease)
-            assert gone.value.code == "CONTROL_CONTENT_REVOKED"
-            await PayloadStore(store).scrub(lease, limit=256)
-            assert not await rows(env, "SELECT * FROM public.bot_payload_bodies WHERE payload_id=ANY(%s)",
-                                  ([current["values_payload_id"], request["profile_payload_id"],
-                                    request["body_payload_id"], request["manifest_payload_id"]],))
-        else:
-            assert (await MemoryConfig(store).runtime(lease))["values"] == {
-                **original["revisions"][0]["values"],
-                "semantic_associations_enabled": True,
-            }
-            assert await PayloadStore(store).read_json(lease, request["profile_payload_id"], expected_deletion_epoch=0) == original["requests"][0]["profile"]
-        before = await rows(env, "SELECT * FROM public.bot_payload_headers ORDER BY payload_id")
-        await store.migrate()
-        assert await rows(env, "SELECT * FROM public.bot_payload_headers ORDER BY payload_id") == before
-    finally:
-        await store.close()

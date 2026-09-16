@@ -19,13 +19,9 @@ from forest.adapters.onebot import (
     parse_event,
     verify_signature,
 )
-from forest.delivery import DeliveryWorker, PreparedDelivery
+from forest.delivery import PreparedDelivery
 from forest.errors import ForestError
 from forest.runtime_modules import BotModuleRegistry
-from forest.shell_ingress import ShellIngressGuard
-from forest.storage.bindings import BindingStore
-from forest.storage.delivery import DeliveryStore
-from forest.storage.messages import MessageStore
 
 _LOST_AUTHORITY = {"STALE_HOST", "STORAGE_SEALED", "KERNEL_UNAVAILABLE", "BOT_SCOPE_MISMATCH"}
 
@@ -100,11 +96,6 @@ class BindingRuntime:
         self.global_model_slots = global_model_slots
         self.packages = dict(packages)
         self.module_packages = {} if module_packages is None else module_packages
-        self.bindings = BindingStore(bot.store)
-        self.messages = MessageStore(bot.store, self.bindings)
-        self.shell_ingress = ShellIngressGuard(bot.store.bot_id)
-        self.memory_sources = self.messages._memory_sources()
-        self.delivery = DeliveryStore(bot.store, self.bindings)
         self.connections: dict[str, Connection] = {}
         self.errors: dict[str, str] = {}
         self._applied: dict[str, tuple[int, str]] = {}
@@ -121,18 +112,6 @@ class BindingRuntime:
         self._close_task: asyncio.Task | None = None
         self._started = False
         self._failure: ForestError | None = None
-        self.delivery_worker = DeliveryWorker(
-            self.delivery, self.kernel._authority, self.prepare, on_error=self._delivery_error
-        )
-        from forest.storage.command_limits import CommandLimitStore
-        from forest.storage.command_policies import CommandPolicyStore
-        from forest.storage.message_handler_limits import MessageHandlerLimitStore
-        from forest.storage.message_handler_policies import MessageHandlerPolicyStore
-
-        self.command_policies = CommandPolicyStore(bot.store)
-        self.command_limits = CommandLimitStore(bot.store)
-        self.message_handler_policies = MessageHandlerPolicyStore(bot.store)
-        self.message_handler_limits = MessageHandlerLimitStore(bot.store)
         self.job_authority = job_authority
         self.module_registry = BotModuleRegistry(self)
 
@@ -191,9 +170,7 @@ class BindingRuntime:
             await self.module_registry.start()
             self._tasks = [
                 asyncio.create_task(self.run_forever(), name="binding-supervisor"),
-                asyncio.create_task(self.delivery_worker.run_forever(), name="binding-delivery"),
                 asyncio.create_task(self._health_loop(), name="binding-health"),
-                asyncio.create_task(self._memory_backfill_loop(), name="memory-source-backfill"),
             ]
             self._tasks.extend(self.module_registry.tasks())
             for task in self._tasks:
@@ -204,40 +181,10 @@ class BindingRuntime:
         while not self._closed.is_set():
             if (
                 self.module_registry.failures()
-                or self.delivery_worker.failure is not None
             ):
                 self._fatal("PLATFORM_CHILD_FAILED")
                 return
             await asyncio.sleep(0.1)
-
-    async def _memory_backfill_loop(self):
-        """Incremental legacy source recovery; no model or network dependency.
-
-        Each bounded repository batch validates current ownership. Memory
-        recovery errors remain visible and retry without stopping live input.
-        The task belongs to the platform supervisor and is cancelled on close.
-        """
-        while not self._closed.is_set():
-            delay = 10
-            try:
-                async with asyncio.timeout(5):
-                    result = await self.memory_sources.backfill(self.kernel._authority(), limit=32)
-                self.errors.pop("memory_sources", None)
-                delay = 0.25 if result["more_possible"] else 5
-            except asyncio.CancelledError:
-                raise
-            except ForestError as exc:
-                if exc.code in _LOST_AUTHORITY:
-                    raise
-                self.errors["memory_sources"] = exc.code[:128]
-            except (TimeoutError, psycopg.Error, PoolTimeout):
-                self.errors["memory_sources"] = "MEMORY_SOURCE_BACKFILL_UNAVAILABLE"
-            except Exception:
-                self.errors["memory_sources"] = "MEMORY_SOURCE_BACKFILL_FAILED"
-            try:
-                await asyncio.wait_for(self._closed.wait(), delay)
-            except TimeoutError:
-                pass
 
     async def ensure_components(self, component_ids=None):
         ids = tuple(self.packages) if component_ids is None else tuple(component_ids)
@@ -286,7 +233,7 @@ class BindingRuntime:
 
     async def _disconnect(self, connection):
         try:
-            await self.bindings.disconnect(
+            await self.module("adapter.onebot").bindings.disconnect(
                 self._cleanup_lease(),
                 connection.row["binding_id"],
                 client_incarnation=connection.row["client_incarnation"],
@@ -299,7 +246,9 @@ class BindingRuntime:
     async def _resolve_activation(self, pending, *, adopt):
         async with asyncio.timeout(5):
             try:
-                row = await self.bindings.current(self._cleanup_lease(), pending.binding_id)
+                row = await self.module("adapter.onebot").bindings.current(
+                    self._cleanup_lease(), pending.binding_id
+                )
             except ForestError as exc:
                 if exc.code not in _LOST_AUTHORITY | {"BINDING_NOT_FOUND"}:
                     raise
@@ -314,7 +263,7 @@ class BindingRuntime:
                 self._adopt(pending, row)
                 return True
             if ours:
-                await self.bindings.disconnect(
+                await self.module("adapter.onebot").bindings.disconnect(
                     self._cleanup_lease(),
                     pending.binding_id,
                     client_incarnation=pending.client_incarnation,
@@ -357,7 +306,7 @@ class BindingRuntime:
             async with self._connect_slots:
                 if self._closed.is_set():
                     return
-                saved = await self.bindings.candidate_config(
+                saved = await self.module("adapter.onebot").bindings.candidate_config(
                     self.kernel._authority(), binding_id, revision,
                     expected_desired_revision=desired["revision"], recover_effective=recover,
                 )
@@ -393,7 +342,9 @@ class BindingRuntime:
                         raise ForestError(
                             "ONEBOT_IDENTITY_MISMATCH", "API account differs from binding", 409
                         )
-                drained = await self.bindings.drain(self.kernel._authority(), binding_id, desired["revision"])
+                drained = await self.module("adapter.onebot").bindings.drain(
+                    self.kernel._authority(), binding_id, desired["revision"]
+                )
                 old = self.connections.get(binding_id)
                 if old is not None:
                     old.accepting = False
@@ -413,7 +364,7 @@ class BindingRuntime:
                     transport,
                 )
                 self._pending[pending.client_incarnation] = pending
-                row = await self.bindings.activate(
+                row = await self.module("adapter.onebot").bindings.activate(
                     self.kernel._authority(),
                     binding_id,
                     revision,
@@ -453,7 +404,7 @@ class BindingRuntime:
             if code in _LOST_AUTHORITY:
                 self._fatal(code)
             try:
-                await self.bindings.report_error(
+                await self.module("adapter.onebot").bindings.report_error(
                     self.kernel._authority(), binding_id, desired["revision"], code
                 )
             except Exception:
@@ -470,7 +421,9 @@ class BindingRuntime:
     async def run_forever(self):
         while not self._closed.is_set():
             try:
-                desired = await self.bindings.desired(self.kernel._authority())
+                desired = await self.module("adapter.onebot").bindings.desired(
+                    self.kernel._authority()
+                )
                 for row in desired:
                     binding_id = row["binding_id"]
                     old = self.connections.get(binding_id)
@@ -591,14 +544,16 @@ class BindingRuntime:
         binding_id = connection.row["binding_id"]
         preview = parse_event(body, self_id=connection.row["self_id"])
         preview_event = (
-            self.messages._normalized(preview.as_dict()) if preview is not None else None
+            self.module("adapter.onebot").messages._normalized(preview.as_dict())
+            if preview is not None else None
         )
-        ingress_plan = self.shell_ingress.classify(connection.row, preview_event)
+        adapter = self.module("adapter.onebot")
+        ingress_plan = adapter.shell_ingress.classify(connection.row, preview_event)
         task = asyncio.current_task()
         connection.tasks.add(task)
         try:
-            async with self.shell_ingress.enter(ingress_plan) as priority_proof:
-                staged = await self.messages.stage_platform_input(
+            async with adapter.shell_ingress.enter(ingress_plan) as priority_proof:
+                staged = await adapter.messages.stage_platform_input(
                     self.kernel._authority(), binding_id, body,
                     expected_binding_epoch=connection.row["binding_epoch"],
                 )
@@ -629,14 +584,14 @@ class BindingRuntime:
                         timeout=10,
                         input_parent_ids=(staged.origin_payload_id,),
                     )
-                    if self.messages._normalized(normalized.value["message"]) != event:
+                    if adapter.messages._normalized(normalized.value["message"]) != event:
                         raise ForestError(
                             "ONEBOT_PROJECTION_CONFLICT",
                             "Codec changed the authenticated platform projection",
                             409,
                         )
                 if event["author"].get("is_self"):
-                    echo = await self.delivery.find_echo(
+                    echo = await adapter.delivery.find_echo(
                         self.kernel._authority(),
                         binding_id,
                         event["platform_message_id"],
@@ -647,7 +602,7 @@ class BindingRuntime:
                         return {"accepted": True, "kind": "KNOWN_ECHO"}
                 trigger = False
                 if priority_proof is None:
-                    current = await self.bindings.execution_config(
+                    current = await adapter.bindings.execution_config(
                         self.kernel._authority(), binding_id,
                         expected_binding_epoch=connection.row["binding_epoch"],
                     )
@@ -675,7 +630,7 @@ class BindingRuntime:
                             )
                         )
                     )
-                receipt = await self.messages.ingest(
+                receipt = await adapter.messages.ingest(
                     self.kernel._authority(),
                     binding_id,
                     event,
@@ -732,7 +687,7 @@ class BindingRuntime:
                 receipt.result_payload_id,
                 receipt.result_digest,
             )
-        current = await self.bindings.execution_config(
+        current = await self.module("adapter.onebot").bindings.execution_config(
             self.kernel._authority(), actor.binding_id, expected_binding_epoch=actor.binding_epoch, data=True,
         )
         config = current["config"]
@@ -774,7 +729,7 @@ class BindingRuntime:
             or connection.row["connection_epoch"] != claim.connection_epoch
         ):
             raise ForestError("STALE_BINDING", "Delivery belongs to an old connection", 409)
-        current = await self.bindings.execution_config(
+        current = await self.module("adapter.onebot").bindings.execution_config(
             self.kernel._authority(), claim.route["binding_id"], expected_binding_epoch=claim.binding_epoch,
         )
         await self.ensure_components(("adapter.onebot",))
@@ -838,19 +793,21 @@ class BindingRuntime:
     async def _close(self):
         for task in (*self._jobs.values(), *self._component_jobs.values(), *self._tasks):
             task.cancel()
-        errors = []
-        for closer in (self.delivery_worker.close,):
-            try:
-                await closer()
-            except Exception as exc:
-                errors.append(exc)
-        errors.extend(await self.module_registry.close())
         await asyncio.gather(
             *self._tasks,
             *self._jobs.values(),
             *self._component_jobs.values(),
             return_exceptions=True,
         )
+        errors = await self.module_registry.close()
+        if errors or self._clients or self._pending or self.connections:
+            raise ForestError("PLATFORM_CLEANUP_FAILED", "Platform resources remain owned", 503)
+        self._tasks.clear()
+        self._jobs.clear()
+        self._component_jobs.clear()
+
+    async def _close_adapter_resources(self):
+        errors = []
         for pending in list(self._pending.values()):
             try:
                 await self._resolve_activation(pending, adopt=False)
@@ -874,6 +831,3 @@ class BindingRuntime:
                 errors.append(exc)
         if errors or self._clients or self._pending or self.connections:
             raise ForestError("PLATFORM_CLEANUP_FAILED", "Platform resources remain owned", 503)
-        self._tasks.clear()
-        self._jobs.clear()
-        self._component_jobs.clear()

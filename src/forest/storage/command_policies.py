@@ -235,7 +235,7 @@ class CommandPolicyStore:
                 row = await (
                     await conn.execute(
                         "SELECT revision FROM public.bot_command_policy_heads "
-                        "WHERE bot_id=%s AND binding_id=%s AND command_id=%s",
+                        "WHERE bot_id=%s AND binding_id=%s AND command_id=%s FOR SHARE",
                         (
                             self.store.bot_id,
                             payload.get("binding_id"),

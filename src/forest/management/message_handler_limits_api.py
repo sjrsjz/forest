@@ -107,7 +107,8 @@ def install_message_handler_limit_routes(app, runtime):
         ticket, operation = await signed(
             request, bot, who, "message.handler.limit.read", {}, write=False
         )
-        return await bot.platform.message_handler_limits.read(ticket, operation)
+        limits = bot.platform.module("message.router").limits
+        return await limits.read(ticket, operation)
 
     @app.post("/management/v1/bots/{bot_id}/message-handler-limit-change-plans")
     async def plan(bot_id: str, body: HandlerLimitPlan, request: Request):
@@ -118,7 +119,8 @@ def install_message_handler_limit_routes(app, runtime):
             "values": body.values.model_dump(),
         }
         ticket, operation = await signed(request, bot, who, "message.handler.limit.plan", payload)
-        return await bot.platform.message_handler_limits.plan(ticket, operation, payload)
+        limits = bot.platform.module("message.router").limits
+        return await limits.plan(ticket, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/message-handler-limit-management-requests")
     async def apply(bot_id: str, body: HandlerLimitApply, request: Request):
@@ -130,7 +132,8 @@ def install_message_handler_limit_routes(app, runtime):
             "plan_digest": body.plan_digest,
         }
         ticket, operation = await signed(request, bot, who, "message.handler.limit.apply", payload)
-        result = await bot.platform.message_handler_limits.apply(ticket, operation, payload)
+        limits = bot.platform.module("message.router").limits
+        result = await limits.apply(ticket, operation, payload)
         if result is not None and not bot.control.is_unavailable(result):
             bot.platform.notify()
         return result

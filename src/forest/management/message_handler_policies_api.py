@@ -96,7 +96,8 @@ def install_message_handler_policy_routes(app, runtime):
         ticket, operation = await signed(
             request, bot, who, "message.handler.policy.read", payload, write=False
         )
-        return await bot.platform.message_handler_policies.read(ticket, operation, binding_id)
+        policies = bot.platform.module("message.router").policies
+        return await policies.read(ticket, operation, binding_id)
 
     @app.post(
         "/management/v1/bots/{bot_id}/bindings/{binding_id}/components/{component_id}/"
@@ -114,7 +115,8 @@ def install_message_handler_policy_routes(app, runtime):
             "values": body.values.model_dump(),
         }
         ticket, operation = await signed(request, bot, who, "message.handler.policy.plan", payload)
-        return await bot.platform.message_handler_policies.plan(ticket, operation, payload)
+        policies = bot.platform.module("message.router").policies
+        return await policies.plan(ticket, operation, payload)
 
     @app.post(
         "/management/v1/bots/{bot_id}/bindings/{binding_id}/components/{component_id}/"
@@ -132,7 +134,8 @@ def install_message_handler_policy_routes(app, runtime):
             "plan_id": body.plan_id, "plan_digest": body.plan_digest,
         }
         ticket, operation = await signed(request, bot, who, "message.handler.policy.apply", payload)
-        result = await bot.platform.message_handler_policies.apply(ticket, operation, payload)
+        policies = bot.platform.module("message.router").policies
+        result = await policies.apply(ticket, operation, payload)
         if result is not None and not bot.control.is_unavailable(result):
             bot.platform.notify()
         return result

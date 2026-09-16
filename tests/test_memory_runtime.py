@@ -46,7 +46,7 @@ async def test_runtime_silent_drain_shares_group_sources_with_independent_cuts(
 
     before = await conversations()
     assert len(before) == 2 and all(row["context_applied_seq"] == 0 for row in before.values())
-    source_store = p.runtime.memory_sources
+    source_store = p.runtime.module("memory.graph").sources
     unread = await source_store.read(
         p.kernel._authority(),
         before["30001"]["conversation_id"],
@@ -124,10 +124,13 @@ async def test_runtime_owns_bounded_backfill_and_reclaims_its_supervised_task(pl
     heads = await wait_for(scanned)
     assert [row["kind"] for row in heads] == ["INPUT", "REPLY"]
     assert all(row["bot_id"] == p.env.store.bot_id for row in heads)
-    assert not memory_tasks[0].done() and "memory_sources" not in p.runtime.errors
+    memory = p.runtime.module("memory.graph")
+    assert memory_tasks == [memory.backfill_task]
+    assert not memory_tasks[0].done() and "memory_sources" not in memory.errors
     async with asyncio.timeout(10):
         await p.runtime.close()
     assert all(task.done() for task in tasks)
     assert not p.runtime._tasks and not p.runtime._clients and not p.runtime.connections
     assert connection.client._client.is_closed
     assert p.runtime.failure is None
+    assert not hasattr(p.runtime, "memory_sources")

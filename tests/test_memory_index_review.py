@@ -32,7 +32,7 @@ def runtime_fixture():
     platform.module = lambda component_id: (
         scheduler if component_id == "conversation.scheduler" else None
     )
-    runtime = MemoryRuntime(platform)
+    runtime = MemoryRuntime(platform, messages=platform.messages)
     cfg = {
         "revision": 1,
         "values": {**DEFAULT_MEMORY_SETTINGS, "enabled": True},
@@ -51,7 +51,11 @@ def runtime_fixture():
     async def semantic_process(*args, **kwargs):
         return None
 
+    async def no_backfill(*args, **kwargs):
+        return {"more_possible": False}
+
     runtime.config = SimpleNamespace(runtime=config)
+    runtime.sources = SimpleNamespace(backfill=no_backfill)
     runtime.index = SimpleNamespace(recover=empty, enroll=empty, retryable=empty, pending=empty)
     runtime.media = SimpleNamespace(recover=empty, scan=empty)
     runtime.graph = SimpleNamespace(pending=graph_pending)

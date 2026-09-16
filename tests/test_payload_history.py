@@ -254,16 +254,16 @@ async def test_two_published_legacy_replies_continue_after_the_first_view_is_cli
         kernel.lease = env.lease
         runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
         try:
-            received = await runtime.messages.ingest(env.lease, "binding-a",
+            received = await runtime.module("adapter.onebot").messages.ingest(env.lease, "binding-a",
                 event(82, group="completed-group", text="continue after clipped legacy history"), decision="TRIGGER")
-            actor = await owner(runtime.messages, env.lease, received["conversation_id"], "current-after-history")
-            selected = await runtime.messages.select_input(actor, "current-cut")
-            view = await runtime.messages.context(actor, run_id=selected["run_id"])
+            actor = await owner(runtime.module("adapter.onebot").messages, env.lease, received["conversation_id"], "current-after-history")
+            selected = await runtime.module("adapter.onebot").messages.select_input(actor, "current-cut")
+            view = await runtime.module("adapter.onebot").messages.context(actor, run_id=selected["run_id"])
             assert env.completed.reply["reply_id"] not in {u["reply_id"] for u in view["units"]}
             agent = runtime.module("agent.runtime")
             assert (await agent.runner.advance(actor, selected, view)).status == "FINAL_READY"
             await agent.runner.state.commit_final(
-                actor, selected["run_id"], "current-final", runtime.delivery
+                actor, selected["run_id"], "current-final", runtime.module("adapter.onebot").delivery
             )
             assert len(requests) == 1 and b"second old reply" in requests[0]["body"]
             assert not await row(env, "SELECT 1 FROM public.bot_memory_config_heads")

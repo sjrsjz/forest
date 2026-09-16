@@ -290,7 +290,8 @@ async def test_foreground_query_timeout_cancels_real_http_and_releases_owned_tas
         runtime = MemoryRuntime(
             SimpleNamespace(
                 bot=SimpleNamespace(store=env.store), messages=images.messages, vault=env.vault
-            )
+            ),
+            messages=images.messages,
         )
         try:
             task = asyncio.create_task(runtime.retrieve_for_step(actor, snapshot, state))
@@ -350,7 +351,8 @@ async def test_query_deadline_includes_actual_postgres_search_after_http_complet
         runtime = MemoryRuntime(
             SimpleNamespace(
                 bot=SimpleNamespace(store=env.store), messages=images.messages, vault=env.vault
-            )
+            ),
+            messages=images.messages,
         )
         original = runtime.queries._search
 

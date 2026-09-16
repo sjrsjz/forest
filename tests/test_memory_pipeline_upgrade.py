@@ -48,11 +48,13 @@ from forest.storage.messages import MessageStore
 
 pytestmark = pytest.mark.postgres
 
-# Frozen from 394c7cb Git blobs, not recomputed from current files at test time.
+# Development baseline used to seed nonempty history fixtures. Forest has not
+# shipped, so an intentionally rewritten baseline replaces the old checksum
+# instead of adding a compatibility migration.
 RELEASED = {
     **P3_RELEASED,
     "021_payloads.sql": "b56edd570454d2b65d6d1710dd124dbaa65cf85091ec3e864c19b1ca6cdd1116",
-    "022_memory_sources.sql": "ae57fb41c4d2a01d3d744c6705acc118045e903e6d644adb5cdde346881c3f86",
+    "022_memory_sources.sql": "ea5e68eb3e7b6e43492350bd77a41be01c05742dfc47b4cc3c6a4ca27f7204fc",
 }
 OLD_ACTIONS = [
     "config.read",
@@ -660,16 +662,16 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
         runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
         try:
             actor = await owner(
-                runtime.messages, env.lease, env.retry.actor.conversation_id, "upgrade-recovery"
+                runtime.module("adapter.onebot").messages, env.lease, env.retry.actor.conversation_id, "upgrade-recovery"
             )
-            selected = await runtime.messages.select_input(actor, "resume-old")
-            view = await runtime.messages.context(actor, run_id=selected["run_id"])
+            selected = await runtime.module("adapter.onebot").messages.select_input(actor, "resume-old")
+            view = await runtime.module("adapter.onebot").messages.context(actor, run_id=selected["run_id"])
             assert selected["run_id"] == env.retry.run_id and selected["status"] == "RESUME"
             agent = runtime.module("agent.runtime")
             disposition = await agent.runner.advance(actor, selected, view)
             assert disposition.status == "FINAL_READY"
             reply = await agent.runner.state.commit_final(
-                actor, selected["run_id"], "finish-old", runtime.delivery
+                actor, selected["run_id"], "finish-old", runtime.module("adapter.onebot").delivery
             )
             assert reply["parts"] == [[{"type": "text", "text": "Completed after upgrade"}]]
             assert len(requests) == 1 and requests[0]["body"] == env.retry.prepared.body
@@ -697,26 +699,26 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
                 assert not (await snapshot(conn, ("bot_agent_memory_bindings",)))[
                     "bot_agent_memory_bindings"
                 ]
-            await runtime.messages.release_actor(actor)
+            await runtime.module("adapter.onebot").messages.release_actor(actor)
 
             # A fresh model boundary invokes the new retrieval hook, which must
             # choose DISABLED without contacting embedding/media providers.
-            new = await runtime.messages.ingest(
+            new = await runtime.module("adapter.onebot").messages.ingest(
                 env.lease,
                 "binding-a",
                 event(4, group="retry-group", text="new request after upgrade"),
                 decision="TRIGGER",
             )
             actor = await owner(
-                runtime.messages, env.lease, new["conversation_id"], "upgrade-next-run"
+                runtime.module("adapter.onebot").messages, env.lease, new["conversation_id"], "upgrade-next-run"
             )
-            selected = await runtime.messages.select_input(actor, "select-new")
-            view = await runtime.messages.context(actor, run_id=selected["run_id"])
+            selected = await runtime.module("adapter.onebot").messages.select_input(actor, "select-new")
+            view = await runtime.module("adapter.onebot").messages.context(actor, run_id=selected["run_id"])
             assert (
                 await runtime.module("agent.runtime").runner.advance(actor, selected, view)
             ).status == "FINAL_READY"
             await runtime.module("agent.runtime").runner.state.commit_final(
-                actor, selected["run_id"], "finish-new", runtime.delivery
+                actor, selected["run_id"], "finish-new", runtime.module("adapter.onebot").delivery
             )
             assert len(requests) == 2 and b"new request after upgrade" in requests[1]["body"]
             async with env.store.pool.connection() as conn:
@@ -735,7 +737,7 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
                     "bot_memory_config_revisions",
                 ):
                     assert not (await snapshot(conn, (table,)))[table]
-            await runtime.messages.release_actor(actor)
+            await runtime.module("adapter.onebot").messages.release_actor(actor)
         finally:
             await runtime.close()
             await kernel.close()

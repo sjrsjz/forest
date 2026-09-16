@@ -58,6 +58,8 @@ flowchart LR
 
 当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。启动失败会先清理失败模块自身，再按逆依赖序排空已启动模块；关闭失败保留 FAILED 并允许后续关闭重试。下一步仍需把这些瞬时状态接入持久代际发布、健康检查、Contract Router 原子切换和按依赖边隔离的故障策略。
 
+官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore 与发送 Worker，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`command.router`、`message.router` 分别拥有业务命令和普通消息 Handler 的策略/容量存储。Agent、Memory、Conversation Scheduler、Shell 和 Job 只从依赖图取得这些对象，`BindingRuntime` 不再暴露 `messages`、`bindings`、`delivery`、`memory_sources` 或策略存储便利属性。发送连接监督和 OneBot 网络接纳仍在 `BindingRuntime`，是下一步需要迁入 adapter 生命周期的剩余部分。
+
 ## 4. 控制台信息架构
 
 顶层导航固定为内核概念：

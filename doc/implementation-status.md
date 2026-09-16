@@ -38,6 +38,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 控制台使用受限 iframe、摘要校验和有界 `MessageChannel` 装载模块 UI；
 - `BindingRuntime` 的若干 Agent/Memory/Scheduler/Shell 便利属性已删除，调用方开始按组件 ID 取能力。
 - `BotModuleRegistry` 已拥有严格生命周期状态；失败模块会清理自身，已启动依赖按逆序排空，关闭失败可重试，控制面不再采用模块自报 `state`。
+- `adapter.onebot` 已拥有 Binding/Inbox/Shell ingress/Delivery 端口和发送 Worker；`memory.graph` 已拥有来源回填；`command.router` 与 `message.router` 已拥有各自策略和容量存储。`BindingRuntime` 对应便利属性已删除。
 
 这只是控制面所有权和传输收口。运行时组合根、完整生命周期切换、路由图与资源归属尚未全部迁完。
 
@@ -47,7 +48,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 ### P0 微内核
 
-- `BindingRuntime` 仍直接构造或协调部分业务模块，需要改为注册表、工厂和生命周期协调器装配；
+- `BindingRuntime` 仍负责 OneBot 网络连接接纳、候选切换和部分平台监督；这些剩余职责需要迁入 `adapter.onebot` 模块及通用 supervisor；
 - 瞬时生命周期状态机及失败清理已落实；仍需接入持久代际发布、健康检查、Contract Router 原子切换、按依赖边故障隔离和进程恢复；
 - command、message handler、service、event、job 必须统一编译进可解释 RouteGraph；
 - dispatch trace 必须按消息、组件、代际和结果查询，且与可编辑业务配置分离；
