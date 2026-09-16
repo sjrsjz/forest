@@ -152,6 +152,68 @@ async def graph_ready(p, roots):
     return page["scopes"] if published_images == expected_images else False
 
 
+async def test_qiyu_siliconflow_profile_publishes_normalized_vector(platform):
+    p = platform
+
+    async def qwen_embeddings(writer, request):
+        body = json.loads(request["body"])
+        assert body == {
+            "model": "Qwen/Qwen3-VL-Embedding-8B",
+            "dimensions": 4096,
+            "encoding_format": "float",
+            "truncate": "right",
+            "input": [{"text": "qiyu-vl-profile"}],
+        }
+        await send(
+            writer,
+            {
+                "model": "Qwen/Qwen3-VL-Embedding-8B",
+                "object": "list",
+                "usage": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+                "data": [
+                    {
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": [3.0, 4.0] + [0.0] * 4094,
+                    }
+                ],
+            },
+        )
+
+    async with server(qwen_embeddings) as (endpoint, requests, _):
+        try:
+            await configure(
+                p,
+                endpoint,
+                model="Qwen/Qwen3-VL-Embedding-8B",
+                dimensions=4096,
+                deployment_id="qiyu-siliconflow-qwen3-vl",
+                model_revision="qiyu-production-2026-09",
+            )
+            await p.runtime._replace(p.desired)
+            await p.runtime.start()
+            await receive(p, 9, message=[{"type": "text", "data": {"text": "qiyu-vl-profile"}}])
+            await wait_state(p, lambda: source_ready(p, 1))
+            stored = await rows(
+                p,
+                "SELECT profile_metadata FROM public.bot_memory_embedding_requests",
+            )
+            vector = await rows(p, "SELECT vector FROM public.bot_memory_vectors")
+            assert len(requests) == 1
+            assert stored == [
+                {
+                    "profile_metadata": {
+                        "dimensions": 4096,
+                        "protocol_revision": "siliconflow-qwen3-vl-embedding-http-2026-09-v1",
+                    },
+                }
+            ]
+            assert vector[0]["vector"][:2] == pytest.approx([0.6, 0.8])
+            assert len(vector[0]["vector"]) == 4096
+        finally:
+            await p.runtime.close()
+
+
 def closed_memory(runtime):
     assert runtime.closed and runtime.task.done()
     assert not runtime.workers and not runtime.executions and not runtime.clients

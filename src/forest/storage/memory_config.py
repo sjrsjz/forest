@@ -20,10 +20,13 @@ NUMERIC_FIELDS = (
     "media_max_bytes", "capture_max_attempts", "query_max_parts", "query_max_images",
     "query_limit", "query_timeout", "max_result_tokens", "max_result_images", "max_result_bytes",
 )
-
-
 def _metadata(values):
-    return {key: values[key] for key in ("enabled", *NUMERIC_FIELDS)}
+    return {
+        **{key: values[key] for key in ("enabled", *NUMERIC_FIELDS)},
+        "profile_deployment_digest": digest_json([values["deployment_id"]]),
+        "profile_model_digest": digest_json([values["model"]]),
+        "profile_revision_digest": digest_json([values["model_revision"]]),
+    }
 
 
 class MemoryConfig:
@@ -83,18 +86,25 @@ class MemoryConfig:
             hydrated = {**hydrated, "values": normalized}
         return {**row, **hydrated}
 
-    async def _deployment(self, conn, values):
-        conflict = await (
-            await conn.execute(
-                "SELECT 1 FROM public.bot_memory_deployment_bindings WHERE bot_id=%s "
-                "AND deployment_digest=%s AND endpoint_digest<>%s",
-                (self.store.bot_id, digest_json([values["deployment_id"]]), digest_json([values["endpoint"]])),
+    @staticmethod
+    def _profile_lifecycle(saved, values):
+        if not saved:
+            return
+        metadata = saved["values_metadata"]
+        expected = _metadata(values)
+        lifecycle_changed = any(
+            metadata.get(key) != expected[key]
+            for key in (
+                "dimensions",
+                "profile_deployment_digest",
+                "profile_model_digest",
+                "profile_revision_digest",
             )
-        ).fetchone()
-        if conflict:
+        )
+        if lifecycle_changed:
             raise ForestError(
-                "MEMORY_DEPLOYMENT_CONFLICT",
-                "Changing endpoint requires a new deployment identity",
+                "MEMORY_PROFILE_LIFECYCLE_CONFLICT",
+                "Embedding model identity is fixed for this Bot; create a new Bot to replace it",
                 409,
             )
 
@@ -155,7 +165,7 @@ class MemoryConfig:
                     "REVISION_CONFLICT", "Memory settings changed; reload before applying"
                 )
             saved = await self._revision(conn, head["revision"], required=False)
-            await self._deployment(conn, values)
+            self._profile_lifecycle(saved, values)
             cipher = (
                 secret_ciphertext
                 if payload["credentials_changed"]
@@ -241,7 +251,8 @@ class MemoryConfig:
             if plan["expires_at"] <= await self.store._now(conn):
                 raise ForestError("PLAN_EXPIRED", "Preview the Memory settings again")
             plan = await self.hydrate_in(conn, self.store, plan, kind="PLAN")
-            await self._deployment(conn, plan["values"])
+            saved = await self._revision(conn, head["revision"], required=False)
+            self._profile_lifecycle(saved, plan["values"])
             revision = head["revision"] + 1
             secret_revision = head["secret_revision"] + int(
                 plan["credentials_changed"] or head["revision"] == 0

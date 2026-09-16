@@ -8,7 +8,9 @@
 
 `bot_memory_config_heads` 保存当前版本和密钥版本。计划和已提交版本分别写入只增不改的 `bot_memory_config_plans`、`bot_memory_config_revisions`。计划绑定 Bot、issuer、subject、期望版本、规范化配置、密钥变化摘要和十分钟期限；应用使用 CAS，并在事务末尾重新检查短期 Web 权限期限。相同幂等请求返回原回执，旧请求重放不能推进当前版本。
 
-服务地址是完整 `/embeddings` URL，拒绝内嵌凭据、query、fragment。更换地址必须使用新 `deployment_id`；历史中用过的部署身份也不能绑定到另一地址。模型固定为 Jina CLIP v2，维度选择 512 或 1024，文本与图片能力独立于聊天模型的 vision 配置。`model_revision` 是管理员对模型与预处理版本的声明，并非服务端权重哈希证明。
+服务地址是完整 `/embeddings` URL，拒绝内嵌凭据、query、fragment。当前支持 Jina CLIP v2（512/1024 维）和 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B`（64–4096 的受控维度集合），文本与图片能力独立于聊天模型的 vision 配置。`model_revision` 是管理员对模型与预处理版本的声明，并非服务端权重哈希证明。
+
+首次提交记忆配置是 Bot 的嵌入空间初始化边界。此后 `deployment_id`、`model`、`model_revision` 和 `dimensions` 与 Bot 生命周期绑定：管理服务在 plan 阶段拒绝改变，数据库在 revision 写入阶段再次证明，WebUI 也把对应字段设为只读。Endpoint、凭据、开关和预算仍可按普通 CAS 配置轮换；更换 endpoint 的前提是它继续提供相同模型、修订、维度和预处理语义。需要更换模型种类、权重/预处理修订或维度时，创建新 Bot 并通过显式迁移流程转移需要保留的业务数据，不能在旧向量空间上就地重解释历史向量。配置正文被遗忘后仍永久保留 deployment、model、model revision 的不可逆摘要和维度，因此正文清理不会解除生命周期约束，也不会泄露原声明字符串。
 
 升级迁移 023 逐项继承已有权限：`config.read/plan/apply` 分别映射 `memory.config.read/plan/apply`，`message.read` 映射 `memory.read`。不会把只读 issuer 扩大为可写，也不会启用停用的 issuer。
 

@@ -132,7 +132,14 @@ def main():
             budget = page.locator('#memory-config [name="daily_request_budget"]')
             batch = page.locator('#memory-config [name="batch_size"]')
             key = page.locator('#memory-config [name="api_key"]')
+            endpoint = page.locator('#memory-config [name="endpoint"]')
             expect(budget).to_have_value("200")
+            for name in ("deployment_id", "model", "model_revision", "dimensions"):
+                expect(page.locator(f'#memory-config [name="{name}"]')).to_be_disabled()
+            expect(endpoint).to_be_enabled()
+            assert page.locator(
+                '#memory-config [name="model"] option[value="Qwen/Qwen3-VL-Embedding-8B"]'
+            ).count() == 1
             expect(page.locator("#memory-state")).to_contain_text("DISABLED")
             sources = page.locator("#memory-sources input[type=checkbox]")
             expect(sources).to_have_count(2)
@@ -154,7 +161,7 @@ def main():
             expect(page.locator("#memory-associations .memory-association")).to_have_count(1)
             expect(page.locator("#memory-associations-status")).to_contain_text("有效 0")
             expect(page.locator("#memory-associations .memory-association button")).to_contain_text("恢复")
-            page.locator('#memory-config [name="dimensions"]').select_option("1024")
+            endpoint.fill("https://embedding.example.com/v1/embeddings")
             page.locator('#memory-config [name="enabled"]').check()
             page.locator('#memory-config [name="semantic_associations_enabled"]').uncheck()
             page.locator('#memory-config [name="media_allowed_origins"]').fill(
@@ -167,7 +174,8 @@ def main():
             sent = page.evaluate(
                 "fixture.calls.filter(c=>c.path.endsWith('/change-plans')).at(-1).body"
             )
-            assert sent["values"]["dimensions"] == 1024 and sent["values"]["enabled"]
+            assert sent["values"]["dimensions"] == 512 and sent["values"]["enabled"]
+            assert sent["values"]["endpoint"] == "https://embedding.example.com/v1/embeddings"
             assert not sent["values"]["semantic_associations_enabled"]
             assert sent["values"]["media_allowed_origins"] == ["https://images.example.com"]
 

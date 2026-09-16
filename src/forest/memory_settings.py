@@ -13,7 +13,7 @@ class MemorySettings(BaseModel):
     semantic_associations_enabled: bool = Field(default=True, strict=True)
     endpoint: str = Field(default="https://api.jina.ai/v1/embeddings", max_length=2048)
     deployment_id: str = Field(default="jina-clip-v2", min_length=1, max_length=128)
-    model: Literal["jina-clip-v2"] = "jina-clip-v2"
+    model: Literal["jina-clip-v2", "Qwen/Qwen3-VL-Embedding-8B"] = "jina-clip-v2"
     model_revision: str = Field(default="v1", min_length=1, max_length=128)
     dimensions: int = Field(default=512, strict=True)
     batch_size: int = Field(default=16, ge=1, le=32, strict=True)
@@ -90,8 +90,16 @@ class MemorySettings(BaseModel):
     @field_validator("dimensions")
     @classmethod
     def dimension(cls, value):
-        if value not in {512, 1024}:
-            raise ValueError("Choose 512 or 1024 dimensions")
+        if value not in {64, 128, 256, 512, 768, 1024, 2048, 4096}:
+            raise ValueError("Choose a dimension supported by the configured embedding model")
+        return value
+
+    @field_validator("dimensions")
+    @classmethod
+    def model_dimension(cls, value, info):
+        model = info.data.get("model", "jina-clip-v2")
+        if model == "jina-clip-v2" and value not in {512, 1024}:
+            raise ValueError("Jina CLIP v2 supports 512 or 1024 dimensions here")
         return value
 
 

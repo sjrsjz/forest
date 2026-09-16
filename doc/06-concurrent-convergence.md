@@ -337,7 +337,7 @@ document_id = H(bot_id, source_manifest_digest, source_part_refs,
 
 文本先就绪时可以发布声明 TEXT 覆盖的文档/索引修订；图片后来 READY 使对应依赖水位变脏，并在固定原 part 位置生成 IMAGE 或已配置 MIXED 工件。没有图片的工作不能将整体文档标为完整，旧 PARTIAL 修订晚到不能覆盖已经发布的扩展覆盖；索引发布对相同版本的覆盖以集合并/规范 manifest 重建，若源内容修订变化则重新验证而非盲目并。捕获失败或预算不足保持有界 PARTIAL/FAILED 状态和修复 Job，不回退源顺序，不让无图分支触发隐式 caption/OCR API。裁剪不等待嵌入完成。
 
-迁移 EmbeddingProfile 时新 `space_id/profile_revision` 在独立 index generation 中建立，来源持续写入通过各自 desired/processed 水位补齐；发布 `embedding_index_heads` 时 CAS 校验覆盖与当前源/删除依赖。查询固定某个已发布 head，并使用与其匹配的 query encoder/预处理；同维度不同空间不能混算余弦或其他距离。需并查不同空间时分别排序后按固定规则融合结果，来源重复项只作一次证据，融合配置与选中的各 head 进入查询快照。
+EmbeddingProfile 与 Bot 生命周期绑定，同一 Bot 不执行空间原地迁移。模型、修订或维度变化时创建新 Bot，在其独立 index generation 中按显式迁移输入重建；来源写入通过各自 desired/processed 水位补齐，发布 `embedding_index_heads` 时 CAS 校验覆盖与当前源/删除依赖。查询固定某个已发布 head，并使用与其匹配的 query encoder/预处理；同维度不同空间不能混算余弦或其他距离。若跨 Bot 迁移工具需要并查新旧空间，只能分别排序后按版本化规则融合候选，来源重复项只作一次证据，融合配置与选中的各 head 进入查询快照。
 
 ### 6.7 模型能力投影与并发请求
 

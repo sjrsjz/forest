@@ -8,10 +8,10 @@ const groups = [
     ['enabled', '启用此 Bot 的图文记忆', 'checkbox'],
     ['semantic_associations_enabled', '启用跨群自动语义联想（复用已生成向量）', 'checkbox'],
     ['endpoint', '完整嵌入 API 地址', 'url'],
-    ['deployment_id', '部署身份（更换服务地址时使用新身份）', 'text'],
-    ['model', '模型协议', ['jina-clip-v2']],
+    ['deployment_id', '部署身份（首次配置后随 Bot 生命周期冻结）', 'text'],
+    ['model', '模型协议', ['jina-clip-v2', 'Qwen/Qwen3-VL-Embedding-8B']],
     ['model_revision', '模型与预处理版本声明', 'text'],
-    ['dimensions', '向量维度', [512, 1024]],
+    ['dimensions', '向量维度', [64, 128, 256, 512, 768, 1024, 2048, 4096]],
     ['api_key', 'API 密钥（留空保留）', 'password'],
     ['clear_api_key', '清除已有 API 密钥', 'checkbox'],
   ]],
@@ -235,6 +235,9 @@ export function memoryPanel(api, busy, notice) {
       const field = form.elements[name]; if (!field) continue;
       if (field.type === 'checkbox') field.checked = value;
       else field.value = Array.isArray(value) ? value.join('\n') : value;
+    }
+    for (const name of ['deployment_id', 'model', 'model_revision', 'dimensions']) {
+      if (form.elements[name]) form.elements[name].disabled = row.revision > 0;
     }
     $('memory-edit').disabled = false;
     $('memory-config-status').textContent = row.values_payload_state === 'DRAFT'

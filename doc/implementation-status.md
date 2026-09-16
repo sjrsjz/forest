@@ -1,8 +1,8 @@
 # Forest 实现状态与验证记录
 
-## 0. 当前发布候选快照（2026-09-15）
+## 0. 当前发布候选快照（2026-09-16）
 
-当前产品运行源码基线为 `273731a`（writer generation 25、Bot schema 086），后续变化只涉及验收脚本和文档。P0–P5 的首版纵向功能已形成可部署闭环：原生异步微内核与受监督 Worker、多 Bot/Binding、群消息持久化与 Actor 调度、受控插件热重载、唯一持久会话 Agent、定时与审批、每 Bot 多主干图文记忆、WebUI/群聊 Shell、可靠发送，以及加密备份、隔离恢复和存储代际切换。产品运行时没有子 Agent；每个 `(bot_id, conversation_id)` 只有一个 Agent。
+当前发布候选使用 writer generation 26、Bot schema 087。P0–P5 的首版纵向功能已形成可部署闭环：原生异步微内核与受监督 Worker、多 Bot/Binding、群消息持久化与 Actor 调度、受控插件热重载、唯一持久会话 Agent、定时与审批、每 Bot 多主干图文记忆、WebUI/群聊 Shell、可靠发送，以及加密备份、隔离恢复和存储代际切换。产品运行时没有子 Agent；每个 `(bot_id, conversation_id)` 只有一个 Agent。
 
 当前 `forest:local` 镜像已通过真实 Edge 加随机命名的独立 Docker Compose 全流程。验收覆盖初始化和登录、viewer/admin 边界、部署与 Bot 审计、配置预览/应用/双窗口冲突/重启、双 Bot 隔离、组件导入/热重载/启停、OneBot Web 配置与真实 HTTP fake transport、Core Shell、Agent HTTP、计划任务、禁用态多模态记忆、UNKNOWN 对账、加密备份/导入/独立校验/隔离恢复/Bot 激活/旧存储清理和注销；脚本最终删除随机项目的容器与卷，宿主不存在残留 `forest-e2e-*` 容器。轻量真实 Edge 组件页面专项随后也通过，明确点击了包声明兼容时可用、未声明时禁用的 Handler 接管开关，并验证提交正文中的显式 opt-in。截图与备份测试工件保存在被 Git 忽略的 `.local/browser-artifacts`。
 
@@ -14,10 +14,14 @@
 |---|---|---|
 | 真实 QQ 入站 | 真实身份、群查询、单次发送与读回已通过 | 在许可群由外部用户触发一条消息，核对真实 Inbox 作者、同群 Actor、Agent/Handler 选择及最终回执；避免高频发送 |
 | 商业 LLM | 传输、协议解析、预算和故障注入已由本地 HTTP 集成覆盖；真实请求未执行 | 经明确外发授权后，用 WebUI 配置的供应商做一次有界 ModelTurn 请求，核对用量与协议解析，不把回答正文写入验收日志 |
-| 原生图文 Embedding | 图文请求、图片/混合召回及生命周期已由本地真实 TCP/PostgreSQL 集成覆盖；没有可确认的 `jina-clip-v2` 实网凭据 | 使用兼容的原生图文 Embedding 账号各做一条文字、图片及混合查询，并核对维度、计费回执和跨群来源标签 |
-| 长时间运行 | 当前功能族回归、真实 PostgreSQL 竞争、Edge/Compose 已通过；本会话未重新跑完 100 次重载压力项 | 空闲机器上完成 100 次重载和持续消息/检索容量 soak，记录资源曲线；此前历史基线的 100 次重载通过记录保留在下文 |
+| 原生图文 Embedding | 已使用 QiYu 的 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 配置完成图片加三条文字的实网混合请求：4 个 4096 维向量、usage 存在、相关文字排序高于两个无关主题；真实 PostgreSQL 端到端发布也通过 | 首版验收完成；生产数据集质量基准与长期供应商漂移监测属于持续运营 |
+| 长时间运行 | 新增并完成 100 次真实 Worker 热重载：每代旧进程退出、active worker 恒为 1、调用/操作账本排空且无 cleanup error | 继续执行持续消息/检索容量 soak 并记录资源曲线；它不阻塞嵌入协议与生命周期切片提交 |
 
 Bot 级账号 scope、MFA、WAL/PITR、裸机身份胶囊、自由上传检索、完整图浏览器、额外平台和更多 Provider adapter 列为后续增强，不阻塞这个首版候选。它们不能在页面或文档中冒充已经实现。
+
+多模态嵌入切片新增 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 原生协议，并把模型身份纳入 Bot 生命周期。首次记忆配置确定 `deployment_id + model + model_revision + dimensions`，后续 Python plan、WebUI 和数据库迁移 087 都拒绝改变这些字段；endpoint、凭据和预算允许轮换，但 endpoint 必须继续代表同一向量空间。配置正文遗忘后永久保留三个身份字段的不可逆摘要和维度，使相同空间的 endpoint/预算修复仍可证明，模型变化仍被拒绝。迁移把 writer generation 提升到 26，将请求 profile 证明和向量维度上限扩展至 Qwen 的 4096 维，同时保持 Jina 既有空间兼容。协议/配置纯测试为 `82 passed, 7 skipped`，迁移与生命周期真实 PostgreSQL 专项为 `37 passed`，Qwen 4096 维消息接纳到向量发布纵向测试为 `1 passed`，100 次真实 Worker 重载为 `1 passed`、146.88 秒。QiYu 凭据的实网混合请求返回 HTTP 200、4 个 4096 维向量和 usage；真实照片与相关文字余弦相似度 0.214978，高于抽象主题 0.125009 与量子主题 0.010301。凭据和返回正文未写入日志。生命周期、载荷遗忘、旧库升级、writer fence 和备份恢复的最终组合为 `74 passed`。
+
+generation 26 首次加入后，隔离恢复专项发现恢复与激活管理器仍给导入连接设置 generation 25，数据库写围栏按设计拒绝旧写者。两处连接已统一到 generation 26；真实 PostgreSQL 隔离恢复测试通过。刷新离线源码覆盖镜像后，完整 Edge/Compose 再次通过三数据库隔离恢复、Bot 存储激活和旧代际回收。正常 `docker compose build` 本次因容器 DNS 无法解析 PyPI 镜像未完成；验证镜像从既有锁定依赖镜像离线覆盖当前 `src/forest`，不把这种环境绕行记录成干净的首次构建。
 
 普通消息 Handler 兼容热重载接管新增 writer generation 25 与迁移 086。冻结链项继续保持不可变；只有候选包声明 `message_handler_takeover="compatible"` 且管理员在组件配置中明确启用时，生命周期发布才会在同一事务追加接管事实。候选定义必须保持完全相同的 component、handler identity 和 spec digest，链项还必须处于未领取、零 attempt 状态。数据库触发器证明 from/to generation、package、route epoch、registry publication 与处于 `QUIESCENT` 的 lifecycle operation 一致，结果提交按最新有效 generation 校验；连续多次重载形成可审计的单调事实链。WebUI 已加入接管授权开关，旧配置缺省关闭，可遗忘配置正文的 metadata 只额外保留该布尔授权。真实 PostgreSQL 专项当前为 `11 passed`，覆盖单次和连续接管、Actor 读取、真实 Kernel v2 调用及结果提交、发布/领取竞争合流、双重授权缺失、spec 变化、已领取项、SQL 伪造和 generation 24 writer 围栏；配置 metadata、管理激活证明与静态声明专项另行通过。当前镜像的真实 Edge/Compose 管理流程及许可群 OneBot 单次正向 WebSocket 发送/读回均已完成，Handler 的真实 QQ 入站触发仍待上线验收。
 
@@ -77,7 +81,7 @@ v2–v9 registry 与语法静态回归为 `100 passed`；Core、Shell、writer �
 
 该切片的 Shell/registry/payload/writer/control 组合回归为 `130 passed`，配置、Web authority 与组件载荷组合回归为 `46 passed`，Fleet 为 `11 passed`，Web Bot 为 `2 passed`。补入 apply 已提交而外层回执尚未写入的故障恢复后，模块纵向测试为 `3 passed`；writer、备份、外部工件与 Web 备份相关复验为 `34 passed`。Ruff、Python 编译、管理页面 JavaScript 语法和补丁空白检查通过。`forest:module-shell` 镜像构建成功，真实 Edge + 独立 Compose 从页面点击组件重载，确认 desired 推进、effective 经生命周期随后追平且配置值不变，并继续通过完整多 Bot、OneBot、单 Agent、图文 Memory、三库备份/导入/校验/恢复、存储激活与旧代回收流程；临时容器与卷均已清理。这些是分组回归，不宣称一次新的全仓库基线。
 
-更新日期：2026-09-15。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**Web 多 Bot、原生微内核、OneBot HTTP 与正向 Universal WebSocket、P2 插件升级与普通消息 Handler、P3 持久单 Agent/定时任务、P4 跨群图文记忆，以及 P5 管理、加密多数据库备份、导入、校验、隔离恢复、存储代际激活与保留期清理均已形成首版纵向闭环；当前处于发布候选验收阶段。**页面支持模型、人格、图文能力、工具权限、嵌入及媒体/查询预算、审批、任务配置与运行取消，也能按群和作者核对记忆来源后预览遗忘、建立/解除/恢复来源联想，并通过维护版本暂停或恢复 Bot 业务。模型/工具步骤以数据库安全点接入群消息，输入投影保留作者及群来源，裁剪不调用摘要 API。
+更新日期：2026-09-16。本文记录当前代码的实际能力，[01–12 设计文档](README.md)继续描述首版目标。**Web 多 Bot、原生微内核、OneBot HTTP 与正向 Universal WebSocket、P2 插件升级与普通消息 Handler、P3 持久单 Agent/定时任务、P4 跨群图文记忆，以及 P5 管理、加密多数据库备份、导入、校验、隔离恢复、存储代际激活与保留期清理均已形成首版纵向闭环；当前处于发布候选验收阶段。**页面支持模型、人格、图文能力、工具权限、嵌入及媒体/查询预算、审批、任务配置与运行取消，也能按群和作者核对记忆来源后预览遗忘、建立/解除/恢复来源联想，并通过维护版本暂停或恢复 Bot 业务。模型/工具步骤以数据库安全点接入群消息，输入投影保留作者及群来源，裁剪不调用摘要 API。
 
 Agent 核心已经按[Agentlib 专项审计](research-qiyu-agentlib.md)和[单 Agent 详细设计](p3-agent.md)改为每个 `(bot_id, conversation_id)` 一条模型—工具执行链。宿主固定不可覆盖的 CorePrompt v1 及摘要，Bot 人格进入独立 PresetContext；Provider 输出按原子 XML ModelTurn 解析，一轮至多一个 FunctionCall，非法输出仅允许一次有界修复。`forest_analyze`、ChildScheduler、Child 配置和页面入口已删除，迁移 050 终结并封存旧记录。旧验证章节只证明被撤销代码当时可运行。公开来源遗忘已经通过 Web 和 Shell 接通；`shell-gate-v4` 新增 P0 Bot 暂停和 P1 恢复，v5 又接通组件事件与组件持久任务管理，v6 接通脱敏 Bot 审计，v7 接通发令群上下文检查与安全点裁剪请求，v8 接通模块状态与重载，v9 接通固定 Core 救援 form，v10 接通 P0 管理员预检；后续版本继续保持旧 gate 可解析。审核式来源联想通过 Web 接入既有纯图归约器和 Agent 召回，群 Shell 暂不提供跨群联想命令。组件事件与组件持久任务都已提供 Web/Shell 元数据观察、DEAD 回放和显式退役；两者均不创建产品 Agent，组件任务仍与会话 Agent 定时任务保持独立。Shell 参数、结果和 CONTROL 回复链已进入来源遗忘闭包；Inbox 前的三通道容量隔离、修订绑定资格缓存、无权主体令牌桶和 Web 聚合统计已经接通。WAL/PITR、自由上传、Bot 级账号 scope 和 MFA 是后续增强；首版 Shell 的状态、运行、任务、记忆、上下文、组件、审计与固定 Core 救援命令已经接通。
 
@@ -213,7 +217,7 @@ Bot 供应任务在部署库固定原始计划、稳定 Bot UUID、数据库/角
 | P1 群聊与多 Bot | 首版闭环完成 | OneBot HTTP/正向 WebSocket、全量 Inbox/作者来源、同群串行跨群并行、Actor fencing、静默裁剪、冻结 Handler 链和可靠发送均已接通；真实 QQ 入站触发与持续压力是上线验收项，额外平台属于后续增强 |
 | P2 热重载与恢复 | 首版闭环完成 | 完整 ZIP、离线锁定环境、持久 watch、受控 KV 迁移、恢复、历史配置、last-good 与 Handler 显式兼容接管已接入；任意 Python 调用栈迁移和通用外部状态后端不在首版范围 |
 | P3 Agent 与上下文 | 首版闭环完成 | 唯一会话 Agent、固定 CorePrompt、PresetContext、原子 ModelTurn、一次修复、下一模型调用安全点、工具/审批/取消、interval/cron 和旧 Child 封存均已接入；真实商业 Provider 的一次有界验收仍需明确外发授权，更多 Provider adapter 属于后续增强 |
-| P4 多模态多主干记忆 | 首版闭环完成 | 每 Bot 多主干图、独立原图捕获、原生图文请求、图片/混合召回、逐项群/作者来源、跨主干联想、异步写合流、遗忘防复活和文本模型投影已接通；兼容 Embedding 的实网图文验收和大规模检索 soak 待执行，自由上传与完整图浏览器属于后续增强 |
+| P4 多模态多主干记忆 | 首版闭环完成 | 每 Bot 多主干图、独立原图捕获、Jina/Qwen 原生图文请求、图片/混合召回、逐项群/作者来源、跨主干联想、异步写合流、遗忘防复活和文本模型投影已接通；Qwen 实网图文验收完成，大规模检索 soak 待执行，自由上传与完整图浏览器属于后续增强 |
 | P5 完整管理与容量 | 首版日常管理和恢复闭环完成 | WebUI、Shell CONTROL、权限/密钥/预算、诊断、审计、备份导入校验、隔离恢复、Bot/部署代际切换和保留期清理已接通；Bot 级账号 scope、MFA、WAL/PITR、裸机身份胶囊和更细角色属于后续增强 |
 
 初始化 bootstrap 仍使用跨进程事务固定计划并依靠目标库幂等初始化；它的 `owner_epoch=1` 表示该初始化子系统没有接管 API。新 BotStore 的宿主/组件执行租约与 fencing 是独立协议，不能据此宣称 bootstrap 或 Bot 存储迁移已经支持完整接管恢复。
@@ -452,6 +456,6 @@ P1 增加了真实 PostgreSQL 分类排列性质、群 Actor 竞争/失权、最
 
 ## 5. 下一步
 
-首版代码现处于发布候选收尾阶段。下一步按开头清单完成许可群真实入站、经明确授权的商业 ModelTurn、兼容原生图文 Embedding，以及机器空闲时的 100 次重载与持续容量 soak；每项都保留可复现命令、稳定状态和清理结果。若这些外部条件暂不可用，发布说明必须明确标为待验收，不能用本地 fake 对端的结果替代。
+首版代码现处于发布候选收尾阶段。Qwen 原生图文 Embedding 实网验收和 100 次真实 Worker 重载已经完成。下一步按开头清单完成许可群真实入站、经明确授权的商业 ModelTurn，以及持续消息/检索容量 soak；每项都保留可复现命令、稳定状态和清理结果。若这些外部条件暂不可用，发布说明必须明确标为待验收，不能用本地 fake 对端的结果替代。
 
 后续版本再推进 Bot 级账号 scope、MFA、WAL/PITR、裸机身份胶囊、自由上传检索、完整图浏览器、更多平台和 Provider adapter。它们不改变首版已经固定的唯一会话 Agent、同群 Actor、有界通信、显式生命周期、全局多主干记忆和来源标记语义。

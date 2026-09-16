@@ -1,4 +1,4 @@
-"""Native Jina CLIP v2 transport with immutable, separately attributed facets.
+"""Native multimodal embedding transport with immutable, attributed facets.
 
 The host supplies authorized MediaSnapshots and a final dispatch permit. This
 module performs no media fetches, model discovery, retries, database writes or
@@ -24,13 +24,20 @@ import httpx
 from forest.errors import ForestError
 from forest.models import MediaSnapshot
 
-PROTOCOL_REVISION = "jina-clip-v2-http-2026-09-v1"
+JINA_MODEL = "jina-clip-v2"
+SILICONFLOW_VL_MODEL = "Qwen/Qwen3-VL-Embedding-8B"
+PROTOCOL_REVISIONS = {
+    JINA_MODEL: "jina-clip-v2-http-2026-09-v1",
+    SILICONFLOW_VL_MODEL: "siliconflow-qwen3-vl-embedding-http-2026-09-v1",
+}
+# Public compatibility name used by existing Jina records and integrations.
+PROTOCOL_REVISION = PROTOCOL_REVISIONS[JINA_MODEL]
 MAX_BATCH_ITEMS = 32
 MAX_TEXT_BYTES = 8192
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_BATCH_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
-MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 SOURCE_FIELDS = frozenset(
     {
@@ -158,25 +165,29 @@ def _source(value):
 class EmbeddingProfile:
     """Public immutable space identity, without endpoints or credentials.
 
-    A deployment_id identifies one fixed endpoint and model installation. The
-    owner must assign a new ID when changing that binding. model_revision is an
-    operator declaration: Jina's response does not prove a remote weights hash.
+    The model, declared revision, dimensions and deployment identity belong to
+    one Bot for its lifetime. The endpoint and credentials may rotate while the
+    operator preserves that embedding space. model_revision is an operator
+    declaration; a provider response does not prove a remote weights hash.
     """
 
     deployment_id: str
     model_revision: str
-    model: str = "jina-clip-v2"
+    model: str = JINA_MODEL
     dimensions: int = 512
 
     def __post_init__(self):
         _identifier(self.deployment_id)
         _identifier(self.model_revision)
-        if (
-            self.model != "jina-clip-v2"
-            or type(self.dimensions) is not int
-            or not 1 <= self.dimensions <= 1024
-        ):
-            raise _error("EMBEDDING_PROFILE_INVALID", "Unsupported CLIP model or dimensions")
+        dimensions = (
+            set(range(1, 1025))
+            if self.model == JINA_MODEL
+            else {64, 128, 256, 512, 768, 1024, 2048, 4096}
+            if self.model == SILICONFLOW_VL_MODEL
+            else set()
+        )
+        if type(self.dimensions) is not int or self.dimensions not in dimensions:
+            raise _error("EMBEDDING_PROFILE_INVALID", "Unsupported embedding model or dimensions")
 
     def as_dict(self):
         return {
@@ -184,11 +195,11 @@ class EmbeddingProfile:
             "model_revision": self.model_revision,
             "model": self.model,
             "dimensions": self.dimensions,
-            "protocol_revision": PROTOCOL_REVISION,
+            "protocol_revision": PROTOCOL_REVISIONS[self.model],
             "document_task": None,
-            "query_task": "retrieval.query",
+            "query_task": "retrieval.query" if self.model == JINA_MODEL else None,
             "normalized": True,
-            "truncate": False,
+            "truncate": False if self.model == JINA_MODEL else "right",
             "image_input": "authorized_capture_bytes_v1",
             "postprocessing": "l2_float32_v1",
             "mixed_strategy": "independent_facets_v1",
@@ -260,7 +271,12 @@ def _materialize(inputs):
             capture = item.image
             data = capture.content
             image_bytes += len(data)
-            encoded.append({"image": base64.b64encode(data).decode("ascii")})
+            encoded.append(
+                {
+                    "image": base64.b64encode(data).decode("ascii"),
+                    "media_type": capture.mime,
+                }
+            )
             facet = {
                 "modality": "image",
                 "content_digest": _hash(data),
@@ -296,7 +312,7 @@ class PreparedEmbeddingRequest:
             "transport_attempt_id": self.transport_attempt_id,
             "payload_digest": self.payload_digest,
             "space_id": self.space_id,
-            "protocol_revision": PROTOCOL_REVISION,
+            "protocol_revision": self.manifest["profile"]["protocol_revision"],
         }
 
     def replay(self, transport_attempt_id):
@@ -323,8 +339,16 @@ class PreparedEmbeddingRequest:
                     inputs.append(
                         EmbeddingInput(facet["facet_id"], text=item["text"], source_json=source)
                     )
-                elif facet["modality"] == "image" and set(item) == {"image"}:
-                    content = base64.b64decode(item["image"], validate=True)
+                elif facet["modality"] == "image" and set(item) in (
+                    {"image"},
+                    {"image", "media_type"},
+                ):
+                    encoded_image = item["image"]
+                    if encoded_image.startswith("data:"):
+                        header, encoded_image = encoded_image.split(",", 1)
+                        if header != "data:" + facet["capture"]["mime"] + ";base64":
+                            raise ValueError("media type")
+                    content = base64.b64decode(encoded_image, validate=True)
                     capture = MediaSnapshot(**facet["capture"], content=content)
                     inputs.append(
                         EmbeddingInput(facet["facet_id"], image=capture, source_json=source)
@@ -353,16 +377,40 @@ def _prepare(profile, inputs, request_id, transport_attempt_id, purpose):
     _identifier(request_id)
     _identifier(transport_attempt_id)
     encoded, facets = _materialize(inputs)
-    body = {
-        "model": profile.model,
-        "dimensions": profile.dimensions,
-        "embedding_type": "float",
-        "normalized": True,
-        "truncate": False,
-        "input": encoded,
-    }
-    if purpose == "query":
-        body["task"] = "retrieval.query"
+    if profile.model == JINA_MODEL:
+        body = {
+            "model": profile.model,
+            "dimensions": profile.dimensions,
+            "embedding_type": "float",
+            "normalized": True,
+            "truncate": False,
+            "input": [
+                ({"text": item["text"]} if "text" in item else {"image": item["image"]})
+                for item in encoded
+            ],
+        }
+        if purpose == "query":
+            body["task"] = "retrieval.query"
+    else:
+        body = {
+            "model": profile.model,
+            "dimensions": profile.dimensions,
+            "encoding_format": "float",
+            "truncate": "right",
+            "input": [
+                (
+                    {"text": item["text"]}
+                    if "text" in item
+                    else {
+                        "image": "data:"
+                        + item["media_type"]
+                        + ";base64,"
+                        + item["image"]
+                    }
+                )
+                for item in encoded
+            ],
+        }
     wire = _encode(body, limit=MAX_REQUEST_BYTES)
     manifest = {
         "request_id": request_id,
@@ -475,6 +523,7 @@ def _completion(prepared, payload):
         "image_tokens",
         "audio_tokens",
         "video_tokens",
+        "completion_tokens",
     }:
         raise _error("EMBEDDING_USAGE_INVALID", "Embedding usage contains unsupported fields")
     usage = {key: value for key, value in usage.items() if value is not None}
@@ -504,7 +553,9 @@ def _completion(prepared, payload):
         if not finite:
             raise _error("EMBEDDING_VECTOR_INVALID", "Embedding components must be finite numbers")
         norm = math.hypot(*vector)
-        if not math.isfinite(norm) or abs(norm - 1.0) > 0.01:
+        if not math.isfinite(norm) or norm <= 0:
+            raise _error("EMBEDDING_VECTOR_INVALID", "Provider returned a zero or invalid vector")
+        if manifest["profile"]["model"] == JINA_MODEL and abs(norm - 1.0) > 0.01:
             raise _error("EMBEDDING_VECTOR_INVALID", "Provider did not return a normalized vector")
         values = tuple(struct.unpack("<f", struct.pack("<f", v / norm))[0] for v in vector)
         vectors[index] = EmbeddingVector(manifest["facets"][index]["facet_id"], index, values)

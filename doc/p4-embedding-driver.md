@@ -4,7 +4,9 @@
 
 ## 已核实的 Provider 契约
 
-首个协议为 Jina CLIP v2：`POST https://api.jina.ai/v1/embeddings`，Bearer 鉴权，JSON 字段为 `model="jina-clip-v2"`、整数 `dimensions`、`embedding_type="float"`、`normalized=true`、`truncate=false`，以及 `input:[{"text":...},{"image":...}]`。`image` 使用原始图片字节的标准 base64，不能使用旧示例的 `bytes/url` 字段。文档请求省略 task；查询请求加 `retrieval.query`，不发送 CLIP 不支持的 `retrieval.passage`。核实版本为官方 OpenAPI `2026.09.10.1829`。[官方协议](https://api.jina.ai/openapi.json)
+驱动支持两个固定协议。Jina CLIP v2 使用 `POST https://api.jina.ai/v1/embeddings` 和 Bearer 鉴权，JSON 字段为 `model="jina-clip-v2"`、整数 `dimensions`、`embedding_type="float"`、`normalized=true`、`truncate=false`，以及 `input:[{"text":...},{"image":...}]`。`image` 使用原始图片字节的标准 base64。文档请求省略 task；查询请求加 `retrieval.query`，不发送 CLIP 不支持的 `retrieval.passage`。核实版本为官方 OpenAPI `2026.09.10.1829`。[官方协议](https://api.jina.ai/openapi.json)
+
+SiliconFlow Qwen3-VL 使用 `model="Qwen/Qwen3-VL-Embedding-8B"`、`dimensions`、`encoding_format="float"`、`truncate="right"`，输入为 `[{"text":...},{"image":"data:<mime>;base64,..."}]`；文档和查询使用同一 wire contract，不发送 Jina task。允许的维度为 64、128、256、512、768、1024、2048、4096。该适配来自 QiYu 的实际 Docker 配置和请求实现，并已用相同供应商、模型和 4096 维配置完成实网验证。
 
 CLIP v2 对齐文本与图像空间；API 支持 1–1024 维，生产配置宜优先选择官方模型说明列出的 512 或 1024 维。混合列表是每项一个向量，不是把图文融合成一个向量。[官方模型卡](https://huggingface.co/jinaai/jina-clip-v2)
 
@@ -16,7 +18,8 @@ CLIP v2 对齐文本与图像空间；API 支持 1–1024 维，生产配置宜�
 profile = EmbeddingProfile(
     deployment_id="embedding-production-a",
     model_revision="operator-pinned-revision",
-    dimensions=512,
+    model="Qwen/Qwen3-VL-Embedding-8B",
+    dimensions=4096,
 )
 inputs = (
     EmbeddingInput("text-facet", text="红色拱桥",
@@ -28,7 +31,7 @@ prepared = prepare_embedding_request(
     purpose="document",  # 或 query
 )
 client = EmbeddingClient(
-    "https://api.jina.ai/v1/embeddings", runtime_decrypted_key, profile,
+    "https://api.siliconflow.cn/v1/embeddings", runtime_decrypted_key, profile,
 )
 try:
     result = await client.dispatch(prepared, permitcheck=host_final_permit)
@@ -42,13 +45,13 @@ finally:
 
 `.replay(new_attempt_id)` 只复制原字节与逻辑身份；它不是重试授权，也不会发起网络。持久 owner 必须先证明该次尝试允许重试，再分配新 attempt ID。Provider 未承诺本协议的请求幂等键，本驱动不发送或假定这种键存在。
 
-`EmbeddingProfile.space_id` 包含 deployment ID、model、model revision、维度、协议版本、文档/查询 task 配对、capture 输入策略、归一化策略和 independent-facets 策略。Endpoint 和密钥与 profile 分离；部署注册方必须保证一个 deployment ID 只绑定一个实际 endpoint/模型安装，切换 endpoint 时创建新 deployment ID。云端只返回模型名称，`model_revision` 是管理员声明，不能当作远端权重 hash 的证明。自托管端点可以实现相同协议，但需要部署方固定实际权重与预处理版本。
+`EmbeddingProfile.space_id` 包含 deployment ID、model、model revision、维度、协议版本、文档/查询 task 配对、capture 输入策略、归一化策略和 independent-facets 策略。模型、模型修订、维度和 deployment ID 在 Bot 首次提交记忆配置时建立，并与该 Bot 的整个存在周期绑定；后续配置、WebUI 和数据库触发器都会拒绝改变这些字段。Endpoint、密钥和预算与向量空间身份分离，可以轮换；管理员必须保证新 endpoint 提供同一模型、权重/预处理修订和维度，否则应创建新 Bot。`model_revision` 是管理员声明，不能当作远端权重 hash 的证明。
 
 ## 限额与响应
 
-本地硬限额为每批 1–32 个唯一 facet、文本每项 8192 UTF-8 bytes、单图 4 MiB、整批图片原始字节 8 MiB、请求体 12 MiB、响应体 1 MiB、manifest 256 KiB。超限不静默删图、不缩图、不换成文本，不调用额外摘要模型。文本字节上限不充当精确 tokenizer；服务端仍可按实际 token 上限拒绝，`truncate=false` 保留源输入语义。
+本地硬限额为每批 1–32 个唯一 facet、文本每项 8192 UTF-8 bytes、单图 4 MiB、整批图片原始字节 8 MiB、请求体 12 MiB、响应体 8 MiB、manifest 256 KiB。8 MiB 响应上限可容纳 32 个 4096 维 JSON 浮点向量。超限不静默删图、不缩图、不换成文本，不调用额外摘要模型。文本字节上限不充当精确 tokenizer；服务端仍可按实际 token 上限处理或拒绝。
 
-响应只接纳当前模型、完整数量、唯一连续 index、正确维度、有限且非布尔数值的 dense float 向量。按 index 恢复输入顺序和 facet ID；拒绝多向量、稀疏字典、base64 输出、缺项、重复项、零向量、明显未归一化向量。允许浮点 norm 的小误差，再以 `l2_float32_v1` 进行固定输出处理。usage 必须有有效 total_tokens；可选模态计数为 null 时省略，单项计数不能超过总数。官方精确分项求和约束明确限定 v5-omni；CLIP 驱动不把可能重叠的计数相加，也不自行推导计费总量。[官方 Usage 定义](https://api.jina.ai/openapi.json)
+响应只接纳当前模型、完整数量、唯一连续 index、正确维度、有限且非布尔数值的 dense float 向量。按 index 恢复输入顺序和 facet ID；拒绝多向量、稀疏字典、base64 输出、缺项、重复项和零向量。Jina 响应还必须已经归一化；Qwen 原始向量由宿主以 `l2_float32_v1` 确定性归一化，两个协议最终都进入相同的单位向量存储边界。usage 必须有有效 `total_tokens`；允许供应商返回 `completion_tokens` 等受限计数字段，单项计数不能超过总数。
 
 ## 发送、取消与计费事实
 
@@ -67,4 +70,6 @@ API key 只在构造客户端时成为 Authorization header，不进入 profile�
 
 ## 验证范围
 
-`tests/test_embeddings.py` 使用真实本地 TCP 服务核对精确请求字节、图片 base64 解码、混合输入独立向量、乱序响应还原、来源隔离、坏 index/维度/NaN/Infinity/超大整数/usage、响应编码和大小、无跳转/无重试、明确拒绝的未知计费，以及容量超时、外部取消和关闭资源回收。测试服务返回人为构造向量，只验证协议与生命周期；没有验证 Jina 付费服务可用性、真实语义检索质量、计费金额或远端权重版本。
+`tests/test_embeddings.py` 使用真实本地 TCP 服务核对两个协议的精确请求字节、图片 base64/data URI 解码、混合输入独立向量、Qwen 本地归一化、乱序响应还原、来源隔离、坏 index/维度/NaN/Infinity/超大整数/usage、响应编码和大小、无跳转/无重试、明确拒绝的未知计费，以及容量超时、外部取消和关闭资源回收。`tests/test_memory_index_runtime.py` 以真实 PostgreSQL 运行完整的 Qwen 4096 维消息接纳、冻结 profile、HTTP 调用和向量发布链。
+
+实网验收使用 QiYu Docker 配置中的 SiliconFlow endpoint 与 `Qwen/Qwen3-VL-Embedding-8B`，凭据仅在进程内读取，没有写入日志。真实风景照片、相关文字和两个无关文字共返回 4 个 4096 维向量并包含 usage；相关文字余弦相似度 0.214978，高于抽象主题 0.125009 和量子主题 0.010301。该结果证明当前 endpoint 的图文请求、维度、计费回执和基本跨模态排序可用，不证明供应商权重永远不变，也不替代生产数据集评测。

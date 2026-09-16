@@ -14,6 +14,7 @@ from forest.embeddings import (
     MAX_IMAGE_BYTES,
     MAX_RESPONSE_BYTES,
     MAX_TEXT_BYTES,
+    SILICONFLOW_VL_MODEL,
     EmbeddingCancelled,
     EmbeddingClient,
     EmbeddingInput,
@@ -73,6 +74,19 @@ def response(count=1):
             for i in range(count)
         ],
     }
+
+
+def siliconflow_profile(**changes):
+    values = {
+        "model": SILICONFLOW_VL_MODEL,
+        "dimensions": 4096,
+        **changes,
+    }
+    return EmbeddingProfile(
+        "siliconflow-qwen3-vl",
+        "qwen3-vl-embedding-8b-provider-revision",
+        **values,
+    )
 
 
 async def send(writer, value, *, status=200, content_type="application/json", extra=""):
@@ -165,6 +179,66 @@ def test_revision_dimension_and_deployment_each_create_a_distinct_space():
         )
         == 4
     )
+
+
+def test_siliconflow_vl_request_uses_managed_image_data_uri_and_one_space():
+    image = capture()
+    request = prepared(
+        EmbeddingInput("text", text="红色拱桥"),
+        EmbeddingInput("image", image=image),
+        purpose="query",
+        configuration=siliconflow_profile(),
+    )
+    request.verify()
+    body = json.loads(request.body)
+    assert body == {
+        "model": SILICONFLOW_VL_MODEL,
+        "dimensions": 4096,
+        "encoding_format": "float",
+        "truncate": "right",
+        "input": [
+            {"text": "红色拱桥"},
+            {"image": "data:image/png;base64," + base64.b64encode(PNG).decode("ascii")},
+        ],
+    }
+    assert request.manifest["profile"]["query_task"] is None
+    assert request.manifest["profile"]["protocol_revision"].startswith(
+        "siliconflow-qwen3-vl-embedding-http-"
+    )
+    assert request.space_id != prepared().space_id
+
+
+async def test_siliconflow_vl_response_is_l2_normalized_and_keeps_usage():
+    configuration = siliconflow_profile(dimensions=64)
+
+    async def handler(writer, record):
+        await send(
+            writer,
+            {
+                "model": SILICONFLOW_VL_MODEL,
+                "object": "list",
+                "usage": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+                "data": [
+                    {
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": [3.0, 4.0] + [0.0] * 62,
+                    }
+                ],
+            },
+        )
+
+    async with server(handler) as (endpoint, requests, _):
+        client = EmbeddingClient(endpoint, "key", configuration)
+        try:
+            result = await client.dispatch(
+                prepared(configuration=configuration), permitcheck=permit
+            )
+        finally:
+            await client.aclose()
+    assert result.status == "RESPONDED" and len(requests) == 1
+    assert result.vectors[0].values[:2] == pytest.approx((0.6, 0.8))
+    assert result.usage == {"completion_tokens": 0, "prompt_tokens": 3, "total_tokens": 3}
 
 
 @pytest.mark.parametrize(

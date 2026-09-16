@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
+import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 from test_web_authority import environment as environment
@@ -111,17 +112,41 @@ async def test_concurrent_previews_only_one_config_wins(environment):
     assert (await read(env))["revision"] == 1
 
 
-async def test_endpoint_identity_cannot_be_rebound_even_via_historical_deployment(environment):
+async def test_endpoint_may_change_but_bot_embedding_identity_is_lifecycle_bound(environment):
     env = environment
     await apply(env, await plan(env))
     different = {**DEFAULT_MEMORY_SETTINGS, "endpoint": "http://localhost:8001/v1/embeddings"}
-    with pytest.raises(ForestError) as conflict:
-        await plan(env, revision=1, values=different)
-    assert conflict.value.code == "MEMORY_DEPLOYMENT_CONFLICT"
-    await apply(env, await plan(env, revision=1, values={**different, "deployment_id": "local"}))
-    with pytest.raises(ForestError) as historical:
-        await plan(env, revision=2, values=different)
-    assert historical.value.code == "MEMORY_DEPLOYMENT_CONFLICT"
+    await apply(env, await plan(env, revision=1, values=different))
+    assert (await read(env))["values"]["endpoint"] == different["endpoint"]
+    for field, value in (
+        ("deployment_id", "other-deployment"),
+        ("model", "Qwen/Qwen3-VL-Embedding-8B"),
+        ("model_revision", "other-revision"),
+        ("dimensions", 1024),
+    ):
+        with pytest.raises(ForestError) as conflict:
+            await plan(env, revision=2, values={**different, field: value})
+        assert conflict.value.code == "MEMORY_PROFILE_LIFECYCLE_CONFLICT"
+
+
+async def test_database_rejects_lifecycle_change_if_service_guard_is_bypassed(
+    environment, monkeypatch
+):
+    env = environment
+    await apply(env, await plan(env))
+    monkeypatch.setattr(MemoryConfig, "_profile_lifecycle", staticmethod(lambda saved, values: None))
+    changed = {
+        **DEFAULT_MEMORY_SETTINGS,
+        "deployment_id": "qwen-lifecycle-conflict",
+        "model": "Qwen/Qwen3-VL-Embedding-8B",
+        "model_revision": "qwen-revision",
+        "dimensions": 4096,
+    }
+    preview = await plan(env, revision=1, values=changed)
+    with pytest.raises(psycopg.errors.CheckViolation) as rejected:
+        await apply(env, preview)
+    assert "MEMORY_PROFILE_LIFECYCLE_CONFLICT" in str(rejected.value)
+    assert (await read(env))["revision"] == 1
 
 
 async def test_policy_changes_revoke_current_memory_permission(environment):
@@ -253,3 +278,16 @@ def test_memory_settings_normalize_origins_and_keep_independent_vision_capabilit
     )
     assert value.media_allowed_origins == ["https://images.example.com"]
     assert value.model == "jina-clip-v2" and "vision" not in value.model_dump()
+
+
+def test_memory_settings_accept_qiyu_siliconflow_vl_profile():
+    value = MemorySettings(
+        endpoint="https://api.siliconflow.cn/v1/embeddings",
+        deployment_id="qiyu-siliconflow-qwen3-vl",
+        model="Qwen/Qwen3-VL-Embedding-8B",
+        model_revision="qiyu-production-2026-09",
+        dimensions=4096,
+    )
+    assert value.dimensions == 4096
+    with pytest.raises(ValueError):
+        MemorySettings(dimensions=4096)

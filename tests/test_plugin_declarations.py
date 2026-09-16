@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 import shutil
 import zipfile
 from argparse import Namespace
@@ -545,3 +546,55 @@ async def test_auto_declared_package_uses_real_hot_reload_lifecycle(
     finally:
         await watcher.close()
         await kernel.close()
+
+
+@pytest.mark.postgres
+async def test_100_real_worker_reloads_keep_one_live_generation(
+    tmp_path, bot_database  # noqa: F811
+):
+    if os.environ.get("RUN_FOREST_SOAK") != "1":
+        pytest.skip("set RUN_FOREST_SOAK=1 for the 100-generation Worker soak")
+    store, _ = bot_database
+    source = auto_source(tmp_path)
+    module = source / "src" / "demo" / "__init__.py"
+    baseline = module.read_text(encoding="utf-8")
+    kernel = Kernel(store, lease_seconds=120)
+    watcher = DevWatcher(
+        kernel,
+        PackageCatalog(tmp_path / "catalog"),
+        source,
+        debounce=0.01,
+        poll_interval=0.01,
+    )
+    try:
+        await kernel.start()
+        await watcher.start()
+        await eventually(lambda: watcher.published_count == 1 or watcher.failure)
+        assert watcher.failure is None
+        for generation in range(1, 101):
+            previous = kernel.components["example.auto"].worker
+            module.write_text(
+                baseline.replace(
+                    'return {"value": payload["value"]}',
+                    f'return {{"value": "generation-{generation}:" + payload["value"]}}',
+                ),
+                encoding="utf-8",
+            )
+            await eventually(
+                lambda: watcher.published_count == generation + 1 or watcher.failure,
+                timeout=30,
+            )
+            assert watcher.failure is None
+            assert not previous.alive and len(kernel._workers) == 1
+            result = await kernel.invoke(
+                "example.auto",
+                "echo.call",
+                {"value": "probe"},
+                operation_id=f"soak-{generation}-{uuid4().hex}",
+            )
+            assert result == {"value": f"generation-{generation}:probe"}
+            assert not kernel._operations and not kernel._calls and not kernel.cleanup_errors
+    finally:
+        await watcher.close()
+        await kernel.close()
+    assert not kernel._workers and not kernel.cleanup_errors

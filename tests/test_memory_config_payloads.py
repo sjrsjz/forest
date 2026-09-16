@@ -73,7 +73,14 @@ async def test_values_are_payload_only_and_credentials_keep_their_separate_lifec
         assert row["values"] is None
         assert row["values_payload_id"] and row["values_payload_digest"].startswith("sha256:")
         assert row["values_metadata"] == _metadata(settings)
-        assert set(row["values_metadata"]) == {"enabled", *NUMERIC_FIELDS}
+        assert set(row["values_metadata"]) == {
+            "enabled",
+            *NUMERIC_FIELDS,
+            "profile_deployment_digest",
+            "profile_model_digest",
+            "profile_revision_digest",
+        }
+        assert "private-model-canary" not in repr(row["values_metadata"])
         assert env.vault.decrypt(row["secret_ciphertext"]) == "private-api-key"
     assert (await read(env))["values"] == settings
     assert (await guarded(env, 1))["values"] == settings
@@ -91,7 +98,8 @@ async def test_values_are_payload_only_and_credentials_keep_their_separate_lifec
 async def test_mixed_preview_erasure_does_not_revoke_independent_new_plan_or_revision(environment):
     env = environment
     a = {**DEFAULT_MEMORY_SETTINGS, "enabled": True, "model_revision": "A-private"}
-    b = {**a, "model_revision": "B-independent"}
+    b = {**a, "endpoint": "https://embedding.example.com/v1/embeddings",
+         "daily_request_budget": 201}
     await apply(env, await plan(env, values=a, operation="plan-a"), "apply-a")
     preview = await plan(env, revision=1, values=b, operation="plan-b")
     assert preview["before_values"] == a
@@ -119,7 +127,7 @@ async def test_unavailable_current_config_keeps_cas_and_accepts_explicit_indepen
     with pytest.raises(ForestError) as stopped:
         await MemoryConfig(env.store, env.vault).runtime(env.lease)
     assert stopped.value.code == "CONTROL_CONTENT_REVOKED"
-    repaired = {**DEFAULT_MEMORY_SETTINGS, "enabled": True, "model_revision": "fresh-independent"}
+    repaired = {**DEFAULT_MEMORY_SETTINGS, "enabled": True}
     preview = await plan(env, revision=1, values=repaired, operation="repair")
     assert preview["before_values"] is None and preview["before_values_payload_state"] == "UNAVAILABLE"
     await apply(env, preview)
@@ -127,21 +135,23 @@ async def test_unavailable_current_config_keeps_cas_and_accepts_explicit_indepen
     assert active["values"] == repaired and env.vault.decrypt(active["secret_ciphertext"]) == "retained-key"
 
 
-async def test_deleted_historical_endpoint_cannot_be_rebound_under_the_same_deployment(environment):
+async def test_endpoint_can_rotate_after_old_payload_erasure_but_profile_cannot(environment):
     env = environment
     await apply(env, await plan(env, operation="endpoint-a"))
-    independent = {**DEFAULT_MEMORY_SETTINGS, "deployment_id": "second-deployment"}
+    independent = {**DEFAULT_MEMORY_SETTINGS,
+                   "endpoint": "http://localhost:9987/v1/embeddings"}
     await apply(env, await plan(env, revision=1, values=independent, operation="endpoint-b"))
     await forget_input(env, "endpoint-a")
     assert (await read(env))["values"] == independent
-    changed = {**DEFAULT_MEMORY_SETTINGS, "endpoint": "http://localhost:9988/v1/embeddings"}
+    changed = {**independent, "endpoint": "http://localhost:9988/v1/embeddings"}
+    await apply(env, await plan(env, revision=2, values=changed, operation="endpoint-c"))
     before = await counts(env)
     with pytest.raises(ForestError) as conflict:
-        await plan(env, revision=2, values=changed)
-    assert conflict.value.code == "MEMORY_DEPLOYMENT_CONFLICT"
+        await plan(env, revision=3, values={**changed, "deployment_id": "other"})
+    assert conflict.value.code == "MEMORY_PROFILE_LIFECYCLE_CONFLICT"
     assert await counts(env) == before
     binding = await rows(env, "SELECT * FROM public.bot_memory_deployment_bindings")
-    assert len(binding) == 2 and "http" not in repr(binding)
+    assert len(binding) == 1 and "http" not in repr(binding)
 
 
 async def test_failure_after_record_rolls_back_input_values_receipt_and_plan_bridge(environment, monkeypatch):
