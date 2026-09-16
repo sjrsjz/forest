@@ -118,7 +118,7 @@ class Resolution(Body):
 def operational(row: dict, platform) -> dict:
     """A durable old ONLINE fact alone is not a live connection after restart."""
     result = {**row, "persisted_state": row["state"]}
-    connection = platform.connections.get(row["binding_id"])
+    connection = platform.module("adapter.onebot").connections.get(row["binding_id"])
     try:
         platform.kernel._authority()
         current_host = True
@@ -194,9 +194,10 @@ def install_binding_routes(app: FastAPI, runtime: Any):
         rows = {r["binding_id"]: operational(r, bot.platform)
                 for r in await bot.platform.module("adapter.onebot").bindings.list(signed, op)}
         reservations = await registry.list(bot_id=bot_id, **who)
+        adapter = bot.platform.module("adapter.onebot")
         return {"bindings": [{**reserved, **rows.get(reserved["binding_id"], {}),
                               "registration_stage": reserved["stage"]} for reserved in reservations],
-                "errors": bot.platform.errors}
+                "errors": {**bot.platform.errors, **adapter.errors}}
 
     @app.get("/management/v1/bots/{bot_id}/bindings/{binding_id}/configuration")
     async def binding_configuration(bot_id: str, binding_id: str, request: Request):
@@ -255,7 +256,9 @@ def install_binding_routes(app: FastAPI, runtime: Any):
             raise ForestError("BINDING_NOT_FOUND", "Binding is unavailable", 404)
         registry, fleet, _ = services()
         bot = await fleet.attach(await registry.resolve(binding_id))
-        await bot.platform.receive(binding_id, await request.body(), request.headers.get("x-signature"))
+        await bot.platform.module("adapter.onebot").receive(
+            binding_id, await request.body(), request.headers.get("x-signature")
+        )
         # OneBot treats this as an empty quick-operation response. ACK follows commit.
         return {}
 

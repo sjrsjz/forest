@@ -154,50 +154,10 @@ def _message_routing(platform, _: dict[str, Any]):
     return _MessageRoutingRuntime(platform)
 
 
-class _OneBotRuntime:
-    def __init__(self, platform):
-        from forest.delivery import DeliveryWorker
-        from forest.shell_ingress import ShellIngressGuard
-        from forest.storage.bindings import BindingStore
-        from forest.storage.delivery import DeliveryStore
-        from forest.storage.messages import MessageStore
-
-        self.platform = platform
-        self.bindings = BindingStore(platform.bot.store)
-        self.messages = MessageStore(platform.bot.store, self.bindings)
-        self.shell_ingress = ShellIngressGuard(platform.bot.store.bot_id)
-        self.delivery = DeliveryStore(platform.bot.store, self.bindings)
-        self.worker = DeliveryWorker(
-            self.delivery,
-            platform.kernel._authority,
-            platform.prepare,
-            on_error=platform._delivery_error,
-        )
-        self.task = None
-
-    @property
-    def failure(self):
-        return self.worker.failure
-
-    async def start(self):
-        if self.task is None:
-            import asyncio
-
-            self.task = asyncio.create_task(
-                self.worker.run_forever(), name="binding-delivery"
-            )
-
-    async def quiesce(self):
-        for connection in self.platform.connections.values():
-            connection.accepting = False
-
-    async def close(self):
-        await self.worker.close()
-        await self.platform._close_adapter_resources()
-
-
 def _onebot(platform, _: dict[str, Any]):
-    return _OneBotRuntime(platform)
+    from forest.onebot_runtime import OneBotRuntime
+
+    return OneBotRuntime(platform)
 
 
 def _shell(platform, modules: dict[str, Any]):

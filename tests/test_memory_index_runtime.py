@@ -192,7 +192,7 @@ async def test_qiyu_siliconflow_profile_publishes_normalized_vector(platform):
                 deployment_id="qiyu-siliconflow-qwen3-vl",
                 model_revision="qiyu-production-2026-09",
             )
-            await p.runtime._replace(p.desired)
+            await p.runtime.module("adapter.onebot")._replace(p.desired)
             await p.runtime.start()
             await receive(p, 9, message=[{"type": "text", "data": {"text": "qiyu-vl-profile"}}])
             await wait_state(p, lambda: source_ready(p, 1))
@@ -275,7 +275,7 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
                 ),
             )
             await configure(p, endpoint, [origin])
-            await p.runtime._replace(p.desired)
+            await p.runtime.module("adapter.onebot")._replace(p.desired)
             await p.runtime.start()
             memory = p.runtime.module("memory.graph")
             assert type(memory) is MemoryRuntime
@@ -362,7 +362,7 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
             # against the same Kernel/store and the same durable memory slots.
             await p.runtime.close()
             closed_memory(p.runtime.module("memory.graph"))
-            assert not p.runtime._clients and not p.runtime.connections
+            assert not p.runtime.module("adapter.onebot")._clients and not p.runtime.module("adapter.onebot").connections
             before = await rows(
                 p, "SELECT scope_id,revision FROM public.bot_memory_graph_scopes ORDER BY scope_id"
             )
@@ -372,7 +372,7 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
             )
             restarted = BindingRuntime(original_runtime.bot, p.env.vault, original_runtime.packages)
             p.runtime = restarted
-            await restarted._replace((await restarted.bindings.desired(p.kernel._authority()))[0])
+            await restarted.module("adapter.onebot")._replace((await restarted.module("adapter.onebot").bindings.desired(p.kernel._authority()))[0])
             await restarted.start()
             for _ in range(8):
                 restarted.module("memory.graph").notify()
@@ -441,7 +441,7 @@ async def test_platform_close_recovers_all_owned_inflight_embedding_resources(pl
     async with server(blocked) as (endpoint, requests, _):
         try:
             await configure(p, endpoint)
-            await p.runtime._replace(p.desired)
+            await p.runtime.module("adapter.onebot")._replace(p.desired)
             await p.runtime.start()
             await receive(p, 1)
             await asyncio.wait_for(started.wait(), 12)

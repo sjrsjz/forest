@@ -25,7 +25,7 @@ async def test_runtime_silent_drain_shares_group_sources_with_independent_cuts(
 
     monkeypatch.setattr(ChatCompletionsClient, "dispatch", unexpected_provider)
     monkeypatch.setattr(EmbeddingClient, "dispatch", unexpected_provider)
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     await receive(p, 1, group_id=30001, message="A-first")
     await receive(
         p,
@@ -105,8 +105,8 @@ async def test_runtime_silent_drain_shares_group_sources_with_independent_cuts(
 
 async def test_runtime_owns_bounded_backfill_and_reclaims_its_supervised_task(platform):  # noqa: F811
     p = platform
-    await p.runtime._replace(p.desired)
-    connection = p.runtime.connection(p.binding.binding_id)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
+    connection = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     await p.runtime.start()
     tasks = list(p.runtime._tasks)
     memory_tasks = [task for task in tasks if task.get_name() == "memory-source-backfill"]
@@ -130,7 +130,7 @@ async def test_runtime_owns_bounded_backfill_and_reclaims_its_supervised_task(pl
     async with asyncio.timeout(10):
         await p.runtime.close()
     assert all(task.done() for task in tasks)
-    assert not p.runtime._tasks and not p.runtime._clients and not p.runtime.connections
+    assert not p.runtime._tasks and not p.runtime.module("adapter.onebot")._clients and not p.runtime.module("adapter.onebot").connections
     assert connection.client._client.is_closed
     assert p.runtime.failure is None
     assert not hasattr(p.runtime, "memory_sources")

@@ -87,7 +87,7 @@ async def platform(environment, tmp_path):  # noqa: F811
 
 async def receive(p, number=1, **changes):
     body = encoded(event(message_id=number, **changes))
-    return await p.runtime.receive(p.binding.binding_id, body, signature(body, WEBHOOK))
+    return await p.runtime.module("adapter.onebot").receive(p.binding.binding_id, body, signature(body, WEBHOOK))
 
 
 async def test_runtime_business_resources_are_owned_by_registered_modules(platform):
@@ -103,8 +103,12 @@ async def test_runtime_business_resources_are_owned_by_registered_modules(platfo
         "bindings", "messages", "delivery", "delivery_worker", "shell_ingress",
         "memory_sources", "command_policies", "command_limits",
         "message_handler_policies", "message_handler_limits",
+        "connections", "receive", "prepare", "run_forever", "_replace", "_clients",
+        "_pending", "_jobs", "_applied", "_retries",
     ):
         assert not hasattr(p.runtime, old)
+    assert adapter.connections == {}
+    assert adapter.worker.prepare == adapter.prepare
 
 
 async def wait_for(predicate, timeout=10):
@@ -118,7 +122,7 @@ async def wait_for(predicate, timeout=10):
 
 async def test_signed_all_message_ingress_keeps_authors_and_pending_image_reference(platform):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     first = await receive(p, 1)
     duplicate = await receive(p, 1)
     assert duplicate["accepted"] and duplicate["kind"] == "DUPLICATE"
@@ -127,9 +131,9 @@ async def test_signed_all_message_ingress_keeps_authors_and_pending_image_refere
         p,
         2,
         user_id=20002,
-        sender={"nickname": "同名用户"},
+        sender={"nickname": "鍚屽悕鐢ㄦ埛"},
         message=[
-            {"type": "text", "data": {"text": "图片不是网址文本"}},
+            {"type": "text", "data": {"text": "鍥剧墖涓嶆槸缃戝潃鏂囨湰"}},
             {
                 "type": "image",
                 "data": {"file": "opaque.image", "url": "https://media.test/x?secret=private"},
@@ -164,13 +168,13 @@ async def test_signed_all_message_ingress_keeps_authors_and_pending_image_refere
     )
     bad = encoded(event(post_type="meta_event", self_id=99999))
     with pytest.raises(ForestError):
-        await p.runtime.receive(p.binding.binding_id, bad, signature(bad, WEBHOOK))
+        await p.runtime.module("adapter.onebot").receive(p.binding.binding_id, bad, signature(bad, WEBHOOK))
 
 
 @pytest.mark.parametrize("empty_message", ["", []], ids=["empty-cq", "empty-array"])
 async def test_empty_protocol_message_is_durably_retained_with_author(platform, empty_message):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     accepted = await receive(p, 1, message=empty_message)
     duplicate = await receive(p, 1, message=empty_message)
     assert accepted["accepted"] and duplicate["kind"] == "DUPLICATE"
@@ -199,7 +203,7 @@ async def test_failed_codec_attempt_and_lost_ingress_ack_do_not_poison_retries(
     platform, monkeypatch
 ):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     invoke = p.kernel.invoke_control_with_receipt
     attempts = []
 
@@ -240,7 +244,7 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
     platform, monkeypatch
 ):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     before = p.kernel.components["adapter.onebot"].worker.identity.generation_id
     invoke = p.kernel.invoke_control_with_receipt
 
@@ -251,7 +255,7 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
         return await invoke(*args, **kwargs)
 
     monkeypatch.setattr(p.kernel, "invoke_control_with_receipt", reload_before_call)
-    row = p.runtime.connection(p.binding.binding_id).row
+    row = p.runtime.module("adapter.onebot").connection(p.binding.binding_id).row
     await p.runtime.module("adapter.onebot").delivery.enqueue(
         p.kernel._authority(), operation_id="reload-format-source",
         route={"bot_id": p.env.store.bot_id, "binding_id": p.binding.binding_id,
@@ -262,7 +266,7 @@ async def test_preparation_uses_actual_completed_worker_generation_after_reload(
         conversation_id="format-conversation", response_seq=1,
     )
     claim = await p.runtime.module("adapter.onebot").delivery.claim(p.kernel._authority(), "format-worker")
-    prepared = await p.runtime.prepare(claim)
+    prepared = await p.runtime.module("adapter.onebot").prepare(claim)
     current = p.kernel.components["adapter.onebot"].worker.identity.generation_id
     assert prepared.executor_ref["generation_id"] == current != before
     assert prepared.executor_ref["admission_lane"] == "CONTROL"
@@ -282,13 +286,13 @@ async def test_activation_lost_ack_adopts_committed_epoch_and_close_disconnects(
         raise ConnectionError("lost acknowledgement")
 
     monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "activate", lost_ack)
-    await p.runtime._replace(p.desired)
-    connection = p.runtime.connection(p.binding.binding_id)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
+    connection = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     assert connection.row["connection_epoch"] == 1 and not connection.client._client.is_closed
-    assert not p.runtime._pending
+    assert not p.runtime.module("adapter.onebot")._pending
     assert (await receive(p))["accepted"]
     await p.runtime.close()
-    assert connection.client._client.is_closed and not p.runtime._clients
+    assert connection.client._client.is_closed and not p.runtime.module("adapter.onebot")._clients
     assert (await p.binding.read())["state"] == "OFFLINE"
 
 
@@ -303,12 +307,12 @@ async def test_cancel_after_publication_keeps_owner_until_runtime_close(platform
         await asyncio.Event().wait()
 
     monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "activate", pause_after_commit)
-    task = asyncio.create_task(p.runtime._replace(p.desired))
-    p.runtime._jobs[p.binding.binding_id] = task
+    task = asyncio.create_task(p.runtime.module("adapter.onebot")._replace(p.desired))
+    p.runtime.module("adapter.onebot")._jobs[p.binding.binding_id] = task
     await asyncio.wait_for(published.wait(), 10)
     await p.runtime.close()
     assert task.cancelled()
-    assert not p.runtime._pending and not p.runtime._clients and not p.runtime.connections
+    assert not p.runtime.module("adapter.onebot")._pending and not p.runtime.module("adapter.onebot")._clients and not p.runtime.module("adapter.onebot").connections
     assert (await p.binding.read())["state"] == "OFFLINE"
 
 
@@ -328,17 +332,17 @@ async def test_unknown_publication_retains_client_and_cleanup_retries_after_stor
     monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "activate", lost_ack)
     monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "current", unavailable)
     with pytest.raises(ConnectionError):
-        await p.runtime._replace(p.desired)
+        await p.runtime.module("adapter.onebot")._replace(p.desired)
     assert p.runtime.failure.code == "BINDING_PUBLICATION_UNCERTAIN"
-    assert len(p.runtime._pending) == len(p.runtime._clients) == 1
-    client = next(iter(p.runtime._clients))
+    assert len(p.runtime.module("adapter.onebot")._pending) == len(p.runtime.module("adapter.onebot")._clients) == 1
+    client = next(iter(p.runtime.module("adapter.onebot")._clients))
     assert not client._client.is_closed
     with pytest.raises(ForestError, match="remain owned"):
         await p.runtime.close()
-    assert client in p.runtime._clients
+    assert client in p.runtime.module("adapter.onebot")._clients
     monkeypatch.setattr(p.runtime.module("adapter.onebot").bindings, "current", current)
     await p.runtime.close()
-    assert client._client.is_closed and not p.runtime._pending
+    assert client._client.is_closed and not p.runtime.module("adapter.onebot")._pending
     assert (await p.binding.read())["state"] == "OFFLINE"
 
 
@@ -353,14 +357,14 @@ async def test_cancel_during_identity_probe_closes_unpublished_candidate(platfor
     from forest.adapters.onebot import OneBotHTTPClient
 
     monkeypatch.setattr(OneBotHTTPClient, "get_login_info", probe)
-    task = asyncio.create_task(p.runtime._replace(p.desired))
+    task = asyncio.create_task(p.runtime.module("adapter.onebot")._replace(p.desired))
     await asyncio.wait_for(entered.wait(), 10)
-    clients = list(p.runtime._clients)
+    clients = list(p.runtime.module("adapter.onebot")._clients)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(clients) == 1 and clients[0]._client.is_closed
-    assert not p.runtime._clients and not p.runtime._pending
+    assert not p.runtime.module("adapter.onebot")._clients and not p.runtime.module("adapter.onebot")._pending
     assert (await p.binding.read())["effective_revision"] == 0
 
 
@@ -368,7 +372,7 @@ async def test_supervisor_failure_is_visible_to_fleet_and_closes_local_admission
     platform, monkeypatch
 ):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
 
     async def broken(*args):
         raise RuntimeError("synthetic supervisor defect")
@@ -383,12 +387,12 @@ async def test_supervisor_failure_is_visible_to_fleet_and_closes_local_admission
     bot = SimpleNamespace(ready=True, cleanup_task=None, platform=p.runtime, kernel=p.kernel)
     assert not BotFleet._usable(bot)
     with pytest.raises(ForestError):
-        p.runtime.connection(p.binding.binding_id)
+        p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
 
 
 async def test_reply_component_failure_does_not_interrupt_protocol_worker(platform, monkeypatch):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     adapter = p.kernel.components["adapter.onebot"].worker
     install = p.kernel.install
 
@@ -411,8 +415,8 @@ async def test_runtime_close_survives_waiter_cancellation_without_abandoning_cli
     platform, monkeypatch
 ):
     p = platform
-    await p.runtime._replace(p.desired)
-    connection = p.runtime.connection(p.binding.binding_id)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
+    connection = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     close = connection.client.aclose
     entered, release = asyncio.Event(), asyncio.Event()
     count = 0
@@ -430,25 +434,25 @@ async def test_runtime_close_survives_waiter_cancellation_without_abandoning_cli
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    assert not p.runtime._close_task.done() and connection.client in p.runtime._clients
+    assert not p.runtime._close_task.done() and connection.client in p.runtime.module("adapter.onebot")._clients
     assert (await p.binding.read())["state"] == "OFFLINE"
     release.set()
     await p.runtime.close()
-    assert count == 1 and not p.runtime._clients
+    assert count == 1 and not p.runtime.module("adapter.onebot")._clients
 
 
 async def test_native_worker_group_reply_and_shell_control_continue_independently_when_paused(
     platform,
 ):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     await p.runtime.start()
     await receive(
         p,
         1,
         message=[
             {"type": "at", "data": {"qq": "10001"}},
-            {"type": "text", "data": {"text": "你好"}},
+            {"type": "text", "data": {"text": "浣犲ソ"}},
         ],
     )
 
@@ -464,7 +468,7 @@ async def test_native_worker_group_reply_and_shell_control_continue_independentl
 
     await wait_for(lambda: sent("CHAT"))
     assert any(
-        "你好" in request[2].decode() for request in p.requests if "send_group_msg" in request[0]
+        "浣犲ソ" in request[2].decode() for request in p.requests if "send_group_msg" in request[0]
     )
     await p.env.store.set_maintenance(p.kernel._authority(), 1, False)
     await receive(p, 2, message="#forest status")
@@ -485,7 +489,7 @@ async def test_reserved_shell_ingress_survives_a_broken_reloadable_adapter(
     platform, monkeypatch
 ):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
 
     async def broken_adapter(*args, **kwargs):
         raise ForestError("BROKEN_ADAPTER", "synthetic codec failure", 503)
@@ -506,7 +510,7 @@ async def test_reserved_shell_ingress_survives_a_broken_reloadable_adapter(
 
 async def test_rejection_budget_returns_429_before_raw_payload_or_inbox(platform):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     p.runtime.module("adapter.onebot").shell_ingress = ShellIngressGuard(
         p.env.store.bot_id, rejection_burst=1, rejection_refill_seconds=60
     )

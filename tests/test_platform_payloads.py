@@ -33,10 +33,10 @@ async def erase_input(p):
 
 
 async def queued(p):
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     await receive(p, message="PAYLOAD-CANARY")
     item = await inbox(p)
-    connection = p.runtime.connection(p.binding.binding_id)
+    connection = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     route = {
         "bot_id": p.env.store.bot_id, "binding_id": p.binding.binding_id,
         "platform": "onebot-v11", "self_id": connection.row["self_id"],
@@ -53,7 +53,7 @@ async def queued(p):
 
 async def test_codec_cannot_replace_authenticated_ingress_projection(platform, monkeypatch):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     original = p.kernel.invoke_control_with_receipt
 
     async def substitute(*args, **kwargs):
@@ -71,7 +71,7 @@ async def test_codec_cannot_replace_authenticated_ingress_projection(platform, m
 
 async def test_original_source_revokes_ingress_and_kernel_bodies_but_keeps_config(platform):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     await receive(p, message="PAYLOAD-CANARY")
     async with p.env.store.pool.connection() as conn:
         call = await (await conn.execute("SELECT * FROM public.bot_calls WHERE control_service='onebot.normalize'")).fetchone()
@@ -97,7 +97,7 @@ async def test_original_source_revokes_ingress_and_kernel_bodies_but_keeps_confi
 async def test_send_permit_requires_actual_codec_result_and_carries_its_sources(platform):
     p = platform
     claim = await queued(p)
-    prepared = await p.runtime.prepare(claim)
+    prepared = await p.runtime.module("adapter.onebot").prepare(claim)
     wire = json.loads(prepared.prepared.wire_body)
     wire["message"][0]["data"]["text"] = "substituted after Worker"
     forged = json.dumps(wire, separators=(",", ":"), ensure_ascii=False).encode()
@@ -156,7 +156,7 @@ async def test_completed_codec_result_cannot_substitute_another_message(platform
 
 async def test_http_and_websocket_suppressed_observations_skip_all_reloadable_work(platform):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     body = encoded(
         event(
             message_id=404,
@@ -164,7 +164,7 @@ async def test_http_and_websocket_suppressed_observations_skip_all_reloadable_wo
         )
     )
     normalized = p.runtime.module("adapter.onebot").messages._normalized(
-        parse_event(body, self_id=p.runtime.connection(p.binding.binding_id).row["self_id"])
+        parse_event(body, self_id=p.runtime.module("adapter.onebot").connection(p.binding.binding_id).row["self_id"])
         .as_dict()
     )
     payloads = PayloadStore(p.env.store)
@@ -178,16 +178,16 @@ async def test_http_and_websocket_suppressed_observations_skip_all_reloadable_wo
         expected_deletion_epoch=await payloads.epoch(p.kernel._authority()),
     )
 
-    first = await p.runtime.receive(
+    first = await p.runtime.module("adapter.onebot").receive(
         p.binding.binding_id, body, signature(body, "webhook-test-secret")
     )
     assert first["accepted"] and first["kind"] == "SUPPRESSED_OCCURRENCE"
     assert not first["duplicate"]
 
-    connection = p.runtime.connection(p.binding.binding_id)
+    connection = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     websocket = replace(connection, transport="forward-websocket")
-    p.runtime.connections[p.binding.binding_id] = websocket
-    replay = await p.runtime._receive_websocket(websocket, body)
+    p.runtime.module("adapter.onebot").connections[p.binding.binding_id] = websocket
+    replay = await p.runtime.module("adapter.onebot")._receive_websocket(websocket, body)
     assert replay["kind"] == "SUPPRESSED_OCCURRENCE" and replay["duplicate"]
     assert replay["receipt_id"] == first["receipt_id"]
 

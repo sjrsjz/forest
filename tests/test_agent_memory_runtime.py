@@ -144,7 +144,7 @@ async def test_agent_recalls_cross_group_pixels_and_reuses_fixed_query_across_to
                 **p.desired["desired_values"], "response_mode": "agent",
             }))
             p.desired = (await p.runtime.module("adapter.onebot").bindings.desired(p.kernel._authority()))[0]
-            await p.runtime._replace(p.desired)
+            await p.runtime.module("adapter.onebot")._replace(p.desired)
             await p.runtime.start()
 
             # A different group contributes actual silent history and captures

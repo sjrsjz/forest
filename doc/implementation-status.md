@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-16。
+更新日期：2026-09-17。
 
 ## 结论
 
@@ -38,17 +38,19 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 控制台使用受限 iframe、摘要校验和有界 `MessageChannel` 装载模块 UI；
 - `BindingRuntime` 的若干 Agent/Memory/Scheduler/Shell 便利属性已删除，调用方开始按组件 ID 取能力。
 - `BotModuleRegistry` 已拥有严格生命周期状态；失败模块会清理自身，已启动依赖按逆序排空，关闭失败可重试，控制面不再采用模块自报 `state`。
-- `adapter.onebot` 已拥有 Binding/Inbox/Shell ingress/Delivery 端口和发送 Worker；`memory.graph` 已拥有来源回填；`command.router` 与 `message.router` 已拥有各自策略和容量存储。`BindingRuntime` 对应便利属性已删除。
+- `adapter.onebot` 已拥有 Binding/Inbox/Shell ingress/Delivery 端口、连接集合、候选切换、网络接纳、发送 Worker 与连接监督任务；`memory.graph` 已拥有来源回填；`command.router` 与 `message.router` 已拥有各自策略和容量存储。`BindingRuntime` 对应便利属性及 OneBot 私有状态已删除。
 
 这只是控制面所有权和传输收口。运行时组合根、完整生命周期切换、路由图与资源归属尚未全部迁完。
 
 本次 Memory 管理切片在 PostgreSQL 17 上完成 109 项组合回归，覆盖来源授权、媒体、图归约/存储、组合筛选、游标绑定、主干统计、关系投影、实际 Web 管理路由和模块描述符；定向 Web 回归为 3 项。真实 Edge 在 1440×1100 PC 视口验证默认只展开“来源、主干与遗忘”，页面高度小于 2500 px，配置、状态、人工关系和发布图按需折叠，同时保留配置草稿、联想变更、延迟响应与 Bot 切换保护。该证据不包含十万至百万来源容量压测、真实图片查询入口或关系图布局。
 
+本次 OneBot 所有权切片把连接集合、候选发布/恢复、HTTP/WebSocket 接入、Delivery 准备与两个根监督任务迁入 `adapter.onebot`。PostgreSQL 定向回归包括运行时/接入/关闭 44 项、记忆运行时 4 项、Agent 记忆 2 项、控制发送 3 项以及 Web Binding/Fleet 18 项；无数据库全套为 803 通过、1069 跳过。尚未执行完整 PostgreSQL 全套、真实 QQ 低频验收或长时连接抖动测试，因此这些结果不构成发布结论。
+
 ## 阻断项
 
 ### P0 微内核
 
-- `BindingRuntime` 仍负责 OneBot 网络连接接纳、候选切换和部分平台监督；这些剩余职责需要迁入 `adapter.onebot` 模块及通用 supervisor；
+- `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
 - 瞬时生命周期状态机及失败清理已落实；仍需接入持久代际发布、健康检查、Contract Router 原子切换、按依赖边故障隔离和进程恢复；
 - command、message handler、service、event、job 必须统一编译进可解释 RouteGraph；
 - dispatch trace 必须按消息、组件、代际和结果查询，且与可编辑业务配置分离；

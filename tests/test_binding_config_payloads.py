@@ -241,8 +241,8 @@ async def test_deleted_effective_blocks_new_ingress_and_wire_but_known_delivery_
 
 async def test_runtime_supervisor_closes_revoked_client_without_more_http(platform):
     p = platform
-    await p.runtime._replace(p.desired)
-    connection = p.runtime.connection(p.binding.binding_id)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
+    connection = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     original = len(p.requests)
     plan_op = (
         await rows(
@@ -256,15 +256,15 @@ async def test_runtime_supervisor_closes_revoked_client_without_more_http(platfo
     body = encoded(event(message_id=88))
     await rejected(
         "CONTROL_CONTENT_REVOKED",
-        p.runtime.receive(p.binding.binding_id, body, signature(body, WEBHOOK)),
+        p.runtime.module("adapter.onebot").receive(p.binding.binding_id, body, signature(body, WEBHOOK)),
     )
-    task = asyncio.create_task(p.runtime.run_forever())
+    task = asyncio.create_task(p.runtime.module("adapter.onebot").run_forever())
     try:
         async with asyncio.timeout(8):
             while not connection.client._client.is_closed:
                 await asyncio.sleep(0.02)
         assert not connection.accepting and connection.row["config"] is None
-        assert p.binding.binding_id not in p.runtime.connections
+        assert p.binding.binding_id not in p.runtime.module("adapter.onebot").connections
         assert len(p.requests) == original
         assert (await p.binding.read())["state"] == "OFFLINE"
     finally:
@@ -274,22 +274,22 @@ async def test_runtime_supervisor_closes_revoked_client_without_more_http(platfo
 
 async def test_runtime_can_recover_effective_when_newer_desired_body_was_forgotten(platform):
     p = platform
-    await p.runtime._replace(p.desired)
-    before = p.runtime.connection(p.binding.binding_id)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
+    before = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     await p.binding.apply(
         await p.binding.plan(
             1, {**p.desired["desired_values"], "response_template": "new"}, operation="newer"
         )
     )
     await erase(p.binding, "newer")
-    await p.runtime._disconnect(before)
+    await p.runtime.module("adapter.onebot")._disconnect(before)
     await before.close()
-    p.runtime.connections.pop(p.binding.binding_id)
-    p.runtime._clients.discard(before.client)
-    p.runtime._applied.pop(p.binding.binding_id)
+    p.runtime.module("adapter.onebot").connections.pop(p.binding.binding_id)
+    p.runtime.module("adapter.onebot")._clients.discard(before.client)
+    p.runtime.module("adapter.onebot")._applied.pop(p.binding.binding_id)
     desired = (await p.runtime.module("adapter.onebot").bindings.desired(p.kernel._authority()))[0]
-    await p.runtime._replace(desired)
-    after = p.runtime.connection(p.binding.binding_id)
+    await p.runtime.module("adapter.onebot")._replace(desired)
+    after = p.runtime.module("adapter.onebot").connection(p.binding.binding_id)
     assert after.row["effective_revision"] == 1 and after.row["revision"] == 2
     assert after.row["binding_epoch"] == before.row["binding_epoch"] + 1
     assert (await receive(p, 99))["accepted"]
@@ -299,7 +299,7 @@ async def test_actual_template_worker_result_carries_config_without_tainting_ori
     platform,
 ):
     p = platform
-    await p.runtime._replace(p.desired)
+    await p.runtime.module("adapter.onebot")._replace(p.desired)
     receipt = await receive(
         p,
         111,
@@ -324,7 +324,7 @@ async def test_actual_template_worker_result_carries_config_without_tainting_ori
     selected = await messages.select_input(actor, "template-input")
     context = await messages.context(actor, run_id=selected["run_id"])
     result = await p.runtime.execute(actor, selected, context)
-    current = p.runtime.connection(p.binding.binding_id).row
+    current = p.runtime.module("adapter.onebot").connection(p.binding.binding_id).row
     call = (
         await rows(
             p.binding,

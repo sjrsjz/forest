@@ -2,7 +2,7 @@
 
 ## 1. 修正的问题
 
-当前实现把 `BindingRuntime` 写成了 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。这样的代码虽然具备一些模块 API，却仍由一个业务对象决定系统有哪些能力；它不是本文其余设计所要求的松耦合微内核。
+此前实现曾把 `BindingRuntime` 写成 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。本轮重构已经拆出官方运行时模块及其资源所有权；本文继续作为剩余 Contract Router、持久代际和通用监督重构的权威设计，不再把旧组合根描述成当前事实。
 
 本设计立即取代以下语义：
 
@@ -58,7 +58,7 @@ flowchart LR
 
 当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。启动失败会先清理失败模块自身，再按逆依赖序排空已启动模块；关闭失败保留 FAILED 并允许后续关闭重试。下一步仍需把这些瞬时状态接入持久代际发布、健康检查、Contract Router 原子切换和按依赖边隔离的故障策略。
 
-官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore 与发送 Worker，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`command.router`、`message.router` 分别拥有业务命令和普通消息 Handler 的策略/容量存储。Agent、Memory、Conversation Scheduler、Shell 和 Job 只从依赖图取得这些对象，`BindingRuntime` 不再暴露 `messages`、`bindings`、`delivery`、`memory_sources` 或策略存储便利属性。发送连接监督和 OneBot 网络接纳仍在 `BindingRuntime`，是下一步需要迁入 adapter 生命周期的剩余部分。
+官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`command.router`、`message.router` 分别拥有业务命令和普通消息 Handler 的策略/容量存储。Agent、Memory、Conversation Scheduler、Shell 和 Job 只从依赖图取得这些对象，`BindingRuntime` 不再暴露 OneBot 状态、消息/发送端口、记忆来源或策略存储便利属性。`BindingRuntime` 当前只保留跨模块会话执行、组件 Worker 确保与模块健康汇总；这些能力仍需继续收口到 Contract Router 和通用 supervisor。
 
 ## 4. 控制台信息架构
 
