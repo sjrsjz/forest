@@ -72,7 +72,7 @@ Agent 新模型调用、工具或媒体获取许可严格核验实际 spec/confi
 
 ## 6. 验证与剩余边界
 
-迁移测试使用[冻结的完整 041 包](../tests/fixtures/legacy_041/README.md)在独立解释器中写入真实旧数据，然后由当前运行时升级；不依赖开发机 Git 或相邻 worktree。配置值、SQL reader、旧 writer fencing、旧依赖传播及各族升级具有独立真实 PostgreSQL 测试。
+Forest 尚未发布，已删除冻结 041 包和从错误中间 schema 升级的兼容测试。当前测试从干净最终基线建立数据库，验证配置正文、SQL reader、writer generation、依赖传播和各配置族的运行时不变量；真正发布首版后才冻结该版本的升级夹具与 checksum。
 
 [受控浏览器脚本](../scripts/smoke_control_receipts.py)已通过 22 个真实 Edge 场景，包含原管理回执屏障和四类配置的清理、独立替换及迟到读取；组件历史的可用/不可用项分别验证。该脚本使用发行页面和 JS、受控 HTTP 响应，不替代数据库或真实外部服务验收。最终跨平台和完整容器验收结果另记于[实现状态](implementation-status.md)。
 

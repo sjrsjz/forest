@@ -207,12 +207,12 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 
 | 仍含正文的位置 | 实际写入/读取路径 | 最小迁移契约 |
 | --- | --- | --- |
-| `bot_calls.result` | `Kernel._invoke` 读取 `authorized_call/authorized_child_call` 的旧回执；Worker 返回后 `BotStore.finish_call` 缓存结果。`AgentStore.recover_tool` 也直接读该表 | 增加并冻结独立 `result_digest`、`result_payload_id`；原列严格 NULL。COMPLETED 回执不会因 body 消失变成 NOT_FOUND，不再调用 Worker |
+| `bot_calls.result` | `Kernel._invoke` 读取 `authorized_call/authorized_nested_call` 的旧回执；Worker 返回后 `BotStore.finish_call` 缓存结果。`AgentStore.recover_tool` 也直接读该表 | 增加并冻结独立 `result_digest`、`result_payload_id`；原列严格 NULL。COMPLETED 回执不会因 body 消失变成 NOT_FOUND，不再调用 Worker |
 | `bot_component_state.value`、`bot_state_revisions.value` | `Kernel._state_rpc` → `BotStore.read_state/commit_state`；`snapshot_state/_state_source` 又读全量状态 | 值按固定 `(component,key,revision)` 引用载荷；当前头保留 revision/deleted，历史行保留原值摘要。删除正文不能回退 revision，也不能用业务值 `None` 冒充已擦除值 |
 | `bot_state_steps.receipt` | `commit_state` 的回执实际含完整 `value`，相同步骤重放直接返回旧 receipt | 回执 metadata 保留 operation/revision/原 input 和 payload digest；值只通过同一状态载荷 hydrate。结果内容不可用仍证明该写入已经执行 |
 | `bot_state_migration_sources.source_rows`、`bot_state_migration_results.result_values` | `capture_state_migration` → 两次 Worker `migrate` → `stage_state_migration` → `_publish_state` | 源和候选分离载荷，候选继承全部实际迁移源；最终发布同时复验 route、state revision、runtime fence 与载荷依赖，禁止旧候选恢复被删状态 |
 
-代码入口以当前函数为准：`kernel.py` 的 `_state_rpc/_service_rpc/_invoke/_install_one`；`storage/bot.py` 的 `admit/admit_child/_guard_time/read_state/commit_state/finish_call/authorized_call/authorized_child_call/capture_state_migration/stage_state_migration/_publish_state`。状态、Kernel 回执和 Agent 工具结果之间必须传递宿主掌握的载荷引用；仅迁列、不连接读取依赖，仍会把旧值重新写进新回复。
+代码入口以当前函数为准：`kernel.py` 的 `_state_rpc/_service_rpc/_invoke/_install_one`；`storage/bot.py` 的 `admit/admit_nested/_guard_time/read_state/commit_state/finish_call/authorized_call/authorized_nested_call/capture_state_migration/stage_state_migration/_publish_state`。状态、Kernel 回执和 Agent 工具结果之间必须传递宿主掌握的载荷引用；仅迁列、不连接读取依赖，仍会把旧值重新写进新回复。
 
 建议新增内部 `CallDependencyStore`，固定 Call 的输入依赖 manifest 和摘要，并持久记录返回给 Worker 的状态/子调用结果载荷。`read_state` 必须在同一事务内完成授权、hydrate、登记实际 `(key,revision,payload_id)`，然后才能把值返回 Worker；不能等 Worker 自报“使用了哪些 source”。子服务返回、包括命中已有 COMPLETED 回执的路径，也要在返回父 Worker 前登记其结果依赖。`commit_state`、`finish_call` 以这些真实依赖创建结果载荷，重放只比较原摘要与固定依赖身份。
 

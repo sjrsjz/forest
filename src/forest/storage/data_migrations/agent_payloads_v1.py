@@ -210,10 +210,9 @@ BEGIN
  changed := (OLD.result_payload_id,OLD.result_digest,OLD.result_metadata)
   IS DISTINCT FROM (NEW.result_payload_id,NEW.result_digest,NEW.result_metadata);
  IF OLD.status<>NEW.status AND NOT (
-  (OLD.status='PROPOSED' AND NEW.status IN ('WAIT_APPROVAL','DISPATCHING','WAIT_CHILD','CANCELLED'))
+  (OLD.status='PROPOSED' AND NEW.status IN ('WAIT_APPROVAL','DISPATCHING','CANCELLED'))
   OR (OLD.status='WAIT_APPROVAL' AND NEW.status IN ('DISPATCHING','CANCELLED'))
   OR (OLD.status='DISPATCHING' AND NEW.status IN ('SUCCEEDED','FAILED','NOT_SENT','UNKNOWN'))
-  OR (OLD.status='WAIT_CHILD' AND NEW.status IN ('SUCCEEDED','FAILED','UNKNOWN','CANCELLED'))
   OR (OLD.status='NOT_SENT' AND NEW.status IN ('WAIT_APPROVAL','DISPATCHING','CANCELLED'))
   OR (OLD.status='UNKNOWN' AND NEW.status IN ('SUCCEEDED','FAILED'))
  ) THEN RAISE EXCEPTION 'Tool status transition is invalid'; END IF;
@@ -228,7 +227,7 @@ BEGIN
  END IF;
  IF changed THEN
   IF NOT ((OLD.status='DISPATCHING' AND NEW.status IN ('SUCCEEDED','FAILED','NOT_SENT','UNKNOWN'))
-   OR (OLD.status IN ('UNKNOWN','WAIT_CHILD') AND NEW.status IN ('SUCCEEDED','FAILED')))
+   OR (OLD.status='UNKNOWN' AND NEW.status IN ('SUCCEEDED','FAILED')))
    OR NEW.result_digest IS NULL THEN
    RAISE EXCEPTION 'Tool result requires a new valid observation';
   END IF;

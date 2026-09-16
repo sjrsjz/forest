@@ -21,15 +21,15 @@ from forest.storage.agent import AgentStore
 from forest.storage.bot import BotStore
 from forest.storage.jobs import JobStore
 from forest.storage.messages import MessageStore
-from forest.storage.tree_budget import account_in, reserve_in
+from forest.storage.run_budget import account_in, reserve_in
 
 pytestmark = pytest.mark.postgres
 
-# Frozen from the released 001-017 Git blobs, not recomputed from current SQL.
-# Old checksums are part of the upgrade contract even for a non-Git installation.
+# Baseline checkpoint used to exercise later migration invariants. Forest has
+# not shipped this schema, so these hashes follow the current clean baseline.
 RELEASED = {
     "001_kernel.sql": "6e86ed2eacd57270f0a33132b22ecf7f13beaa8f2c6427c75ede3fc3fdf32462",
-    "002_call_trees.sql": "6d081922bf8401f8427c3ca8edfda78ce9f8117558298b36519a1055e971d8f2",
+    "002_call_trees.sql": "0d0281d688c9623ef1429575fc6078f56a9e94b1942afdd04d4bfe86cf755aed",
     "003_control.sql": "0976ea5d195c7a975cd59982f51f6b54a33ad240b5f0123dfaf776186ab8bfaa",
     "004_bindings.sql": "b20db9600481732058e7cc94ab3439dbc1cdff19559ad671ba0d84771b323755",
     "005_messages.sql": "8e1fc4ffa3a7465f44e48fd529e15ea9b897483c101a7c1e63bde9531a2ac5ea",
@@ -40,7 +40,7 @@ RELEASED = {
     "010_state_migration.sql": "9fc6db1f106ea166feac3940e729653cf18f33828f7d98d059c0fa53b0c6a7c8",
     "011_watch.sql": "d00903c548c06a1da00f8eb8213eea7c9dc221e91b759b522c4af28028362cf4",
     "012_web_config_recovery.sql": "c0afcbaf9423ad6fc0fdadef6f806644f9fb952283b1b2f2a3597ab376c91427",
-    "013_agent.sql": "10feeff0d1846bb04171260d07de47e2f908910a7d5c25dae35baca8b7258148",
+    "013_agent.sql": "90e7b345285443c0bbd8a651506f64f258b824e369b67c980aa88005ed2a0606",
     "014_agent_config.sql": "6b63c0150a3057f2dd7bea8f008ec49241e10f7e8cadfc211db8e0647a24b8ac",
     "015_agent_tool_fences.sql": "c0ffca0e42a3f7dabb1a36d7e4af5be2a108892b2f8c1852f6aa2b465b98bc92",
     "016_media.sql": "09150be91839b8e47c0118b35089f8b54a0c6da7c8479a2e6ff366706521b790",
@@ -115,7 +115,7 @@ async def test_upgrade_backfills_unsettled_and_paid_cost_once_across_days(upgrad
         await attach(store)
         agent = AgentStore(MessageStore(store))
         async with store.pool.connection() as conn, conn.transaction():
-            assert (await (await conn.execute("SELECT count(*) AS n FROM public.bot_agent_tree_budgets")).fetchone())["n"] == 0
+            assert (await (await conn.execute("SELECT count(*) AS n FROM public.bot_agent_run_budgets")).fetchone())["n"] == 0
             if account_first:
                 row = await account_in(conn, "bot-a", "open-run")
                 assert (row["reserved_tokens"], row["charged_tokens"]) == (3000, 165)

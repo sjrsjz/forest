@@ -21,6 +21,9 @@ CREATE TABLE public.bot_agent_runs (
     final_input_revision bigint,
     final_reply_id text,
     error_code text,
+    tool_iteration_count integer NOT NULL DEFAULT 0 CHECK(tool_iteration_count>=0),
+    thinking_iteration_count integer NOT NULL DEFAULT 0 CHECK(thinking_iteration_count>=0),
+    protocol_repair_count integer NOT NULL DEFAULT 0 CHECK(protocol_repair_count>=0),
     deadline_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,run_id),
@@ -74,6 +77,13 @@ CREATE TABLE public.bot_agent_budget_days (
     charged_tokens bigint NOT NULL DEFAULT 0 CHECK(charged_tokens>=0),
     PRIMARY KEY(bot_id,budget_day)
 );
+CREATE TABLE public.bot_agent_run_budgets (
+    bot_id text NOT NULL, run_id text NOT NULL,
+    reserved_tokens bigint NOT NULL DEFAULT 0 CHECK(reserved_tokens>=0),
+    charged_tokens bigint NOT NULL DEFAULT 0 CHECK(charged_tokens>=0),
+    PRIMARY KEY(bot_id,run_id),
+    FOREIGN KEY(bot_id,run_id) REFERENCES public.bot_agent_runs(bot_id,run_id)
+);
 CREATE TABLE public.bot_model_budget_reservations (
     bot_id text NOT NULL, transport_attempt_id text NOT NULL, budget_day date NOT NULL,
     reserved_tokens bigint NOT NULL CHECK(reserved_tokens>=0), charged_tokens bigint,
@@ -122,7 +132,7 @@ BEGIN
     RETURN NEW;
 END $$;
 CREATE TRIGGER bot_agent_run_identity BEFORE UPDATE OR DELETE ON public.bot_agent_runs
-    FOR EACH ROW EXECUTE FUNCTION public.forest_agent_fixed_fields('{owner_epoch,actor_epoch,actor_host_incarnation,checkpoint_seq,next_step_seq,published_step_seq,current_step_id,phase,input_revision,selected_input_end_seq,wait_classified_seq,final_step_id,final_input_revision,final_reply_id,error_code}');
+    FOR EACH ROW EXECUTE FUNCTION public.forest_agent_fixed_fields('{owner_epoch,actor_epoch,actor_host_incarnation,checkpoint_seq,next_step_seq,published_step_seq,current_step_id,phase,input_revision,selected_input_end_seq,wait_classified_seq,final_step_id,final_input_revision,final_reply_id,error_code,tool_iteration_count,thinking_iteration_count,protocol_repair_count}');
 CREATE TRIGGER bot_agent_step_identity BEFORE UPDATE OR DELETE ON public.bot_agent_steps
     FOR EACH ROW EXECUTE FUNCTION public.forest_agent_fixed_fields('{status,model_call_epoch,model_request_id,transport_attempt_id,output,output_digest,closed_parts,published_context_revision}');
 CREATE TRIGGER bot_model_attempt_identity BEFORE UPDATE OR DELETE ON public.bot_model_transport_attempts

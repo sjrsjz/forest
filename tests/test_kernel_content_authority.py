@@ -182,7 +182,7 @@ async def test_independent_calls_share_generation_sources_and_forget_blocks_ever
     }
 
 
-async def test_child_state_read_and_exact_result_are_exposed_to_parent_before_return(authority):
+async def test_nested_state_read_and_exact_result_are_exposed_to_parent_before_return(authority):
     store, lease = authority
     await candidate(store, lease, generation="child-generation", component="child")
     op = await operation(store, lease, generation="child-generation", component="child")
@@ -213,7 +213,7 @@ async def test_child_state_read_and_exact_result_are_exposed_to_parent_before_re
             (parent.generation_id,),
         )
     )[0]
-    child = await store.admit_child(
+    child = await store.admit_nested(
         parent, "child", "child-call", "child-operation", "child-input", input_value={"key": "key"}
     )
     assert await store.read_state(child, "key") == {
@@ -232,7 +232,7 @@ async def test_child_state_read_and_exact_result_are_exposed_to_parent_before_re
     )
     exposures = await rows(
         store,
-        "SELECT * FROM public.bot_generation_exposures WHERE generation_id=%s AND kind='CHILD_RESULT'",
+        "SELECT * FROM public.bot_generation_exposures WHERE generation_id=%s AND kind='NESTED_RESULT'",
         (parent.generation_id,),
     )
     assert len(exposures) == 1 and exposures[0]["payload_refs"] == [completed["result_payload_id"]]
@@ -244,7 +244,7 @@ async def test_child_state_read_and_exact_result_are_exposed_to_parent_before_re
         )
     )[0]
     assert after["revision"] == before["revision"] + 1
-    replay = await store.authorized_child_call(parent, child.operation_id, parent.policy_revision)
+    replay = await store.authorized_nested_call(parent, child.operation_id, parent.policy_revision)
     assert (
         replay["result_payload_id"] == completed["result_payload_id"]
         and replay["result"] == completed["result"]

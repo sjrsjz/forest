@@ -41,7 +41,6 @@ _OWNERS = frozenset(
         "model.result",
         "agent.tool",
         "agent.observation",
-        "agent.child",
         "context.parts",
         "reply.parts",
         "delivery.payload",

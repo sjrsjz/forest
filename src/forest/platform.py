@@ -97,7 +97,7 @@ class BindingRuntime:
             if (
                 self.module_registry.failures()
             ):
-                self._fatal("PLATFORM_CHILD_FAILED")
+                self._fatal("PLATFORM_SUBTASK_FAILED")
                 return
             await asyncio.sleep(0.1)
 

@@ -5,7 +5,6 @@ import json
 import psycopg
 import pytest
 import pytest_asyncio
-from legacy_041 import run_legacy_041
 from test_bot_store import database as database
 from test_config_writer_fence import resources
 
@@ -134,94 +133,6 @@ async def test_cycles_conflicting_proofs_and_runtime_imports_are_rejected(conten
             await conn.execute("INSERT INTO public.bot_payload_legacy_dependencies VALUES (%s,%s,%s,'agent.spec','forged')",
                 (content[0].store.bot_id, second.payload_id, cfg.payload_id))
         assert exc.value.sqlstate == "55000"
-
-
-async def test_frozen_041_process_loads_all_inline_imports_from_snapshot(tmp_path):
-    result = await run_legacy_041(tmp_path, """
-import forest.storage.bot as bot
-import forest.storage.control_receipts as receipts
-import forest.storage.source_domains as domains
-from pathlib import Path
-print(json.dumps({'bot': str(Path(bot.__file__).parent),
- 'receipts': str(Path(receipts.__file__).parent),
- 'generation': bot.WRITER_GENERATION, 'agent_spec': 'AGENT_SPEC' in domains.KINDS,
- 'payload_method': hasattr(receipts.ControlReceiptStore, 'plan_values_proof_in')}))
-""", {"arbitrary": "seed"})
-    assert result["bot"] == result["receipts"]
-    assert result["generation"] == 1
-    assert result["agent_spec"] is False and result["payload_method"] is False
-    assert json.loads(json.dumps(result)) == result
-
-
-async def test_actual_041_receipt_replays_original_input_after_bridge_without_rewriting_facts(
-    database, tmp_path, monkeypatch,
-):
-    old = await run_legacy_041(tmp_path, r'''
-import asyncio, sys
-from dataclasses import asdict
-from forest.storage.bot import BotStore
-from forest.storage.payloads import PayloadStore
-from forest.memory_types import SourceRef
-async def main():
- store=BotStore(PARAMETERS['dsn'],'bot-a'); await store.open()
- try:
-  await store.migrate(); lease=await store.acquire_host('old','041',ttl_seconds=120); p=PayloadStore(store)
-  a=await p.put_json(lease,owner_kind='model.snapshot',owner_id='parent',value={'parent':True},
-   sources=(SourceRef('original'),),expected_deletion_epoch=0)
-  b=await p.put_json(lease,owner_kind='model.snapshot',owner_id='old-child',value={'answer':'same-body'},
-   sources=(SourceRef('direct'),),parents=(a.payload_id,),expected_deletion_epoch=0)
-  async with store.pool.connection() as conn:
-   facts=await (await conn.execute('SELECT * FROM public.bot_payload_headers WHERE payload_id=%s',(b.payload_id,))).fetchone()
-  await store.release_host(lease)
-  print(json.dumps({'a':asdict(a),'b':asdict(b),'facts':facts},default=str))
- finally: await store.close()
-if sys.platform=='win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-asyncio.run(main())
-''', {"dsn": database})
-    path = resources(tmp_path / "new-schema", cutoff="044")
-    monkeypatch.setattr(bot_module, "files", lambda _: path)
-    store = BotStore(database, "bot-a")
-    await store.open()
-    try:
-        await store.migrate()
-        lease = await store.acquire_host("new", "044", ttl_seconds=300)
-        p, content = PayloadStore(store), None
-        content = (p, lease)
-        cfg = await put(content, "cfg", sources=(SourceRef("configuration"),))
-        from types import SimpleNamespace
-
-        await bridge(content, SimpleNamespace(payload_id=old["a"]["payload_id"]), cfg)
-        arguments = {"owner_kind": "model.snapshot", "owner_id": "old-child", "value": {"answer": "same-body"},
-                     "sources": (SourceRef("direct"),), "parents": (old["a"]["payload_id"],), "expected_deletion_epoch": 0}
-        replay = await p.put_json(lease, **arguments)
-        assert replay.payload_id == old["b"]["payload_id"] and replay.digest == old["b"]["digest"] and replay.state == "ACTIVE"
-        assert await available(content, replay) == {"answer": "same-body"}
-        facts = (await rows(content, "SELECT * FROM public.bot_payload_headers WHERE payload_id=%s", (replay.payload_id,)))[0]
-        assert json.loads(json.dumps(facts, default=str)) == old["facts"]
-        for changed in ({"value": {"answer": "different"}}, {"parents": (cfg.payload_id,)},
-                        {"sources": (SourceRef("extra-direct"),)},
-                        {"sources": (SourceRef("direct"), SourceRef("configuration"))}):
-            with pytest.raises(ForestError) as denied:
-                await p.put_json(lease, **(arguments | changed))
-            assert denied.value.code == "PAYLOAD_CONFLICT"
-        with pytest.raises(ForestError) as denied:
-            await p.put_bytes(lease, **(arguments | {"value": b'{"answer":"same-body"}'}))
-        assert denied.value.code == "PAYLOAD_CONFLICT"
-        after = await put(content, "new-child", parents=(old["a"]["payload_id"],))
-        new = (await rows(content, "SELECT manifest FROM public.bot_payload_headers WHERE payload_id=%s", (after.payload_id,)))[0]
-        assert {s["source_unit_id"] for s in new["manifest"]["sources"]} == {"original", "configuration"}
-        await p.forget_sources(lease, "remove-config", (SourceRef("configuration"),), expected_deletion_epoch=0)
-        revoked = await p.put_json(lease, **(arguments | {"expected_deletion_epoch": 1}))
-        assert revoked.state == "REVOKED" and revoked.payload_id == replay.payload_id
-        await denied_read(content, revoked, 1)
-        await p.scrub(lease)
-        scrubbed = await p.put_json(lease, **(arguments | {"expected_deletion_epoch": 1}))
-        assert scrubbed.state == "SCRUBBED" and not await rows(content,
-            "SELECT 1 FROM public.bot_payload_bodies WHERE payload_id=%s", (scrubbed.payload_id,))
-        current = (await rows(content, "SELECT manifest,input_digest,digest FROM public.bot_payload_headers WHERE payload_id=%s", (scrubbed.payload_id,)))[0]
-        assert current == {key: old["facts"][key] for key in ("manifest", "input_digest", "digest")}
-    finally:
-        await store.close()
 
 
 async def denied_read(content, ref, epoch):

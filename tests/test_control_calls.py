@@ -112,7 +112,7 @@ async def test_control_identity_cannot_escalate_to_state_or_children(store):
     await expect("CONTROL_SCOPE_DENIED", store.read_state(grant, "secret"))
     await expect("CONTROL_SCOPE_DENIED", store.commit_state(grant, "x", 0, 1, "step", "digest"))
     await expect(
-        "CONTROL_SCOPE_DENIED", store.admit_child(grant, "business", "child", "op-child", "digest")
+        "CONTROL_SCOPE_DENIED", store.admit_nested(grant, "business", "child", "op-child", "digest")
     )
     await expect(
         "INVALID_GRANT",

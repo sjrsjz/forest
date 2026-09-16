@@ -319,7 +319,7 @@ async def test_exposure_supervisor_failure_terminates_owned_workers(bot_database
     assert not kernel._exposure_retirements
 
 
-async def test_child_receipt_becomes_parent_worker_exposure_and_result_parent(bot_database, tmp_path):
+async def test_nested_receipt_becomes_parent_worker_exposure_and_result_parent(bot_database, tmp_path):
     from test_services import package as service_package
     from test_services import spec
 
@@ -339,7 +339,7 @@ async def test_child_receipt_becomes_parent_worker_exposure_and_result_parent(bo
             "SELECT 1 AS found FROM public.bot_payload_derivations WHERE payload_id=%s AND parent_payload_id=%s",
             (receipt.result_payload_id, child["result_payload_id"])) == {"found": 1}
         delivered = await row(store,
-            "SELECT payload_refs FROM public.bot_generation_exposures WHERE kind='CHILD_RESULT'")
+            "SELECT payload_refs FROM public.bot_generation_exposures WHERE kind='NESTED_RESULT'")
         assert delivered["payload_refs"] == [child["result_payload_id"]]
         domain = await row(store,
             "SELECT source_unit_id FROM public.bot_payload_domains WHERE kind='SERVICE_INPUT' AND owner_id=%s",

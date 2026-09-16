@@ -1,7 +1,7 @@
 """Small native SDK. Context handles cross an authenticated host boundary.
 
 Durable component jobs cross that boundary explicitly. Arbitrary subprocesses
-remain outside the SDK; per-call owned children complete before reply.
+remain outside the SDK; per-call owned nested tasks complete before reply.
 """
 
 from __future__ import annotations

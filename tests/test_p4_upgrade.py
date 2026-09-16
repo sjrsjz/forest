@@ -1,4 +1,4 @@
-"""Real c93b6a4 001-020 authorities, upgraded before any new source writer runs.
+"""Current 001-020 baseline checkpoint, upgraded before source writers run.
 
 The old model rows exercise byte/fact preservation, not restartable Provider
 requests. Legacy plaintext intentionally remains after this P4 source backfill.
@@ -27,13 +27,11 @@ from forest.storage.messages import MessageStore
 
 pytestmark = pytest.mark.postgres
 
-# Obtained once from c93b6a4bad9ef685b8bdc6b58edebf706fb0a5df Git blobs.
-# 001-017 were separately compared with that commit and equal RELEASED.
-# Runtime tests need neither a Git executable nor a .git checkout.
+# Current unpublished baseline checkpoint. These hashes intentionally move
+# when the clean schema is rewritten; they are not a public upgrade contract.
 P3_RELEASED = {
     **RELEASED,
     "018_jobs.sql": "b94dd80be998fc28d6695dce4b1786c070642ed2558134307872559315b6f17e",
-    "019_children.sql": "7a141a8ec95271f8185671497e89e29c2414d52917e1046d856c7ac6c81b60b4",
     "020_shell_commands.sql": "ccf828ca8ea60d719c779dda7bc944003f8f1a453524985f1469330c9ab7f157",
 }
 

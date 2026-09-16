@@ -157,12 +157,12 @@ class KernelContentStore:
     async def hydrate_call_in(self, conn, row):
         return await self.bodies.hydrate_call_in(conn, row, epoch=await self.epoch_in(conn))
 
-    async def child_receipt_in(self, conn, parent, child):
-        child = await self.hydrate_call_in(conn, child)
-        if child is not None and child["status"] == "COMPLETED":
-            await self.expose_in(conn, parent.generation_id, "CHILD_RESULT", child["call_id"],
-                                 [child["result_payload_id"]])
-        return child
+    async def nested_receipt_in(self, conn, parent, nested):
+        nested = await self.hydrate_call_in(conn, nested)
+        if nested is not None and nested["status"] == "COMPLETED":
+            await self.expose_in(conn, parent.generation_id, "NESTED_RESULT", nested["call_id"],
+                                 [nested["result_payload_id"]])
+        return nested
 
     async def state_rows_in(self, conn, component_id, *, required=False):
         """Removed values preserve revision fences but never become JSON null."""

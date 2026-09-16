@@ -28,7 +28,7 @@ OWNER_KINDS = frozenset({
     "memory.source", "memory.assertion", "memory.artifact", "memory.evidence",
     "memory.query", "memory.embedding", "memory.vector", "memory.index",
     "media.source", "media.capture", "media.variant", "model.snapshot", "model.manifest",
-    "model.request", "model.result", "agent.tool", "agent.observation", "agent.child",
+    "model.request", "model.result", "agent.tool", "agent.observation",
     "context.parts", "reply.parts", "delivery.payload", "delivery.request", "delivery.receipt",
     "kernel.input", "kernel.result", "state.value", "state.migration", "control.input", "control.result", "control.config",
     "control.audit", "control.outbox", "job.definition", "shell.arguments", "component.event",
@@ -274,7 +274,7 @@ class PayloadStore:
             if row["input_digest"] != input_digest:
                 # A pre-044 parent's immutable manifest can gain a separately
                 # proven configuration prerequisite. Never rewrite that old
-                # child receipt to match a new flattening. Accept only when the
+                # nested receipt to match a new flattening. Accept only when the
                 # original algorithm reproduces its complete admitted digest:
                 # same bytes, encoding, owner, direct parents and direct input
                 # sources plus those parents' actual original manifests.

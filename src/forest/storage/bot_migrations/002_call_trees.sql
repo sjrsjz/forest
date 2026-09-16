@@ -44,7 +44,7 @@ $$;
 CREATE TRIGGER bot_call_identity BEFORE UPDATE ON public.bot_calls
     FOR EACH ROW EXECUTE FUNCTION public.forest_call_identity();
 
--- Eligibility includes every ancestor, so an orphaned child is never counted as
+-- Eligibility includes every ancestor, so an orphaned nested call is never counted as
 -- a live executor merely because its own target route and deadline remain live.
 CREATE VIEW public.bot_live_calls AS
 WITH RECURSIVE eligible AS (

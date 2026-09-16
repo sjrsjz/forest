@@ -62,7 +62,6 @@ MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
     "030_context_payloads.sql": "context_payloads_v1",
     "031_agent_payloads.sql": "agent_payloads_v1",
-    "032_child_payloads.sql": "child_payloads_v1",
     "033_delivery_payloads.sql": "delivery_payloads_v1",
     "034_legacy_suppression.sql": "legacy_suppression_v1",
     "035_source_links.sql": "source_links_v1",
@@ -2462,7 +2461,7 @@ class BotStore:
         return chain
 
     @capacity_boundary
-    async def admit_child(
+    async def admit_nested(
         self,
         parent_grant: CallGrant,
         target_component_id: str,
@@ -2494,7 +2493,7 @@ class BotStore:
         ).issubset(parent_grant.dependency_components):
             raise ForestError(
                 "DEPENDENCY_DENIED",
-                "Child target and dependencies must belong to the parent's reserved closure",
+                "Nested target and dependencies must belong to the parent's reserved closure",
                 status=403,
             )
         async with self.pool.connection() as conn, conn.transaction():
@@ -2544,7 +2543,7 @@ class BotStore:
                     )
                 )
             ):
-                raise ForestError("STALE_ROUTE", "Selected child Worker changed before admission")
+                raise ForestError("STALE_ROUTE", "Selected nested Worker changed before admission")
             previous = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_calls WHERE bot_id=%s AND (operation_id=%s OR call_id=%s)",
@@ -2563,30 +2562,30 @@ class BotStore:
                 ):
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT",
-                        "Child operation already belongs to another parent or input",
+                        "Nested operation already belongs to another parent or input",
                     )
                 if old["status"] == "COMPLETED":
                     raise ForestError(
                         "CALL_COMPLETED",
-                        "Child operation already completed",
+                        "Nested operation already completed",
                         details={"call_id": old["call_id"]},
                     )
                 if old["status"] in {"FAILED", "CANCELLED"}:
                     raise ForestError(
                         "CALL_FAILED",
-                        "Child operation already terminated",
+                        "Nested operation already terminated",
                         details={"error_code": old["error_code"]},
                     )
-                raise ForestError("OPERATION_PENDING", "Child operation is already admitted")
+                raise ForestError("OPERATION_PENDING", "Nested operation is already admitted")
             if generation is None or generation["status"] not in {"ACTIVE", "QUIESCING"}:
                 raise ForestError(
-                    "ADMISSION_CLOSED", "Child target is not an active or draining generation"
+                    "ADMISSION_CLOSED", "Nested target is not an active or draining generation"
                 )
             if (
                 generation["host_incarnation"] != host["incarnation"]
                 or generation["host_owner_epoch"] != host["owner_epoch"]
             ):
-                raise ForestError("STALE_GENERATION", "Child target belongs to an old host")
+                raise ForestError("STALE_GENERATION", "Nested target belongs to an old host")
             count = await (
                 await conn.execute(
                     "SELECT count(*) AS n FROM public.bot_calls WHERE bot_id=%s AND root_call_id=%s",
@@ -2655,27 +2654,27 @@ class BotStore:
             return self._grant_value(row)
 
     @capacity_boundary
-    async def authorized_child_call(
+    async def authorized_nested_call(
         self, parent_grant: CallGrant, operation_id: str, expected_policy_revision: int
     ) -> dict | None:
         async with self.pool.connection() as conn, conn.transaction():
             _, host = await self._guard(conn, parent_grant)
             if parent_grant.policy_revision != expected_policy_revision:
-                raise ForestError("POLICY_REVOKED", "Child receipt grant was revoked", status=403)
-            child = await (
+                raise ForestError("POLICY_REVOKED", "Nested receipt grant was revoked", status=403)
+            nested = await (
                 await conn.execute(
                     "SELECT * FROM public.bot_calls WHERE bot_id=%s AND operation_id=%s",
                     (self.bot_id, operation_id),
                 )
             ).fetchone()
-            if child is not None and (
-                child["parent_call_id"] != parent_grant.call_id
-                or child["root_call_id"] != parent_grant.root_call_id
+            if nested is not None and (
+                nested["parent_call_id"] != parent_grant.call_id
+                or nested["root_call_id"] != parent_grant.root_call_id
             ):
-                raise ForestError("IDEMPOTENCY_CONFLICT", "Child receipt belongs to another parent")
-            child = await self.content.child_receipt_in(conn, parent_grant, child)
+                raise ForestError("IDEMPOTENCY_CONFLICT", "Nested receipt belongs to another parent")
+            nested = await self.content.nested_receipt_in(conn, parent_grant, nested)
             await self._guard_time(conn, host, parent_grant)
-            return child
+            return nested
 
     async def _guard(
         self, conn: AsyncConnection, grant: CallGrant, *, pending: bool = True, extra_components=()
@@ -2996,7 +2995,7 @@ class BotStore:
                     )
                 if grant.parent_call_id is not None:
                     parent = self._grant_value((await self._chain(conn, grant.call_id))[-2])
-                    call = await self.content.child_receipt_in(conn, parent, call)
+                    call = await self.content.nested_receipt_in(conn, parent, call)
                 await self._guard_time(conn, host, grant)
                 return call
             if call["status"] != "ADMITTED":
@@ -3007,8 +3006,8 @@ class BotStore:
                 for row in descendants
             ):
                 raise ForestError(
-                    "CHILDREN_PENDING",
-                    "A call cannot finish before all of its child calls terminate",
+                    "NESTED_CALLS_PENDING",
+                    "A call cannot finish before all of its nested calls terminate",
                 )
             await self._guard_time(conn, host, grant)
             result_ref = await self.content.bodies.put_call_result_in(
@@ -3029,7 +3028,7 @@ class BotStore:
             assert row is not None
             if grant.parent_call_id is not None:
                 parent = self._grant_value((await self._chain(conn, grant.call_id))[-2])
-                row = await self.content.child_receipt_in(conn, parent, row)
+                row = await self.content.nested_receipt_in(conn, parent, row)
             else:
                 row = await self.content.hydrate_call_in(conn, row)
             await self._guard_time(conn, host, grant)
@@ -3072,8 +3071,8 @@ class BotStore:
             ).fetchone()
             if result is not None and result["parent_call_id"] is not None:
                 raise ForestError(
-                    "CHILD_AUTHORITY_REQUIRED",
-                    "Child receipts require their live parent call authority",
+                    "NESTED_AUTHORITY_REQUIRED",
+                    "Nested receipts require their live parent call authority",
                     status=403,
                 )
             if result is not None and result["admission_lane"] != admission_lane:
@@ -3100,7 +3099,7 @@ class BotStore:
         if call is None:
             raise ForestError("CALL_NOT_FOUND", "Admitted call does not exist", status=404)
         # Cancellation/failure can touch a dynamic descendant subtree. Reserving
-        # all existing routes first prevents a child from introducing a new lock
+        # all existing routes first prevents a nested call from introducing a new lock
         # after this transaction has acquired runtime or parent-call locks.
         await self._all_routes(conn)
         await self._host(conn, lease)

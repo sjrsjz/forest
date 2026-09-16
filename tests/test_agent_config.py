@@ -96,6 +96,8 @@ async def test_key_input_and_plan_owner_are_bound(environment):
     {"media_allowed_origins": ["https://images.example.com/path"]},
     {"context_tokens": 1024, "max_output_tokens": 2048},
     {"model_timeout": 100, "run_timeout": 90},
+    {"children_enabled": False},
+    {"system_prompt": "retired compatibility field"},
 ])
 def test_agent_settings_reject_invalid_provider_inputs(changes):
     with pytest.raises(ValueError):

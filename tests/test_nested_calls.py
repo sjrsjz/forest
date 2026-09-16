@@ -42,7 +42,7 @@ async def environment():
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
-    name = "forest_child_" + uuid4().hex
+    name = "forest_nested_" + uuid4().hex
     admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parts = urlsplit(dsn)
@@ -57,7 +57,7 @@ async def environment():
         yield store, lease, uri
     finally:
         await store.close()
-        assert name.startswith("forest_child_") and len(name) == 45
+        assert name.startswith("forest_nested_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
 
@@ -74,9 +74,11 @@ async def parent(store, lease, name="root", timeout=30, dependencies=(TARGET, LE
     )
 
 
-async def child(store, parent_grant, name="child", target=TARGET, dependencies=(LEAF,), timeout=60):
+async def nested_call(
+    store, parent_grant, name="nested", target=TARGET, dependencies=(LEAF,), timeout=60
+):
     route = await store.get_route(target)
-    return await store.admit_child(
+    return await store.admit_nested(
         parent_grant,
         target,
         name,
@@ -119,27 +121,29 @@ async def wait_for_call_lock(store):
 async def test_nested_calls_share_deadline_and_parent_cannot_finish_early(environment):
     store, lease, _ = environment
     root = await parent(store, lease, timeout=5)
-    nested = await child(store, root)
-    leaf = await child(store, nested, "leaf", LEAF, ())
+    nested = await nested_call(store, root)
+    leaf = await nested_call(store, nested, "leaf", LEAF, ())
     assert root.call_depth == 0 and nested.call_depth == 1 and leaf.call_depth == 2
     assert leaf.root_call_id == nested.root_call_id == root.call_id
     assert leaf.parent_call_id == nested.call_id and nested.parent_call_id == root.call_id
     assert leaf.deadline_at <= nested.deadline_at <= root.deadline_at
-    await rejected("CHILDREN_PENDING", store.finish_call(root, "premature"))
-    await rejected("CHILDREN_PENDING", store.finish_call(nested, "premature"))
+    await rejected("NESTED_CALLS_PENDING", store.finish_call(root, "premature"))
+    await rejected("NESTED_CALLS_PENDING", store.finish_call(nested, "premature"))
     await state_commit(store, leaf)
     await store.finish_call(leaf, {"value": 1})
-    await store.finish_call(nested, {"child_value": 1})
+    await store.finish_call(nested, {"nested_value": 1})
     await store.finish_call(root, {"final_value": 1})
     assert await store.inflight(TARGET) == 0
     assert (await store.read_call("op-leaf"))["parent_call_id"] == nested.call_id
 
 
-async def test_parent_cancel_recursively_terminates_children_and_preserves_prior_facts(environment):
+async def test_parent_cancel_recursively_terminates_nested_calls_and_preserves_prior_facts(
+    environment,
+):
     store, lease, _ = environment
     root = await parent(store, lease)
-    nested = await child(store, root)
-    leaf = await child(store, nested, "leaf", LEAF, ())
+    nested = await nested_call(store, root)
+    leaf = await nested_call(store, nested, "leaf", LEAF, ())
     await state_commit(store, leaf)
     await store.cancel_call(lease, root.call_id)
     for grant in (root, nested, leaf):
@@ -150,7 +154,7 @@ async def test_parent_cancel_recursively_terminates_children_and_preserves_prior
         await rejected("CALL_CANCELLED", store.finish_call(grant, "late"))
     assert (await store.snapshot_state(lease, LEAF))["count"] == {"revision": 1, "value": 1}
     assert await store.inflight(TARGET) == 0
-    await rejected("CALL_CANCELLED", store.authorized_child_call(root, nested.operation_id, 1))
+    await rejected("CALL_CANCELLED", store.authorized_nested_call(root, nested.operation_id, 1))
 
 
 @pytest.mark.parametrize("failure", ["call", "generation"])
@@ -159,8 +163,8 @@ async def test_failed_caller_terminates_descendants_without_requiring_target_fai
 ):
     store, lease, _ = environment
     root = await parent(store, lease)
-    nested = await child(store, root)
-    leaf = await child(store, nested, "leaf", LEAF, ())
+    nested = await nested_call(store, root)
+    leaf = await nested_call(store, nested, "leaf", LEAF, ())
     if failure == "call":
         await store.fail_call(lease, root.call_id, "CALLER_FAILED")
     else:
@@ -177,8 +181,8 @@ async def test_failed_caller_terminates_descendants_without_requiring_target_fai
 async def test_leaf_operations_recheck_every_caller_route(environment, action):
     store, lease, _ = environment
     root = await parent(store, lease)
-    nested = await child(store, root)
-    leaf = await child(store, nested, "leaf", LEAF, ())
+    nested = await nested_call(store, root)
+    leaf = await nested_call(store, nested, "leaf", LEAF, ())
     # Fault injection changes only the caller fence; target rows and leaf token
     # remain unchanged, so validating the target alone would incorrectly pass.
     async with store.pool.connection() as conn:
@@ -199,35 +203,35 @@ async def test_leaf_operations_recheck_every_caller_route(environment, action):
 async def test_parent_deadline_bounds_descendant_work(environment):
     store, lease, _ = environment
     root = await parent(store, lease, timeout=0.2)
-    nested = await child(store, root)
+    nested = await nested_call(store, root)
     assert nested.deadline_at == root.deadline_at
     await asyncio.sleep(0.22)
     await rejected("CALL_EXPIRED", state_commit(store, nested))
-    await rejected("CALL_EXPIRED", store.authorized_child_call(root, nested.operation_id, 1))
+    await rejected("CALL_EXPIRED", store.authorized_nested_call(root, nested.operation_id, 1))
 
 
-async def test_child_receipts_are_bound_to_live_parent_and_cannot_be_top_level(environment):
+async def test_nested_receipts_are_bound_to_live_parent_and_cannot_be_top_level(environment):
     store, lease, _ = environment
     root = await parent(store, lease)
     other = await parent(store, lease, "other")
-    nested = await child(store, root)
+    nested = await nested_call(store, root)
     await store.finish_call(nested, {"result": "saved"})
-    assert (await store.authorized_child_call(root, nested.operation_id, 1))["result"] == {
+    assert (await store.authorized_nested_call(root, nested.operation_id, 1))["result"] == {
         "result": "saved"
     }
     await rejected(
-        "IDEMPOTENCY_CONFLICT", store.authorized_child_call(other, nested.operation_id, 1)
+        "IDEMPOTENCY_CONFLICT", store.authorized_nested_call(other, nested.operation_id, 1)
     )
-    await rejected("CHILD_AUTHORITY_REQUIRED", store.authorized_call(lease, nested.operation_id, 1))
+    await rejected("NESTED_AUTHORITY_REQUIRED", store.authorized_call(lease, nested.operation_id, 1))
     await rejected(
         "IDEMPOTENCY_CONFLICT",
         store.admit(lease, TARGET, "top-replay", nested.operation_id, nested.input_digest),
     )
     await store.cancel_call(lease, root.call_id)
-    await rejected("CALL_CANCELLED", store.authorized_child_call(root, nested.operation_id, 1))
+    await rejected("CALL_CANCELLED", store.authorized_nested_call(root, nested.operation_id, 1))
 
 
-async def test_dependency_reservation_blocks_publish_before_a_child_even_exists(environment):
+async def test_dependency_reservation_blocks_publish_before_a_nested_call_exists(environment):
     store, lease, _ = environment
     root = await parent(store, lease)
     new_generation = "replacement"
@@ -244,7 +248,7 @@ async def test_dependency_reservation_blocks_publish_before_a_child_even_exists(
     await rejected("DRAIN_PENDING", store.publish(lease, op["operation_id"], op["op_epoch"]))
     await rejected("ADMISSION_CLOSED", parent(store, lease, "new-root"))
     assert await store.read_call("op-new-root") is None
-    nested = await child(store, root)  # Existing parent reservation may enter QUIESCING.
+    nested = await nested_call(store, root)  # Existing parent reservation may enter QUIESCING.
     assert nested.generation_id == "gen-" + TARGET
     await state_commit(store, nested)
     await store.finish_call(nested, "done")
@@ -255,19 +259,19 @@ async def test_dependency_reservation_blocks_publish_before_a_child_even_exists(
     quiescent = await store.quiesce_operation(lease, op["operation_id"], op["op_epoch"])
     assert quiescent["phase"] == "QUIESCENT"
     assert (await store.get_route(TARGET))["generation_status"] == "QUIESCENT"
-    await rejected("CALL_TERMINAL", child(store, root, "too-late"))
+    await rejected("CALL_TERMINAL", nested_call(store, root, "too-late"))
     await store.publish(lease, op["operation_id"], op["op_epoch"])
     fresh = await parent(store, lease, "fresh-root")
-    assert (await child(store, fresh, "fresh-child")).generation_id == new_generation
+    assert (await nested_call(store, fresh, "fresh-nested")).generation_id == new_generation
 
 
 async def test_undeclared_dependency_and_nested_expansion_are_rejected(environment):
     store, lease, _ = environment
     root = await parent(store, lease, dependencies=(TARGET,))
-    await rejected("DEPENDENCY_DENIED", child(store, root, target=LEAF, dependencies=()))
-    await rejected("DEPENDENCY_DENIED", child(store, root, dependencies=(LEAF,)))
-    await rejected("CALL_CYCLE", child(store, root, target=CALLER, dependencies=()))
-    assert await store.read_call("op-child") is None
+    await rejected("DEPENDENCY_DENIED", nested_call(store, root, target=LEAF, dependencies=()))
+    await rejected("DEPENDENCY_DENIED", nested_call(store, root, dependencies=(LEAF,)))
+    await rejected("CALL_CYCLE", nested_call(store, root, target=CALLER, dependencies=()))
+    assert await store.read_call("op-nested") is None
 
 
 async def test_depth_limit_and_tree_metadata_survive_reopen(environment):
@@ -278,11 +282,13 @@ async def test_depth_limit_and_tree_metadata_survive_reopen(environment):
     root = await parent(store, lease, dependencies=components)
     current = root
     for index, component in enumerate(components[:8]):
-        current = await child(
-            store, current, "child-" + str(index), component, components[index + 1 :]
+        current = await nested_call(
+            store, current, "nested-" + str(index), component, components[index + 1 :]
         )
     assert current.call_depth == 8
-    await rejected("CALL_DEPTH_EXCEEDED", child(store, current, "too-deep", components[8], ()))
+    await rejected(
+        "CALL_DEPTH_EXCEEDED", nested_call(store, current, "too-deep", components[8], ())
+    )
     reopened = BotStore(uri, "bot-a")
     await reopened.open()
     try:
@@ -295,27 +301,27 @@ async def test_depth_limit_and_tree_metadata_survive_reopen(environment):
         await reopened.close()
 
 
-async def test_child_admission_outbox_failure_rolls_back_without_consuming_id(environment):
+async def test_nested_admission_outbox_failure_rolls_back_without_consuming_id(environment):
     store, lease, _ = environment
     root = await parent(store, lease)
     async with store.pool.connection() as conn:
         await conn.execute("""
-            CREATE FUNCTION public.fail_child_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
+            CREATE FUNCTION public.fail_nested_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN IF NEW.topic='call.admitted' AND NEW.payload ? 'parent_call_id'
-              THEN RAISE EXCEPTION 'child admission injection'; END IF; RETURN NEW; END; $$;
-            CREATE TRIGGER fail_child_outbox BEFORE INSERT ON public.bot_outbox_events
-              FOR EACH ROW EXECUTE FUNCTION public.fail_child_outbox();
+              THEN RAISE EXCEPTION 'nested admission injection'; END IF; RETURN NEW; END; $$;
+            CREATE TRIGGER fail_nested_outbox BEFORE INSERT ON public.bot_outbox_events
+              FOR EACH ROW EXECUTE FUNCTION public.fail_nested_outbox();
         """)
-    with pytest.raises(psycopg.errors.RaiseException, match="child admission injection"):
-        await child(store, root)
-    assert await store.read_call("op-child") is None
+    with pytest.raises(psycopg.errors.RaiseException, match="nested admission injection"):
+        await nested_call(store, root)
+    assert await store.read_call("op-nested") is None
     async with store.pool.connection() as conn:
-        await conn.execute("DROP TRIGGER fail_child_outbox ON public.bot_outbox_events")
-    assert (await child(store, root)).parent_call_id == root.call_id
+        await conn.execute("DROP TRIGGER fail_nested_outbox ON public.bot_outbox_events")
+    assert (await nested_call(store, root)).parent_call_id == root.call_id
 
 
-@pytest.mark.parametrize("first", ["finish", "child"])
-async def test_parent_finish_and_child_admission_have_one_transaction_order(environment, first):
+@pytest.mark.parametrize("first", ["finish", "nested"])
+async def test_parent_finish_and_nested_admission_have_one_transaction_order(environment, first):
     store, lease, uri = environment
     root = await parent(store, lease)
     blocker = await psycopg.AsyncConnection.connect(uri, autocommit=True)
@@ -329,11 +335,11 @@ async def test_parent_finish_and_child_admission_have_one_transaction_order(envi
             if first == "finish":
                 initial = asyncio.create_task(store.finish_call(root, "finished"))
             else:
-                initial = asyncio.create_task(child(store, root))
+                initial = asyncio.create_task(nested_call(store, root))
             tasks.append(initial)
             await wait_for_call_lock(store)
             if first == "finish":
-                second = asyncio.create_task(child(store, root))
+                second = asyncio.create_task(nested_call(store, root))
             else:
                 second = asyncio.create_task(store.finish_call(root, "finished"))
             tasks.append(second)
@@ -341,10 +347,10 @@ async def test_parent_finish_and_child_admission_have_one_transaction_order(envi
         if first == "finish":
             assert result["status"] == "COMPLETED"
             await rejected("CALL_TERMINAL", second)
-            assert await store.read_call("op-child") is None
+            assert await store.read_call("op-nested") is None
         else:
             assert result.parent_call_id == root.call_id
-            await rejected("CHILDREN_PENDING", second)
+            await rejected("NESTED_CALLS_PENDING", second)
             assert (await store.read_call(root.operation_id))["status"] == "ADMITTED"
     finally:
         for task in tasks:
@@ -357,7 +363,7 @@ async def test_parent_finish_and_child_admission_have_one_transaction_order(envi
 async def test_parent_cancel_wins_against_leaf_commit_waiting_on_database_locks(environment):
     store, lease, uri = environment
     root = await parent(store, lease)
-    nested = await child(store, root)
+    nested = await nested_call(store, root)
     blocker = await psycopg.AsyncConnection.connect(uri, autocommit=True)
     tasks = []
     try:

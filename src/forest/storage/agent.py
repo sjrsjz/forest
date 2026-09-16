@@ -289,7 +289,7 @@ class AgentStore:
             ).fetchall()
             run_budgets = await (
                 await conn.execute(
-                    "SELECT b.* FROM public.bot_agent_tree_budgets b JOIN public.bot_agent_runs a USING(bot_id,run_id) "
+                    "SELECT b.* FROM public.bot_agent_run_budgets b JOIN public.bot_agent_runs a USING(bot_id,run_id) "
                     "WHERE b.bot_id=%s AND (%s::text IS NULL OR a.conversation_id=%s) ORDER BY a.created_at DESC LIMIT 200",
                     (self.store.bot_id, scope, scope),
                 )
@@ -1251,7 +1251,7 @@ class AgentStore:
                     "Bot daily token capacity is reserved or consumed",
                     409,
                 )
-            from forest.storage.tree_budget import reserve_in
+            from forest.storage.run_budget import reserve_in
 
             await reserve_in(
                 conn,
@@ -1417,7 +1417,7 @@ class AgentStore:
                     "Provider usage must contain nonnegative integer tokens",
                     422,
                 )
-        from forest.storage.tree_budget import settle_in
+        from forest.storage.run_budget import settle_in
 
         owner = await (
             await conn.execute(
@@ -1569,7 +1569,7 @@ class AgentStore:
                                 422,
                             )
                         else:
-                            if name not in allowed or name == "forest_analyze":
+                            if name not in allowed:
                                 protocol_error = ForestError(
                                     "AGENT_PROTOCOL_LEGACY_RESULT",
                                     "Legacy in-flight tool is unavailable after protocol cutover",

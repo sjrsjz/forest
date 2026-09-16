@@ -123,9 +123,6 @@ class AgentRuntime:
             runtime_values = normalize_stored_agent_values(result["values"])
             for key, value in runtime_values.items():
                 result[key] = value
-            for key in ("system_prompt", "children_enabled", "max_children",
-                        "child_concurrency", "child_timeout", "child_max_output_tokens"):
-                result.pop(key, None)
             return result
         row = await self.config.runtime(actor.host)
         await self._configuration(actor, row["revision"])
@@ -133,8 +130,8 @@ class AgentRuntime:
         tools = [self._freeze_tool(tool) for tool in values["allowed_tools"]]
         return {
             **values,
-            # The immutable config body remains the receipt for upgraded
-            # revisions. Runtime code always derives the current schema from it.
+            # The immutable config body remains the receipt for this revision.
+            # Runtime code always derives the current schema from it.
             "values": row.get("stored_values", values),
             "config_revision": row["revision"],
             "secret_revision": row["secret_revision"],

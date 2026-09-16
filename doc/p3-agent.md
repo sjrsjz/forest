@@ -6,7 +6,7 @@
 
 Forest 的 Agent 是一个 Bot 在一个群会话中的模型—工具执行状态机。运行身份是 `(bot_id, conversation_id, session_id)`。同一会话同时只能有一个活动 Session 和一条 Agent 响应链；不同会话可以并行运行并共享该 Bot 的长期记忆域。
 
-Agent 内部允许连续执行多个模型步骤和工具步骤，但不会创建另一个模型 Agent。原 `forest_analyze`、`ChildScheduler`、Child model attempt、children 配置和“父/子 Agent 接纳”从产品协议中删除。Kernel 服务调用仍可形成嵌套 component RPC call tree；这里的 child call 只表示一个组件调用发起另一个组件调用，不具有 Prompt、Context、记忆或群回复身份。
+Agent 内部允许连续执行多个模型步骤和工具步骤，但不会创建另一个模型 Agent。原 `forest_analyze`、`ChildScheduler`、Child model attempt、children 配置和“父/子 Agent 接纳”从产品协议中删除。Kernel 服务调用仍可形成嵌套 component RPC call tree；协议与代码统一称为 nested call，不使用 Agent Child 术语，也不具有 Prompt、Context、记忆或群回复身份。
 
 Forest 尚未发布，因此最终数据库基线不承诺升级旧 Child 数据。`bot_agent_children`、`bot_child_model_attempts`、Child 专用迁移、数据搬运器、存储 API 和测试夹具都必须直接删除；开发数据库从干净基线重建。禁止用“只读历史”“结算兼容”或写入 fence 把错误的产品语义继续留在目标 schema 中。需要长期保留的费用与外部效果事实只能迁入通用模型调用/效果账本，且不得保留 Child 运行身份。
 
@@ -89,7 +89,7 @@ CorePrompt 使用 CDATA 说明语法，因此模型实际 Assistant 文本中的
 
 PresetContext 是 Bot Agent 配置的一部分，只允许宿主生成的 `SystemMessage`，常见内容包括 Bot 名称、人格、语气、行为边界、当前时间与可选能力说明。它具有独立 revision 和 digest，并固定在一次模型请求 manifest 中。
 
-当前 `system_prompt` 配置在升级时转换成一个 PresetContext 文本项，保留原文和配置历史；新 API 使用 `preset_context`。PresetContext：
+当前未发布基线只接受 `preset_context`，不保留 `system_prompt` 兼容字段或升级投影。PresetContext：
 
 - 不进入群 Context；
 - 不归档、不嵌入、不入记忆图、不被召回；
@@ -292,9 +292,9 @@ protocol_repair_feedback_byte_limit
 ## 11. 落地记录与剩余验收
 
 1. `agent_protocol.py` 已固化 CorePrompt、版本/digest、ModelTurn 类型、serializer/parser 和边界测试。
-2. 旧 `system_prompt` 已迁为 PresetContext，WebUI 已增加 CorePrompt 只读面板和 PresetContext 表单。
+2. 配置 schema 只接受 PresetContext；WebUI 已增加 CorePrompt 只读面板和 PresetContext 表单。
 3. 模型 attempt 已按原子 ModelTurn 完成解析与持久化，每轮至多执行一个工具；非法输出只进行一次有界修复。
 4. 模型、工具和 repair 步骤已接入既有持久 checkpoint、恢复与晚到回执路径。
-5. 产品子 Agent 的在线调度与 UI 已退役，但当前源码仍残留 Child 表、迁移、数据搬运器、Kernel child-call 命名和升级测试；这些残留是必须直接删除的阻断项，不能作为兼容能力保留。
+5. 产品子 Agent 的运行时、工具、配置、UI、表、迁移、数据搬运器和冻结升级夹具已删除；Kernel 内部组件调用统一称为 nested call，Run token 账户不再使用 tree/child 命名。
 6. trigger-cut、静默排空、多主干图文召回和 text-only 投影已有定向回归。
 7. 仍需使用真实 QQ、付费 LLM/Embedding 凭据做长时间联调，并在发布候选上执行完整 Compose 浏览器流程和持续容量压测。

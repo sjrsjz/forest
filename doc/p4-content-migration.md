@@ -43,7 +43,7 @@
 
 父载荷已经撤销时，关联接纳事务为当前回声追加单来源删除决策，撤销含该来源的平面副本，并登记原因、身份与计数。`scrub` 在清除 body 前每批最多推进 256 条此类关联；父 header 的撤销成为下游下一批的依据。其 remaining 包含待传播关联，调用方应迭代至零后才宣称受管正文已经清理完毕。升级 handler 在记录版本前也按批推进至无待处理关联。正常显式删除若一次目标闭包超过 4096 项，仍整体拒绝且不产生成功回执；这一限额不能被用于回滚并丢弃已经确认的回声来源。
 
-`tests/test_payload_migration_infrastructure.py` 使用真实 PostgreSQL 验证：有效/过期宿主、旧连接重新取权、DDL 等锁回滚、handler 失败回滚、稳定 JSON/bytes、已删除来源导入、作用域逃逸、旧 checksum、代码篡改检测、保守来源的固定删除决策，以及非空 022 旧库升级的补偿与无删除时不操作。另有 257 个旧不完整来源的跨批次验证，检查两个正式删除决策、独立完整来源保留、scrub 和后续请求范围不累积。`tests/test_child_payloads.py` 验证实际 Child 重试、晚到 HTTP 用量、父子闭包、下一 Run 不复活、旧 028 精确字节迁移，以及真实 BOUND query 在配置撤销后的派发/结果守卫。各正文族另行验证实际字段迁移与运行时读取。
+`tests/test_payload_migration_infrastructure.py` 使用真实 PostgreSQL 验证通用载荷迁移事务与删除边界。旧 Child payload 测试和升级夹具已随错误产品语义删除，不能再作为现行验收依据；Agent、模型调用、工具、Delivery 和 Kernel 正文分别由当前族测试验证来源闭包与运行时读取。
 
 ## Job 定义正文补充（060–061）
 

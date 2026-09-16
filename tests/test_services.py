@@ -229,7 +229,7 @@ async def test_topological_install_real_processes_and_persistent_multihop_tree(
     assert rows[2]["deadline_at"] <= rows[1]["deadline_at"] <= rows[0]["deadline_at"]
     with pytest.raises(ForestError) as denied:
         await kernel.store.authorized_call(kernel.lease, rows[2]["operation_id"], 1)
-    assert denied.value.code == "CHILD_AUTHORITY_REQUIRED"
+    assert denied.value.code == "NESTED_AUTHORITY_REQUIRED"
 
 
 @pytest.mark.postgres
@@ -378,7 +378,7 @@ class Component(Plugin):
 
 
 @pytest.mark.postgres
-async def test_child_capacity_fails_fast_instead_of_waiting_for_parent_slot(
+async def test_nested_capacity_fails_fast_instead_of_waiting_for_parent_slot(
     tmp_path, service_store
 ):
     kernel = Kernel(service_store, max_calls=1)
@@ -521,7 +521,7 @@ async def test_reverse_shutdown_and_lifecycle_grant_replay(tmp_path, running_ker
 
 
 @pytest.mark.postgres
-async def test_child_state_receipt_replay_and_json_isolation(tmp_path, running_kernel):
+async def test_nested_state_receipt_replay_and_json_isolation(tmp_path, running_kernel):
     kernel = running_kernel
     caller = package(
         tmp_path,
@@ -576,7 +576,7 @@ class Component(Plugin):
 
 
 @pytest.mark.postgres
-async def test_child_shorter_deadline_returns_typed_error_and_allows_parent_recovery(
+async def test_nested_shorter_deadline_returns_typed_error_and_allows_parent_recovery(
     tmp_path, running_kernel
 ):
     kernel = running_kernel

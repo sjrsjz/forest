@@ -114,8 +114,6 @@ class AgentSettings(BaseModel):
             raise ValueError("Model timeout cannot exceed the whole Run deadline")
         if self.allowed_tools and not self.tool_calls:
             raise ValueError("Enable model tool calls before configuring tools")
-        if any(tool.name == "forest_analyze" for tool in self.allowed_tools):
-            raise ValueError("forest_analyze is a retired product tool name")
         if len({tool.name for tool in self.allowed_tools}) != len(self.allowed_tools):
             raise ValueError("Tool names must be unique")
         return self
@@ -123,36 +121,18 @@ class AgentSettings(BaseModel):
 
 DEFAULT_AGENT_SETTINGS = AgentSettings().model_dump()
 
-_RETIRED_FIELDS = {
-    "children_enabled",
-    "max_children",
-    "child_concurrency",
-    "child_timeout",
-    "child_max_output_tokens",
-}
-
-
 def project_stored_agent_values(values: dict) -> dict:
-    """Project legacy field names/defaults without changing its receipt body."""
+    """Project the stored public settings without rewriting its receipt body."""
     if not isinstance(values, dict):
         raise ValueError("Stored Agent settings must be an object")
     result = deepcopy(values)
-    legacy_prompt = result.pop("system_prompt", None)
-    for field in _RETIRED_FIELDS:
-        result.pop(field, None)
-    if "preset_context" not in result:
-        result["preset_context"] = [legacy_prompt] if legacy_prompt else []
     for key, value in DEFAULT_AGENT_SETTINGS.items():
         result.setdefault(key, deepcopy(value))
     return result
 
 
 def normalize_stored_agent_values(values: dict) -> dict:
-    """Validate an immutable legacy config body against the public runtime schema.
-
-    The payload itself is never rewritten.  A subsequent administrator apply
-    persists the normalized schema as a new revision.
-    """
+    """Validate a stored config body against the current public runtime schema."""
     result = project_stored_agent_values(values)
     try:
         return AgentSettings.model_validate(result).model_dump()

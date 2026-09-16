@@ -12,8 +12,6 @@ LIMITS = {
     "max_steps": (16, 128), "run_timeout": (600, 86400),
     "model_timeout": (60, 86400), "daily_token_budget": (1000000, 10000000000),
     "run_token_budget": (1000000, 10000000000), "max_output_tokens": (4096, 262144),
-    "max_children": (4, 8), "child_concurrency": (2, 2),
-    "child_timeout": (90, 86400), "child_max_output_tokens": (1024, 262144),
 }
 
 
@@ -27,7 +25,7 @@ def _metadata(values):
         if type(value) is not int or not 1 <= value <= maximum:
             raise ForestError("AGENT_SPEC_INVALID", "Invalid legacy Agent limits", 422)
         result[key] = value
-    for key, default in (("enabled", True), ("children_enabled", False)):
+    for key, default in (("enabled", True),):
         value = values.get(key, default)
         if type(value) is not bool:
             raise ForestError("AGENT_SPEC_INVALID", "Invalid legacy Agent switch", 422)
@@ -129,22 +127,6 @@ async def migrate_in(conn, store):
                         proof_kind="agent.spec", proof_id=row["run_id"],
                     )
                 step_after = steps[-1]["logical_step_id"]
-            child_after = ""
-            while True:
-                children = await (await conn.execute(
-                    "SELECT child_id,snapshot_payload_id,spec_payload_id FROM public.bot_agent_children "
-                    "WHERE bot_id=%s AND parent_run_id=%s AND child_id>%s ORDER BY child_id LIMIT 64",
-                    (store.bot_id, row["run_id"], child_after),
-                )).fetchall()
-                if not children:
-                    break
-                for child in children:
-                    for payload_id in (child["snapshot_payload_id"], child["spec_payload_id"]):
-                        await import_dependency_in(
-                            conn, store, payload_id, ref.payload_id,
-                            proof_kind="agent.child", proof_id=child["child_id"],
-                        )
-                child_after = children[-1]["child_id"]
         after = rows[-1]["run_id"]
     await conn.execute(FINAL_SQL)
 
@@ -157,8 +139,7 @@ BEGIN
  FOR item IN SELECT * FROM (VALUES
   ('max_steps',16::bigint,128::bigint),('run_timeout',600,86400),('model_timeout',60,86400),
   ('daily_token_budget',1000000,10000000000),('run_token_budget',1000000,10000000000),
-  ('max_output_tokens',4096,262144),('max_children',4,8),('child_concurrency',2,2),
-  ('child_timeout',90,86400),('child_max_output_tokens',1024,262144)) AS limits(key,fallback,maximum)
+  ('max_output_tokens',4096,262144)) AS limits(key,fallback,maximum)
  LOOP
   raw := COALESCE(v->item.key,to_jsonb(item.fallback));
   IF jsonb_typeof(raw) IS DISTINCT FROM 'number' THEN
@@ -170,7 +151,7 @@ BEGIN
   END IF;
   result := result || jsonb_build_object(item.key,raw);
  END LOOP;
- FOR item IN SELECT * FROM (VALUES ('enabled',true),('children_enabled',false)) AS switches(key,fallback)
+ FOR item IN SELECT * FROM (VALUES ('enabled',true)) AS switches(key,fallback)
  LOOP
   raw := COALESCE(v->item.key,to_jsonb(item.fallback));
   IF jsonb_typeof(raw) IS DISTINCT FROM 'boolean' THEN RAISE EXCEPTION 'AGENT_SPEC_INVALID' USING ERRCODE='55000'; END IF;
@@ -206,7 +187,7 @@ CREATE TRIGGER bot_agent_config_plans_immutable BEFORE UPDATE OR DELETE ON publi
 CREATE TRIGGER bot_agent_config_revisions_immutable BEFORE UPDATE OR DELETE ON public.bot_agent_config_revisions
  FOR EACH ROW EXECUTE FUNCTION public.forest_bot_reject_mutation();
 CREATE TRIGGER bot_agent_run_identity BEFORE UPDATE OR DELETE ON public.bot_agent_runs
- FOR EACH ROW EXECUTE FUNCTION public.forest_agent_fixed_fields('{owner_epoch,actor_epoch,actor_host_incarnation,checkpoint_seq,next_step_seq,published_step_seq,current_step_id,phase,input_revision,selected_input_end_seq,wait_classified_seq,final_step_id,final_input_revision,final_reply_id,error_code}');
+ FOR EACH ROW EXECUTE FUNCTION public.forest_agent_fixed_fields('{owner_epoch,actor_epoch,actor_host_incarnation,checkpoint_seq,next_step_seq,published_step_seq,current_step_id,phase,input_revision,selected_input_end_seq,wait_classified_seq,final_step_id,final_input_revision,final_reply_id,error_code,tool_iteration_count,thinking_iteration_count,protocol_repair_count}');
 
 CREATE FUNCTION public.forest_agent_config_values_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE v jsonb; p record; op record; input jsonb; result jsonb; original jsonb; kind text; identity text;

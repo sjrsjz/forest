@@ -939,7 +939,7 @@ class Kernel:
                 await self.store.authorize_generation_dispatch(self._authority(), identity.generation_id)
                 if (await worker.health()).get("healthy") is not True:
                     raise ForestError("WORKER_UNHEALTHY", "Restored candidate failed readiness")
-                # Driver completion follows owned children and their IPC; database also
+                # Driver completion follows owned nested calls and their IPC; database also
                 # verifies no persistent admitted calls remain at the publication point.
                 route = await self.store.publish(
                     self._authority(), operation_id, operation["op_epoch"]
@@ -1441,7 +1441,7 @@ class Kernel:
         if requested_timeout is not None and (
             type(requested_timeout) not in {int, float} or not 0 < requested_timeout <= 120
         ):
-            raise ForestError("INVALID_SERVICE_REQUEST", "Invalid child call timeout", 422)
+            raise ForestError("INVALID_SERVICE_REQUEST", "Invalid nested call timeout", 422)
         timeout = min(
             120, remaining, requested_timeout if requested_timeout is not None else remaining
         )
@@ -1450,7 +1450,7 @@ class Kernel:
         if self._call_count >= self.max_calls:
             # Never wait for a slot held by our own parent. Bounded rejection
             # allows its call tree to unwind instead of deadlocking the pool.
-            raise ForestError("BACKPRESSURE", "No capacity for another child call", 429)
+            raise ForestError("BACKPRESSURE", "No capacity for another nested call", 429)
         self._validate(Draft202012Validator({}), request["payload"], "INPUT_INVALID")
         payload = json.loads(json.dumps(request["payload"], allow_nan=False))
         self._call_count += 1
@@ -1469,7 +1469,7 @@ class Kernel:
                 return receipt.value
         except TimeoutError:
             raise ForestError(
-                "DEADLINE_EXCEEDED", "Component child invocation exceeded its deadline", 504
+                "DEADLINE_EXCEEDED", "Nested component invocation exceeded its deadline", 504
             ) from None
         finally:
             self._call_count -= 1
@@ -1822,7 +1822,7 @@ class Kernel:
                     authority, operation_id, policy_revision, admission_lane=admission_lane,
                     agent_tool_id=agent_tool_id,
                 )
-            return await self.store.authorized_child_call(parent[1], operation_id, policy_revision)
+            return await self.store.authorized_nested_call(parent[1], operation_id, policy_revision)
 
         previous = await existing_call()
         if previous is not None:
@@ -2040,7 +2040,7 @@ class Kernel:
                 if admission_lane == "CONTROL"
                 else self.store.admit
                 if parent is None
-                else self.store.admit_child
+                else self.store.admit_nested
             )
             grant = await admit(
                 authority if parent is None else parent[1],

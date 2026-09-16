@@ -7,7 +7,7 @@ ALTER TABLE public.bot_payload_domains ADD CONSTRAINT bot_payload_domains_kind_c
 
 CREATE TABLE public.bot_payload_legacy_dependencies (
  bot_id text NOT NULL, payload_id text NOT NULL, parent_payload_id text NOT NULL,
- proof_kind text NOT NULL CHECK(proof_kind IN ('agent.spec','agent.child','memory.request','binding.initial','binding.unknown','generation.config','watch.config')),
+ proof_kind text NOT NULL CHECK(proof_kind IN ('agent.spec','memory.request','binding.initial','binding.unknown','generation.config','watch.config')),
  proof_id text NOT NULL CHECK(octet_length(proof_id) BETWEEN 1 AND 4096),
  PRIMARY KEY(bot_id,payload_id,parent_payload_id), CHECK(payload_id<>parent_payload_id),
  FOREIGN KEY(bot_id,payload_id) REFERENCES public.bot_payload_headers(bot_id,payload_id),

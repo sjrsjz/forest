@@ -14,10 +14,6 @@ LIMITS = {
     "max_steps": (16, 128), "run_timeout": (600, 86400),
     "model_timeout": (60, 86400), "daily_token_budget": (1000000, 10000000000),
     "run_token_budget": (1000000, 10000000000), "max_output_tokens": (4096, 262144),
-    # Retired product-Child limits remain in the permanent receipt shape so
-    # pre-retirement frozen specs keep validating byte-for-byte.
-    "max_children": (4, 8), "child_concurrency": (2, 2),
-    "child_timeout": (90, 86400), "child_max_output_tokens": (1024, 262144),
 }
 
 
@@ -33,7 +29,7 @@ def values_metadata(values):
         if type(value) is not int or not 1 <= value <= maximum:
             raise ForestError("AGENT_SPEC_INVALID", "Invalid bounded Agent configuration", 422)
         result[key] = value
-    for key, default in (("enabled", True), ("children_enabled", False)):
+    for key, default in (("enabled", True),):
         value = values.get(key, default)
         if type(value) is not bool:
             raise ForestError("AGENT_SPEC_INVALID", "Agent switches must be booleans", 422)

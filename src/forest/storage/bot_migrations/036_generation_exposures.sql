@@ -34,7 +34,7 @@ CREATE TABLE public.bot_generation_exposures (
  generation_id text NOT NULL,
  exposure_id text NOT NULL CHECK(octet_length(exposure_id) BETWEEN 1 AND 256 AND exposure_id !~ '[[:cntrl:]]'),
  revision bigint NOT NULL CHECK(revision>0),
- kind text NOT NULL CHECK(kind IN ('CALL_INPUT','STATE_READ','CHILD_RESULT','CONFIG','PREPARE_STATE','MIGRATION_SOURCE','RESTORE_STATE')),
+ kind text NOT NULL CHECK(kind IN ('CALL_INPUT','STATE_READ','NESTED_RESULT','CONFIG','PREPARE_STATE','MIGRATION_SOURCE','RESTORE_STATE')),
  subject_ref text NOT NULL CHECK(octet_length(subject_ref) BETWEEN 1 AND 256 AND subject_ref !~ '[[:cntrl:]]'),
  payload_refs text[] NOT NULL CHECK(public.forest_exposure_refs_valid(payload_refs)),
  input_digest text NOT NULL CHECK(input_digest ~ '^sha256:[a-f0-9]{64}$'),

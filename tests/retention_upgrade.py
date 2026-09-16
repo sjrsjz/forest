@@ -16,8 +16,6 @@ _FIELDS = {
     "bot_inbound_media_refs": {"source": "source_payload_id"},
     "bot_media_captures": {"content": "payload_id", "source_manifest": "manifest_payload_id"},
     "bot_conversation_replies": {"parts": "payload_id"},
-    "bot_agent_children": {"snapshot": "snapshot_payload_id", "spec": "spec_payload_id", "result": "result_payload_id"},
-    "bot_child_model_attempts": {"request_body": "request_payload_id", "manifest": "manifest_payload_id", "result": "result_payload_id"},
     "bot_send_parts": {"payload": "payload_id"},
     "bot_send_attempts": {"wire_body": "wire_payload_id"},
 }

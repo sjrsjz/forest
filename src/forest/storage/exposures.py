@@ -27,7 +27,7 @@ KINDS = frozenset(
     {
         "CALL_INPUT",
         "STATE_READ",
-        "CHILD_RESULT",
+        "NESTED_RESULT",
         "CONFIG",
         "PREPARE_STATE",
         "MIGRATION_SOURCE",
