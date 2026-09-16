@@ -136,10 +136,14 @@ class BindingRuntime:
         self.job_authority = job_authority
         self.module_registry = BotModuleRegistry(self)
 
+    def module(self, component_id: str):
+        """Resolve a runtime capability owner by its stable component identity."""
+        return self.module_registry.get(component_id)
+
     def _notify_work(self):
-        self.scheduler.notify()
-        self.jobs.notify()
-        self.memory.notify()
+        self.module("conversation.scheduler").notify()
+        self.module("scheduler.jobs").notify()
+        self.module("memory.graph").notify()
         self.kernel.notify_events()
         self.kernel.notify_component_jobs()
 
@@ -151,7 +155,7 @@ class BindingRuntime:
         grant = claim.delegation
         if grant["issuer_id"] != self.job_authority.issuer_id:
             raise ForestError("JOB_DELEGATION_REVOKED", "Job authority issuer changed", 403)
-        request = self.job_store.authorization_request(claim)
+        request = self.module("scheduler.jobs").store.authorization_request(claim)
         return await self.job_authority.issue_delegation(
             subject_id=grant["subject_id"], bot_id=self.bot.store.bot_id,
             operation_id=request["operation_id"], payload=request["payload"],
@@ -682,8 +686,8 @@ class BindingRuntime:
                 )
                 if receipt.get("kind") == "SUPPRESSED_OCCURRENCE":
                     return {"accepted": True, **receipt}
-                self.scheduler.notify()
-                self.shell.notify()
+                self.module("conversation.scheduler").notify()
+                self.module("shell.command").notify()
                 return {"accepted": True, "event_id": receipt["event_id"]}
         finally:
             connection.tasks.discard(task)
@@ -733,7 +737,7 @@ class BindingRuntime:
         )
         config = current["config"]
         if selected.get("agent_phase") is not None or config["response_mode"] == "agent":
-            return await self.agent.runner.advance(actor, selected, context)
+            return await self.module("agent.runtime").runner.advance(actor, selected, context)
         if config["response_mode"] != "component":
             raise ForestError("RESPONDER_DISABLED", "This Binding has no active responder", 409)
         await self.ensure_components(("forest.reply",))

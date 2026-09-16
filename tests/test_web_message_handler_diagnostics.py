@@ -81,7 +81,8 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
                     "apply-handler-diagnostic-policy-" + handler_id,
                 )
 
-            await managed.platform.scheduler._tick_lock.acquire()
+            scheduler = managed.platform.module("conversation.scheduler")
+            await scheduler._tick_lock.acquire()
             actor = None
             try:
                 secret = "private-handler-message"
@@ -149,7 +150,7 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
             finally:
                 if actor is not None:
                     await managed.platform.messages.release_actor(actor)
-                managed.platform.scheduler._tick_lock.release()
+                scheduler._tick_lock.release()
 
             viewer_password = "handler-diagnostic-viewer-password"
             created = await create_account(

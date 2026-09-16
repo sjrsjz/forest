@@ -74,7 +74,8 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
                 },
                 "apply-command-diagnostic-policy",
             )
-            await managed.platform.scheduler._tick_lock.acquire()
+            scheduler = managed.platform.module("conversation.scheduler")
+            await scheduler._tick_lock.acquire()
             messages = managed.platform.messages
 
             secret_argument = "private-command-argument"
@@ -153,7 +154,7 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
                     )
                 ).fetchone()
             assert operations["n"] == 1
-            managed.platform.scheduler._tick_lock.release()
+            scheduler._tick_lock.release()
 
             viewer_password = "command-diagnostic-viewer-password"
             created = await create_account(

@@ -143,7 +143,9 @@ class MemoryRuntime:
                             )
                     if (
                         cfg["values"]["semantic_associations_enabled"]
-                        and not self.platform.scheduler.active_conversations
+                        and not self.platform.module(
+                            "conversation.scheduler"
+                        ).active_conversations
                         and "semantic:reconcile" not in self.workers
                     ):
                         self._spawn(

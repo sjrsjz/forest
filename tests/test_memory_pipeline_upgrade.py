@@ -665,9 +665,10 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
             selected = await runtime.messages.select_input(actor, "resume-old")
             view = await runtime.messages.context(actor, run_id=selected["run_id"])
             assert selected["run_id"] == env.retry.run_id and selected["status"] == "RESUME"
-            disposition = await runtime.agent.runner.advance(actor, selected, view)
+            agent = runtime.module("agent.runtime")
+            disposition = await agent.runner.advance(actor, selected, view)
             assert disposition.status == "FINAL_READY"
-            reply = await runtime.agent.runner.state.commit_final(
+            reply = await agent.runner.state.commit_final(
                 actor, selected["run_id"], "finish-old", runtime.delivery
             )
             assert reply["parts"] == [[{"type": "text", "text": "Completed after upgrade"}]]
@@ -712,9 +713,9 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
             selected = await runtime.messages.select_input(actor, "select-new")
             view = await runtime.messages.context(actor, run_id=selected["run_id"])
             assert (
-                await runtime.agent.runner.advance(actor, selected, view)
+                await runtime.module("agent.runtime").runner.advance(actor, selected, view)
             ).status == "FINAL_READY"
-            await runtime.agent.runner.state.commit_final(
+            await runtime.module("agent.runtime").runner.state.commit_final(
                 actor, selected["run_id"], "finish-new", runtime.delivery
             )
             assert len(requests) == 2 and b"new request after upgrade" in requests[1]["body"]

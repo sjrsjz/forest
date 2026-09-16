@@ -176,14 +176,15 @@ async def test_web_retry_never_enqueued_failure_keeps_occurrence_identity(tmp_pa
         # Hold automatic claims at its documented no-authority boundary. Use
         # the same host storage methods as a dispatcher to checkpoint a known
         # failure before durable ingress, then exercise the real Web retry.
-        managed.platform.jobs.authorize = None
+        jobs = managed.platform.module("scheduler.jobs")
+        jobs.authorize = None
         values = definition(group["conversation_id"])
         await applied(client, root, await planned(client, root, values))
         queued = await post(client, root + "/jobs/run-requests", {
             "job_id": "daily", "expected_revision": 1,
         }, "manual-fails-before-ingress")
-        store = managed.platform.job_store
-        lease = managed.platform.jobs._lease()
+        store = jobs.store
+        lease = jobs._lease()
         claim = await store.claim_pending(lease, "web-retry-fixture", ttl_seconds=30)
         assert claim is not None
         await store.fail(lease, claim, "DEFINITELY_NOT_ENQUEUED")

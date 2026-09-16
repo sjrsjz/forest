@@ -497,7 +497,8 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
             response_mode="agent",
         )
         final_ready, release = asyncio.Event(), asyncio.Event()
-        finalize = managed.platform.scheduler.finalize_agent
+        scheduler = managed.platform.module("conversation.scheduler")
+        finalize = scheduler.finalize_agent
         commits = []
 
         async def delayed_final(actor, disposition, delivery):
@@ -506,7 +507,7 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
             await release.wait()
             return await finalize(actor, disposition, delivery)
 
-        managed.platform.scheduler.finalize_agent = delayed_final
+        scheduler.finalize_agent = delayed_final
         assert (
             await receive(client, binding["binding_id"], 1, "other request", mention=True)
         ).status_code == 200

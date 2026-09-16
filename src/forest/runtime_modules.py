@@ -18,7 +18,6 @@ from forest.errors import ForestError
 @dataclass(frozen=True)
 class RuntimeModuleDescriptor:
     component_id: str
-    alias: str
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
 
@@ -67,10 +66,10 @@ def _jobs(platform, modules: dict[str, Any]):
     from forest.job_scheduler import JobDispatcher
     from forest.storage.jobs import JobStore
 
-    platform.job_store = JobStore(platform.messages)
+    store = JobStore(platform.messages)
     scheduler = modules["conversation.scheduler"]
     return JobDispatcher(
-        platform.job_store,
+        store,
         platform.kernel._authority,
         authorize=platform._authorize_job if platform.job_authority is not None else None,
         on_change=scheduler.notify,
@@ -78,14 +77,14 @@ def _jobs(platform, modules: dict[str, Any]):
 
 
 OFFICIAL_MODULES = (
-    RuntimeModuleDescriptor("memory.graph", "memory", (), _memory),
-    RuntimeModuleDescriptor("agent.runtime", "agent", ("memory.graph",), _agent),
+    RuntimeModuleDescriptor("memory.graph", (), _memory),
+    RuntimeModuleDescriptor("agent.runtime", ("memory.graph",), _agent),
     RuntimeModuleDescriptor(
-        "conversation.scheduler", "scheduler", ("agent.runtime",), _conversation
+        "conversation.scheduler", ("agent.runtime",), _conversation
     ),
-    RuntimeModuleDescriptor("shell.command", "shell", (), _shell),
+    RuntimeModuleDescriptor("shell.command", (), _shell),
     RuntimeModuleDescriptor(
-        "scheduler.jobs", "jobs", ("conversation.scheduler",), _jobs
+        "scheduler.jobs", ("conversation.scheduler",), _jobs
     ),
 )
 
@@ -119,9 +118,6 @@ class BotModuleRegistry:
                 instance = descriptor.factory(self.platform, self.instances)
                 self.instances[descriptor.component_id] = instance
                 self.order.append(descriptor.component_id)
-                # Compatibility alias only; construction and lifecycle ownership
-                # stay in this registry while call sites migrate to contracts.
-                setattr(self.platform, descriptor.alias, instance)
                 remaining.pop(descriptor.component_id)
 
     def get(self, component_id: str):

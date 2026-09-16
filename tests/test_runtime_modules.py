@@ -21,9 +21,9 @@ class Module:
         self.events.append(("close", self.name))
 
 
-def descriptor(name, alias, requires, events, *, fail=False):
+def descriptor(name, requires, events, *, fail=False):
     return RuntimeModuleDescriptor(
-        name, alias, tuple(requires), lambda _platform, _modules: Module(name, events, fail=fail)
+        name, tuple(requires), lambda _platform, _modules: Module(name, events, fail=fail)
     )
 
 
@@ -32,12 +32,12 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
     events = []
     platform = SimpleNamespace()
     registry = BotModuleRegistry(platform, (
-        descriptor("consumer", "consumer", ("provider",), events),
-        descriptor("independent", "independent", (), events),
-        descriptor("provider", "provider", (), events),
+        descriptor("consumer", ("provider",), events),
+        descriptor("independent", (), events),
+        descriptor("provider", (), events),
     ))
     assert registry.order.index("provider") < registry.order.index("consumer")
-    assert platform.consumer is registry.get("consumer")
+    assert not hasattr(platform, "consumer")
     await registry.start()
     await registry.close()
     starts = [name for action, name in events if action == "start"]
@@ -49,8 +49,8 @@ def test_registry_rejects_missing_or_cyclic_dependencies():
     events = []
     with pytest.raises(ForestError) as caught:
         BotModuleRegistry(SimpleNamespace(), (
-            descriptor("left", "left", ("right",), events),
-            descriptor("right", "right", ("left",), events),
+            descriptor("left", ("right",), events),
+            descriptor("right", ("left",), events),
         ))
     assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
 
@@ -59,8 +59,8 @@ def test_registry_rejects_missing_or_cyclic_dependencies():
 async def test_registry_rolls_back_started_modules_when_start_fails():
     events = []
     registry = BotModuleRegistry(SimpleNamespace(), (
-        descriptor("first", "first", (), events),
-        descriptor("second", "second", ("first",), events, fail=True),
+        descriptor("first", (), events),
+        descriptor("second", ("first",), events, fail=True),
     ))
     with pytest.raises(RuntimeError, match="second"):
         await registry.start()

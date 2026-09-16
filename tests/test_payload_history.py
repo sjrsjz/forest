@@ -260,8 +260,11 @@ async def test_two_published_legacy_replies_continue_after_the_first_view_is_cli
             selected = await runtime.messages.select_input(actor, "current-cut")
             view = await runtime.messages.context(actor, run_id=selected["run_id"])
             assert env.completed.reply["reply_id"] not in {u["reply_id"] for u in view["units"]}
-            assert (await runtime.agent.runner.advance(actor, selected, view)).status == "FINAL_READY"
-            await runtime.agent.runner.state.commit_final(actor, selected["run_id"], "current-final", runtime.delivery)
+            agent = runtime.module("agent.runtime")
+            assert (await agent.runner.advance(actor, selected, view)).status == "FINAL_READY"
+            await agent.runner.state.commit_final(
+                actor, selected["run_id"], "current-final", runtime.delivery
+            )
             assert len(requests) == 1 and b"second old reply" in requests[0]["body"]
             assert not await row(env, "SELECT 1 FROM public.bot_memory_config_heads")
         finally:

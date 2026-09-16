@@ -33,13 +33,14 @@ async def eventually(p, check, *, timeout=25):
                 value = await check()
                 if value:
                     return value
-                p.runtime.memory.notify()
+                p.runtime.module("memory.graph").notify()
                 await asyncio.sleep(0.05)
     except TimeoutError:
         heads = await rows(p, "SELECT run_id,phase,error_code FROM public.bot_agent_runs")
         decisions = await rows(p, "SELECT * FROM public.bot_agent_memory_bindings")
         pytest.fail(f"Agent/memory did not converge: heads={heads!r}, decisions={decisions!r}, "
-                    f"scheduler={p.runtime.scheduler.errors!r}, memory={p.runtime.memory.errors!r}")
+                    f"scheduler={p.runtime.module('conversation.scheduler').errors!r}, "
+                    f"memory={p.runtime.module('memory.graph').errors!r}")
 
 
 def headers(body, kind):
@@ -262,4 +263,5 @@ async def test_agent_recalls_cross_group_pixels_and_reuses_fixed_query_across_to
         finally:
             release_first.set()
             await p.runtime.close()
-        assert not p.runtime.memory.executions and not p.runtime.memory.workers and not p.runtime.memory.clients
+        memory = p.runtime.module("memory.graph")
+        assert not memory.executions and not memory.workers and not memory.clients

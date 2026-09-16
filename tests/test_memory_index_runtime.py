@@ -36,13 +36,14 @@ async def wait_state(p, predicate, *, timeout=20):
                 result = await predicate()
                 if result:
                     return result
-                p.runtime.memory.notify()
+                p.runtime.module("memory.graph").notify()
                 await asyncio.sleep(0.1)
     except TimeoutError:
         facets = await rows(p, "SELECT state,error_code FROM public.bot_memory_index_facets")
         captures = await rows(p, "SELECT status,error_code FROM public.bot_memory_media_heads")
         pytest.fail(
-            f"Memory runtime did not converge: {p.runtime.memory.errors!r}; facets={facets!r}; captures={captures!r}"
+            f"Memory runtime did not converge: {p.runtime.module('memory.graph').errors!r}; "
+            f"facets={facets!r}; captures={captures!r}"
         )
 
 
@@ -66,7 +67,7 @@ async def configure(p, endpoint, origins=(), *, revision=0, enabled=True, **chan
             p.env, revision=revision, values=values, secret=EMBEDDING_KEY if revision == 0 else None
         ),
     )
-    p.runtime.memory.notify()
+    p.runtime.module("memory.graph").notify()
     return result
 
 
@@ -108,7 +109,8 @@ async def graph_ready(p, roots):
     )
     if len(entries) != roots:
         return False
-    graph, lease = p.runtime.memory.graph, p.kernel._authority()
+    graph = p.runtime.module("memory.graph").graph
+    lease = p.kernel._authority()
     page = await graph.discover(lease, limit=roots)
     if len(page["scopes"]) != roots or page["next_after"] is not None:
         return False
@@ -275,8 +277,9 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
             await configure(p, endpoint, [origin])
             await p.runtime._replace(p.desired)
             await p.runtime.start()
-            assert type(p.runtime.memory) is MemoryRuntime
-            assert p.runtime.memory.task in p.runtime._tasks
+            memory = p.runtime.module("memory.graph")
+            assert type(memory) is MemoryRuntime
+            assert memory.task in p.runtime._tasks
             await asyncio.gather(
                 *(
                     receive(
@@ -350,13 +353,15 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
             # before testing restart deduplication. Otherwise restart may validly
             # publish the just-captured images for the first time.
             for scope in settled_scopes:
-                receipt = await p.runtime.memory.graph.refresh(p.kernel._authority(), scope)
+                receipt = await p.runtime.module("memory.graph").graph.refresh(
+                    p.kernel._authority(), scope
+                )
                 assert receipt.get("unchanged"), receipt
 
             # Stop the complete platform, then construct a new actual platform
             # against the same Kernel/store and the same durable memory slots.
             await p.runtime.close()
-            closed_memory(p.runtime.memory)
+            closed_memory(p.runtime.module("memory.graph"))
             assert not p.runtime._clients and not p.runtime.connections
             before = await rows(
                 p, "SELECT scope_id,revision FROM public.bot_memory_graph_scopes ORDER BY scope_id"
@@ -370,7 +375,7 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
             await restarted._replace((await restarted.bindings.desired(p.kernel._authority()))[0])
             await restarted.start()
             for _ in range(8):
-                restarted.memory.notify()
+                restarted.module("memory.graph").notify()
                 await asyncio.sleep(0.15)
             assert (
                 await rows(
@@ -413,11 +418,11 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
 
             await wait_state(p, drained_disabled)
             for _ in range(4):
-                restarted.memory.notify()
+                restarted.module("memory.graph").notify()
                 await asyncio.sleep(0.1)
             assert len(requests) == 4 and len(downloads) == 2 and not llm_requests
             await restarted.close()
-            closed_memory(restarted.memory)
+            closed_memory(restarted.module("memory.graph"))
         finally:
             if restarted is not None:
                 await restarted.close()
@@ -440,7 +445,7 @@ async def test_platform_close_recovers_all_owned_inflight_embedding_resources(pl
             await p.runtime.start()
             await receive(p, 1)
             await asyncio.wait_for(started.wait(), 12)
-            runtime = p.runtime.memory
+            runtime = p.runtime.module("memory.graph")
             clients, executions, workers = (
                 set(runtime.clients),
                 set(runtime.executions),

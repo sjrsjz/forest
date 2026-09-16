@@ -180,7 +180,8 @@ class AgentRuntime:
         return snapshot, media
 
     async def retrieve_memory(self, actor, spec, snapshot):
-        return await self.platform.memory.retrieve_for_step(actor, snapshot, self.runner.state)
+        memory = self.platform.module("memory.graph")
+        return await memory.retrieve_for_step(actor, snapshot, self.runner.state)
 
     async def authorize_tool(self, actor, spec, tool, trigger):
         current = await self._configuration(actor, spec["config_revision"])
