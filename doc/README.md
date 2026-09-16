@@ -4,67 +4,33 @@
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
-## 阅读顺序
+## 文档权威顺序
 
-| 文档 | 解决的问题 |
-|---|---|
-| [实现状态与验证记录](implementation-status.md) | 当前可运行切片、尚未完成的阶段、启动入口及真实验证边界 |
-| [P0 Worker 资源监督 SDK](p0-resource-sdk.md) | 调用/代际资源所有权、额度、LIFO 清理及取消/停止边界 |
-| [P0 持久组件事件](p0-component-events.md) | 事件声明、持久发布、稳定订阅、热重载接续、重试与死信 |
-| [P0 组件事件管理](p0-component-event-management.md) | 死信回放 epoch、订阅显式退役、并发围栏与 Web 管理边界 |
-| [P0 组件持久任务](p0-component-jobs.md) | 插件自有持久工作、固定主体与预算、调用账本对账、热重载接续及与会话 Agent 任务的边界 |
-| [P0 组件持久任务管理](p0-component-job-management.md) | 死信回放 epoch、处理器显式退役、并发合流与 Web 管理边界 |
-| [P2 插件包与依赖环境](p2-plugin-packages.md) | 完整 ZIP、开发版本、离线锁、平台与 SDK 隔离 |
-| [P2 持久状态迁移](p2-state-migration.md) | 纯迁移接口、双次验证、状态/路由原子发布与故障恢复 |
-| [P2 Web 插件管理](p2-web-plugin-management.md) | 导入与启用、通用表单、版本切换、历史配置与重启恢复 |
-| [P2 业务命令](p2-business-commands.md) | `@command` 声明、Web 用户策略、持久分类、同群 Actor、原子回复及热重载边界 |
-| [P2 普通群消息插件链](p2-message-handlers.md) | AliceBot 式异步 handler/priority/停止链、持久路由、Agent 回落、同群串行与热重载边界 |
-| [P3 单 Agent 协议与持久运行](p3-agent.md) | 不可覆盖 CorePrompt、PresetContext、原子 ModelTurn、模型/工具安全点与持久恢复 |
-| [P3 Agent 状态与并发](p3-agent-state.md) | 许可、预算、精确切口、工具观察、取消与最终提交恢复 |
-| [P3 定时任务](p3-jobs.md) | 持久计划、日历与补跑、受权入队、非重叠占用和管理取消 |
-| [P4 Job 定义载荷](p4-job-payloads.md) | prompt/settings 与 delegation 的来源证明、正文遗忘、调度撤权及 writer v3 切换 |
-| [P4 Shell 参数与结果载荷](p4-shell-payloads.md) | 群聊命令参数、管理结果、CONTROL 回复父链、终结状态及 writer v4 切换 |
-| [P3 产品子 Agent 删除](p3-children.md) | 撤销错误产品语义并从未发布基线直接删除相关代码、表和管理入口 |
-| [P3 群聊管理与监督](p3-control.md) | 实际 Shell 命令、共同管理协议、控制预留槽及定时授权边界 |
-| [P4 来源与载荷存储](p4-source-payloads.md) | 已接入消息流水的来源/资格、可清理正文基础及尚未迁移的旧副本 |
-| [P4 纯图归约器](p4-graph-reducer.md) | 固定源事实的多主干、乱序合流、撤回、并列冲突及必要证据 |
-| [P4 跨主干联想管理与召回](p4-association-retrieval.md) | 审核式来源联想、非主干分片、持久发布和有界一跳召回 |
-| [P4 自动跨主干语义联想](p4-semantic-associations.md) | 复用图文向量的持久 Top-K 维护、并发合流、删除失效与召回来源标记 |
-| [P4 图文嵌入驱动](p4-embedding-driver.md) | 原生文本/图片 HTTP 协议、向量空间、精确请求和取消/计费边界 |
-| [P4 正文迁移协议](p4-content-migration.md) | 事务内正文搬运、冻结迁移算法、旧宿主隔离与保守来源撤销 |
-| [P4 Agent 载荷](p4-agent-payloads.md) | 快照/精确请求/工具结果的来源传递、删除守卫与恢复结算 |
-| [P4 发送载荷](p4-delivery-payloads.md) | 排队发送的来源依赖、精确 wire、迟到回执与对账清理 |
-| [P4 Kernel 与 Worker 来源](p4-kernel-payloads.md) | 代际暴露合流、调用/状态正文、配置来源域及回收屏障 |
-| [P4 管理输入与回执](p4-control-payloads.md) | 管理输入、原操作回放、审计/outbox 引用与页面失效 |
-| [P5 配置正文与独立替换](p5-configuration-payloads.md) | 各配置族、运行 spec、旧副本依赖、删除后的 WebUI 修复与并发守卫 |
-| [P5 Web 账号与固定角色管理](p5-account-management.md) | 管理账号创建、角色/停用/改密计划、会话撤销、最后管理员与幂等恢复 |
-| [P5 部署审计查询](p5-deployment-audit.md) | 不可变部署事实、稳定键集分页、服务端字段脱敏与 Web 核对入口 |
-| [P5 Bot 审计元数据](p5-bot-audit.md) | Bot 局部审计权威、群聊/Web 脱敏读取、稳定游标与 v6 Shell gate |
-| [P5 组件生命周期 Shell](p5-module-lifecycle-shell.md) | v8 模块元数据/reload、v11 完整快照校验与独立启停状态轴、Web/Shell 同源 CAS 与 writer v9 围栏 |
-| [P5 群聊 Core 救援入口](p5-core-shell.md) | v9 固定救援 form、v10 P0 管理员预检、既有权威复用与 writer v8 围栏 |
-| [P5 Shell 接入容量](p5-shell-ingress-admission.md) | Inbox 前资格缓存、普通/P0/拒绝通道、拒绝令牌桶与无主体运行时统计 |
-| [P5 多数据库备份与隔离恢复](p5-backup-restore.md) | 每库一致切口、加密工件、持久任务、删除屏障、隔离恢复与目录切换 |
-| [P5 部署控制面离线恢复](p5-deployment-recovery.md) | 停服互斥、归档/目标复验、Bootstrap 恢复 head 与原子切换 |
-| [P5 OneBot 正向 WebSocket](p5-onebot-forward-websocket.md) | Universal 单连接、echo 合流、入站 FIFO、Binding 代际与发送不确定性 |
-| [P5 已遗忘来源迟到接纳](p5-suppressed-occurrence-ack.md) | metadata-only ACK、deletion epoch 仲裁、重复合流与正文防复活 |
-| [P4 剩余载荷迁移](p4-payload-migration-notes.md) | Kernel、配置等剩余正文副本、来源依赖及完整物理清理边界 |
-| [P4 记忆配置](p4-memory-config.md) | 独立嵌入/媒体/查询配置、Web 表单、修订与预算边界 |
-| [P4 持久图存储](p4-graph-store.md) | 多主干分片、连续邻接、稳定事实、全局修订与 CAS 发布 |
-| [P4 记忆运行链路](p4-memory-runtime.md) | 原图捕获、异步索引、图文召回、Agent 证据绑定与模型投影 |
-| [P4 记忆来源管理与公开遗忘](p4-memory-administration.md) | 全局来源列表、高影响 plan/apply、删除 epoch 合流、后台 scrub 与 Shell 版本兼容 |
-| [01 架构设计](01-architecture.md) | 系统边界、技术方向、模块职责、部署方式、架构决策 |
-| [02 微内核与生命周期详细设计](02-kernel-lifecycle.md) | 包与组件契约、依赖解析、资源所有权、加载/卸载、热重载、故障恢复 |
-| [03 通信与调度详细设计](03-communication-scheduling.md) | 消息格式、服务调用、事件、流、顺序、背压、取消、幂等、发送回执 |
-| [04 多 Bot、Agent 与记忆详细设计](04-bot-agent-memory.md) | Bot 身份、跨群并发、Agent 状态机、工具执行、全局记忆与检索 |
-| [05 持久化、鉴权与运维详细设计](05-storage-security-operations.md) | 数据模型、事务边界、能力授权、隔离、配置、观测、验收与开发阶段 |
-| [06 异步并发写与合流性详细设计](06-concurrent-convergence.md) | 操作代数、确定性事实投影、冲突、LLM 工件选择、乱序重放、遗忘防复活与性质验收 |
-| [07 原生 Python 插件与开发体验详细设计](07-python-plugin-development.md) | 普通模块/类与异步钩子、简易声明、SDK、自动 watch、原生 Python 热重载 |
-| [08 群聊上下文与交互详细设计](08-group-context-interaction.md) | 全量群消息、最后触发切口、同群串行响应、静默排空、持续裁剪与多人身份 |
-| [09 群聊管理 Shell 与命令系统详细设计](09-group-shell-command-system.md) | 远程管理、确定性命令路由、优先级、忙时控制、任务回执与救援入口 |
-| [10 多主干记忆图与来源明确的召回](10-multi-trunk-memory-graph.md) | 每群独立主干、跨主干联想、图写入合流、模型可见群来源与无摘要裁剪 |
-| [11 多模态记忆与模型输入投影](11-multimodal-memory-and-model-projection.md) | 文本/图片持久记忆、原生多模态嵌入、图片查询及文本LLM的非破坏性输入投影 |
-| [12 WebUI 后台管理详细设计](12-webui-administration.md) | 浏览器初始化与日常配置、后台页面、配置版本与生效、管理API、权限和实时运维 |
-| [13 微内核运行时与控制面重构详细设计](13-microkernel-control-plane-redesign.md) | 删除业务硬编码组合根、注册表驱动运行时、模块自带沙箱 UI、RouteGraph 与 dispatch trace |
+后续实现必须先读本节。文档冲突时按表中从上到下裁决；代码现状和历史迁移记录不能反向修改目标语义。
+
+| 优先级 | 文档 | 约束范围 |
+|---|---|---|
+| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md) | 当前纠偏基线：微内核、模块注册、持久代际、RouteGraph、模块管理 UI；直接否决业务组合根和固定产品后台 |
+| 2 | [01 架构设计](01-architecture.md) | 系统边界、模块职责、部署与总体验收不变量 |
+| 3 | [02 生命周期](02-kernel-lifecycle.md)、[03 通信与调度](03-communication-scheduling.md)、[05 存储与鉴权](05-storage-security-operations.md)、[06 并发合流](06-concurrent-convergence.md) | 通用协议、所有权、事务、授权与收敛规则 |
+| 4 | [08 群聊上下文](08-group-context-interaction.md)、[09 群聊 Shell](09-group-shell-command-system.md)、[10 多主干记忆图](10-multi-trunk-memory-graph.md)、[11 多模态记忆](11-multimodal-memory-and-model-projection.md)、[12 WebUI](12-webui-administration.md) | 交互、管理和数据域专项契约；不得扩大微内核职责 |
+| 5 | [04 多 Bot、Agent 与记忆](04-bot-agent-memory.md)、[07 Python 插件](07-python-plugin-development.md)、[P3 单 Agent 协议](p3-agent.md) | 可替换模块的详细行为；Agent 仅是模块，不能成为框架主循环 |
+| 状态证据 | [实现状态与验证记录](implementation-status.md) | 唯一的当前完成度来源；不定义目标架构 |
+
+任何实现若需要新增顶层 Agent/Memory/Bot 业务页面、在 `BindingRuntime` 上持有业务对象、引入产品子 Agent、按旧未发布表增加兼容迁移，或绕过注册表直接调用模块，均应视为设计错误并先修改方案。
+
+## 实现切片文档
+
+`p0-*` 至 `p5-*` 记录纵向实现、测试和局部协议。它们用于证明某项机制或复用不变量，必须服从上面的权威设计；标题中的“已实现”只说明该切片曾通过其测试，不说明目标微内核已经完成。
+
+- 内核模块机制：[资源监督](p0-resource-sdk.md)、[组件事件](p0-component-events.md)、[组件任务](p0-component-jobs.md)、[插件包](p2-plugin-packages.md)、[状态迁移](p2-state-migration.md)、[业务命令](p2-business-commands.md)、[消息处理器](p2-message-handlers.md)。
+- 单 Agent 与群聊控制：[Agent 状态](p3-agent-state.md)、[定时任务](p3-jobs.md)、[群聊监督](p3-control.md)、[组件生命周期 Shell](p5-module-lifecycle-shell.md)、[Core 救援入口](p5-core-shell.md)、[Shell 接入容量](p5-shell-ingress-admission.md)。
+- 多模态记忆与来源：[来源载荷](p4-source-payloads.md)、[图归约器](p4-graph-reducer.md)、[人工联想召回](p4-association-retrieval.md)、[自动语义联想](p4-semantic-associations.md)、[图文嵌入](p4-embedding-driver.md)、[图存储](p4-graph-store.md)、[记忆运行链路](p4-memory-runtime.md)、[来源管理](p4-memory-administration.md)。
+- 控制面与恢复：[Web 插件管理](p2-web-plugin-management.md)、[账号管理](p5-account-management.md)、[部署审计](p5-deployment-audit.md)、[Bot 审计](p5-bot-audit.md)、[备份恢复](p5-backup-restore.md)、[部署恢复](p5-deployment-recovery.md)、[OneBot WebSocket](p5-onebot-forward-websocket.md)。
+
+## 撤销设计与历史调查
+
+以下文档不属于实现规格，不应出现在开发任务的依赖链中：[产品子 Agent 删除记录](p3-children.md)、[旧 Agent 载荷记录](p4-agent-payloads.md)、[已发布数据库迁移研究](p4-content-migration.md)、[旧正文副本调查](p4-payload-migration-notes.md)。它们仅解释已删除设计为何错误或保存通用的数据清理证据。Forest 未发布基线不创建其中的 Child 表、handler、升级夹具或兼容路径；需要追查旧实现时优先使用 Git 历史。
 
 ## 需求对应
 

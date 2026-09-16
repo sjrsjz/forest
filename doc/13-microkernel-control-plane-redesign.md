@@ -1,5 +1,7 @@
 # 微内核运行时与控制面重构详细设计
 
+> **权威性：当前最高。** 后续代码、测试和 P0–P5 实现记录若与本文冲突，应删除或重写冲突实现；不得为 Forest 未发布期间的错误对象模型增加兼容层。本文所称 Agent 始终是可替换的单执行链模块，不是内核调度主体，也不存在产品子 Agent。
+
 ## 1. 修正的问题
 
 此前实现曾把 `BindingRuntime` 写成 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。本轮重构已经拆出官方运行时模块及其资源所有权；本文继续作为剩余 Contract Router、持久代际和通用监督重构的权威设计，不再把旧组合根描述成当前事实。
@@ -65,13 +67,13 @@ flowchart LR
 顶层导航固定为内核概念：
 
 1. **部署**：内核版本、容量、全局操作、管理账号和备份。
-2. **运行实例**：选择 Bot 作用域，查看状态、模块、Adapter/路由、任务和观测。
+2. **运行实例**：选择 Bot 作用域，查看状态、模块、RouteGraph、任务和观测。
 3. **模块注册表**：包、摘要、契约、依赖、能力请求、UI 工件和版本。
 4. **操作与追踪**：生命周期操作、dispatch trace、outbox/effect 对账、失败恢复。
 5. **安全**：主体、作用域、能力授予、组件命令授权和审计。
 6. **存储**：部署存储、各实例事实库、媒体、索引、备份与恢复。
 
-选中 Bot 后只改变作用域，不改变产品分类。实例页签固定为“状态、模块、Adapter 与路由、任务、观测”。Agent、Memory、OneBot 在“模块”列表中并列；进入某模块后才显示其配置、业务诊断和自带 UI。记忆浏览器属于 Memory 模块的管理视图，Agent 对话/Run 浏览器属于 Agent 模块的管理视图。
+选中 Bot 后只改变作用域，不改变产品分类。实例页签固定为“状态、模块、RouteGraph、任务、观测”。Agent、Memory、OneBot 在“模块”列表中并列；进入某模块后才显示其配置、业务诊断和自带 UI。记忆浏览器属于 Memory 模块的管理视图，Agent 对话/Run 浏览器属于 Agent 模块的管理视图。控制台不得根据 `component_id` 分支导入业务 JavaScript、拼专用 URL 或生成固定导航；官方模块也必须走描述符、query/action contract 与 UI 工件装载路径。
 
 ## 5. 模块携带管理 UI
 
@@ -142,3 +144,16 @@ POST /management/v1/bots/{bot_id}/runtime-modules/{component_id}/actions/{operat
 - 配置 UI 的包摘要、schema、当前运行代际一致性有自动测试；篡改、路径逃逸、超大资源、协议不兼容和越权消息被拒绝。
 - 命令授权在 RouteGraph 中可解释，一次消息的 dispatch trace 可按组件和代际查询。
 - Agent 和 Memory 移出宿主组合根后，现有同群串行/跨群并发、多主干多模态记忆和群 Shell 不变量继续通过集成测试。
+
+## 9. 实现前拒绝清单
+
+出现下列任一方案时应先停止编码并修正文档/任务：
+
+- 在 `BindingRuntime`、`BotRuntimeSupervisor` 或 Web 应用入口直接构造/保存 Agent、Memory、Adapter、Shell、Scheduler、Delivery 的具体对象；
+- 为 Agent、Memory、LLM、Embedding 或 OneBot 新增控制台顶层页面、专用宿主表单或绕过通用模块路由的 HTTP 端点；
+- 把 Agent 的下一次模型调用实现成另一个 Agent、私有分支调度器或独立 Prompt/预算树；
+- 为已删除的 Child 表、旧页面、旧 DTO、旧 handler 或未发布数据库增加兼容迁移、fallback 读取或双写；
+- 让模块 UI 直接取得管理员会话、任意管理 API、数据库连接或父页面 DOM；
+- 仅记录进程内 ACTIVE 状态，却把模块展示为已经发布到持久 Generation/RouteGraph；
+- 用当前模块 head 解释历史消息，而不使用该消息接纳时冻结的 `graph_digest`；
+- 为降低实现成本而弱化同群唯一 Agent、消息切口、作者来源、多主干/多模态记忆或异步写合流不变量。

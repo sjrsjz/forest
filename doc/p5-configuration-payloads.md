@@ -28,7 +28,7 @@ flowchart LR
 
 | 对象 | 可清理正文与运行依赖 | 删除后仍保留的事实 |
 | --- | --- | --- |
-| Agent 配置 | plan/revision 值；Run frozen spec；实际步骤快照；升级前遗留 Child 的 spec 来源仅供清理与审计 | 修订、秘密版本、固定数值预算/期限、Run/step 身份、原 spec 摘要 |
+| Agent 配置 | plan/revision 值；Run frozen spec；实际步骤快照 | 修订、秘密版本、固定数值预算/期限、Run/step 身份、原 spec 摘要 |
 | Memory 配置 | plan/revision 值；Embedding 请求的 profile、精确请求及 manifest 的实际配置父引用 | 修订、固定预算、dimensions/protocol、向量空间与 endpoint 身份摘要、费用 |
 | Binding | 首次登记名称；plan/revision 值；effective 配置精确引用实际 V | 账号身份、期望/生效修订、Binding/connection epoch、永久送达事实 |
 | 组件 | plan/revision 值；真实 activation 对应 generation 的配置来源 | 包摘要、能力集合、生命周期操作、代际和路由 fencing |
@@ -44,15 +44,15 @@ Watch 的真实 Host 初始化记录 `watch.initialize` 输入并建立 spec，�
 
 所有必需的业务头在读取配置正文、取得 memory clock 之前按既有顺序加锁。组件和 Watch 发布须再次核对真实配置头、当前 desired、实际 activation、Host/operation/policy fencing 与候选 generation；apply 的旧回执不是永久发布许可。
 
-Agent 新模型调用、工具或媒体获取许可严格核验实际 spec/config 的当前可用性。媒体来源校验从实际 Agent 配置 V 读取允许的 origin，不再访问旧明文列。配置已清理时不发起新的 HTTP；已经开始的外部请求仍按原尝试身份记录已知费用和结果状态，不能因此恢复结果正文或发布新的内容。升级前 Child 只允许进入终结、费用结算和清理路径，不能产生新请求或候选结果。
+Agent 新模型调用、工具或媒体获取许可严格核验实际 spec/config 的当前可用性。媒体来源校验从实际 Agent 配置 V 读取允许的 origin，不访问明文副本。配置已清理时不发起新的 HTTP；已经开始的外部请求仍按原尝试身份记录已知费用和结果状态，不能因此恢复结果正文或发布新的内容。
 
-已知完成事实可仅凭元数据结算。UNKNOWN 表示无法确认外部效果，不能自动重跑或释放其预算占用。明确取消会撤销原 Actor lease；失权旧执行者不能补写结果。升级迁移另行撤销遗留 Child lease。取消后的 UNKNOWN 保留待管理核对，不在本切片增加跨取消的无条件结果接纳通道。
+已知完成事实可仅凭元数据结算。UNKNOWN 表示无法确认外部效果，不能自动重跑或释放其预算占用。明确取消会撤销原 Actor lease；失权旧执行者不能补写结果。取消后的 UNKNOWN 保留待管理核对，不在本切片增加跨取消的无条件结果接纳通道。
 
 ## 4. 不改写旧摘要的升级
 
 042 提升最低 writer generation；旧宿主不能对新 schema 恢复写入。001–041 SQL、handler 和原 helper 保持原样，042 之后使用独立版本化 checksum 信封。045–049 显式覆盖它们调用的冻结 044 dependency importer，避免迁移算法变化却沿用旧 checksum。
 
-043 提供配置正文读取器。044 为旧载荷增加单独、不可修改的补充依赖表与闭包；不改旧 header、manifest、来源清单、业务摘要或原操作 ID。045–048 搬运各正文族，并用真实 Run、升级前遗留 Child、Embedding request、Binding revision、activation 或 Watch 行证明旧副本的对应关系。Child 证明只服务于旧数据清理和审计，不构成继续调度许可。
+旧编号 043–048 只记录曾验证过的依赖闭包思路，不是当前数据库升级计划。最终基线直接以真实 Run、Embedding request、Binding revision、activation 或 Watch 行证明载荷关系；不得创建补充旧表、兼容 handler 或只为开发期错误 schema 服务的迁移。
 
 补充依赖参与实际读取、新派生、exact echo 的两个传播方向、exposure、遗忘和范围检查。先遗忘再升级时，新证明的旧副本立即继承原 suppression，不重新写入正文。迁移不能只截取前若干后代；正常读取和新写仍受完整来源数量限制，超限明确拒绝。
 

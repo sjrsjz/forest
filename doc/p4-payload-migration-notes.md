@@ -1,6 +1,6 @@
 # P4 准备：正文分离、物理清理与不可复活的删除闭包
 
-状态：**历史副本调查，不是当前目标 schema 或兼容计划。** 第 1–11 节保留旧实现曾产生正文副本的位置，供提取通用遗忘不变量；其中的 Child 入口、表、迁移、handler 和测试不得被后续实现恢复或保留。Forest 尚未发布，最终基线直接删除整条 Child 分支并重建开发数据库，不承担 019/032/050 的升级兼容。当前协议以[单 Agent 协议](p3-agent.md)、[产品子 Agent 删除](p3-children.md)和[实现状态](implementation-status.md)为准。其余通用 Payload、Kernel、配置、Job 与 Shell 载荷边界仍需按各自现行文档复核；本页不把 `visible=false`、`context_disposition` 或任务取消占位解释成删除。
+状态：**历史副本调查，不是当前目标 schema、任务清单或兼容计划。禁止从本文生成迁移、表、DTO、handler 或测试。** Forest 尚未发布，最终基线直接按[单 Agent 协议](p3-agent.md)、[微内核重构](13-microkernel-control-plane-redesign.md)和[实现状态](implementation-status.md)重建。本文只保留仍适用于当前系统的通用 Payload、Kernel、配置、Job 与 Shell 清理不变量；已撤销产品语义的具体结构已经从清单删除。`visible=false`、`context_disposition` 或任务取消占位不等于删除。
 
 “永久事实头 + 可清理载荷体 + 来源依赖”契约已用于新记忆和上述正文族。新 Agent Reply 从最终步骤的显式父载荷登记；旧回复和不能证明来源闭包的内容继续保持 `lineage_complete=false`。Kernel 状态读取和 Worker 跨调用缓存仍需要补齐真实依赖，不能把局部来源传递称为全链路保证。迁移后的记录一旦撤销或清理，禁止回退旧正文列。
 
@@ -21,10 +21,8 @@
 | `bot_model_request_manifests.manifest` | **`projected_units` 保存完整投影文本**；`source_manifest` 也复制展示信息。名称叫 manifest 不代表它只含引用 | request_id、原 manifest_digest、input/projected_content digests、能力/序列化版本、输入/媒体/证据引用 |
 | `bot_model_transport_attempts.request_body` | 完整精确 API JSON bytes；vision 输入包含 `data:image/…;base64,…`，是图片的另一份完整字节表示 | request/attempt IDs、wire_digest、许可/开始/结果状态、预算、宿主与 owner fence |
 | 同表 `result`、`prepared_metadata` | result 含模型文本/工具参数与 usage；prepared_metadata 当前是 token/stream/serializer 等小型恢复数据，应拆出允许保留的字段 | result_digest、usage、provider receipt ID、错误码和 token 结算；正文另存 |
-| `bot_agent_tools.arguments`、`result` | 可任意嵌套文本、图片引用、工具响应与子 Agent 结果 | tool ID、operation ID、arguments/result digests、实际触发和 principal_ref、状态/尝试次数 |
+| `bot_agent_tools.arguments`、`result` | 可任意嵌套文本、图片引用与工具响应 | tool ID、operation ID、arguments/result digests、实际触发和 principal_ref、状态/尝试次数 |
 | `bot_agent_tool_observations.observation` | **013 的 `forest_agent_tool_observe` 每次相关状态变化写 `to_jsonb(NEW)` 整行**，重复复制 arguments/result | observation ID、operation ID、attempt_count、状态、原观察摘要和载荷引用 |
-| `bot_agent_children.snapshot`、`spec`、`result` | 私有分支冻结源内容、委托任务与候选结果；结果采纳后还会进父工具 result | child/parent/tool IDs、source_unit_ids、原 snapshot/result digests、lease/状态/父 checkpoint |
-| `bot_child_model_attempts.request_body`、`manifest`、`result`、`metadata` | 子模型同样保存完整请求（可含 base64 图片）、投影文本与输出 | request/attempt IDs、wire/result digests、结果状态、日/树预算及费用事实 |
 | `bot_send_parts.payload` | 发送消息段原文或媒体引用 | intent/part/operation IDs、payload_digest、顺序、state/owner/attempt |
 | `bot_send_attempts.wire_body` | 精确 OneBot API bytes；以后允许图片发送时也可能含完整编码图片 | attempt/intent/part IDs、wire_digest、固定目标、许可时间、发送结果与 UNKNOWN 状态 |
 | send parts/attempts 的 `receipt`；`bot_delivery_resolutions.reason/result` | receipt 目前主要是平台 ID/错误码，但接口接收有界任意 JSON；人工 reason 是自由文本 | 经白名单验证的效果状态/平台消息 ID、人工决定主体/时间、原输入摘要 |
@@ -48,13 +46,12 @@ Binding/Agent 的 `secret_ciphertext` 属于凭据生命周期，不是默认记
 - `005.forest_inbox_source_immutable` 明确拒绝 DELETE，并固定 `author/segments`；`bot_conversation_replies_immutable` 拒绝 UPDATE/DELETE。
 - `013.forest_agent_fixed_fields` 固定 Agent spec、step snapshot、模型 request_body、工具 arguments、Context step/control parts；`forest_agent_observation_once` 又固定已经观察到的模型 result/output。`bot_model_manifests_immutable`、`bot_agent_tool_observations_immutable` 和 checkpoint 触发器拒绝整行变更。
 - `016.bot_media_captures_immutable` 拒绝 UPDATE/DELETE；content 为非空、长度至少 1，并要求 `blob_digest=sha256(content)`。`forest_media_source_immutable` 固定 URI/source 且禁止删除媒体源行。用空 bytes 替换既不符合约束，也伪造了原 blob 的内容。
-- `019` 固定 child snapshot/spec、child request_body；wire_digest 有 bytea 计算 CHECK，已存在 result 也不能替换。
 - `006.bot_delivery_immutable` 固定 intent、payload、精确 wire_body 和人工 resolution。parts/attempts 的触发器仅拦 UPDATE，并不代表它们可安全整行删除：FK、echo reconciliation、UNKNOWN 处理和去重都依赖这些行。
 - `001` 的 state steps/revisions、audit，`003` 的 Web 操作/config，`004` 的 Binding 修订，`010` 的状态迁移副本，`018` 的 Job definitions/plans 均有拒绝修改的触发器。`020` 的 Shell arguments 也固定。
 
 ### 2.2 保留事实行，删除载荷行
 
-Inbox → Trigger/Context/媒体/echo/Job；Run → Reply/Agent/step；step → model manifest/attempt/tool/child；Intent/part → attempt/echo/resolution；Call → state step/revision/子调用，都有 FK 或等价恢复依赖。简单 `DELETE CASCADE` 会删掉证明“这个 operation 已经做过”的唯一依据，之后同 ID 重试可能再次执行。
+Inbox → Trigger/Context/媒体/echo/Job；Run → Reply/Agent/step；step → model manifest/attempt/tool；Intent/part → attempt/echo/resolution；Call → state step/revision/嵌套组件调用，都有 FK 或等价恢复依赖。简单 `DELETE CASCADE` 会删掉证明“这个 operation 已经做过”的唯一依据，之后同 ID 重试可能再次执行。
 
 推荐保留各表原主键、UNIQUE、FK、原摘要与状态；可清理内容通过独立 payload ID 引用。ID 指向永久载荷头，载荷头可处于 SCRUBBED，而物理载荷体被删除。FK 不指向会被删除的 body 行。
 
@@ -87,13 +84,13 @@ Inbox → Trigger/Context/媒体/echo/Job；Run → Reply/Agent/step；step → 
 
 1. 先创建来源头、载荷头/body、依赖/owner 表和删除协调表；对旧数据生成稳定、可重跑的 payload IDs。
 2. 将上节列出的正文列逐列搬到 body 表，原行增加 `<purpose>_payload_id`。原 SHA-256/input/result/wire 摘要原样保留；缺少独立结果摘要的 `bot_calls.result`、state value、audit/details 等补摘要。
-3. 从 Inbox/Context/step snapshot/model manifest/child source_unit_ids/Reply → Delivery/Call → Agent tool 的已有关联回填 lineage。OneBot normalize/prepare 的 Kernel 回执应在宿主调用时显式登记来源，不能只依赖 operation ID 字符串格式猜关系。
+3. 从 Inbox/Context/step snapshot/model manifest/Reply → Delivery/Call → Agent tool 的已有关联回填 lineage。OneBot normalize/prepare 的 Kernel 回执应在宿主调用时显式登记来源，不能只依赖 operation ID 字符串格式猜关系。
 4. 对无法证明来源的旧插件状态/自由 JSON，标记 `LEGACY_UNTRACKED`，在数据删除计划中列明。若用户要求覆盖该部分，应暂停并保守清理整个关联组件/Run 载荷；不能把“不知道来源”当作“与删除无关”。
 5. 重建触发器：不可变的是事实头、payload ID 和原摘要；body 表只允许首次插入或受控 scrub。旧代码直接读正文列将不能运行，必须在同一发布更新所有 Repository 的 hydrate/replay/写入路径。
 6. 移除旧明文列，或把旧表重建为仅有事实头的新表后切换；不能保留一个无人读取但仍有正文的 legacy 表。`DROP COLUMN` 本身也不证明历史物理页已清理，见第 8 节。
 7. 对迁移源表、审计、outbox、逻辑导出、临时转储进行副本清点。完成后才恢复写入；旧版本宿主不得绕过 schema generation 重新连接。
 
-媒体表的 hash/长度检查移到“ACTIVE payload 首次写入”事务或约束触发器；SCRUBBED header 仍保存原 blob_digest，但没有 content 字段可被误验为另一张图片。模型/child/Delivery 的原精确 bytes 同理；删除后不可构建 `PreparedModelRequest` 或 `PreparedSend`，应返回明确的 `PAYLOAD_ERASED`。
+媒体表的 hash/长度检查移到“ACTIVE payload 首次写入”事务或约束触发器；SCRUBBED header 仍保存原 blob_digest，但没有 content 字段可被误验为另一张图片。模型/Delivery 的原精确 bytes 同理；删除后不可构建 `PreparedModelRequest` 或 `PreparedSend`，应返回明确的 `PAYLOAD_ERASED`。
 
 OneBot normalize 的 Kernel 调用完成时间可能早于 Inbox 接纳，二者之间崩溃会留下未关联源的完整 result。该入口需要宿主生成的 ingress-envelope/原始调用关联和接纳时的绑定事务，或对尚不能归属的副本采用有界 `UNBOUND` 保留与保守清理策略。不能只在成功写 Inbox 后登记 lineage，却把失败/半完成解析调用遗留在闭包之外。晚到的旧 epoch normalize 返回同样受载荷接纳 fence 约束。
 
@@ -101,7 +98,7 @@ OneBot normalize 的 Kernel 调用完成时间可能早于 Inbox 接纳，二者
 
 用结构化依赖登记内容的复制和派生，而不是等遗忘时扫描整个 Bot 的 JSON 猜引用。依赖至少区分内容依据、作者展示信息、身份/审计引用；只有永久安全字段可留在 metadata。
 
-原始消息的删除闭包包括媒体源 URI、所有捕获/变体、raw-unit payload、涉及它的模型 snapshot、manifest.projected_units、精确请求体、结果/工具组、子 Agent、最终回复、发送 payload/wirebody，以及相应 Kernel result、tool observation 和管理/audit/outbox 副本。模型输出默认依赖实际输入的所有 included parts；不能通过“结果没有逐字引用原文”证明不存在依赖。保存了完整 canonical snapshot 的载荷则依赖该快照内全部内容，包括后来没有发给模型的部分。
+原始消息的删除闭包包括媒体源 URI、所有捕获/变体、raw-unit payload、涉及它的模型 snapshot、manifest.projected_units、精确请求体、结果/工具组、最终回复、发送 payload/wirebody，以及相应 Kernel result、tool observation 和管理/audit/outbox 副本。模型输出默认依赖实际输入的所有 included parts；不能通过“结果没有逐字引用原文”证明不存在依赖。保存了完整 canonical snapshot 的载荷则依赖该快照内全部内容，包括后来没有发给模型的部分。
 
 一份精确请求同时混有多个群/多个用户时，不能原位删几段后继续宣称是原 wire_digest。删除整个精确 body，保留原摘要和 metadata；如业务仍允许继续，重新选择未删除来源、形成新逻辑步骤/新请求，而不能对 UNKNOWN 原 attempt 自动重发。
 
@@ -146,7 +143,6 @@ PayloadStore.observe_terminal_in(conn, original_permit, result_metadata, body=No
 | `AgentStore.snapshot/prepare_model/check_model_permit` | snapshot/payload/manifest 登记依赖；最终网络前许可重验 included source parts 与媒体 grant；准备好的 bytes 不构成授权 |
 | `AgentStore.complete_model/observe_tool/close_tools/_flush/commit_final` | 接收晚到 metadata，拒绝被删内容的新 payload/派生发布；tool observation trigger 只复制 metadata 与载荷引用 |
 | `AgentStore.replay_prepared/recover_tool/load` | 已删载荷明确终止内容恢复，不从 Kernel 回执或新 request UUID 绕过；UNKNOWN 不转可重试 |
-| `ChildStore.spawn/prepare/check_permit/complete/adopt/media` | 私有 snapshot/模型/结果使用父来源 manifest；删除后不采纳子结果，不从父缓存恢复图片 |
 | `DeliveryStore.enqueue_in/claim/permit/mark_started` | intent 绑定回答 source manifest/deletion epoch；精确发送许可最后复验，未开始工作因删除失效 |
 | `DeliveryStore.complete/reconcile/recover` | 原 attempt 的结果仍可对账，但 receipt 内容须白名单；scrub 后不得把 body 再附回、不得让 NOT_SENT 人工决定自动复活消息 |
 | `BotStore.admit/_guard/commit_state/finish_call/authorized_call` | 跨 Worker 调用传播由宿主签发的来源依赖；参数/结果/写状态登记 lineage；被删 result 重放只给已完成且内容不可用的 receipt |
@@ -189,8 +185,8 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 
 验收至少包括：
 
-1. 使用唯一 canary 文本和唯一测试图片生成 Inbox → 模型请求 → tool/child → Reply/Delivery → Kernel/audit 副本，执行遗忘后检查所有 body 表、原列/旧表、base64 精确请求及可读索引均无载荷；单验查询过滤不足。
-2. 延迟图片下载、模型、子模型、工具、embedding 与图发布，先提交删除后放回结果：允许 metadata 结算，不得新增正文、字节、向量、可发送回复或工具提案。
+1. 使用唯一 canary 文本和唯一测试图片生成 Inbox → 模型请求 → tool → Reply/Delivery → Kernel/audit 副本，执行遗忘后检查所有 body 表、原列/旧表、base64 精确请求及可读索引均无载荷；单验查询过滤不足。
+2. 延迟图片下载、模型调用、工具、embedding 与图发布，先提交删除后放回结果：允许 metadata 结算，不得新增正文、字节、向量、可发送回复或工具提案。
 3. scrub 中途崩溃后接管，已删 body 不重新插入；相同 operation 仍幂等完成，UNKNOWN 仍 UNKNOWN。
 4. 共享图片的甲源删除与乙源引用接纳/GC 交错，证明合法乙引用保留且甲来源不能恢复；Bot B 完全隔离。
 5. 同一请求中混合两个群来源，删其中一个后原精确请求不可重放；新上下文仍有正确未删群来源和不可用占位。
@@ -245,9 +241,9 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 
 ### 10.4 031/032 的当前闭包与局部守卫要求
 
-031 的 snapshot 继承实际 Context 和私有 closed_parts；manifest 继承 snapshot 与 BOUND evidence；request → model result → tool arguments/results → closed_parts → Reply 继续传递父载荷。032 的 child snapshot 还继承父工具参数和父模型输出，child candidate → 父工具结果也传递实际结果载荷；因此 child task 中转述的跨群证据不会只因未列入显式选中 unit IDs 而丢失删除依赖。
+Agent snapshot 继承实际 Context 和私有 closed_parts；manifest 继承 snapshot 与 BOUND evidence；request → model result → tool arguments/results → closed_parts → Reply 继续传递父载荷。工具对跨群证据的转述同样必须继承实际来源，不能只依赖显式选中的 unit IDs。
 
-**可读载荷与当前执行授权必须同时复验。** Child 的发送许可、结果发布和父采纳需要使用完整 `AgentMemoryStore.guard_run_in`，不能只调用检查 payload 的内部 guard，否则父 BOUND evidence 的当前 MemoryConfig/来源资格撤销可能被漏过。结算入口保留 metadata 分支，不能把来源 guard 放在费用结算前的无条件身份入口。
+**可读载荷与当前执行授权必须同时复验。** Agent 的发送许可、结果发布和工具结果采纳需要使用完整运行守卫，不能只调用检查 payload 的内部 guard，否则 BOUND evidence 的当前 MemoryConfig/来源资格撤销可能被漏过。结算入口保留 metadata 分支，不能把来源 guard 放在费用结算前的无条件身份入口。
 
 另外，旧快照在 Actor 接管时可能已被擦除：`AgentStore.load` 的 hydrate 会在 `AgentRunner.advance` 获得 head 之前抛错。恢复必须先凭当前 Actor、准确 Conversation/active Session 和 Run metadata，在同一事务重新核实真实撤销，再终止该已存在 Agent；不能误走“没有 Agent checkpoint”的 legacy 分支，也不能为了取得新 owner 而恢复旧正文。来源未撤销、其他群、旧 Actor 和无 Agent 的 legacy Run 均不得被这一分支结束。
 
@@ -255,7 +251,7 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 
 1. **跨调用缓存与重启**：真实 Worker 的 Call A 读取带 canary 的状态并缓存，Call B 不再调用 state.read；遗忘 A 后，B 不得写状态/返回可发布结果。已暴露 generation 被回收；新 Worker 只能读取合法剩余状态，旧状态迁移候选也不能恢复该 canary。
 2. **回执与物理副本**：同一状态操作生成 current/history/receipt、Kernel result、Agent tool result，控制预览另生成 Web/audit/outbox 副本。删除后核查原列 NULL 和实际 body 删除；同 operation 保留原完成状态及摘要，不重复执行；旧 UNKNOWN 保持明确不确定。
-3. **权限与接管**：在最终 Kernel Gateway 写入前、Child 已获 permit 后以及重新 claim 一个已擦除快照前交错撤销。完整权限复验阻止新发送/发布；已知费用仍结算，结束后按既有 silent drain 完成 Session，其他群及无 Agent 的 legacy Run 不受影响。
+3. **权限与接管**：在最终 Kernel Gateway 写入前、工具已获 permit 后以及重新 claim 一个已擦除快照前交错撤销。完整权限复验阻止新发送/发布；已知费用仍结算，结束后按既有 silent drain 完成 Session，其他群及无 Agent 的恢复 Run 不受影响。
 4. **非空旧库升级**：真实旧状态、迁移候选、长 operation ID、已完成 Call、配置预览/历史与 Job/Shell 数据，从发布过的 SQL 起步迁移；中断/重启后固定摘要、状态和删除 marker 不变，执行期没有旧正文列 fallback。
 
 ## 11. 036–038 完成时记录的后续实施边界
@@ -266,7 +262,7 @@ Python bytes、HTTP 客户端缓冲和运行中的 Worker 也可能暂时持有�
 | --- | --- |
 | 控制结果、审计与 outbox | `BotControl._record` 当前复制同一预览结果到三处；改为共享结果载荷和封闭 metadata。旧 operation 的完成状态、原摘要保留，正文不可用时不得重新执行 |
 | 取消及分类原因 | 自由 reason 与固定状态码分离。旧 checkpoint 的原 checksum 不改写，迁移原正文并保留其引用；终止和结算不能依赖已删原因正文 |
-| Bot 配置与冻结 spec | 组件/Agent/Memory/Binding/Watch 的 plan、revision、current 和 `AgentRun.spec`；真实配置父载荷须继续传到 generation、模型请求及子 Agent。SQL 发布、调度字段和表达式索引同时更新 |
+| Bot 配置与冻结 spec | 组件/Agent/Memory/Binding/Watch 的 plan、revision、current 和 `AgentRun.spec`；真实配置父载荷须继续传到 generation、模型请求及工具。SQL 发布、调度字段和表达式索引同时更新 |
 | Shell | 已接受命令输入 → arguments → 管理结果/CONTROL 已由 062–063 接通；最终写事务复验实际父载荷，不能换新 operation 恢复旧参数或结果；Job definition → occurrence 输入已由 060–061 接通 |
 
 Web/CLI 的手工配置属于独立管理员输入域，不按文本相似猜测聊天来源。Shell 命令来自真实群消息，其派生内容须继承该消息；框架自动复制配置或记忆时同样继承实际父载荷。旧 generation/Reply 的不可变 manifest 不能原地补写；无法证明旧上游时采用明确的保守迁移策略。

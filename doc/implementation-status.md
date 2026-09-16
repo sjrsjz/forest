@@ -31,6 +31,9 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 ## 本轮已经完成的重构切片
 
+- 文档入口已经按“13 号纠偏基线 → 通用架构/协议 → 专项设计 → 实现状态”建立明确权威顺序；P0–P5 实现切片和旧迁移调查不再与目标架构并列，也不能生成兼容任务。
+- WebUI 设计已删除固定 Agent/Memory/LLM 页面和专用 Memory 查询端点，控制台只保留内核导航、RouteGraph 与通用模块工作区；官方模块同样通过描述符、schema、query/action 和沙箱 UI 暴露管理能力。
+- 历史载荷文档已经删除产品 Child 数据流和“先迁移开发期旧表”的实施措辞；当前未发布数据库只接受干净最终基线。
 - 官方核心模块进入显式注册表，并声明稳定 `component_id`、依赖和能力；
 - 通用管理入口按 `(bot_id, component_id, operation_id)` 解析模块的 query/action contract；
 - Agent 与 Memory 的专用 `/agent/*`、`/memory/*` 管理端点已删除；
