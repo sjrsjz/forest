@@ -1,0 +1,4 @@
+.memory-association{margin-top:16px;padding:16px;border:1px solid #405747;border-radius:9px;overflow-wrap:anywhere}
+.memory-association p{margin:0 0 8px;line-height:1.7}
+.memory-association span{color:#a1b2a8;font-size:13px}
+body.viewer #memory-forget-plan,body.viewer #memory-association-plan{display:none!important}

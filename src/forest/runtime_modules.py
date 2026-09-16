@@ -16,10 +16,43 @@ from forest.errors import ForestError
 
 
 @dataclass(frozen=True)
+class RuntimeManagementView:
+    """Trusted management assets owned by an official runtime module."""
+
+    label: str
+    template: str
+    module: str
+    protocol: str = "forest.trusted-management-view/1"
+    style: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.label.strip() or any(ord(char) < 32 for char in self.label):
+            raise ValueError("Runtime management view labels must be printable")
+        for value, suffix in ((self.template, ".html"), (self.module, ".js")):
+            if (
+                not value.startswith("/static/")
+                or not value.endswith(suffix)
+                or ".." in value.split("/")
+                or "\\" in value
+            ):
+                raise ValueError("Runtime management assets must use canonical /static paths")
+        if self.protocol != "forest.trusted-management-view/1":
+            raise ValueError("Unsupported runtime management view protocol")
+        if self.style is not None and (
+            not self.style.startswith("/static/")
+            or not self.style.endswith(".css")
+            or ".." in self.style.split("/")
+            or "\\" in self.style
+        ):
+            raise ValueError("Runtime management styles must use canonical /static paths")
+
+
+@dataclass(frozen=True)
 class RuntimeModuleDescriptor:
     component_id: str
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
+    management_view: RuntimeManagementView | None = None
 
 
 def _memory(platform, _: dict[str, Any]):
@@ -77,8 +110,24 @@ def _jobs(platform, modules: dict[str, Any]):
 
 
 OFFICIAL_MODULES = (
-    RuntimeModuleDescriptor("memory.graph", (), _memory),
-    RuntimeModuleDescriptor("agent.runtime", ("memory.graph",), _agent),
+    RuntimeModuleDescriptor(
+        "memory.graph",
+        (),
+        _memory,
+        RuntimeManagementView(
+            "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js",
+            style="/static/modules/memory.graph.css",
+        ),
+    ),
+    RuntimeModuleDescriptor(
+        "agent.runtime",
+        ("memory.graph",),
+        _agent,
+        RuntimeManagementView(
+            "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js",
+            style="/static/modules/agent.runtime.css",
+        ),
+    ),
     RuntimeModuleDescriptor(
         "conversation.scheduler", ("agent.runtime",), _conversation
     ),
@@ -173,6 +222,18 @@ class BotModuleRegistry:
                 "component_id": descriptor.component_id,
                 "requires": list(descriptor.requires),
                 "state": getattr(self.instances[descriptor.component_id], "state", "ACTIVE"),
+                "management_view": (
+                    {
+                        "kind": "trusted-module",
+                        "label": descriptor.management_view.label,
+                        "template": descriptor.management_view.template,
+                        "module": descriptor.management_view.module,
+                        "protocol": descriptor.management_view.protocol,
+                        "style": descriptor.management_view.style,
+                    }
+                    if descriptor.management_view is not None
+                    else None
+                ),
             }
             for descriptor in self.descriptors
         ]

@@ -44,6 +44,8 @@ flowchart LR
 
 运行时代码只能按稳定 `component_id` 从 `ModuleRegistry` 解析能力，禁止在 Bot/Binding 对象上重新暴露 `agent`、`memory`、`scheduler`、`shell`、`jobs` 等便利属性。模块拥有自己的内部资源，例如 `scheduler.jobs` 拥有 JobStore；调用者不得越过模块边界持有该资源。这样删除或替换模块时，内核与业务模块之间不会留下隐式对象图，依赖关系也能由注册表完整描述和校验。
 
+官方受信模块可在描述符中声明 `management_view`，包含显示名、协议版本、HTML 模板、CSS 和 ES module 控制器资产。控制台壳只能从运行时注册表枚举并装载这些声明，不能按模块 ID 建立页面映射。受信资产必须随 Forest 发行并限制在 `/static/`；可安装包不获得这一执行级别，仍使用下节的摘要绑定沙箱 iframe。
+
 模块描述包含：
 
 - `component_id`、包摘要、作用域、代际和运行驱动；
@@ -105,6 +107,8 @@ dispatch trace 是观测记录，不是可编辑“执行链”。每次消息�
 模块除配置 UI 外可声明只读管理视图和类型化管理动作。视图查询不是任意 SQL，而是组件注册的 management query contract；返回 DTO 经宿主字段授权、分页上限和脱敏后传给 iframe。动作必须映射到已注册 operation type，并走计划、授权、幂等、审计和生命周期执行器。
 
 Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模块提供 session/run/model-turn/tool-call 视图；Adapter 提供连接和协议事件；Scheduler 提供作业与 lease。控制台壳仅呈现模块给出的视图目录和通用状态，不为这些类型写专用顶层页面。
+
+当前纠偏切片已经把 Agent/Memory 的 HTML 和控制器所有权移到模块资产，`index.html` 与 `app.js` 不再含两个模块的页面或 ID 映射。它们现有的 HTTP DTO 仍由 `agent_api.py` 与 `memory_api.py` 分别实现；后续必须把这些查询/动作注册成带权限、分页和审计约束的 management contract，才能让同一宿主协议承载第三方复杂管理视图。
 
 ## 8. 完成判据
 

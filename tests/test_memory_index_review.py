@@ -22,15 +22,17 @@ async def empty(*args, **kwargs):
 
 def runtime_fixture():
     store = SimpleNamespace(bot_id="review-bot")
-    runtime = MemoryRuntime(
-        SimpleNamespace(
-            bot=SimpleNamespace(store=store),
-            messages=SimpleNamespace(store=store),
-            kernel=SimpleNamespace(_authority=lambda: "host"),
-            vault=SimpleNamespace(decrypt=lambda value: "test-key"),
-            scheduler=SimpleNamespace(active_conversations={}),
-        )
+    scheduler = SimpleNamespace(active_conversations={})
+    platform = SimpleNamespace(
+        bot=SimpleNamespace(store=store),
+        messages=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda: "host"),
+        vault=SimpleNamespace(decrypt=lambda value: "test-key"),
     )
+    platform.module = lambda component_id: (
+        scheduler if component_id == "conversation.scheduler" else None
+    )
+    runtime = MemoryRuntime(platform)
     cfg = {
         "revision": 1,
         "values": {**DEFAULT_MEMORY_SETTINGS, "enabled": True},

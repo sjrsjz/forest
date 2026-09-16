@@ -1,0 +1,13 @@
+#agent-config fieldset{border:0;padding:0;margin:0;min-width:0}
+#agent-runs .card button{margin-right:10px}
+#agent-runs summary,#agent-runs dd{overflow-wrap:anywhere}
+#bot-agent label{margin-top:16px}
+.agent-config-columns{align-items:start}
+.agent-advanced{margin:0;padding:16px 18px;border:1px solid #405747;border-radius:10px;color:#e8efeb}
+.agent-advanced>summary{font-weight:700;color:#bfdcc8}
+.agent-advanced[open]>summary{margin-bottom:8px}
+#agent-config>fieldset>details{padding:14px 18px;border:1px solid #314237;border-radius:10px}
+#agent-config>fieldset>.actions{margin-top:14px}
+body.viewer #agent-apply{display:none!important}
+@media(max-width:850px){.agent-config-columns{grid-template-columns:1fr}}
+@media(max-width:580px){.agent-advanced{padding:13px}}

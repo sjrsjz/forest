@@ -201,3 +201,5 @@ export function agentPanel(api, busy, notice) {
   }
   return {reset, select, refresh, invalidateContent};
 }
+
+export const createModulePanel = agentPanel;

@@ -11,7 +11,7 @@ from playwright.sync_api import expect, sync_playwright
 from forest.memory_settings import DEFAULT_MEMORY_SETTINGS
 
 BOOTSTRAP = r"""
-import {memoryPanel} from '/static/memory.js';
+import {runtimeModuleViews} from '/static/runtime-module-views.js';
 window.fixture = {calls:[],hold:[],pending:[],plans:{},receipts:{},associations:[],
   row:{revision:1,secret_revision:1,has_api_key:true,values:DEFAULT_VALUES},
   sources:[
@@ -67,10 +67,16 @@ const api = async (path,body,headers) => {
 };
 const notice=text=>{document.getElementById('notice').textContent=text;};
 const busy=async(button,work)=>{button.disabled=true;try{await work();}catch(error){notice(error.message);}finally{button.disabled=false;}};
-window.panel=memoryPanel(api,busy,notice);
 document.getElementById('bots').classList.remove('hidden');
 document.getElementById('bot-detail').classList.remove('hidden');
-window.ready=panel.select({bot_id:'bot-a',stage:'READY'}).then(()=>true);
+const nav=document.createElement('nav'),registry=document.createElement('div'),root=document.createElement('div');
+document.getElementById('bot-detail').append(nav,registry,root);
+window.panel=runtimeModuleViews({api,busy,notice,nav,registry,root,packageElements:[]});
+panel.update([{component_id:'memory.graph',requires:[],management_view:{kind:'trusted-module',
+  protocol:'forest.trusted-management-view/1',label:'图文记忆',
+  template:'/static/modules/memory.graph.html',module:'/static/memory.js',
+  style:'/static/modules/memory.graph.css'}}]);
+window.ready=panel.select({bot_id:'bot-a',stage:'READY'}).then(()=>{panel.show('memory.graph');return true;});
 """
 
 
@@ -95,6 +101,16 @@ def main():
                 "/": (html.encode(), "text/html; charset=utf-8"),
                 "/fixture.js": (bootstrap.encode(), "text/javascript"),
                 "/static/memory.js": ((static / "memory.js").read_bytes(), "text/javascript"),
+                "/static/runtime-module-views.js": (
+                    (static / "runtime-module-views.js").read_bytes(), "text/javascript"
+                ),
+                "/static/modules/memory.graph.html": (
+                    (static / "modules/memory.graph.html").read_bytes(),
+                    "text/html; charset=utf-8",
+                ),
+                "/static/modules/memory.graph.css": (
+                    (static / "modules/memory.graph.css").read_bytes(), "text/css"
+                ),
                 "/static/configuration-forms.js": ((static / "configuration-forms.js").read_bytes(), "text/javascript"),
                 "/static/style.css": ((static / "style.css").read_bytes(), "text/css"),
             }

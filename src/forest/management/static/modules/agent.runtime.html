@@ -1,0 +1,40 @@
+<section id="bot-agent" class="card hidden">
+          <h2>Agent 与模型</h2><p id="agent-config-status" role="status"></p>
+          <p class="hint">先配置模型，再将账号的回复模式设为 Agent。所有群消息都进入短期上下文；同群串行、跨群并行，裁剪不调用摘要模型。</p>
+          <details><summary>内置 Agent 核心协议（只读）</summary><p id="agent-protocol-version"></p><code id="agent-protocol-digest"></code><pre id="agent-core-prompt"></pre></details>
+          <form id="agent-config"><fieldset disabled><div class="columns agent-config-columns"><div>
+            <label class="check"><input name="enabled" type="checkbox">启用此 Bot 的 Agent</label>
+            <label>模型 API 地址<input name="endpoint" type="url" required maxlength="2048" placeholder="https://example.com/v1"></label>
+            <label>模型名称<input name="model" maxlength="200"></label>
+            <label>API 密钥<input name="api_key" type="password" autocomplete="new-password" maxlength="4096" placeholder="留空保留已有密钥"></label>
+            <label class="check"><input name="clear_api_key" type="checkbox">清除已有 API 密钥</label>
+            <label>Bot 人格与预设上下文<textarea name="preset_context" rows="6" maxlength="32768"></textarea></label>
+            <label class="check"><input name="vision" type="checkbox">模型支持图片输入</label>
+            <label class="check"><input name="tool_calls" type="checkbox">模型支持工具调用</label>
+            <label class="check"><input name="stream" type="checkbox">使用流式模型响应</label>
+            <label class="check"><input name="stream_usage" type="checkbox">流式响应包含用量</label>
+          </div><details class="agent-advanced"><summary>容量与运行限制</summary><div>
+            <label>上下文容量（token）<input name="context_tokens" type="number" min="1024" max="262144" required></label>
+            <label>每次最大输出（token）<input name="max_output_tokens" type="number" min="64" max="32768" required></label>
+            <label>每日 Bot 预算（token）<input name="daily_token_budget" type="number" min="1024" max="100000000" required></label>
+            <label>每轮最多模型步骤<input name="max_steps" type="number" min="1" max="64" required></label>
+            <label>每轮最多工具迭代<input name="max_tool_iterations" type="number" min="0" max="32" required></label>
+            <label>每轮最多纯思考迭代<input name="max_thinking_iterations" type="number" min="0" max="16" required></label>
+            <label>协议修复次数<input name="max_protocol_repairs" type="number" min="0" max="1" required></label>
+            <label>运行期限（秒）<input name="run_timeout" type="number" min="10" max="3600" required></label>
+            <label>模型请求超时（秒）<input name="model_timeout" type="number" min="1" max="300" required></label>
+            <label>模型输出限制参数<select name="output_token_parameter"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label>
+            <label>每张图片预留 token 上限<input name="image_token_upper_bound" type="number" min="1" max="262144" required></label>
+            <label>允许抓取图片的来源（每行一个 HTTP origin）<textarea name="media_allowed_origins" rows="3" placeholder="https://images.example.com"></textarea></label>
+            <p class="hint">不支持图片的模型只接收文本投影，原始图片引用仍保留。图片来源需明确允许。</p>
+          </div></details></div>
+          <details><summary>协议与单次运行预算</summary><p class="hint">核心协议不可配置；无效输出最多进行一次有界修复。候选与修复反馈分别受独立字节限制。</p>
+            <label>单次运行预算（token）<input name="run_token_budget" type="number" min="1024" max="1000000" value="32768" required></label>
+            <label>协议候选最大字节<input name="protocol_candidate_byte_limit" type="number" min="4096" max="4194304" required></label>
+            <label>修复反馈最大字节<input name="protocol_repair_feedback_byte_limit" type="number" min="1024" max="32768" required></label>
+          </details>
+          <details><summary>工具授权</summary><p class="hint">最多 16 项。每项填写 name、component_id、service、contract_major、description、authority（trigger / binding_admin）、approval（always / never）和 effect（read / idempotent / non_idempotent）。工具依据具体触发消息的作者授权；每个 ModelTurn 最多请求一个工具。</p><label>允许的工具（JSON 数组）<textarea name="allowed_tools" rows="8" spellcheck="false">[]</textarea></label></details>
+          <div class="actions"><button type="submit">预览 Agent 变更</button></div></fieldset><div class="actions"><button id="agent-reload" type="button" class="subtle">读取最新配置</button></div></form>
+          <div id="agent-preview" class="hidden"><h3>待应用 Agent 配置</h3><pre id="agent-config-diff"></pre><button id="agent-apply">应用 Agent 变更</button></div>
+          <h3>运行与工具审批</h3><button id="agent-refresh" class="subtle">刷新运行记录</button><div id="agent-runs"></div>
+        </section>

@@ -14,7 +14,7 @@ from forest.agent_protocol import protocol_descriptor
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
 
 BOOTSTRAP = r"""
-import {agentPanel} from '/static/agent-panel.js';
+import {runtimeModuleViews} from '/static/runtime-module-views.js';
 window.fixture={rows:{},calls:[],hold:[],pending:[],errors:[]};
 const defaults=__DEFAULTS__;
 for (const bot of ['a','b']) fixture.rows[bot]={revision:1,values:{...defaults,model:'model-'+bot},protocol:__PROTOCOL__,has_api_key:true};
@@ -43,10 +43,18 @@ async function busy(button,work) {
   if(button) button.disabled=true;
   try { await work(); } catch(e) { fixture.errors.push(e.message); } finally { if(button)button.disabled=false; }
 }
-window.panel=agentPanel(api,busy,message=>{document.getElementById('notice').textContent=message;});
 document.getElementById('bots').classList.remove('hidden');
 document.getElementById('bot-detail').classList.remove('hidden');
-window.ready=panel.select({bot_id:'a'}).then(()=>true);
+const nav=document.createElement('nav'),registry=document.createElement('div'),root=document.createElement('div');
+document.getElementById('bot-detail').append(nav,registry,root);
+window.panel=runtimeModuleViews({api,busy,
+  notice:message=>{document.getElementById('notice').textContent=message;},
+  nav,registry,root,packageElements:[]});
+panel.update([{component_id:'agent.runtime',requires:['memory.graph'],management_view:{
+  kind:'trusted-module',protocol:'forest.trusted-management-view/1',
+  label:'Agent 与模型',template:'/static/modules/agent.runtime.html',
+  module:'/static/agent-panel.js',style:'/static/modules/agent.runtime.css'}}]);
+window.ready=panel.select({bot_id:'a'}).then(()=>{panel.show('agent.runtime');return true;});
 """
 
 
@@ -68,9 +76,17 @@ def main():
         def do_GET(self):
             resources = {"/": (html.encode(), "text/html; charset=utf-8"),
                          "/fixture.js": (bootstrap.encode(), "text/javascript")}
-            for name in ("agent-panel.js", "configuration-forms.js", "style.css"):
+            for name in (
+                "agent-panel.js", "configuration-forms.js", "runtime-module-views.js", "style.css"
+            ):
                 resources["/static/" + name] = ((static / name).read_bytes(),
                     "text/css" if name.endswith(".css") else "text/javascript")
+            resources["/static/modules/agent.runtime.html"] = (
+                (static / "modules/agent.runtime.html").read_bytes(), "text/html; charset=utf-8"
+            )
+            resources["/static/modules/agent.runtime.css"] = (
+                (static / "modules/agent.runtime.css").read_bytes(), "text/css"
+            )
             if self.path not in resources:
                 self.send_error(404)
                 return
@@ -100,6 +116,7 @@ def main():
             expect(model).to_have_value("model-a")
             model.fill("edited-model")
             page.get_by_text('协议与单次运行预算', exact=True).click()
+            page.locator('.agent-advanced > summary').click()
             page.locator('[name="run_token_budget"]').fill('24000')
             page.locator('[name="max_tool_iterations"]').fill('6')
             page.locator('[name="preset_context"]').fill('浏览器测试人格')

@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
-from forest.runtime_modules import BotModuleRegistry, RuntimeModuleDescriptor
+from forest.runtime_modules import (
+    OFFICIAL_MODULES,
+    BotModuleRegistry,
+    RuntimeManagementView,
+    RuntimeModuleDescriptor,
+)
 
 
 class Module:
@@ -53,6 +58,46 @@ def test_registry_rejects_missing_or_cyclic_dependencies():
             descriptor("right", ("left",), events),
         ))
     assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
+
+
+def test_official_management_views_are_declared_by_module_descriptors():
+    descriptors = {item.component_id: item for item in OFFICIAL_MODULES}
+    agent = descriptors["agent.runtime"].management_view
+    memory = descriptors["memory.graph"].management_view
+    assert (agent.label, agent.template, agent.module) == (
+        "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js"
+    )
+    assert agent.style == "/static/modules/agent.runtime.css"
+    assert (memory.label, memory.template, memory.module) == (
+        "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js"
+    )
+    assert memory.style == "/static/modules/memory.graph.css"
+    assert all(
+        item.management_view is None
+        for component_id, item in descriptors.items()
+        if component_id not in {"agent.runtime", "memory.graph"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("template", "module", "protocol"),
+    [
+        ("https://example.test/view.html", "/static/view.js", "forest.trusted-management-view/1"),
+        ("/static/../secret.html", "/static/view.js", "forest.trusted-management-view/1"),
+        ("/static/view.html", "/static/view.txt", "forest.trusted-management-view/1"),
+        ("/static/view.html", "/static/view.js", "forest.trusted-management-view/2"),
+    ],
+)
+def test_runtime_management_view_rejects_untrusted_assets(template, module, protocol):
+    with pytest.raises(ValueError):
+        RuntimeManagementView("view", template, module, protocol)
+
+
+def test_runtime_management_view_rejects_untrusted_style():
+    with pytest.raises(ValueError):
+        RuntimeManagementView(
+            "view", "/static/view.html", "/static/view.js", style="/static/../view.css"
+        )
 
 
 @pytest.mark.asyncio

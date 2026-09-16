@@ -1,6 +1,4 @@
 import { bindingsPanel } from './bindings.js';
-import { agentPanel } from './agent-panel.js';
-import { memoryPanel } from './memory.js';
 import { jobsPanel } from './jobs-panel.js';
 import { eventsPanel } from './events-panel.js';
 import { componentJobsPanel } from './component-jobs-panel.js';
@@ -16,6 +14,7 @@ import { auditPanel } from './audit-panel.js';
 import { botAuditPanel } from './bot-audit-panel.js';
 import { backupPanel as createBackupPanel } from './backup-panel.js';
 import { mountModuleUi } from './module-ui-host.js';
+import { runtimeModuleViews } from './runtime-module-views.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -150,8 +149,7 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   bindingPanel.reset();
-  modelPanel.reset();
-  memoriesPanel.reset();
+  runtimeViews.reset();
   scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
@@ -212,8 +210,6 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
 const bindingPanel = bindingsPanel(api, busy, notice);
-const modelPanel = agentPanel(api, busy, notice);
-const memoriesPanel = memoryPanel(api, busy, notice);
 const scheduledPanel = jobsPanel(api, busy, notice);
 const componentEventsPanel = eventsPanel(api, busy, notice);
 const durableJobsPanel = componentJobsPanel(api, busy, notice);
@@ -246,7 +242,7 @@ const botComponentHistory = $('bot-components').nextElementSibling;
 botComponentHistory.id = 'bot-component-history';
 const botWorkspacePanes = new Map([
   ['status', [botOverview]],
-  ['modules', [$('bot-components'), botComponentHistory, $('bot-agent'), $('bot-memory')]],
+  ['modules', [$('bot-components'), botComponentHistory]],
   ['routes', [$('bot-bindings')]],
   ['tasks', [$('bot-jobs'), $('bot-component-jobs'), $('bot-events')]],
   ['observability', [$('bot-handler-diagnostics'), $('bot-command-diagnostics'), $('bot-audit')]],
@@ -313,48 +309,24 @@ moduleSurfaceNav.className = 'module-surface-nav';
 moduleSurfaceNav.setAttribute('aria-label', '当前实例模块');
 const moduleRegistryList = document.createElement('div');
 moduleRegistryList.className = 'module-registry-list';
-botWorkspaceContainers.get('modules').prepend(moduleRegistryList, moduleSurfaceNav);
-const moduleSurfaces = new Map([
-  ['package', [$('bot-components'), botComponentHistory]],
-  ['agent.runtime', [$('bot-agent')]],
-  ['memory.graph', [$('bot-memory')]],
-]);
-let activeModuleSurface = 'package';
-function showModuleSurface(componentId) {
-  if (!moduleSurfaces.has(componentId)) return;
-  activeModuleSurface = componentId;
-  for (const [id, elements] of moduleSurfaces) {
-    for (const element of elements) element.classList.toggle('bot-module-surface-inactive', id !== componentId);
-  }
-  for (const button of moduleSurfaceNav.querySelectorAll('button')) {
-    button.classList.toggle('selected', button.dataset.moduleId === componentId);
-  }
-}
+const runtimeModuleViewRoot = document.createElement('div');
+runtimeModuleViewRoot.className = 'runtime-module-views';
+botWorkspaceContainers.get('modules').prepend(
+  moduleRegistryList, moduleSurfaceNav, runtimeModuleViewRoot,
+);
+const runtimeViews = runtimeModuleViews({
+  api, busy, notice,
+  nav: moduleSurfaceNav,
+  registry: moduleRegistryList,
+  root: runtimeModuleViewRoot,
+  packageElements: [$('bot-components'), botComponentHistory],
+});
 function renderRuntimeModules(runtime) {
   const pkg = selectedPackage();
-  const rows = [
-    ...(pkg ? [{component_id: pkg.component_id, requires: [], surface: 'package'}] : []),
-    ...(runtime.runtime_modules || []).map(row => ({...row, surface: row.component_id})),
-  ];
-  moduleRegistryList.replaceChildren(); moduleSurfaceNav.replaceChildren();
-  for (const row of rows) {
-    const item = document.createElement('div'); item.className = 'module-registry-row';
-    const identity = document.createElement('strong'); identity.textContent = row.component_id;
-    const detail = document.createElement('span');
-    detail.textContent = row.requires?.length ? `依赖 ${row.requires.join('、')}` : '无启动依赖';
-    item.append(identity, detail); moduleRegistryList.append(item);
-    if (moduleSurfaces.has(row.surface)) {
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'subtle';
-      button.dataset.moduleId = row.surface; button.textContent = row.component_id;
-      button.addEventListener('click', () => showModuleSurface(row.surface));
-      moduleSurfaceNav.append(button);
-    }
-  }
-  if (!moduleSurfaces.has(activeModuleSurface) ||
-      ![...moduleSurfaceNav.querySelectorAll('button')].some(button => button.dataset.moduleId === activeModuleSurface)) {
-    activeModuleSurface = 'package';
-  }
-  showModuleSurface(activeModuleSurface);
+  runtimeViews.update(
+    runtime.runtime_modules || [],
+    pkg ? {component_id: pkg.component_id, requires: []} : null,
+  );
 }
 
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
@@ -366,7 +338,8 @@ function invalidateControl(scope) {
     $('bot-config-diff').replaceChildren(); $('bot-invoke-result').replaceChildren();
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
-  for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
+  runtimeViews.invalidateContent(scope);
+  for (const panel of [bindingPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -559,8 +532,7 @@ async function readBotConfig() {
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
   bindingPanel.reset();
-  modelPanel.reset();
-  memoriesPanel.reset();
+  runtimeViews.reset();
   scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
@@ -594,9 +566,8 @@ async function selectBot(id) {
     await readBotRuntime(); if (epoch !== selectionEpoch) return;
     await loadPackages(); if (epoch !== selectionEpoch) return;
     await readBotConfig(); if (epoch !== selectionEpoch) return;
+    await runtimeViews.select(row); if (epoch !== selectionEpoch) return;
     await bindingPanel.select(row);
-    if (epoch !== selectionEpoch) return;
-    await modelPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await scheduledPanel.select(row);
     if (epoch !== selectionEpoch) return;
@@ -613,8 +584,6 @@ async function selectBot(id) {
     await commandDiagnosticsPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await botAudit.select(row);
-    if (epoch !== selectionEpoch) return;
-    await memoriesPanel.select(row);
   }
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));

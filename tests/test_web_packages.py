@@ -91,6 +91,17 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             "shell.command",
         }
         assert modules["agent.runtime"]["requires"] == ["memory.graph"]
+        assert modules["agent.runtime"]["management_view"]["kind"] == "trusted-module"
+        assert modules["agent.runtime"]["management_view"]["protocol"] == (
+            "forest.trusted-management-view/1"
+        )
+        assert modules["memory.graph"]["management_view"]["template"].endswith(
+            "/memory.graph.html"
+        )
+        assert modules["memory.graph"]["management_view"]["style"].endswith(
+            "/memory.graph.css"
+        )
+        assert modules["conversation.scheduler"]["management_view"] is None
         assert (await invoke(client, base, 2, "call-1"))["result"]["value"] == 4
         await apply(client, base, await make_plan(client, base, broken, "Broken", 9, 1, "p2"), "a2")
         # A failed candidate must leave the old durable effective revision/Worker live.

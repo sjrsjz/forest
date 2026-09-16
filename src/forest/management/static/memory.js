@@ -392,3 +392,5 @@ export function memoryPanel(api, busy, notice) {
   }
   return {reset, select, invalidateContent};
 }
+
+export const createModulePanel = memoryPanel;
