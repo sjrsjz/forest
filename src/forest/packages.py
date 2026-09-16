@@ -47,6 +47,7 @@ MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_PACKAGE_FILES = 512
 MAX_PACKAGE_ENTRIES = 4096
 MAX_PACKAGE_DEPTH = 32
+MAX_MANAGEMENT_UI_BYTES = 256 * 1024
 IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
@@ -173,6 +174,15 @@ MANIFEST_SCHEMA = {
                                 key: {"type": "string"}
                                 for key in ("name", "contract", "input_schema", "output_schema")
                             },
+                        },
+                    },
+                    "management_ui": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["entrypoint", "protocol"],
+                        "properties": {
+                            "entrypoint": {"type": "string"},
+                            "protocol": {"const": "forest.management-ui/1"},
                         },
                     },
                     "publishes": {
@@ -506,6 +516,38 @@ def _schema(files: dict[str, bytes], reference: str) -> dict:
         raise ForestError("INVALID_SCHEMA", "Invalid package JSON schema", 422) from exc
 
 
+def _management_ui(files: dict[str, bytes], component: dict) -> dict | None:
+    declaration = component.get("management_ui")
+    if declaration is None:
+        return None
+    reference = declaration["entrypoint"]
+    path = PurePosixPath(reference)
+    if (
+        not isinstance(reference, str)
+        or not reference.startswith("ui/")
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.suffix.lower() != ".html"
+        or reference not in files
+    ):
+        _fail("INVALID_MANAGEMENT_UI", "Management UI must be a packaged ui/*.html file")
+    content = files[reference]
+    if not content or len(content) > MAX_MANAGEMENT_UI_BYTES:
+        _fail("INVALID_MANAGEMENT_UI", "Management UI exceeds its byte limit")
+    try:
+        html = content.decode("utf-8")
+    except UnicodeError as exc:
+        raise ForestError("INVALID_MANAGEMENT_UI", "Management UI must be UTF-8 HTML", 422) from exc
+    if "\x00" in html or not re.search(r"<!doctype\s+html|<html(?:\s|>)", html, re.IGNORECASE):
+        _fail("INVALID_MANAGEMENT_UI", "Management UI must be a complete HTML document")
+    return {
+        "entrypoint": reference,
+        "protocol": declaration["protocol"],
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "bytes": len(content),
+    }
+
+
 def _manifest(files: dict[str, bytes]) -> dict:
     verify_checksums(files)
     try:
@@ -574,6 +616,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         contract_range(dependency["contract"])
         dependency_names.add(name)
     _schema(files, component.get("config_schema"))
+    _management_ui(files, component)
     services = component.get("provides", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
@@ -728,6 +771,13 @@ class PackageSnapshot:
 
     def schema(self, reference: str) -> dict:
         return _schema(self._verified_files(), reference)
+
+    def management_ui(self) -> tuple[dict, bytes] | None:
+        files = self._verified_files()
+        metadata = _management_ui(files, self.component)
+        if metadata is None:
+            return None
+        return metadata, files[metadata["entrypoint"]]
 
     def _verified_files(self) -> dict[str, bytes]:
         files = _capture(self.root)

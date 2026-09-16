@@ -69,8 +69,8 @@ def install_job_routes(app, runtime):
         return ticket, operation
 
     def notify(bot):
-        bot.platform.scheduler.notify()
-        bot.platform.jobs.notify()
+        bot.platform.module_registry.get("conversation.scheduler").notify()
+        bot.platform.module_registry.get("scheduler.jobs").notify()
 
     @app.get("/management/v1/bots/{bot_id}/jobs")
     async def read(bot_id: str, request: Request, job_id: str | None = Query(default=None, min_length=1, max_length=128)):

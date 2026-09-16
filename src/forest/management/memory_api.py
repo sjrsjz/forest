@@ -139,7 +139,8 @@ def install_memory_routes(app, runtime):
     async def configuration(bot_id: str, request: Request):
         who, bot = await target(request, bot_id)
         ticket, op = await signed(request, bot, who, "memory.config.read", {}, write=False)
-        return await bot.platform.memory.config.read(ticket, op)
+        memory = bot.platform.module_registry.get("memory.graph")
+        return await memory.config.read(ticket, op)
 
     @app.post("/management/v1/bots/{bot_id}/memory/change-plans")
     async def plan(bot_id: str, body: MemoryPlan, request: Request):
@@ -153,7 +154,7 @@ def install_memory_routes(app, runtime):
             "secret_digest": digest_json({"api_key": secret}),
         }
         ticket, op = await signed(request, bot, who, "memory.config.plan", payload)
-        return await bot.platform.memory.config.plan(
+        return await bot.platform.module_registry.get("memory.graph").config.plan(
             ticket,
             op,
             payload,
@@ -165,16 +166,19 @@ def install_memory_routes(app, runtime):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "memory.config.apply", payload)
-        result = await bot.platform.memory.config.apply(ticket, op, payload)
+        memory = bot.platform.module_registry.get("memory.graph")
+        result = await memory.config.apply(ticket, op, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.memory.notify()
+            memory.notify()
         return result
 
     @app.get("/management/v1/bots/{bot_id}/memory/status")
     async def status(bot_id: str, request: Request):
         who, bot = await target(request, bot_id)
         ticket, operation = await signed(request, bot, who, "memory.read", {}, write=False)
-        return await bot.platform.memory.inspect(ticket, operation, {})
+        return await bot.platform.module_registry.get("memory.graph").inspect(
+            ticket, operation, {}
+        )
 
     @app.get("/management/v1/bots/{bot_id}/memory/sources")
     async def sources(bot_id: str, request: Request):
@@ -192,24 +196,27 @@ def install_memory_routes(app, runtime):
         ticket, operation = await signed(
             request, bot, who, "memory.forget.read", payload, write=False
         )
-        return await bot.platform.memory.administration.read(ticket, operation, payload)
+        memory = bot.platform.module_registry.get("memory.graph")
+        return await memory.administration.read(ticket, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/memory/forget-plans")
     async def forget_plan(bot_id: str, body: ForgetPlan, request: Request):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "memory.forget.plan", payload)
-        return await bot.platform.memory.administration.plan(ticket, operation, payload)
+        memory = bot.platform.module_registry.get("memory.graph")
+        return await memory.administration.plan(ticket, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/memory/forget-requests")
     async def forget_apply(bot_id: str, body: ForgetApply, request: Request):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "memory.forget.apply", payload)
-        result = await bot.platform.memory.administration.apply(
+        memory = bot.platform.module_registry.get("memory.graph")
+        result = await memory.administration.apply(
             ticket, operation, payload, lease=bot.kernel._authority()
         )
-        bot.platform.memory.notify()
+        memory.notify()
         return result
 
     @app.get("/management/v1/bots/{bot_id}/memory/associations")
@@ -229,22 +236,25 @@ def install_memory_routes(app, runtime):
         ticket, operation = await signed(
             request, bot, who, "memory.association.read", payload, write=False
         )
-        return await bot.platform.memory.associations.read(ticket, operation, payload)
+        memory = bot.platform.module_registry.get("memory.graph")
+        return await memory.associations.read(ticket, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/memory/association-plans")
     async def association_plan(bot_id: str, body: AssociationPlan, request: Request):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump(exclude_none=True)
         ticket, operation = await signed(request, bot, who, "memory.association.plan", payload)
-        return await bot.platform.memory.associations.plan(ticket, operation, payload)
+        memory = bot.platform.module_registry.get("memory.graph")
+        return await memory.associations.plan(ticket, operation, payload)
 
     @app.post("/management/v1/bots/{bot_id}/memory/association-requests")
     async def association_apply(bot_id: str, body: AssociationApply, request: Request):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, operation = await signed(request, bot, who, "memory.association.apply", payload)
-        result = await bot.platform.memory.associations.apply(
+        memory = bot.platform.module_registry.get("memory.graph")
+        result = await memory.associations.apply(
             ticket, operation, payload, lease=bot.kernel._authority()
         )
-        bot.platform.memory.notify()
+        memory.notify()
         return result

@@ -27,9 +27,10 @@ pytestmark = pytest.mark.postgres
 async def test_legacy_config_shared_by_two_runs_cannot_authorize_the_other_spec(
     upgrade_database, tmp_path, monkeypatch, current,
 ):
-    # Pin this authorization regression to the complete Agent/Binding and Context
-    # safe-point cutovers; the later module/Watch families are not part of its proof.
-    prefix = resources(tmp_path / "schema-065", cutoff="065")
+    # Exercise the current MessageStore against a fully upgraded database. A
+    # historical cutoff becomes invalid whenever ingress gains another durable
+    # registry dependency and does not strengthen this scope proof.
+    prefix = resources(tmp_path / "schema-current", cutoff="087")
     monkeypatch.setattr(bot_module, "files", lambda namespace: prefix)
     monkeypatch.setattr(legacy, "OLD_ACTIONS", [*legacy.OLD_ACTIONS, "binding.plan", "binding.apply"])
     async with old_bot(upgrade_database, tmp_path) as env:

@@ -15,6 +15,7 @@ import { accountsPanel } from './accounts-panel.js';
 import { auditPanel } from './audit-panel.js';
 import { botAuditPanel } from './bot-audit-panel.js';
 import { backupPanel as createBackupPanel } from './backup-panel.js';
+import { mountModuleUi } from './module-ui-host.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -165,7 +166,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
-  $('bot-detail').classList.add('hidden'); $('create-bot-form').reset();
+  $('bot-detail').classList.add('hidden'); botCatalog.open = true; $('create-bot-form').reset();
   $('config-form').reset(); $('diff').replaceChildren(); setIdentity(null);
   $('notice').classList.add('hidden'); show('login');
 }));
@@ -201,6 +202,7 @@ let maintenanceKey = null;
 const maintenanceWrites = new Map();
 let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0, runtimeReadSeq = 0;
 let readConfigFields, readInvokeFields, historyBefore = null, importKey = null;
+let mountedModuleUi = null;
 let componentReplacementRequired = false, componentReplacementDraft = false;
 let componentSourceRevision = null;
 const replaceComponent = replacementButton($('bot-runtime-status'), 'component-replace-configuration', () => {
@@ -226,6 +228,135 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
 const deploymentAudit = auditPanel(api, busy);
 const botAudit = botAuditPanel(api, busy);
 const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
+
+// A Bot is a runtime scope. The workspace is organized around kernel concepts;
+// Agent and Memory remain module surfaces inside the module pane.
+const botCatalog = document.createElement('details');
+botCatalog.id = 'bot-catalog'; botCatalog.className = 'card bot-catalog'; botCatalog.open = true;
+const botCatalogSummary = document.createElement('summary');
+botCatalogSummary.textContent = '运行实例列表与创建';
+const botCatalogIntro = document.querySelector('#bots > p.muted');
+const botCatalogColumns = document.querySelector('#bots > .columns');
+botCatalog.append(botCatalogSummary, botCatalogIntro, botCatalogColumns);
+$('bot-detail').before(botCatalog);
+
+const botOverview = $('bot-detail').firstElementChild;
+botOverview.id = 'bot-overview';
+const botComponentHistory = $('bot-components').nextElementSibling;
+botComponentHistory.id = 'bot-component-history';
+const botWorkspacePanes = new Map([
+  ['status', [botOverview]],
+  ['modules', [$('bot-components'), botComponentHistory, $('bot-agent'), $('bot-memory')]],
+  ['routes', [$('bot-bindings')]],
+  ['tasks', [$('bot-jobs'), $('bot-component-jobs'), $('bot-events')]],
+  ['observability', [$('bot-handler-diagnostics'), $('bot-command-diagnostics'), $('bot-audit')]],
+  ['security', [$('bot-command-policies'), $('bot-handler-policies')]],
+]);
+const botWorkspaceLabels = new Map([
+  ['status', '状态'], ['modules', '模块'], ['routes', 'Adapter 与路由'],
+  ['tasks', '任务'], ['observability', '观测'], ['security', '安全与授权'],
+]);
+const botWorkspaceContainers = new Map();
+for (const [name, elements] of botWorkspacePanes) {
+  const container = document.createElement('section');
+  container.className = 'bot-workspace-pane'; container.dataset.botPane = name;
+  container.id = `bot-workspace-${name}`; container.setAttribute('role', 'tabpanel');
+  container.setAttribute('aria-labelledby', `bot-workspace-tab-${name}`);
+  elements[0].before(container);
+  for (const element of elements) container.append(element);
+  botWorkspaceContainers.set(name, container);
+}
+const botWorkspaceNav = document.createElement('nav');
+botWorkspaceNav.id = 'bot-workspace-nav'; botWorkspaceNav.className = 'bot-workspace-nav';
+botWorkspaceNav.setAttribute('aria-label', 'Bot 管理分区');
+botWorkspaceNav.setAttribute('role', 'tablist');
+let activeBotWorkspacePane = 'status';
+function showBotWorkspacePane(name, focus = false) {
+  if (!botWorkspacePanes.has(name)) return;
+  activeBotWorkspacePane = name;
+  for (const [pane, container] of botWorkspaceContainers) {
+    container.classList.toggle('bot-pane-inactive', pane !== name);
+    container.setAttribute('aria-hidden', String(pane !== name));
+  }
+  for (const button of botWorkspaceNav.querySelectorAll('button')) {
+    const selected = button.dataset.botPane === name;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  }
+  if (focus) botWorkspaceNav.scrollIntoView({block: 'start', behavior: 'smooth'});
+}
+for (const [name, label] of botWorkspaceLabels) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'subtle'; button.dataset.botPane = name;
+  button.id = `bot-workspace-tab-${name}`; button.setAttribute('role', 'tab');
+  button.setAttribute('aria-controls', `bot-workspace-${name}`);
+  button.textContent = label;
+  button.addEventListener('click', () => showBotWorkspacePane(name, true));
+  botWorkspaceNav.append(button);
+}
+botWorkspaceNav.addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const buttons = [...botWorkspaceNav.querySelectorAll('button')];
+  const current = buttons.indexOf(document.activeElement);
+  if (current < 0) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 :
+    (current + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+  buttons[next].focus(); showBotWorkspacePane(buttons[next].dataset.botPane);
+});
+$('bot-detail').prepend(botWorkspaceNav);
+showBotWorkspacePane(activeBotWorkspacePane);
+
+const moduleSurfaceNav = document.createElement('nav');
+moduleSurfaceNav.className = 'module-surface-nav';
+moduleSurfaceNav.setAttribute('aria-label', '当前实例模块');
+const moduleRegistryList = document.createElement('div');
+moduleRegistryList.className = 'module-registry-list';
+botWorkspaceContainers.get('modules').prepend(moduleRegistryList, moduleSurfaceNav);
+const moduleSurfaces = new Map([
+  ['package', [$('bot-components'), botComponentHistory]],
+  ['agent.runtime', [$('bot-agent')]],
+  ['memory.graph', [$('bot-memory')]],
+]);
+let activeModuleSurface = 'package';
+function showModuleSurface(componentId) {
+  if (!moduleSurfaces.has(componentId)) return;
+  activeModuleSurface = componentId;
+  for (const [id, elements] of moduleSurfaces) {
+    for (const element of elements) element.classList.toggle('bot-module-surface-inactive', id !== componentId);
+  }
+  for (const button of moduleSurfaceNav.querySelectorAll('button')) {
+    button.classList.toggle('selected', button.dataset.moduleId === componentId);
+  }
+}
+function renderRuntimeModules(runtime) {
+  const pkg = selectedPackage();
+  const rows = [
+    ...(pkg ? [{component_id: pkg.component_id, requires: [], surface: 'package'}] : []),
+    ...(runtime.runtime_modules || []).map(row => ({...row, surface: row.component_id})),
+  ];
+  moduleRegistryList.replaceChildren(); moduleSurfaceNav.replaceChildren();
+  for (const row of rows) {
+    const item = document.createElement('div'); item.className = 'module-registry-row';
+    const identity = document.createElement('strong'); identity.textContent = row.component_id;
+    const detail = document.createElement('span');
+    detail.textContent = row.requires?.length ? `依赖 ${row.requires.join('、')}` : '无启动依赖';
+    item.append(identity, detail); moduleRegistryList.append(item);
+    if (moduleSurfaces.has(row.surface)) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'subtle';
+      button.dataset.moduleId = row.surface; button.textContent = row.component_id;
+      button.addEventListener('click', () => showModuleSurface(row.surface));
+      moduleSurfaceNav.append(button);
+    }
+  }
+  if (!moduleSurfaces.has(activeModuleSurface) ||
+      ![...moduleSurfaceNav.querySelectorAll('button')].some(button => button.dataset.moduleId === activeModuleSurface)) {
+    activeModuleSurface = 'package';
+  }
+  showModuleSurface(activeModuleSurface);
+}
+
 const selectedPackage = () => packageRows.find((p) => p.package_digest === $('bot-package').value);
 const componentPath = () => `/bots/${encodeURIComponent(selectedBot.bot_id)}/components/${encodeURIComponent(selectedPackage().component_id)}`;
 function clearBotPlan() { formEpoch++; botPlan = null; botApplyKey = null; $('bot-config-preview').classList.add('hidden'); }
@@ -238,6 +369,7 @@ function invalidateControl(scope) {
   for (const panel of [bindingPanel, modelPanel, memoriesPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
+  mountedModuleUi?.destroy(); mountedModuleUi = null;
   botConfig = null; readConfigFields = null; readInvokeFields = null; invokeKey = null;
   componentReload = null;
   moduleStateRequest = null;
@@ -314,6 +446,7 @@ function updateBotState(state) {
   $('bot-desired').textContent = state.desired_revision;
   $('bot-effective').textContent = state.effective_revision;
   const component = state.runtime.components.find((c) => c.component_id === selectedPackage().component_id);
+  renderRuntimeModules(state.runtime);
   const error = component?.error_code || state.runtime.error_code;
   const ingress = state.runtime.ingress;
   if (ingress) {
@@ -347,7 +480,24 @@ function updateBotState(state) {
 }
 function renderComponent(config, grants = [], handlerTakeover = false) {
   const pkg = selectedPackage();
+  mountedModuleUi?.destroy(); mountedModuleUi = null;
+  $('bot-config-fields').classList.remove('hidden');
   readConfigFields = schemaForm($('bot-config-fields'), pkg.config_schema, config);
+  if (pkg.management_ui) {
+    const packageDigest = pkg.package_digest;
+    let customDraft = structuredClone(config || {});
+    mountModuleUi($('bot-module-ui'), pkg, customDraft, values => {
+      if (selectedPackage()?.package_digest !== packageDigest) return;
+      customDraft = values; readConfigFields = () => structuredClone(customDraft); formEpoch++;
+      clearBotPlan();
+    }).then(host => {
+      if (selectedPackage()?.package_digest !== packageDigest) { host.destroy(); return; }
+      mountedModuleUi = host; $('bot-config-fields').classList.add('hidden');
+      readConfigFields = () => structuredClone(customDraft);
+    }).catch(error => notice(`${error.message} 已回退到通用 schema 表单。`));
+  } else {
+    $('bot-module-ui').classList.add('hidden');
+  }
   $('bot-grants').required = pkg.grants.length > 0;
   $('bot-grants').disabled = false;
   $('bot-config-form').querySelector('button[type="submit"]').disabled = false;
@@ -389,6 +539,7 @@ async function readBotConfig() {
   replaceComponent.disabled = !state.defaults;
   updateBotState(state);
   if (componentReplacementRequired) {
+    mountedModuleUi?.destroy(); mountedModuleUi = null;
     readConfigFields = null; $('bot-config-fields').replaceChildren(); $('bot-grants').checked = false;
     $('bot-handler-takeover').checked = false;
     $('bot-grants').disabled = true; $('bot-handler-takeover').disabled = true;
@@ -425,6 +576,8 @@ async function selectBot(id) {
   const row = await api(`/bots/${encodeURIComponent(id)}`);
   if (epoch !== selectionEpoch) return;
   selectedBot = row; $('bot-detail').classList.remove('hidden');
+  botCatalog.open = false;
+  showBotWorkspacePane('status');
   $('bot-name').textContent = row.display_name;
   $('rename-bot-form').elements.display_name.value = row.display_name;
   $('bot-status').textContent = `${botStatus(row.stage)}${row.error_code ? ` · ${row.error_code}` : ''}`;

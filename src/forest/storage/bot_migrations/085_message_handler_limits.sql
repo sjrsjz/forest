@@ -16,7 +16,7 @@ ALTER TABLE public.bot_control_value_sources
   'message.handler.policy','message.handler.limit'
 ));
 
-UPDATE public.bot_web_issuers i SET actions=(
+UPDATE public.bot_web_issuers i SET actions=COALESCE((
  SELECT jsonb_agg(action ORDER BY action) FROM (
   SELECT DISTINCT action FROM jsonb_array_elements_text(
    i.actions ||
@@ -28,7 +28,7 @@ UPDATE public.bot_web_issuers i SET actions=(
     THEN '["message.handler.limit.apply"]'::jsonb ELSE '[]'::jsonb END
   ) AS action
  ) AS expanded
-);
+), '[]'::jsonb);
 
 CREATE TABLE public.bot_message_handler_limit_heads (
  bot_id text PRIMARY KEY,

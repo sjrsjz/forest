@@ -222,6 +222,34 @@ class CommandPolicyStore:
             return result
 
     async def apply(self, ticket, operation_id: str, payload: dict) -> dict:
+        try:
+            return await self._apply(ticket, operation_id, payload)
+        except ForestError as exc:
+            if exc.code != "CONTROL_CONTENT_REVOKED":
+                raise
+            # A concurrent winner can advance the policy head while the losing
+            # transaction is resolving its immutable plan payload. Re-read the
+            # head after rollback so the public conflict is determined by the
+            # authoritative revision rather than payload cleanup timing.
+            async with self.store.pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT revision FROM public.bot_command_policy_heads "
+                        "WHERE bot_id=%s AND binding_id=%s AND command_id=%s",
+                        (
+                            self.store.bot_id,
+                            payload.get("binding_id"),
+                            payload.get("command_id"),
+                        ),
+                    )
+                ).fetchone()
+            if row is not None and row["revision"] != payload.get("expected_revision"):
+                raise ForestError(
+                    "REVISION_CONFLICT", "Command policy changed after preview", 409
+                ) from exc
+            raise
+
+    async def _apply(self, ticket, operation_id: str, payload: dict) -> dict:
         if not isinstance(payload, dict) or set(payload) != {
             "binding_id", "command_id", "expected_revision", "plan_id", "plan_digest"
         } or type(payload["expected_revision"]) is not int or payload["expected_revision"] < 0:

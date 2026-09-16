@@ -93,20 +93,21 @@ def install_agent_routes(app, runtime):
     async def configuration(bot_id: str, request: Request):
         who, bot = await target(request, bot_id)
         ticket, op = await signed(request, bot, who, "agent.config.read", {}, write=False)
-        return await bot.platform.agent.config.read(ticket, op)
+        agent = bot.platform.module_registry.get("agent.runtime")
+        return await agent.config.read(ticket, op)
 
     @app.post("/management/v1/bots/{bot_id}/agent/change-plans")
     async def plan(bot_id: str, body: AgentPlan, request: Request):
         who, bot = await target(request, bot_id, write=True)
         if body.values.enabled:
             for tool in body.values.allowed_tools:
-                bot.platform.agent._freeze_tool(tool.model_dump())
+                bot.platform.module_registry.get("agent.runtime")._freeze_tool(tool.model_dump())
         secret = "" if body.clear_api_key else body.api_key
         changed = body.clear_api_key or secret is not None
         payload = {"expected_revision": body.expected_revision, "values": body.values.model_dump(),
                    "credentials_changed": changed, "secret_digest": digest_json({"api_key": secret})}
         ticket, op = await signed(request, bot, who, "agent.config.plan", payload)
-        return await bot.platform.agent.config.plan(
+        return await bot.platform.module_registry.get("agent.runtime").config.plan(
             ticket, op, payload,
             secret_ciphertext=runtime.catalog.vault.encrypt(secret) if changed else None,
         )
@@ -116,9 +117,11 @@ def install_agent_routes(app, runtime):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.config.apply", payload)
-        result = await bot.platform.agent.config.apply(ticket, op, payload)
+        result = await bot.platform.module_registry.get("agent.runtime").config.apply(
+            ticket, op, payload
+        )
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.scheduler.notify()
+            bot.platform.module_registry.get("conversation.scheduler").notify()
         return result
 
     @app.get("/management/v1/bots/{bot_id}/agent/runs")
@@ -126,16 +129,18 @@ def install_agent_routes(app, runtime):
         who, bot = await target(request, bot_id)
         payload = {}
         ticket, op = await signed(request, bot, who, "agent.read", payload, write=False)
-        return await bot.platform.agent.runner.state.inspect(ticket, op, payload)
+        agent = bot.platform.module_registry.get("agent.runtime")
+        return await agent.runner.state.inspect(ticket, op, payload)
 
     @app.post("/management/v1/bots/{bot_id}/agent/approvals")
     async def approval(bot_id: str, body: Approval, request: Request):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.approval", payload)
-        result = await bot.platform.agent.runner.state.decide_approval(ticket, op, payload)
+        agent = bot.platform.module_registry.get("agent.runtime")
+        result = await agent.runner.state.decide_approval(ticket, op, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.scheduler.notify()
+            bot.platform.module_registry.get("conversation.scheduler").notify()
         return result
 
     @app.post("/management/v1/bots/{bot_id}/agent/cancellations")
@@ -143,9 +148,10 @@ def install_agent_routes(app, runtime):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.cancel", payload)
-        result = await bot.platform.agent.runner.state.cancel(ticket, op, payload)
+        agent = bot.platform.module_registry.get("agent.runtime")
+        result = await agent.runner.state.cancel(ticket, op, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.scheduler.notify()
+            bot.platform.module_registry.get("conversation.scheduler").notify()
         return result
 
     @app.post("/management/v1/bots/{bot_id}/agent/resolutions")
@@ -153,7 +159,8 @@ def install_agent_routes(app, runtime):
         who, bot = await target(request, bot_id, write=True)
         payload = body.model_dump()
         ticket, op = await signed(request, bot, who, "agent.resolve", payload)
-        result = await bot.platform.agent.runner.state.resolve(ticket, op, payload)
+        agent = bot.platform.module_registry.get("agent.runtime")
+        result = await agent.runner.state.resolve(ticket, op, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.scheduler.notify()
+            bot.platform.module_registry.get("conversation.scheduler").notify()
         return result

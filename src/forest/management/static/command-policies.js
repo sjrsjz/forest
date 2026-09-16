@@ -114,7 +114,7 @@ export function commandPoliciesPanel(api, busy, notice) {
       if (!valid(own)) return;
       $('command-policy-password').value = '';
       await read();
-      if (valid(own)) notice('业务命令策略已应用。新消息使用新修订。', true);
+      if (valid(own)) notice('组件命令授权已应用。新消息使用新修订。', true);
     });
   });
   async function select(row) {

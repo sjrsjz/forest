@@ -226,9 +226,29 @@ async def test_upgrade_job_grants_preserve_existing_issuer_restrictions(upgrade_
             expected.add("module.reload")
         if "config.apply" in actions:
             expected.add("module.enable")
-        if {"config.apply", "message.cancel"} <= set(actions):
-            expected.add("module.disable")
-        assert set(after["actions"]) == expected
+            if {"config.apply", "message.cancel"} <= set(actions):
+                expected.add("module.disable")
+            if "message.read" in actions:
+                expected.update({
+                    "command.policy.read", "command.execution.read", "command.limit.read",
+                    "message.handler.policy.read", "message.handler.execution.read",
+                    "message.handler.limit.read",
+                })
+            if "config.plan" in actions:
+                expected.update({
+                    "command.policy.plan", "command.limit.plan",
+                    "message.handler.policy.plan", "message.handler.limit.plan",
+                })
+            if {"config.apply", "message.cancel"} <= set(actions):
+                expected.update({
+                    "command.policy.apply", "command.limit.apply",
+                    "message.handler.policy.apply", "message.handler.limit.apply",
+                })
+            if "message.cancel" in actions:
+                expected.update({
+                    "command.execution.recover", "message.handler.execution.recover",
+                })
+            assert set(after["actions"]) == expected
         if scope in {"readonly", "config_readonly", "empty", "invoke_only"}:
             assert not {"memory.config.plan", "memory.config.apply"}.intersection(after["actions"])
         if "message.read" not in actions:

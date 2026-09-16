@@ -158,6 +158,7 @@ class BotFleet:
 
     @staticmethod
     def describe_package(p: PackageSnapshot) -> dict:
+        management_ui = p.management_ui()
         return {
                 "package_digest": p.digest,
                 "package_id": p.manifest["package_id"],
@@ -169,6 +170,7 @@ class BotFleet:
                     "message_handler_takeover", "none"
                 ),
                 "config_schema": p.schema(p.component["config_schema"]),
+                "management_ui": management_ui[0] if management_ui else None,
                 "grants": p.component.get("capabilities", {}).get("requests", []),
                 "services": [
                     {"name": s["name"], "input_schema": p.schema(s["input_schema"])}
@@ -590,6 +592,9 @@ class BotFleet:
             "error_code": self.errors.get(bot_id)
             or ("BOT_RECOVERING" if bot is not None and not attached else None),
             "ingress": ingress.snapshot() if ingress is not None else None,
+            "runtime_modules": []
+            if bot is None or bot.platform is None
+            else bot.platform.module_registry.describe(),
             "components": []
             if bot is None
             else [

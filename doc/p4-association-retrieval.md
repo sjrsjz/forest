@@ -59,9 +59,13 @@ ACTIVE --retract apply--> INACTIVE/PENDING --graph publish--> INACTIVE/CURRENT
 
 若没有当前图、图仍待发布或图查询失败，向量结果照常返回，`completeness.graph` 明确为 `UNAVAILABLE/PENDING/PARTIAL`；图派生故障不阻塞普通对话。
 
-## 5. WebUI 与可见性
+## 5. 模块管理视图与可见性
 
-来源页选择恰好两项后可以预览建立联想；关系列表显示有效和已解除的 head、两个端点各自的群、作者和来源 ID、association revision 及 `CURRENT/PENDING`。有效关系可以预览解除，已解除关系可以按其当前 revision 预览恢复。切换 Bot、刷新来源、删除 epoch 改变或内容失效会清除旧计划和幂等键，迟到响应不能写回另一个 Bot 的页面。
+Memory 模块的关系浏览器展示完整图关系，不把“人工 association head”冒充全部关系。查询结果至少包含 `relation_id/type/direction/origin/weight/active`、左右端点的来源 ID/主干/群/作者/时间、证据引用、贡献/撤回状态、图修订和投影状态；`TRUNK_NEXT`、人工 `ASSOCIATES_WITH`、向量联想和以后增加的规则关系必须可区分。关系可按主干、类型、来源、状态、端点、时间和图修订筛选，并使用稳定键集分页或有界邻域查询。
+
+人工联想只是关系浏览器中的一种可变关系。来源结果选择恰好两项后可以预览建立人工联想；有效人工关系可以预览解除，已解除关系可以按其当前 revision 预览恢复。结构边和自动联想只显示其证据与重建状态，不能用人工联想 API 修改。切换 Bot、刷新来源、删除 epoch 改变或内容失效会清除旧计划和幂等键，迟到响应不能写回另一个 Bot 的页面。
+
+该视图由 `memory.graph` 模块注册的 management query/action contract 提供，在微内核控制台的模块详情中加载；它不是控制台壳的硬编码顶层页面。宿主负责授权、分页上限、字段脱敏和计划提交，模块 UI 负责筛选与图/表呈现。
 
 Web 可以跨群管理当前 Bot。群聊 Shell 暂不增加联想命令；以后接入时只能从发令群选择至少一个端点，并复用同一管理协议，不能通过图边扩大群管理员的来源可见范围。
 

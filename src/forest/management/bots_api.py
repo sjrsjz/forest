@@ -204,6 +204,29 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
             "Cache-Control": "no-store",
         })
 
+    @app.get("/management/v1/packages/{package_digest}/management-ui")
+    async def package_management_ui(package_digest: str, request: Request):
+        await principal(request)
+        fleet = services()[1]
+        package = fleet.packages.get(package_digest)
+        if package is None:
+            raise ForestError("PACKAGE_UNAVAILABLE", "Package is not registered", 404)
+        asset = await asyncio.to_thread(package.management_ui)
+        if asset is None:
+            raise ForestError("MANAGEMENT_UI_UNAVAILABLE", "Package has no management UI", 404)
+        metadata, content = asset
+        return Response(content, media_type="text/html; charset=utf-8", headers={
+            "Cache-Control": "private, no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                "img-src data: blob:; font-src data:; connect-src 'none'; "
+                "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "X-Forest-Package-Digest": package_digest,
+            "X-Forest-Management-UI-Digest": metadata["sha256"],
+        })
+
     @app.get("/management/v1/bots/{bot_id}/components/{component_id}/configuration")
     async def configuration(bot_id: str, component_id: str, request: Request):
         bot, operation, signed = await ticket(request, bot_id, "config.read",

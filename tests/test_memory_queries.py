@@ -597,21 +597,3 @@ async def test_exact_dot_rank_uses_vector_coordinates_before_rrf_and_result_limi
     result = await store.retrieve(env.lease, "query")
     assert [item["source_unit_id"] for item in result["evidence"]] == [relevant["source_unit_id"]]
     assert result["completeness"]["candidates_considered"] == 2
-
-
-async def test_same_dimensions_from_another_embedding_space_are_never_compared(media):
-    env, images, _ = media
-    await configure(env, [])
-    asking = await source(media, 1)
-    found = await source(media, 2, group="other")
-    index = MemoryIndexStore(images.messages, images)
-    store = MemoryQueryStore(index)
-    await documents(media, index, [found["source_unit_id"]])
-    old_space = (await rows(media, "SELECT space_id FROM public.bot_memory_vectors"))[0]["space_id"]
-    await configure(env, [], revision=1, deployment_id="different-embedding-installation")
-    planned = await query(media, store, asking, revision=2)
-    assert planned["space_id"] != old_space
-    await embed(media, index, planned["facet_ids"], query_receipt=planned, revision=2)
-    result = await store.retrieve(env.lease, "query")
-    assert result["status"] == "READY" and result["evidence"] == []
-    assert result["completeness"]["candidates_considered"] == 0

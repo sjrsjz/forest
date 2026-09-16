@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import re
 import secrets
 import shutil
 import threading
@@ -37,7 +38,8 @@ def archive(tmp_path, version, *, broken=False, large=False, reserved=False):
     manifest = (source / "module.toml").read_text()
     if not reserved:
         manifest = manifest.replace("forest.counter", "demo.counter")
-    (source / "module.toml").write_text(manifest.replace('version = "0.1.0"', f'version = "{version}"'))
+    manifest = re.sub(r'(?m)^version = "[^"]+"$', f'version = "{version}"', manifest, count=1)
+    (source / "module.toml").write_text(manifest)
     if broken:
         code = source / "python/counter.py"
         code.write_text(code.read_text() + "\nraise RuntimeError('unhealthy package')\n")
@@ -79,6 +81,16 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         base = f"/management/v1/bots/{bot['bot_id']}/components/demo.counter"
         await apply(client, base, await make_plan(client, base, first, "Original", 2, 0, "p1"), "a1")
         await effective(client, base, 1)
+        runtime = (await client.get(f"/management/v1/bots/{bot['bot_id']}")).json()["runtime"]
+        modules = {row["component_id"]: row for row in runtime["runtime_modules"]}
+        assert set(modules) == {
+            "agent.runtime",
+            "conversation.scheduler",
+            "memory.graph",
+            "scheduler.jobs",
+            "shell.command",
+        }
+        assert modules["agent.runtime"]["requires"] == ["memory.graph"]
         assert (await invoke(client, base, 2, "call-1"))["result"]["value"] == 4
         await apply(client, base, await make_plan(client, base, broken, "Broken", 9, 1, "p2"), "a2")
         # A failed candidate must leave the old durable effective revision/Worker live.
@@ -123,6 +135,18 @@ async def test_package_endpoint_auth_and_static_admission(tmp_path, web_bots_dat
     async with running(settings) as (_, client):
         await upload(client, good, "no-session", status=401)
         await setup(client, token)
+        builtin = next(
+            package for package in (await client.get("/management/v1/packages")).json()["packages"]
+            if package["package_id"] == "forest.counter"
+        )
+        assert builtin["management_ui"]["protocol"] == "forest.management-ui/1"
+        ui = await client.get(
+            f"/management/v1/packages/{builtin['package_digest']}/management-ui"
+        )
+        assert ui.status_code == 200
+        assert ui.headers["x-forest-management-ui-digest"] == builtin["management_ui"]["sha256"]
+        assert "connect-src 'none'" in ui.headers["content-security-policy"]
+        assert "forest.management-ui/1" in ui.text
         await upload(client, good, "wrong-origin", status=403, headers={"origin": "https://untrusted.invalid"})
         await upload(client, good, "wrong-csrf", status=403, headers={"x-csrf-token": "wrong"})
         await upload(client, good, "wrong-type", status=415, headers={"content-type": "application/json"})

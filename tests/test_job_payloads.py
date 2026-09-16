@@ -17,6 +17,7 @@ from forest.errors import ForestError
 from forest.storage.job_payloads import delegation_metadata
 from forest.storage.jobs import JobStore
 from forest.storage.messages import MessageStore
+from forest.storage.migration_v26 import WRITER_GENERATION
 
 pytestmark = pytest.mark.postgres
 
@@ -61,7 +62,7 @@ async def test_job_plan_and_revision_store_only_closed_operational_metadata(job_
         gate = await (await conn.execute(
             "SELECT minimum_generation FROM public.bot_schema_writer_gate"
         )).fetchone()
-    assert gate["minimum_generation"] == 20
+    assert gate["minimum_generation"] == WRITER_GENERATION
     assert plan["values"] is revision["values"] is revision["delegation"] is None
     assert plan["values_metadata"] == revision["values_metadata"]
     assert plan["values_metadata"]["max_overlap"] == 3

@@ -1,6 +1,6 @@
-# P3 产品子 Agent 退役与兼容迁移
+# P3 产品子 Agent 删除
 
-状态：**旧设计已撤销。此文只记录升级兼容，不再定义可用能力。**新的 Agent 语义见[单 Agent 协议与持久运行](p3-agent.md)。
+状态：**旧设计已撤销，并从未发布基线直接删除。**此文只记录禁止重新引入的语义。新的 Agent 语义见[单 Agent 协议与持久运行](p3-agent.md)。
 
 Forest 曾实现 `forest_analyze`、`ChildScheduler`、`bot_agent_children` 和 `bot_child_model_attempts`，让群 Agent 再发起独立模型请求。该实现误解了 QiYu Agentlib：Agentlib 的“下一轮”是同一个 Agent 在工具或 Provider 安全边界后的下一次模型调用，pending branch 也是同一条对话执行链；它没有群聊子 Agent。
 
@@ -13,13 +13,6 @@ Forest 曾实现 `forest_analyze`、`ChildScheduler`、`bot_agent_children` 和 
 - 计划任务需要对话时向目标 Conversation 写入 trigger，进入唯一 Agent Session；
 - 组件内部的嵌套 Kernel RPC 继续存在，但称为 component call tree，不称为 Agent。
 
-已经发布的数据库迁移文件保持不可变。`050_single_agent_protocol.sql` 已执行以下收敛：
+Forest 尚未上线，不为这项错误抽象保留兼容层。重建数据库基线时直接删除 Child 相关表、索引、触发器、权限、配置字段、DTO、API、WebUI、调度器和测试夹具；开发数据库由干净基线重建。历史迁移文件若尚未形成公开发布契约，可以压平或替换，不要求旧 019/032 数据库升级，不提供只读 Child 诊断，也不允许旧备份把 Child 运行状态恢复进新基线。
 
-1. 锁定旧 Child 表并把非终态记录转为 `CANCELLED` 或明确的遗留失败状态；
-2. 结算已知模型用量，`UNKNOWN` 费用事实继续保留，不推断为未发送；
-3. 对旧 request/result payload 保持既有来源、删除屏障和保留期规则；
-4. 安装拒绝 INSERT/业务状态推进的数据库 fence，防止旧 Worker 重新创建任务；
-5. 不删除历史事实表，便于审计和旧备份恢复；
-6. 新运行时不 hydrate 或调度任何遗留 Child 记录。
-
-升级测试需要覆盖旧 019/032 数据库、活动/等待/未知/终态 Child 记录、载荷已清理记录以及旧 Worker 持有连接的情形。迁移完成后，只有显式的只读历史诊断可以看见遗留记录。
+需要保留的只有独立于 Child 抽象的真实外部效果账本和已确认费用事实；保留它们时去除 Child 业务身份，按通用模型调用/效果协议归档。测试只需证明代码、最终 schema、管理路由和运行注册表中不存在产品子 Agent，并证明计划任务和同群新触发都进入唯一 Conversation Agent 队列。

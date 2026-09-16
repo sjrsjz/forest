@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：初版目标设计，实现进行中。更新日期：2026-09-14。当前已接通独立 Web 管理、固定管理员/查看者账号生命周期、多 Bot 运行、原生 Python Worker、OneBot HTTP、持久单 Agent、定时任务、跨群图文记忆、来源遗忘、审核式跨主干联想召回，以及加密多数据库备份、未注册隔离恢复、托管 Bot 代际激活、部署控制面离线切换、保留期清理和旧存储代际回收；QiYu Agentlib 的固定 CorePrompt、PresetContext、原子 ModelTurn 和单 Agent 工具循环已经接入，旧产品子 Agent 已从活动协议退役。裸机恢复身份胶囊、完整运维和长期容量治理仍在实施。[实现状态与验证记录](implementation-status.md)区分代码现状和目标契约，[接入说明](p1-integration.md)描述当前队列、控制入口及恢复边界，实际启动方式见[项目 README](../README.md)。01–12 的首版目标不因当前切片范围缩减。
+状态：目标设计与激进重构进行中。更新日期：2026-09-16。01–13 描述目标契约，不代表相应能力已经实现。2026-09-16 的架构复核确认旧实现把 `BindingRuntime` 写成业务组合根，并把 Bot、Agent、Memory 固化成后台产品栏目；该实现不再作为可发布基线。当前代码只完成了部分纵向协议和第一段微内核纠偏，必须以[实现状态与验证记录](implementation-status.md)顶部的当前重构状态为准。旧发布候选、旧迁移和历史测试数字仅作取证记录，不能用于判断现有工作树已经满足架构。实际启动方式见[项目 README](../README.md)。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -24,7 +24,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [P3 定时任务](p3-jobs.md) | 持久计划、日历与补跑、受权入队、非重叠占用和管理取消 |
 | [P4 Job 定义载荷](p4-job-payloads.md) | prompt/settings 与 delegation 的来源证明、正文遗忘、调度撤权及 writer v3 切换 |
 | [P4 Shell 参数与结果载荷](p4-shell-payloads.md) | 群聊命令参数、管理结果、CONTROL 回复父链、终结状态及 writer v4 切换 |
-| [P3 产品子 Agent 退役](p3-children.md) | 撤销错误产品语义、旧数据库终结与只读兼容迁移 |
+| [P3 产品子 Agent 删除](p3-children.md) | 撤销错误产品语义并从未发布基线直接删除相关代码、表和管理入口 |
 | [P3 群聊管理与监督](p3-control.md) | 实际 Shell 命令、共同管理协议、控制预留槽及定时授权边界 |
 | [P4 来源与载荷存储](p4-source-payloads.md) | 已接入消息流水的来源/资格、可清理正文基础及尚未迁移的旧副本 |
 | [P4 纯图归约器](p4-graph-reducer.md) | 固定源事实的多主干、乱序合流、撤回、并列冲突及必要证据 |
@@ -64,6 +64,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | [10 多主干记忆图与来源明确的召回](10-multi-trunk-memory-graph.md) | 每群独立主干、跨主干联想、图写入合流、模型可见群来源与无摘要裁剪 |
 | [11 多模态记忆与模型输入投影](11-multimodal-memory-and-model-projection.md) | 文本/图片持久记忆、原生多模态嵌入、图片查询及文本LLM的非破坏性输入投影 |
 | [12 WebUI 后台管理详细设计](12-webui-administration.md) | 浏览器初始化与日常配置、后台页面、配置版本与生效、管理API、权限和实时运维 |
+| [13 微内核运行时与控制面重构详细设计](13-microkernel-control-plane-redesign.md) | 删除业务硬编码组合根、注册表驱动运行时、模块自带沙箱 UI、RouteGraph 与 dispatch trace |
 
 ## 需求对应
 

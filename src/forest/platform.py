@@ -21,6 +21,7 @@ from forest.adapters.onebot import (
 )
 from forest.delivery import DeliveryWorker, PreparedDelivery
 from forest.errors import ForestError
+from forest.runtime_modules import BotModuleRegistry
 from forest.shell_ingress import ShellIngressGuard
 from forest.storage.bindings import BindingStore
 from forest.storage.delivery import DeliveryStore
@@ -95,6 +96,7 @@ class BindingRuntime:
     def __init__(self, bot, vault, packages: dict, *, global_slots=None, job_authority=None,
                  global_model_slots=None, module_packages=None):
         self.bot, self.kernel, self.vault = bot, bot.kernel, vault
+        self.global_slots = global_slots
         self.global_model_slots = global_model_slots
         self.packages = dict(packages)
         self.module_packages = {} if module_packages is None else module_packages
@@ -122,44 +124,17 @@ class BindingRuntime:
         self.delivery_worker = DeliveryWorker(
             self.delivery, self.kernel._authority, self.prepare, on_error=self._delivery_error
         )
-        from forest.agent_runtime import AgentRuntime
-        from forest.group_scheduler import GroupScheduler
-        from forest.job_scheduler import JobDispatcher
-        from forest.memory_runtime import MemoryRuntime
-        from forest.shell import ShellDispatcher
         from forest.storage.command_limits import CommandLimitStore
         from forest.storage.command_policies import CommandPolicyStore
-        from forest.storage.jobs import JobStore
         from forest.storage.message_handler_limits import MessageHandlerLimitStore
         from forest.storage.message_handler_policies import MessageHandlerPolicyStore
 
-        self.memory = MemoryRuntime(self)
-        self.agent = AgentRuntime(self)
         self.command_policies = CommandPolicyStore(bot.store)
         self.command_limits = CommandLimitStore(bot.store)
         self.message_handler_policies = MessageHandlerPolicyStore(bot.store)
         self.message_handler_limits = MessageHandlerLimitStore(bot.store)
-
-        self.scheduler = GroupScheduler(
-            self.messages,
-            lease=self.kernel._authority,
-            execute=self.execute,
-            delivery=self.delivery,
-            global_slots=global_slots,
-            finalize_agent=self.agent.runner.finalize,
-            execution_timeout=3600,
-        )
-        self.shell = ShellDispatcher(
-            self.messages, self.bindings, self.delivery, self.kernel._authority,
-            on_change=self._notify_work, module_packages=self.module_packages,
-        )
-        self.job_store = JobStore(self.messages)
         self.job_authority = job_authority
-        self.jobs = JobDispatcher(
-            self.job_store, self.kernel._authority,
-            authorize=self._authorize_job if job_authority is not None else None,
-            on_change=self.scheduler.notify,
-        )
+        self.module_registry = BotModuleRegistry(self)
 
     def _notify_work(self):
         self.scheduler.notify()
@@ -209,25 +184,14 @@ class BindingRuntime:
                 raise ForestError("BINDING_RUNTIME_CLOSED", "Platform runtime is closed", 503)
             if self._started:
                 return
-            await self.scheduler.start()
-            await self.shell.start()
-            await self.agent.start()
-            await self.jobs.start()
-            await self.memory.start()
+            await self.module_registry.start()
             self._tasks = [
                 asyncio.create_task(self.run_forever(), name="binding-supervisor"),
                 asyncio.create_task(self.delivery_worker.run_forever(), name="binding-delivery"),
                 asyncio.create_task(self._health_loop(), name="binding-health"),
                 asyncio.create_task(self._memory_backfill_loop(), name="memory-source-backfill"),
             ]
-            if self.scheduler.task is not None:
-                self._tasks.append(self.scheduler.task)
-            if self.shell.task is not None:
-                self._tasks.append(self.shell.task)
-            if self.jobs.task is not None:
-                self._tasks.append(self.jobs.task)
-            if self.memory.task is not None:
-                self._tasks.append(self.memory.task)
+            self._tasks.extend(self.module_registry.tasks())
             for task in self._tasks:
                 task.add_done_callback(self._critical_done)
             self._started = True
@@ -235,10 +199,8 @@ class BindingRuntime:
     async def _health_loop(self):
         while not self._closed.is_set():
             if (
-                self.scheduler.failure is not None
+                self.module_registry.failures()
                 or self.delivery_worker.failure is not None
-                or self.shell.failure is not None
-                or self.jobs.failure is not None
             ):
                 self._fatal("PLATFORM_CHILD_FAILED")
                 return
@@ -873,12 +835,12 @@ class BindingRuntime:
         for task in (*self._jobs.values(), *self._component_jobs.values(), *self._tasks):
             task.cancel()
         errors = []
-        for closer in (self.jobs.close, self.scheduler.close, self.shell.close,
-                       self.delivery_worker.close, self.agent.close, self.memory.close):
+        for closer in (self.delivery_worker.close,):
             try:
                 await closer()
             except Exception as exc:
                 errors.append(exc)
+        errors.extend(await self.module_registry.close())
         await asyncio.gather(
             *self._tasks,
             *self._jobs.values(),

@@ -74,6 +74,7 @@ class FakeBindingRuntime:
     def __init__(self, bot, vault, packages, **kwargs):
         self.bot, self.vault, self.packages = bot, vault, packages
         self._tasks = []
+        self.module_registry = SimpleNamespace(describe=lambda: [])
         self.failure = None
         self.started = self.closed = False
 

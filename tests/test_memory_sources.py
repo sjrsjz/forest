@@ -396,6 +396,9 @@ async def test_legacy_backfill_resumes_bounded_cursors_and_uses_actual_batch_eli
     repository, lease, _ = messages
 
     class OldWriter:
+        def unit_id(self, source_event_id):
+            return MemorySourceStore(repository).unit_id(source_event_id)
+
         async def register_input_in(self, *args, **kwargs):
             pass
 

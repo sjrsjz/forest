@@ -49,7 +49,7 @@ async def test_web_command_policy_requires_reauth_and_persists_source_body(
     token, settings = await provision(tmp_path, web_bots_database)
     async with running(settings) as (app, client):
         await setup(client, token)
-        assert "业务命令策略" in (await client.get("/")).text
+        assert "组件命令授权" in (await client.get("/")).text
         assert "export function commandPoliciesPanel" in (
             await client.get("/static/command-policies.js")
         ).text

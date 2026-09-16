@@ -105,7 +105,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
         `${row.terminal_reason ? ` · ${row.terminal_reason}` : ''}`,
       );
     }
-    empty(chains, '没有 Handler 执行链。');
+    empty(chains, '没有 Handler dispatch trace。');
     const attempts = $('handler-diagnostic-attempts'); attempts.replaceChildren();
     for (const row of data.attempts) {
       addRow(
@@ -118,7 +118,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
     }
     empty(attempts, '没有 Handler attempt。');
     $('handler-diagnostic-status').textContent =
-      `读取 ${data.chains.length} 条执行链和 ${data.attempts.length} 次尝试；` +
+      `读取 ${data.chains.length} 条Dispatch trace和 ${data.attempts.length} 次尝试；` +
       '页面不读取群消息、用户标识、插件返回正文或异常正文。';
   }
 

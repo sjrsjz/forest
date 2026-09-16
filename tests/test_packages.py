@@ -140,6 +140,55 @@ def test_supported_resource_and_lifecycle_limits_survive_snapshot(tmp_path):
     assert snapshot.component["lifecycle"]["prepare_timeout_s"] == 0.5
 
 
+def test_management_ui_is_immutable_package_content(tmp_path):
+    root = source(tmp_path)
+    (root / "ui").mkdir()
+    html = b"<!doctype html><html><body><script>parent.postMessage('ignored','*')</script></body></html>"
+    (root / "ui" / "index.html").write_bytes(html)
+    with (root / "module.toml").open("a", encoding="utf-8") as stream:
+        stream.write(
+            '\n[components.management_ui]\nentrypoint = "ui/index.html"\n'
+            'protocol = "forest.management-ui/1"\n'
+        )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(root)
+    metadata, content = snapshot.management_ui()
+    assert content == html
+    assert metadata == {
+        "entrypoint": "ui/index.html",
+        "protocol": "forest.management-ui/1",
+        "sha256": __import__("hashlib").sha256(html).hexdigest(),
+        "bytes": len(html),
+    }
+    path = snapshot.root / "ui" / "index.html"
+    path.chmod(0o600)
+    path.write_text("<!doctype html><html>tampered</html>", encoding="utf-8")
+    with pytest.raises(ForestError) as caught:
+        snapshot.management_ui()
+    assert caught.value.code == "PACKAGE_TAMPERED"
+
+
+@pytest.mark.parametrize("entrypoint,protocol,body", [
+    ("../index.html", "forest.management-ui/1", "<!doctype html><html></html>"),
+    ("ui/index.js", "forest.management-ui/1", "<!doctype html><html></html>"),
+    ("ui/index.html", "forest.management-ui/2", "<!doctype html><html></html>"),
+    ("ui/index.html", "forest.management-ui/1", "fragment only"),
+])
+def test_invalid_management_ui_declarations_are_rejected(
+        tmp_path, entrypoint, protocol, body):
+    root = source(tmp_path)
+    target = root / "ui" / "index.html"
+    target.parent.mkdir()
+    target.write_text(body, encoding="utf-8")
+    with (root / "module.toml").open("a", encoding="utf-8") as stream:
+        stream.write(
+            f'\n[components.management_ui]\nentrypoint = "{entrypoint}"\n'
+            f'protocol = "{protocol}"\n'
+        )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert caught.value.code in {"INVALID_MANIFEST", "INVALID_MANAGEMENT_UI"}
+
+
 def test_event_declarations_and_capabilities_survive_static_snapshot(tmp_path):
     root = source(tmp_path)
     manifest = root / "module.toml"
