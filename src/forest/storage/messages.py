@@ -1965,6 +1965,7 @@ class MessageStore:
                 conn, lease, operation_id="control:" + current["command_id"], route=route, parts=parts,
                 conversation_id=current["conversation_id"], lane="CONTROL", command_id=current["command_id"],
                 control_seq=1, root_operation_id=current["command_id"],
+                cause_kind="SHELL_COMMAND", cause_id=current["command_id"],
                 expected_policy_revision=current["policy_revision"],
                 parents=(outcome_ref.payload_id, binding["config_payload_id"]),
             )
@@ -3848,6 +3849,7 @@ class MessageStore:
                 lane="CHAT",
                 response_seq=response_seq,
                 root_operation_id=notice_id,
+                cause_kind="CONVERSATION_NOTICE", cause_id=notice_id,
                 expected_policy_revision=actor.policy_revision,
                 parents=(body.payload_id,),
             )
@@ -4097,6 +4099,7 @@ class MessageStore:
                     lane="CHAT",
                     response_seq=response_seq,
                     root_operation_id=chain_id,
+                    cause_kind="MESSAGE_HANDLER_CHAIN", cause_id=chain_id,
                     expected_policy_revision=actor.policy_revision,
                     parents=(body.payload_id,),
                 )
@@ -4332,6 +4335,7 @@ class MessageStore:
                     lane="CHAT",
                     response_seq=response_seq,
                     root_operation_id=chain_id,
+                    cause_kind="MESSAGE_HANDLER_CHAIN", cause_id=chain_id,
                     expected_policy_revision=actor.policy_revision,
                     parents=(body.payload_id,),
                 )
@@ -4558,6 +4562,7 @@ class MessageStore:
                     lane="CHAT",
                     response_seq=response_seq,
                     root_operation_id=request_id,
+                    cause_kind="BUSINESS_COMMAND_REQUEST", cause_id=request_id,
                     expected_policy_revision=actor.policy_revision,
                     parents=(body.payload_id,),
                 )
@@ -4746,6 +4751,7 @@ class MessageStore:
             conn, actor.host, operation_id="reply:" + reply_id, route=route, parts=parts,
             conversation_id=actor.conversation_id, lane="CHAT", response_seq=response_seq,
             root_operation_id=run_id, expected_policy_revision=actor.policy_revision,
+            cause_kind="AGENT_RUN", cause_id=run_id,
             parents=(body.payload_id,),
         )
         reply = await (await conn.execute(

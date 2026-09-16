@@ -385,7 +385,7 @@ async def test_actual_028_upgrade_preserves_exact_wire_and_unknown_without_plain
             "INSERT INTO public.bot_delivery_streams(bot_id,stream_id,binding_id,lane,last_seq) VALUES ('bot-a','old-stream','binding','CHAT',1)"
         )
         await conn.execute(
-            "INSERT INTO public.bot_send_intents(bot_id,intent_id,operation_id,input_digest,root_operation_id,binding_id,binding_epoch,policy_revision,storage_generation,stream_id,send_lane,conversation_id,response_seq,sequence,reply_route,adapter_contract) VALUES ('bot-a','old-intent','old-operation','old-digest','old-root','binding',1,1,1,'old-stream','CHAT','conversation',1,1,%s,'onebot-v11:1')",
+            "INSERT INTO public.bot_send_intents(bot_id,intent_id,operation_id,input_digest,root_operation_id,cause_kind,cause_id,binding_id,binding_epoch,policy_revision,storage_generation,stream_id,send_lane,conversation_id,response_seq,sequence,reply_route,adapter_contract) VALUES ('bot-a','old-intent','old-operation','old-digest','old-root','DELIVERY_OPERATION','old-operation','binding',1,1,1,'old-stream','CHAT','conversation',1,1,%s,'onebot-v11:1')",
             (Jsonb(old_route),),
         )
         await conn.execute(

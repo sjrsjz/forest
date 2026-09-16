@@ -1,12 +1,12 @@
 const $ = id => document.getElementById(id);
 
 export function createModulePanel(api, busy, notice) {
-  let bot = null, epoch = 0, snapshot = null, traces = [];
+  let bot = null, epoch = 0, snapshot = null, traces = [], traceScanTruncated = false;
   const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/snapshot`;
   const operationPath = name => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/${name}`;
 
   function reset() {
-    epoch++; bot = null; snapshot = null; traces = [];
+    epoch++; bot = null; snapshot = null; traces = []; traceScanTruncated = false;
     $('bot-route-graph').classList.add('hidden');
     $('route-graph-summary').replaceChildren();
     $('route-graph-nodes').replaceChildren();
@@ -73,7 +73,9 @@ export function createModulePanel(api, busy, notice) {
     $('dispatch-traces').replaceChildren(...traces.map(trace => {
       const article = document.createElement('article'); article.className = 'dispatch-trace';
       const header = document.createElement('header');
-      const title = document.createElement('strong'); title.textContent = `${trace.channel_id} · #${trace.ingress_seq} · ${trace.status}`;
+      const title = document.createElement('strong');
+      title.textContent = `${trace.channel_id} · #${trace.ingress_seq} · ${trace.status}`
+        + (trace.causal_truncated ? ' · \u56e0\u679c\u5df2\u622a\u65ad' : '');
       const graph = document.createElement('button'); graph.type = 'button'; graph.className = 'subtle'; graph.textContent = '查看冻结图';
       if (trace.graph_digest) {
         graph.addEventListener('click', event => busy(event.currentTarget, () => frozenGraph(trace.graph_digest)));
@@ -88,7 +90,11 @@ export function createModulePanel(api, busy, notice) {
         const route = document.createElement('span'); route.textContent = `${entry.kind} · ${entry.node_id}`;
         const state = document.createElement('strong'); state.textContent = entry.status;
         const owner = document.createElement('small'); owner.textContent = `组件 ${text(entry.component_id)} · 代际 ${text(entry.generation_id)}`;
-        const reason = document.createElement('small'); reason.textContent = entry.reason || JSON.stringify(entry.references || {});
+        const reason = document.createElement('small');
+        const cause = entry.references && entry.references.caused_by;
+        reason.textContent = entry.reason || (cause
+          ? `\u7531 ${cause.kind} · ${cause.id} \u89e6\u53d1 · ${JSON.stringify(entry.references)}`
+          : JSON.stringify(entry.references || {}));
         row.append(route, state, owner, reason); article.append(row);
       }
       return article;
@@ -102,7 +108,10 @@ export function createModulePanel(api, busy, notice) {
     for (const [key, value] of data) if (String(value).trim()) query.set(key, String(value).trim());
     const result = await api(`${operationPath('dispatch-traces')}?${query}`);
     if (!bot || own !== epoch) return;
-    traces = result.traces || []; renderTraces();
+    traces = result.traces || [];
+    traceScanTruncated = Boolean(result.candidate_scan_truncated);
+    renderTraces();
+    if (traceScanTruncated) $('dispatch-trace-status').textContent += ' \u5019\u9009\u626b\u63cf\u5df2\u5230\u4e0a\u9650\uff0c\u8bf7\u589e\u52a0\u6d88\u606f\u3001\u7fa4\u6216\u65f6\u95f4\u7b5b\u9009\u3002';
   }
 
   $('route-graph-filter').addEventListener('input', render);

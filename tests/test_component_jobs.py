@@ -15,6 +15,7 @@ import pytest_asyncio
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from forest.dispatch_trace import DispatchTraceStore
 from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.packages import PackageCatalog
@@ -190,6 +191,33 @@ async def test_job_schedule_is_convergent_and_lost_ack_does_not_repeat_handler(
         assert state["runs"]["value"] == [
             {"job_id": first["job_id"], "value": 7, "version": "0.1.0"}
         ]
+        async with component_job_store.pool.connection() as conn:
+            source = await (
+                await conn.execute(
+                    "SELECT c.operation_id FROM public.bot_component_jobs j "
+                    "JOIN public.bot_calls c ON (c.bot_id,c.call_id)=(j.bot_id,j.source_call_id)"
+                )
+            ).fetchone()
+            entries, truncated = await DispatchTraceStore(
+                component_job_store
+            )._causal_entries(
+                conn,
+                {source["operation_id"]: {
+                    "kind": "test_operation", "id": source["operation_id"]
+                }},
+                [],
+            )
+        assert truncated is False
+        job = next(entry for entry in entries if entry["kind"] == "component_job")
+        assert job["status"] == "ACKED"
+        assert job["references"]["caused_by"]["kind"] == "kernel_call"
+        worker = next(
+            entry for entry in entries
+            if entry["kind"] == "kernel_call"
+            and entry["references"].get("caused_by", {}).get("kind") == "component_job"
+        )
+        assert worker["status"] == "COMPLETED"
+        assert worker["generation_id"] == job["generation_id"]
     finally:
         await kernel.close()
 

@@ -242,6 +242,25 @@ async def test_command_is_an_ingress_barrier_and_publishes_one_atomic_chat_resul
     assert command_entry["generation_id"] == selected["request"]["generation_id"]
     assert command_entry["references"]["call_operation_id"] == operation_id
     assert command_entry["references"]["result_id"] == result["result_id"]
+    call_entry = next(
+        entry for entry in trace["traces"][0]["entries"] if entry["kind"] == "kernel_call"
+    )
+    assert call_entry["status"] == "COMPLETED"
+    assert call_entry["component_id"] == "actor.command"
+    assert call_entry["references"]["operation_id"] == operation_id
+    assert call_entry["references"]["caused_by"] == {
+        "kind": "business_command_request",
+        "id": command["business_request_id"],
+    }
+    delivery_entry = next(
+        entry for entry in trace["traces"][0]["entries"] if entry["kind"] == "delivery_part"
+    )
+    assert delivery_entry["status"] == "PENDING"
+    assert delivery_entry["references"]["caused_by"] == {
+        "kind": "business_command_request",
+        "id": command["business_request_id"],
+    }
+    assert trace["traces"][0]["causal_truncated"] is False
 
 
 @pytest.mark.parametrize(

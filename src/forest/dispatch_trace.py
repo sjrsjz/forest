@@ -2,6 +2,9 @@
 
 from forest.storage.control import BotControl
 
+_MAX_CAUSAL_ENTRIES = 256
+_MAX_CAUSAL_HOPS = 8
+
 
 def _iso(value):
     return value.isoformat() if value is not None else None
@@ -27,6 +30,244 @@ class DispatchTraceStore:
             return "PASSED", None
         return "PENDING", None
 
+    async def _causal_entries(self, conn, seed_operations, causes):
+        """Follow only durable causal identities; never infer lineage from payload text."""
+        calls, events, event_deliveries, jobs = {}, {}, {}, {}
+        cause_by_operation = dict(seed_operations)
+        frontier = set(seed_operations)
+        truncated = False
+        for _ in range(_MAX_CAUSAL_HOPS):
+            frontier -= {row["operation_id"] for row in calls.values()}
+            if not frontier:
+                break
+            call_rows = await (
+                await conn.execute(
+                    "WITH RECURSIVE tree AS ("
+                    "SELECT c.* FROM public.bot_calls c WHERE c.bot_id=%s AND c.operation_id=ANY(%s) "
+                    "UNION ALL SELECT child.* FROM public.bot_calls child JOIN tree parent "
+                    "ON child.bot_id=parent.bot_id AND child.parent_call_id=parent.call_id "
+                    "WHERE child.call_depth<=8) SELECT DISTINCT ON (call_id) * FROM tree "
+                    "ORDER BY call_id,call_depth LIMIT %s",
+                    (self.store.bot_id, list(frontier), _MAX_CAUSAL_ENTRIES + 1),
+                )
+            ).fetchall()
+            if len(call_rows) > _MAX_CAUSAL_ENTRIES:
+                truncated = True
+                call_rows = call_rows[:_MAX_CAUSAL_ENTRIES]
+            new_calls = []
+            for row in call_rows:
+                if row["call_id"] not in calls:
+                    calls[row["call_id"]] = row
+                    new_calls.append(row)
+            if not new_calls:
+                break
+            call_ids = [row["call_id"] for row in new_calls]
+            event_rows = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_component_events WHERE bot_id=%s "
+                    "AND publisher_call_id=ANY(%s) ORDER BY event_seq,event_id LIMIT %s",
+                    (self.store.bot_id, call_ids, _MAX_CAUSAL_ENTRIES + 1),
+                )
+            ).fetchall()
+            if len(event_rows) > _MAX_CAUSAL_ENTRIES:
+                truncated = True
+                event_rows = event_rows[:_MAX_CAUSAL_ENTRIES]
+            for row in event_rows:
+                events[row["event_id"]] = row
+            if event_rows:
+                delivery_rows = await (
+                    await conn.execute(
+                        "SELECT * FROM public.bot_event_deliveries WHERE bot_id=%s "
+                        "AND event_id=ANY(%s) ORDER BY event_seq,delivery_id LIMIT %s",
+                        (
+                            self.store.bot_id,
+                            [row["event_id"] for row in event_rows],
+                            _MAX_CAUSAL_ENTRIES + 1,
+                        ),
+                    )
+                ).fetchall()
+                if len(delivery_rows) > _MAX_CAUSAL_ENTRIES:
+                    truncated = True
+                    delivery_rows = delivery_rows[:_MAX_CAUSAL_ENTRIES]
+                for row in delivery_rows:
+                    event_deliveries[row["delivery_id"]] = row
+                    if row["call_operation_id"]:
+                        cause_by_operation[row["call_operation_id"]] = {
+                            "kind": "component_event_delivery",
+                            "id": row["delivery_id"],
+                        }
+                        frontier.add(row["call_operation_id"])
+            job_rows = await (
+                await conn.execute(
+                    "SELECT * FROM public.bot_component_jobs WHERE bot_id=%s "
+                    "AND source_call_id=ANY(%s) ORDER BY job_seq,job_id LIMIT %s",
+                    (self.store.bot_id, call_ids, _MAX_CAUSAL_ENTRIES + 1),
+                )
+            ).fetchall()
+            if len(job_rows) > _MAX_CAUSAL_ENTRIES:
+                truncated = True
+                job_rows = job_rows[:_MAX_CAUSAL_ENTRIES]
+            for row in job_rows:
+                jobs[row["job_id"]] = row
+                if row["call_operation_id"]:
+                    cause_by_operation[row["call_operation_id"]] = {
+                        "kind": "component_job",
+                        "id": row["job_id"],
+                    }
+                    frontier.add(row["call_operation_id"])
+            if len(calls) + len(events) + len(event_deliveries) + len(jobs) > _MAX_CAUSAL_ENTRIES:
+                truncated = True
+                break
+        else:
+            truncated = bool(frontier - {row["operation_id"] for row in calls.values()})
+
+        call_by_operation = {row["operation_id"]: row for row in calls.values()}
+        entries = []
+        for row in calls.values():
+            if row["parent_call_id"]:
+                cause = {"kind": "kernel_call", "id": row["parent_call_id"]}
+            else:
+                cause = cause_by_operation.get(row["operation_id"])
+            references = {
+                "call_id": row["call_id"],
+                "operation_id": row["operation_id"],
+                "root_call_id": row["root_call_id"],
+                "call_depth": row["call_depth"],
+                "input_digest": row["input_digest"],
+            }
+            if cause:
+                references["caused_by"] = cause
+            if row["parent_call_id"]:
+                references["parent_call_id"] = row["parent_call_id"]
+            if row.get("result_digest"):
+                references["result_digest"] = row["result_digest"]
+            entries.append({
+                "kind": "kernel_call",
+                "node_id": "call:" + row["call_id"],
+                "component_id": row["component_id"],
+                "generation_id": row["generation_id"],
+                "status": row["status"],
+                "reason": row["error_code"],
+                "started_at": _iso(row["created_at"]),
+                "completed_at": None,
+                "references": references,
+            })
+        for row in events.values():
+            entries.append({
+                "kind": "component_event",
+                "node_id": "event:" + row["event_id"],
+                "component_id": row["publisher_component_id"],
+                "generation_id": row["publisher_generation_id"],
+                "status": "PUBLISHED",
+                "reason": None,
+                "started_at": _iso(row["created_at"]),
+                "completed_at": _iso(row["created_at"]),
+                "references": {
+                    "event_id": row["event_id"], "event_seq": row["event_seq"],
+                    "topic": row["topic"], "payload_digest": row["payload_digest"],
+                    "caused_by": {"kind": "kernel_call", "id": row["publisher_call_id"]},
+                },
+            })
+        for row in event_deliveries.values():
+            call = call_by_operation.get(row["call_operation_id"])
+            entries.append({
+                "kind": "component_event_delivery",
+                "node_id": "event-delivery:" + row["delivery_id"],
+                "component_id": row["component_id"],
+                "generation_id": call["generation_id"] if call else None,
+                "status": row["status"],
+                "reason": row["last_error_code"],
+                "started_at": _iso(row["created_at"]),
+                "completed_at": _iso(row["acked_at"]),
+                "references": {
+                    "delivery_id": row["delivery_id"], "event_id": row["event_id"],
+                    "subscriber_id": row["subscriber_id"],
+                    "call_operation_id": row["call_operation_id"],
+                    "caused_by": {"kind": "component_event", "id": row["event_id"]},
+                },
+            })
+        for row in jobs.values():
+            call = call_by_operation.get(row["call_operation_id"])
+            entries.append({
+                "kind": "component_job",
+                "node_id": "job:" + row["job_id"],
+                "component_id": row["component_id"],
+                "generation_id": call["generation_id"] if call else None,
+                "status": row["status"],
+                "reason": row["last_error_code"],
+                "started_at": _iso(row["created_at"]),
+                "completed_at": _iso(row["acked_at"]),
+                "references": {
+                    "job_id": row["job_id"], "job_seq": row["job_seq"],
+                    "handler_id": row["handler_id"],
+                    "call_operation_id": row["call_operation_id"],
+                    "caused_by": {"kind": "kernel_call", "id": row["source_call_id"]},
+                },
+            })
+
+        cause_ids_by_kind = {}
+        for item in causes:
+            cause_ids_by_kind.setdefault(item["kind"], set()).add(item["id"])
+        delivery_rows = []
+        for cause_kind, cause_ids in sorted(cause_ids_by_kind.items()):
+            rows = await (
+                await conn.execute(
+                    "SELECT i.*,p.part_index,p.part_operation_id,p.payload_digest,p.state,p.revision,"
+                    "p.error_code,p.attempt_id,p.attempt_count,p.updated_at,a.state AS attempt_state,"
+                    "a.wire_digest,a.executor_ref,a.permitted_at,a.started_at,a.observed_at,"
+                    "r.operation_id AS resolution_operation_id,r.decision AS resolution_decision "
+                    "FROM public.bot_send_intents i JOIN public.bot_send_parts p USING(bot_id,intent_id) "
+                    "LEFT JOIN public.bot_send_attempts a ON a.bot_id=p.bot_id AND a.attempt_id=p.attempt_id "
+                    "LEFT JOIN LATERAL (SELECT x.operation_id,x.decision FROM public.bot_delivery_resolutions x "
+                    "WHERE (x.bot_id,x.intent_id,x.part_index)=(p.bot_id,p.intent_id,p.part_index) "
+                    "ORDER BY x.created_at DESC LIMIT 1) r ON true "
+                    "WHERE i.bot_id=%s AND i.cause_kind=%s AND i.cause_id=ANY(%s) "
+                    "ORDER BY i.created_at,i.intent_id,p.part_index "
+                    "LIMIT %s",
+                    (
+                        self.store.bot_id, cause_kind, sorted(cause_ids),
+                        _MAX_CAUSAL_ENTRIES + 1,
+                    ),
+                )
+            ).fetchall()
+            delivery_rows.extend(rows)
+        if delivery_rows:
+            delivery_rows.sort(
+                key=lambda row: (row["created_at"], row["intent_id"], row["part_index"])
+            )
+            if len(delivery_rows) > _MAX_CAUSAL_ENTRIES:
+                truncated = True
+                delivery_rows = delivery_rows[:_MAX_CAUSAL_ENTRIES]
+            for row in delivery_rows:
+                executor = row["executor_ref"] or {}
+                references = {
+                    "intent_id": row["intent_id"], "part_index": row["part_index"],
+                    "part_operation_id": row["part_operation_id"],
+                    "root_operation_id": row["root_operation_id"],
+                    "payload_digest": row["payload_digest"], "revision": row["revision"],
+                    "attempt_count": row["attempt_count"],
+                    "caused_by": {"kind": row["cause_kind"].lower(), "id": row["cause_id"]},
+                }
+                for key in ("attempt_id", "attempt_state", "wire_digest", "resolution_operation_id", "resolution_decision"):
+                    if row[key] is not None:
+                        references[key] = row[key]
+                entries.append({
+                    "kind": "delivery_part",
+                    "node_id": f'delivery:{row["intent_id"]}:{row["part_index"]}',
+                    "component_id": executor.get("component_id", "adapter.onebot"),
+                    "generation_id": executor.get("generation_id"),
+                    "status": row["state"],
+                    "reason": row["error_code"],
+                    "started_at": _iso(row["started_at"] or row["permitted_at"] or row["created_at"]),
+                    "completed_at": _iso(row["observed_at"]),
+                    "references": references,
+                })
+        entries.sort(key=lambda item: (item["started_at"] or "", item["kind"], item["node_id"]))
+        if len(entries) > _MAX_CAUSAL_ENTRIES:
+            truncated = True
+            entries = entries[:_MAX_CAUSAL_ENTRIES]
+        return entries, truncated
+
     async def read(self, ticket, operation_id: str, payload: dict) -> dict:
         limit = payload["limit"]
         conversation_id = payload.get("conversation_id")
@@ -38,6 +279,8 @@ class DispatchTraceStore:
         status = payload.get("status")
         received_after = payload.get("received_after")
         received_before = payload.get("received_before")
+        deep_filter = component_id is not None or generation_id is not None or status is not None
+        scan_limit = min(max(limit * 5, 100), 500) if deep_filter else limit
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "module.read", operation_id, payload)
             roots = await (
@@ -57,22 +300,7 @@ class DispatchTraceStore:
                     "AND (%s::text IS NULL OR i.event_id=%s) "
                     "AND (%s::timestamptz IS NULL OR i.received_at>=%s::timestamptz) "
                     "AND (%s::timestamptz IS NULL OR i.received_at<%s::timestamptz) "
-                    "AND ((%s::text IS NULL AND %s::text IS NULL) OR "
-                    "(b.request_id IS NOT NULL AND (%s::text IS NULL OR b.component_id=%s) "
-                    "AND (%s::text IS NULL OR b.generation_id=%s)) OR EXISTS(SELECT 1 FROM "
-                    "public.bot_message_handler_chain_items x WHERE x.bot_id=i.bot_id "
-                    "AND x.chain_id=h.chain_id AND (%s::text IS NULL OR x.component_id=%s) "
-                    "AND (%s::text IS NULL OR x.generation_id=%s)) OR EXISTS(SELECT 1 FROM "
-                    "public.bot_route_graph_snapshots gs CROSS JOIN LATERAL "
-                    "jsonb_array_elements(gs.snapshot->'nodes') n WHERE gs.bot_id=i.bot_id "
-                    "AND gs.graph_digest=i.graph_digest AND n->>'kind'='runtime_module' "
-                    "AND (%s::text IS NULL OR n->>'component_id'=%s) "
-                    "AND (%s::text IS NULL OR n->>'generation_id'=%s) AND ("
-                    "n->>'component_id'='adapter.onebot' OR "
-                    "(s.command_id IS NOT NULL AND n->>'component_id'='shell.command') OR "
-                    "(t.trigger_id IS NOT NULL AND n->>'component_id'='agent.runtime')))) "
-                    "AND (%s::text IS NULL OR COALESCE(s.status,b.status,h.status,t.status,"
-                    "i.trigger_decision)=%s) ORDER BY i.received_at DESC,i.event_id DESC LIMIT %s",
+                    "ORDER BY i.received_at DESC,i.event_id DESC LIMIT %s",
                     (
                         self.store.bot_id,
                         conversation_id, conversation_id,
@@ -81,12 +309,7 @@ class DispatchTraceStore:
                         event_id, event_id,
                         received_after, received_after,
                         received_before, received_before,
-                        component_id, generation_id,
-                        component_id, component_id, generation_id, generation_id,
-                        component_id, component_id, generation_id, generation_id,
-                        component_id, component_id, generation_id, generation_id,
-                        status, status,
-                        limit,
+                        scan_limit,
                     ),
                 )
             ).fetchall()
@@ -153,6 +376,16 @@ class DispatchTraceStore:
                     (self.store.bot_id, event_ids),
                 )
             ).fetchall()
+            run_ids = sorted({row["claimed_run_id"] for row in agents if row["claimed_run_id"]})
+            agent_tools = []
+            if run_ids:
+                agent_tools = await (
+                    await conn.execute(
+                        "SELECT run_id,tool_call_id,operation_id FROM public.bot_agent_tools "
+                        "WHERE bot_id=%s AND run_id=ANY(%s) ORDER BY run_id,call_index",
+                        (self.store.bot_id, run_ids),
+                    )
+                ).fetchall()
             graph_rows = await (
                 await conn.execute(
                     "SELECT graph_digest,snapshot FROM public.bot_route_graph_snapshots "
@@ -160,15 +393,51 @@ class DispatchTraceStore:
                     (self.store.bot_id, list({row["graph_digest"] for row in roots})),
                 )
             ).fetchall()
+            shell_by_event = {row["event_id"]: row for row in shells}
+            business_by_event = {row["event_id"]: row for row in businesses}
+            chain_by_event = {row["event_id"]: row for row in chains}
+            items_by_chain = {}
+            for row in items:
+                items_by_chain.setdefault(row["chain_id"], []).append(row)
+            agent_by_event = {row["event_id"]: row for row in agents}
+            tools_by_run = {}
+            for row in agent_tools:
+                tools_by_run.setdefault(row["run_id"], []).append(row)
+            causal_by_event = {}
+            for root in roots:
+                seeds = {}
+                cause_roots = []
+                shell = shell_by_event.get(root["event_id"])
+                if shell:
+                    cause_roots.append({"kind": "SHELL_COMMAND", "id": shell["command_id"]})
+                business = business_by_event.get(root["event_id"])
+                if business:
+                    cause = {"kind": "business_command_request", "id": business["request_id"]}
+                    cause_roots.append({"kind": "BUSINESS_COMMAND_REQUEST", "id": business["request_id"]})
+                    if business["call_operation_id"]:
+                        seeds[business["call_operation_id"]] = cause
+                chain = chain_by_event.get(root["event_id"])
+                if chain:
+                    cause_roots.append({"kind": "MESSAGE_HANDLER_CHAIN", "id": chain["chain_id"]})
+                    for item in items_by_chain.get(chain["chain_id"], ()):
+                        if item["call_operation_id"]:
+                            seeds[item["call_operation_id"]] = {
+                                "kind": "message_handler_attempt",
+                                "id": f'{chain["chain_id"]}:{item["route_index"]}:{item["attempt_no"]}',
+                            }
+                agent = agent_by_event.get(root["event_id"])
+                if agent and agent["claimed_run_id"]:
+                    run_id = agent["claimed_run_id"]
+                    cause_roots.append({"kind": "AGENT_RUN", "id": run_id})
+                    for tool in tools_by_run.get(run_id, ()):
+                        seeds[tool["operation_id"]] = {
+                            "kind": "agent_tool", "id": f'{run_id}:{tool["tool_call_id"]}'
+                        }
+                causal_by_event[root["event_id"]] = await self._causal_entries(
+                    conn, seeds, cause_roots
+                )
             await self.control._time(conn, claims)
 
-        shell_by_event = {row["event_id"]: row for row in shells}
-        business_by_event = {row["event_id"]: row for row in businesses}
-        chain_by_event = {row["event_id"]: row for row in chains}
-        items_by_chain = {}
-        for row in items:
-            items_by_chain.setdefault(row["chain_id"], []).append(row)
-        agent_by_event = {row["event_id"]: row for row in agents}
         graph_by_digest = {row["graph_digest"]: row["snapshot"] for row in graph_rows}
 
         def runtime_identity(graph_digest, component):
@@ -275,10 +544,36 @@ class DispatchTraceStore:
                         if agent[key] is not None
                     },
                 })
+            causal_entries, causal_truncated = causal_by_event[root["event_id"]]
+            entries.extend(causal_entries)
             traces.append({
                 **root,
                 "received_at": _iso(root["received_at"]),
                 "entries": entries,
+                "causal_truncated": causal_truncated,
             })
-        return {"filter": payload, "traces": traces}
-
+        if deep_filter:
+            def matches(trace):
+                entries = trace["entries"]
+                if component_id is not None and generation_id is not None:
+                    if not any(
+                        entry["component_id"] == component_id
+                        and entry["generation_id"] == generation_id for entry in entries
+                    ):
+                        return False
+                elif component_id is not None and not any(
+                    entry["component_id"] == component_id for entry in entries
+                ):
+                    return False
+                elif generation_id is not None and not any(
+                    entry["generation_id"] == generation_id for entry in entries
+                ):
+                    return False
+                return status is None or trace["status"] == status or any(
+                    entry["status"] == status for entry in entries
+                )
+            traces = [trace for trace in traces if matches(trace)][:limit]
+        result = {"filter": payload, "traces": traces}
+        if deep_filter and len(roots) == scan_limit:
+            result["candidate_scan_truncated"] = True
+        return result

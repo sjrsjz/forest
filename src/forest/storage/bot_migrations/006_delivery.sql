@@ -22,6 +22,11 @@ CREATE TABLE public.bot_send_intents (
     operation_id text NOT NULL,
     input_digest text NOT NULL,
     root_operation_id text NOT NULL,
+    cause_kind text NOT NULL CHECK (cause_kind IN (
+        'SHELL_COMMAND','CONVERSATION_NOTICE','MESSAGE_HANDLER_CHAIN',
+        'BUSINESS_COMMAND_REQUEST','AGENT_RUN','KERNEL_CALL','DELIVERY_OPERATION'
+    )),
+    cause_id text NOT NULL,
     binding_id text NOT NULL,
     binding_epoch bigint NOT NULL,
     policy_revision bigint NOT NULL,
@@ -72,6 +77,7 @@ CREATE TABLE public.bot_send_parts (
     UNIQUE (bot_id, part_operation_id),
     FOREIGN KEY (bot_id, intent_id) REFERENCES public.bot_send_intents
 );
+CREATE INDEX bot_send_intents_cause ON public.bot_send_intents(bot_id,cause_kind,cause_id);
 CREATE INDEX bot_send_pending ON public.bot_send_parts (bot_id, available_at) WHERE state='PENDING';
 CREATE TABLE public.bot_send_attempts (
     bot_id text NOT NULL,

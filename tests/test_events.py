@@ -14,6 +14,7 @@ import pytest_asyncio
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from forest.dispatch_trace import DispatchTraceStore
 from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.packages import PackageCatalog
@@ -207,7 +208,23 @@ async def test_event_publish_fans_out_and_lost_ack_does_not_repeat_handler(
             count = await (await conn.execute(
                 "SELECT count(*) AS n FROM bot_component_events"
             )).fetchone()
+            entries, truncated = await DispatchTraceStore(event_store)._causal_entries(
+                conn,
+                {"publish-seven": {"kind": "test_operation", "id": "publish-seven"}},
+                [],
+            )
         assert count["n"] == 1
+        assert truncated is False
+        assert {entry["kind"] for entry in entries} >= {
+            "kernel_call", "component_event", "component_event_delivery"
+        }
+        published = next(entry for entry in entries if entry["kind"] == "component_event")
+        assert published["references"]["caused_by"]["kind"] == "kernel_call"
+        deliveries = [
+            entry for entry in entries if entry["kind"] == "component_event_delivery"
+        ]
+        assert len(deliveries) == 2 and all(entry["status"] == "ACKED" for entry in deliveries)
+        assert all(entry["generation_id"] for entry in deliveries)
     finally:
         await kernel.close()
 

@@ -173,6 +173,8 @@ class DeliveryStore:
         command_id: str | None = None,
         control_seq: int | None = None,
         root_operation_id: str | None = None,
+        cause_kind: str = "DELIVERY_OPERATION",
+        cause_id: str | None = None,
         expected_policy_revision: int | None = None,
         adapter_contract: str = "onebot-v11:1",
         parents=(),
@@ -192,6 +194,13 @@ class DeliveryStore:
         _text(conversation_id, "conversation_id")
         root_operation_id = root_operation_id or operation_id
         _text(root_operation_id, "root_operation_id")
+        cause_id = cause_id or operation_id
+        _text(cause_id, "cause_id")
+        if cause_kind not in {
+            "SHELL_COMMAND", "CONVERSATION_NOTICE", "MESSAGE_HANDLER_CHAIN",
+            "BUSINESS_COMMAND_REQUEST", "AGENT_RUN", "KERNEL_CALL", "DELIVERY_OPERATION",
+        }:
+            raise ForestError("INVALID_DELIVERY", "Delivery cause kind is invalid", 422)
         if lane not in ("CHAT", "CONTROL") or adapter_contract != "onebot-v11:1":
             raise ForestError(
                 "INVALID_DELIVERY", "Unsupported delivery lane or adapter contract", 422
@@ -233,6 +242,7 @@ class DeliveryStore:
                 "sequence": sequence,
                 "command_id": command_id,
                 "root": root_operation_id,
+                "cause": [cause_kind, cause_id],
                 "adapter_contract": adapter_contract,
                 "policy": expected_policy_revision,
             }
@@ -283,14 +293,16 @@ class DeliveryStore:
         intent_id = str(uuid4())
         row = await (
             await conn.execute(
-                "INSERT INTO public.bot_send_intents(bot_id,intent_id,operation_id,input_digest,root_operation_id,binding_id,binding_epoch,policy_revision,storage_generation,stream_id,send_lane,conversation_id,response_seq,command_id,control_seq,sequence,reply_route,adapter_contract,lineage_digest) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                "INSERT INTO public.bot_send_intents(bot_id,intent_id,operation_id,input_digest,root_operation_id,cause_kind,cause_id,binding_id,binding_epoch,policy_revision,storage_generation,stream_id,send_lane,conversation_id,response_seq,command_id,control_seq,sequence,reply_route,adapter_contract,lineage_digest) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (
                     self.store.bot_id,
                     intent_id,
                     operation_id,
                     input_digest,
                     root_operation_id,
+                    cause_kind,
+                    cause_id,
                     route["binding_id"],
                     route["binding_epoch"],
                     runtime["policy_revision"],

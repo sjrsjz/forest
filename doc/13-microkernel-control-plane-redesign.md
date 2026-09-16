@@ -110,7 +110,11 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。ShellGate 的保留管理命令先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 
-dispatch trace 是观测记录，不是可编辑“执行链”。当前 `routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图；业务命令和 Handler 条目携带已有 operation、call、result、failure 和 response 引用。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；宿主重启并发布新图后，旧消息仍显示旧代际，不能用当前 head 改写历史。后续仍需把通用 effect/outbox 因果引用纳入同一 trace；控制台始终只读，不能拖拽 trace 改变生产路由。
+dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。它再沿不可变身份扩展 Kernel call 的 parent/root 树、调用发布的 component event、每个 subscriber delivery、调用创建的 component job、Job/Event 实际生成的后续 call，以及外部 SendIntent/SendPart/transport attempt/resolution。每条扩展记录必须携带类型化 `caused_by={kind,id}`；发送意图必须在创建事务中保存 `cause_kind/cause_id`，禁止用 operation 字符串前缀、正文或时间邻近猜测来源。
+
+控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；实际 Kernel call 使用其冻结 Generation；尚未执行的 Event/Job/Delivery 不借用当前 head 伪造代际。外部发送逐 part 显示 `PENDING/CLAIMED/DISPATCHING/SENT/FAILED/UNKNOWN/CANCELLED/SKIPPED`，`UNKNOWN` 只能由显式 resolution 收敛。Trace 只返回身份、状态、摘要、时间和因果引用，不返回消息正文、事件/任务载荷、wire body 或平台 receipt 正文。
+
+单次因果展开必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询的最终实现必须使用以消息根和稳定游标索引的不可变 lineage 事实，不能依赖无界递归或先载入大量消息再在浏览器过滤。当前进程内的有界候选扫描只是重构期投影，命中扫描上限会返回 `candidate_scan_truncated`，不能被文档或 UI 宣称为完整历史结果。控制台始终只读，不能拖拽 trace 改变生产路由。
 
 ## 7. 可扩展管理视图
 
