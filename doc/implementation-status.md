@@ -37,6 +37,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 模块描述符可投影管理操作目录和 `management_ui` 工件；
 - 控制台使用受限 iframe、摘要校验和有界 `MessageChannel` 装载模块 UI；
 - `BindingRuntime` 的若干 Agent/Memory/Scheduler/Shell 便利属性已删除，调用方开始按组件 ID 取能力。
+- `BotModuleRegistry` 已拥有严格生命周期状态；失败模块会清理自身，已启动依赖按逆序排空，关闭失败可重试，控制面不再采用模块自报 `state`。
 
 这只是控制面所有权和传输收口。运行时组合根、完整生命周期切换、路由图与资源归属尚未全部迁完。
 
@@ -47,7 +48,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 ### P0 微内核
 
 - `BindingRuntime` 仍直接构造或协调部分业务模块，需要改为注册表、工厂和生命周期协调器装配；
-- 生命周期必须严格落实 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`，并验证失败隔离、排空、代际原子切换和恢复；
+- 瞬时生命周期状态机及失败清理已落实；仍需接入持久代际发布、健康检查、Contract Router 原子切换、按依赖边故障隔离和进程恢复；
 - command、message handler、service、event、job 必须统一编译进可解释 RouteGraph；
 - dispatch trace 必须按消息、组件、代际和结果查询，且与可编辑业务配置分离；
 - 模块资源所有权仍需继续清理，宿主不得越过契约持有 JobStore、AgentStore 或 Memory 内部对象。

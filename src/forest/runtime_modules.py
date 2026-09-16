@@ -8,8 +8,10 @@ making Agent or Memory kernel types.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from forest.errors import ForestError
@@ -53,6 +55,42 @@ class RuntimeModuleDescriptor:
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
     management_view: RuntimeManagementView | None = None
+
+
+class ModuleLifecycleState(StrEnum):
+    DISCOVERED = "DISCOVERED"
+    VALIDATED = "VALIDATED"
+    PREPARED = "PREPARED"
+    ACTIVE = "ACTIVE"
+    QUIESCING = "QUIESCING"
+    QUIESCENT = "QUIESCENT"
+    STOPPED = "STOPPED"
+    FAILED = "FAILED"
+
+
+_TRANSITIONS = {
+    ModuleLifecycleState.DISCOVERED: {ModuleLifecycleState.VALIDATED},
+    ModuleLifecycleState.VALIDATED: {ModuleLifecycleState.PREPARED, ModuleLifecycleState.FAILED},
+    ModuleLifecycleState.PREPARED: {
+        ModuleLifecycleState.ACTIVE,
+        ModuleLifecycleState.STOPPED,
+        ModuleLifecycleState.FAILED,
+    },
+    ModuleLifecycleState.ACTIVE: {
+        ModuleLifecycleState.QUIESCING,
+        ModuleLifecycleState.FAILED,
+    },
+    ModuleLifecycleState.QUIESCING: {
+        ModuleLifecycleState.QUIESCENT,
+        ModuleLifecycleState.FAILED,
+    },
+    ModuleLifecycleState.QUIESCENT: {
+        ModuleLifecycleState.STOPPED,
+        ModuleLifecycleState.FAILED,
+    },
+    ModuleLifecycleState.FAILED: {ModuleLifecycleState.STOPPED},
+    ModuleLifecycleState.STOPPED: set(),
+}
 
 
 def _memory(platform, _: dict[str, Any]):
@@ -152,12 +190,41 @@ class BotModuleRegistry:
         self.descriptors = tuple(descriptors)
         self.instances: dict[str, Any] = {}
         self.order: list[str] = []
+        self.states: dict[str, ModuleLifecycleState] = {
+            descriptor.component_id: ModuleLifecycleState.DISCOVERED
+            for descriptor in self.descriptors
+        }
+        self._lifecycle_lock = None
+        self._closed = False
         self._build()
+
+    def _transition(self, component_id, state):
+        current = self.states[component_id]
+        if state not in _TRANSITIONS[current]:
+            raise ForestError(
+                "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                f"Module {component_id} cannot move from {current} to {state}",
+            )
+        self.states[component_id] = state
 
     def _build(self) -> None:
         remaining = {item.component_id: item for item in self.descriptors}
         if len(remaining) != len(self.descriptors):
             raise ForestError("DUPLICATE_RUNTIME_MODULE", "Runtime module identities must be unique")
+        for descriptor in self.descriptors:
+            identity = descriptor.component_id
+            if (
+                not identity
+                or len(identity) > 128
+                or identity[0] not in "abcdefghijklmnopqrstuvwxyz0123456789"
+                or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in identity)
+                or len(set(descriptor.requires)) != len(descriptor.requires)
+                or identity in descriptor.requires
+            ):
+                raise ForestError(
+                    "RUNTIME_MODULE_DESCRIPTOR_INVALID", "Runtime module descriptor is invalid"
+                )
+            self._transition(identity, ModuleLifecycleState.VALIDATED)
         while remaining:
             ready = sorted(
                 (item for item in remaining.values()
@@ -170,64 +237,125 @@ class BotModuleRegistry:
                     "Runtime module dependencies are missing or cyclic",
                 )
             for descriptor in ready:
-                instance = descriptor.factory(self.platform, self.instances)
+                try:
+                    instance = descriptor.factory(self.platform, self.instances)
+                except BaseException:
+                    self._transition(descriptor.component_id, ModuleLifecycleState.FAILED)
+                    raise
                 self.instances[descriptor.component_id] = instance
                 self.order.append(descriptor.component_id)
+                self._transition(descriptor.component_id, ModuleLifecycleState.PREPARED)
                 remaining.pop(descriptor.component_id)
 
     def get(self, component_id: str):
         return self.instances[component_id]
 
     async def start(self) -> None:
-        started = []
-        try:
-            for component_id in self.order:
-                instance = self.instances[component_id]
-                start = getattr(instance, "start", None)
-                if start is not None:
-                    await start()
-                started.append(component_id)
-        except BaseException:
-            for component_id in reversed(started):
-                close = getattr(self.instances[component_id], "close", None)
-                if close is not None:
-                    try:
-                        await close()
-                    except Exception:
-                        pass
-            raise
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise ForestError(
+                    "RUNTIME_MODULE_REGISTRY_CLOSED", "Runtime module registry is closed", 503
+                )
+            if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
+                return
+            started = []
+            current = None
+            try:
+                for component_id in self.order:
+                    current = component_id
+                    if self.states[component_id] != ModuleLifecycleState.PREPARED:
+                        raise ForestError(
+                            "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                            "Runtime module graph is not prepared for activation",
+                        )
+                    instance = self.instances[component_id]
+                    start = getattr(instance, "start", None)
+                    if start is not None:
+                        await start()
+                    self._transition(component_id, ModuleLifecycleState.ACTIVE)
+                    started.append(component_id)
+            except BaseException:
+                if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
+                    self._transition(current, ModuleLifecycleState.FAILED)
+                    await self._cleanup(current)
+                for component_id in reversed(started):
+                    await self._quiesce_and_cleanup(component_id)
+                raise
 
     async def close(self) -> list[Exception]:
-        errors = []
-        for component_id in reversed(self.order):
-            close = getattr(self.instances[component_id], "close", None)
-            if close is None:
-                continue
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        async with self._lifecycle_lock:
+            if self._closed:
+                return []
+            errors = []
+            for component_id in reversed(self.order):
+                try:
+                    state = self.states[component_id]
+                    if state == ModuleLifecycleState.ACTIVE:
+                        await self._quiesce_and_cleanup(component_id)
+                    elif state in {
+                        ModuleLifecycleState.PREPARED,
+                        ModuleLifecycleState.FAILED,
+                        ModuleLifecycleState.QUIESCENT,
+                    }:
+                        await self._cleanup(component_id)
+                except Exception as exc:
+                    errors.append(exc)
+            self._closed = not errors and all(
+                state == ModuleLifecycleState.STOPPED for state in self.states.values()
+            )
+            return errors
+
+    async def _quiesce_and_cleanup(self, component_id):
+        self._transition(component_id, ModuleLifecycleState.QUIESCING)
+        quiesce = getattr(self.instances[component_id], "quiesce", None)
+        if quiesce is not None:
             try:
+                await quiesce()
+            except BaseException:
+                self._transition(component_id, ModuleLifecycleState.FAILED)
+                await self._cleanup(component_id)
+                raise
+        self._transition(component_id, ModuleLifecycleState.QUIESCENT)
+        await self._cleanup(component_id)
+
+    async def _cleanup(self, component_id):
+        close = getattr(self.instances[component_id], "close", None)
+        try:
+            if close is not None:
                 await close()
-            except Exception as exc:
-                errors.append(exc)
-        return errors
+        except BaseException:
+            if self.states[component_id] != ModuleLifecycleState.FAILED:
+                self._transition(component_id, ModuleLifecycleState.FAILED)
+            raise
+        self._transition(component_id, ModuleLifecycleState.STOPPED)
 
     def tasks(self):
         return [
             task for component_id in self.order
+            if self.states[component_id] == ModuleLifecycleState.ACTIVE
             if (task := getattr(self.instances[component_id], "task", None)) is not None
         ]
 
     def failures(self):
-        return {
-            component_id: failure
-            for component_id in self.order
-            if (failure := getattr(self.instances[component_id], "failure", None)) is not None
-        }
+        result = {}
+        for component_id in self.order:
+            failure = getattr(self.instances[component_id], "failure", None)
+            if self.states[component_id] == ModuleLifecycleState.FAILED:
+                result[component_id] = failure or "MODULE_LIFECYCLE_FAILED"
+            elif failure is not None:
+                result[component_id] = failure
+        return result
 
     def describe(self) -> list[dict]:
         return [
             {
                 "component_id": descriptor.component_id,
                 "requires": list(descriptor.requires),
-                "state": getattr(self.instances[descriptor.component_id], "state", "ACTIVE"),
+                "state": self.states[descriptor.component_id],
                 "management_view": (
                     {
                         "kind": "trusted-module",

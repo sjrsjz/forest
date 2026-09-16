@@ -6,14 +6,16 @@ from forest.errors import ForestError
 from forest.runtime_modules import (
     OFFICIAL_MODULES,
     BotModuleRegistry,
+    ModuleLifecycleState,
     RuntimeManagementView,
     RuntimeModuleDescriptor,
 )
 
 
 class Module:
-    def __init__(self, name, events, *, fail=False):
+    def __init__(self, name, events, *, fail=False, close_failures=0):
         self.name, self.events, self.fail = name, events, fail
+        self.close_failures = close_failures
         self.task = None
         self.failure = None
 
@@ -24,11 +26,21 @@ class Module:
 
     async def close(self):
         self.events.append(("close", self.name))
+        if self.close_failures:
+            self.close_failures -= 1
+            raise RuntimeError("close:" + self.name)
+
+    async def quiesce(self):
+        self.events.append(("quiesce", self.name))
 
 
-def descriptor(name, requires, events, *, fail=False):
+def descriptor(name, requires, events, *, fail=False, close_failures=0):
     return RuntimeModuleDescriptor(
-        name, tuple(requires), lambda _platform, _modules: Module(name, events, fail=fail)
+        name,
+        tuple(requires),
+        lambda _platform, _modules: Module(
+            name, events, fail=fail, close_failures=close_failures
+        ),
     )
 
 
@@ -41,10 +53,13 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
         descriptor("independent", (), events),
         descriptor("provider", (), events),
     ))
+    assert set(registry.states.values()) == {ModuleLifecycleState.PREPARED}
     assert registry.order.index("provider") < registry.order.index("consumer")
     assert not hasattr(platform, "consumer")
     await registry.start()
+    assert set(registry.states.values()) == {ModuleLifecycleState.ACTIVE}
     await registry.close()
+    assert set(registry.states.values()) == {ModuleLifecycleState.STOPPED}
     starts = [name for action, name in events if action == "start"]
     closes = [name for action, name in events if action == "close"]
     assert closes == list(reversed(starts))
@@ -109,4 +124,41 @@ async def test_registry_rolls_back_started_modules_when_start_fails():
     ))
     with pytest.raises(RuntimeError, match="second"):
         await registry.start()
-    assert events == [("start", "first"), ("start", "second"), ("close", "first")]
+    assert events == [
+        ("start", "first"),
+        ("start", "second"),
+        ("close", "second"),
+        ("quiesce", "first"),
+        ("close", "first"),
+    ]
+    assert set(registry.states.values()) == {ModuleLifecycleState.STOPPED}
+
+
+@pytest.mark.asyncio
+async def test_registry_retries_failed_cleanup_without_restarting_modules():
+    events = []
+    registry = BotModuleRegistry(SimpleNamespace(), (
+        descriptor("owned", (), events, close_failures=1),
+    ))
+    await registry.start()
+    errors = await registry.close()
+    assert len(errors) == 1
+    assert registry.states["owned"] == ModuleLifecycleState.FAILED
+    assert not registry._closed
+    assert await registry.close() == []
+    assert registry.states["owned"] == ModuleLifecycleState.STOPPED
+    assert events == [
+        ("start", "owned"), ("quiesce", "owned"),
+        ("close", "owned"), ("close", "owned"),
+    ]
+
+
+@pytest.mark.parametrize("identity,requires", [
+    ("Agent Runtime", ()),
+    ("agent.runtime", ("agent.runtime",)),
+    ("agent.runtime", ("memory.graph", "memory.graph")),
+])
+def test_registry_rejects_invalid_descriptor_identity_or_edges(identity, requires):
+    with pytest.raises(ForestError) as caught:
+        BotModuleRegistry(SimpleNamespace(), (descriptor(identity, requires, []),))
+    assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"

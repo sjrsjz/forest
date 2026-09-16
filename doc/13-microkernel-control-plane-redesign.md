@@ -56,6 +56,8 @@ flowchart LR
 
 依赖图必须无环。生命周期协调器拓扑准备和启动，反向排空和停止。Contract Router 只向 ACTIVE 代际发布路由；候选代际完成 schema、依赖、能力、状态迁移和健康检查后一次切换。任何组件失败都按依赖边影响实例，不以“平台子任务失败”笼统拖停无关模块。
 
+当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。启动失败会先清理失败模块自身，再按逆依赖序排空已启动模块；关闭失败保留 FAILED 并允许后续关闭重试。下一步仍需把这些瞬时状态接入持久代际发布、健康检查、Contract Router 原子切换和按依赖边隔离的故障策略。
+
 ## 4. 控制台信息架构
 
 顶层导航固定为内核概念：
