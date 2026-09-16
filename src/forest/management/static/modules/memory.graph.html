@@ -1,21 +1,50 @@
 <section id="bot-memory" class="card hidden">
           <h2>图文记忆</h2><p id="memory-config-status" role="status"></p>
           <p class="hint">各群保留独立来源与时间主干，共享当前 Bot 的记忆。文本与图片片段分别嵌入；文本模型也能使用图片召回的来源信息。裁剪不调用摘要模型。模型版本由管理员声明，保存配置不代表已验证远端语义质量。</p>
-          <form id="memory-config"><fieldset id="memory-edit" disabled>
+          <details class="memory-section"><summary>嵌入、媒体与召回配置</summary><form id="memory-config"><fieldset id="memory-edit" disabled>
             <div id="memory-fields" class="columns"></div>
             <div class="actions"><button type="submit">预览记忆变更</button></div>
           </fieldset><div class="actions"><button id="memory-reload" type="button" class="subtle">读取最新记忆配置</button></div></form>
-          <div id="memory-preview" class="hidden"><h3>待应用记忆配置</h3><pre id="memory-diff"></pre><button id="memory-apply" type="button">应用记忆变更</button></div>
-          <h3>记忆服务状态</h3><p class="hint">下方显示运行时观测。费用不确定的请求不会自动重试；尚未完成索引的配置可能还没有可召回记录。</p>
-          <button id="memory-refresh" class="subtle" type="button">刷新记忆状态</button><pre id="memory-state" aria-live="polite"></pre>
-          <h3>来源与遗忘</h3>
-          <p class="hint">这里管理当前 Bot 的全局记忆来源。每项保留原群和作者；首版遗忘整个来源单元。先预览影响，再提交删除。提交会立即禁止召回，正文由后台分批物理清理；已发送到外部的内容无法撤回。</p>
-          <div class="actions"><button id="memory-sources-refresh" class="subtle" type="button">刷新来源</button><button id="memory-sources-more" class="subtle" type="button" disabled>加载更多来源</button><button id="memory-association-plan" class="subtle" type="button" disabled>预览联想两个来源</button><button id="memory-forget-plan" type="button" disabled>预览遗忘所选来源</button></div>
+          <div id="memory-preview" class="hidden"><h3>待应用记忆配置</h3><pre id="memory-diff"></pre><button id="memory-apply" type="button">应用记忆变更</button></div></details>
+          <details class="memory-section"><summary>运行状态与索引队列</summary><p class="hint">费用不确定的请求不会自动重试；尚未完成索引的配置可能还没有可召回记录。</p>
+          <button id="memory-refresh" class="subtle" type="button">刷新记忆状态</button><pre id="memory-state" aria-live="polite"></pre></details>
+          <details class="memory-section" open><summary>来源、主干与遗忘</summary>
+          <p class="hint">按群主干、稳定作者、消息类型、模态和时间组合筛选。结果使用稳定键集分页；每项明确显示群与作者。遗忘先预览再提交，提交后立即禁止召回。</p>
+          <div id="memory-trunks" class="memory-trunks" aria-live="polite"></div>
+          <form id="memory-source-filter" class="memory-filter">
+            <label>群主干<select name="group_source_id"><option value="">全部主干</option></select></label>
+            <label>稳定作者 ID<input name="principal_ref" maxlength="256" placeholder="principal:…"></label>
+            <label>消息类型<select name="kind"><option value="">全部</option><option value="INPUT">群消息</option><option value="REPLY">Bot 回复</option></select></label>
+            <label>模态<select name="has_image"><option value="">全部</option><option value="true">含图片</option><option value="false">纯文本</option></select></label>
+            <label>起始时间<input name="occurred_from" type="datetime-local"></label>
+            <label>结束时间<input name="occurred_before" type="datetime-local"></label>
+            <label>每页<select name="limit"><option>25</option><option>50</option><option>100</option></select></label>
+            <div class="actions"><button type="submit" class="subtle">查询来源</button><button id="memory-source-filter-clear" type="button" class="subtle">清除筛选</button></div>
+          </form>
+          <div class="actions"><button id="memory-sources-refresh" class="subtle" type="button">刷新当前页</button><button id="memory-sources-more" class="subtle" type="button" disabled>下一页</button><button id="memory-association-plan" class="subtle" type="button" disabled>联想两个来源</button><button id="memory-forget-plan" type="button" disabled>遗忘所选来源</button></div>
           <p id="memory-sources-status" role="status"></p><div id="memory-sources" aria-live="polite"></div>
           <div id="memory-association-preview" class="hidden"><h3>待提交联想变更</h3><pre id="memory-association-diff"></pre><button id="memory-association-apply" type="button">提交联想变更</button></div>
           <div id="memory-forget-preview" class="hidden"><h3>待提交遗忘计划</h3><pre id="memory-forget-diff"></pre><button id="memory-forget-apply" type="button">提交遗忘</button></div>
-          <h3>跨主干联想</h3>
-          <p class="hint">联想可跨群聊主干连接两个来源。召回时只做有界一跳扩展，并在每次调用前重新核验来源权限和删除版本。关系变更先预览再提交。</p>
-          <button id="memory-associations-refresh" class="subtle" type="button">刷新联想</button>
+          </details>
+          <details class="memory-section"><summary>跨主干联想与审核</summary>
+          <p class="hint">关系显示审核来源、图作用域、贡献 ID、投影版本和是否跨主干。召回只做有界一跳扩展，并在每次调用前重新核验来源权限和删除版本。</p>
+          <form id="memory-association-filter" class="memory-filter compact">
+            <label>端点来源 ID<input name="source_unit_id" maxlength="256"></label>
+            <label>群主干<select name="group_source_id"><option value="">全部主干</option></select></label>
+            <label>状态<select name="active"><option value="">全部</option><option value="true">有效</option><option value="false">已解除</option></select></label>
+            <label>图投影<select name="projection_state"><option value="">全部</option><option value="CURRENT">已同步</option><option value="PENDING">待发布</option></select></label>
+            <div class="actions"><button type="submit" class="subtle">查询关系</button><button id="memory-association-filter-clear" type="button" class="subtle">清除筛选</button></div>
+          </form>
+          <div class="actions"><button id="memory-associations-refresh" class="subtle" type="button">刷新关系</button><button id="memory-associations-more" class="subtle" type="button" disabled>下一页</button></div>
           <p id="memory-associations-status" role="status"></p><div id="memory-associations" aria-live="polite"></div>
+          </details>
+          <details class="memory-section"><summary>发布关系图：分片、节点与边</summary>
+          <p class="hint">这是 Memory 模块实际发布的图分片，不是人工联想的别名。选择分片可查看固定图版本、覆盖窗口、节点、边、证据来源和分页游标；节点 ID 可用于邻接筛选。</p>
+          <form id="memory-graph-filter" class="memory-filter compact">
+            <label>节点 ID<input name="node_id" maxlength="256" placeholder="留空显示整个分片"></label>
+            <label>每页<select name="limit"><option>50</option><option selected>100</option><option>256</option></select></label>
+          </form>
+          <div class="actions"><button id="memory-graph-scopes-refresh" class="subtle" type="button">刷新图分片</button><button id="memory-graph-scopes-more" class="subtle" type="button" disabled>更多分片</button></div>
+          <p id="memory-graph-status" role="status"></p><div id="memory-graph-scopes" class="memory-trunks" aria-live="polite"></div>
+          <div class="actions"><button id="memory-graph-more" class="subtle" type="button" disabled>更多边</button></div><pre id="memory-graph-view" aria-live="polite"></pre></details>
         </section>

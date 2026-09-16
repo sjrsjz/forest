@@ -102,6 +102,11 @@ async def test_reviewed_association_retract_and_reactivate_publish_only_explicit
         admin, ticket, "memory.association.read", "read", {"limit": 50}
     )
     assert current["associations"][0]["projection_state"] == "CURRENT"
+    relation = current["associations"][0]["relation"]
+    assert relation["kind"] == "ASSOCIATES_WITH"
+    assert relation["origin"] == "REVIEWED_MANUAL"
+    assert relation["cross_trunk"]
+    assert relation["contribution_id"] == created["association_id"] + ":revision:1"
     assert {
         current["associations"][0][side]["source"]["channel_id"]
         for side in ("left", "right")
@@ -109,6 +114,34 @@ async def test_reviewed_association_retract_and_reactivate_publish_only_explicit
     projection = await admin.graph.read(lease, scope.scope_id)
     assert [edge["kind"] for edge in projection["edges"]] == ["ASSOCIATES_WITH"]
     assert {node["ref"]["kind"] for node in projection["nodes"]} == {"SOURCE_UNIT"}
+
+    filtered = await request(
+        admin, ticket, "memory.association.read", "read",
+        {
+            "limit": 50,
+            "source_unit_id": ids[0],
+            "group_source_id": by_group["group-one"]["source"]["group_source_id"],
+            "active": True,
+            "projection_state": "CURRENT",
+        },
+    )
+    assert [item["association_id"] for item in filtered["associations"]] == [
+        created["association_id"]
+    ]
+    scopes = await request(
+        admin, ticket, "memory.association.read", "graph_scopes",
+        {"limit": 25}, lease=lease,
+    )
+    assert scopes["graph_revision"] >= 1
+    assert any(item["scope_id"] == scope.scope_id for item in scopes["scopes"])
+    graph_view = await request(
+        admin, ticket, "memory.association.read", "graph_scope",
+        {"scope_id": scope.scope_id, "graph_revision": scopes["graph_revision"], "limit": 100},
+        lease=lease,
+    )
+    assert graph_view["coverage"]["partition"] == "associations-v1"
+    assert [edge["kind"] for edge in graph_view["edges"]] == ["ASSOCIATES_WITH"]
+    assert graph_view["required_source_refs"]
 
     retract = await request(
         admin,

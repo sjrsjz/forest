@@ -101,11 +101,42 @@ class SourceQuery(Body):
     limit: int = Field(default=50, ge=1, le=100)
     after: str | None = Field(default=None, min_length=1, max_length=512)
     group_source_id: str | None = Field(default=None, min_length=1, max_length=256)
+    principal_ref: str | None = Field(default=None, min_length=1, max_length=256)
+    kind: str | None = Field(default=None, pattern="^(INPUT|REPLY)$")
+    has_image: bool | None = None
+    occurred_from: str | None = Field(default=None, min_length=1, max_length=64)
+    occurred_before: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class TrunkQuery(Body):
+    limit: int = Field(default=50, ge=1, le=100)
+    after: str | None = Field(default=None, min_length=1, max_length=256)
+    platform: str | None = Field(default=None, min_length=1, max_length=256)
+    channel_kind: str | None = Field(default=None, min_length=1, max_length=256)
+    channel_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class AssociationQuery(Body):
     limit: int = Field(default=50, ge=1, le=100)
     after: str | None = Field(default=None, min_length=1, max_length=512)
+    source_unit_id: str | None = Field(default=None, min_length=1, max_length=256)
+    group_source_id: str | None = Field(default=None, min_length=1, max_length=256)
+    active: bool | None = None
+    projection_state: str | None = Field(default=None, pattern="^(CURRENT|PENDING)$")
+
+
+class GraphScopesQuery(Body):
+    limit: int = Field(default=25, ge=1, le=100)
+    after: str | None = Field(default=None, min_length=1, max_length=256)
+    graph_revision: int | None = Field(default=None, ge=0)
+
+
+class GraphScopeQuery(Body):
+    scope_id: str = Field(min_length=1, max_length=256)
+    limit: int = Field(default=100, ge=1, le=256)
+    after: str | None = Field(default=None, min_length=1, max_length=256)
+    graph_revision: int | None = Field(default=None, ge=0)
+    node_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class MemoryManagementContract(ModuleManagementContract):
@@ -114,9 +145,18 @@ class MemoryManagementContract(ModuleManagementContract):
             ModuleOperation("configuration", "query", "memory.config.read", EmptyInput, self.configuration),
             ModuleOperation("status", "query", "memory.read", EmptyInput, self.status),
             ModuleOperation("sources", "query", "memory.forget.read", SourceQuery, self.sources),
+            ModuleOperation("trunks", "query", "memory.forget.read", TrunkQuery, self.trunks),
             ModuleOperation(
                 "associations", "query", "memory.association.read", AssociationQuery,
                 self.associations,
+            ),
+            ModuleOperation(
+                "graph.scopes", "query", "memory.association.read", GraphScopesQuery,
+                self.graph_scopes,
+            ),
+            ModuleOperation(
+                "graph.scope", "query", "memory.association.read", GraphScopeQuery,
+                self.graph_scope,
             ),
             ModuleOperation(
                 "configuration.plan", "action", "memory.config.plan", MemoryPlan, self.plan,
@@ -157,9 +197,30 @@ class MemoryManagementContract(ModuleManagementContract):
             request.ticket, request.operation_id, request.payload
         )
 
+    async def trunks(self, request, body):
+        return await request.module.administration.trunks(
+            request.ticket, request.operation_id, request.payload
+        )
+
     async def associations(self, request, body):
         return await request.module.associations.read(
             request.ticket, request.operation_id, request.payload
+        )
+
+    async def graph_scopes(self, request, body):
+        return await request.module.associations.graph_scopes(
+            request.ticket,
+            request.operation_id,
+            request.payload,
+            lease=request.bot.kernel._authority(),
+        )
+
+    async def graph_scope(self, request, body):
+        return await request.module.associations.graph_scope(
+            request.ticket,
+            request.operation_id,
+            request.payload,
+            lease=request.bot.kernel._authority(),
         )
 
     async def plan(self, request, body):

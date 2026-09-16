@@ -27,8 +27,13 @@ const api = async (path,body,headers) => {
   else if(path.endsWith('/status')) result={state:'DISABLED',last_error:null};
   else if(path.includes('/sources?')) result={deletion_epoch:0,fact_revision:2,
     sources:structuredClone(fixture.sources),next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
+  else if(path.includes('/trunks?')) result={trunks:[
+    {group_source_id:'trunk-one',channel_id:'group-one',stored_sources:1,registered_sources:1,authors:1,image_sources:0},
+    {group_source_id:'trunk-two',channel_id:'group-two',stored_sources:1,registered_sources:1,authors:1,image_sources:0},
+  ],next_after:null};
   else if(path.includes('/associations?')) result={deletion_epoch:0,fact_revision:2,graph_revision:1,
     associations:structuredClone(fixture.associations),next_after:null};
+  else if(path.includes('/graph.scopes?')) result={graph_revision:1,scopes:[],next_after:null};
   else if(path.endsWith('/actions/association.plan')) {
     const endpoints=body.active ? body.source_unit_ids.map(id=>fixture.sources.find(row=>row.source_unit_id===id))
       : [fixture.associations.find(row=>row.association_id===body.association_id).left,
@@ -157,6 +162,9 @@ def main():
                 '#memory-config [name="model"] option[value="Qwen/Qwen3-VL-Embedding-8B"]'
             ).count() == 1
             expect(page.locator("#memory-state")).to_contain_text("DISABLED")
+            assert page.locator(".memory-section[open]").count() == 1
+            collapsed_height = page.evaluate("document.documentElement.scrollHeight")
+            assert collapsed_height < 2500, collapsed_height
             sources = page.locator("#memory-sources input[type=checkbox]")
             expect(sources).to_have_count(2)
             expect(page.locator("#memory-association-plan")).to_be_disabled()
@@ -168,6 +176,7 @@ def main():
             expect(page.locator("#memory-association-preview")).to_be_visible()
             expect(page.locator("#memory-association-diff")).to_contain_text("group-one")
             page.locator("#memory-association-apply").click()
+            page.get_by_text("跨主干联想与审核", exact=True).click()
             expect(page.locator("#memory-associations .memory-association")).to_have_count(1)
             expect(page.locator("#memory-associations-status")).to_contain_text("有效 1")
             page.locator("#memory-associations .memory-association button").click()
@@ -177,6 +186,7 @@ def main():
             expect(page.locator("#memory-associations .memory-association")).to_have_count(1)
             expect(page.locator("#memory-associations-status")).to_contain_text("有效 0")
             expect(page.locator("#memory-associations .memory-association button")).to_contain_text("恢复")
+            page.locator(".memory-section summary").first.click()
             endpoint.fill("https://embedding.example.com/v1/embeddings")
             page.locator('#memory-config [name="enabled"]').check()
             page.locator('#memory-config [name="semantic_associations_enabled"]').uncheck()

@@ -74,7 +74,9 @@ function reply(path, method, body) {
   if (path.endsWith('/runtime-modules/memory.graph/queries/configuration')) return {revision:0,values:memoryDefaults,has_api_key:false,secret_revision:0};
   if (path.endsWith('/runtime-modules/memory.graph/queries/status')) return {configured:false,enabled:false,revision:0,counts:{facets:{},captures:{},attempts:{}},budget:null,errors:{}};
   if (path.includes('/runtime-modules/memory.graph/queries/sources?')) return {deletion_epoch:0,sources:[],next_after:null,scrub:{revoked_payloads:0,pending_links:0}};
+  if (path.includes('/runtime-modules/memory.graph/queries/trunks?')) return {trunks:[],next_after:null};
   if (path.includes('/runtime-modules/memory.graph/queries/associations?')) return {deletion_epoch:0,graph_revision:0,associations:[]};
+  if (path.includes('/runtime-modules/memory.graph/queries/graph.scopes?')) return {graph_revision:0,scopes:[],next_after:null};
   if (path.endsWith('/jobs')) return {jobs:[],occurrences:[]};
   if (path.endsWith('/bindings')) return {bindings:[]};
   if (path.endsWith('/conversations')) return {conversations:[]};

@@ -52,7 +52,10 @@ class MemoryAssociationAdministration:
 
     async def read(self, ticket, operation_id, payload=None):
         payload = _clone({} if payload is None else payload)
-        if set(payload) - {"after", "limit"}:
+        if set(payload) - {
+            "after", "limit", "source_unit_id", "group_source_id", "active",
+            "projection_state",
+        }:
             raise ForestError("MEMORY_ASSOCIATION_INVALID", "Unknown association selector", 422)
         after = payload.get("after", "")
         if after:
@@ -60,22 +63,57 @@ class MemoryAssociationAdministration:
         limit = payload.get("limit", 50)
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ForestError("MEMORY_ASSOCIATION_INVALID", "Association page limit is 1 to 50", 422)
+        source_unit_id = payload.get("source_unit_id")
+        if source_unit_id is not None:
+            _identifier(source_unit_id)
+        group_source_id = payload.get("group_source_id")
+        if group_source_id is not None:
+            _identifier(group_source_id)
+        active = payload.get("active")
+        if active is not None and type(active) is not bool:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Association state is invalid", 422)
+        projection = payload.get("projection_state")
+        if projection not in {None, "CURRENT", "PENDING"}:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Projection state is invalid", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(
                 conn, ticket, "memory.association.read", operation_id, payload
             )
+            scoped_group = await MemoryAdministration(
+                self.messages, control=self.control
+            )._group_scope_in(conn, claims, group_source_id)
             rows = await (await conn.execute(
                 "SELECT h.*,s.operation_revision,latest.published_operation_revision,"
-                "latest.graph_revision AS published_graph_revision "
+                "latest.graph_revision AS published_graph_revision,"
+                "ls.target_group_source_id AS left_group_source_id,"
+                "rs.target_group_source_id AS right_group_source_id "
                 "FROM public.bot_memory_association_heads h "
                 "JOIN public.bot_memory_graph_scopes s USING(bot_id,scope_id) "
+                "JOIN public.bot_memory_source_units lu ON lu.bot_id=h.bot_id "
+                "AND lu.source_unit_id=h.left_source_unit_id "
+                "JOIN public.bot_memory_sources ls ON ls.bot_id=lu.bot_id AND ls.source_id=lu.source_id "
+                "JOIN public.bot_memory_source_units ru ON ru.bot_id=h.bot_id "
+                "AND ru.source_unit_id=h.right_source_unit_id "
+                "JOIN public.bot_memory_sources rs ON rs.bot_id=ru.bot_id AND rs.source_id=ru.source_id "
                 "LEFT JOIN LATERAL (SELECT p.graph_revision,"
                 "(p.snapshot->>'operation_revision')::bigint AS published_operation_revision "
                 "FROM public.bot_memory_graph_publications p WHERE p.bot_id=h.bot_id "
                 "AND p.scope_id=h.scope_id ORDER BY p.revision DESC LIMIT 1) latest ON true "
                 "WHERE h.bot_id=%s AND h.association_id>%s "
+                "AND (%s::text IS NULL OR h.left_source_unit_id=%s OR h.right_source_unit_id=%s) "
+                "AND (%s::text IS NULL OR ls.target_group_source_id=%s OR rs.target_group_source_id=%s) "
+                "AND (%s::boolean IS NULL OR h.active=%s) "
+                "AND (%s::text IS NULL OR (%s='CURRENT' AND latest.published_operation_revision=s.operation_revision) "
+                "OR (%s='PENDING' AND latest.published_operation_revision IS DISTINCT FROM s.operation_revision)) "
                 "ORDER BY h.association_id LIMIT %s",
-                (self.store.bot_id, after, limit),
+                (
+                    self.store.bot_id, after,
+                    source_unit_id, source_unit_id, source_unit_id,
+                    scoped_group, scoped_group, scoped_group,
+                    active, active,
+                    projection, projection, projection,
+                    limit,
+                ),
             )).fetchall()
             ids = sorted({
                 identity for row in rows
@@ -110,6 +148,19 @@ class MemoryAssociationAdministration:
                         else "PENDING"
                     ),
                     "published_graph_revision": row["published_graph_revision"],
+                    "relation": {
+                        "kind": "ASSOCIATES_WITH",
+                        "origin": "REVIEWED_MANUAL",
+                        "scope_id": row["scope_id"],
+                        "contribution_id": row["current_contribution_id"],
+                        "operation_revision": row["operation_revision"],
+                        "published_operation_revision": row["published_operation_revision"],
+                        "cross_trunk": (
+                            row["left_group_source_id"] != row["right_group_source_id"]
+                        ),
+                        "left_group_source_id": row["left_group_source_id"],
+                        "right_group_source_id": row["right_group_source_id"],
+                    },
                     "left": MemoryAdministration._public_source(left),
                     "right": MemoryAdministration._public_source(right),
                 })
@@ -121,6 +172,69 @@ class MemoryAssociationAdministration:
                 "associations": result,
                 "next_after": rows[-1]["association_id"] if len(rows) == limit else None,
             }
+
+    async def graph_scopes(self, ticket, operation_id, payload, *, lease):
+        payload = _clone(payload)
+        if set(payload) - {"after", "limit", "graph_revision"}:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Unknown graph scope selector", 422)
+        after = payload.get("after", "")
+        if after:
+            _identifier(after)
+        limit = payload.get("limit", 25)
+        revision = payload.get("graph_revision")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Graph scope limit is 1 to 100", 422)
+        if revision is not None and (type(revision) is not int or revision < 0):
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Graph revision is invalid", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            claims = await self.control._guard(
+                conn, ticket, "memory.association.read", operation_id, payload
+            )
+            if claims.get("source_conversation_id") is not None:
+                raise ForestError(
+                    "SHELL_SCOPE_DENIED", "Group commands cannot traverse the global memory graph", 403
+                )
+            await self.control._time(conn, claims)
+        result = await self.graph.coverage(
+            lease, graph_revision=revision, after_scope_id=after, limit=limit
+        )
+        result["scopes"] = [dict(row) for row in result["scopes"]]
+        return result
+
+    async def graph_scope(self, ticket, operation_id, payload, *, lease):
+        payload = _clone(payload)
+        if set(payload) - {"scope_id", "after", "limit", "graph_revision", "node_id"}:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Unknown graph edge selector", 422)
+        scope_id = _identifier(payload.get("scope_id"), maximum=256)
+        after = payload.get("after", "")
+        if after:
+            _identifier(after)
+        limit = payload.get("limit", 100)
+        revision = payload.get("graph_revision")
+        node_id = payload.get("node_id")
+        if node_id is not None:
+            _identifier(node_id)
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Graph edge limit is 1 to 256", 422)
+        if revision is not None and (type(revision) is not int or revision < 0):
+            raise ForestError("MEMORY_ASSOCIATION_INVALID", "Graph revision is invalid", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            claims = await self.control._guard(
+                conn, ticket, "memory.association.read", operation_id, payload
+            )
+            if claims.get("source_conversation_id") is not None:
+                raise ForestError(
+                    "SHELL_SCOPE_DENIED", "Group commands cannot traverse the global memory graph", 403
+                )
+            await self.control._time(conn, claims)
+        return await self.graph.read(
+            lease,
+            scope_id,
+            graph_revision=revision,
+            after=after,
+            limit=limit,
+            node_ids=[node_id] if node_id else None,
+        )
 
     async def _plan_target_in(self, conn, payload):
         desired = payload.get("active")

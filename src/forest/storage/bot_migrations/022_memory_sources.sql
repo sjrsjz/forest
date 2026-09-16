@@ -59,6 +59,16 @@ CREATE TABLE public.bot_memory_source_media (
 );
 CREATE INDEX bot_memory_source_observation_cut ON public.bot_memory_source_occurrences(bot_id,conversation_id,ingress_seq,source_unit_id);
 CREATE INDEX bot_memory_source_observation_unit ON public.bot_memory_source_occurrences(bot_id,source_unit_id);
+CREATE INDEX bot_memory_sources_trunk
+    ON public.bot_memory_sources(bot_id,target_group_source_id,source_id);
+CREATE INDEX bot_memory_source_units_browse
+    ON public.bot_memory_source_units(bot_id,occurred_at DESC,source_unit_id DESC);
+CREATE INDEX bot_memory_source_units_source_browse
+    ON public.bot_memory_source_units(bot_id,source_id,occurred_at DESC,source_unit_id DESC);
+CREATE INDEX bot_memory_source_units_principal_browse
+    ON public.bot_memory_source_units(bot_id,principal_ref,occurred_at DESC,source_unit_id DESC);
+CREATE INDEX bot_memory_source_units_kind_browse
+    ON public.bot_memory_source_units(bot_id,kind,occurred_at DESC,source_unit_id DESC);
 CREATE TABLE public.bot_memory_backfill_heads (
     bot_id text NOT NULL REFERENCES public.forest_bot_identity(bot_id),
     kind text NOT NULL CHECK(kind IN ('INPUT','REPLY')), cursor_id text NOT NULL DEFAULT '',

@@ -475,6 +475,14 @@ class MemorySourceStore:
         include_payload=True,
         after_source_unit_id=None,
         group_source_id=None,
+        browse=False,
+        before_occurred_at=None,
+        before_source_unit_id=None,
+        principal_ref=None,
+        source_kind=None,
+        has_image=None,
+        occurred_from=None,
+        occurred_before=None,
     ):
         """Trusted host transaction: global index or frozen conversation candidates.
 
@@ -519,6 +527,25 @@ class MemorySourceStore:
             or not 1 <= len(group_source_id) <= 256
         ):
             raise ValueError("Global source group filter")
+        if type(browse) is not bool or (browse and not paged):
+            raise ValueError("Source browse mode")
+        if browse and after_source_unit_id is not None:
+            raise ValueError("Browse uses a composite cursor")
+        if (before_occurred_at is None) != (before_source_unit_id is None):
+            raise ValueError("Incomplete source browse cursor")
+        if before_source_unit_id is not None and (
+            not isinstance(before_source_unit_id, str)
+            or not 1 <= len(before_source_unit_id) <= 256
+        ):
+            raise ValueError("Source browse cursor")
+        if principal_ref is not None and (
+            not isinstance(principal_ref, str) or not 1 <= len(principal_ref) <= 256
+        ):
+            raise ValueError("Source principal filter")
+        if source_kind not in {None, "INPUT", "REPLY"}:
+            raise ValueError("Source kind filter")
+        if has_image is not None and type(has_image) is not bool:
+            raise ValueError("Source modality filter")
         clock = await self.payloads.lock_in(conn)
         rows = await (
             await conn.execute(
@@ -528,6 +555,13 @@ class MemorySourceStore:
                 "WHERE u.bot_id=%s AND (%s::text IS NULL OR s.target_group_source_id=%s) "
                 "AND (%s::text[] IS NULL OR u.source_unit_id=ANY(%s)) "
                 "AND (%s::text IS NULL OR u.source_unit_id>%s) "
+                "AND (%s::text IS NULL OR u.principal_ref=%s) "
+                "AND (%s::text IS NULL OR u.kind=%s) "
+                "AND (%s::timestamptz IS NULL OR u.occurred_at>=%s) "
+                "AND (%s::timestamptz IS NULL OR u.occurred_at<%s) "
+                "AND (%s::boolean IS NULL OR %s=(EXISTS(SELECT 1 FROM public.bot_memory_source_media m "
+                "WHERE m.bot_id=u.bot_id AND m.source_unit_id=u.source_unit_id))) "
+                "AND (%s::timestamptz IS NULL OR (u.occurred_at,u.source_unit_id)<(%s,%s)) "
                 "AND h.state='ACTIVE' AND u.lineage_complete "
                 "AND EXISTS(SELECT 1 FROM public.bot_payload_bodies b WHERE b.bot_id=h.bot_id AND b.payload_id=h.payload_id) "
                 "AND NOT EXISTS(SELECT 1 FROM public.forest_payload_effective_sources p "
@@ -548,7 +582,9 @@ class MemorySourceStore:
                 "WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id AND (i.context_disposition<>'READABLE' OR (i.origin='job' AND t.status='CANCELLED'))) "
                 "OR EXISTS(SELECT 1 FROM public.bot_memory_source_occurrences o JOIN public.bot_message_echo_aliases a USING(bot_id,event_id) WHERE o.bot_id=d.bot_id AND o.source_unit_id=d.source_unit_id))) "
                 + (
-                    "ORDER BY u.source_unit_id LIMIT %s"
+                    "ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT %s"
+                    if browse
+                    else "ORDER BY u.source_unit_id LIMIT %s"
                     if paged
                     else "ORDER BY u.accepted_at DESC,u.source_unit_id LIMIT %s"
                 ),
@@ -560,6 +596,19 @@ class MemorySourceStore:
                     source_unit_ids,
                     (after_source_unit_id or "") if paged else None,
                     (after_source_unit_id or "") if paged else None,
+                    principal_ref,
+                    principal_ref,
+                    source_kind,
+                    source_kind,
+                    occurred_from,
+                    occurred_from,
+                    occurred_before,
+                    occurred_before,
+                    has_image,
+                    has_image,
+                    before_occurred_at,
+                    before_occurred_at,
+                    before_source_unit_id,
                     conversation is not None,
                     conversation["group_source_id"] if conversation else None,
                     conversation["conversation_id"] if conversation else None,
@@ -626,7 +675,12 @@ class MemorySourceStore:
             # Otherwise a sparse page could hide later authorized sources.
             "next_after": (
                 rows[-1]["source_unit_id"]
-                if paged and len(rows) == limit
+                if paged and not browse and len(rows) == limit
+                else None
+            ),
+            "next_position": (
+                (rows[-1]["occurred_at"], rows[-1]["source_unit_id"])
+                if browse and len(rows) == limit
                 else None
             ),
         }

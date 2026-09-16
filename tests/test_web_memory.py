@@ -195,6 +195,10 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             )
             assert source["source"]["channel_id"] == "31001"
             assert source["author"]["external_user_id"] == "20001"
+            trunks = await get(
+                client, root + "/runtime-modules/memory.graph/queries/trunks?limit=100"
+            )
+            assert {item["channel_id"] for item in trunks["trunks"]} == {"31001", "31002"}
             association = await post(
                 client,
                 root + "/runtime-modules/memory.graph/actions/association.plan",
@@ -231,6 +235,25 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 current_associations["associations"][0][side]["source"]["channel_id"]
                 for side in ("left", "right")
             } == {"31001", "31002"}
+            scopes = await get(
+                client, root + "/runtime-modules/memory.graph/queries/graph.scopes?limit=25"
+            )
+            association_scope = next(
+                item for item in scopes["scopes"]
+                if item["coverage"]["partition"] == "associations-v1"
+            )
+            graph_response = await client.get(
+                root + "/runtime-modules/memory.graph/queries/graph.scope",
+                params={
+                    "scope_id": association_scope["scope_id"],
+                    "graph_revision": scopes["graph_revision"],
+                    "limit": 100,
+                },
+            )
+            assert graph_response.status_code == 200, graph_response.text
+            assert [edge["kind"] for edge in graph_response.json()["edges"]] == [
+                "ASSOCIATES_WITH"
+            ]
             proposal = await post(
                 client,
                 root + "/runtime-modules/memory.graph/actions/forget.plan",

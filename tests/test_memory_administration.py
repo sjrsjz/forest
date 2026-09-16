@@ -65,6 +65,66 @@ async def test_global_source_listing_keeps_group_author_and_multimodal_provenanc
     assert image["source"]["group_source_id"] == image["source"]["target_group_source_id"]
 
 
+async def test_source_browser_composes_filters_uses_bound_cursor_and_lists_trunks(messages):
+    repository, lease, _ = messages
+    receipts = [
+        await receive(repository, lease, 1, group="group-one", user="alice", text="first"),
+        await receive(repository, lease, 2, group="group-one", user="bob", text="second"),
+        await receive(repository, lease, 3, group="group-two", user="alice", text="third"),
+    ]
+    await admit(repository, lease, receipts[0], "admit-group-one")
+    await admit(repository, lease, receipts[2], "admit-group-two")
+    ticket = await _ticket_factory(repository.store, lease)
+    admin = MemoryAdministration(repository)
+
+    first = await request(admin, ticket, "memory.forget.read", "read", {"limit": 1})
+    second = await request(
+        admin, ticket, "memory.forget.read", "read",
+        {"limit": 1, "after": first["next_after"]},
+    )
+    assert first["next_after"]
+    assert first["sources"][0]["source_unit_id"] != second["sources"][0]["source_unit_id"]
+
+    target = next(
+        row for row in (first["sources"] + second["sources"])
+        if row["author"]["external_user_id"] in {"alice", "bob"}
+    )
+    filtered = await request(
+        admin, ticket, "memory.forget.read", "read",
+        {
+            "limit": 20,
+            "group_source_id": target["source"]["group_source_id"],
+            "principal_ref": target["author"]["principal_ref"],
+            "kind": "INPUT",
+            "has_image": False,
+            "occurred_from": "2026-09-12T00:00:00Z",
+            "occurred_before": "2026-09-14T00:00:00Z",
+        },
+    )
+    assert filtered["sources"]
+    assert all(
+        row["source"]["group_source_id"] == target["source"]["group_source_id"]
+        and row["author"]["principal_ref"] == target["author"]["principal_ref"]
+        and row["kind"] == "INPUT"
+        and all(part["type"] != "image" for part in row["parts"])
+        for row in filtered["sources"]
+    )
+    with pytest.raises(ForestError) as mismatch:
+        await request(
+            admin, ticket, "memory.forget.read", "read",
+            {"limit": 1, "after": first["next_after"], "kind": "REPLY"},
+        )
+    assert mismatch.value.code == "MEMORY_SOURCE_CURSOR_INVALID"
+
+    trunks = await request(
+        admin, ticket, "memory.forget.read", "trunks", {"limit": 20}
+    )
+    assert {row["channel_id"] for row in trunks["trunks"]} == {"group-one", "group-two"}
+    one = next(row for row in trunks["trunks"] if row["channel_id"] == "group-one")
+    assert one["registered_sources"] == one["stored_sources"] == 2
+    assert one["authors"] == 2 and one["inputs"] == 2
+
+
 async def test_reviewed_forget_is_atomic_replayable_and_immediately_suppressed(messages):
     repository, lease, _ = messages
     receipt = await receive(repository, lease, 1, text="erase me")

@@ -46,10 +46,11 @@ const groups = [
 export function memoryPanel(api, busy, notice) {
   const form = $('memory-config');
   let bot = null, epoch = 0, edit = 0, readSeq = 0, statusSeq = 0, sourceSeq = 0;
-  let associationSeq = 0;
+  let associationSeq = 0, trunkSeq = 0, graphSeq = 0;
   let configuration = null, pending = null, planKey = null, applyKey = null;
   let sourceView = null, forgetPlan = null, forgetPlanKey = null, forgetApplyKey = null;
   let associationView = null, associationPlan = null;
+  let graphScopesView = null, graphView = null;
   let associationPlanKey = null, associationApplyKey = null;
   const replace = replacementButton($('memory-config-status'), 'memory-replace-configuration', () => {
     if (!configuration?.defaults) return;
@@ -88,12 +89,16 @@ export function memoryPanel(api, busy, notice) {
     $('memory-preview').classList.add('hidden');
   }
   function reset() {
-    epoch++; readSeq++; statusSeq++; sourceSeq++; associationSeq++;
+    epoch++; readSeq++; statusSeq++; sourceSeq++; associationSeq++; trunkSeq++; graphSeq++;
     bot = null; configuration = null;
     clearPlan(); form.reset(); $('memory-edit').disabled = true;
     $('bot-memory').classList.add('hidden'); $('memory-state').textContent = '';
     $('memory-config-status').textContent = '';
     clearForget(); $('memory-sources').replaceChildren(); $('memory-sources-status').textContent = '';
+    $('memory-trunks').replaceChildren(); $('memory-source-filter').reset();
+    $('memory-association-filter').reset();
+    $('memory-graph-scopes').replaceChildren(); $('memory-graph-view').textContent = '';
+    $('memory-graph-status').textContent = ''; $('memory-graph-more').disabled = true;
     $('memory-sources-more').disabled = true;
     clearAssociations();
     replace.classList.add('hidden');
@@ -114,6 +119,7 @@ export function memoryPanel(api, busy, notice) {
     $('memory-association-plan').disabled = true;
     $('memory-associations').replaceChildren();
     $('memory-associations-status').textContent = '';
+    $('memory-associations-more').disabled = true;
   }
   function selectedSourceIds() {
     return [...$('memory-sources').querySelectorAll('input:checked')].map(item => item.value);
@@ -133,6 +139,43 @@ export function memoryPanel(api, busy, notice) {
     const text = (row.parts || []).filter(part => part.type === 'text').map(part => part.text).join(' ').trim();
     const images = (row.parts || []).filter(part => part.type === 'image').length;
     return `${group} · ${who} · ${row.kind} · ${text.slice(0, 180) || (images ? `${images} 张图片` : '无文本预览')}`;
+  }
+  function queryFrom(form) {
+    const query = new URLSearchParams();
+    for (const [name, raw] of new FormData(form)) {
+      const value = String(raw).trim();
+      if (!value) continue;
+      query.set(name, name.startsWith('occurred_') ? new Date(value).toISOString() : value);
+    }
+    return query;
+  }
+  function updateTrunkSelect(id, trunks) {
+    const select = $(id).elements.group_source_id, selected = select.value;
+    select.replaceChildren(new Option('全部主干', ''));
+    for (const trunk of trunks) {
+      select.append(new Option(`${trunk.channel_id} · ${trunk.stored_sources} 条`, trunk.group_source_id));
+    }
+    if ([...select.options].some(option => option.value === selected)) select.value = selected;
+  }
+  function renderTrunks(result) {
+    const root = $('memory-trunks'); root.replaceChildren();
+    for (const trunk of result.trunks) {
+      const item = document.createElement('div'); item.className = 'memory-trunk';
+      const title = document.createElement('strong'); title.textContent = trunk.channel_id;
+      const identity = document.createElement('code'); identity.textContent = trunk.group_source_id;
+      const detail = document.createElement('small');
+      detail.textContent = `${trunk.stored_sources}/${trunk.registered_sources} 可用 · ${trunk.authors} 位作者 · ${trunk.image_sources} 条含图`;
+      item.append(title, identity, detail); root.append(item);
+    }
+    updateTrunkSelect('memory-source-filter', result.trunks);
+    updateTrunkSelect('memory-association-filter', result.trunks);
+  }
+  async function refreshTrunks() {
+    if (!bot) return;
+    const own = epoch, seq = ++trunkSeq, prefix = path();
+    const result = await api(`${prefix}/queries/trunks?limit=100`);
+    if (!valid(own) || seq !== trunkSeq) return;
+    renderTrunks(result);
   }
   function renderSources(result, append = false) {
     const root = $('memory-sources');
@@ -160,21 +203,29 @@ export function memoryPanel(api, busy, notice) {
   async function refreshSources(after = null, append = false) {
     if (!bot) return;
     const own = epoch, seq = ++sourceSeq, prefix = path();
-    const cursor = after ? `&after=${encodeURIComponent(after)}` : '';
-    const result = await api(`${prefix}/queries/sources?limit=50${cursor}`);
+    const query = queryFrom($('memory-source-filter'));
+    if (after) query.set('after', after);
+    const result = await api(`${prefix}/queries/sources?${query}`);
     if (!valid(own) || seq !== sourceSeq) return;
     renderSources(result, append);
   }
-  function renderAssociations(result) {
-    associationView = result;
-    const root = $('memory-associations'); root.replaceChildren();
+  function renderAssociations(result, append = false) {
+    const root = $('memory-associations');
+    if (append && associationView && associationView.deletion_epoch === result.deletion_epoch) {
+      associationView = {...result, associations:[...associationView.associations, ...result.associations]};
+    } else {
+      associationView = result; root.replaceChildren();
+    }
     for (const row of result.associations) {
       const item = document.createElement('div'); item.className = 'memory-association';
       const description = document.createElement('p');
       description.textContent = `${sourceLabel(row.left)} ↔ ${sourceLabel(row.right)}`;
       const identity = document.createElement('code'); identity.textContent = row.association_id;
       const state = document.createElement('span');
-      state.textContent = ` · 版本 ${row.revision} · ${row.active ? '有效' : '已解除'} · ${row.projection_state === 'CURRENT' ? '图已同步' : '等待后台发布'}`;
+      const relation = row.relation || {};
+      state.textContent = ` · 版本 ${row.revision} · ${row.active ? '有效' : '已解除'} · ${row.projection_state === 'CURRENT' ? '图已同步' : '等待后台发布'} · ${relation.cross_trunk ? '跨主干' : '同主干'}`;
+      const provenance = document.createElement('small');
+      provenance.textContent = `审核关系 ${relation.kind || row.relation_key} · scope ${relation.scope_id || '-'} · contribution ${relation.contribution_id || '-'} · published ${relation.published_operation_revision ?? '-'}/${relation.operation_revision ?? '-'}`;
       const remove = document.createElement('button'); remove.type = 'button';
       remove.className = 'subtle';
       remove.textContent = row.active ? '预览解除联想' : '预览恢复联想';
@@ -189,17 +240,79 @@ export function memoryPanel(api, busy, notice) {
           active:true,
           source_unit_ids:[row.left.source_unit_id, row.right.source_unit_id],
         }, remove));
-      item.append(description, identity, state, document.createElement('br'), remove); root.append(item);
+      item.append(description, identity, state, document.createElement('br'), provenance, document.createElement('br'), remove); root.append(item);
     }
+    $('memory-associations-more').disabled = !associationView.next_after;
     $('memory-associations-status').textContent =
-      `图版本 ${result.graph_revision} · 关系记录 ${result.associations.length} · 有效 ${result.associations.filter(row => row.active).length}`;
+      `图版本 ${associationView.graph_revision} · 已加载关系 ${associationView.associations.length} · 有效 ${associationView.associations.filter(row => row.active).length}`;
   }
-  async function refreshAssociations() {
+  async function refreshAssociations(after = null, append = false) {
     if (!bot) return;
     const own = epoch, seq = ++associationSeq, prefix = path();
-    const result = await api(`${prefix}/queries/associations?limit=50`);
+    const query = queryFrom($('memory-association-filter')); query.set('limit', '50');
+    if (after) query.set('after', after);
+    const result = await api(`${prefix}/queries/associations?${query}`);
     if (!valid(own) || seq !== associationSeq) return;
-    renderAssociations(result);
+    renderAssociations(result, append);
+  }
+  function renderGraphScopes(result, append = false) {
+    const root = $('memory-graph-scopes');
+    if (append && graphScopesView?.graph_revision === result.graph_revision) {
+      graphScopesView = {...result, scopes:[...graphScopesView.scopes, ...result.scopes]};
+    } else {
+      graphScopesView = result; root.replaceChildren();
+    }
+    for (const scope of result.scopes) {
+      const item = document.createElement('div'); item.className = 'memory-trunk';
+      const button = document.createElement('button'); button.type = 'button';
+      button.className = 'memory-scope-button';
+      const title = document.createElement('strong'); title.textContent = `分片修订 ${scope.revision}`;
+      const identity = document.createElement('code'); identity.textContent = scope.scope_id;
+      const detail = document.createElement('small');
+      detail.textContent = `${scope.coverage.partition} · 发布于图版本 ${scope.graph_revision}`;
+      button.append(title, identity, detail); item.append(button); root.append(item);
+      button.addEventListener('click', () => busy(button, () => refreshGraphScope(
+        scope.scope_id, graphScopesView.graph_revision,
+      )));
+    }
+    $('memory-graph-scopes-more').disabled = !graphScopesView.next_after;
+    $('memory-graph-status').textContent = `固定图版本 ${graphScopesView.graph_revision} · 已加载 ${graphScopesView.scopes.length} 个分片`;
+  }
+  async function refreshGraphScopes(after = null, append = false) {
+    if (!bot) return;
+    const own = epoch, seq = ++graphSeq, prefix = path();
+    const query = new URLSearchParams({limit:'25'});
+    if (after) {
+      query.set('after', after);
+      query.set('graph_revision', String(graphScopesView.graph_revision));
+    }
+    const result = await api(`${prefix}/queries/graph.scopes?${query}`);
+    if (!valid(own) || seq !== graphSeq) return;
+    renderGraphScopes(result, append);
+  }
+  async function refreshGraphScope(scopeId, graphRevision, after = null, append = false) {
+    if (!bot) return;
+    const own = epoch, seq = ++graphSeq, prefix = path();
+    const query = queryFrom($('memory-graph-filter'));
+    query.set('scope_id', scopeId); query.set('graph_revision', String(graphRevision));
+    if (after) query.set('after', after);
+    const result = await api(`${prefix}/queries/graph.scope?${query}`);
+    if (!valid(own) || seq !== graphSeq) return;
+    graphView = append && graphView?.scope_id === result.scope_id
+      ? {...result, edges:[...graphView.edges, ...result.edges], nodes:[...graphView.nodes, ...result.nodes]}
+      : result;
+    $('memory-graph-more').disabled = !graphView.next_after;
+    $('memory-graph-view').textContent = JSON.stringify({
+      scope_id:graphView.scope_id,
+      graph_revision:graphView.graph_revision,
+      scope_revision:graphView.scope_revision,
+      coverage:graphView.coverage,
+      halos:graphView.halos,
+      required_source_refs:graphView.required_source_refs,
+      nodes:graphView.nodes,
+      edges:graphView.edges,
+      next_after:graphView.next_after,
+    }, null, 2);
   }
   async function previewAssociation(payload, button) {
     if (!bot) return;
@@ -303,12 +416,40 @@ export function memoryPanel(api, busy, notice) {
   $('memory-reload').addEventListener('click', event => busy(event.currentTarget, read));
   $('memory-refresh').addEventListener('click', event => busy(event.currentTarget, refresh));
   $('memory-sources-refresh').addEventListener('click', event => busy(event.currentTarget, refreshSources));
+  $('memory-source-filter').addEventListener('submit', event => {
+    event.preventDefault(); busy(event.submitter, refreshSources);
+  });
+  $('memory-source-filter-clear').addEventListener('click', event => {
+    $('memory-source-filter').reset(); busy(event.currentTarget, refreshSources);
+  });
   $('memory-sources-more').addEventListener('click', event => {
     const after = sourceView?.next_after;
     if (after) busy(event.currentTarget, () => refreshSources(after, true));
   });
   $('memory-associations-refresh').addEventListener('click', event =>
     busy(event.currentTarget, refreshAssociations));
+  $('memory-association-filter').addEventListener('submit', event => {
+    event.preventDefault(); busy(event.submitter, refreshAssociations);
+  });
+  $('memory-association-filter-clear').addEventListener('click', event => {
+    $('memory-association-filter').reset(); busy(event.currentTarget, refreshAssociations);
+  });
+  $('memory-associations-more').addEventListener('click', event => {
+    const after = associationView?.next_after;
+    if (after) busy(event.currentTarget, () => refreshAssociations(after, true));
+  });
+  $('memory-graph-scopes-refresh').addEventListener('click', event =>
+    busy(event.currentTarget, refreshGraphScopes));
+  $('memory-graph-scopes-more').addEventListener('click', event => {
+    const after = graphScopesView?.next_after;
+    if (after) busy(event.currentTarget, () => refreshGraphScopes(after, true));
+  });
+  $('memory-graph-more').addEventListener('click', event => {
+    const after = graphView?.next_after;
+    if (after) busy(event.currentTarget, () => refreshGraphScope(
+      graphView.scope_id, graphView.graph_revision, after, true,
+    ));
+  });
   $('memory-association-plan').addEventListener('click', event => {
     if (!sourceView) return;
     const ids = selectedSourceIds();
@@ -375,16 +516,22 @@ export function memoryPanel(api, busy, notice) {
     const own = epoch;
     await read();
     if (valid(own)) await refresh();
+    if (valid(own)) await refreshTrunks();
     if (valid(own)) await refreshSources();
     if (valid(own)) await refreshAssociations();
+    if (valid(own)) await refreshGraphScopes();
   }
   function invalidateContent(scope) {
     if (!bot || scope !== path()) return;
-    epoch++; readSeq++; statusSeq++; sourceSeq++; associationSeq++;
+    epoch++; readSeq++; statusSeq++; sourceSeq++; associationSeq++; trunkSeq++; graphSeq++;
     configuration = null; clearPlan();
     clearConfiguration(form); $('memory-edit').disabled = true;
     $('memory-diff').replaceChildren(); $('memory-state').replaceChildren();
     clearForget(); $('memory-sources').replaceChildren(); $('memory-sources-status').textContent = '';
+    $('memory-trunks').replaceChildren();
+    graphScopesView = null; graphView = null;
+    $('memory-graph-scopes').replaceChildren(); $('memory-graph-view').textContent = '';
+    $('memory-graph-status').textContent = ''; $('memory-graph-more').disabled = true;
     $('memory-sources-more').disabled = true;
     clearAssociations();
     $('memory-config-status').textContent = '相关内容已不可用，请重新加载当前配置。';

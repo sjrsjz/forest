@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from psycopg.types.json import Jsonb
@@ -28,6 +30,57 @@ def _identifier(value, *, maximum=256):
             or any(ord(char) < 32 for char in value)):
         raise ForestError("MEMORY_MANAGEMENT_INVALID", "Memory identifier is invalid", 422)
     return value
+
+
+def _instant(value, name):
+    if value is None or isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+    else:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        raise ForestError("MEMORY_MANAGEMENT_INVALID", f"{name} must include a timezone", 422)
+    return parsed.astimezone(timezone.utc)
+
+
+def _source_cursor(filters, position):
+    occurred_at, source_unit_id = position
+    value = {
+        "v": 1,
+        "filters": digest_json(filters),
+        "occurred_at": occurred_at.isoformat(),
+        "source_unit_id": source_unit_id,
+    }
+    raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _read_source_cursor(value, filters):
+    if value is None:
+        return None, None
+    _identifier(value, maximum=512)
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode())
+        if (
+            set(decoded) != {"v", "filters", "occurred_at", "source_unit_id"}
+            or decoded["v"] != 1
+            or decoded["filters"] != digest_json(filters)
+        ):
+            raise ValueError
+        source_unit_id = _identifier(decoded["source_unit_id"])
+        occurred_at = _instant(decoded["occurred_at"], "Source cursor timestamp")
+    except (ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError, binascii.Error):
+        raise ForestError(
+            "MEMORY_SOURCE_CURSOR_INVALID",
+            "Source cursor is invalid or belongs to different filters",
+            422,
+        ) from None
+    return occurred_at, source_unit_id
 
 
 class MemoryAdministration:
@@ -88,24 +141,51 @@ class MemoryAdministration:
 
     async def read(self, ticket, operation_id, payload=None):
         payload = _clone({} if payload is None else payload)
-        if set(payload) - {"after", "limit", "group_source_id"}:
+        allowed = {
+            "after", "limit", "group_source_id", "principal_ref", "kind", "has_image",
+            "occurred_from", "occurred_before",
+        }
+        if set(payload) - allowed:
             raise ForestError("MEMORY_MANAGEMENT_INVALID", "Unknown memory source selector", 422)
         after = payload.get("after")
-        if after is not None:
-            _identifier(after)
         limit = payload.get("limit", 50)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ForestError("MEMORY_MANAGEMENT_INVALID", "Source page limit is 1 to 100", 422)
         group = payload.get("group_source_id")
         if group is not None:
             _identifier(group)
+        principal = payload.get("principal_ref")
+        if principal is not None:
+            _identifier(principal)
+        kind = payload.get("kind")
+        if kind not in {None, "INPUT", "REPLY"}:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Source kind is invalid", 422)
+        has_image = payload.get("has_image")
+        if has_image is not None and type(has_image) is not bool:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Image filter is invalid", 422)
+        occurred_from = _instant(payload["occurred_from"], "Start time") if payload.get("occurred_from") else None
+        occurred_before = _instant(payload["occurred_before"], "End time") if payload.get("occurred_before") else None
+        if occurred_from and occurred_before and occurred_from >= occurred_before:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Start time must precede end time", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(
                 conn, ticket, "memory.forget.read", operation_id, payload
             )
             group = await self._group_scope_in(conn, claims, group)
+            filters = {
+                "group_source_id": group,
+                "principal_ref": principal,
+                "kind": kind,
+                "has_image": has_image,
+                "occurred_from": occurred_from.isoformat() if occurred_from else None,
+                "occurred_before": occurred_before.isoformat() if occurred_before else None,
+            }
+            before_time, before_id = _read_source_cursor(after, filters)
             view = await self.sources.authorize_sources_in(
-                conn, group_source_id=group, after_source_unit_id=after,
+                conn, group_source_id=group, browse=True,
+                before_occurred_at=before_time, before_source_unit_id=before_id,
+                principal_ref=principal, source_kind=kind, has_image=has_image,
+                occurred_from=occurred_from, occurred_before=occurred_before,
                 limit=limit, include_payload=True,
             )
             recent = await (await conn.execute(
@@ -132,10 +212,77 @@ class MemoryAdministration:
                 "deletion_epoch": view["deletion_epoch"],
                 "fact_revision": view["fact_revision"],
                 "group_source_id": group,
+                "filters": filters,
                 "sources": sources,
-                "next_after": view["next_after"],
+                "next_after": (
+                    _source_cursor(filters, view["next_position"])
+                    if view["next_position"] else None
+                ),
                 "scrub": {"revoked_payloads": revoked["count"], "pending_links": links["count"]},
                 "recent": [{**row, "created_at": row["created_at"].isoformat()} for row in recent],
+            }
+
+    async def trunks(self, ticket, operation_id, payload=None):
+        payload = _clone({} if payload is None else payload)
+        if set(payload) - {"after", "limit", "platform", "channel_kind", "channel_id"}:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Unknown memory trunk selector", 422)
+        after = payload.get("after", "")
+        if after:
+            _identifier(after)
+        limit = payload.get("limit", 50)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ForestError("MEMORY_MANAGEMENT_INVALID", "Trunk page limit is 1 to 100", 422)
+        selectors = {}
+        for key in ("platform", "channel_kind", "channel_id"):
+            value = payload.get(key)
+            if value is not None:
+                selectors[key] = _identifier(value)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            claims = await self.control._guard(
+                conn, ticket, "memory.forget.read", operation_id, payload
+            )
+            group = await self._group_scope_in(conn, claims)
+            rows = await (await conn.execute(
+                "SELECT s.target_group_source_id AS group_source_id,min(s.platform) AS platform,"
+                "min(s.realm_id) AS realm_id,min(s.channel_kind) AS channel_kind,"
+                "min(s.channel_id) AS channel_id,count(u.source_unit_id) AS registered_sources,"
+                "count(u.source_unit_id) FILTER (WHERE h.state='ACTIVE' AND EXISTS("
+                "SELECT 1 FROM public.bot_payload_bodies b WHERE b.bot_id=h.bot_id "
+                "AND b.payload_id=h.payload_id)) AS stored_sources,"
+                "count(DISTINCT u.principal_ref) AS authors,"
+                "count(u.source_unit_id) FILTER (WHERE u.kind='INPUT') AS inputs,"
+                "count(u.source_unit_id) FILTER (WHERE u.kind='REPLY') AS replies,"
+                "count(u.source_unit_id) FILTER (WHERE EXISTS(SELECT 1 "
+                "FROM public.bot_memory_source_media m WHERE m.bot_id=u.bot_id "
+                "AND m.source_unit_id=u.source_unit_id)) AS image_sources,"
+                "max(u.occurred_at) AS latest_occurred_at "
+                "FROM public.bot_memory_sources s "
+                "LEFT JOIN public.bot_memory_source_units u USING(bot_id,source_id) "
+                "LEFT JOIN public.bot_payload_headers h ON h.bot_id=u.bot_id AND h.payload_id=u.payload_id "
+                "WHERE s.bot_id=%s AND s.source_kind='GROUP' "
+                "AND s.target_group_source_id>%s "
+                "AND (%s::text IS NULL OR s.target_group_source_id=%s) "
+                "AND (%s::text IS NULL OR s.platform=%s) "
+                "AND (%s::text IS NULL OR s.channel_kind=%s) "
+                "AND (%s::text IS NULL OR s.channel_id=%s) "
+                "GROUP BY s.target_group_source_id ORDER BY s.target_group_source_id LIMIT %s",
+                (
+                    self.store.bot_id, after, group, group,
+                    selectors.get("platform"), selectors.get("platform"),
+                    selectors.get("channel_kind"), selectors.get("channel_kind"),
+                    selectors.get("channel_id"), selectors.get("channel_id"), limit,
+                ),
+            )).fetchall()
+            await self.control._time(conn, claims)
+            trunks = []
+            for row in rows:
+                item = dict(row)
+                if item["latest_occurred_at"] is not None:
+                    item["latest_occurred_at"] = item["latest_occurred_at"].isoformat()
+                trunks.append(item)
+            return {
+                "trunks": trunks,
+                "next_after": rows[-1]["group_source_id"] if len(rows) == limit else None,
             }
 
     async def plan(self, ticket, operation_id, payload):

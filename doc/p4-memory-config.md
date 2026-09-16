@@ -28,9 +28,18 @@
 - `POST .../runtime-modules/memory.graph/actions/configuration.plan`
 - `POST .../runtime-modules/memory.graph/actions/configuration.apply`
 - `GET .../runtime-modules/memory.graph/queries/status`
+- `GET .../runtime-modules/memory.graph/queries/trunks`
+- `GET .../runtime-modules/memory.graph/queries/sources`
+- `GET .../runtime-modules/memory.graph/queries/associations`
+- `GET .../runtime-modules/memory.graph/queries/graph.scopes`
+- `GET .../runtime-modules/memory.graph/queries/graph.scope`
 
 这些 operation 由 Memory 模块的 `forest.module-management/1` 契约声明，通用宿主路由不含 Memory 分支。所有调用经过当前会话、Bot 可见性和签名权限；action 另需 CSRF 与稳定 `Idempotency-Key`。签名 ticket 不交给浏览器。运行时状态从 `ModuleRegistry` 解析 `memory.graph` 后调用模块的 `inspect`，不拼造后端成功状态。配置密钥在签名权限载荷中只保留变化标志和不可逆摘要，原文只进入凭据加密路径。
 
 界面分别跟踪 Bot 选择、草稿编辑、读取序号与提交身份。读取、预览、应用的旧响应不能覆盖更新的草稿或另一个 Bot 的表单；密钥草稿也遵循这一规则。版本冲突后需要读取最新配置再预览，不自动把旧草稿应用到新版本。
+
+来源浏览按群主干、稳定 `principal_ref`、INPUT/REPLY、是否含图片和时间范围组合筛选。分页游标固定 `(occurred_at, source_unit_id)` 并绑定规范化筛选摘要；把旧游标用于另一组筛选会被拒绝。数据库基线为时间、来源、作者和类型建立浏览索引，正文仅按每页上限解密。主干目录给出注册/可用来源、作者、输入/回复和含图数量。
+
+人工联想查询可按端点、主干、启用状态和图投影状态筛选，并返回 `ASSOCIATES_WITH` 的审核来源、scope、贡献 ID、当前/已发布 operation revision 与跨主干标记。`graph.scopes` 和 `graph.scope` 读取实际发布图的固定 revision、覆盖窗口、节点、边和所需来源引用；群聊 Shell 作用域不能借此遍历 Bot 全局图。它们是有界只读查询，不接受 SQL、任意 URL 或客户端提供的权限名。
 
 `tests/test_memory_config.py` 覆盖真实 PostgreSQL CAS、幂等重放、凭据轮换、计划所属主体和 issuer、部署身份、policy 和最终许可串行。`tests/test_web_memory.py` 覆盖 HTTP 配置、跨 Bot 隔离、重启与鉴权。`scripts/smoke_memory_panel.py` 使用实际页面和 Edge，加受控 API 响应顺序验证草稿保护；该浏览器测试不代替真实 Provider 服务验收。

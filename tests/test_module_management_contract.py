@@ -47,6 +47,26 @@ def test_query_contract_normalizes_transport_strings_before_signing():
     assert body.limit == 50
     assert payload == {"limit": 50, "group_source_id": "group:42"}
 
+    operation, body, payload = contract.prepare(
+        "sources",
+        "query",
+        {
+            "limit": "25", "kind": "INPUT", "has_image": "true",
+            "occurred_from": "2026-09-01T00:00:00Z",
+        },
+    )
+    assert operation.authority == "memory.forget.read"
+    assert body.has_image is True
+    assert payload == {
+        "limit": 25, "kind": "INPUT", "has_image": True,
+        "occurred_from": "2026-09-01T00:00:00Z",
+    }
+    operation, _, payload = contract.prepare(
+        "trunks", "query", {"limit": "10", "channel_id": "933179609"}
+    )
+    assert operation.authority == "memory.forget.read"
+    assert payload == {"limit": 10, "channel_id": "933179609"}
+
 
 def test_contract_rejects_unknown_kind_and_returns_serializable_validation_details():
     contract = MemoryManagementContract()

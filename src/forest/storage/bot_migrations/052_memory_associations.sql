@@ -23,6 +23,12 @@ CREATE TRIGGER bot_memory_association_head_identity
     BEFORE UPDATE OR DELETE ON public.bot_memory_association_heads
     FOR EACH ROW EXECUTE FUNCTION public.forest_agent_fixed_fields(
         '{revision,active,current_contribution_id}');
+CREATE INDEX bot_memory_association_left_browse
+    ON public.bot_memory_association_heads(bot_id,left_source_unit_id,association_id);
+CREATE INDEX bot_memory_association_right_browse
+    ON public.bot_memory_association_heads(bot_id,right_source_unit_id,association_id);
+CREATE INDEX bot_memory_association_state_browse
+    ON public.bot_memory_association_heads(bot_id,active,association_id);
 
 CREATE TABLE public.bot_memory_association_changes (
     bot_id text NOT NULL,
