@@ -18,12 +18,14 @@ from test_delivery import permit as delivery_permit
 
 from forest.dispatch_trace import DispatchTraceStore
 from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.routing_graph import RouteGraphStore
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore
 from forest.storage.delivery import DeliveryStore
 from forest.storage.input_payloads import InputContentStore
 from forest.storage.messages import MessageStore
+from forest.storage.runtime_graph import RuntimeModuleGraphStore
 
 pytestmark = pytest.mark.postgres
 
@@ -163,6 +165,66 @@ async def test_ingress_freezes_content_addressed_route_graph_and_projects_dispat
                 (repository.store.bot_id, received["event_id"]),
             )
     assert count["n"] == 1
+
+
+async def test_dispatch_trace_keeps_frozen_native_generation_after_host_restart(messages):
+    repository, first_lease, _ = messages
+    store = repository.store
+    descriptor = {
+        "protocol": "forest.runtime-module/1",
+        "component_id": "adapter.onebot",
+        "requires": [],
+        "factory_ref": "forest.onebot_runtime:OneBotRuntime",
+        "management_view": None,
+        "management_contract": None,
+    }
+    descriptor = {**descriptor, "descriptor_digest": digest_json(descriptor)}
+    graphs = RuntimeModuleGraphStore(store)
+    first = await graphs.prepare(first_lease, [descriptor])
+    await graphs.publish(first_lease, first)
+    received = await receive(repository, first_lease, "native-generation-before-restart")
+
+    await store.release_host(first_lease)
+    second_lease = await store.acquire_host("host-b", "incarnation-b", ttl_seconds=300)
+    second = await graphs.prepare(second_lease, [descriptor])
+    await graphs.publish(second_lease, second)
+    assert first.generations["adapter.onebot"] != second.generations["adapter.onebot"]
+
+    ticket = await signed_ticket_factory(store)
+    operation = "read-old-native-generation-trace"
+    payload = {"event_id": received["event_id"], "limit": 10}
+    trace = (await DispatchTraceStore(store).read(
+        await ticket("module.read", operation, payload), operation, payload
+    ))["traces"][0]
+    assert trace["entries"][0]["generation_id"] == first.generations["adapter.onebot"]
+    filtered_operation = "filter-old-native-generation-trace"
+    filtered_payload = {
+        "component_id": "adapter.onebot",
+        "generation_id": first.generations["adapter.onebot"],
+        "limit": 10,
+    }
+    filtered = await DispatchTraceStore(store).read(
+        await ticket("module.read", filtered_operation, filtered_payload),
+        filtered_operation,
+        filtered_payload,
+    )
+    assert [item["event_id"] for item in filtered["traces"]] == [received["event_id"]]
+    current_filter_operation = "reject-current-generation-for-old-trace"
+    current_filter_payload = {
+        "component_id": "adapter.onebot",
+        "generation_id": second.generations["adapter.onebot"],
+        "limit": 10,
+    }
+    assert (await DispatchTraceStore(store).read(
+        await ticket("module.read", current_filter_operation, current_filter_payload),
+        current_filter_operation,
+        current_filter_payload,
+    ))["traces"] == []
+    current = await RouteGraphStore(store).snapshot()
+    current_adapter = next(
+        node for node in current["nodes"] if node["node_id"] == "runtime:adapter.onebot"
+    )
+    assert current_adapter["generation_id"] == second.generations["adapter.onebot"]
 
 
 async def test_ingress_graph_fence_orders_concurrent_component_publication(messages, monkeypatch):

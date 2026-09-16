@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Any
 
 from forest.errors import ForestError
+from forest.packages import digest_json
 
 
 @dataclass(frozen=True)
@@ -256,7 +257,73 @@ class BotModuleRegistry:
         }
         self._lifecycle_lock = None
         self._closed = False
+        self.graph_identity = None
+        store = getattr(getattr(platform, "bot", None), "store", None)
+        if store is None:
+            self.graph_store = None
+        else:
+            from forest.storage.runtime_graph import RuntimeModuleGraphStore
+
+            self.graph_store = RuntimeModuleGraphStore(store)
         self._build()
+
+    def _descriptor_facts(self) -> list[dict]:
+        facts = []
+        for descriptor in self.descriptors:
+            view = descriptor.management_view
+            contract = getattr(self.instances[descriptor.component_id], "management_contract", None)
+            fact = {
+                "protocol": "forest.runtime-module/1",
+                "component_id": descriptor.component_id,
+                "requires": list(descriptor.requires),
+                "factory_ref": (
+                    descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__
+                ),
+                "management_view": (
+                    {
+                        "label": view.label,
+                        "template": view.template,
+                        "module": view.module,
+                        "protocol": view.protocol,
+                        "style": view.style,
+                    }
+                    if view is not None
+                    else None
+                ),
+                "management_contract": contract.describe() if contract is not None else None,
+            }
+            facts.append({**fact, "descriptor_digest": digest_json(fact)})
+        return facts
+
+    def _lease(self, *, allow_closing=False):
+        if allow_closing and hasattr(self.platform, "_cleanup_lease"):
+            return self.platform._cleanup_lease()
+        return self.platform.kernel._authority(allow_closing=allow_closing)
+
+    @staticmethod
+    def _lost_persistence_authority(exc):
+        return isinstance(exc, ForestError) and exc.code in {
+            "STALE_HOST",
+            "KERNEL_UNAVAILABLE",
+            "STORAGE_SEALED",
+        }
+
+    async def _record_current_states(self, lease, *, failure_code=None):
+        if self.graph_store is None or self.graph_identity is None:
+            return
+        states = {}
+        for component_id, state in self.states.items():
+            if state == ModuleLifecycleState.FAILED:
+                states[component_id] = ("FAILED", failure_code or "MODULE_LIFECYCLE_FAILED")
+            elif state == ModuleLifecycleState.STOPPED:
+                states[component_id] = ("STOPPED", None)
+            elif state in {ModuleLifecycleState.QUIESCING, ModuleLifecycleState.QUIESCENT}:
+                states[component_id] = ("QUIESCING", None)
+            elif state == ModuleLifecycleState.ACTIVE:
+                states[component_id] = ("ACTIVE", None)
+            else:
+                states[component_id] = ("PREPARED", None)
+        await self.graph_store.record_states(lease, self.graph_identity, states)
 
     def _transition(self, component_id, state):
         current = self.states[component_id]
@@ -320,6 +387,13 @@ class BotModuleRegistry:
                 )
             if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
                 return
+            lease = None
+            if self.graph_store is not None:
+                lease = self._lease()
+                if self.graph_identity is None:
+                    self.graph_identity = await self.graph_store.prepare(
+                        lease, self._descriptor_facts()
+                    )
             started = []
             current = None
             try:
@@ -336,12 +410,51 @@ class BotModuleRegistry:
                         await start()
                     self._transition(component_id, ModuleLifecycleState.ACTIVE)
                     started.append(component_id)
-            except BaseException:
+                if self.graph_store is not None:
+                    await self.graph_store.publish(lease, self.graph_identity)
+            except BaseException as exc:
+                failure_code = (
+                    exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
+                )
+                rollback_errors = []
+                if (
+                    self.graph_store is not None
+                    and current is not None
+                    and self.states[current] in {
+                        ModuleLifecycleState.PREPARED,
+                        ModuleLifecycleState.ACTIVE,
+                    }
+                ):
+                    try:
+                        await self.graph_store.record_states(
+                            lease,
+                            self.graph_identity,
+                            {current: ("FAILED", failure_code)},
+                        )
+                    except Exception as rollback_error:
+                        rollback_errors.append(rollback_error)
                 if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
                     self._transition(current, ModuleLifecycleState.FAILED)
-                    await self._cleanup(current)
+                    try:
+                        await self._cleanup(current)
+                    except Exception as rollback_error:
+                        rollback_errors.append(rollback_error)
                 for component_id in reversed(started):
-                    await self._quiesce_and_cleanup(component_id)
+                    try:
+                        await self._quiesce_and_cleanup(component_id)
+                    except Exception as rollback_error:
+                        rollback_errors.append(rollback_error)
+                try:
+                    await self._record_current_states(lease, failure_code=failure_code)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+                if rollback_errors:
+                    raise ForestError(
+                        "RUNTIME_MODULE_START_ROLLBACK_FAILED",
+                        "Runtime module startup failed and resources remain owned",
+                        503,
+                        details={"start_error": failure_code, "cleanup_errors": len(rollback_errors)},
+                    ) from exc
                 raise
 
     async def close(self) -> list[Exception]:
@@ -350,6 +463,18 @@ class BotModuleRegistry:
         async with self._lifecycle_lock:
             if self._closed:
                 return []
+            lease = None
+            if self.graph_store is not None and self.graph_identity is not None:
+                try:
+                    lease = self._lease(allow_closing=True)
+                    await self.graph_store.retire(lease, self.graph_identity)
+                except ForestError as exc:
+                    if not self._lost_persistence_authority(exc):
+                        raise
+                    # A fenced owner must still release process-local resources.
+                    # Its persistent graph remains historical until the current
+                    # owner atomically replaces or retires it.
+                    lease = None
             errors = []
             for component_id in reversed(self.order):
                 try:
@@ -364,6 +489,13 @@ class BotModuleRegistry:
                         await self._cleanup(component_id)
                 except Exception as exc:
                     errors.append(exc)
+            if lease is not None:
+                failure_code = (
+                    errors[0].code
+                    if errors and isinstance(errors[0], ForestError)
+                    else ("RUNTIME_MODULE_CLEANUP_FAILED" if errors else None)
+                )
+                await self._record_current_states(lease, failure_code=failure_code)
             self._closed = not errors and all(
                 state == ModuleLifecycleState.STOPPED for state in self.states.values()
             )
@@ -430,6 +562,12 @@ class BotModuleRegistry:
                 "component_id": descriptor.component_id,
                 "requires": list(descriptor.requires),
                 "state": self.states[descriptor.component_id],
+                "graph_id": self.graph_identity.graph_id if self.graph_identity is not None else None,
+                "generation_id": (
+                    self.graph_identity.generations[descriptor.component_id]
+                    if self.graph_identity is not None
+                    else None
+                ),
                 "management_view": (
                     {
                         "kind": "trusted-module",

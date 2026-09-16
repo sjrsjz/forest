@@ -57,12 +57,20 @@ class DispatchTraceStore:
                     "AND (%s::text IS NULL OR i.event_id=%s) "
                     "AND (%s::timestamptz IS NULL OR i.received_at>=%s::timestamptz) "
                     "AND (%s::timestamptz IS NULL OR i.received_at<%s::timestamptz) "
-                    "AND (%s::text IS NULL OR b.component_id=%s OR EXISTS(SELECT 1 FROM "
+                    "AND ((%s::text IS NULL AND %s::text IS NULL) OR "
+                    "(b.request_id IS NOT NULL AND (%s::text IS NULL OR b.component_id=%s) "
+                    "AND (%s::text IS NULL OR b.generation_id=%s)) OR EXISTS(SELECT 1 FROM "
                     "public.bot_message_handler_chain_items x WHERE x.bot_id=i.bot_id "
-                    "AND x.chain_id=h.chain_id AND x.component_id=%s)) "
-                    "AND (%s::text IS NULL OR b.generation_id=%s OR EXISTS(SELECT 1 FROM "
-                    "public.bot_message_handler_chain_items x WHERE x.bot_id=i.bot_id "
-                    "AND x.chain_id=h.chain_id AND x.generation_id=%s)) "
+                    "AND x.chain_id=h.chain_id AND (%s::text IS NULL OR x.component_id=%s) "
+                    "AND (%s::text IS NULL OR x.generation_id=%s)) OR EXISTS(SELECT 1 FROM "
+                    "public.bot_route_graph_snapshots gs CROSS JOIN LATERAL "
+                    "jsonb_array_elements(gs.snapshot->'nodes') n WHERE gs.bot_id=i.bot_id "
+                    "AND gs.graph_digest=i.graph_digest AND n->>'kind'='runtime_module' "
+                    "AND (%s::text IS NULL OR n->>'component_id'=%s) "
+                    "AND (%s::text IS NULL OR n->>'generation_id'=%s) AND ("
+                    "n->>'component_id'='adapter.onebot' OR "
+                    "(s.command_id IS NOT NULL AND n->>'component_id'='shell.command') OR "
+                    "(t.trigger_id IS NOT NULL AND n->>'component_id'='agent.runtime')))) "
                     "AND (%s::text IS NULL OR COALESCE(s.status,b.status,h.status,t.status,"
                     "i.trigger_decision)=%s) ORDER BY i.received_at DESC,i.event_id DESC LIMIT %s",
                     (
@@ -73,8 +81,10 @@ class DispatchTraceStore:
                         event_id, event_id,
                         received_after, received_after,
                         received_before, received_before,
-                        component_id, component_id, component_id,
-                        generation_id, generation_id, generation_id,
+                        component_id, generation_id,
+                        component_id, component_id, generation_id, generation_id,
+                        component_id, component_id, generation_id, generation_id,
+                        component_id, component_id, generation_id, generation_id,
                         status, status,
                         limit,
                     ),
@@ -143,6 +153,13 @@ class DispatchTraceStore:
                     (self.store.bot_id, event_ids),
                 )
             ).fetchall()
+            graph_rows = await (
+                await conn.execute(
+                    "SELECT graph_digest,snapshot FROM public.bot_route_graph_snapshots "
+                    "WHERE bot_id=%s AND graph_digest=ANY(%s)",
+                    (self.store.bot_id, list({row["graph_digest"] for row in roots})),
+                )
+            ).fetchall()
             await self.control._time(conn, claims)
 
         shell_by_event = {row["event_id"]: row for row in shells}
@@ -152,13 +169,25 @@ class DispatchTraceStore:
         for row in items:
             items_by_chain.setdefault(row["chain_id"], []).append(row)
         agent_by_event = {row["event_id"]: row for row in agents}
+        graph_by_digest = {row["graph_digest"]: row["snapshot"] for row in graph_rows}
+
+        def runtime_identity(graph_digest, component):
+            graph = graph_by_digest.get(graph_digest, {})
+            for node in graph.get("nodes", ()):
+                if node.get("kind") == "runtime_module" and node.get("component_id") == component:
+                    return node["node_id"], node["generation_id"]
+            return "runtime:" + component, None
+
         traces = []
         for root in roots:
+            adapter_node, adapter_generation = runtime_identity(
+                root["graph_digest"], "adapter.onebot"
+            )
             entries = [{
                 "kind": "ingress",
-                "node_id": "runtime:adapter.onebot",
+                "node_id": adapter_node,
                 "component_id": "adapter.onebot",
-                "generation_id": None,
+                "generation_id": adapter_generation,
                 "status": root["trigger_decision"],
                 "reason": root["classification_reason"],
                 "started_at": _iso(root["received_at"]),
@@ -167,11 +196,14 @@ class DispatchTraceStore:
             }]
             shell = shell_by_event.get(root["event_id"])
             if shell:
+                shell_node, shell_generation = runtime_identity(
+                    root["graph_digest"], "shell.command"
+                )
                 entries.append({
                     "kind": "shell",
-                    "node_id": "runtime:shell.core",
-                    "component_id": "shell.core",
-                    "generation_id": None,
+                    "node_id": shell_node,
+                    "component_id": "shell.command",
+                    "generation_id": shell_generation,
                     "status": shell["status"],
                     "reason": None,
                     "started_at": _iso(shell["created_at"]),
@@ -226,11 +258,14 @@ class DispatchTraceStore:
                     })
             agent = agent_by_event.get(root["event_id"])
             if agent:
+                agent_node, agent_generation = runtime_identity(
+                    root["graph_digest"], "agent.runtime"
+                )
                 entries.append({
                     "kind": "agent",
-                    "node_id": "runtime:agent.core",
-                    "component_id": "agent.core",
-                    "generation_id": None,
+                    "node_id": agent_node,
+                    "component_id": "agent.runtime",
+                    "generation_id": agent_generation,
                     "status": agent["agent_phase"] or agent["trigger_status"],
                     "reason": agent["error_code"] or agent["terminal_reason"],
                     "started_at": _iso(agent["created_at"]),
@@ -246,5 +281,4 @@ class DispatchTraceStore:
                 "entries": entries,
             })
         return {"filter": payload, "traces": traces}
-
 

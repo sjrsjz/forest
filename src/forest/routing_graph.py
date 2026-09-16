@@ -90,12 +90,32 @@ class RouteGraphStore:
             "AND r.generation_id=h.generation_id WHERE h.bot_id=%s AND h.active=true "
             "ORDER BY h.component_id,h.handler_id",
         )
+        runtime_modules = await self._rows(
+            conn,
+            "SELECT m.component_id,m.generation_id,m.graph_id,m.descriptor_digest,"
+            "g.descriptor_set_digest,g.host_id,g.host_incarnation,g.host_owner_epoch,"
+            "l.state AS lifecycle_state FROM public.bot_runtime_graph_heads h "
+            "JOIN public.bot_runtime_graphs g ON g.bot_id=h.bot_id AND g.graph_id=h.graph_id "
+            "JOIN public.bot_runtime_module_generations m ON m.bot_id=g.bot_id "
+            "AND m.graph_id=g.graph_id LEFT JOIN LATERAL (SELECT f.state FROM "
+            "public.bot_runtime_module_lifecycle_facts f WHERE f.bot_id=m.bot_id "
+            "AND f.generation_id=m.generation_id ORDER BY f.sequence DESC LIMIT 1) l ON true "
+            "WHERE h.bot_id=%s AND h.graph_id IS NOT NULL ORDER BY m.component_id",
+        )
+        runtime_dependencies = await self._rows(
+            conn,
+            "SELECT d.source_component_id,d.source_generation_id,d.target_component_id,"
+            "d.target_generation_id,d.graph_id FROM public.bot_runtime_module_dependencies d "
+            "JOIN public.bot_runtime_graph_heads h ON h.bot_id=d.bot_id AND h.graph_id=d.graph_id "
+            "WHERE d.bot_id=%s ORDER BY d.source_component_id,d.target_component_id",
+        )
         if clocks is None:
             clocks = {}
             for key, table in (
                 ("service", "bot_service_clock"),
                 ("command", "bot_command_clocks"),
                 ("message_handler", "bot_message_handler_clocks"),
+                ("runtime", "bot_runtime_graph_clock"),
             ):
                 row = await (
                     await conn.execute(
@@ -110,6 +130,12 @@ class RouteGraphStore:
             nodes.append({
                 "node_id": "component:" + row["component_id"],
                 "kind": "component",
+                **row,
+            })
+        for row in runtime_modules:
+            nodes.append({
+                "node_id": "runtime:" + row["component_id"],
+                "kind": "runtime_module",
                 **row,
             })
         for row in services:
@@ -151,7 +177,7 @@ class RouteGraphStore:
 
         edges = []
         for node in nodes:
-            if node["kind"] != "component":
+            if node["kind"] not in {"component", "runtime_module"}:
                 edges.append({
                     "edge_id": f'owned-by:{node["node_id"]}',
                     "kind": "owned_by",
@@ -186,6 +212,20 @@ class RouteGraphStore:
                 "target": target,
                 "status": status,
                 **requirement,
+            })
+        for dependency in runtime_dependencies:
+            edges.append({
+                "edge_id": (
+                    "runtime-requires:"
+                    + dependency["source_component_id"]
+                    + ":"
+                    + dependency["target_component_id"]
+                ),
+                "kind": "requires_component",
+                "source": "runtime:" + dependency["source_component_id"],
+                "target": "runtime:" + dependency["target_component_id"],
+                "status": "RESOLVED",
+                **dependency,
             })
         for publication in publications:
             source = f'event-publisher:{publication["component_id"]}:{publication["definition_id"]}'
@@ -227,6 +267,7 @@ class RouteGraphStore:
             ("command", "bot_command_clocks"),
             ("message_handler", "bot_message_handler_clocks"),
             ("service", "bot_service_clock"),
+            ("runtime", "bot_runtime_graph_clock"),
         ):
             row = await (
                 await conn.execute(
@@ -252,13 +293,14 @@ class RouteGraphStore:
             await conn.execute(
                 "SELECT snapshot FROM public.bot_route_graph_snapshots WHERE bot_id=%s "
                 "AND route_digest=%s AND service_revision=%s AND command_revision=%s "
-                "AND message_handler_revision=%s",
+                "AND message_handler_revision=%s AND runtime_revision=%s",
                 (
                     self.store.bot_id,
                     route_digest,
                     clocks["service"],
                     clocks["command"],
                     clocks["message_handler"],
+                    clocks["runtime"],
                 ),
             )
         ).fetchone()
@@ -271,7 +313,8 @@ class RouteGraphStore:
             await conn.execute(
                 "INSERT INTO public.bot_route_graph_snapshots("
                 "bot_id,graph_digest,protocol,route_digest,service_revision,command_revision,"
-                "message_handler_revision,snapshot) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "message_handler_revision,runtime_revision,snapshot) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT DO NOTHING RETURNING graph_digest",
                 (
                     self.store.bot_id,
@@ -281,6 +324,7 @@ class RouteGraphStore:
                     clocks["service"],
                     clocks["command"],
                     clocks["message_handler"],
+                    clocks["runtime"],
                     Jsonb(snapshot),
                 ),
             )

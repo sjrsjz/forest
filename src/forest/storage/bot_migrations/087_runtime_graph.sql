@@ -295,6 +295,178 @@ $$;
 CREATE TRIGGER bot_service_head_guard BEFORE UPDATE OR DELETE
  ON public.bot_service_heads FOR EACH ROW EXECUTE FUNCTION public.forest_service_head_guard();
 
+-- Official native modules use the same persistent graph semantics as packaged
+-- components without pretending that they are Python Worker package rows.
+CREATE TABLE public.bot_runtime_graph_clock (
+ bot_id text PRIMARY KEY REFERENCES public.forest_bot_identity(bot_id),
+ revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.bot_runtime_graphs (
+ bot_id text NOT NULL REFERENCES public.forest_bot_identity(bot_id),
+ graph_id text NOT NULL,
+ descriptor_set_digest text NOT NULL CHECK(descriptor_set_digest ~ '^sha256:[a-f0-9]{64}$'),
+ host_id text NOT NULL,
+ host_incarnation text NOT NULL,
+ host_owner_epoch bigint NOT NULL CHECK(host_owner_epoch>0),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,graph_id),
+ UNIQUE(bot_id,host_incarnation,descriptor_set_digest)
+);
+
+CREATE TABLE public.bot_runtime_module_generations (
+ bot_id text NOT NULL,
+ generation_id text NOT NULL,
+ graph_id text NOT NULL,
+ component_id text NOT NULL,
+ descriptor_digest text NOT NULL CHECK(descriptor_digest ~ '^sha256:[a-f0-9]{64}$'),
+ descriptor jsonb NOT NULL CHECK(jsonb_typeof(descriptor)='object'),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,generation_id),
+ UNIQUE(bot_id,graph_id,component_id),
+ FOREIGN KEY(bot_id,graph_id) REFERENCES public.bot_runtime_graphs(bot_id,graph_id),
+ CHECK(descriptor->>'component_id'=component_id),
+ CHECK(descriptor->>'descriptor_digest'=descriptor_digest)
+);
+
+CREATE TABLE public.bot_runtime_module_dependencies (
+ bot_id text NOT NULL,
+ graph_id text NOT NULL,
+ source_generation_id text NOT NULL,
+ source_component_id text NOT NULL,
+ target_generation_id text NOT NULL,
+ target_component_id text NOT NULL,
+ PRIMARY KEY(bot_id,graph_id,source_component_id,target_component_id),
+ FOREIGN KEY(bot_id,source_generation_id)
+  REFERENCES public.bot_runtime_module_generations(bot_id,generation_id),
+ FOREIGN KEY(bot_id,target_generation_id)
+  REFERENCES public.bot_runtime_module_generations(bot_id,generation_id),
+ CHECK(source_component_id<>target_component_id)
+);
+
+CREATE TABLE public.bot_runtime_module_lifecycle_facts (
+ bot_id text NOT NULL,
+ generation_id text NOT NULL,
+ sequence bigint NOT NULL CHECK(sequence>0),
+ state text NOT NULL CHECK(state IN ('PREPARED','ACTIVE','QUIESCING','STOPPED','FAILED')),
+ error_code text,
+ host_incarnation text NOT NULL,
+ host_owner_epoch bigint NOT NULL CHECK(host_owner_epoch>0),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,generation_id,sequence),
+ FOREIGN KEY(bot_id,generation_id)
+  REFERENCES public.bot_runtime_module_generations(bot_id,generation_id),
+ CHECK((state='FAILED') OR error_code IS NULL)
+);
+
+CREATE TABLE public.bot_runtime_graph_publications (
+ bot_id text NOT NULL REFERENCES public.forest_bot_identity(bot_id),
+ revision bigint NOT NULL CHECK(revision>0),
+ graph_id text NOT NULL,
+ operation_kind text NOT NULL CHECK(operation_kind IN ('ACTIVATE','RETIRE')),
+ host_incarnation text NOT NULL,
+ host_owner_epoch bigint NOT NULL CHECK(host_owner_epoch>0),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,revision),
+ FOREIGN KEY(bot_id,graph_id) REFERENCES public.bot_runtime_graphs(bot_id,graph_id)
+);
+
+CREATE TABLE public.bot_runtime_graph_heads (
+ bot_id text PRIMARY KEY REFERENCES public.forest_bot_identity(bot_id),
+ graph_id text,
+ revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ FOREIGN KEY(bot_id,graph_id) REFERENCES public.bot_runtime_graphs(bot_id,graph_id)
+);
+
+CREATE FUNCTION public.forest_runtime_lifecycle_fact_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE host record; existing record; prior record;
+BEGIN
+ SELECT * INTO host FROM public.bot_host_lease WHERE bot_id=NEW.bot_id;
+ IF NOT FOUND OR host.expires_at<=clock_timestamp()
+  OR ROW(host.incarnation,host.owner_epoch)
+     IS DISTINCT FROM ROW(NEW.host_incarnation,NEW.host_owner_epoch) THEN
+  RAISE EXCEPTION 'RUNTIME_LIFECYCLE_STALE_HOST' USING ERRCODE='55000';
+ END IF;
+ SELECT * INTO existing FROM public.bot_runtime_module_lifecycle_facts
+  WHERE bot_id=NEW.bot_id AND generation_id=NEW.generation_id AND sequence=NEW.sequence;
+ IF FOUND THEN
+  IF ROW(existing.state,existing.error_code,existing.host_incarnation,existing.host_owner_epoch)
+     IS DISTINCT FROM ROW(NEW.state,NEW.error_code,NEW.host_incarnation,NEW.host_owner_epoch) THEN
+   RAISE EXCEPTION 'RUNTIME_LIFECYCLE_FACT_CONFLICT' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+ END IF;
+ SELECT * INTO prior FROM public.bot_runtime_module_lifecycle_facts
+  WHERE bot_id=NEW.bot_id AND generation_id=NEW.generation_id
+  ORDER BY sequence DESC LIMIT 1;
+ IF NOT FOUND THEN
+  IF NEW.sequence<>1 OR NEW.state<>'PREPARED' THEN
+   RAISE EXCEPTION 'RUNTIME_LIFECYCLE_MUST_PREPARE' USING ERRCODE='55000';
+  END IF;
+ ELSIF NEW.sequence<>prior.sequence+1 OR NOT (
+  (prior.state='PREPARED' AND NEW.state IN ('ACTIVE','FAILED','STOPPED')) OR
+  (prior.state='ACTIVE' AND NEW.state IN ('QUIESCING','FAILED','STOPPED')) OR
+  (prior.state='QUIESCING' AND NEW.state IN ('FAILED','STOPPED')) OR
+  (prior.state='FAILED' AND NEW.state='STOPPED')
+ ) THEN
+  RAISE EXCEPTION 'RUNTIME_LIFECYCLE_TRANSITION_INVALID' USING ERRCODE='55000';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER bot_runtime_lifecycle_fact_guard BEFORE INSERT
+ ON public.bot_runtime_module_lifecycle_facts FOR EACH ROW
+ EXECUTE FUNCTION public.forest_runtime_lifecycle_fact_guard();
+
+CREATE FUNCTION public.forest_runtime_graph_head_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE publication record; clock_revision bigint;
+BEGIN
+ IF TG_OP='DELETE' OR NEW.bot_id IS DISTINCT FROM OLD.bot_id THEN
+  RAISE EXCEPTION 'RUNTIME_GRAPH_HEAD_DELETE_FORBIDDEN' USING ERRCODE='55000';
+ END IF;
+ IF ROW(NEW.graph_id,NEW.revision) IS NOT DISTINCT FROM ROW(OLD.graph_id,OLD.revision) THEN
+  RETURN NEW;
+ END IF;
+ IF NEW.revision<>OLD.revision+1 THEN
+  RAISE EXCEPTION 'RUNTIME_GRAPH_REVISION_INVALID' USING ERRCODE='55000';
+ END IF;
+ SELECT * INTO publication FROM public.bot_runtime_graph_publications
+  WHERE bot_id=NEW.bot_id AND revision=NEW.revision;
+ SELECT revision INTO clock_revision FROM public.bot_runtime_graph_clock WHERE bot_id=NEW.bot_id;
+ IF NOT FOUND OR clock_revision<>NEW.revision THEN
+  RAISE EXCEPTION 'RUNTIME_GRAPH_CLOCK_CONFLICT' USING ERRCODE='55000';
+ END IF;
+ IF NEW.graph_id IS NULL THEN
+  IF OLD.graph_id IS NULL OR publication.operation_kind IS DISTINCT FROM 'RETIRE'
+   OR publication.graph_id IS DISTINCT FROM OLD.graph_id THEN
+   RAISE EXCEPTION 'RUNTIME_GRAPH_PUBLICATION_CONFLICT' USING ERRCODE='55000';
+  END IF;
+ ELSIF publication.operation_kind IS DISTINCT FROM 'ACTIVATE'
+  OR publication.graph_id IS DISTINCT FROM NEW.graph_id THEN
+  RAISE EXCEPTION 'RUNTIME_GRAPH_PUBLICATION_CONFLICT' USING ERRCODE='55000';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER bot_runtime_graph_head_guard BEFORE UPDATE OR DELETE
+ ON public.bot_runtime_graph_heads FOR EACH ROW
+ EXECUTE FUNCTION public.forest_runtime_graph_head_guard();
+
+CREATE TRIGGER bot_runtime_graph_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_runtime_graphs FOR EACH ROW EXECUTE FUNCTION public.forest_bot_reject_mutation();
+CREATE TRIGGER bot_runtime_generation_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_runtime_module_generations FOR EACH ROW EXECUTE FUNCTION public.forest_bot_reject_mutation();
+CREATE TRIGGER bot_runtime_dependency_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_runtime_module_dependencies FOR EACH ROW EXECUTE FUNCTION public.forest_bot_reject_mutation();
+CREATE TRIGGER bot_runtime_lifecycle_fact_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_runtime_module_lifecycle_facts FOR EACH ROW EXECUTE FUNCTION public.forest_bot_reject_mutation();
+CREATE TRIGGER bot_runtime_publication_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_runtime_graph_publications FOR EACH ROW EXECUTE FUNCTION public.forest_bot_reject_mutation();
+
 -- Every newly admitted message freezes the exact authoritative RouteGraph it observed.
 -- Snapshots are content addressed and shared by all messages admitted under the same graph.
 CREATE TABLE public.bot_route_graph_snapshots (
@@ -305,10 +477,11 @@ CREATE TABLE public.bot_route_graph_snapshots (
  service_revision bigint NOT NULL CHECK(service_revision>=0),
  command_revision bigint NOT NULL CHECK(command_revision>=0),
  message_handler_revision bigint NOT NULL CHECK(message_handler_revision>=0),
+ runtime_revision bigint NOT NULL CHECK(runtime_revision>=0),
  snapshot jsonb NOT NULL CHECK(jsonb_typeof(snapshot)='object'),
  captured_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(bot_id,graph_digest),
- UNIQUE(bot_id,route_digest,service_revision,command_revision,message_handler_revision),
+ UNIQUE(bot_id,route_digest,service_revision,command_revision,message_handler_revision,runtime_revision),
  FOREIGN KEY(bot_id) REFERENCES public.forest_bot_identity(bot_id),
  CHECK(snapshot->>'bot_id'=bot_id),
  CHECK(snapshot->>'protocol'=protocol),

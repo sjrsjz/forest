@@ -45,9 +45,10 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 可安装组件的 service 声明与依赖要求已成为不可变 Generation 事实；service head 与组件 route、command、message handler、event、job 在同一发布事务切换，普通 service 调用会核对持久 head、Generation 和 route epoch。
 - `routing.graph` 已作为官方模块注册，通过通用 management contract 输出 `REPEATABLE READ` 的确定性 RouteGraph；WebUI 视图由模块描述符装载，可筛选节点并查看依赖/事件边及缺失、不兼容、歧义状态。
 - 新消息接纳会在既有 Bot runtime/注册表锁序下保存不可变 `graph_digest`；稳定路由按 registry revision 与 route 摘要直接复用内容寻址快照，只有路由键变化才重建全图。`routing.graph` 可按会话、Binding、群、消息、组件、代际、结果和时间读取由现有权威事实投影的 dispatch trace，并回看消息当时的冻结图。
+- 官方运行时模块已拥有持久 RuntimeGraph/Generation、依赖边、追加式生命周期事实和原子 graph head。启动全部成功后才发布整图；失败启动不暴露部分模块；关闭先撤下 head 再逆序排空。RouteGraph 冻结 runtime revision，Adapter/Shell/Agent trace 从消息旧快照解析代际，宿主换代后不会改写历史。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
-这只是控制面所有权、传输和可安装组件路由的收口。官方模块的持久生命周期、运行时组合根、dispatch trace 的通用 effect/outbox 因果引用与资源归属尚未全部迁完。
+这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、dispatch trace 的通用 effect/outbox 因果引用与资源归属尚未全部迁完。
 
 本次 Memory 管理切片在 PostgreSQL 17 上完成 109 项组合回归，覆盖来源授权、媒体、图归约/存储、组合筛选、游标绑定、主干统计、关系投影、实际 Web 管理路由和模块描述符；定向 Web 回归为 3 项。真实 Edge 在 1440×1100 PC 视口验证默认只展开“来源、主干与遗忘”，页面高度小于 2500 px，配置、状态、人工关系和发布图按需折叠，同时保留配置草稿、联想变更、延迟响应与 Bot 切换保护。该证据不包含十万至百万来源容量压测、真实图片查询入口或关系图布局。
 
@@ -57,13 +58,15 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 本次单 Agent 基线清理删除 019/032/050 Child 迁移、Child payload handler、冻结 041 兼容包和只服务旧 Child/配置升级的测试；保留的组件递归调用改称 nested call，Run 预算表与模块也改用 run 命名。干净数据库门禁明确检查 Child 表和迁移不存在。PostgreSQL 回归为 Agent/配置/nested call/正文授权 63 项、配置与当前基线 19 项、P3/P4 保留不变量 12 项、Agent payload/Kernel/service/Web 77 项以及更新后的 Agent 配置 19 项；集合有重叠。无数据库回归为 711 通过、36 跳过、1105 因 PostgreSQL marker 未选择。尚未执行完整 PostgreSQL 全套。
 
+本次官方运行时持久图切片在 PostgreSQL 17 上完成 runtime registry/graph、消息 RouteGraph/trace、平台生命周期和 writer-fence 组合回归 71 项；另有启动失败不发布、关闭失败重试、宿主失租接管以及换代后旧消息仍绑定旧 Adapter Generation 的定向用例。无 PostgreSQL 套件为 711 通过、36 跳过、1113 因 marker 未选择；Ruff 与 Python compileall 通过。该集合尚未覆盖完整 PostgreSQL 全套、长时间反复失租/数据库分区和 effect/outbox trace。
+
 ## 阻断项
 
 ### P0 微内核
 
 - `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
-- 官方模块瞬时生命周期状态机及失败清理已落实，但尚未与可安装包的持久 Generation/Route 状态机合并；仍需统一健康检查、按依赖边故障隔离和进程恢复；
-- 可安装包的 command、message handler、service、event、job 已进入同一可解释 RouteGraph，消息入场也已冻结精确 `graph_digest`；仍需把官方运行时模块纳入持久图；
+- 官方模块已发布独立的持久 RuntimeGraph/Generation 并进入同一 RouteGraph；它和可安装 Worker 仍使用不同运行驱动，需统一健康检查、按依赖边故障隔离、失租恢复和监督器接口；
+- command、message handler、service、event、job 与官方 runtime module 已进入同一可解释 RouteGraph，消息入场冻结精确 `graph_digest`；仍需把跨模块 effect/outbox 因果边纳入 trace；
 - dispatch trace 已能按消息、群、组件、代际、结果和时间查询，且与可编辑业务配置分离；仍需补齐跨模块通用 effect/outbox 因果引用；
 - 模块资源所有权仍需继续清理，宿主不得越过契约持有 JobStore、AgentStore 或 Memory 内部对象。
 

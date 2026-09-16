@@ -158,6 +158,27 @@ async def test_registry_rolls_back_started_modules_when_start_fails():
 
 
 @pytest.mark.asyncio
+async def test_registry_continues_start_rollback_after_failed_module_cleanup():
+    events = []
+    registry = BotModuleRegistry(SimpleNamespace(), (
+        descriptor("first", (), events),
+        descriptor("second", ("first",), events, fail=True, close_failures=1),
+    ))
+    with pytest.raises(ForestError) as caught:
+        await registry.start()
+    assert caught.value.code == "RUNTIME_MODULE_START_ROLLBACK_FAILED"
+    assert events == [
+        ("start", "first"),
+        ("start", "second"),
+        ("close", "second"),
+        ("quiesce", "first"),
+        ("close", "first"),
+    ]
+    assert registry.states["first"] == ModuleLifecycleState.STOPPED
+    assert registry.states["second"] == ModuleLifecycleState.FAILED
+
+
+@pytest.mark.asyncio
 async def test_registry_retries_failed_cleanup_without_restarting_modules():
     events = []
     registry = BotModuleRegistry(SimpleNamespace(), (

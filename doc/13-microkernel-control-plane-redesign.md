@@ -58,7 +58,7 @@ flowchart LR
 
 依赖图必须无环。生命周期协调器拓扑准备和启动，反向排空和停止。Contract Router 只向 ACTIVE 代际发布路由；候选代际完成 schema、依赖、能力、状态迁移和健康检查后一次切换。任何组件失败都按依赖边影响实例，不以“平台子任务失败”笼统拖停无关模块。
 
-当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。启动失败会先清理失败模块自身，再按逆依赖序排空已启动模块；关闭失败保留 FAILED 并允许后续关闭重试。可安装包已有独立的持久 Generation/Route 状态机；两套状态机尚未合并，不能把官方模块的进程内 `ACTIVE` 当作已经持久发布的 Generation。后续仍需统一健康检查、恢复和按依赖边隔离的故障策略。
+当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次宿主 incarnation 为完整官方描述符集建立一个不可变 RuntimeGraph，并为每个官方模块建立 Generation；描述符摘要覆盖依赖、factory 身份、管理契约和 UI 工件。所有模块启动成功后，数据库在一个事务中追加 ACTIVE 生命周期事实并切换 runtime graph head；任一启动失败只记录 FAILED/STOPPED，不能发布部分图。关闭先原子撤下 head，再按逆依赖序排空并追加终态；消息冻结的旧图仍保留旧代际。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 仍使用不同的运行驱动和代际事实表，后续需统一健康检查、恢复和按依赖边隔离的故障策略，不能把二者误称为已经共用同一 Worker 生命周期实现。
 
 官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询契约和管理视图；`command.router`、`message.router` 依赖它并分别拥有业务命令和普通消息 Handler 的策略/容量存储。Agent、Memory、Conversation Scheduler、Shell 和 Job 只从依赖图取得这些对象，`BindingRuntime` 不再暴露 OneBot 状态、消息/发送端口、记忆来源或策略存储便利属性。`BindingRuntime` 当前只保留跨模块会话执行、组件 Worker 确保与模块健康汇总；这些能力仍需继续收口到 Contract Router 和通用 supervisor。
 
@@ -106,11 +106,11 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 当前实现不再从 Worker 内存拼 service 图。每个 Generation 在注册时固化 `provides` 的精确契约与输入/输出 schema 摘要，以及 `requires` 的版本范围、必需性和启动依赖标记；发布事务同时切换组件 route、service head、command head、message-handler head、event subscription head 和 job head。普通 service 调用在交给 Worker 前核对持久 service head、目标 Generation 和 `route_epoch`，随后由既有调用准入事务决定新根调用或已保留父调用是否可继续。冻结阶段不会因为只读解析提前拒绝已经入场的调用树。
 
-`routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径已经持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service registry clock；它用三类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。当前图覆盖可安装包；官方运行时模块仍只有进程内生命周期描述，尚未进入同一持久 Generation 图。
+`routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径已经持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service、runtime graph clock；它用四类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，官方 runtime module 及其依赖边也从持久 head 投影；WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。ShellGate 的保留管理命令先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 
-dispatch trace 是观测记录，不是可编辑“执行链”。当前 `routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图；业务命令和 Handler 条目携带已有 operation、call、result、failure 和 response 引用。官方 Shell/Agent/Adapter 尚未进入持久 Generation 图时，其 trace 明确使用 `runtime:*` 节点且代际为空，不能伪造代际。后续仍需把通用 effect/outbox 因果引用和官方模块代际纳入同一图；控制台始终只读，不能拖拽 trace 改变生产路由。
+dispatch trace 是观测记录，不是可编辑“执行链”。当前 `routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图；业务命令和 Handler 条目携带已有 operation、call、result、failure 和 response 引用。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；宿主重启并发布新图后，旧消息仍显示旧代际，不能用当前 head 改写历史。后续仍需把通用 effect/outbox 因果引用纳入同一 trace；控制台始终只读，不能拖拽 trace 改变生产路由。
 
 ## 7. 可扩展管理视图
 

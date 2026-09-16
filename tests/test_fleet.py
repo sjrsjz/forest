@@ -584,6 +584,27 @@ async def test_real_expired_host_is_reaped_before_new_owner_and_state_survives(a
     assert new is not old and not old_worker.alive and not old.kernel._workers
     assert new.kernel.lease.owner_epoch > old_lease.owner_epoch
     assert new.kernel.lease.incarnation != old_lease.incarnation
+    async with new.store.pool.connection() as conn:
+        runtime_head = await (
+            await conn.execute(
+                "SELECT g.host_incarnation FROM public.bot_runtime_graph_heads h JOIN "
+                "public.bot_runtime_graphs g USING(bot_id,graph_id) WHERE h.bot_id=%s",
+                (new.store.bot_id,),
+            )
+        ).fetchone()
+        old_states = await (
+            await conn.execute(
+                "SELECT l.state FROM public.bot_runtime_graphs g JOIN "
+                "public.bot_runtime_module_generations m USING(bot_id,graph_id) JOIN LATERAL "
+                "(SELECT f.state FROM public.bot_runtime_module_lifecycle_facts f "
+                "WHERE f.bot_id=m.bot_id AND f.generation_id=m.generation_id "
+                "ORDER BY f.sequence DESC LIMIT 1) l ON true WHERE g.bot_id=%s "
+                "AND g.host_incarnation=%s",
+                (new.store.bot_id, old_lease.incarnation),
+            )
+        ).fetchall()
+    assert runtime_head["host_incarnation"] == new.kernel.lease.incarnation
+    assert old_states and {row["state"] for row in old_states} == {"STOPPED"}
     with pytest.raises(ForestError):
         await new.store.renew_host(old_lease)
     await new.kernel.install(snapshot, config=config, grants=grants)
