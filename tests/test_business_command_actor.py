@@ -13,6 +13,7 @@ from binding_seed import _ticket_factory, create_online_binding
 from psycopg import sql
 from test_messages import event
 
+from forest.dispatch_trace import DispatchTraceStore
 from forest.errors import ForestError
 from forest.group_scheduler import BusinessCommandExecution, GroupScheduler
 from forest.kernel import Kernel
@@ -218,6 +219,29 @@ async def test_command_is_an_ingress_barrier_and_publishes_one_atomic_chat_resul
         ).fetchall()
     assert request["status"] == "COMPLETED"
     assert intents == [{"send_lane": "CHAT", "response_seq": 1}]
+
+    trace_payload = {
+        "event_id": command["event_id"],
+        "component_id": "actor.command",
+        "generation_id": selected["request"]["generation_id"],
+        "status": "COMPLETED",
+        "limit": 10,
+    }
+    trace_operation = "business-command-dispatch-trace"
+    tickets = await _ticket_factory(messages.store)
+    trace = await DispatchTraceStore(messages.store).read(
+        await tickets("module.read", trace_operation, trace_payload),
+        trace_operation,
+        trace_payload,
+    )
+    command_entry = next(
+        entry for entry in trace["traces"][0]["entries"]
+        if entry["kind"] == "business_command"
+    )
+    assert command_entry["status"] == "REPLY"
+    assert command_entry["generation_id"] == selected["request"]["generation_id"]
+    assert command_entry["references"]["call_operation_id"] == operation_id
+    assert command_entry["references"]["result_id"] == result["result_id"]
 
 
 @pytest.mark.parametrize(

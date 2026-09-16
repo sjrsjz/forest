@@ -41,15 +41,16 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - `adapter.onebot` 已拥有 Binding/Inbox/Shell ingress/Delivery 端口、连接集合、候选切换、网络接纳、发送 Worker 与连接监督任务；`memory.graph` 已拥有来源回填；`command.router` 与 `message.router` 已拥有各自策略和容量存储。`BindingRuntime` 对应便利属性及 OneBot 私有状态已删除。
 - 可安装组件的 service 声明与依赖要求已成为不可变 Generation 事实；service head 与组件 route、command、message handler、event、job 在同一发布事务切换，普通 service 调用会核对持久 head、Generation 和 route epoch。
 - `routing.graph` 已作为官方模块注册，通过通用 management contract 输出 `REPEATABLE READ` 的确定性 RouteGraph；WebUI 视图由模块描述符装载，可筛选节点并查看依赖/事件边及缺失、不兼容、歧义状态。
+- 新消息接纳会在既有 Bot runtime/注册表锁序下保存不可变 `graph_digest`；稳定路由按 registry revision 与 route 摘要直接复用内容寻址快照，只有路由键变化才重建全图。`routing.graph` 可按会话、Binding、群、消息、组件、代际、结果和时间读取由现有权威事实投影的 dispatch trace，并回看消息当时的冻结图。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
-这只是控制面所有权、传输和可安装组件路由的收口。官方模块的持久生命周期、运行时组合根、dispatch trace 与资源归属尚未全部迁完。
+这只是控制面所有权、传输和可安装组件路由的收口。官方模块的持久生命周期、运行时组合根、dispatch trace 的通用 effect/outbox 因果引用与资源归属尚未全部迁完。
 
 本次 Memory 管理切片在 PostgreSQL 17 上完成 109 项组合回归，覆盖来源授权、媒体、图归约/存储、组合筛选、游标绑定、主干统计、关系投影、实际 Web 管理路由和模块描述符；定向 Web 回归为 3 项。真实 Edge 在 1440×1100 PC 视口验证默认只展开“来源、主干与遗忘”，页面高度小于 2500 px，配置、状态、人工关系和发布图按需折叠，同时保留配置草稿、联想变更、延迟响应与 Bot 切换保护。该证据不包含十万至百万来源容量压测、真实图片查询入口或关系图布局。
 
 本次 OneBot 所有权切片把连接集合、候选发布/恢复、HTTP/WebSocket 接入、Delivery 准备与两个根监督任务迁入 `adapter.onebot`。PostgreSQL 定向回归包括运行时/接入/关闭 44 项、记忆运行时 4 项、Agent 记忆 2 项、控制发送 3 项以及 Web Binding/Fleet 18 项；无数据库全套为 803 通过、1069 跳过。尚未执行完整 PostgreSQL 全套、真实 QQ 低频验收或长时连接抖动测试，因此这些结果不构成发布结论。
 
-本次持久 RouteGraph 切片完成 service Generation 事实、原子 service head 发布、调用前路由核对和模块化只读图视图。PostgreSQL 验证分别为 RouteGraph 定向 2 项、干净数据库门禁 1 项、Kernel/service 36 项、平台与 Web 20 项、跨注册表存储 61 项、writer fence 9 项；压平基线后的 `test_web_packages.py` 复跑 4 项通过。无数据库全套为 803 通过、1071 跳过；这些集合有重叠，不能相加。Ruff、Python compileall、RouteGraph JavaScript 语法检查和 `git diff --check` 通过。尚未完成官方运行时模块的持久图统一、消息入场 `graph_digest`、dispatch trace 和完整 PostgreSQL 全套。
+本次持久 RouteGraph 切片完成 service Generation 事实、原子 service head 发布、调用前路由核对和模块化只读图视图。PostgreSQL 验证分别为 RouteGraph 定向 2 项、干净数据库门禁 1 项、Kernel/service 36 项、平台与 Web 20 项、跨注册表存储 61 项、writer fence 9 项；压平基线后的 `test_web_packages.py` 复跑 4 项通过。随后补齐了消息入场 `graph_digest`、按摘要读取历史图和 dispatch trace 投影；定向数据库门禁/消息/RouteGraph 3 项、Web 模块契约与静态视图 3 项、Job 触发 18 项、P3/P4 基线 12 项通过。消息并发全套先发现整事务 `REPEATABLE READ` 会让重复接纳出现 serialization failure；改为沿既有 runtime/registry 锁序冻结图后，35 项全部通过；业务命令和消息 Handler 的真实执行 trace 各有定向用例。当前无数据库全套为 711 通过、36 跳过、1108 因 PostgreSQL marker 未选择。上述集合有重叠，不能相加。仍需完成官方运行时模块持久图、effect/outbox trace 引用和完整 PostgreSQL 全套。Ruff、Python compileall、RouteGraph JavaScript 语法检查和 `git diff --check` 通过。
 
 本次单 Agent 基线清理删除 019/032/050 Child 迁移、Child payload handler、冻结 041 兼容包和只服务旧 Child/配置升级的测试；保留的组件递归调用改称 nested call，Run 预算表与模块也改用 run 命名。干净数据库门禁明确检查 Child 表和迁移不存在。PostgreSQL 回归为 Agent/配置/nested call/正文授权 63 项、配置与当前基线 19 项、P3/P4 保留不变量 12 项、Agent payload/Kernel/service/Web 77 项以及更新后的 Agent 配置 19 项；集合有重叠。无数据库回归为 711 通过、36 跳过、1105 因 PostgreSQL marker 未选择。尚未执行完整 PostgreSQL 全套。
 
@@ -59,8 +60,8 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 - `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
 - 官方模块瞬时生命周期状态机及失败清理已落实，但尚未与可安装包的持久 Generation/Route 状态机合并；仍需统一健康检查、按依赖边故障隔离和进程恢复；
-- 可安装包的 command、message handler、service、event、job 已进入同一可解释 RouteGraph；仍需把官方运行时模块纳入持久图，并让消息入场保存精确的 `graph_digest`；
-- dispatch trace 必须按消息、组件、代际和结果查询，且与可编辑业务配置分离；
+- 可安装包的 command、message handler、service、event、job 已进入同一可解释 RouteGraph，消息入场也已冻结精确 `graph_digest`；仍需把官方运行时模块纳入持久图；
+- dispatch trace 已能按消息、群、组件、代际、结果和时间查询，且与可编辑业务配置分离；仍需补齐跨模块通用 effect/outbox 因果引用；
 - 模块资源所有权仍需继续清理，宿主不得越过契约持有 JobStore、AgentStore 或 Memory 内部对象。
 
 ### P1 群聊调度与 Shell

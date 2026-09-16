@@ -111,7 +111,7 @@ MIGRATION_V22 = frozenset({"083_message_handler_execution.sql"})
 MIGRATION_V23 = frozenset({"084_message_handler_diagnostics.sql"})
 MIGRATION_V24 = frozenset({"085_message_handler_limits.sql"})
 MIGRATION_V25 = frozenset({"086_message_handler_takeovers.sql"})
-MIGRATION_V26 = frozenset({"087_memory_profile_lifecycle.sql"})
+MIGRATION_V26 = frozenset({"087_runtime_graph.sql"})
 
 
 def _migration_checksum(version: str, source: str) -> str:

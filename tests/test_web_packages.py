@@ -101,9 +101,19 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         ]
         assert modules["command.router"]["requires"] == ["routing.graph"]
         assert modules["message.router"]["requires"] == ["routing.graph"]
-        assert modules["routing.graph"]["management_contract"]["operations"] == [{
-            "operation_id": "snapshot", "kind": "query", "authority": "module.read"
-        }]
+        assert modules["routing.graph"]["management_contract"]["operations"] == [
+            {"operation_id": "snapshot", "kind": "query", "authority": "module.read"},
+            {
+                "operation_id": "snapshot-version",
+                "kind": "query",
+                "authority": "module.read",
+            },
+            {
+                "operation_id": "dispatch-traces",
+                "kind": "query",
+                "authority": "module.read",
+            },
+        ]
         assert modules["agent.runtime"]["management_view"]["kind"] == "trusted-module"
         assert modules["agent.runtime"]["management_view"]["protocol"] == (
             "forest.trusted-management-view/1"
@@ -147,6 +157,12 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             and node["service_name"] == "counter.increment"
             for node in graph["nodes"]
         )
+        trace_response = await client.get(
+            f"/management/v1/bots/{bot['bot_id']}/runtime-modules/"
+            "routing.graph/queries/dispatch-traces?limit=5"
+        )
+        assert trace_response.status_code == 200, trace_response.text
+        assert trace_response.json() == {"filter": {"limit": 5}, "traces": []}
         await apply(client, base, await make_plan(client, base, broken, "Broken", 9, 1, "p2"), "a2")
         # A failed candidate must leave the old durable effective revision/Worker live.
         async with asyncio.timeout(30):

@@ -104,11 +104,11 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 当前实现不再从 Worker 内存拼 service 图。每个 Generation 在注册时固化 `provides` 的精确契约与输入/输出 schema 摘要，以及 `requires` 的版本范围、必需性和启动依赖标记；发布事务同时切换组件 route、service head、command head、message-handler head、event subscription head 和 job head。普通 service 调用在交给 Worker 前核对持久 service head、目标 Generation 和 `route_epoch`，随后由既有调用准入事务决定新根调用或已保留父调用是否可继续。冻结阶段不会因为只读解析提前拒绝已经入场的调用树。
 
-`routing.graph` 在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。缺失、不兼容或歧义依赖作为边的解析状态出现，WebUI 只读呈现这一快照，不能产生另一套可编辑路由。当前图覆盖可安装包；官方运行时模块仍只有进程内生命周期描述，尚未进入同一持久 Generation 图。
+`routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径已经持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service registry clock；它用三类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。当前图覆盖可安装包；官方运行时模块仍只有进程内生命周期描述，尚未进入同一持久 Generation 图。
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。ShellGate 的保留管理命令先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 
-dispatch trace 是观测记录，不是可编辑“执行链”。每次消息记录：输入序号、固定路由快照、匹配节点、跳过/拒绝原因、开始结束时间、结果摘要、产生的 operation/effect/outbox 引用。控制台可按 Bot、群、消息、组件、代际、结果和时间筛选，并从路由图定位一次执行；不能拖拽 trace 改变生产路由。
+dispatch trace 是观测记录，不是可编辑“执行链”。当前 `routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图；业务命令和 Handler 条目携带已有 operation、call、result、failure 和 response 引用。官方 Shell/Agent/Adapter 尚未进入持久 Generation 图时，其 trace 明确使用 `runtime:*` 节点且代际为空，不能伪造代际。后续仍需把通用 effect/outbox 因果引用和官方模块代际纳入同一图；控制台始终只读，不能拖拽 trace 改变生产路由。
 
 ## 7. 可扩展管理视图
 

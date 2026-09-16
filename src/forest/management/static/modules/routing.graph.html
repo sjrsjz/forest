@@ -11,4 +11,22 @@
   <p id="route-graph-status" role="status"></p>
   <div id="route-graph-nodes" class="route-graph-nodes" aria-live="polite"></div>
   <details><summary>依赖与事件边</summary><div id="route-graph-edges" class="route-graph-edges"></div></details>
+  <details id="dispatch-trace-panel">
+    <summary>消息 Dispatch Trace</summary>
+    <form id="dispatch-trace-filter" class="dispatch-trace-filter">
+      <label>群/会话 ID<input name="conversation_id" maxlength="256"></label>
+      <label>Binding ID<input name="binding_id" maxlength="128"></label>
+      <label>群/频道 ID<input name="channel_id" maxlength="256"></label>
+      <label>消息事件 ID<input name="event_id" maxlength="256"></label>
+      <label>组件 ID<input name="component_id" maxlength="128"></label>
+      <label>代际 ID<input name="generation_id" maxlength="128"></label>
+      <label>结果状态<input name="status" maxlength="64"></label>
+      <label>开始时间（含时区）<input name="received_after" maxlength="64" placeholder="2026-09-17T00:00:00+08:00"></label>
+      <label>截止时间（含时区）<input name="received_before" maxlength="64" placeholder="2026-09-18T00:00:00+08:00"></label>
+      <label>数量<input name="limit" type="number" min="1" max="100" value="30"></label>
+      <button type="submit">查询</button>
+    </form>
+    <p id="dispatch-trace-status" role="status"></p>
+    <div id="dispatch-traces" class="dispatch-traces" aria-live="polite"></div>
+  </details>
 </section>

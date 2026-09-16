@@ -12,11 +12,13 @@ from uuid import uuid4
 import psycopg
 import pytest
 import pytest_asyncio
-from binding_seed import create_online_binding
+from binding_seed import create_online_binding, signed_ticket_factory
 from psycopg import sql
 from test_delivery import permit as delivery_permit
 
+from forest.dispatch_trace import DispatchTraceStore
 from forest.errors import ForestError
+from forest.routing_graph import RouteGraphStore
 from forest.storage.bindings import BindingStore
 from forest.storage.bot import BotStore
 from forest.storage.delivery import DeliveryStore
@@ -92,6 +94,156 @@ async def test_concurrent_dedup_has_no_ingress_gaps_or_duplicate_claims(messages
     assert len(view["units"]) == 10
     assert len(view["triggers"]) == 10
     await fails("INGEST_CONFLICT", receive(repository, lease, 0, text="changed"))
+
+
+async def test_ingress_freezes_content_addressed_route_graph_and_projects_dispatch_trace(
+    messages, monkeypatch
+):
+    repository, lease, _ = messages
+    received = await receive(repository, lease, "route-trace")
+    assert received["graph_digest"].startswith("sha256:")
+    duplicate = await receive(repository, lease, "route-trace")
+    assert duplicate["duplicate"] is True
+    assert duplicate["graph_digest"] == received["graph_digest"]
+    snapshot_builder = RouteGraphStore._snapshot_in
+
+    async def unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("stable RouteGraph should reuse its content-addressed snapshot")
+
+    monkeypatch.setattr(RouteGraphStore, "_snapshot_in", unexpected_rebuild)
+    stable = await receive(repository, lease, "route-trace-stable")
+    monkeypatch.setattr(RouteGraphStore, "_snapshot_in", snapshot_builder)
+    assert stable["graph_digest"] == received["graph_digest"]
+
+    ticket = await signed_ticket_factory(repository.store)
+    graph_operation = "read-frozen-route-graph"
+    graph_payload = {"graph_digest": received["graph_digest"]}
+    graph = await RouteGraphStore(repository.store).read_version(
+        await ticket("module.read", graph_operation, graph_payload),
+        graph_operation,
+        received["graph_digest"],
+    )
+    assert graph["graph_digest"] == received["graph_digest"]
+    assert graph["protocol"] == "forest.route-graph/1"
+
+    trace_operation = "read-dispatch-trace"
+    trace_payload = {"event_id": received["event_id"], "limit": 10}
+    result = await DispatchTraceStore(repository.store).read(
+        await ticket("module.read", trace_operation, trace_payload),
+        trace_operation,
+        trace_payload,
+    )
+    assert len(result["traces"]) == 1
+    trace = result["traces"][0]
+    assert trace["graph_digest"] == received["graph_digest"]
+    assert trace["status"] == "PASSED"
+    assert trace["entries"] == [{
+        "kind": "ingress",
+        "node_id": "runtime:adapter.onebot",
+        "component_id": "adapter.onebot",
+        "generation_id": None,
+        "status": "NO_TRIGGER",
+        "reason": "",
+        "started_at": trace["received_at"],
+        "completed_at": trace["received_at"],
+        "references": {},
+    }]
+
+    async with repository.store.pool.connection() as conn:
+        count = await (
+            await conn.execute(
+                "SELECT count(*) AS n FROM public.bot_route_graph_snapshots WHERE bot_id=%s",
+                (repository.store.bot_id,),
+            )
+        ).fetchone()
+        with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            await conn.execute(
+                "UPDATE public.bot_message_inbox SET graph_digest=NULL "
+                "WHERE bot_id=%s AND event_id=%s",
+                (repository.store.bot_id, received["event_id"]),
+            )
+    assert count["n"] == 1
+
+
+async def test_ingress_graph_fence_orders_concurrent_component_publication(messages, monkeypatch):
+    repository, lease, _ = messages
+    store = repository.store
+
+    async def prepare(generation, expected_epoch):
+        await store.register_generation(
+            lease,
+            "trace.component",
+            generation,
+            "package-" + generation,
+            "config-" + generation,
+            "worker-" + generation,
+        )
+        await store.mark_ready(lease, generation)
+        operation = await store.begin_operation(
+            lease,
+            "trace.component",
+            "publish-" + generation,
+            "plan-" + generation,
+            generation,
+            expected_epoch,
+        )
+        await store.freeze(lease, operation["operation_id"], operation["op_epoch"])
+        return operation
+
+    first_operation = await prepare("trace-gen-1", 0)
+    await store.publish(lease, first_operation["operation_id"], first_operation["op_epoch"])
+    second_operation = await prepare("trace-gen-2", 1)
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = RouteGraphStore.freeze_in
+
+    async def hold_graph(self, conn):
+        entered.set()
+        await release.wait()
+        return await original(self, conn)
+
+    monkeypatch.setattr(RouteGraphStore, "freeze_in", hold_graph)
+    admission = asyncio.create_task(receive(repository, lease, "before-publication"))
+    publication = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        publication = asyncio.create_task(
+            store.publish(lease, second_operation["operation_id"], second_operation["op_epoch"])
+        )
+        await asyncio.sleep(0.05)
+        assert publication.done() is False
+        release.set()
+        before = await admission
+        await publication
+    finally:
+        release.set()
+        await asyncio.gather(
+            admission, *([publication] if publication is not None else []),
+            return_exceptions=True,
+        )
+        monkeypatch.setattr(RouteGraphStore, "freeze_in", original)
+    after = await receive(repository, lease, "after-publication")
+    assert before["graph_digest"] != after["graph_digest"]
+
+    async with store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT graph_digest,snapshot FROM public.bot_route_graph_snapshots "
+                "WHERE bot_id=%s AND graph_digest=ANY(%s)",
+                (store.bot_id, [before["graph_digest"], after["graph_digest"]]),
+            )
+        ).fetchall()
+    graphs = {row["graph_digest"]: row["snapshot"] for row in rows}
+    before_node = next(
+        node for node in graphs[before["graph_digest"]]["nodes"]
+        if node["node_id"] == "component:trace.component"
+    )
+    after_node = next(
+        node for node in graphs[after["graph_digest"]]["nodes"]
+        if node["node_id"] == "component:trace.component"
+    )
+    assert before_node["generation_id"] == "trace-gen-1"
+    assert after_node["generation_id"] == "trace-gen-2"
 
 
 async def test_group_trunk_is_shared_but_equal_message_ids_from_two_accounts_are_distinct(messages):

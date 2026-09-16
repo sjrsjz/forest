@@ -9,7 +9,7 @@ from forest.storage import bot as bot_module
 from forest.storage.bot import BotStore
 
 FENCE = "042_schema_writer_v2.sql"
-CURRENT_FENCE = "087_memory_profile_lifecycle.sql"
+CURRENT_FENCE = "087_runtime_graph.sql"
 
 
 def resources(path, *, cutoff="042"):

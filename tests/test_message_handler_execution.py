@@ -8,6 +8,7 @@ from binding_seed import create_online_binding, signed_ticket_factory
 from test_kernel import bot_database as bot_database
 from test_message_handler_chains import event, set_policy
 
+from forest.dispatch_trace import DispatchTraceStore
 from forest.group_scheduler import GroupScheduler, MessageHandlerExecution
 from forest.kernel import Kernel
 from forest.packages import PackageCatalog
@@ -220,6 +221,28 @@ async def test_actor_runs_one_frozen_item_per_quantum_and_reply_suppresses_agent
         assert chain["status"] == "REPLIED" and chain["current_index"] == 2
         assert inbox["trigger_decision"] == "NO_TRIGGER"
         assert trigger_count == 0
+
+        trace_payload = {
+            "event_id": accepted["event_id"],
+            "component_id": "actor.handlers",
+            "generation_id": second["request"]["generation_id"],
+            "status": "REPLIED",
+            "limit": 10,
+        }
+        operation = "handler-dispatch-trace"
+        ticket = await signed_ticket_factory(store)
+        projected = await DispatchTraceStore(store).read(
+            await ticket("module.read", operation, trace_payload), operation, trace_payload
+        )
+        handler_entries = [
+            entry for entry in projected["traces"][0]["entries"]
+            if entry["kind"] == "message_handler"
+        ]
+        assert [entry["status"] for entry in handler_entries] == ["PASS", "REPLY"]
+        assert [entry["generation_id"] for entry in handler_entries] == [
+            second["request"]["generation_id"], second["request"]["generation_id"]
+        ]
+        assert all(entry["references"]["call_operation_id"] for entry in handler_entries)
     finally:
         if actor is not None:
             await messages.release_actor(actor)

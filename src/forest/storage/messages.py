@@ -609,6 +609,7 @@ class MessageStore:
                         "conversation_id": identifiers["conversation_id"],
                         "event_id": identifiers["event_id"],
                         "ingress_seq": existing["ingress_seq"],
+                        "graph_digest": existing["graph_digest"],
                         "duplicate": True,
                         "command_id": (
                             "command:" + digest_json(identifiers["event_id"])
@@ -861,7 +862,8 @@ class MessageStore:
                 )).fetchone()
                 await self.bindings._final_guard(conn, lease, binding, data=False, require_receive=True)
                 return {"conversation_id": conversation_id, "event_id": event_id,
-                        "ingress_seq": existing["ingress_seq"], "duplicate": True,
+                        "ingress_seq": existing["ingress_seq"],
+                        "graph_digest": existing["graph_digest"], "duplicate": True,
                         "command_id": command_id,
                         "business_request_id": (
                             "business-command:" + digest_json(event_id)
@@ -911,19 +913,23 @@ class MessageStore:
                 else:
                     segments.append(part)
             seq = conversation["next_ingress_seq"]
+            from forest.routing_graph import RouteGraphStore
+
+            route_graph = await RouteGraphStore(self.store).freeze_in(conn)
             payload = await contents.put_input_in(conn, event_id=event_id, source_event_id=source_event_id,
                 author=value["author"], segments=segments, expected_deletion_epoch=clock["deletion_epoch"])
             inbox = await (await conn.execute(
                 "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
-                "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,"
+                "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,graph_digest,"
                 "business_classification_pending,business_fallback_decision,"
                 "business_fallback_rule_revision,business_fallback_reason,"
                 "business_classification_next_attempt_at,business_classification_error_code) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
                 "CASE WHEN %s THEN clock_timestamp() END,%s) RETURNING *",
                 (self.store.bot_id, conversation_id, event_id, seq, value["platform_message_id"],
                  source_event_id, input_digest, Jsonb(identity(value["author"])), payload.payload_id,
                  value["sent_at"], _tokens({"author": value["author"], "segments": segments}),
+                 route_graph["graph_digest"],
                  business_classification_error is not None,
                  fallback_decision if business_classification_error is not None else None,
                  fallback_rule_revision if business_classification_error is not None else None,
@@ -1042,6 +1048,7 @@ class MessageStore:
             )
             return {"conversation_id": conversation_id, "event_id": event_id,
                     "ingress_seq": seq, "duplicate": False, "command_id": command_id,
+                    "graph_digest": route_graph["graph_digest"],
                     "business_request_id": business_request_id,
                     "message_handler_chain_id": (
                         handler_chain["chain_id"] if handler_chain is not None else None
@@ -1085,10 +1092,14 @@ class MessageStore:
                 raise ForestError("INGEST_CONFLICT", "Internal Job identity was reused", 409)
             await self._register_memory_input(conn, conversation, event_id, reconstructed=True)
             return {"event_id": event_id, "trigger_id": trigger_id,
-                    "conversation_id": conversation_id, "ingress_seq": existing["ingress_seq"]}
+                    "conversation_id": conversation_id, "ingress_seq": existing["ingress_seq"],
+                    "graph_digest": existing["graph_digest"]}
         if conversation["next_ingress_seq"] - conversation["context_applied_seq"] > 10000:
             raise ForestError("INBOX_BACKPRESSURE", "Conversation input backlog is full", 429)
         seq = conversation["next_ingress_seq"]
+        from forest.routing_graph import RouteGraphStore
+
+        route_graph = await RouteGraphStore(self.store).freeze_in(conn)
         contents = InputContentStore(self.store)
         clock = await contents.payloads.lock_in(conn)
         payload = await contents.put_input_in(conn, event_id=event_id,
@@ -1096,12 +1107,12 @@ class MessageStore:
             expected_deletion_epoch=clock["deletion_epoch"])
         await conn.execute(
             "INSERT INTO public.bot_message_inbox(bot_id,conversation_id,event_id,ingress_seq,"
-            "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,origin) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'job')",
+            "platform_message_id,source_event_id,input_digest,author,payload_id,sent_at,estimated_tokens,"
+            "graph_digest,origin) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'job')",
             (self.store.bot_id, conversation_id, event_id, seq,
              "internal:" + occurrence["occurrence_id"], "source:" + occurrence["occurrence_id"],
              digest, Jsonb(identity(author)), payload.payload_id, occurrence["scheduled_for"],
-             _tokens({"author": author, "segments": segments})),
+             _tokens({"author": author, "segments": segments}), route_graph["graph_digest"]),
         )
         await conn.execute(
             "UPDATE public.bot_conversations SET next_ingress_seq=next_ingress_seq+1,"
@@ -1116,7 +1127,8 @@ class MessageStore:
                                 {"occurrence_id": occurrence["occurrence_id"],
                                  "conversation_id": conversation_id, "ingress_seq": seq})
         return {"event_id": event_id, "trigger_id": trigger_id,
-                "conversation_id": conversation_id, "ingress_seq": seq}
+                "conversation_id": conversation_id, "ingress_seq": seq,
+                "graph_digest": route_graph["graph_digest"]}
 
     async def _classify_in(self, conn, conversation_id, event_id, decision, rule_revision, reason):
         row = await (await conn.execute(

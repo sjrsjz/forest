@@ -27,8 +27,10 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert 'id="bot-agent"' in agent and 'id="bot-memory"' not in agent
     assert 'id="bot-memory"' in memory and 'id="bot-agent"' not in memory
     assert 'id="bot-route-graph"' in routing
+    assert 'id="dispatch-trace-panel"' in routing
     assert "createModulePanel" in host
     assert "descriptor.management_view" in host
     assert "#bot-agent" in agent_style
     assert ".memory-association" in memory_style
     assert ".route-graph-nodes" in routing_style
+    assert ".dispatch-traces" in routing_style

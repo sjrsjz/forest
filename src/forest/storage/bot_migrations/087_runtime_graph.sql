@@ -294,3 +294,69 @@ END;
 $$;
 CREATE TRIGGER bot_service_head_guard BEFORE UPDATE OR DELETE
  ON public.bot_service_heads FOR EACH ROW EXECUTE FUNCTION public.forest_service_head_guard();
+
+-- Every newly admitted message freezes the exact authoritative RouteGraph it observed.
+-- Snapshots are content addressed and shared by all messages admitted under the same graph.
+CREATE TABLE public.bot_route_graph_snapshots (
+ bot_id text NOT NULL,
+ graph_digest text NOT NULL CHECK(graph_digest ~ '^sha256:[a-f0-9]{64}$'),
+ protocol text NOT NULL CHECK(octet_length(protocol) BETWEEN 1 AND 128),
+ route_digest text NOT NULL CHECK(route_digest ~ '^sha256:[a-f0-9]{64}$'),
+ service_revision bigint NOT NULL CHECK(service_revision>=0),
+ command_revision bigint NOT NULL CHECK(command_revision>=0),
+ message_handler_revision bigint NOT NULL CHECK(message_handler_revision>=0),
+ snapshot jsonb NOT NULL CHECK(jsonb_typeof(snapshot)='object'),
+ captured_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(bot_id,graph_digest),
+ UNIQUE(bot_id,route_digest,service_revision,command_revision,message_handler_revision),
+ FOREIGN KEY(bot_id) REFERENCES public.forest_bot_identity(bot_id),
+ CHECK(snapshot->>'bot_id'=bot_id),
+ CHECK(snapshot->>'protocol'=protocol),
+ CHECK(snapshot->>'graph_digest'=graph_digest)
+);
+CREATE TRIGGER bot_route_graph_snapshot_immutable BEFORE UPDATE OR DELETE
+ ON public.bot_route_graph_snapshots FOR EACH ROW
+ EXECUTE FUNCTION public.forest_bot_reject_mutation();
+
+ALTER TABLE public.bot_message_inbox
+ ADD COLUMN graph_digest text,
+ ADD CONSTRAINT bot_message_inbox_graph_digest_shape CHECK(
+  graph_digest IS NULL OR graph_digest ~ '^sha256:[a-f0-9]{64}$'
+ ),
+ ADD CONSTRAINT bot_message_inbox_graph_snapshot_fk
+  FOREIGN KEY(bot_id,graph_digest)
+  REFERENCES public.bot_route_graph_snapshots(bot_id,graph_digest);
+CREATE INDEX bot_message_inbox_graph_trace
+ ON public.bot_message_inbox(bot_id,graph_digest,received_at DESC,event_id DESC);
+
+CREATE OR REPLACE FUNCTION public.forest_inbox_source_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP = 'DELETE' THEN
+  RAISE EXCEPTION 'Inbox source deletion requires a dedicated retention migration'
+   USING ERRCODE='55000';
+ END IF;
+ IF ROW(NEW.bot_id,NEW.conversation_id,NEW.event_id,NEW.ingress_seq,
+        NEW.platform_message_id,NEW.source_event_id,NEW.input_digest,NEW.author,
+        NEW.segments,NEW.sent_at,NEW.received_at,NEW.graph_digest)
+    IS DISTINCT FROM
+    ROW(OLD.bot_id,OLD.conversation_id,OLD.event_id,OLD.ingress_seq,
+        OLD.platform_message_id,OLD.source_event_id,OLD.input_digest,OLD.author,
+        OLD.segments,OLD.sent_at,OLD.received_at,OLD.graph_digest) THEN
+  RAISE EXCEPTION 'Inbox source identity, content and route graph are immutable'
+   USING ERRCODE='55000';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.forest_inbox_graph_required() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.graph_digest IS NULL THEN
+  RAISE EXCEPTION 'MESSAGE_ROUTE_GRAPH_REQUIRED' USING ERRCODE='55000';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER bot_message_graph_required BEFORE INSERT ON public.bot_message_inbox
+ FOR EACH ROW EXECUTE FUNCTION public.forest_inbox_graph_required();
