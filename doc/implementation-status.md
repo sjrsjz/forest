@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-17。本页覆盖截至本次 `kernel.audit` 管理面收口工作区的实现事实。
+更新日期：2026-09-17。本页覆盖截至 `deployment.configuration` 管理面收口提交的实现事实。
 
 ## 结论
 
@@ -90,6 +90,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `ManagementScopeProvider` 注册表已分别实现 Bot 与 deployment 的身份解析、可见性和授权适配；deployment 不复用 `bot.store`、Bot policy revision，也不伪造 Bot ticket。首个 deployment 服务 `deployment.audit` 已进入独立生命周期注册表，旧 `/management/v1/audit`、固定审计 DOM 和专用控制器已删除。
 - `deployment.accounts` 已接管账号目录、创建、变更计划/提交和 UI；旧专用路由、固定页面与壳层控制器 import 已删除。自我降权后以 viewer 会话恢复相同幂等回执的语义仍由 `authenticated` apply action 与存储事务共同保证。
 - `deployment.configuration` 已接管 schema、当前投影、计划/提交契约和 UI；旧 `/configuration`、`/change-plans`、`/management-requests` 与固定表单已删除。登录与 session 端点只读取生效配置以计算会话 TTL 和壳层品牌文字。
+- 下一迁移对象是 `deployment.bot-catalog`。目录模块只拥有列表、创建、重命名、供应重试和供应 Job；选择目录项必须经壳层通用 `openScope(bot,id)` 挂载 Bot 注册表，不能把维护、组件配置或 Agent/Memory 页面移入 deployment authority。
 - 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。
