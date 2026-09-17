@@ -44,6 +44,16 @@ Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot �
 
 非输入 Context 单元只能通过幂等追加 operation 写入。最终 `REPLY` 单元与其回答的 trigger 状态必须在同一调度器事务提交；不存在绕过 Context 单独把 trigger 标为 `ANSWERED` 的 Repository 方法。Delivery 仍只接收 reply/send-intent 引用并独立记录外部送达，不能反向改写 Context 或 trigger。
 
+`agent.runtime` 的干净 bundle 物理拥有 `agent_sessions`、`agent_runs`、`run_inputs`、`run_input_triggers`、`run_checkpoints`、`model_requests`、`model_transport_attempts`、`model_turns`、`tool_calls` 与 `tool_observations`。它不拥有 Conversation Inbox/trigger/InputBatch/Context 顺序，不拥有 Provider 客户端、Delivery SendIntent、Memory 图、Kernel Call/Effect 或审批 authority。来自这些模块的对象只保存稳定引用、摘要、冻结 revision 和当时验证结果；不得跨 schema 外键或 join。
+
+`agent_sessions` 表示一个 Conversation 的单 Agent 逻辑响应链，活动状态对 `conversation_ref` 具有唯一约束；它不是“子 Agent registry”。一个 Session 内的 Run 和一个 Run 内的 ModelTurn/ToolCall 都按顺序推进，不能让同群两个 Run 同时取得执行 lease。调度器先产生稳定 `session_ref/run_ref` 并提交 trigger cut，Agent runtime 再以幂等 start operation 接受 InputBatch 引用；两边通过类型化事件/回执收敛，不双写对方表。
+
+每个 Run 冻结 `agent_spec_revision`、配置/Preset PayloadRef、`ForestCorePrompt protocol_version + digest`、parser/serializer revision、预算和绝对 deadline。CorePrompt 正文仍是发布制品中的只读常量，不复制到数据库、不允许 WebUI 更新；每个模型请求必须再次固定它的版本、digest 与实际 Provider 指令通道。`run_inputs` 只追加 InputBatch 引用与规范化 trigger/principal 成员，不能覆盖早期 input revision。
+
+`model_requests` 是一次语义模型调用的不可变 manifest；`model_transport_attempts` 是其实际 wire/effect 尝试，`UNKNOWN` 只能由明确对账解决，不能重发来猜测。`model_turns` 只接受 [P3 Agent 协议](p3-agent.md)解析出的一个完整原子 ModelTurn；原始候选、解析后 turn、Assistant 候选与 FunctionCall 参数均是 `kernel.payload` 引用。`tool_calls` 保存 Agent 工具业务语义和明确 `authority_trigger_ref`，通用派发状态由 `kernel.effect` 管理；Kernel 表不得重新出现 Agent tool ID。
+
+`run_checkpoints` 是不可变、带 checksum 的恢复事实。可变 Run head 只指向最后 checkpoint、当前 input/step 和 phase；owner epoch 与短 lease 保护物理执行权。进程内 Python 对象、流回调或异常对象都不是恢复权威。最终 Assistant 仍必须交给 `conversation.scheduler` 的原子 Context/reply 端口，Agent runtime 自己不能把 trigger 标为 `ANSWERED` 或直接写 Delivery。
+
 该 bundle 不拥有 `conversation_sessions`、`runs`、`model_turns`、`tool_calls`、`business_command_requests`、`message_handler_chains` 或平台 Binding。一个 Conversation 的 `active_session_ref/active_run_ref` 只是串行调度 fence 的外部身份，不是对 Agent schema 的 SQL 外键。输入批次成员必须使用规范化关系表，不能把 event/trigger ID 数组藏进 JSON。所有已接纳且允许读取的消息都先占用不可变 `ingress_seq`；分类可以乱序完成，但 `classified_through_seq` 只跨越连续终态前缀。
 
 输入选择仅接受 `IDLE`、`MODEL_SAFE_POINT` 和 `SESSION_END` 三种边界。事务锁定单个 lane 后，以 `classified_through_seq` 为上界寻找最后一个待领取 trigger：存在 trigger 时提交从 `context_applied_seq + 1` 到该 trigger 的连续前缀；其后的普通尾部留队。模型安全点没有 trigger 时不消费普通尾部；Session 结束或空闲且只有普通消息时提交无 Run 的 `SILENT_DRAIN`。`WAIT_INPUT/CONTINUE/IDLE` 等无批次结果也写不可变 selection 回执；相同 operation 与相同输入摘要精确重放第一次结果，冲突重用拒绝；同群 actor epoch 串行，不同群不共享锁。
