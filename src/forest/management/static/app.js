@@ -1,5 +1,3 @@
-import { messageHandlerPoliciesPanel } from './message-handler-policies.js';
-import { messageHandlerDiagnosticsPanel } from './message-handler-diagnostics.js';
 import { schemaForm } from './schema-form.js';
 import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
@@ -143,8 +141,6 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   runtimeViews.reset();
-  handlerPolicyPanel.reset();
-  handlerDiagnosticsPanel.reset();
   botAudit.reset();
   accountPanel.reset();
   deploymentAudit.reset();
@@ -197,8 +193,6 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   componentSourceRevision = null;
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
-const handlerPolicyPanel = messageHandlerPoliciesPanel(api, busy, notice);
-const handlerDiagnosticsPanel = messageHandlerDiagnosticsPanel(api, busy, notice);
 const accountPanel = accountsPanel(api, busy, notice, (message) => {
   accountPanel.reset(); configuration = null; pendingPlan = null;
   setIdentity(null); show('login'); notice(message, true);
@@ -225,12 +219,11 @@ botComponentHistory.id = 'bot-component-history';
 const botWorkspacePanes = new Map([
   ['status', [botOverview]],
   ['modules', [$('bot-components'), botComponentHistory]],
-  ['observability', [$('bot-handler-diagnostics'), $('bot-audit')]],
-  ['security', [$('bot-handler-policies')]],
+  ['observability', [$('bot-audit')]],
 ]);
 const botWorkspaceLabels = new Map([
   ['status', '状态'], ['modules', '模块'],
-  ['observability', '观测'], ['security', '安全与授权'],
+  ['observability', '观测'],
 ]);
 const botWorkspaceContainers = new Map();
 for (const [name, elements] of botWorkspacePanes) {
@@ -319,7 +312,7 @@ function invalidateControl(scope) {
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
   runtimeViews.invalidateContent(scope);
-  for (const panel of [handlerPolicyPanel, handlerDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
+  botAudit.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -512,8 +505,6 @@ async function readBotConfig() {
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
   runtimeViews.reset();
-  handlerPolicyPanel.reset();
-  handlerDiagnosticsPanel.reset();
   botAudit.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
@@ -541,10 +532,6 @@ async function selectBot(id) {
     await loadPackages(); if (epoch !== selectionEpoch) return;
     await readBotConfig(); if (epoch !== selectionEpoch) return;
     await runtimeViews.select(row); if (epoch !== selectionEpoch) return;
-    await handlerPolicyPanel.select(row);
-    if (epoch !== selectionEpoch) return;
-    await handlerDiagnosticsPanel.select(row);
-    if (epoch !== selectionEpoch) return;
     await botAudit.select(row);
   }
 }

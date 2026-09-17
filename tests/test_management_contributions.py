@@ -60,6 +60,16 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             "bindings", "policies", "policy.plan", "policy.apply", "limits",
             "limit.plan", "limit.apply", "diagnostics", "recovery",
         }
+        messages, = modules["message.router"]["management_contributions"]
+        assert messages["contribution_id"] == "messages"
+        assert messages["surface"]["template"] == "/static/modules/message.router.html"
+        assert {
+            item["operation_id"]
+            for item in modules["message.router"]["management_contract"]["operations"]
+        } == {
+            "bindings", "policies", "policy.plan", "policy.apply", "limits",
+            "limit.plan", "limit.apply", "diagnostics", "recovery",
+        }
         assert {
             item["operation_id"]
             for item in modules["routing.graph"]["management_contract"]["operations"]
@@ -101,6 +111,10 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             f"/management/v1/scopes/bot/{bot['bot_id']}/modules/command.router/queries"
         )
         assert (await client.get(command + "/bindings")).json() == {"bindings": []}
+        message = (
+            f"/management/v1/scopes/bot/{bot['bot_id']}/modules/message.router/queries"
+        )
+        assert (await client.get(message + "/bindings")).json() == {"bindings": []}
         assert (
             await client.get(f"/management/v1/bots/{bot['bot_id']}/jobs")
         ).status_code == 404
@@ -122,6 +136,18 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         assert (
             await client.get(
                 f"/management/v1/bots/{bot['bot_id']}/bindings/missing/command-policies"
+            )
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/message-handler-limits")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/message-handlers/diagnostics")
+        ).status_code == 404
+        assert (
+            await client.get(
+                f"/management/v1/bots/{bot['bot_id']}/bindings/missing/"
+                "message-handler-policies"
             )
         ).status_code == 404
 

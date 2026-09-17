@@ -4,11 +4,14 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, recoveryKey = null;
   let limitRevision = 0, limitPlan = null, limitApplyKey = null, limitReadSeq = 0;
   const valid = own => bot !== null && own === epoch;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/message.router`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
 
   function reset() {
     epoch++; readSeq++; limitReadSeq++; bot = null; recoveryKey = null;
     limitRevision = 0; limitPlan = null; limitApplyKey = null;
+    $('bot-handler-diagnostics').open = false;
     $('bot-handler-diagnostics').classList.add('hidden');
     $('handler-diagnostic-binding').replaceChildren();
     $('handler-diagnostic-summary').replaceChildren();
@@ -41,7 +44,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
   async function loadLimits() {
     if (!bot) return;
     const own = epoch, seq = ++limitReadSeq;
-    const data = await api(`${base()}/message-handler-limits`);
+    const data = await api(query('limits'));
     if (!valid(own) || seq !== limitReadSeq) return;
     limitRevision = data.revision; clearLimitPlan();
     if (data.values === null) {
@@ -57,7 +60,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
   }
 
   async function loadBindings() {
-    const own = epoch, data = await api(`${base()}/bindings`);
+    const own = epoch, data = await api(query('bindings'));
     if (!valid(own)) return;
     const select = $('handler-diagnostic-binding'), previous = select.value;
     select.replaceChildren();
@@ -130,7 +133,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
     const params = new URLSearchParams({limit: '50'});
     const binding = $('handler-diagnostic-binding').value;
     if (binding) params.set('binding_id', binding);
-    const data = await api(`${base()}/message-handlers/diagnostics?${params}`);
+    const data = await api(query('diagnostics', params));
     if (valid(own) && seq === readSeq) render(data);
   }
 
@@ -143,7 +146,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
     const own = epoch, key = recoveryKey;
     busy(event.currentTarget, async () => {
       const result = await api(
-        `${base()}/message-handlers/recovery`, {limit: 128}, {'Idempotency-Key': key},
+        action('recovery'), {limit: 128}, {'Idempotency-Key': key},
       );
       if (!valid(own)) return;
       recoveryKey = null; await refresh();
@@ -167,7 +170,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
       const own = epoch, key = crypto.randomUUID();
       const values = limitValues(), draft = JSON.stringify(values);
       const plan = await api(
-        `${base()}/message-handler-limit-change-plans`,
+        action('limit.plan'),
         {
           expected_revision: limitRevision,
           values,
@@ -190,7 +193,7 @@ export function messageHandlerDiagnosticsPanel(api, busy, notice) {
     busy(event.currentTarget, async () => {
       const own = epoch, plan = limitPlan;
       const result = await api(
-        `${base()}/message-handler-limit-management-requests`,
+        action('limit.apply'),
         {
           expected_revision: plan.expected_revision,
           plan_id: plan.plan_id,

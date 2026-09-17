@@ -107,7 +107,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             "component.worker-host", "adapter.onebot", "agent.runtime"
         ]
         assert modules["command.router"]["requires"] == ["adapter.onebot", "routing.graph"]
-        assert modules["message.router"]["requires"] == ["routing.graph"]
+        assert modules["message.router"]["requires"] == ["adapter.onebot", "routing.graph"]
         assert modules["command.router"]["management_contract"]["operations"] == [
             {"operation_id": "bindings", "kind": "query", "authority": "binding.read"},
             {
@@ -145,6 +145,49 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
                 "operation_id": "recovery",
                 "kind": "action",
                 "authority": "command.execution.recover",
+            },
+        ]
+        assert modules["message.router"]["management_contract"]["operations"] == [
+            {"operation_id": "bindings", "kind": "query", "authority": "binding.read"},
+            {
+                "operation_id": "policies",
+                "kind": "query",
+                "authority": "message.handler.policy.read",
+            },
+            {
+                "operation_id": "policy.plan",
+                "kind": "action",
+                "authority": "message.handler.policy.plan",
+            },
+            {
+                "operation_id": "policy.apply",
+                "kind": "action",
+                "authority": "message.handler.policy.apply",
+            },
+            {
+                "operation_id": "limits",
+                "kind": "query",
+                "authority": "message.handler.limit.read",
+            },
+            {
+                "operation_id": "limit.plan",
+                "kind": "action",
+                "authority": "message.handler.limit.plan",
+            },
+            {
+                "operation_id": "limit.apply",
+                "kind": "action",
+                "authority": "message.handler.limit.apply",
+            },
+            {
+                "operation_id": "diagnostics",
+                "kind": "query",
+                "authority": "message.handler.execution.read",
+            },
+            {
+                "operation_id": "recovery",
+                "kind": "action",
+                "authority": "message.handler.execution.recover",
             },
         ]
         assert modules["routing.graph"]["management_contract"]["operations"] == [
@@ -199,6 +242,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         agent_contribution, = modules["agent.runtime"]["management_contributions"]
         memory_contribution, = modules["memory.graph"]["management_contributions"]
         command_contribution, = modules["command.router"]["management_contributions"]
+        message_contribution, = modules["message.router"]["management_contributions"]
         assert agent_contribution["protocol"] == "forest.management-contribution/1"
         assert agent_contribution["scope_kinds"] == ["bot"]
         assert agent_contribution["surface"]["kind"] == "trusted-module"
@@ -213,6 +257,9 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         )
         assert command_contribution["surface"]["template"].endswith(
             "/command.router.html"
+        )
+        assert message_contribution["surface"]["template"].endswith(
+            "/message.router.html"
         )
         assert modules["conversation.scheduler"]["management_contributions"] == []
         assert modules["agent.runtime"]["management_contract"]["protocol"] == (

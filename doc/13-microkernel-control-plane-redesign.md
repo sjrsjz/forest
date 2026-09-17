@@ -67,7 +67,7 @@ flowchart LR
 
 当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次 Registry 激活分配独立 activation UUID，为完整官方描述符集建立一个不可变 RuntimeGraph，并为每个官方模块建立 Generation；即使宿主 lease incarnation 未变化，关闭后再次启动也必须创建新图和新代际，绝不重新激活已经 `STOPPED` 的记录。描述符摘要覆盖依赖、factory 身份、管理契约、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`。当前官方模块仍同属一个 Forest Python distribution，所以共享由该 distribution 全部 Python、SQL、HTML、CSS、JavaScript、JSON 和 TOML 资源派生的内容摘要；这比伪造独立包身份更准确，待物理拆包后再自然变为各包摘要。存储 bundle 的 `package_digest` 必须等于描述符工件摘要。所有模块启动成功后，数据库在一个事务中追加 ACTIVE 生命周期事实并切换 runtime graph head；任一启动失败只记录 FAILED/STOPPED，不能发布部分图。关闭先原子撤下 head，再按逆依赖序排空并追加终态；消息冻结的旧图仍保留旧代际。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 仍使用不同的运行驱动和代际事实表，后续需统一健康检查、恢复和按依赖边隔离的故障策略，不能把二者误称为已经共用同一 Worker 生命周期实现。
 
-官方 `adapter.onebot` 模块拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询、组件 Event 和 ComponentJob 的持久存储及管理视图；事件/任务的查询、失败重放和 Handler 退役均通过该模块的类型化管理契约完成。`command.router` 依赖 `adapter.onebot` 的 Binding/Message 端口和 `routing.graph`，拥有业务命令策略、容量、脱敏诊断、恢复操作和对应管理 UI；`message.router` 依赖路由图并拥有普通消息 Handler 的策略/容量存储，其管理面仍待按相同方式收口。`component.worker-host` 独占可安装包 Worker 的启动锁、错误状态和 Kernel install 调用，OneBot 通过依赖端口请求 codec。`contract.router` 独占冻结消息分派、命令/Handler 调用、Agent 选择和模板 responder，Conversation Scheduler 只持有它的 `execute` 端口。`scheduler.jobs` 自己构造授权端口并把冻结委派翻译为部署 authority 请求。
+官方 `adapter.onebot` 模块拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询、组件 Event 和 ComponentJob 的持久存储及管理视图；事件/任务的查询、失败重放和 Handler 退役均通过该模块的类型化管理契约完成。`command.router` 与 `message.router` 都依赖 `adapter.onebot` 的 Binding/Message 端口和 `routing.graph`，分别拥有业务命令与普通消息 Handler 的策略、容量、脱敏诊断、恢复操作和管理 UI。`component.worker-host` 独占可安装包 Worker 的启动锁、错误状态和 Kernel install 调用，OneBot 通过依赖端口请求 codec。`contract.router` 独占冻结消息分派、命令/Handler 调用、Agent 选择和模板 responder，Conversation Scheduler 只持有它的 `execute` 端口。`scheduler.jobs` 自己构造授权端口并把冻结委派翻译为部署 authority 请求。
 
 `BindingRuntime` 是已废弃的错误抽象，目标代码中不得保留该类型或兼容别名。Bot 作用域的宿主由 `BotRuntimeSupervisor` 表达；它只监督冻结模块图、内核任务、宿主 lease、统一唤醒和故障传播。模块唤醒通过通用生命周期/工作通知端口汇总，健康状态从各 Generation 的监督结果归约。Supervisor 不得知道某次唤醒属于 Agent、Memory、OneBot 或 Job，也不得持有这些模块的 Store、客户端或业务回调。
 
@@ -150,14 +150,14 @@ POST /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/action
 
 密钥输入在权限签名前投影为“是否变化 + 不可逆摘要”，原始密钥只交给经过校验的模块 handler，并立即进入凭据库加密路径；权限载荷、operation digest、审计参数和错误详情都不能携带密钥正文。输入错误返回稳定 `MODULE_MANAGEMENT_INPUT_INVALID`，未知或 query/action 类型不符返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`，校验详情必须可安全 JSON 序列化。
 
-当前 Agent 模块已注册配置读取/计划/应用、Run 查询/取消、审批和未知工具结果核对；Memory 模块已注册配置读取/计划/应用、状态、来源、联想、遗忘计划/应用和联想计划/应用；Routing 模块已注册 Event 与 ComponentJob 的查询、失败重放和 Handler 退役计划/应用；Command Router 已注册 Binding 目录、命令策略、容量、脱敏诊断和有界恢复。需要当前密码的命令策略/容量动作由通用管理网关在签票前重新鉴权，票据和 payload provenance 只携带去除密码后的规范载荷。旧 `/agent/*`、`/memory/*`、`/bots/{bot_id}/events/*`、`/bots/{bot_id}/component-jobs/*` 和命令策略/容量/诊断专用端点直接删除，不保留兼容别名。对应 HTML、CSS、ES module 控制器由模块描述符声明，`index.html`、`app.js` 和通用路由均不按这些组件 ID 分支。
+当前 Agent 模块已注册配置读取/计划/应用、Run 查询/取消、审批和未知工具结果核对；Memory 模块已注册配置读取/计划/应用、状态、来源、联想、遗忘计划/应用和联想计划/应用；Routing 模块已注册 Event 与 ComponentJob 的查询、失败重放和 Handler 退役计划/应用；Command Router 与 Message Router 均已注册 Binding 目录、策略、容量、脱敏诊断和有界恢复。需要当前密码的策略/容量动作由通用管理网关在签票前重新鉴权，票据和 payload provenance 只携带去除密码后的规范载荷。旧 `/agent/*`、`/memory/*`、`/bots/{bot_id}/events/*`、`/bots/{bot_id}/component-jobs/*` 和命令/消息路由专用管理端点直接删除，不保留兼容别名。对应 HTML、CSS、ES module 控制器由模块描述符声明，`index.html`、`app.js` 和通用路由均不按这些组件 ID 分支。
 
 管理调用的所有权和传输已经收口。Memory 模块现已声明群主干目录、来源组合筛选、绑定筛选条件的 `(occurred_at, source_unit_id)` 稳定键集分页、人工关系筛选，以及实际发布图的 scope/节点/边遍历；返回关系会说明审核来源、贡献、投影版本和跨主干状态。相关索引直接进入最终数据库基线，控制台只通过模块 operation 使用这些能力。全文/图片查询式召回入口、关系图可视化和十万至百万来源容量压测仍未完成，不能用现有列表与 JSON 图遍历冒充。
 
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。
-- 删除顶层硬编码 Agent、Memory、Event、ComponentJob 和 Command Router 页面；模块列表来自服务端注册投影。
+- 删除顶层硬编码 Agent、Memory、Event、ComponentJob、Command Router 和 Message Router 页面；模块列表来自服务端注册投影。
 - 至少一个真实官方模块随包携带 UI，并通过沙箱协议完成读取草稿、产生补丁、预览与应用。
 - 不带 UI 的模块仍可用通用 schema 表单配置。
 - 配置 UI 的包摘要、schema、当前运行代际一致性有自动测试；篡改、路径逃逸、超大资源、协议不兼容和越权消息被拒绝。

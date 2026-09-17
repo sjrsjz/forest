@@ -285,6 +285,7 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
     memory, = descriptors["memory.graph"].management
     routing, = descriptors["routing.graph"].management
     command, = descriptors["command.router"].management
+    message, = descriptors["message.router"].management
     schedules, = descriptors["scheduler.jobs"].management
     assert (agent.label, agent.template, agent.module) == (
         "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js"
@@ -311,12 +312,16 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
         "commands", ("bot",), "/static/command-router.js"
     )
     assert command.template == "/static/modules/command.router.html"
+    assert (message.contribution_id, message.scope_kinds, message.module) == (
+        "messages", ("bot",), "/static/message-router.js"
+    )
+    assert message.template == "/static/modules/message.router.html"
     assert all(
         item.management == ()
         for component_id, item in descriptors.items()
         if component_id not in {
             "adapter.onebot", "agent.runtime", "command.router", "memory.graph",
-            "routing.graph", "scheduler.jobs"
+            "message.router", "routing.graph", "scheduler.jobs"
         }
     )
 
@@ -332,13 +337,14 @@ def test_policy_stores_are_owned_by_routing_modules_not_platform_attributes():
     command = next(item for item in OFFICIAL_MODULES if item.component_id == "command.router")
     message = next(item for item in OFFICIAL_MODULES if item.component_id == "message.router")
     command_runtime = command.factory(platform, {"adapter.onebot": adapter})
-    message_runtime = message.factory(platform, {})
+    message_runtime = message.factory(platform, {"adapter.onebot": adapter})
     assert command_runtime.policies.store is platform.bot.store
     assert command_runtime.limits.store is platform.bot.store
     assert command_runtime.bindings is adapter.bindings
     assert command_runtime.diagnostics.messages is adapter.messages
     assert message_runtime.policies.store is platform.bot.store
     assert message_runtime.limits.store is platform.bot.store
+    assert message_runtime.bindings is adapter.bindings
     assert not hasattr(platform, "command_policies")
     assert not hasattr(platform, "message_handler_policies")
 

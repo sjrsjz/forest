@@ -50,7 +50,9 @@ async def test_web_message_handler_policy_requires_reauth_and_persists_source_bo
     token, settings = await provision(tmp_path, web_bots_database)
     async with running(settings) as (app, client):
         await setup(client, token)
-        assert "普通群消息处理策略" in (await client.get("/")).text
+        assert "普通群消息处理策略" in (
+            await client.get("/static/modules/message.router.html")
+        ).text
         assert "export function messageHandlerPoliciesPanel" in (
             await client.get("/static/message-handler-policies.js")
         ).text
@@ -60,12 +62,15 @@ async def test_web_message_handler_policy_requires_reauth_and_persists_source_bo
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/message.router"
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         package = PackageCatalog(tmp_path / "packages").build(handler_source(tmp_path))
         await managed.kernel.install(package)
         binding = await create_binding(client, root, {"self_id": "10001", "display_name": "QQ"}, "create-handler-policy-binding")
-        path = root + "/bindings/" + binding["binding_id"]
-        response = await client.get(path + "/message-handler-policies")
+        directory = (await client.get(module + "/queries/bindings")).json()
+        assert [row["binding_id"] for row in directory["bindings"]] == [binding["binding_id"]]
+        policy_query = module + "/queries/policies?binding_id=" + binding["binding_id"]
+        response = await client.get(policy_query)
         assert response.status_code == 200, response.text
         initial = response.json()
         assert initial["registry_revision"] == 1
@@ -81,9 +86,11 @@ async def test_web_message_handler_policy_requires_reauth_and_persists_source_bo
         handler = initial["handlers"][0]
         assert handler["handler_id"] == "ordinary" and handler["handler"] == "ordinary"
 
-        policy_path = path + "/components/policy.handler/message-handlers/ordinary"
-        plan_url = policy_path + "/policy-change-plans"
+        plan_url = module + "/actions/policy.plan"
         plan_body = {
+            "binding_id": binding["binding_id"],
+            "component_id": "policy.handler",
+            "handler_id": "ordinary",
             "expected_revision": 0,
             "values": {"mode": "USER_SET", "user_ids": ["20002", "10003", "20002"]},
             "current_password": "wrong-password-value",
@@ -97,8 +104,10 @@ async def test_web_message_handler_policy_requires_reauth_and_persists_source_bo
         plan = await post(client, plan_url, plan_body, "plan-handler-policy")
         assert plan["values"] == {"mode": "USER_SET", "user_ids": ["10003", "20002"]}
         assert PASSWORD not in str(plan)
-        apply_url = policy_path + "/policy-management-requests"
+        apply_url = module + "/actions/policy.apply"
         apply_body = {
+            "binding_id": binding["binding_id"], "component_id": "policy.handler",
+            "handler_id": "ordinary",
             "expected_revision": plan["expected_revision"], "plan_id": plan["plan_id"],
             "plan_digest": plan["plan_digest"], "current_password": PASSWORD,
         }
@@ -106,7 +115,7 @@ async def test_web_message_handler_policy_requires_reauth_and_persists_source_bo
         assert applied["revision"] == 1 and applied["status"] == "APPLIED"
         assert await post(client, apply_url, apply_body, "apply-handler-policy") == applied
 
-        saved = (await client.get(path + "/message-handler-policies")).json()["handlers"][0]
+        saved = (await client.get(policy_query)).json()["handlers"][0]
         assert saved["revision"] == 1
         assert saved["values"] == plan["values"]
         assert saved["values_payload_state"] == "ACTIVE"
@@ -145,15 +154,16 @@ async def test_policy_preview_is_rejected_after_handler_spec_hot_reload(
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/message.router"
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         catalog = PackageCatalog(tmp_path / "packages")
         await managed.kernel.install(catalog.build(handler_source(tmp_path, version="0.1.0")))
         binding = await create_binding(client, root, {"self_id": "10002", "display_name": "QQ"}, "create-stale-policy-binding")
-        path = (root + "/bindings/" + binding["binding_id"]
-                + "/components/policy.handler/message-handlers/ordinary")
         plan = await post(
-            client, path + "/policy-change-plans",
-            {"expected_revision": 0, "values": {"mode": "ADMINS", "user_ids": []},
+            client, module + "/actions/policy.plan",
+            {"binding_id": binding["binding_id"], "component_id": "policy.handler",
+             "handler_id": "ordinary", "expected_revision": 0,
+             "values": {"mode": "ADMINS", "user_ids": []},
              "current_password": PASSWORD},
             "stale-policy-plan",
         )
@@ -161,15 +171,17 @@ async def test_policy_preview_is_rejected_after_handler_spec_hot_reload(
             tmp_path, version="0.2.0", priority=20
         )))
         response = await client.post(
-            path + "/policy-management-requests",
-            json={"expected_revision": 0, "plan_id": plan["plan_id"],
+            module + "/actions/policy.apply",
+            json={"binding_id": binding["binding_id"], "component_id": "policy.handler",
+                  "handler_id": "ordinary", "expected_revision": 0,
+                  "plan_id": plan["plan_id"],
                   "plan_digest": plan["plan_digest"], "current_password": PASSWORD},
             headers={"idempotency-key": "stale-policy-apply"},
         )
         assert response.status_code == 409
         assert response.json()["code"] == "MESSAGE_HANDLER_POLICY_PLAN_STALE"
         policies = (await client.get(
-            root + "/bindings/" + binding["binding_id"] + "/message-handler-policies"
+            module + "/queries/policies?binding_id=" + binding["binding_id"]
         )).json()
         assert policies["handlers"][0]["revision"] == 0
         assert policies["handlers"][0]["priority"] == 20
@@ -185,23 +197,26 @@ async def test_message_handler_policy_expected_revision_has_single_winner(tmp_pa
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/message.router"
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         await managed.kernel.install(PackageCatalog(tmp_path / "packages").build(handler_source(tmp_path)))
         binding = await create_binding(client, root, {"self_id": "10003", "display_name": "QQ"}, "create-policy-race-binding")
-        path = (root + "/bindings/" + binding["binding_id"]
-                + "/components/policy.handler/message-handlers/ordinary")
         plans = []
         for index, mode in enumerate(("EVERYONE", "ADMINS")):
             plans.append(await post(
-                client, path + "/policy-change-plans",
-                {"expected_revision": 0, "values": {"mode": mode, "user_ids": []},
+                client, module + "/actions/policy.plan",
+                {"binding_id": binding["binding_id"], "component_id": "policy.handler",
+                 "handler_id": "ordinary", "expected_revision": 0,
+                 "values": {"mode": mode, "user_ids": []},
                  "current_password": PASSWORD},
                 f"race-plan-{index}",
             ))
         responses = await asyncio.gather(*(
             client.post(
-                path + "/policy-management-requests",
-                json={"expected_revision": 0, "plan_id": plan["plan_id"],
+                module + "/actions/policy.apply",
+                json={"binding_id": binding["binding_id"],
+                      "component_id": "policy.handler", "handler_id": "ordinary",
+                      "expected_revision": 0, "plan_id": plan["plan_id"],
                       "plan_digest": plan["plan_digest"], "current_password": PASSWORD},
                 headers={"idempotency-key": f"race-apply-{index}"},
             )

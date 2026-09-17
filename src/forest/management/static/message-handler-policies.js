@@ -2,15 +2,18 @@ const $ = (id) => document.getElementById(id);
 
 export function messageHandlerPoliciesPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, pending = null, applyKey = null;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/message.router`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
   const password = () => $('handler-policy-password').value;
-  const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
+  const post = (operation, body, key) => api(action(operation), body, {'Idempotency-Key':key});
   const valid = (own) => bot !== null && own === epoch;
   function clearPlan() {
     pending = null; applyKey = null; $('handler-policy-preview').classList.add('hidden');
   }
   function reset() {
     epoch++; readSeq++; bot = null; clearPlan();
+    $('bot-handler-policies').open = false;
     $('bot-handler-policies').classList.add('hidden');
     $('handler-policy-binding').replaceChildren();
     $('handler-policy-list').replaceChildren();
@@ -18,7 +21,7 @@ export function messageHandlerPoliciesPanel(api, busy, notice) {
     $('handler-policy-password').value = '';
   }
   async function loadBindings() {
-    const own = epoch, data = await api(`${base()}/bindings`);
+    const own = epoch, data = await api(query('bindings'));
     if (!valid(own)) return;
     const select = $('handler-policy-binding'), previous = select.value;
     select.replaceChildren();
@@ -40,7 +43,7 @@ export function messageHandlerPoliciesPanel(api, busy, notice) {
     if (!binding) {
       $('handler-policy-status').textContent = '还没有已登记的 Binding。'; return;
     }
-    const data = await api(`${base()}/bindings/${encodeURIComponent(binding)}/message-handler-policies`);
+    const data = await api(query('policies', {binding_id:binding}));
     if (!valid(own) || sequence !== readSeq || binding !== $('handler-policy-binding').value) return;
     $('handler-policy-status').textContent =
       `Binding 策略 · 处理器注册表修订 ${data.registry_revision} · ${data.handlers.length} 条有效处理器`;
@@ -77,10 +80,9 @@ export function messageHandlerPoliciesPanel(api, busy, notice) {
       const own = epoch, key = crypto.randomUUID();
       busy(button, async () => {
         const plan = await post(
-          `${base()}/bindings/${encodeURIComponent(binding)}/components/` +
-          `${encodeURIComponent(handler.component_id)}/message-handlers/` +
-          `${encodeURIComponent(handler.handler_id)}/policy-change-plans`,
-          {expected_revision:handler.revision, values, current_password:password()}, key,
+          'policy.plan',
+          {binding_id:binding, component_id:handler.component_id, handler_id:handler.handler_id,
+            expected_revision:handler.revision, values, current_password:password()}, key,
         );
         if (!valid(own)) return;
         pending = {binding, handler, plan}; applyKey = crypto.randomUUID();
@@ -107,10 +109,9 @@ export function messageHandlerPoliciesPanel(api, busy, notice) {
     busy(event.currentTarget, async () => {
       const {binding, handler, plan} = frozen;
       await post(
-        `${base()}/bindings/${encodeURIComponent(binding)}/components/` +
-        `${encodeURIComponent(handler.component_id)}/message-handlers/` +
-        `${encodeURIComponent(handler.handler_id)}/policy-management-requests`,
-        {expected_revision:plan.expected_revision, plan_id:plan.plan_id,
+        'policy.apply',
+        {binding_id:binding, component_id:handler.component_id, handler_id:handler.handler_id,
+          expected_revision:plan.expected_revision, plan_id:plan.plan_id,
           plan_digest:plan.plan_digest, current_password:password()}, key,
       );
       if (!valid(own)) return;

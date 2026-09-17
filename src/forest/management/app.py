@@ -38,11 +38,6 @@ from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
 from forest.management.cleanup import StorageCleanupManager
 from forest.management.fleet import BotFleet
-from forest.management.message_handler_diagnostics_api import (
-    install_message_handler_diagnostic_routes,
-)
-from forest.management.message_handler_limits_api import install_message_handler_limit_routes
-from forest.management.message_handler_policies_api import install_message_handler_policy_routes
 from forest.management.module_api import install_module_routes
 from forest.management.onebot_protocol import install_onebot_protocol_route
 from forest.management.provision import BotProvisioner
@@ -694,9 +689,6 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_bot_routes(app, runtime)
     install_onebot_protocol_route(app, runtime)
     install_module_routes(app, runtime)
-    install_message_handler_policy_routes(app, runtime)
-    install_message_handler_diagnostic_routes(app, runtime)
-    install_message_handler_limit_routes(app, runtime)
     install_bot_audit_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")

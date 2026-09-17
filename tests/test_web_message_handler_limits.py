@@ -18,10 +18,10 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
     settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
     async with running(settings) as (app, client):
         await setup(client, token)
-        page = (await client.get("/")).text
+        page = (await client.get("/static/modules/message.router.html")).text
         assert "普通消息 Handler 容量与调用者限流" in page
         script = (await client.get("/static/message-handler-diagnostics.js")).text
-        assert "message-handler-limit-change-plans" in script
+        assert "action('limit.plan')" in script
         bot = await post(
             client,
             "/management/v1/bots",
@@ -30,8 +30,8 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
             status=202,
         )
         await ready(client, bot)
-        root = "/management/v1/bots/" + bot["bot_id"]
-        initial = (await client.get(root + "/message-handler-limits")).json()
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/message.router"
+        initial = (await client.get(module + "/queries/limits")).json()
         assert initial == {
             "revision": 0,
             "values": DEFAULT_MESSAGE_HANDLER_LIMITS,
@@ -48,7 +48,7 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
             "principal_refill_seconds": 15,
             "deadline_seconds": 45,
         }
-        plan_url = root + "/message-handler-limit-change-plans"
+        plan_url = module + "/actions/limit.plan"
         denied = await client.post(
             plan_url,
             json={
@@ -74,11 +74,11 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
             "plan_digest": plan["plan_digest"],
             "current_password": PASSWORD,
         }
-        apply_url = root + "/message-handler-limit-management-requests"
+        apply_url = module + "/actions/limit.apply"
         applied = await post(client, apply_url, apply_body, "apply-handler-limits")
         assert applied == {"revision": 1, "status": "APPLIED"}
         assert await post(client, apply_url, apply_body, "apply-handler-limits") == applied
-        saved = (await client.get(root + "/message-handler-limits")).json()
+        saved = (await client.get(module + "/queries/limits")).json()
         assert saved["revision"] == 1
         assert saved["values"] == values
         assert saved["values_payload_state"] == "ACTIVE"
@@ -120,7 +120,7 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
         assert created.status_code == 201, created.text
         await client.post("/management/v1/logout", json={})
         assert (await login_as(client, "limit-viewer", viewer_password)).status_code == 200
-        assert (await client.get(root + "/message-handler-limits")).status_code == 200
+        assert (await client.get(module + "/queries/limits")).status_code == 200
         rejected = await client.post(
             plan_url,
             json={

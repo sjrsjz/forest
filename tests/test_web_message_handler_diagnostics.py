@@ -24,10 +24,10 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
     async with onebot_server(self_id="1000") as server:
         async with running(settings) as (app, client):
             await setup(client, token)
-            page = (await client.get("/")).text
+            page = (await client.get("/static/modules/message.router.html")).text
             assert "普通消息 Handler 运行诊断" in page
-            module = (await client.get("/static/message-handler-diagnostics.js")).text
-            assert "export function messageHandlerDiagnosticsPanel" in module
+            controller = (await client.get("/static/message-handler-diagnostics.js")).text
+            assert "export function messageHandlerDiagnosticsPanel" in controller
 
             bot = await post(
                 client,
@@ -38,6 +38,11 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
             )
             await ready(client, bot)
             root = "/management/v1/bots/" + bot["bot_id"]
+            module = (
+                "/management/v1/scopes/bot/"
+                + bot["bot_id"]
+                + "/modules/message.router"
+            )
             managed = await app.state.runtime.fleet.attach(bot["bot_id"])
             await managed.kernel.install(
                 PackageCatalog(tmp_path / "packages").build(handler_source(tmp_path))
@@ -46,17 +51,13 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
             binding_id = binding["binding_id"]
             await configure(client, root + "/bindings/" + binding_id, server["origin"])
             for handler_id in ("first", "second"):
-                policy_root = (
-                    root
-                    + "/bindings/"
-                    + binding_id
-                    + "/components/actor.handlers/message-handlers/"
-                    + handler_id
-                )
                 plan = await post(
                     client,
-                    policy_root + "/policy-change-plans",
+                    module + "/actions/policy.plan",
                     {
+                        "binding_id": binding_id,
+                        "component_id": "actor.handlers",
+                        "handler_id": handler_id,
                         "expected_revision": 0,
                         "values": {"mode": "EVERYONE", "user_ids": []},
                         "current_password": PASSWORD,
@@ -65,8 +66,11 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
                 )
                 await post(
                     client,
-                    policy_root + "/policy-management-requests",
+                    module + "/actions/policy.apply",
                     {
+                        "binding_id": binding_id,
+                        "component_id": "actor.handlers",
+                        "handler_id": handler_id,
                         "expected_revision": 0,
                         "plan_id": plan["plan_id"],
                         "plan_digest": plan["plan_digest"],
@@ -97,7 +101,7 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
                 )
                 assert selected["status"] == "MESSAGE_HANDLER"
 
-                response = await client.get(root + "/message-handlers/diagnostics?limit=25")
+                response = await client.get(module + "/queries/diagnostics?limit=25")
                 assert response.status_code == 200, response.text
                 body = response.json()
                 assert body["summary"]["pending"] == 1
@@ -110,21 +114,21 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
                 assert "sensitive-user" not in response.text
 
                 filtered = await client.get(
-                    root
-                    + "/message-handlers/diagnostics?binding_id="
+                    module
+                    + "/queries/diagnostics?binding_id="
                     + binding_id
                     + "&limit=10"
                 )
                 assert filtered.status_code == 200
                 assert filtered.json()["filter"]["binding_id"] == binding_id
                 missing = await client.get(
-                    root + "/message-handlers/diagnostics?binding_id=missing&limit=10"
+                    module + "/queries/diagnostics?binding_id=missing&limit=10"
                 )
                 assert missing.status_code == 404
-                unknown = await client.get(root + "/message-handlers/diagnostics?unknown=1")
+                unknown = await client.get(module + "/queries/diagnostics?unknown=1")
                 assert unknown.status_code == 422
 
-                recovery_url = root + "/message-handlers/recovery"
+                recovery_url = module + "/actions/recovery"
                 assert (await client.post(recovery_url, json={"limit": 8})).status_code == 422
                 first = await post(client, recovery_url, {"limit": 8}, "recover-handlers")
                 replay = await post(client, recovery_url, {"limit": 8}, "recover-handlers")
@@ -158,9 +162,9 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
             assert created.status_code == 201, created.text
             await client.post("/management/v1/logout", json={})
             assert (await login_as(client, "handler-viewer", viewer_password)).status_code == 200
-            assert (await client.get(root + "/message-handlers/diagnostics")).status_code == 200
+            assert (await client.get(module + "/queries/diagnostics")).status_code == 200
             denied = await client.post(
-                root + "/message-handlers/recovery",
+                module + "/actions/recovery",
                 json={"limit": 8},
                 headers={"idempotency-key": "viewer-handler-recovery-denied"},
             )

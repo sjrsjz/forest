@@ -302,12 +302,17 @@ class _CommandRoutingRuntime:
 
 
 class _MessageRoutingRuntime:
-    def __init__(self, runtime):
+    def __init__(self, runtime, adapter):
+        from forest.storage.message_handler_diagnostics import MessageHandlerDiagnosticsStore
         from forest.storage.message_handler_limits import MessageHandlerLimitStore
         from forest.storage.message_handler_policies import MessageHandlerPolicyStore
 
         self.policies = MessageHandlerPolicyStore(runtime.bot.store)
         self.limits = MessageHandlerLimitStore(runtime.bot.store)
+        self.bindings = adapter.bindings
+        self.diagnostics = MessageHandlerDiagnosticsStore(
+            runtime.bot.store, control=getattr(runtime.bot, "control", None)
+        )
 
 
 def _command_routing(runtime, modules: dict[str, Any]):
@@ -318,8 +323,12 @@ def _command_routing(runtime, modules: dict[str, Any]):
     return module
 
 
-def _message_routing(runtime, _: dict[str, Any]):
-    return _MessageRoutingRuntime(runtime)
+def _message_routing(runtime, modules: dict[str, Any]):
+    from forest.management.message_contract import MessageRoutingManagementContract
+
+    module = _MessageRoutingRuntime(runtime, modules["adapter.onebot"])
+    module.management_contract = MessageRoutingManagementContract()
+    return module
 
 
 def _onebot(runtime, modules: dict[str, Any]):
@@ -474,7 +483,19 @@ OFFICIAL_MODULES = (
         ),),
     ),
     RuntimeModuleDescriptor(
-        "message.router", ("routing.graph",), _message_routing, _OFFICIAL_ARTIFACT
+        "message.router",
+        ("adapter.onebot", "routing.graph"),
+        _message_routing,
+        _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "messages",
+            "普通消息路由",
+            ("bot",),
+            "/static/modules/message.router.html",
+            "/static/message-router.js",
+            group="routing",
+            order=50,
+        ),),
     ),
     RuntimeModuleDescriptor(
         "contract.router",

@@ -15,11 +15,15 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="bot-component-jobs"' not in index
     assert 'id="bot-command-policies"' not in index
     assert 'id="bot-command-diagnostics"' not in index
+    assert 'id="bot-handler-policies"' not in index
+    assert 'id="bot-handler-diagnostics"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
     assert "commandPoliciesPanel" not in app
     assert "businessCommandDiagnosticsPanel" not in app
+    assert "messageHandlerPoliciesPanel" not in app
+    assert "messageHandlerDiagnosticsPanel" not in app
     assert "moduleSurfaces" not in app
     assert "'agent.runtime'" not in app
     assert "'memory.graph'" not in app
@@ -40,6 +44,7 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     jobs = (STATIC / "modules/scheduler.jobs.html").read_text(encoding="utf-8")
     onebot = (STATIC / "modules/adapter.onebot.html").read_text(encoding="utf-8")
     command = (STATIC / "modules/command.router.html").read_text(encoding="utf-8")
+    message = (STATIC / "modules/message.router.html").read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
     memory_style = (STATIC / "modules/memory.graph.css").read_text(encoding="utf-8")
@@ -62,6 +67,11 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     command_controller = (STATIC / "command-router.js").read_text(encoding="utf-8")
     assert "commandPoliciesPanel" in command_controller
     assert "businessCommandDiagnosticsPanel" in command_controller
+    assert '<details id="bot-handler-policies"' in message
+    assert '<details id="bot-handler-diagnostics"' in message
+    message_controller = (STATIC / "message-router.js").read_text(encoding="utf-8")
+    assert "messageHandlerPoliciesPanel" in message_controller
+    assert "messageHandlerDiagnosticsPanel" in message_controller
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host
