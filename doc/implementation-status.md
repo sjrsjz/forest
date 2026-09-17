@@ -84,7 +84,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `BotProvisioner._initialize`、`BotFleet.attach`、CLI 和 Restore 仍调用 `BotStore.migrate()`；必须改为最小 Kernel bootstrap 加所选模块的准确 schema bundle。
 - 当前 `forest_kernel.bot_identity` 和 `forest_kernel.schema_bundles` installer 已能校验摘要、namespace、Repository contract、执行档位、并发安装和事务回滚。第三方 `declarative` SQL 与 distribution 绑定的 `official` 完整不变量 SQL 已严格分流，但官方模块尚未提供完整业务 bundle。
 - 首个 `kernel.runtime` 干净 baseline 已建立并可由官方 bundle 安装器原子安装：只含租约、模块代际、通用调用、状态引用和 RuntimeGraph，不含旧表中的 `agent_tool_id`、OneBot 控制服务特例、业务枚举或跨业务外键。它目前是已验证的 cutover 候选；在其他官方模块 bundle 与 Repository 一起完成前，生产启动路径仍由旧 `BotStore.migrate()` 建库，不能把候选存在误报为切换完成。
-- `kernel.payload` 的干净 baseline 与 Repository 已建立：规范化保存来源 manifest、正文、派生边、删除 epoch、精确遗忘选择和 scrub 状态；载荷接纳与遗忘按同一 clock 行收敛，先接纳会被随后遗忘闭包撤销，先遗忘会拒绝晚到正文。`kernel.audit` 候选只保存可筛选的脱敏 envelope，详情必须经 payload 端口复核，不保存 JSONB 正文或跨模块 join。两者仍未接入生产启动链与旧生产者。`kernel.authorization` 与 `kernel.effect` 仍未取得干净 bundle/Repository；这些表不能并入 Runtime、Payload 或 Audit 来缩短切换路径。
+- `kernel.payload` 的干净 baseline 与 Repository 已建立：规范化保存来源 manifest、正文、派生边、删除 epoch、精确遗忘选择和 scrub 状态；载荷接纳与遗忘按同一 clock 行收敛，先接纳会被随后遗忘闭包撤销，先遗忘会拒绝晚到正文。`kernel.audit` 候选只保存可筛选的脱敏 envelope，详情必须经 payload 端口复核，不保存 JSONB 正文或跨模块 join。`kernel.authorization` 候选只保存规范化能力授予集、最长 30 秒的精确票据、一次性消费、撤销事实、单调策略 revision 与通用批准；票据消费和撤销按同一 policy clock 合流，不吞入 Web 会话、OneBot 管理员、Agent 工具或模块策略正文。这三个候选仍未接入生产启动链与旧生产者。`kernel.effect` 仍未取得干净 bundle/Repository；不能把它并入 Runtime、Payload、Authorization 或 Audit 来缩短切换路径。
 - 不能把历史 001…087 迁移压成包含全部业务表的单一“官方 bundle”；模块只能拥有自己的 namespace 和 Repository。
 - 干净库拒绝旧迁移账本、未知业务表和非空升级路径；开发数据库直接重建。
 
@@ -113,7 +113,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 当前工作区的验证证据：
 
-- 无 PostgreSQL 全套：`839 passed, 1066 skipped`；
+- 无 PostgreSQL 全套：`839 passed, 1068 skipped`；
 - `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - `command.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；密码重新鉴权、载荷脱敏、热重载失效和并发 CAS 均包含在内。
 - `message.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；Binding 目录、密码脱敏、Handler 恢复幂等和并发 CAS 均包含在内。
@@ -127,7 +127,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `component.worker-host`：契约、贡献发现、UI 所有权和载荷定向组为 `26 passed`；隔离 PostgreSQL 17 下双 Bot 配置/调用/重启、组件验证与启停、历史正文清理、跨边界回执、跨 Bot 计划隔离、包升级失败恢复、Bot scope 包内 UI 工件和旧组件端点消失共 `10 passed`，随后对新增 artifact 与旧端点断言各自重跑为 `1 passed`。
 - host scope：稳定 identity、独立 Registry 生命周期和静态 UI 定向组 `49 passed`；隔离 PostgreSQL 17 下 host provider、模块发现、运行投影和错误 scope 拒绝为 `1 passed`，管理会话/账号/配置整组为 `9 passed`。
 - `deployment.backup`、`deployment.restore`、`host.storage`：隔离 PostgreSQL 17 下完成创建备份、网关文件流下载、网关流式导入、只读校验、隔离恢复、宿主回收、权限边界和旧端点 404 的端到端链路 `1 passed`；作用域发现、包制品回归与基础管理整组 `14 passed`。
-- Schema bundle 与干净 kernel 模块候选：隔离 PostgreSQL 17 下 bootstrap、第三方声明式 SQL、官方函数/触发器执行、档位账本身份、并发安装、回滚、Runtime 通用事实、Audit 筛选/幂等/不可变/payload-port，以及 Payload 来源闭包/遗忘/scrub/双锁序收敛整组 `46 passed`；第三方描述符冒充 `official` 在 SQL 执行前拒绝。
+- Schema bundle 与干净 kernel 模块候选：隔离 PostgreSQL 17 下 bootstrap、第三方声明式 SQL、官方函数/触发器执行、档位账本身份、并发安装、回滚、Runtime 通用事实、Audit 筛选/幂等/不可变/payload-port、Payload 来源闭包/遗忘/scrub/双锁序收敛，以及 Authorization 精确票据/撤销/幂等消费/双锁序收敛整组 `48 passed`；Payload 相同 owner 的双共享锁幂等准入另连续回归 `10 × 1 passed`，已消除正文触发器共享锁升级造成的死锁。第三方描述符冒充 `official` 在 SQL 执行前拒绝。
 - PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
 - 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
 - Ruff、Python compileall、四个受影响 ES module 的 `node --check` 和 `git diff --check` 通过；

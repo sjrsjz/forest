@@ -17,7 +17,7 @@
 | Kernel bootstrap (`forest_kernel`) | Bot 身份、schema bundle 账本 | RuntimeGraph、业务配置、调用、授权、效果、审计正文 |
 | `kernel.runtime` | Bot 运行封印、host/module lease、Generation、Route、Lifecycle、通用 Call、状态引用、RuntimeGraph | Agent/Adapter/Memory/Shell/Job 业务字段、业务 payload 正文 |
 | `kernel.payload` | Payload header/body、SourceManifest、派生父边、payload capability、删除 epoch 与 revoke/scrub 状态 | Memory 图、Context 顺序、业务可检索索引、模块私有配置 head |
-| `kernel.authorization` | 能力授予、撤销、主体映射引用、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台凭据 |
+| `kernel.authorization` | 精确能力授予集、短寿命票据、一次性消费、撤销事实、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台账号、OneBot 管理员列表 |
 | `kernel.effect` | 通用 Effect identity、dispatch fence、attempt/outcome 与 UNKNOWN 对账 | Delivery SendIntent、OneBot wire body、Agent 工具上下文副本 |
 | `kernel.audit` | 通用审计 envelope、来源 operation/call 引用、脱敏查询索引 | 模块业务正文、密钥、跨模块复制的完整 payload |
 | `adapter.onebot` | Binding、连接事实、规范化入站、平台媒体引用、发送 attempt/receipt | Agent Run、记忆向量、其他 Adapter 的连接状态 |
@@ -31,6 +31,12 @@
 模块表放入由 bundle 分配的独占 PostgreSQL schema。模块运行角色只拥有该 schema 的 DML 权限和明确批准的内核函数；第三方 Worker 不获得数据库连接。官方受信模块也必须经自己的 Repository 访问，不能借同进程身份跨模块 join。跨模块原子流程使用内核主持的类型化 transaction participant 或 outbox/effect 协议；不能靠某模块直接更新另一模块的表来“方便地”完成事务。
 
 `kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用 Call、组件状态 payload 引用和 RuntimeGraph。Call 的来源种类、服务名和 payload 身份是有界通用字段；该 bundle 不因“都是内核功能”而吞并 payload、authorization、effect 或 audit 的表。任何 kernel 模块表都不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让对应 kernel 模块提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
+
+`kernel.authorization` 只回答“某个稳定主体凭哪一组当前能力，能否对精确资源执行精确动作”。授予集按主体、可选目标组件代际、能力键、资源种类和资源 ID 规范化并以摘要寻址；模块自身仍解释管理员名单、群 Shell 规则、工具策略、可见性和业务审批含义。模块先通过自己的策略端口形成能力请求，授权模块再签发最长 30 秒且绑定 `ticket_id + operation_id + subject + audience + action + resource + input_digest + plan_digest + grant_set_digest + policy_revision` 的票据。消费记录是不可变的一次性事实；相同 operation 的精确重放返回原回执，不同输入或目标复用身份必须拒绝。
+
+授权撤销与票据消费在同一 Bot 的 `policy_clock` 上线性化。普通授予、签发与首次消费取得共享事务锁，撤销取得排他事务锁并把 revision 只推进一次。若消费先提交，随后撤销不能抹掉已经发生的效果，但精确重放仍返回原消费事实；若撤销先提交，旧票据在最终消费边界观察到新 revision 并拒绝。撤销事实、旧/新 revision、选择器和幂等 operation 必须同事务提交，不能只在缓存中递增数字。授予集、票据和消费事实不可更新或删除，批准只允许 `PENDING -> APPROVED|REJECTED` 以及 `APPROVED -> CONSUMED` 的单向转换。
+
+Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot 群管理员和平台身份解析属于 Adapter/Shell；Agent 工具定义、参数验证和工具审批的业务上下文属于 Agent。它们可把稳定主体引用、策略结果或批准依据交给授权端口，但不能把这些业务表搬进 `kernel.authorization`，也不能让通用票据携带密码、平台令牌或任意策略正文。授权模块不跨 schema 建外键或 join，涉及正文的限制条件必须使用经 `kernel.payload` 端口复核的载荷引用。
 
 ## 3. Schema bundle 生命周期
 
@@ -95,7 +101,7 @@ PayloadRef {
 
 异步写只有两种合法排列：新结果先提交，则 apply 必须在重算闭包时包含它；apply 先提交，则新结果在最终发布时观察更高 epoch 并被拒绝。下载、embedding、LLM、工具、图构建和平台发送均在外部 I/O 后、写入业务事实前复验来源、epoch、Generation、Host lease 和自身 operation 身份。已发生费用或外部结果可以结算元数据，不能重新发布正文。
 
-`kernel.payload` 的普通 admission 对 Bot deletion clock 取得共享事务锁，多个群和多个模块可以并行写不同 payload；遗忘 apply 取得同一行的排他锁并只把 epoch 推进一次。这样 apply 若后获得锁，会看见并撤销此前提交的正文及其派生闭包；apply 若先获得锁，晚到 admission 在锁释放后必须观察新 epoch 和 suppression 后失败。不得为了简化实现把每个 Bot 的全部 payload admission 都串行化到排他 clock 锁，也不得只在事务外比较 epoch。
+`kernel.payload` 的普通 admission 对 Bot deletion clock 取得共享事务锁，多个群和多个模块可以并行写不同 payload；遗忘 apply 取得同一行的排他锁并只把 epoch 推进一次。这样 apply 若后获得锁，会看见并撤销此前提交的正文及其派生闭包；apply 若先获得锁，晚到 admission 在锁释放后必须观察新 epoch 和 suppression 后失败。正文最终接纳触发器必须复用同一种共享锁，不能在已经持有共享锁后升级成排他锁；否则两个相同 payload 的幂等并发写会在唯一键等待与锁升级之间形成死锁。不得为了简化实现把每个 Bot 的全部 payload admission 都串行化到排他 clock 锁，也不得只在事务外比较 epoch。
 
 相同幂等 operation 重放返回原永久回执和“正文已撤销”状态，不重新调用 Worker、模型或平台。不同输入复用 operation ID 必须拒绝。UNKNOWN 外部效果保持 UNKNOWN，遗忘不能把它改写成确定未发送。
 

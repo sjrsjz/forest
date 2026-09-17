@@ -306,7 +306,7 @@ BEGIN
         RAISE EXCEPTION 'Payload removal requires committed revocation' USING ERRCODE = '55000';
     END IF;
     SELECT deletion_epoch INTO current_epoch FROM deletion_clock
-        WHERE bot_id = NEW.bot_id FOR UPDATE;
+        WHERE bot_id = NEW.bot_id FOR SHARE;
     SELECT item_count INTO manifest_count FROM source_manifests
         WHERE bot_id = NEW.bot_id AND manifest_id = header.source_manifest_id;
     SELECT count(*) INTO actual_sources FROM source_manifest_items

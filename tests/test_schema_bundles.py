@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -17,6 +18,10 @@ from forest.schema_bundles import (
     StorageBundleSpec,
     validate_official_storage_baseline,
     validate_storage_baseline,
+)
+from forest.storage.authorization_authority import (
+    CapabilityGrant,
+    KernelAuthorizationRepository,
 )
 from forest.storage.bot import BotStore
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
@@ -258,6 +263,246 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
 
 
 @pytest.mark.postgres
+async def test_clean_kernel_authorization_fences_exact_tickets_and_revocation(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    row = await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    assert row["component_id"] == "kernel.authorization"
+    lowered = storage.baseline.lower()
+    for forbidden in (b"agent", b"onebot", b"memory", b"binding", b"job", b"web_session"):
+        assert forbidden not in lowered
+
+    authority = KernelAuthorizationRepository(store, namespace=storage.spec.namespace)
+    grant_args = {
+        "grantee_kind": "platform.user",
+        "grantee_id": "qq/1234",
+        "entries": (
+            CapabilityGrant("module.reload", "component", "example.worker"),
+        ),
+        "expected_policy_revision": 1,
+        "audience_component_id": "component.worker-host",
+        "audience_generation_id": "generation/one",
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=2),
+    }
+    left, right = await asyncio.gather(
+        authority.create_grant_set(**grant_args),
+        authority.create_grant_set(**grant_args),
+    )
+    assert left == right
+
+    input_digest = "sha256:" + "1" * 64
+    ticket_args = {
+        "issuer_kind": "deployment.gateway",
+        "issuer_id": "gateway/one",
+        "subject_kind": "platform.user",
+        "subject_id": "qq/1234",
+        "action": "module.reload",
+        "resource_kind": "component",
+        "resource_id": "example.worker",
+        "input_digest": input_digest,
+        "plan_digest": None,
+        "grant_set": left,
+    }
+    consumed_expiry = datetime.now(timezone.utc) + timedelta(seconds=20)
+    pending_expiry = datetime.now(timezone.utc) + timedelta(seconds=20)
+    consumed_ticket = await authority.issue_ticket(
+        ticket_id="ticket/consumed",
+        operation_id="operation/consumed",
+        expires_at=consumed_expiry,
+        **ticket_args,
+    )
+    pending_ticket = await authority.issue_ticket(
+        ticket_id="ticket/pending",
+        operation_id="operation/pending",
+        expires_at=pending_expiry,
+        **ticket_args,
+    )
+    assert consumed_ticket["grant_set_digest"] == left.grant_set_digest
+    assert pending_ticket["policy_revision"] == 1
+
+    consume_args = {
+        "ticket_id": "ticket/consumed",
+        "operation_id": "operation/consumed",
+        "action": "module.reload",
+        "resource_kind": "component",
+        "resource_id": "example.worker",
+        "input_digest": input_digest,
+        "plan_digest": None,
+        "audience_component_id": "component.worker-host",
+        "audience_generation_id": "generation/one",
+    }
+    receipt = await authority.consume_ticket(**consume_args)
+    assert await authority.consume_ticket(**consume_args) == receipt
+    revocation = await authority.revoke(
+        operation_id="revoke/one",
+        selector_kind="principal",
+        selector_id="qq/1234",
+        expected_policy_revision=1,
+    )
+    assert revocation["policy_revision"] == 2
+    assert await authority.revoke(
+        operation_id="revoke/one",
+        selector_kind="principal",
+        selector_id="qq/1234",
+        expected_policy_revision=1,
+    ) == revocation
+    assert await authority.consume_ticket(**consume_args) == receipt
+    assert await authority.issue_ticket(
+        ticket_id="ticket/pending",
+        operation_id="operation/pending",
+        expires_at=pending_expiry,
+        **ticket_args,
+    ) == pending_ticket
+    with pytest.raises(ForestError) as caught:
+        await authority.consume_ticket(
+            **{**consume_args, "ticket_id": "ticket/pending", "operation_id": "operation/pending"}
+        )
+    assert caught.value.code == "POLICY_CONFLICT"
+
+    async with store.pool.connection() as conn:
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("DELETE FROM {}.tickets WHERE bot_id=%s").format(
+                    sql.Identifier(storage.spec.namespace)
+                ),
+                (store.bot_id,),
+            )
+
+
+@pytest.mark.postgres
+async def test_kernel_authorization_consumption_and_revocation_converge_in_both_orders(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    authority = KernelAuthorizationRepository(store, namespace=storage.spec.namespace)
+    digest = "sha256:" + "2" * 64
+
+    async def issue(revision: int, suffix: str):
+        grant = await authority.create_grant_set(
+            grantee_kind="component",
+            grantee_id="shell.command",
+            entries=(CapabilityGrant("runtime.inspect", "bot", store.bot_id),),
+            expected_policy_revision=revision,
+        )
+        await authority.issue_ticket(
+            ticket_id=f"ticket/{suffix}",
+            issuer_kind="kernel",
+            issuer_id="kernel.authorization",
+            subject_kind="component",
+            subject_id="shell.command",
+            action="runtime.inspect",
+            resource_kind="bot",
+            resource_id=store.bot_id,
+            operation_id=f"operation/{suffix}",
+            input_digest=digest,
+            plan_digest=None,
+            grant_set=grant,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+        )
+
+    def consume_values(suffix: str):
+        return {
+            "ticket_id": f"ticket/{suffix}",
+            "operation_id": f"operation/{suffix}",
+            "action": "runtime.inspect",
+            "resource_kind": "bot",
+            "resource_id": store.bot_id,
+            "input_digest": digest,
+            "plan_digest": None,
+        }
+
+    await issue(1, "consume-first")
+    consumed = asyncio.Event()
+    release_consumption = asyncio.Event()
+    revoke_started = asyncio.Event()
+
+    async def consume_first():
+        async with store.pool.connection() as conn, conn.transaction():
+            receipt = await authority.consume_ticket_in(conn, **consume_values("consume-first"))
+            consumed.set()
+            await release_consumption.wait()
+            return receipt
+
+    async def revoke_after_consumption():
+        await consumed.wait()
+        revoke_started.set()
+        return await authority.revoke(
+            operation_id="revoke/after-consumption",
+            selector_kind="grant",
+            selector_id="consume-first",
+            expected_policy_revision=1,
+        )
+
+    consumption_task = asyncio.create_task(consume_first())
+    revocation_task = asyncio.create_task(revoke_after_consumption())
+    await revoke_started.wait()
+    release_consumption.set()
+    receipt, revocation = await asyncio.gather(consumption_task, revocation_task)
+    assert receipt["policy_revision"] == 1
+    assert revocation["policy_revision"] == 2
+    assert await authority.consume_ticket(**consume_values("consume-first")) == receipt
+
+    await issue(2, "revoke-first")
+    revoked = asyncio.Event()
+    release_revocation = asyncio.Event()
+
+    async def revoke_first():
+        async with store.pool.connection() as conn, conn.transaction():
+            result = await authority.revoke_in(
+                conn,
+                operation_id="revoke/before-consumption",
+                selector_kind="grant",
+                selector_id="revoke-first",
+                expected_policy_revision=2,
+            )
+            revoked.set()
+            await release_revocation.wait()
+            return result
+
+    async def consume_after_revocation():
+        await revoked.wait()
+        try:
+            await authority.consume_ticket(**consume_values("revoke-first"))
+        except ForestError as exc:
+            return exc.code
+        return "accepted"
+
+    revocation_task = asyncio.create_task(revoke_first())
+    consumption_task = asyncio.create_task(consume_after_revocation())
+    await revoked.wait()
+    release_revocation.set()
+    revocation, result = await asyncio.gather(revocation_task, consumption_task)
+    assert revocation["policy_revision"] == 3
+    assert result == "POLICY_CONFLICT"
+
+
+@pytest.mark.postgres
 async def test_clean_kernel_audit_bundle_is_filterable_immutable_and_payload_only(
     clean_authority,
 ):
@@ -484,9 +729,25 @@ async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
         expected_deletion_epoch=0,
     )
     assert child.source_manifest_digest == parent.source_manifest_digest
-    parallel = await asyncio.gather(
-        *(
-            repository.put_bytes(
+    admission_locks = 0
+    both_admissions_ready = asyncio.Event()
+
+    async def parallel_put():
+        nonlocal admission_locks
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "SELECT deletion_epoch FROM {}.deletion_clock "
+                    "WHERE bot_id=%s FOR SHARE"
+                ).format(sql.Identifier(storage.spec.namespace)),
+                (store.bot_id,),
+            )
+            admission_locks += 1
+            if admission_locks == 2:
+                both_admissions_ready.set()
+            await both_admissions_ready.wait()
+            return await repository.put_bytes_in(
+                conn,
                 owner_component_id="memory.graph",
                 owner_kind="retrieval.evidence",
                 owner_id="evidence/parallel",
@@ -495,9 +756,8 @@ async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
                 parents=(parent.payload_id,),
                 expected_deletion_epoch=0,
             )
-            for _ in range(2)
-        )
-    )
+
+    parallel = await asyncio.gather(parallel_put(), parallel_put())
     assert parallel[0] == parallel[1]
     receipt = await repository.forget(
         operation_id="forget/1",
