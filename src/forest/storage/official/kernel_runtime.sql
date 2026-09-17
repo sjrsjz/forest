@@ -40,6 +40,7 @@ CREATE TABLE generations (
     generation_id text NOT NULL,
     component_id text NOT NULL,
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[a-f0-9]{64}$'),
+    config_revision bigint NOT NULL CHECK (config_revision > 0),
     config_payload_id text NOT NULL,
     config_payload_digest text NOT NULL CHECK (config_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
     instance_id text NOT NULL,
@@ -55,6 +56,7 @@ CREATE TABLE generations (
     )),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, generation_id),
+    UNIQUE (bot_id, generation_id, component_id, package_digest),
     UNIQUE (bot_id, worker_incarnation)
 );
 
@@ -217,6 +219,7 @@ CREATE TABLE runtime_graph_modules (
     bot_id text NOT NULL,
     graph_id text NOT NULL,
     component_id text NOT NULL,
+    generation_id text NOT NULL,
     package_id text NOT NULL,
     package_version text NOT NULL,
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -233,6 +236,8 @@ CREATE TABLE runtime_graph_modules (
     ),
     PRIMARY KEY (bot_id, graph_id, component_id),
     FOREIGN KEY (bot_id, graph_id) REFERENCES runtime_graphs(bot_id, graph_id),
+    FOREIGN KEY (bot_id, generation_id, component_id, package_digest)
+        REFERENCES generations(bot_id, generation_id, component_id, package_digest),
     CHECK (
         (storage_schema_id IS NULL AND storage_schema_version IS NULL
             AND storage_namespace IS NULL AND storage_baseline_sha256 IS NULL
@@ -294,13 +299,13 @@ LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
     IF ROW(
         OLD.bot_id, OLD.generation_id, OLD.component_id, OLD.package_digest,
-        OLD.config_payload_id, OLD.config_payload_digest, OLD.instance_id,
+        OLD.config_revision, OLD.config_payload_id, OLD.config_payload_digest, OLD.instance_id,
         OLD.worker_incarnation, OLD.host_incarnation, OLD.host_owner_epoch,
         OLD.state_schema, OLD.state_contract_digest, OLD.capability_grants_digest,
         OLD.created_at
     ) IS DISTINCT FROM ROW(
         NEW.bot_id, NEW.generation_id, NEW.component_id, NEW.package_digest,
-        NEW.config_payload_id, NEW.config_payload_digest, NEW.instance_id,
+        NEW.config_revision, NEW.config_payload_id, NEW.config_payload_digest, NEW.instance_id,
         NEW.worker_incarnation, NEW.host_incarnation, NEW.host_owner_epoch,
         NEW.state_schema, NEW.state_contract_digest, NEW.capability_grants_digest,
         NEW.created_at

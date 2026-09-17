@@ -248,6 +248,27 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
             )
         ).fetchone()
         assert seeded["bot_id"] == store.bot_id
+        columns = await (
+            await conn.execute(
+                "SELECT table_name,column_name,is_nullable FROM information_schema.columns "
+                "WHERE table_schema=%s AND ((table_name='generations' AND "
+                "column_name='config_revision') OR (table_name='runtime_graph_modules' "
+                "AND column_name='generation_id')) ORDER BY table_name",
+                (namespace,),
+            )
+        ).fetchall()
+        assert columns == [
+            {
+                "table_name": "generations",
+                "column_name": "config_revision",
+                "is_nullable": "NO",
+            },
+            {
+                "table_name": "runtime_graph_modules",
+                "column_name": "generation_id",
+                "is_nullable": "NO",
+            },
+        ]
         await conn.execute(
             sql.SQL(
                 "INSERT INTO {}.host_incarnations"
@@ -261,6 +282,62 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
                     sql.Identifier(namespace)
                 )
             )
+        digest = "sha256:" + "1" * 64
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.generations"
+                "(bot_id,generation_id,component_id,package_digest,config_revision,"
+                "config_payload_id,config_payload_digest,instance_id,worker_incarnation,"
+                "host_incarnation,host_owner_epoch,state_schema,state_contract_digest,"
+                "capability_grants_digest,status) VALUES "
+                "(%s,'gen-1','component.correct',%s,7,'payload-7',%s,'instance-1',"
+                "'worker-1','inc',1,1,%s,%s,'READY')"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, digest, digest, digest, digest),
+        )
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("UPDATE {}.generations SET config_revision=8").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.runtime_graphs"
+                "(bot_id,graph_id,graph_revision,graph_digest,activation_id,state) "
+                "VALUES (%s,'graph-1',1,%s,'activation-1','PREPARED')"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, digest),
+        )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.runtime_graph_modules"
+                    "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
+                    "package_digest,driver,trust_level) VALUES "
+                    "(%s,'graph-1','component.wrong','gen-1','pkg','1.0.0',%s,'native','official')"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, digest),
+            )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.runtime_graph_modules"
+                    "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
+                    "package_digest,driver,trust_level) VALUES "
+                    "(%s,'graph-1','component.correct','gen-1','pkg','1.0.0',%s,'native','official')"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "sha256:" + "2" * 64),
+            )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.runtime_graph_modules"
+                "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
+                "package_digest,driver,trust_level) VALUES "
+                "(%s,'graph-1','component.correct','gen-1','pkg','1.0.0',%s,'native','official')"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, digest),
+        )
 
 
 @pytest.mark.postgres
