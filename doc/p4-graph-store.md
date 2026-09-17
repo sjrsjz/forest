@@ -1,6 +1,6 @@
 # P4 PostgreSQL 图分片与发布
 
-`forest.storage.memory_graph.GraphStore(messages)` 将[纯事实归约器](p4-graph-reducer.md)接入真实 Bot PostgreSQL。`025_memory_graph.sql` 保存不可变事实、图发布记录和有索引的节点/边邻接表；事实值正文仍放在 `PayloadStore`。没有增加隐式实体抽取、LLM 摘要或按消息调用模型。
+`forest.storage.memory_graph.GraphStore(messages)` 将[纯事实归约器](p4-graph-reducer.md)接入真实 Bot PostgreSQL。Memory 模块的内容寻址 schema bundle 保存不可变事实、图发布记录和有索引的节点/边邻接表；事实值正文仍放在该模块拥有的受管载荷存储。它不增加隐式实体抽取、LLM 摘要或按消息调用模型。
 
 这是一种原生图驱动实现，不以 Neo4j 等独立服务作为必要前提。图仍是候选索引；它不授予任何跨群读取权限，也不将联想边的权重解释成事实置信度。
 

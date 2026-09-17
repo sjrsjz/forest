@@ -92,7 +92,7 @@ WebUI 按 Binding 显示并配置普通 handler 的 `DISABLED / EVERYONE / ADMIN
 
 运行诊断按 Bot 或 Binding 返回冻结链、当前路由、attempt、稳定错误码与 Kernel 调用阶段，不返回群消息、用户标识、插件结果正文或异常正文。管理员的有界恢复操作只记录幂等唤醒请求并通知正常调度器：未领取链按原顺序领取，已完成调用复用原 call operation 提交；策略已撤销的已完成结果记录为 `POLICY_REVOKED_AFTER_CALL` 并被抑制，`ADMITTED` 调用保持等待，不能制造第二次副作用。viewer 只有读取权限。
 
-迁移按 issuer 已有基础能力派生管理 action：`message.read` 只派生运行与策略读取，`config.plan` 派生策略规划，`config.apply + message.cancel` 才派生策略应用，`message.cancel` 派生恢复。升级不会把旧只读或空权限 issuer 提升为 Handler/命令写者。
+Message Handler 模块安装时分别显式授予运行读取、策略读取/规划/应用和恢复 action；通用 `message.read/config.*` 权限不能自动推导模块管理能力。只读或无权 issuer 不会成为 Handler/命令写者。
 
 容量至少包含每 Bot/Binding/主体待处理链上限、每链最大 handler 数、单 event 字节上限、主体令牌桶、handler deadline 和全局 P2 槽。拒绝不得回落 Agent 以绕过治理；原消息仍进入 Context，并由本群 Actor 生成固定的安全通知。
 

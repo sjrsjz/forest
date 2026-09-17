@@ -1,72 +1,71 @@
-# P4 记忆来源管理与公开遗忘协议
+# P4 记忆来源、关系与遗忘管理
 
-状态：遗忘纵向切片已实现；大规模来源浏览和完整关系浏览正在按本文修正。底层来源抑制、删除 epoch、派生闭包和物理 scrub 已接入审核 plan/apply 与当前 `shell-gate-v7` 群命令。已有 Web 来源页只适合验证协议，不视为数月运行后的管理成品。
+> **文档级别：Memory 模块详细设计。** 本文定义长期运行后的管理能力，不定义控制台顶层页面。所有查询和动作由 `memory.graph` 的 management contract 暴露，WebUI 壳只负责通用模块工作区、授权、游标和沙箱 UI。
 
-## 1. 管理对象和首版范围
+## 1. 管理对象
 
-管理员管理的是 Bot 全局记忆域中的稳定 `source_unit_id`，不是按群建立的独立记忆库。来源列表逐项返回来源群、作者、发生时间、内容类型、来源修订和正文可用状态；跨群来源不能在页面上丢失出处。只提供 `limit + group` 的简单列表不满足管理要求。
+管理员面对的是一个 Bot 的全局多主干记忆域。群聊对应稳定主干，私聊、内部任务和外部知识使用明确的其他来源类型；它们不是独立数据库。每个来源、节点、关系和召回结果都必须显示原始群/来源、作者、时间、模态、证据及当前可用状态。
 
-来源浏览以数十万至数百万条来源为常态，服务端提供组合筛选：主干/群、作者平台 ID、发生时间范围、来源种类、text/image/mixed 模态、载荷可用状态、索引状态以及全文搜索。所有分页使用稳定键集游标 `(occurred_at, source_unit_id)` 或所选排序对应的唯一复合游标；不得把全部来源加载到浏览器，也不提供无上限 offset 翻页。
+管理视图至少包含：
 
-全文条件使用独立可重建的搜索投影和 GIN 索引，投影只保存经过授权规则允许检索的规范文本与必要筛选列。图片通过多模态向量查询进入检索试验，不把 caption 冒充图片语义。列表返回 `has_more/next_cursor` 和可选估算分面；默认不执行阻塞写入的精确全表计数。WebUI 使用虚拟化结果、筛选栏和单项详情抽屉，刷新只替换当前游标窗口。
+- **主干目录**：群来源身份、平台/realm/外部群 ID、名称快照、最早/最新来源位置、来源数、图发布水位和索引水位；
+- **来源检索**：按主干、作者平台 ID、时间、来源类型、text/image/mixed、正文状态、索引状态和全文条件组合筛选；
+- **关系浏览**：从来源、断言、实体或关系进入邻接图，明确边类型、方向、两端来源、人工/向量/规则贡献、权重、证据、有效状态、图修订和是否跨主干；
+- **召回试验**：以文本、图片或混合输入调用真实 Memory 查询契约，显示 facet、候选、过滤原因、跨主干扩展路径和最终 EvidenceBundle；
+- **遗忘操作**：选择完整来源单元，预览影响闭包，应用 suppression/deletion epoch，并观察异步 scrub 进度。
 
-首版公开遗忘只接受完整来源单元，等价目标为 `SourceRef(source_unit_id, source_revision, "*")`。接口不宣称可以只删除一张图片或一句文本，因为当前 canonical source payload 依赖整个单元，部分删除会使原摘要和有序 ContentPart 失真。以后增加部分删除必须引入新的内容修订和独立事实身份。
+Memory 页面是模块自带的管理 UI。控制台不能复制一套 Memory 专用 REST API、固定表单或顶层导航；无自定义 UI 时由同一 query/action schema 生成通用视图。
 
-公开协议分四步：
+## 2. 大规模浏览和稳定分页
 
-1. `memory.forget.read` 分页读取当前可见、已进入长期记忆资格且来源闭包完整的来源；
-2. `memory.forget.plan` 固定请求目标、当前删除 epoch、解析后的别名/遗留保守目标、影响计数、主体、签发者和十分钟期限；
-3. `memory.forget.apply` 在同一事务复验计划、权限、宿主、删除 epoch 和解析目标，然后提高 epoch、写永久 suppression、撤销受影响载荷并写管理回执；
-4. MemoryRuntime 持续执行有界 scrub 批次，传播迟到的确切来源依赖并物理删除已撤销 body。
+来源规模按数十万至数百万设计。所有过滤都在服务端进入有索引的查询计划，正文只在命中有界 ID 后按权限加载。不得把全量来源、节点或边送到浏览器再筛选。
 
-列表和计划可以展示内容；apply 回执只保留来源身份、计数和状态，不复制已删除正文。原模型、平台和用户已经收到的外部字节无法由本地 scrub 撤回。
-
-## 2. 计划与并发合流
-
-计划保存 `requested_targets`、当时解析的 `resolved_targets` 和受影响正文数。解析包括确切 alias 依赖、已有 legacy marker 和来源不完整的旧单元。apply 重新解析并要求目标闭包与影响数都和计划一致；若另一事务在其间新增了受影响派生正文或改变需要显式审阅的目标集合，返回 `FORGET_PLAN_CHANGED`，管理员重新预览。普通新消息不改变 deletion epoch，也不会仅因流量使无关计划失效。
-
-apply 对 `bot_memory_clock` 加锁并检查 `expected_deletion_epoch`。与新载荷写入的排列只有两类：
-
-- 新载荷先提交：apply 在同一 epoch 找到并撤销它；
-- apply 先提交：新载荷看到更高 epoch 和 suppression，不能带已删除来源写入正文。
-
-计划之后才出现的确切来源链接必须由 `forest_reconcile_source_links` 传播 suppression；scrub 的 `remaining` 包含这种待传播链接，所以恢复器只有在其归零后才报告物理清理排空。多个管理员基于同一 epoch 提交不同计划时只允许一个推进；另一请求返回删除版本冲突，不做最后写入覆盖。
-
-同 operation ID 同输入返回原回执；同 ID 异输入拒绝。apply、来源 suppression、载荷撤销、Web operation、audit 和 outbox 同事务提交，不能出现页面显示成功但删除事实回滚的状态。
-
-## 3. 授权和群聊 Shell
-
-Web 票据增加 `memory.forget.read/plan/apply`。已有受限 issuer 只按原能力升级：read 需要 `memory.read`，plan 需要 `memory.read + memory.config.plan`，apply 需要 `memory.read + memory.config.apply`；disabled issuer 不因迁移恢复可用。
-
-WebUI 可以管理该 Bot 全局范围。群聊 Shell 只能列出和操作当前群主干的来源，不能凭另一个群的 `source_unit_id` 删除跨群内容。Shell 的 plan 和 apply 必须由同一当前 Binding 管理员执行，apply 携带页面等价的 `plan_id + plan_digest + expected_deletion_epoch`。
-
-当前 v4 继承的记忆命令为：
+默认排序为 `(occurred_at DESC, source_unit_id DESC)`，游标同时绑定：
 
 ```text
-#forest memory list
-#forest memory forget-plan <source_unit_id> --expect-deletion-epoch <deletion_epoch>
-#forest memory forget-apply <plan_id> --digest <plan_digest> --expect-deletion-epoch <deletion_epoch>
+bot_id + operation_id + normalized_filters + sort + snapshot_revision
 ```
 
-`shell-gate-v2` 的命令表和摘要保持不变。记忆命令首次发布于冻结的 `shell-gate-v3`，v4 完整继承 v3 契约并增加 Bot 维护命令，当前 v5 再继承 v4 并增加组件管理；Dispatcher 按持久 `gate_version` 选择冻结 registry，使升级前已排队的 v2/v3/v4 命令继续使用原 schema 和动作映射。
+换 Bot、筛选、排序或图修订后旧游标失效。页面返回 `items/has_more/next_cursor/snapshot_revision`；不默认执行精确全表计数。前端使用虚拟列表或有限 DOM 分页，详情抽屉按 ID 延迟读取正文和关系。持续写入期间，固定 snapshot 的翻页无重复和遗漏；用户主动刷新才进入新 snapshot。
 
-## 4. 持久结构和恢复
+全文条件使用 Memory 模块可重建的授权搜索投影和 GIN/等价索引。图片查询使用原生图文嵌入，不通过 caption 代替图片向量。大图、原图下载和敏感正文预览分别鉴权，列表本身只返回摘要与稳定来源标签。
 
-迁移新增不可变 `bot_memory_forget_plans`，保存计划身份、原 plan operation、主体、issuer、期望 epoch、请求/解析目标、影响计数、保守扩展标记、摘要与期限。实际完成事实继续使用既有 `bot_payload_forget_requests` 和 `bot_payload_suppression`，不再建立第二套删除账本。
+关系图查询必须有起点、方向、边类型、深度、节点/边上限和时间预算。达到上限时返回截断原因与续查游标，不能无界递归，也不能把“当前页没有边”表述为全局没有关系。
 
-MemoryRuntime 每次只 scrub 有界批次，不在 HTTP 或 Shell 请求中等待全闭包物理删除。状态接口报告当前 deletion epoch、REVOKED body 数、待传播 source link 数和最近遗忘操作。宿主重启后扫描同一账本继续；失效 Host 不能 scrub，新的 Host 从剩余计数恢复。
+## 3. 遗忘协议
 
-来源正文已经不可用时，列表不返回伪造默认值；历史遗忘请求仍显示固定 ID、epoch、目标数和是否发生 legacy conservative 扩展。数据库旧页、WAL、备份和部署库正文仍按独立运维阶段处理。
+首版公开遗忘的最小目标是完整 `SourceUnit`。部分图片或一句文本仍属于该来源的有序内容，不能原地删 part 后保留旧 revision；未来若支持部分删除，必须生成新内容修订和新的来源身份。
 
-## 5. 验收
+协议分为：
 
-- Web 双 Bot 来源列表、计划和 apply 隔离；CSRF、幂等、过期计划和同 epoch 竞争；
-- plan 后新增无关消息仍可 apply，解析目标变化必须重新计划；
-- apply 与并发派生载荷写入的两种排列都不复活正文；
-- apply 事务内故障回滚 suppression、epoch、Web 回执、audit 和 outbox；
-- scrub 跨宿主恢复、批次上限和迟到 source link 传播；
-- text/image 源均可选择，列表和计划逐项保留群与作者；
-- Shell v2 已排队命令继续回放，v3 当前群计划/提交可用，跨群 source ID 拒绝；
-- 真实 PostgreSQL 升级保持旧 issuer 权限子集和既有迁移 checksum。
-- 十万条以上多群、多作者、图文混合来源下，组合筛选命中索引、分页无重复/遗漏，页面 DOM 大小有界；新消息持续写入时已固定页游标语义明确。
-- 来源详情能导航至完整关系视图；每条关系明确类型、方向、左右端点及其群/作者/时间、权重、来源（人工/向量/规则）、证据、active 状态和图发布修订。
+1. `sources.query`：按权限分页读取可见来源；
+2. `forget.plan`：固定请求目标、解析后的精确派生闭包、影响数、当前 `deletion_epoch`、plan digest 和期限；
+3. `forget.apply`：同一主体提交 plan/digest/expected epoch，事务中重新解析闭包并 CAS；集合变化返回 `FORGET_PLAN_CHANGED`；
+4. `forget.status`：报告 `REVOKED`、在线 body/media/vector 待清理量、备份/WAL 保留边界及最终状态。
+
+apply 与新载荷写入按[干净数据库基线](14-clean-schema-and-payload-provenance.md#5-删除与异步完成的线性化)处理：新写先提交则必须进入闭包，删除先提交则晚到发布观察新 epoch 并失败。相同 operation 与相同输入返回原回执；相同 operation 的不同输入拒绝。apply、suppression、载荷撤销、管理 operation、audit 和必要 outbox 在同一短事务提交。
+
+来源正文不可用时，永久事实仍显示 opaque ID、群/作者的授权摘要、epoch、影响数和 scrub 状态；不得以空 JSON、缓存副本或审计详情恢复正文。外部模型、平台或用户已经收到的字节无法由本地 scrub 撤回，界面将它们列为独立边界。
+
+## 4. 人工关系管理
+
+人工联想同样使用 `plan -> apply`。plan 固定左右端点的 source/node identity、关系类型、方向、审核理由载荷、当前 graph/deletion revision 和预期影响。apply 重验端点仍存在、当前管理员可查看两端来源、跨主干传播策略允许、图修订未越过冲突边界，再写不可变 relation contribution。
+
+删除关系通过追加 retraction/contribution reversal 表达，不修改历史边。自动向量或规则贡献与人工贡献分别显示；同一逻辑边可以有多个证据贡献，UI 不能把聚合权重冒充单条事实置信度。跨主干边必须在两端都显示来源群；从当前群召回时仍执行输出可见性检查。
+
+## 5. 群聊 Shell 边界
+
+群聊 Shell 提供当前群作用域的有界查询、forget plan/apply 和关系计划状态。它不能通过提交其他群的 source ID 绕过作用域，也不能在聊天命令中返回大段正文或整张图。
+
+ShellGate 只解析固定命令并签发当前 Binding/群/主体上下文；实际动作调用与 WebUI 相同的 Memory management contract。命令优先级、独立 CONTROL 回执、最终授权和资源租约仍按[群聊 Shell](09-group-shell-command-system.md)执行。Shell registry 与当前模块 Generation 一起冻结，不维护为了开发期旧命令版本而存在的兼容分派器。
+
+## 6. 验收
+
+- 以至少十万条多群、多作者、图文混合来源验证组合索引、固定 snapshot 键集分页、正文有界加载和浏览器 DOM 上限；
+- 新消息持续写入时，同一游标窗口无重复/遗漏，换筛选和换 Bot 拒绝旧游标；
+- 来源详情可以导航到完整的有界关系视图，逐边显示方向、端点群/作者/时间、贡献来源、证据、状态与图修订；
+- 文本、图片和混合查询均使用真实嵌入路径，召回结果明确当前群和来源群；
+- forget plan 后新增相关派生写会使计划变化或被 epoch 拦截，无关消息不使计划失效；
+- 并发 apply 只有一个推进 epoch，scrub 跨宿主恢复且迟到向量/图/模型结果不复活内容；
+- WebUI 与 Shell 使用同一模块 operation，权限范围不同但不维护两套业务实现；
+- 页面在普通 PC 视口下默认只展开一个工作区，筛选、结果、详情和关系图按需展开，不依赖超长纵向表单。

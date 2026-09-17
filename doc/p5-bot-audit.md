@@ -13,8 +13,8 @@ Bot 审计查询是观察接口。它不读取 Agent Context，不创建模型�
 
 ## 2. 授权与范围
 
-该命令在 `shell-gate-v6/audit.read` 首次发布；当前 v7 完整继承其冻结契约，新命令以 v7 接纳，作用域仍固定为接收事件的 `bot_id`。
-执行事务开始时检查持久命令 claim、gate/action/类型化参数、Host lease、Binding epoch 和原消息
+`audit.read` 由 Bot Audit 模块在当前 RouteGraph 注册，作用域固定为接收事件的 `bot_id`。命令接纳时冻结模块 Generation、schema digest 和规范参数，不保留开发期 gate 兼容表。
+执行事务开始时检查持久命令 claim、route/action/类型化参数、Host lease、Binding epoch 和原消息
 的可信 principal；返回前再读取当前 Binding 配置并确认作者仍在 `admin_user_ids`。群主、昵称、
 引用内容、OCR 和模型输出都不能授予权限。
 
@@ -24,7 +24,7 @@ policy revision 的票据。`audit.read` 属于固定 `READ_ACTIONS`，因此 ad
 
 ## 3. 查询和稳定游标
 
-存储按 `(created_at DESC, audit_id DESC)` 排序，迁移 058 建立 Bot 时间索引和 action 时间索引。
+存储按 `(created_at DESC, audit_id DESC)` 排序；Bot Audit 模块的干净 schema bundle 从首次创建即包含时间和 action 索引。
 请求可带精确 `action`、`before` 与 `limit`：Web 默认 50、上限 100；群命令默认 12、上限 20。
 `before` 是上一页最后一项的 `audit_id`。服务端先在同一 Bot 内恢复它的 `created_at`，然后使用
 严格小于 `(created_at,audit_id)` 的键集条件读取下一页。
@@ -54,11 +54,9 @@ issuer、ticket basis、输入/结果 payload、消息、工具参数、模型�
 读取自身不写 `bot_audit_records` 或 `bot_web_operations`，否则刷新页面会产生递归日志并改变
 游标。票据仍在读取前后检查期限；查询超时或权限撤回不会提交部分业务效果。
 
-## 5. 兼容、恢复与容量
+## 5. 恢复与容量
 
-v2–v5 gate 保持冻结，已经领取的旧命令按持久版本执行；只有新入站使用 v6。迁移 058 只为
-拥有 `config.read` 或 `message.read` 的既有 Web issuer 增加 `audit.read`，不会把只写身份扩成
-读取身份。新建可信 issuer 从当前动作表取得同一能力。
+已接纳命令按冻结 Generation 恢复，不能在重启后用当前 registry 重新解析。`audit.read` 必须显式授予；`config.read`、`message.read` 或写权限都不能自动扩大为审计读取能力。
 
 审计当前仍随 Bot 数据库永久保存。本切片提供有界观察、索引和脱敏，不提供删除、全文检索、
 宿主 stdout、容器终端、WAL 归档或备份恢复。长期容量必须由后续 Bot 备份/保留协议处理；不能
@@ -67,6 +65,6 @@ v2–v5 gate 保持冻结，已经领取的旧命令按持久版本执行；只�
 ## 6. 验证
 
 真实 PostgreSQL 测试固定三条相同时间的记录，验证二元组分页、并发新增后续页隔离、action
-筛选、非法输入、v5/v6 gate 兼容和旧 issuer 最小权限升级。Shell 测试从两个群读取同一 Bot
+筛选、非法输入、冻结 Generation 恢复和 issuer 最小权限。Shell 测试从两个群读取同一 Bot
 的元数据，确认结果走 CONTROL 且敏感 `details` 不出现。ASGI 测试通过真实 Web authority
 读取目标 Bot，并确认未知查询字段被拒绝、浏览器响应只有固定字段。

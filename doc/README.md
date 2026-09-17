@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：目标设计与激进重构进行中。更新日期：2026-09-17。01–13 描述目标契约，不代表相应能力已经实现；[13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)是架构纠偏后的最高优先级设计，[实现状态与验证记录](implementation-status.md)是代码完成度的唯一权威。P0–P5 中标为历史、迁移依据或旧实现调查的段落只用于提取不变量，不能要求为未发布结构保留表、DTO、API、页面或兼容迁移。发生冲突时先按 13 删除错误业务组合根和产品子 Agent，再修正文档与代码。实际启动方式见[项目 README](../README.md)。
+状态：目标设计与激进重构进行中。更新日期：2026-09-17。01–14 描述目标契约，不代表相应能力已经实现；[13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)与[14 干净数据库基线](14-clean-schema-and-payload-provenance.md)是架构纠偏后的最高优先级设计，[实现状态与验证记录](implementation-status.md)是代码完成度的唯一权威。P0–P5 只作为仍与目标一致的局部实现记录，不能要求为未发布结构保留表、DTO、API、页面或兼容迁移。实际启动方式见[项目 README](../README.md)。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -10,7 +10,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 | 优先级 | 文档 | 约束范围 |
 |---|---|---|
-| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md) | 当前纠偏基线：微内核、模块注册、持久代际、RouteGraph、模块管理 UI；直接否决业务组合根和固定产品后台 |
+| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md) | 当前纠偏基线：微内核、模块注册、持久代际、RouteGraph、模块管理 UI、模块数据所有权与干净 schema bundle；直接否决业务组合根、固定产品后台和巨型全产品内核 SQL |
 | 2 | [01 架构设计](01-architecture.md) | 系统边界、模块职责、部署与总体验收不变量 |
 | 3 | [02 生命周期](02-kernel-lifecycle.md)、[03 通信与调度](03-communication-scheduling.md)、[05 存储与鉴权](05-storage-security-operations.md)、[06 并发合流](06-concurrent-convergence.md) | 通用协议、所有权、事务、授权与收敛规则 |
 | 4 | [08 群聊上下文](08-group-context-interaction.md)、[09 群聊 Shell](09-group-shell-command-system.md)、[10 多主干记忆图](10-multi-trunk-memory-graph.md)、[11 多模态记忆](11-multimodal-memory-and-model-projection.md)、[12 WebUI](12-webui-administration.md) | 交互、管理和数据域专项契约；不得扩大微内核职责 |
@@ -25,12 +25,10 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 - 内核模块机制：[资源监督](p0-resource-sdk.md)、[组件事件](p0-component-events.md)、[组件任务](p0-component-jobs.md)、[插件包](p2-plugin-packages.md)、[状态迁移](p2-state-migration.md)、[业务命令](p2-business-commands.md)、[消息处理器](p2-message-handlers.md)。
 - 单 Agent 与群聊控制：[Agent 状态](p3-agent-state.md)、[定时任务](p3-jobs.md)、[群聊监督](p3-control.md)、[组件生命周期 Shell](p5-module-lifecycle-shell.md)、[Core 救援入口](p5-core-shell.md)、[Shell 接入容量](p5-shell-ingress-admission.md)。
-- 多模态记忆与来源：[来源载荷](p4-source-payloads.md)、[图归约器](p4-graph-reducer.md)、[人工联想召回](p4-association-retrieval.md)、[自动语义联想](p4-semantic-associations.md)、[图文嵌入](p4-embedding-driver.md)、[图存储](p4-graph-store.md)、[记忆运行链路](p4-memory-runtime.md)、[来源管理](p4-memory-administration.md)。
+- 多模态记忆与来源：[统一载荷与来源闭包](14-clean-schema-and-payload-provenance.md#4-统一载荷与来源闭包)、[图归约器](p4-graph-reducer.md)、[人工联想召回](p4-association-retrieval.md)、[自动语义联想](p4-semantic-associations.md)、[图文嵌入](p4-embedding-driver.md)、[图存储](p4-graph-store.md)、[记忆运行链路](p4-memory-runtime.md)、[来源管理](p4-memory-administration.md)。
 - 控制面与恢复：[Web 插件管理](p2-web-plugin-management.md)、[账号管理](p5-account-management.md)、[部署审计](p5-deployment-audit.md)、[Bot 审计](p5-bot-audit.md)、[备份恢复](p5-backup-restore.md)、[部署恢复](p5-deployment-recovery.md)、[OneBot WebSocket](p5-onebot-forward-websocket.md)。
 
-## 撤销设计与历史调查
-
-以下文档不属于实现规格，不应出现在开发任务的依赖链中：[产品子 Agent 删除记录](p3-children.md)、[旧 Agent 载荷记录](p4-agent-payloads.md)、[已发布数据库迁移研究](p4-content-migration.md)、[旧正文副本调查](p4-payload-migration-notes.md)。它们仅解释已删除设计为何错误或保存通用的数据清理证据。Forest 未发布基线不创建其中的 Child 表、handler、升级夹具或兼容路径；需要追查旧实现时优先使用 Git 历史。
+撤销的产品子 Agent、开发期 payload 迁移和旧库升级设计已从工作树删除，避免后续实现把历史记录当规格；需要追查时使用 Git 历史。当前代码中发现相应表、handler、fallback 或测试时直接删除。
 
 ## 需求对应
 
@@ -52,6 +50,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 记忆与嵌入完整支持文本和图片，并能按图召回 | 11 的有序ContentPart、受管媒体、对齐嵌入空间与text/image/mixed query；04–06、10同步来源与索引协议 |
 | LLM不支持多模态时调用API前去掉图片 | 11 的模型能力快照及逐请求ModelInputProjection；08区分持久裁剪和请求投影，保留原图及图片检索能力 |
 | 通过WebUI后台管理，无需手改日常配置文件 | 12 的首次初始化、schema表单、配置变更与运维闭环；05定义存储权威，WebUI/Shell/CLI共用控制协议 |
+| 激进重构且不保留未发布兼容层 | 13 的重构拒绝清单与 14 的最小 Kernel baseline、模块 schema bundle、统一载荷来源闭包 |
 
 ## 源码调研依据
 
@@ -110,5 +109,6 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 19. 每次LLM请求按实际模型能力生成独立投影视图；文本模型请求移除所有图片载荷并标记未见图片，不删除持久媒体、不改变输入切口，也不隐式调用OCR/描述模型。
 20. WebUI是首版正式管理入口，日常配置持久化为受版本控制的事实，通过界面完成；页面、群聊Shell和CLI不直接改文件或运行对象，提交均走同一授权、版本冲突和生命周期协议。
 21. 配置期望、生效版本与实际运行状态分别可见；保存成功不冒充已生效，断开浏览器不取消持久操作，冲突不以最后保存覆盖，密钥不通过配置读取接口回显。
+22. Kernel baseline 不包含 Agent、Memory、Adapter、Shell、Job 或 Delivery 业务表；模块数据结构随内容寻址包安装并归模块所有，开发期旧库只重建、不迁移。
 
 出现跨文档冲突时，先维护这些不变量，再修改具体契约；不得由实现自行弱化并仍宣称满足设计。

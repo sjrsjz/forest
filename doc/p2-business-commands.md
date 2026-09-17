@@ -157,7 +157,7 @@ Worker 不能直接发送 OneBot action。宿主在一个 Bot 事务内完成：
 3. **已完成：** Web policy preview/apply、表单和来源 payload；
 4. **4a 已完成：** OneBot 确定性 token 分类、持久 request、策略拒绝、策略收紧与遗忘/重复事件合流；**4b 已完成：** 分类故障持久重试、冻结 fallback、固定 deadline 占位，以及 Actor 有序的拒绝和分类失败通知；
 5. **5a 已完成：** 不可变 `Reply/Consumed/Pass`、Worker `CommandEvent` 调用、Kernel generation/route/schema 栅栏与稳定 operation 结果重放；**5b 已完成：** Actor P2 领取、领取时当前 Actor/Binding 授权复核，以及 request/result/Context/reply sequence/Delivery 原子提交；**5c 已完成：** 执行故障的不可变 attempt、持久退避/deadline、Actor 接管和安全终态回复；
-6. **6a 已完成：** Web 脱敏诊断、幂等有界恢复、旧 issuer 精确扩权和真实 PostgreSQL/HTTP 纵向验证；**6b 容量与浏览器部分已完成：** Bot/Binding/主体队列限额、主体令牌桶、参数字节限制、Web 版本化配置、旧 writer 围栏、双连接池 PostgreSQL 竞争及真实 Edge 表单验证；**6b 外部验收待完成：** 许可 OneBot 低频端到端收发。
+6. **6a 已完成：** Web 脱敏诊断、幂等有界恢复、最小权限授予和真实 PostgreSQL/HTTP 纵向验证；**6b 容量与浏览器部分已完成：** Bot/Binding/主体队列限额、主体令牌桶、参数字节限制、Web 版本化配置、Generation/Host 围栏、双连接池 PostgreSQL 竞争及真实 Edge 表单验证；**6b 外部验收待完成：** 许可 OneBot 低频端到端收发。
 
 最低验证包括：
 

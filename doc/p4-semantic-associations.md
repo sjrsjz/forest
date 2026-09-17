@@ -1,6 +1,6 @@
 # P4 自动跨主干语义联想
 
-状态：已接入的 P4 实现切片。本文描述迁移 059、向量发布后的持久维护队列、关系投票合流、删除失效和 Agent 召回投影。它复用已经为原生图文检索生成的 embedding，不增加 LLM、摘要或额外 embedding 请求。
+状态：已接入的 P4 实现切片。本文描述向量发布后的持久维护队列、关系投票合流、删除失效和 Agent 召回投影。它复用已经为原生图文检索生成的 embedding，不增加 LLM、摘要或额外 embedding 请求。
 
 ## 1. 语义边界
 
@@ -12,7 +12,7 @@
 
 ## 2. 发布、排队和处理水位
 
-文档 embedding 结果与 `bot_memory_vectors` 在一个短事务中发布。数据库触发器随后按 `(bot_id, space_id, source_unit_id)` 增加 `requested_revision`；同一批中的多个 facet、重复通知和并发发布合并到一个来源任务行，并单调推进该行水位。迁移 059 会为升级前已经存在的向量补建待处理水位。
+文档 embedding 结果与 Memory 模块向量表在一个短事务中发布。数据库触发器随后按 `(bot_id, space_id, source_unit_id)` 增加 `requested_revision`；同一批中的多个 facet、重复通知和并发发布合并到一个来源任务行，并单调推进该行水位。干净 bundle 从首次写入就建立该维护水位，不存在升级前向量补建路径。
 
 MemoryRuntime 每次只让一个 `semantic:reconcile` worker 领取该 Bot 的维护工作。不同宿主尝试仍由 Host lease 约束；同一宿主中的并发调用使用 `FOR UPDATE SKIP LOCKED` 领取不同来源。处理器在事务开始按 Kernel 锁序取得 runtime、Host 和 deletion clock，再锁任务水位。外部 embedding HTTP 不在这个事务中发生。
 

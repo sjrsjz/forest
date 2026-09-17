@@ -25,7 +25,7 @@
 
 每次 dispatch 的调用 operation 包含 `delivery_id + replay_epoch + dispatch_count`。因此回放后的第一次调用绝不会碰撞回放前已经完成或失败的 `bot_call`；同一 replay epoch 内丢 ACK 仍沿用原 operation 对账。回放不改变 `event_id`、`event_seq`、delivery 身份或原 payload 摘要，插件继续以 `event_id` 保证业务幂等。
 
-从旧 schema 升级时，已经处于 INFLIGHT 的 delivery 继续使用行内持久化的旧 operation，不按新公式重算；租约恢复先完成原调用对账。只有下一次新 attempt 或显式 replay 才使用带 replay epoch 的新身份。
+每个 INFLIGHT delivery 从首次创建即持久化准确 operation；租约恢复先完成原调用对账，不按当前代码重新计算身份。只有下一次新 attempt 或显式 replay 才使用递增的 replay epoch。
 
 若正文已被撤销，回放请求返回 `EVENT_PAYLOAD_UNAVAILABLE`，不会制造必然再次 DEAD 的工作。回放比同订阅中更晚的未完成 delivery 具有原 `event_seq` 顺序；它重新成为 open delivery 后会阻挡后续领取，直到 ACKED 或再次 DEAD。
 
@@ -63,9 +63,9 @@ DEAD -- explicit replay --> RETRY_WAIT
 - `event.retire.plan`：预览一个订阅的退役影响；
 - `event.retire.apply`：按计划提交退役。
 
-旧 issuer 只按已有最小能力升级：拥有 `message.read` 或 `config.read` 才得到 `event.read`；同时拥有 `event.read + service.invoke` 才得到 replay；同时拥有 `event.read + config.plan` 才得到 retirement plan；同时拥有 `event.read + config.apply + message.cancel` 才得到 retirement apply。只读身份不会升级为写身份。
+Event 模块安装时各管理能力分别显式授予：`event.read`、`event.replay`、`event.retire.plan` 和 `event.retire.apply` 不能由通用读写权限自动推导。只读身份不会获得 replay 或 retirement 写能力。
 
-WebUI 在 Bot 页面显示订阅和最近投递。DEAD 行只在服务端返回 `replay_allowed=true` 时显示回放按钮；active subscription 提供退役预览，apply 按钮只提交当前 plan。Bot 切换、内容撤销或并发刷新会清空草稿和 idempotency key。群聊 Shell 的 `shell-gate-v5` 已复用相同 Store 管理方法：`event` 域提供受限列表、DEAD 回放和订阅 plan/apply 退役，不另写直达数据库的旁路。每次目标事务和 CONTROL 回复都重新检查当前 Binding 管理员、binding epoch、host lease 与命令 claim。
+WebUI 在 Event 模块工作区显示订阅和最近投递。DEAD 行只在服务端返回 `replay_allowed=true` 时显示回放按钮；active subscription 提供退役预览，apply 按钮只提交当前 plan。Bot 切换、内容撤销或并发刷新会清空草稿和 idempotency key。群聊 Shell 从当前 RouteGraph 注册的 `event` 命令复用相同 management contract：提供受限列表、DEAD 回放和订阅 plan/apply 退役，不另写直达数据库的旁路。每次目标事务和 CONTROL 回复都重新检查当前 Binding 管理员、binding epoch、host lease 与命令 claim。
 
 ## 6. 验收
 
@@ -76,6 +76,6 @@ WebUI 在 Bot 页面显示订阅和最近投递。DEAD 行只在服务端返回 
 - 退役与并发发布无遗漏窗口，退役后不再生成 delivery；
 - INFLIGHT 阻止退役 apply，ACK/失败确定后重新 plan 可以提交；
 - 退役后普通热重载允许省略旧声明，但拒绝同身份隐式复活；
-- 旧库权限迁移不扩大只读或无权 issuer；
+- 干净安装的最小权限不扩大只读或无权 issuer；
 - Web 会话、CSRF、幂等键、plan 绑定与 Bot 隔离均经过真实 PostgreSQL 管理链路验证。
-- Shell v5 的冻结语法、旧 gate 兼容、当前管理员复核、受限群回执和同状态机管理经过真实 PostgreSQL/Worker 验证。
+- Shell 冻结 RouteGraph/Generation/schema、当前管理员复核、受限群回执和同状态机管理经过真实 PostgreSQL/Worker 验证。

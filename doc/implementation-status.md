@@ -15,6 +15,8 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 每个 `(bot_id, conversation_id)` 只有一条持久 Agent 执行链，不存在产品“子 Agent”；
 - 项目未上线，允许删除错误 API、表、页面和测试并重建开发数据库，不为未发布结构增加兼容迁移。
 
+数据库边界以[干净数据库基线、模块数据所有权与载荷来源](14-clean-schema-and-payload-provenance.md)为准：内核只安装最小 baseline，Agent/Memory/OneBot/Shell/Job/Delivery 各自随模块包安装内容寻址 schema bundle。把开发期 001…087 压成一个仍包含全部业务模块表的巨型 SQL 只能算清理迁移链的临时产物，不能合入为最终微内核基线；它必须继续拆分为内核和模块所有权边界。
+
 ## 已落地且仍可复用的能力
 
 以下能力有实现与定向测试，但仍须在新模块边界下复验：
@@ -31,9 +33,9 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 ## 本轮已经完成的重构切片
 
-- 文档入口已经按“13 号纠偏基线 → 通用架构/协议 → 专项设计 → 实现状态”建立明确权威顺序；P0–P5 实现切片和旧迁移调查不再与目标架构并列，也不能生成兼容任务。
+- 文档入口已经按“13/14 号纠偏基线 → 通用架构/协议 → 专项设计 → 实现状态”建立明确权威顺序；P0–P5 实现切片不再与目标架构并列，也不能生成兼容任务。
 - WebUI 设计已删除固定 Agent/Memory/LLM 页面和专用 Memory 查询端点，控制台只保留内核导航、RouteGraph 与通用模块工作区；官方模块同样通过描述符、schema、query/action 和沙箱 UI 暴露管理能力。
-- 历史载荷文档已经删除产品 Child 数据流和“先迁移开发期旧表”的实施措辞；当前未发布数据库只接受干净最终基线。
+- 产品 Child 删除记录、开发期 payload 迁移说明和非空旧库升级文档已经从工作树删除；统一来源闭包与删除规则改由 14 号设计定义。
 - 官方核心模块进入显式注册表，并声明稳定 `component_id`、依赖和能力；
 - 通用管理入口按 `(bot_id, component_id, operation_id)` 解析模块的 query/action contract；
 - Agent 与 Memory 的专用 `/agent/*`、`/memory/*` 管理端点已删除；
@@ -66,6 +68,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 ### P0 微内核
 
+- 当前 PostgreSQL schema 仍把多数官方模块表放在同一历史 public 基线；必须按 14 号设计拆成最小 Kernel baseline 和内容寻址模块 bundle，并让 Lifecycle Coordinator 安装/核验准确 bundle。开发期旧 migration handler、legacy marker、fallback 和升级夹具全部删除；
 - `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
 - 官方模块已发布独立的持久 RuntimeGraph/Generation 并进入同一 RouteGraph；它和可安装 Worker 仍使用不同运行驱动，需统一健康检查、按依赖边故障隔离、失租恢复和监督器接口；
 - command、message handler、service、event、job 与官方 runtime module 已进入同一可解释 RouteGraph，消息入场冻结精确 `graph_digest`；Kernel call、component event/job 与 Delivery 因果边已进入 trace，仍需归一旧 `bot_outbox_events` 来源；
@@ -109,7 +112,7 @@ VL 嵌入模型的种类在 Bot 创建时冻结并与 Bot 生命周期绑定；�
 只有满足以下条件后才能重新标记为发布候选：
 
 1. 第 13 号文档的退出条件全部有代码与测试证据；
-2. 干净数据库从最终基线创建，不依赖错误架构的兼容层；
+2. 干净数据库从最小 Kernel baseline 和所选模块的准确 schema bundle 创建，不依赖错误架构的兼容层，也不存在全产品巨型内核 SQL；
 3. 无数据库与 PostgreSQL 全套回归通过；
 4. 模块 UI、路由、生命周期、同群排队、跨群并发、记忆写合流及图文召回完成集成测试；
 5. Docker Compose、真实 OneBot 许可群低频交互和重启恢复通过；

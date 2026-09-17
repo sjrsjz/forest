@@ -12,7 +12,7 @@
 
 首次提交记忆配置是 Bot 的嵌入空间初始化边界。此后 `deployment_id`、`model`、`model_revision` 和 `dimensions` 与 Bot 生命周期绑定：管理服务在 plan 阶段拒绝改变，数据库在 revision 写入阶段再次证明，WebUI 也把对应字段设为只读。Endpoint、凭据、开关和预算仍可按普通 CAS 配置轮换；更换 endpoint 的前提是它继续提供相同模型、修订、维度和预处理语义。需要更换模型种类、权重/预处理修订或维度时，创建新 Bot 并通过显式迁移流程转移需要保留的业务数据，不能在旧向量空间上就地重解释历史向量。配置正文被遗忘后仍永久保留 deployment、model、model revision 的不可逆摘要和维度，因此正文清理不会解除生命周期约束，也不会泄露原声明字符串。
 
-升级迁移 023 逐项继承已有权限：`config.read/plan/apply` 分别映射 `memory.config.read/plan/apply`，`message.read` 映射 `memory.read`。不会把只读 issuer 扩大为可写，也不会启用停用的 issuer。
+Memory 模块首次安装时不从通用权限名猜测或扩大授权。部署者分别授予 `memory.config.read/plan/apply`、`memory.read` 和更细的正文/图片权限；只读 issuer 不获得写能力，停用的 issuer 不因模块安装恢复可用。
 
 ## 宿主许可
 

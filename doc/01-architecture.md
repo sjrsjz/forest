@@ -124,6 +124,8 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 
 Bot 和会话模块是首套官方发行配置的必需模块，但不成为通用内核类型系统的一部分。没有 Agent 时仍能提供命令型 Bot。
 
+内核数据库基线同样不能把官方发行配置固化成内核类型。最小 baseline 只包含模块安装账本、RuntimeGraph/Generation、契约路由、授权、调用、效果与操作等通用事实；Agent、Memory、Adapter、Conversation Scheduler、Shell、Job 和 Delivery 的业务表由各模块的内容寻址 schema bundle 创建并拥有。跨模块原子操作由内核主持已注册 participant，不允许模块直接写另一模块的表。详细规则见[14 干净数据库基线](14-clean-schema-and-payload-provenance.md)。
+
 ## 5. 实现方向与隔离
 
 ### 5.1 语言和运行时决策

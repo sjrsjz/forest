@@ -2,7 +2,7 @@
 
 ## 1. 范围
 
-`shell-gate-v8` 首次提供、当前 v11 完整继承：
+Module Lifecycle 模块向当前 Shell registry 提供：
 
 ```text
 #forest module list
@@ -10,9 +10,9 @@
 #forest module reload <component_id> --expect-revision <desired_revision>
 ```
 
-`modules` 是 `module` 的确定性别名。v8 首次发布 list/status/reload，v11 增加 validate/enable/disable；已经排队的 v2–v10 请求继续按各自 gate 解释，不会被新语法重新解析。v9 的固定 `core reload` 复用这里的同一 reload 权威。
+`modules` 是 `module` 的确定性别名。命令接纳时冻结当前 RouteGraph、模块 Generation、参数 schema 和规范参数；恢复时不重新解析原消息。固定 `core reload` 复用这里的同一 reload 权威。
 
-`shell-gate-v11` 增加：
+同一 registry 还提供：
 
 ```text
 #forest module validate <component_id> --expect-config-revision <desired_revision> --expect-state-revision <module_revision>
@@ -54,7 +54,7 @@ reload 不是“停止旧 Worker 后再试一次”的旁路。Shell 只授权�
 
 ## 4. 幂等、并发与恢复
 
-一条命令派生稳定的三个 operation identity：包装操作、plan 子操作和 apply 子操作。进程内 opaque delegation 只允许这条 v8 命令调用两种固定配置子动作，外部参数不能选择 action、operation identity 或配置值。每个子操作继续写不可变输入/结果载荷和控制回执。
+一条命令派生稳定的三个 operation identity：包装操作、plan 子操作和 apply 子操作。进程内 opaque delegation 只允许这条命令调用两种固定配置子动作，外部参数不能选择 action、operation identity 或配置值。每个子操作继续写不可变输入/结果载荷和控制回执。
 
 Host 在 plan 前从 revision N 读取值，但 `config.plan` 会再次检查 head；apply 又在目标 head 上执行最终 CAS。因此 Web 保存、另一个群命令和同一命令重试遵循相同裁决：
 
@@ -70,11 +70,11 @@ Host 在 plan 前从 revision N 读取值，但 `config.plan` 会再次检查 he
 
 组件配置卡片提供“验证”“启用”“停用”“重载”。页面冻结当前 config/state revision；重载使用稳定的 plan/apply 幂等键，启停使用独立 state CAS 与稳定幂等键。网络确认丢失时可以读取原回执，修订冲突会丢弃过期草稿并刷新配置。页面只把“接纳”显示为等待生命周期切换，最终状态仍以 effective revision、route 和 runtime 组件状态为准。
 
-## 6. 版本围栏与验证
+## 6. 代际围栏与验证
 
-Bot 迁移 066 把 writer generation 提升为 6。generation-5 Host 不认识 v8 命令，迁移提交后不能重新取得 Host lease；066 checksum 绑定 `migration_v6.py`、`shell_registry_v8.py` 和 `shell_payloads_v8.py`，同时不改变 064/065 已发布 checksum。迁移 069 将 generation 提升为 9；checksum 绑定 `migration_v9.py`、`shell_registry_v11.py` 和 `shell_payloads_v11.py`，generation-8 Host 在提交后永久失去 Host 写权。
+命令请求保存接纳时的 RouteGraph 摘要、owner component/generation、schema digest 和规范参数。旧 Generation 被撤下后不能领取新命令；已接纳命令只有在原代仍被允许排空时完成，否则以 `GENERATION_RETIRED` 终结。Forest 未发布基线不维护 gate 版本链、writer-generation 数据库升级或版本专用 registry/helper。
 
-专项验证覆盖 v8/v11 schema 与旧 gate 兼容、真实 PostgreSQL reload/validate/enable/disable、双 CAS 幂等重放、Shell 完整 CONTROL 回执、Web 与 Shell 同 revision 竞争、正文不进入群输出、暂停态投影、旧 issuer 最小权限映射，以及 generation-5 和 generation-8 writer 永久失权。
+专项验证覆盖当前 schema、真实 PostgreSQL reload/validate/enable/disable、双 CAS 幂等重放、Shell 完整 CONTROL 回执、Web 与 Shell 同 revision 竞争、正文不进入群输出、暂停态投影、issuer 最小权限，以及旧 Generation 撤路由后永久失去提交权。
 
 ## 7. 配置修订与启停修订分离
 
@@ -83,7 +83,7 @@ Bot 迁移 066 把 writer generation 提升为 6。generation-5 Host 不认识 v
 - `desired_state_revision`：管理员最后接纳的启停意图；
 - `effective_state_revision`：Kernel 已完成生命周期发布的启停意图；
 - 修订正文只有 `enabled`、`reason`、提交主体、策略版本和来源 operation；
-- 尚无模块状态修订时，已配置组件按兼容默认值 `enabled=true, revision=0` 处理。
+- 模块首次配置必须在同一 plan/apply 中创建显式状态修订；不存在“缺行即启用”的兼容默认值。
 
 因此配置和启停形成两个正交的 CAS 轴。禁用期间仍可编辑或 reload 配置，Fleet 不会加载新 Worker；再次启用时，Fleet 使用最新 desired 配置和最新 desired 启停修订共同创建 activation。一次成功的 INSTALL 发布同时推进配置 effective 和模块 effective；一次 DISABLE 发布只推进模块 effective，保留最后成功的配置 effective 作为重新启用失败时的已知可运行版本。
 
@@ -148,4 +148,4 @@ Shell status、WebUI 和审计均显示两个 revision 轴、最近 lifecycle ki
 
 WebUI 的组件卡片提供“验证”“启用”“停用”“重载”。按钮冻结当前 config/state revision；停用必须填写原因并显示依赖影响。提交后页面显示“已接纳，等待生命周期发布”，轮询到 effective state、route 和 generation 一致才显示完成。冲突会清除旧草稿并重新读取；网络确认丢失使用同一幂等键读取原回执。
 
-实现验证至少覆盖：双 CAS 竞争、禁用中的迟到父调用、冻结后的依赖调用、依赖者阻止 provider 禁用、可选依赖、禁用期间编辑配置、启用同时推进两个 effective head、发布确认丢失、冻结后 abort、Host 接管、Shell/Web 竞争、旧 gate 重放、旧 writer 永久失权、正文遗忘、停用期间事件/任务不丢失，以及浏览器端完整启停往返。
+实现验证至少覆盖：双 CAS 竞争、禁用中的迟到父调用、冻结后的依赖调用、依赖者阻止 provider 禁用、可选依赖、禁用期间编辑配置、启用同时推进两个 effective head、发布确认丢失、冻结后 abort、Host 接管、Shell/Web 竞争、冻结 Generation 恢复与失权、正文遗忘、停用期间事件/任务不丢失，以及浏览器端完整启停往返。

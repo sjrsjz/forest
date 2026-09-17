@@ -38,7 +38,7 @@ CHAT 按 Conversation/response_seq/part 排序，CONTROL 按独立 command/contr
 
 ## 群聊管理入口
 
-固定完整前缀 `#forest` 在 Inbox 接纳时进入独立 CONTROL 路径。识别直接文本及可信的开头 Bot mention，不把引用、转发或 self echo 当命令。未知命令、坏语法和无权限请求均不回落普通 Agent。当前支持状态、Run/Job 管理和本群记忆来源遗忘；管理员来自有效 Binding 配置的显式 QQ ID，群 owner/admin 角色不自动授予框架权限。`shell-gate-v2` 的已接纳命令保持冻结，新消息使用增加记忆命令的 v3，Dispatcher 按持久 gate 版本恢复。
+固定完整前缀 `#forest` 在 Inbox 接纳时进入独立 CONTROL 路径。识别直接文本及可信的开头 Bot mention，不把引用、转发或 self echo 当命令。未知命令、坏语法和无权限请求均不回落普通 Agent。状态、Run/Job 管理和本群记忆来源遗忘分别由当前模块 Generation 注册；管理员来自有效 Binding 配置的显式 QQ ID，群 owner/admin 角色不自动授予框架权限。请求在接纳时冻结 RouteGraph、owner Generation、schema digest 和规范参数，Dispatcher 恢复时不重新解析群消息。
 
 当前不执行任意系统命令、不开放 OS shell。敏感原始参数不写入普通 Context 或日志，未知命令只保存摘要和固定说明；已接入命令使用类型化参数、会话 scope 和 P0–P2 优先级，动态注册、运维 runbook 与完整授权委托仍按 09 文档实现。管理回执不占普通群 Actor，也不改正在执行的提示上下文。
 

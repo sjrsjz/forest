@@ -60,9 +60,9 @@ raw staging 与正式 Inbox 是两个事务，因此第二次检查不可省略�
 
 普通 Inbox 已存在时返回 `DUPLICATE`，继续复用原 `event_id/ingress_seq/trigger_decision`。这条路径不读取已遗忘正文，因此同一消息在遗忘后的网络重试仍能取得稳定 ACK。
 
-## 5. 升级与恢复
+## 5. Schema bundle 与恢复
 
-迁移 070 新建封闭收据表，并把 `forest.writer_generation` 提升到 10。升级要求旧 Host 停止；迁移提交后 generation 9 进程不能重新取得或续签 HostLease，避免同一 schema 上一部分进程持久 ACK、另一部分进程仍返回瞬时拒绝。
+Adapter 模块的干净 schema bundle 从首次创建即包含封闭收据表；不存在旧 Host 不识别该收据的开发期升级状态。请求绑定当前 Adapter Generation、RouteGraph 和 HostLease，失效代不能领取或提交，避免同一 Bot 一部分进程持久 ACK、另一部分进程仍返回瞬时拒绝。
 
 备份和隔离恢复按普通 Bot 表保存这些收据及其 suppression 外键。收据不参与 Context、图、索引或 payload scrub，也不阻止正常存储代际清理。恢复开放前的既有 schema/行数/外键核对会覆盖该表。
 
@@ -74,4 +74,4 @@ raw staging 与正式 Inbox 是两个事务，因此第二次检查不可省略�
 - 同一事件身份换正文：返回 `INGEST_CONFLICT`，原收据不变；
 - 普通 Inbox 在遗忘后重投：返回原 Inbox 元数据 ACK，不读取或恢复正文；
 - HTTP POST 与正向 WebSocket 入口返回相同结果，均不触发 Agent 或发送；
-- generation 9 Host 在迁移 070 后不能重新取得租约；旧 001–069 非空数据库可升级且原事实不变。
+- 旧 Adapter Generation 撤路由后不能重新取得租约或提交收据；非空开发期数据库被拒绝并重建。

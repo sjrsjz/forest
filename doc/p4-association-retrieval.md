@@ -76,5 +76,5 @@ Web 可以跨群管理当前 Bot。群聊 Shell 暂不增加联想命令；以�
 - 同端点反向建立归一到同一 head；同 revision 并发 apply 只有一个成功；解除和再次建立不复活旧 contribution；
 - 图 publish 失败或宿主重启后从持久 pending scope 恢复，未发布期间向量召回继续；
 - 当前群未进入 input cut 的端点、私有来源、已撤回/删除来源和缺少任一边证据的候选不泄露节点、群名或计数；
-- apply 原子回滚 head/change/graph operation/Web operation/audit/outbox；001–052 非空旧库升级保持既有 issuer 限制；
+- apply 原子回滚 head/change/graph operation/Web operation/audit/outbox；从干净 Memory bundle 创建时 issuer 只获得显式授予的最小权限；
 - Web 双 Bot、迟到响应和计划失效隔离；前端不要求编辑 JSON 或服务器文件。

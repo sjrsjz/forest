@@ -36,7 +36,7 @@ BotStore 当前最多持有 8 条数据库连接。若普通消息和明显无�
 
 值只包含 `is_current_admin` 和按当前策略算出的实际 priority，默认 TTL 5 秒、最多 512 项，按最近使用淘汰。`principal_bucket` 对验证账号使用稳定 `principal_ref`；匿名主体按 Binding 与群形成共享桶，不能通过省略匿名 ID 为每条消息创建新额度。
 
-缓存命中产生宿主内部 `ShellPriorityProof`：绑定 Bot/Binding 修订、命令名、gate、声明 priority 与作者 principal。MessageStore 在 Inbox 事务中对当前 Binding 行、作者和重新解析出的命令逐字段复核；不一致返回 `SHELL_PRIORITY_PROOF_INVALID`。没有宿主证明的直接 MessageStore 调用保留原数据库读取路径，用于恢复和兼容测试。
+缓存命中产生宿主内部 `ShellPriorityProof`：绑定 Bot/Binding 修订、RouteGraph digest、owner Generation、命令名、声明 priority 与作者 principal。MessageStore 在 Inbox 事务中对当前 Binding 行、作者和重新解析出的命令逐字段复核；不一致返回 `SHELL_PRIORITY_PROOF_INVALID`。没有宿主证明的内部恢复调用必须从权威 Binding 与冻结 RouteGraph 重新计算，不能使用仅服务旧测试的旁路。
 
 该证明不是可序列化票据，不进入 Worker、HTTP、群输出或数据库。Python 插件拿不到 MessageStore 或 guard 对象；即使宿主进程内对象被错误复用，修订与作者复核也会拒绝跨 Binding/跨主体重定向。
 
