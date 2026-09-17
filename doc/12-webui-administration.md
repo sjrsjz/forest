@@ -219,9 +219,9 @@ API 使用 `/management/v1` 等显式大版本路径和版本化 DTO；下表是
 
 ## 9. 管理身份、密钥与内容安全
 
-当前已落地的第一阶段账号协议见 [P5 Web 账号与固定角色管理](p5-account-management.md)：`admin` 与 `viewer` 固定模板、服务端只读 action 门禁、账号创建、角色/停用/改密 plan/apply、全会话撤销、最后管理员并发保护和响应丢失后的幂等恢复。下文的 Bot 级 scope、运维/审计模板、平台身份映射与 MFA 仍是后续目标。
+账号和会话由 deployment scope 的准确身份模块贡献。首版至少提供管理员与只读审计角色、服务端 action 门禁、账号创建、角色/停用/改密 plan/apply、全会话撤销、最后管理员并发保护和响应丢失后的幂等恢复；Bot 级授权仍由目标 Bot authority 裁决，不能由 deployment 角色越权代签。
 
-部署级不可变操作已经通过[部署审计查询](p5-deployment-audit.md)接入管理员 WebUI：服务端白名单投影详情，按时间与 audit ID 的稳定键集游标分页，并在读取前后复核会话。它不合并各 Bot 数据库日志，也不替代后续受 scope 约束的审计角色、导出和保留期管理。
+部署级审计由 `deployment.audit` 贡献白名单投影详情，并按时间与 audit ID 的稳定键集游标分页，在读取前后复核会话。它不合并各 Bot 数据库日志；Bot 审计由目标 Bot 的 `kernel.audit` contribution 暴露。实现完成度与已运行证据只记录在[实现状态](implementation-status.md)，不能反向改变本节的模块边界。
 
 管理账号具有独立身份；平台用户可显式关联账号用于批准政策，但必须验证双方身份，不能通过昵称/QQ 号文本相同自动绑定。角色提供部署管理员、Bot 管理员、运维、审计只读模板，真实许可由 action + authority_scope + 资源/数据范围决定。隐藏按钮只用于提示，HTTP、目标操作及最终效果各自检查授权。
 

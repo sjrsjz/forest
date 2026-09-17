@@ -1,6 +1,8 @@
 # P3 单 Agent 协议与持久运行详细设计
 
-状态：**单 Agent 核心协议已实现；本文同时是实现约束和后续验收依据。**设计依据是 [QiYu Agentlib 专项审计](research-qiyu-agentlib.md)，当前运行范围与外部联调边界见 [implementation-status.md](implementation-status.md)。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+历史快照当时状态：单 Agent 核心协议曾作为该纵向切片的实现约束和验收依据。当前规范正文已经迁入 [04 多 Bot、Agent 与记忆](04-bot-agent-memory.md#31-forestcoreprompt-v1)；设计依据见 [QiYu Agentlib 专项审计](research-qiyu-agentlib.md)，当前运行范围与外部联调边界见 [implementation-status.md](implementation-status.md)。
 
 ## 1. Agent 的唯一含义
 

@@ -138,7 +138,7 @@ Agent 工作期间到达的新普通消息照常入队。Shell 执行不会把�
 2. 已启用的业务命令按冻结 RouteGraph 选择唯一 owner，执行其参数 schema、策略和 P2 handler；
 3. 未认领消息进入普通 Handler 链，再按冻结 trigger decision 回落 Agent 或静默 Context。
 
-业务命令策略绑定 `(bot_id, binding/group scope, command_id, component_generation, principal_class)`，默认禁用。命中后的拒绝或失败不能 fallback Agent 以绕过策略。多个 handler 的 priority 只在同一命令 owner 内排序，不能覆盖 Core 前缀或提高服务等级。完整 Handler 顺序见[P2 业务命令](p2-business-commands.md)和[P2 普通消息链](p2-message-handlers.md)。
+业务命令策略绑定 `(bot_id, binding/group scope, command_id, component_generation, principal_class)`，默认禁用。命中后的拒绝或失败不能 fallback Agent 以绕过策略。多个 handler 的 priority 只在同一命令 owner 内排序，不能覆盖 Core 前缀或提高服务等级。完整顺序以本节、[03 的冻结路由](03-communication-scheduling.md#3-路由与执行)和[08 的会话接纳](08-group-context-interaction.md)为准。
 
 ## 10. 受控原生进程
 

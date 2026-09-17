@@ -1,6 +1,8 @@
 # P3 群聊管理与任务监督
 
-> **文档级别：实现切片。** 目标协议以[09 群聊 Shell](09-group-shell-command-system.md)为准。本页只说明 Shell 如何调用现有模块管理契约，不定义 gate 版本链或兼容旧 registry。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+> **历史文档原标签：实现切片。** 目标协议以[09 群聊 Shell](09-group-shell-command-system.md)为准。本页只说明 Shell 如何调用现有模块管理契约，不定义 gate 版本链或兼容旧 registry。
 
 ## 1. 命令来源与模块所有权
 

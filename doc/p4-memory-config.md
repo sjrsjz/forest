@@ -1,5 +1,7 @@
 # P4 记忆配置与管理界面
 
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
 每个 Bot 使用独立的 `MemoryConfig`。公开配置由 `MemorySettings` 规范化，密钥只接受写入；读取只暴露 `has_api_key` 与 `secret_revision`，不返回密钥、密文或其摘要。清除密钥是显式操作，空输入默认保留。配置默认禁用。
 
 管理界面沿用 Bot 选择，将嵌入服务、索引费用、图片抓取存储、检索输出分为四组普通表单。流程是读取当前版本、编辑、预览、应用。预览不会调用嵌入服务；保存只表示配置通过校验并已提交。服务状态另行读取真实运行时观测，不能以保存成功代替远端模型可用性或语义质量验收。

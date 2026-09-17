@@ -1,6 +1,8 @@
 # P2 普通群消息插件链详细设计
 
-状态：首个执行纵向闭环、容量治理、显式兼容代际接管与 Web 运行管理已完成。SDK/包声明/Worker/Kernel 类型化调用、持久 effective registry、Binding 策略 Web、接纳事务内冻结链、Conversation Actor 单项执行、attempt/result/failure、Agent fallback、CHAT Delivery 与延迟 Context 物化已经接通。策略在领取和结果提交时复核；领取前收缩会取消链。调用已经形成持久回执后发生收缩时，恢复 Actor 抑制该旧授权结果并终结链；仍为 `ADMITTED` 的调用必须先收敛，不能换 operation 或并发重放。真实浏览器和许可群 OneBot 低频验收仍待完成。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+历史快照当时状态：首个执行纵向闭环、容量治理、显式兼容代际接管与 Web 运行管理已完成。SDK/包声明/Worker/Kernel 类型化调用、持久 effective registry、Binding 策略 Web、接纳事务内冻结链、Conversation Actor 单项执行、attempt/result/failure、Agent fallback、CHAT Delivery 与延迟 Context 物化已经接通。策略在领取和结果提交时复核；领取前收缩会取消链。调用已经形成持久回执后发生收缩时，恢复 Actor 抑制该旧授权结果并终结链；仍为 `ADMITTED` 的调用必须先收敛，不能换 operation 或并发重放。真实浏览器和许可群 OneBot 低频验收仍待完成。
 
 ## 1. 参考实现与目标
 

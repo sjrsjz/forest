@@ -1,6 +1,8 @@
 # OneBot、群聊调度与可靠发送实现说明
 
-> **文档级别：历史实现切片。** 本页只保留 OneBot 纵向验收证据，不定义目标所有权、schema 或组合根。实现必须以 01–14 和[当前实现状态](implementation-status.md)为准；旧类名、页面和 `public` 表不能成为兼容要求。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+> **历史文档原标签：历史实现切片。** 本页只保留 OneBot 纵向验收证据，不定义目标所有权、schema 或组合根。实现必须以 01–14 和[当前实现状态](implementation-status.md)为准；旧类名、页面和 `public` 表不能成为兼容要求。
 
 平台实现和登录态由部署者提供，Forest 不内置 QQ 客户端。HTTP 与正向 WebSocket 都只是 `adapter.onebot` 可选择的 transport；实际完成情况见实现状态，不能从本页的旧 P1 阶段描述推断。
 

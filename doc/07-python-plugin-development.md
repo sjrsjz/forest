@@ -46,7 +46,7 @@ class Hello:
 
 handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Consumed` 表示已完成且无需默认回复；两者都不能阻止这条正常群消息进入历史。抛出的异常进入统一错误契约。命令路由冲突在启用时检查，不按文件枚举顺序偶然挑选一个处理器。
 
-以上是 P2 业务命令接口；持久注册、用户策略、分类、同群 Actor 与原子回复的实现协议见 [P2 业务命令与普通消息插件链](p2-business-commands.md)。`#forest` 由核心 ShellGate 保留，普通 handler 无论 priority 多高都不能覆盖或提前消费它；命中保留命名空间后的错误、拒绝和 `Pass` 均不能回落到 Agent。业务命令的 `handler.priority` 只决定允许阶段内的匹配顺序，不等于宿主 `service_class`。管理扩展通过[09 的版本化 CommandSpec](09-group-shell-command-system.md)登记到显式扩展命名空间，接受部署授权和固定参数 schema，默认 P1，不能自行申请成为核心 P0 救援命令。
+业务命令的持久注册、冻结路由、用户策略、分类、同群 Actor 与原子回复服从[03 通信与调度](03-communication-scheduling.md)、[08 群聊交互](08-group-context-interaction.md)和[09 群聊 Shell](09-group-shell-command-system.md)。`#forest` 由核心 ShellGate 保留，普通 handler 无论 priority 多高都不能覆盖或提前消费它；命中保留命名空间后的错误、拒绝和 `Pass` 均不能回落到 Agent。业务命令的 `handler.priority` 只决定允许阶段内的匹配顺序，不等于宿主 `service_class`。管理扩展通过 09 的版本化 CommandSpec 登记到显式扩展命名空间，接受部署授权和固定参数 schema，默认 P1，不能自行申请成为核心 P0 救援命令。
 
 群消息上下文收集由框架统一完成，不要求每个插件重复 push 用户消息。触发分类只产生结构化决策与原始事件引用，不能直接 `Agent.run()` 或自行 `create_task` 开启回复；待触发由唯一 ConversationSession 在模型安全点按最后触发记录选择前缀。没有触发也照常静默保存/裁剪，详见[08](08-group-context-interaction.md)。命令插件若需要长期模型对话，同样申请该会话的调度资格。
 
@@ -102,9 +102,9 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 Context 只在当前调用及其受监督子调用中有效，不能存入 `self` 后交给下一条消息使用。跨服务只声明契约，不 `import other_plugin`；同包 `helpers.py` 可正常相对 import，因为它随整个包一起形成同一不可变版本。
 
-持久事件的 payload 正文进入受来源与删除 epoch 约束的内容存储。消费 envelope 明确携带发布组件、原契约与 event ID；同一订阅串行、不同订阅可并行。发布幂等、ACK 丢失恢复、热重载接续和死信边界见 [P0 持久组件事件](p0-component-events.md)。
+持久事件的 payload 正文进入受来源与删除 epoch 约束的内容存储。消费 envelope 明确携带发布组件、原契约与 event ID；同一订阅串行、不同订阅可并行。发布幂等、ACK 丢失恢复、热重载接续和死信边界由[03 的持久事件协议](03-communication-scheduling.md#7-持久事件与消费者)、[02 的 Generation 生命周期](02-kernel-lifecycle.md)和[14 的载荷所有权](14-clean-schema-and-payload-provenance.md)共同裁决。
 
-组件持久任务通过 manifest `jobs` 和代码 `@job(handler_id)` 成对声明；调用内使用 `ctx.jobs.schedule(handler_id, payload, operation_id=..., delay_seconds=...)`。它只调用同一组件当前代际的处理器，不创建 Agent、不读取群上下文，也不继承用户或管理员权限。处理器可用稳定 operation 调度下一周期，完整 claim、预算、重试与热重载协议见[组件持久任务详细设计](p0-component-jobs.md)。面向群会话唯一 Agent 的 interval/cron 任务仍使用 P3 会话任务协议。
+组件持久任务通过 manifest `jobs` 和代码 `@job(handler_id)` 成对声明；调用内使用 `ctx.jobs.schedule(handler_id, payload, operation_id=..., delay_seconds=...)`。它只调用同一组件当前代际的处理器，不创建 Agent、不读取群上下文，也不继承用户或管理员权限。claim、预算、重试与热重载服从[02 生命周期](02-kernel-lifecycle.md)、[03 调度](03-communication-scheduling.md)和[06 合流](06-concurrent-convergence.md)。面向群会话唯一 Agent 的 interval/cron 任务必须通过 `conversation.scheduler` 产生 trigger，并按[04 Agent](04-bot-agent-memory.md)与[08 群聊交互](08-group-context-interaction.md)进入同一条响应链。
 
 Agent 的工具提议必须引用其服务的 trigger/request ID，宿主分别检查对应主体；同批多个用户的权限不能取并集。`event.sender` 来自平台认证后规范化的作者快照，回复引用、转发作者、正文中的名字与管理员称谓都不能替换它。业务插件返回回复只生成 CHAT 意图，最终外发按该群 response_seq 排序。管理扩展通过绑定 command_id 的控制回执接口产生 CONTROL 意图，宿主验证命令授权；普通 `Reply` 不能自行选择控制通道来跳过聊天顺序或配额。
 

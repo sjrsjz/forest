@@ -1,5 +1,7 @@
 # P5 部署审计查询
 
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
 ## 1. 范围与权威
 
 部署审计页面读取部署数据库的不可变 `audit_records`，用于核对初始化、部署配置、Bot 目录、Binding 预留、插件导入和 Web 账号操作。它不合并各 Bot 数据库中的 `bot_audit_records`，也不把跨库记录伪装成一条全局顺序；Bot 的 Agent、消息、发送、记忆、组件事件和持久任务仍由对应 Bot 权威页面读取。

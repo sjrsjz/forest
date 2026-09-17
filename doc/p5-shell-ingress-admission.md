@@ -1,6 +1,8 @@
 # P5 群聊 Shell 接入容量与资格缓存
 
-> **文档级别：目标协议与旧切片纠偏。** 旧实现把入口 Guard、Binding 管理员配置和 `MessageStore` 绑进 OneBot 组合根，该所有权已撤销。本文只保留入口容量算法；目标边界以 [09](09-group-shell-command-system.md)、[13](13-microkernel-control-plane-redesign.md)和[14](14-clean-schema-and-payload-provenance.md)为准，完成度只看[实现状态](implementation-status.md)。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+> **历史文档原标签：目标协议与旧切片纠偏。** 旧实现把入口 Guard、Binding 管理员配置和 `MessageStore` 绑进 OneBot 组合根，该所有权已撤销。本文只保留入口容量算法；目标边界以 [09](09-group-shell-command-system.md)、[13](13-microkernel-control-plane-redesign.md)和[14](14-clean-schema-and-payload-provenance.md)为准，完成度只看[实现状态](implementation-status.md)。
 
 本文处理平台事件认证以后、Bot UnitOfWork 接纳以前的容量隔离。Shell 的管理员策略、命令请求、持久优先级和执行归 `shell.command`；Inbox/Context 归 `conversation.scheduler`；平台连接与事件观察归 Adapter。
 

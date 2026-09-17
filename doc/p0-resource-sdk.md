@@ -1,6 +1,8 @@
 # P0 Worker 资源监督 SDK
 
-状态：本页描述已实现的首版 `ctx.resources` 纵向切片。它管理 Python Worker 进程内可关闭对象，不宣称提供操作系统级沙箱、持久 Job 或跨进程句柄迁移。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+历史快照当时状态：本页描述已实现的首版 `ctx.resources` 纵向切片。它管理 Python Worker 进程内可关闭对象，不宣称提供操作系统级沙箱、持久 Job 或跨进程句柄迁移。
 
 ## 1. 所有权与接口
 

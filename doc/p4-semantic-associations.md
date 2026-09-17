@@ -1,6 +1,8 @@
 # P4 自动跨主干语义联想
 
-状态：已接入的 P4 实现切片。本文描述向量发布后的持久维护队列、关系投票合流、删除失效和 Agent 召回投影。它复用已经为原生图文检索生成的 embedding，不增加 LLM、摘要或额外 embedding 请求。
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
+历史快照当时状态：已接入的 P4 实现切片。本文描述向量发布后的持久维护队列、关系投票合流、删除失效和 Agent 召回投影。它复用已经为原生图文检索生成的 embedding，不增加 LLM、摘要或额外 embedding 请求。
 
 ## 1. 语义边界
 

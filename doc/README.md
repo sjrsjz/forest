@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：目标设计与激进重构进行中。更新日期：2026-09-18。[00 架构总契约](00-architecture-contract.md)是当前实现的唯一入口和最高权威；01–14 展开各领域契约，不代表相应能力已经实现。[实现状态与验证记录](implementation-status.md)是代码完成度的唯一权威。P0–P5 是历史纵向切片和局部协议证据，**不是新的实现输入**；只有经 00–14 明确确认且不依赖旧对象模型的部分可以复用。它们不能要求为未发布结构保留表、DTO、API、页面或兼容迁移。实际启动方式见[项目 README](../README.md)。
+状态：目标设计与激进重构进行中。更新日期：2026-09-18。[00 架构总契约](00-architecture-contract.md)是当前实现的唯一入口和最高权威；01–14 展开各领域契约，不代表相应能力已经实现。[实现状态与验证记录](implementation-status.md)是代码完成度的唯一权威。P0–P5 是历史纵向切片和局部协议证据，**不是新的实现输入**；只有经 00–14 明确确认且不依赖旧对象模型的部分可以复用。它们不能要求为未发布结构保留表、DTO、API、页面或兼容迁移。项目根 [README](../README.md) 只提供当前架构入口和开发检查；生产启动说明要等干净 RuntimeGraph 切换完成后再恢复。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -15,7 +15,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 2 | [01 架构设计](01-architecture.md) | 系统边界、模块职责、部署与总体验收不变量 |
 | 3 | [02 生命周期](02-kernel-lifecycle.md)、[03 通信与调度](03-communication-scheduling.md)、[05 存储与鉴权](05-storage-security-operations.md)、[06 并发合流](06-concurrent-convergence.md) | 通用协议、所有权、事务、授权与收敛规则 |
 | 4 | [08 群聊上下文](08-group-context-interaction.md)、[09 群聊 Shell](09-group-shell-command-system.md)、[10 多主干记忆图](10-multi-trunk-memory-graph.md)、[11 多模态记忆](11-multimodal-memory-and-model-projection.md)、[12 WebUI](12-webui-administration.md) | 交互、管理和数据域专项契约；不得扩大微内核职责 |
-| 5 | [04 多 Bot、Agent 与记忆](04-bot-agent-memory.md)、[07 Python 插件](07-python-plugin-development.md)、[P3 单 Agent 协议](p3-agent.md) | 可替换模块的详细行为；Agent 仅是模块，不能成为框架主循环 |
+| 5 | [04 多 Bot、Agent 与记忆](04-bot-agent-memory.md)、[07 Python 插件](07-python-plugin-development.md) | 可替换模块的详细行为；04 包含 CorePrompt 规范正文，Agent 仅是模块，不能成为框架主循环 |
 | 状态证据 | [实现状态与验证记录](implementation-status.md) | 唯一的当前完成度来源；不定义目标架构 |
 
 任何实现若需要新增顶层 Agent/Memory/Bot 业务页面、恢复已废弃的 `BindingRuntime` 组合根、在通用 Supervisor 上持有业务对象、引入产品子 Agent、按旧未发布表增加兼容迁移，或绕过注册表直接调用模块，均应视为设计错误并先修改方案。
@@ -41,7 +41,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 不同群异步对话 | 03 的接收序号和公平调度，04 的独立 Actor/Run 与 continuation |
 | 异步并发写的合流性 | 06 的事实集合与确定性归约；不可合流操作显式仲裁 |
 | 参考 AliceBot 的开发便利性，无需绑定 Wasm | 07 的 Python 插件/装饰器/异步钩子/watch，框架托管 IPC 与资源 |
-| Agentlib 的单 Agent 核心协议 | P3 的内置 CorePrompt、独立 PresetContext、原子 ModelTurn、单工具循环和跨重启 checkpoint |
+| Agentlib 的单 Agent 核心协议 | 04 的内置 CorePrompt 规范正文、独立 PresetContext、原子 ModelTurn、单工具循环和跨重启 checkpoint；08 定义消息安全边界 |
 | 所有群消息进入上下文，按最后触发记录推进下一轮 | 08 的持久输入流水、触发记录、模型安全边界与静默排空；03–05 同步该契约 |
 | 历史正确区分不同用户 | 08 的结构化作者快照、引用来源与归档证据归属，禁止多人批次混合授权 |
 | 管理员通过群聊管理框架并处理指令优先级 | 09 的 ShellGate、命令注册与授权、P0–P4 调度、CONTROL 回执；02–05 同步生命周期与事务边界 |

@@ -62,7 +62,7 @@ SendIntent 只保存 cause、目标、顺序和受管 part PayloadRef；最终�
 
 每个 Run 冻结 `agent_spec_revision`、配置/Preset PayloadRef、`ForestCorePrompt protocol_version + digest`、parser/serializer revision、预算和绝对 deadline。CorePrompt 正文仍是发布制品中的只读常量，不复制到数据库、不允许 WebUI 更新；每个模型请求必须再次固定它的版本、digest 与实际 Provider 指令通道。`run_inputs` 只追加 InputBatch 引用与规范化 trigger/principal 成员，不能覆盖早期 input revision。
 
-`model_requests` 是一次语义模型调用的不可变 manifest；`model_transport_attempts` 是其实际 wire/effect 尝试。每个派发或对账结果先追加不可变 `model_observations`，再按单向状态机更新 attempt/request/Run；互相冲突的晚到证据保留为 rejected observation，不能覆盖已接受结果。`UNKNOWN` 只能由明确对账解决，不能重发来猜测。`model_turns` 只接受 [P3 Agent 协议](p3-agent.md)解析出的一个完整原子 ModelTurn；原始候选、解析后 turn、Assistant 候选与 FunctionCall 参数均是 `kernel.payload` 引用。`tool_calls` 保存 Agent 工具业务语义和明确 `authority_trigger_ref`，通用派发状态由 `kernel.effect` 管理；Kernel 表不得重新出现 Agent tool ID。
+`model_requests` 是一次语义模型调用的不可变 manifest；`model_transport_attempts` 是其实际 wire/effect 尝试。每个派发或对账结果先追加不可变 `model_observations`，再按单向状态机更新 attempt/request/Run；互相冲突的晚到证据保留为 rejected observation，不能覆盖已接受结果。`UNKNOWN` 只能由明确对账解决，不能重发来猜测。`model_turns` 只接受 [04 的 Agent 协议](04-bot-agent-memory.md#31-forestcoreprompt-v1)解析出的一个完整原子 ModelTurn；原始候选、解析后 turn、Assistant 候选与 FunctionCall 参数均是 `kernel.payload` 引用。`tool_calls` 保存 Agent 工具业务语义和明确 `authority_trigger_ref`，通用派发状态由 `kernel.effect` 管理；Kernel 表不得重新出现 Agent tool ID。
 
 `run_checkpoints` 是不可变、带 checksum 的恢复事实。可变 Run head 只指向最后 checkpoint、当前 input/step 和 phase；owner epoch 与短 lease 保护物理执行权。进程内 Python 对象、流回调或异常对象都不是恢复权威。最终 Assistant 仍必须交给 `conversation.scheduler` 的原子 Context/reply 端口，Agent runtime 自己不能把 trigger 标为 `ANSWERED` 或直接写 Delivery。
 

@@ -1,5 +1,7 @@
 # P4 PostgreSQL 图分片与发布
 
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
 `forest.storage.memory_graph.GraphStore(messages)` 将[纯事实归约器](p4-graph-reducer.md)接入真实 Bot PostgreSQL。Memory 模块的内容寻址 schema bundle 保存不可变事实、图发布记录和有索引的节点/边邻接表；事实值正文仍放在该模块拥有的受管载荷存储。它不增加隐式实体抽取、LLM 摘要或按消息调用模型。
 
 这是一种原生图驱动实现，不以 Neo4j 等独立服务作为必要前提。图仍是候选索引；它不授予任何跨群读取权限，也不将联想边的权重解释成事实置信度。

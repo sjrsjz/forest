@@ -1,5 +1,7 @@
 # P4 原生图文嵌入驱动
 
+> **历史快照｜禁止作为当前实现规格。** 本文只记录旧纵向切片及其当时的局部验证。它服从 [00 架构总契约](00-architecture-contract.md) 与 01–14 号详细设计；冲突内容已经失效。不得据此新增或恢复旧表、编号迁移、兼容读取、固定业务页面、专用宿主 API、巨型 Store、业务组合根或产品子 Agent。需要复用算法时，必须先把 owner、namespace、Repository contract、Generation、UnitOfWork participant、并发 fence 和 management contribution 映射到当前设计。
+
 `forest.embeddings` 是独立的原生异步 HTTP Provider 边界，复用现有 httpx 和 `MediaSnapshot`。它不连接数据库、不读取配置文件、不保存密钥、不获取图片 URL、不调用聊天模型，也不重试请求。图文混批返回各片段的独立向量，供后续记忆检索合并排名。
 
 ## 已核实的 Provider 契约

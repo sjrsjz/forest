@@ -48,8 +48,10 @@ def fails(code: str, candidate: str, **kwargs):
 
 
 def test_documented_core_prompt_is_the_immutable_runtime_source():
-    document = (Path(__file__).parents[1] / "doc" / "p3-agent.md").read_text(encoding="utf-8")
-    section = document.split("### 2.2 CorePrompt v1 原文", 1)[1]
+    document = (Path(__file__).parents[1] / "doc" / "04-bot-agent-memory.md").read_text(
+        encoding="utf-8"
+    )
+    section = document.split("### 3.1 ForestCorePrompt v1", 1)[1]
     documented = re.search(r"```xml\n(.*?)\n```", section, re.DOTALL).group(1)
     assert documented == CORE_PROMPT
     descriptor = protocol_descriptor()
