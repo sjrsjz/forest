@@ -1610,3 +1610,53 @@ async def test_embedding_budget_converges_and_keeps_unknown_exposure(clean_memor
     recovered = await budget.snapshot(recovery_day)
     assert recovered["unknown_requests"] == 1
     assert recovered["unknown_tokens"] == 40
+
+
+@pytest.mark.postgres
+async def test_unrelated_forget_does_not_strand_pending_embedding_facet(clean_memory_graph):
+    _store, _storage, payloads, memory, forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "removed")
+    await _register(memory, "survivor")
+    removed = await _unit_values(
+        payloads, source_suffix="removed", unit_suffix="removed-before-embedding"
+    )
+    survivor = await _unit_values(
+        payloads, source_suffix="survivor", unit_suffix="survivor-after-epoch"
+    )
+    await _capture_and_qualify(memory, payloads, batches, removed, suffix="removed-epoch")
+    await _capture_and_qualify(memory, payloads, batches, survivor, suffix="survivor-epoch")
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    facet = (
+        await retrieval.prepare_source_facets(
+            operation_id="facets/survivor-before-epoch",
+            source_unit_id="unit/survivor-after-epoch",
+            expected_deletion_epoch=0,
+        )
+    )["facets"][0]
+    await forget.apply(
+        operation_id="forget/unrelated-before-embedding",
+        source_unit_ids=("unit/removed-before-embedding",),
+        expected_deletion_epoch=0,
+        reason_code="ADMIN_REQUEST",
+    )
+    materialized = await retrieval.materialize_facet(
+        facet["facet_id"], expected_deletion_epoch=1
+    )
+    assert materialized["source"]["source_unit_id"] == "unit/survivor-after-epoch"
+    permit = await retrieval.prepare_attempt(
+        operation_id="embedding/survivor/prepare",
+        attempt_id="embedding/survivor/attempt",
+        facet_id=facet["facet_id"],
+        executor_component_id="embedding.qiyu-vl",
+        executor_generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert permit.accepted_deletion_epoch == 1

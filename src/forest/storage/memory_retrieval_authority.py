@@ -871,7 +871,7 @@ class MemoryRetrievalRepository:
                 raise ForestError(
                     "MEMORY_FACET_NOT_DISPATCHABLE", "Embedding facet cannot start an attempt", 409
                 )
-            await self._epoch(conn, expected=facet["accepted_deletion_epoch"])
+            current_deletion_epoch = await self._epoch(conn)
             unit, _ = await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
             if unit["source_revision"] != facet["source_revision"]:
                 raise ForestError("MEMORY_SOURCE_UNAVAILABLE", "Embedding source changed", 409)
@@ -883,7 +883,7 @@ class MemoryRetrievalRepository:
                 executor_component_id,
                 executor_generation_id,
                 route_revision,
-                facet["accepted_deletion_epoch"],
+                current_deletion_epoch,
                 deadline_at,
             )
             await self._verify_fence(conn, provisional)
@@ -906,7 +906,7 @@ class MemoryRetrievalRepository:
                         executor_component_id,
                         executor_generation_id,
                         route_revision,
-                        facet["accepted_deletion_epoch"],
+                        current_deletion_epoch,
                         deadline_at,
                     ),
                 )
@@ -967,7 +967,7 @@ class MemoryRetrievalRepository:
                 or facet["current_attempt_id"] != permit.attempt_id
             ):
                 raise ForestError("MEMORY_STALE_EMBEDDING_PERMIT", "Embedding facet moved", 409)
-            await self._epoch(conn, expected=facet["accepted_deletion_epoch"])
+            await self._epoch(conn, expected=permit.accepted_deletion_epoch)
             await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
             attempt = await (
                 await conn.execute(
@@ -1191,8 +1191,6 @@ class MemoryRetrievalRepository:
             stored_vector = None
             if outcome == "SUCCEEDED":
                 await self._epoch(conn, expected=expected_deletion_epoch)
-                if facet["accepted_deletion_epoch"] != expected_deletion_epoch:
-                    raise ForestError("DELETION_CONFLICT", "Embedding source epoch changed", 409)
                 unit, _ = await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
                 if unit["source_revision"] != facet["source_revision"]:
                     raise ForestError("MEMORY_SOURCE_UNAVAILABLE", "Embedding source changed", 409)
