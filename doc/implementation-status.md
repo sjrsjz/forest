@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-17。本页覆盖截至 `deployment.configuration` 管理面收口提交的实现事实。
+更新日期：2026-09-17。本页覆盖截至 `deployment.bot-catalog` 管理面收口提交的实现事实。
 
 ## 结论
 
@@ -10,7 +10,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 1. Bot 创建、挂载和恢复仍调用巨型 `BotStore.migrate()`，多数官方模块业务表仍位于历史 `public` schema；
 2. 可安装 Worker 仍由官方 `component.worker-host` 模块内部管理，尚未完成与官方模块一致的代际热替换、失租恢复和按依赖边故障隔离；
-3. Web 壳仍安装 Bot 身份管理和备份等专用路由与面板；deployment 注册表目前包含 `deployment.configuration`、`deployment.audit` 与 `deployment.accounts`，host 作用域注册表尚未落地。
+3. Web 壳仍硬编码包工件目录、Bot 维护/组件配置和备份恢复等专用路由与面板；deployment 注册表目前包含 `deployment.configuration`、`deployment.audit`、`deployment.accounts` 与 `deployment.bot-catalog`，host 作用域注册表尚未落地。
 
 因此，能在 WebUI 中创建 Bot、配置 Agent、查看 Memory 或运行 OneBot，不能作为微内核完成的证据。
 
@@ -91,6 +91,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `deployment.accounts` 已接管账号目录、创建、变更计划/提交和 UI；旧专用路由、固定页面与壳层控制器 import 已删除。自我降权后以 viewer 会话恢复相同幂等回执的语义仍由 `authenticated` apply action 与存储事务共同保证。
 - `deployment.configuration` 已接管 schema、当前投影、计划/提交契约和 UI；旧 `/configuration`、`/change-plans`、`/management-requests` 与固定表单已删除。登录与 session 端点只读取生效配置以计算会话 TTL 和壳层品牌文字。
 - `deployment.bot-catalog` 已接管列表、创建、重命名、供应重试和供应 Job；旧 `/management/v1/bots` 目录 CRUD、`/management/v1/provision-jobs/*`、固定目录 DOM 和壳层表单处理已删除。目录选择只调用壳层通用 `openScope({kind:'bot',id,row})`，其中 `row` 只是显示提示；壳层必须再经 `/scopes/{kind}/{id}/modules` 和 Bot provider 解析真实 ACTIVE 注册表。Bot 维护、组件配置和 Agent/Memory 模块仍经目标 Bot authority 处理。
+- 下一步先扩展通用管理传输的受限工件上传/下载协议，然后迁移 `deployment.package-registry`。包列表、导入、导出与校验属于 deployment/host 工件目录；某个 Bot 选择哪个包代际仍属于 Bot scope 的 `component.worker-host`。不允许为了 ZIP 流继续保留无所有者的壳层 `/packages` 专用 API。
 - 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。
