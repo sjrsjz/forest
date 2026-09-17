@@ -6,7 +6,7 @@
 
 Forest 的部署目录、每个 Bot 事实库和宿主工件目录是三个不同权威域。首版备份必须覆盖部署 PostgreSQL、创建时已冻结的 Bot 清单、每个可达 Bot PostgreSQL、插件内容寻址工件，以及恢复加密凭据所需的受保护主密钥。向量和图当前同属 Bot 事实库；若以后迁到外部索引，manifest 必须明确标记为可重建派生物或独立快照，不能默认为已经备份。
 
-备份不制造跨库事务。每个数据库各自在 `REPEATABLE READ READ ONLY` 快照中导出，manifest 保存数据库身份、Kernel baseline 摘要、已安装模块 schema bundle 集合、事务快照、WAL LSN、捕获起止时间、Bot 删除 epoch、按 owner schema 划分的表/列清单、行数和内容摘要。部署快照先冻结本次 roster，全部 Bot 捕获后再读取部署目录锚点；两次目录 revision 不一致时工件仍可用于取证，但状态为 `INCONSISTENT`，不能直接进入恢复计划。
+备份不制造跨库事务。每个数据库各自在 `REPEATABLE READ READ ONLY` 快照中导出，manifest 保存数据库身份、`forest_kernel` bootstrap 摘要、已安装模块 schema bundle 集合、事务快照、WAL LSN、捕获起止时间、Bot 删除 epoch、按 owner schema 划分的表/列清单、行数和内容摘要。部署快照先冻结本次 roster，全部 Bot 捕获后再读取部署目录锚点；两次目录 revision 不一致时工件仍可用于取证，但状态为 `INCONSISTENT`，不能直接进入恢复计划。
 
 以下规则始终成立：
 
@@ -16,7 +16,7 @@ Forest 的部署目录、每个 Bot 事实库和宿主工件目录是三个不�
 4. 普通下载不含明文密钥。整个工件由随机数据密钥流式认证加密，数据密钥由管理员提供的恢复口令包装；口令只在请求内存中存在。
 5. 数据密钥另由当前部署 SecretVault 包装并保存到持久 Job，使进程重启可以接续同一工件。下载工件不依赖原部署主密钥解包。
 6. 备份、校验、恢复和切换都是有界持久操作。浏览器断开不取消任务，相同幂等键只能恢复同一输入摘要。
-7. 部署与 Bot 的 Kernel baseline、模块 bundle 集合及各自 schema 必须精确匹配当前恢复计划；未知 bundle、缺表、额外列、跨 owner 约束或摘要不一致一律保持隔离。
+7. 部署与 Bot 的 bootstrap、模块 bundle 集合及各自 schema 必须精确匹配当前恢复计划；未知 bundle、缺表、额外列、跨 owner 约束或摘要不一致一律保持隔离。
 
 ## 2. 工件格式
 
@@ -32,7 +32,7 @@ bots/<bot_id>/tables/<ordinal>-<table>.bin
 artifacts/<package_digest>.zip
 ```
 
-数据库表使用 PostgreSQL `COPY ... TO STDOUT (FORMAT BINARY)` 的原始字节。manifest 固定数据库 server major、encoding、collation、Kernel baseline 与 module bundle checksum、owner schema/表名、按 `attnum` 排列的列、列类型 OID/名称、生成属性、主键和 owner 内外键依赖。恢复只对由当前镜像中准确 baseline/bundle 建立且 manifest 完全一致的表执行 `COPY FROM STDIN`；不拼接备份提供的 SQL，也不执行工件脚本。
+数据库表使用 PostgreSQL `COPY ... TO STDOUT (FORMAT BINARY)` 的原始字节。manifest 固定数据库 server major、encoding、collation、bootstrap 与 module bundle checksum、owner schema/表名、按 `attnum` 排列的列、列类型 OID/名称、生成属性、主键和 owner 内外键依赖。恢复只对由当前镜像中准确 bootstrap/bundle 建立且 manifest 完全一致的表执行 `COPY FROM STDIN`；不拼接备份提供的 SQL，也不执行工件脚本。
 
 `master.key` 只在已加密正文中出现，用于恢复部署库中的 DSN、账号计划和 Bot 内 SecretVault ciphertext。Bootstrap SQLite 不直接复制，因为它固定原部署 DSN；恢复器从已验证的部署身份和目标 DSN 创建新的本地冻结计划，避免旧地址重新成为启动权威。
 
@@ -82,7 +82,7 @@ RESERVED -> UPLOADING -> UPLOADED -> QUEUED -> IMPORTING -> IMPORTED
 
 接纳事务验证当前 admin 会话、恢复口令强度、范围和容量，生成稳定 `backup_id`、随机数据密钥、口令包装和 SecretVault 包装，保存输入摘要后提交。后台执行者通过 owner epoch/lease 领取；同一 deployment 同时最多一个 CAPTURING，每个 Bot 按稳定 `bot_id` 顺序捕获。独立续租任务覆盖单库 COPY、包导出和整包加密；续租失败取消主捕获任务。不可取消的线程 I/O 必须先收束，随后才能删除该 owner epoch 的临时目录。任务不持部署事务等待 Bot 数据库或长文件 I/O。
 
-每库捕获步骤先读取身份、Kernel baseline 和已安装模块 bundle 账本，在只读快照内按 owner schema 导出所有表并生成临时数据库 manifest；文件 fsync 完成后才提交 cut 回执。接管者使用新的 owner epoch 从头建立自己的临时工件，不能复用仍可能被旧线程写入的路径。最终 SEALING 对 ZIP 成员逐项摘要、流式加密到 owner epoch 专属候选文件。发布事务锁定 Job 并复核 owner/lease，执行原子 rename 与目录 fsync 后再次核对租约，再一并提交 cut、`backup_artifacts` 和 READY/INCONSISTENT 状态。每个 epoch 的最终候选名不同，陈旧线程即使迟到也不能覆盖当前权威工件；未进入 `backup_artifacts` 的候选没有下载权威，交给后续孤儿清理。日志与审计只记录已发布的标量。
+每库捕获步骤先读取身份、bootstrap 和已安装模块 bundle 账本，在只读快照内按 owner schema 导出所有表并生成临时数据库 manifest；文件 fsync 完成后才提交 cut 回执。接管者使用新的 owner epoch 从头建立自己的临时工件，不能复用仍可能被旧线程写入的路径。最终 SEALING 对 ZIP 成员逐项摘要、流式加密到 owner epoch 专属候选文件。发布事务锁定 Job 并复核 owner/lease，执行原子 rename 与目录 fsync 后再次核对租约，再一并提交 cut、`backup_artifacts` 和 READY/INCONSISTENT 状态。每个 epoch 的最终候选名不同，陈旧线程即使迟到也不能覆盖当前权威工件；未进入 `backup_artifacts` 的候选没有下载权威，交给后续孤儿清理。日志与审计只记录已发布的标量。
 
 遗忘、消息写入和备份读快照按 PostgreSQL 正常 MVCC 先后线性化。manifest 中的 deletion epoch 是该数据库 cut 的一部分。备份读取不会阻塞长事务之外的业务写，也不添加 retention pin；正在 scrub 的正文可能在该快照内仍有 body，但对应 header/suppression 已使其在恢复时不可读。捕获后发生的删除不在旧工件中，因此开放恢复前必须提供后续删除屏障。
 
@@ -102,12 +102,12 @@ WebUI 不提供固定的“存储与备份”产品页面。`deployment.backup` 
 
 当前 `verify` 先按持久来源密文摘要重新读取本地工件，认证解密到任务私有临时目录，再要求 manifest 顶层、数据库、表、列、成员和包路径都是精确键集。数据库 roster 必须与接纳时冻结的 cut 一一对应，目录起止锚点必须相同；完成只发布有期限的验证事实和脱敏审计，不产生 PostgreSQL 目标。`restore-stage` 只接受与当前工件密文/清单摘要仍一致的有效回执，随后重复认证解密和清单检查，防止校验与使用之间发生替换。`INCONSISTENT`、过期、已删除或被替换的工件不能进入恢复。每个目标使用 `forest_restore_<job-prefix>_<ordinal>` 随机任务名，创建后写入数据库 owner marker 并撤销 `PUBLIC` 权限；staging 不写 `bot_storage_plans`、`bot_storage_generations` 或 head。只有激活接纳事务才追加不可变 generation，运行目录仍指向旧代。
 
-恢复器只运行当前镜像的最小 Kernel baseline 和 manifest 指定的准确模块 bundle，不执行备份中的 SQL。它要求 server version、encoding、collation、全部 bundle checksum、owner schema、表列、约束和序列定义精确相同，随后在一个目标库事务中关闭受控触发式约束、清空表、逐表 binary COPY、核对行数、恢复序列并显式扫描所有 owner schema 外键及禁止的跨 owner 依赖；任一步失败会回滚该库的数据事务。提交后再次核对部署/Bot 身份。Bot 副本在独立事务中提升 storage generation 和 maintenance epoch、撤销 host lease，并设置 `SEALED`、`data_admission=false`、`control_admission=false`。部署副本也保持未注册且不可被 Web 启动计划发现。全部目标成功后才原子发布 Job `STAGED` 与脱敏完成审计。
+恢复器只运行当前镜像的最小 `forest_kernel` bootstrap 和 manifest 指定的准确模块 bundle，不执行备份中的 SQL。它要求 server version、encoding、collation、全部 bundle checksum、owner schema、表列、约束和序列定义精确相同，随后在一个目标库事务中关闭受控触发式约束、清空表、逐表 binary COPY、核对行数、恢复序列并显式扫描所有 owner schema 外键及禁止的跨 owner 依赖；任一步失败会回滚该库的数据事务。提交后再次核对部署/Bot 身份。Bot 副本在独立事务中提升 storage generation 和 maintenance epoch、撤销 host lease，并设置 `SEALED`、`data_admission=false`、`control_admission=false`。部署副本也保持未注册且不可被 Web 启动计划发现。全部目标成功后才原子发布 Job `STAGED` 与脱敏完成审计。
 
 恢复分为三个不同操作：
 
 1. `verify` 只读工件并生成有期限的验证回执。
-2. `restore-stage` 当前把来源工件的全部数据库恢复到系统新建的未注册空库，安装准确 Kernel baseline 与模块 schema bundle，再按 owner schema/稳定表名执行 binary COPY；序列按捕获值恢复并扫描外键。全部目标保持网络隔离和 `SEALED/ISOLATED`。选择部分数据库和显式外部目标属于后续扩展。
+2. `restore-stage` 当前把来源工件的全部数据库恢复到系统新建的未注册空库，安装准确 bootstrap 与模块 schema bundle，再按 owner schema/稳定表名执行 binary COPY；序列按捕获值恢复并扫描外键。全部目标保持网络隔离和 `SEALED/ISOLATED`。选择部分数据库和显式外部目标属于后续扩展。
 3. `restore-activate` 已支持托管 Bot 目标。预览核对当前目录 head、托管集群与受限 owner、恢复 marker、Bot 身份、SEALED 隔离状态、精确 deletion epoch，以及当前库和恢复库的 Binding、发送、调用、模型、工具、Shell、Job 与组件事件关键效果账本。任一 `DISPATCHING/UNKNOWN` 等未决效果或账本差异都拒绝计划；当前实现只接受 deletion epoch 与备份 cut 完全相同的保守情形，不推断增量删除日志。外部 Bot 存储仍保持隔离；部署控制面只允许同一宿主数据目录的离线 CLI 保留原部署身份并切换 BootstrapState 的有效目标，不能由正在被替换的 Web 请求自我覆盖。
 
 同 Bot 恢复不创建第二个 Bot 身份。目录切换前旧库保持权威；切换后新库才可 ACTIVE，旧库永久 SEALED 且运行凭据撤销。部分 Bot 恢复逐项保存结果，不声明全局原子成功。恢复包中已有待发送意图按原状态处理：确定未发送可由原 dispatcher 接续，SENT 不重发，UNKNOWN 保持人工对账；控制 outbox 不因新部署未见其消费者而改写状态。

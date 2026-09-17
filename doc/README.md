@@ -50,7 +50,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 记忆与嵌入完整支持文本和图片，并能按图召回 | 11 的有序ContentPart、受管媒体、对齐嵌入空间与text/image/mixed query；04–06、10同步来源与索引协议 |
 | LLM不支持多模态时调用API前去掉图片 | 11 的模型能力快照及逐请求ModelInputProjection；08区分持久裁剪和请求投影，保留原图及图片检索能力 |
 | 通过WebUI后台管理，无需手改日常配置文件 | 12 的首次初始化、作用域选择、模块贡献 UI、schema表单、配置变更与运维闭环；05定义存储权威，WebUI/Shell/CLI共用控制协议 |
-| 激进重构且不保留未发布兼容层 | 13 的重构拒绝清单与 14 的最小 Kernel baseline、模块 schema bundle、统一载荷来源闭包 |
+| 激进重构且不保留未发布兼容层 | 13 的重构拒绝清单与 14 的最小 bootstrap、独立模块 schema bundle、统一载荷来源闭包 |
 
 ## 源码调研依据
 
@@ -109,7 +109,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 19. 每次LLM请求按实际模型能力生成独立投影视图；文本模型请求移除所有图片载荷并标记未见图片，不删除持久媒体、不改变输入切口，也不隐式调用OCR/描述模型。
 20. WebUI是首版正式管理入口，日常配置持久化为受版本控制的事实，通过界面完成；页面、群聊Shell和CLI不直接改文件或运行对象，提交均走同一授权、版本冲突和生命周期协议。
 21. 配置期望、生效版本与实际运行状态分别可见；保存成功不冒充已生效，断开浏览器不取消持久操作，冲突不以最后保存覆盖，密钥不通过配置读取接口回显。
-22. Kernel baseline 不包含 Agent、Memory、Adapter、Shell、Job 或 Delivery 业务表；模块数据结构随内容寻址包安装并归模块所有，开发期旧库只重建、不迁移。
+22. 不可绕过的 `forest_kernel` bootstrap 只包含 Bot 身份与 schema bundle 账本；Runtime、Authorization、Effect、Audit 也是拥有独立 bundle/Repository/UI 贡献的 kernel 模块，不能把它们和 Agent、Memory、Adapter、Shell、Job、Delivery 压成巨型内核表。开发期旧库只重建、不迁移。
 23. WebUI 壳层不固定 Bot/Agent/Memory/安全/存储产品栏目；当前作用域内的导航、配置、查询与动作由准确模块 Generation 的管理贡献生成，内核自身也遵循该协议。
 
 出现跨文档冲突时，先维护这些不变量，再修改具体契约；不得由实现自行弱化并仍宣称满足设计。

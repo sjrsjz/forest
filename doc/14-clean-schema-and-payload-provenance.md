@@ -4,7 +4,7 @@
 
 ## 1. 目标
 
-持久化必须服务微内核边界，而不是把当前官方模块固化成一个产品数据库。内核只拥有运行、路由、授权和效果的通用事实；Agent、Memory、Adapter、Conversation Scheduler、Shell、Job 与 Delivery 分别拥有自己的状态和载荷。模块卸载、替换或热重载时，内核不需要理解其业务表。
+持久化必须服务微内核边界，而不是把当前官方模块固化成一个产品数据库。不可绕过的 bootstrap 只拥有 Bot 身份与 schema bundle 账本；运行、授权、外部效果和审计分别由不可卸载但仍遵守模块描述符、bundle、Repository 与管理贡献协议的 kernel 模块持有。Agent、Memory、Adapter、Conversation Scheduler、Shell、Job 与 Delivery 分别拥有自己的状态和载荷。模块卸载、替换或热重载时，bootstrap 和其他模块都不需要理解其业务表。
 
 正文和二进制内容必须从首次写入起携带完整来源闭包。删除、授权收缩、热重载、异步索引完成和外部结果晚到时，任何路径都不能通过缓存、派生正文或重放回执复活已撤销来源。
 
@@ -14,7 +14,11 @@
 
 | 所有者 | 可以持久化的内容 | 禁止持久化的内容 |
 |---|---|---|
-| Kernel | Bot 身份、schema bundle 账本、RuntimeGraph、Generation、RouteGraph、能力授予、Call/Effect/Operation、lease/fence | Agent prompt、记忆节点、OneBot wire body、Job 定义、模块配置正文 |
+| Kernel bootstrap (`forest_kernel`) | Bot 身份、schema bundle 账本 | RuntimeGraph、业务配置、调用、授权、效果、审计正文 |
+| `kernel.runtime` | Bot 运行封印、host/module lease、Generation、Route、Lifecycle、通用 Call、状态引用、RuntimeGraph | Agent/Adapter/Memory/Shell/Job 业务字段、业务 payload 正文 |
+| `kernel.authorization` | 能力授予、撤销、主体映射引用、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台凭据 |
+| `kernel.effect` | 通用 Effect identity、dispatch fence、attempt/outcome 与 UNKNOWN 对账 | Delivery SendIntent、OneBot wire body、Agent 工具上下文副本 |
+| `kernel.audit` | 通用审计 envelope、来源 operation/call 引用、脱敏查询索引 | 模块业务正文、密钥、跨模块复制的完整 payload |
 | `adapter.onebot` | Binding、连接事实、规范化入站、平台媒体引用、发送 attempt/receipt | Agent Run、记忆向量、其他 Adapter 的连接状态 |
 | `conversation.scheduler` | Conversation lane、ingress 顺序、分类水位、trigger 与 InputBatch 切口 | 模型 Provider 私有状态、长期记忆图 |
 | `agent.runtime` | Session/Run/ModelTurn/ToolCall/checkpoint、模型请求与结果载荷引用 | 平台连接、Memory 内部索引、内核路由 head |
@@ -25,7 +29,7 @@
 
 模块表放入由 bundle 分配的独占 PostgreSQL schema。模块运行角色只拥有该 schema 的 DML 权限和明确批准的内核函数；第三方 Worker 不获得数据库连接。官方受信模块也必须经自己的 Repository 访问，不能借同进程身份跨模块 join。跨模块原子流程使用内核主持的类型化 transaction participant 或 outbox/effect 协议；不能靠某模块直接更新另一模块的表来“方便地”完成事务。
 
-`kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用 Call、组件状态 payload 引用和 RuntimeGraph。Call 的来源种类、服务名和 payload 身份是有界通用字段；内核表不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让内核提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
+`kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用 Call、组件状态 payload 引用和 RuntimeGraph。Call 的来源种类、服务名和 payload 身份是有界通用字段；该 bundle 不因“都是内核功能”而吞并 authorization、effect 或 audit 的表。任何 kernel 模块表都不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让对应 kernel 模块提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
 
 ## 3. Schema bundle 生命周期
 
@@ -103,13 +107,13 @@ participant 集合、顺序、输入摘要和结果摘要写入 operation；重�
 
 ## 7. 配置、UI 与敏感字段
 
-模块配置属于模块 schema。内核只保存可路由的配置 revision 身份、desired/effective 指针和配置载荷引用；字段 schema、默认值、验证、计划差异与生效动作由准确 Generation 的管理契约提供。WebUI 通过模块描述符加载 schema 或沙箱 UI，不建立 Agent/Memory/OneBot 专用表单。
+模块配置属于模块 schema。拥有该组件配置的模块 Repository 保存 revision、desired/effective 指针和配置载荷引用；`kernel.runtime` 只在 Generation/RuntimeGraph 中冻结本次实际采用的 revision、payload identity 与 digest，不维护另一套可写配置 head。字段 schema、默认值、验证、计划差异与生效动作由准确 Generation 的管理契约提供。WebUI 通过模块描述符加载 schema 或沙箱 UI，不建立 Agent/Memory/OneBot 专用表单。
 
 密钥正文直接写入 Secret Resolver，配置载荷只保存 opaque `secret_ref`。读取配置不回显密钥；修改计划只记录“是否变化”和不可逆摘要。VL embedding 的模型种类、输出维度、归一化和融合语义属于 Bot 创建时冻结的 Memory schema identity；创建 Bot 后只能更换协议兼容 endpoint/凭据。改变模型种类必须创建新的 Bot 记忆域或执行未来明确设计的全量重建操作，不能通过普通配置 apply 偷换向量空间。
 
 ## 8. 干净基线验收
 
-- 空部署只安装最小内核 baseline；其中不存在 Agent、Memory、OneBot、Shell、Job 或 Delivery 业务表。
+- 新 Bot 数据库先只安装 `forest_kernel` bootstrap，再按冻结的首发 RuntimeGraph 安装所需 kernel 模块与所选业务模块 bundle；bootstrap 中不存在 RuntimeGraph、授权、效果、审计或任何业务表，任何 kernel 模块 bundle 中也不得混入 Agent、Memory、OneBot、Shell、Job 或 Delivery 业务表。
 - 启用模块才安装其准确 bundle；删除任一官方模块包后，内核仍能启动并明确报告缺失契约。
 - 目标命名空间非空、摘要不符、未知对象、越权 DDL 和跨 owner 引用均拒绝。
 - 源码、SQL 和测试中不存在开发期 `migration_v*`、001…087 回放、legacy marker、旧列 fallback、双写或非空旧库升级夹具。

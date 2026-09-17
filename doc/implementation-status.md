@@ -84,6 +84,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `BotProvisioner._initialize`、`BotFleet.attach`、CLI 和 Restore 仍调用 `BotStore.migrate()`；必须改为最小 Kernel bootstrap 加所选模块的准确 schema bundle。
 - 当前 `forest_kernel.bot_identity` 和 `forest_kernel.schema_bundles` installer 已能校验摘要、namespace、Repository contract、执行档位、并发安装和事务回滚。第三方 `declarative` SQL 与 distribution 绑定的 `official` 完整不变量 SQL 已严格分流，但官方模块尚未提供完整业务 bundle。
 - 首个 `kernel.runtime` 干净 baseline 已建立并可由官方 bundle 安装器原子安装：只含租约、模块代际、通用调用、状态引用和 RuntimeGraph，不含旧表中的 `agent_tool_id`、OneBot 控制服务特例、业务枚举或跨业务外键。它目前是已验证的 cutover 候选；在其他官方模块 bundle 与 Repository 一起完成前，生产启动路径仍由旧 `BotStore.migrate()` 建库，不能把候选存在误报为切换完成。
+- `kernel.authorization`、`kernel.effect` 与 `kernel.audit` 尚未取得各自的干净 bundle/Repository；当前通用授权、效果和审计表仍混在历史 schema。它们不能并入 `kernel.runtime` 候选来缩短切换路径。
 - 不能把历史 001…087 迁移压成包含全部业务表的单一“官方 bundle”；模块只能拥有自己的 namespace 和 Repository。
 - 干净库拒绝旧迁移账本、未知业务表和非空升级路径；开发数据库直接重建。
 
@@ -141,7 +142,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 只有同时满足以下条件，才能重新评估发布候选：
 
 1. 13、14 号文档的退出条件都有代码和测试证据；
-2. 干净数据库只由最小 Kernel baseline 与所选模块 bundle 创建；
+2. 干净数据库只由最小 `forest_kernel` bootstrap 和冻结 RuntimeGraph 所需的准确模块 bundle 创建；
 3. `BindingRuntime`、宿主业务对象捷径、固定业务后台页面和旧专用 API 全部不存在；
 4. 无 PostgreSQL 与完整 PostgreSQL 回归通过；
 5. 模块 UI、生命周期、同群排队、跨群并发、记忆写合流和图文召回通过集成测试；

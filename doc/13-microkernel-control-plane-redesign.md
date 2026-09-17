@@ -20,8 +20,8 @@ Forest 尚未上线，本阶段采用直接重构：允许删除错误抽象、�
 
 每次重构以最终模型建立测试数据；数据库 schema 从干净实例创建。Bot 事实库由两个层次组成：
 
-1. **最小内核基线**只创建 Bot 身份、已安装 schema bundle 账本、RuntimeGraph/Generation、契约路由、能力授予、调用/效果/操作账本和内核必要的 fencing。它不能创建 Agent、Memory、OneBot、Shell、Scheduler 或 Delivery 的业务表。
-2. **模块 schema bundle**随不可变模块包发布，由 manifest 声明 `schema_id`、内容摘要、所有者组件、目标数据库作用域及创建脚本。Lifecycle Coordinator 在 PREPARED 阶段把 bundle 安装到模块独占命名空间，校验空命名空间、摘要和数据库能力，完成后才允许该 Generation 进入路由图。模块只能通过自身 Repository 访问所属表；跨模块引用使用稳定 ID 和契约，不以跨所有者 SQL、外键或共享 ORM 对象形成隐藏依赖。
+1. **不可绕过的 bootstrap 基线**只创建 `forest_kernel.bot_identity` 与 `forest_kernel.schema_bundles`，用于确认目标 Bot 和原子安装内容寻址 bundle。它不创建 RuntimeGraph、授权、效果、审计或任何业务表。
+2. **模块 schema bundle**随不可变模块包发布，由 manifest 声明 `schema_id`、内容摘要、所有者组件、目标数据库作用域及创建脚本。`kernel.runtime`、`kernel.authorization`、`kernel.effect` 与 `kernel.audit` 是不可卸载的首发 kernel 模块，但与其他模块一样拥有独立 bundle、Repository、Generation 和管理贡献。Lifecycle Coordinator 在 PREPARED 阶段把 bundle 安装到模块独占命名空间，校验空命名空间、摘要和数据库能力，完成后才允许该 Generation 进入路由图。模块只能通过自身 Repository 访问所属表；跨模块引用使用稳定 ID 和契约，不以跨所有者 SQL、外键或共享 ORM 对象形成隐藏依赖。
 
 当前版本尚未发布，因此内核和每个模块都只有一份“从空命名空间创建”的内容寻址基线。已经存在旧迁移账本、旧 Forest 表或未知业务表的数据库一律拒绝，开发和测试环境直接重建。不得保留按 001…087 顺序回放的未发布迁移链、旧数据搬运器、writer-generation 过渡门或非空旧库升级测试；也不得把这些迁移压成一个包含全部官方业务模块的巨型内核 SQL 后称为微内核。首次正式发布以后，内核与各模块才可分别从其首发基线增加有明确版本边界的升级图。
 

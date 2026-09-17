@@ -11,7 +11,7 @@
 #forest core reload <component_id> --expect-revision <desired_revision>
 ```
 
-`core status/cancel/disable` 声明 P0；`core reload` 是 P1。只有可信发言主体命中当前 Binding 管理员名单时才保留声明的 P0，否则请求拒绝或按普通 P1 查询处理。命令随当前 Kernel baseline 一次创建，不保留开发期 gate grammar、writer generation 或旧请求升级分派器。
+`core status/cancel/disable` 声明 P0；`core reload` 是 P1。只有可信发言主体命中当前 Binding 管理员名单时才保留声明的 P0，否则请求拒绝或按普通 P1 查询处理。核心命令 grammar 随当前 Forest distribution 固定并由 bootstrap 后装载的核心 ShellGate 提供；它不属于数据库 baseline，也不保留开发期 gate grammar、writer generation 或旧请求升级分派器。
 
 Core 不是服务器终端、交互式 Shell 或第二套管理框架。它不接受自由 argv、脚本、路径、环境变量、密钥、跨 Bot 目标或插件注册命令。解析只依赖发行版内的冻结 token、封闭参数 schema 和固定动作映射；业务插件及其 Worker 不能覆盖这些 form。
 

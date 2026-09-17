@@ -18,7 +18,9 @@ PostgreSQL 作为首版持久事实与协调账本。每个 Bot 的共享图包�
 
 ## 2. 数据模型
 
-下表为逻辑 schema，实际 SQL migration 在实现阶段生成。所有 `*_at` 使用 UTC；外部 ID 用字符串。独立 Bot 数据库仍保留 bot_id 和检查约束。下述主键为简写，共享物理部署时必须将 bot_id 纳入主键、唯一键与外键。
+下表是跨模块协议需要保存的**逻辑事实词汇**，不是一份共享 SQL schema，也不是 `BotStore.migrate()` 的建表清单。实际表由拥有该事实的模块以内容寻址 schema bundle 在独占 namespace 中创建，并只能经该模块 Repository 访问；模块之间保存带摘要的类型化引用，禁止跨 namespace 外键、宿主直查和跨模块 join。首次发布前每个模块只有从空 namespace 安装的 baseline，不生成或保留开发期编号 SQL migration。所有 `*_at` 使用 UTC，外部 ID 用字符串；独立 Bot 数据库仍保留 `bot_id` 和检查约束。下述主键均为逻辑简写，共享物理部署时必须将 `bot_id` 纳入本模块的主键、唯一键与外键。
+
+事实所有权按职责拆分：deployment 目录、包仓库、账号和管理入口分别由对应 deployment 模块持有；`kernel.runtime` 只持有 lease、Generation、Route、Lifecycle、通用 Call、状态引用和 RuntimeGraph；Authorization、Effect 与 Audit 分别属于自己的 kernel 模块；Shell、配置、Adapter、Conversation、Agent、Routing、Delivery、Scheduler 与 Memory 各自由准确模块持有自己的表。后续各节把相关事实放在一起是为了描述跨模块因果关系，不授予任何组件把它们建进同一个 `public` schema 的权力。准确模块表、namespace、bundle 身份和 Repository contract 以[干净数据库基线](14-clean-schema-and-payload-provenance.md)为准。
 
 ### 2.1 控制与所有权
 
@@ -455,7 +457,7 @@ forest memory rebuild --bot alice --scope <scope_id>
 | A-50 | 密钥表单保存/轮换、参数报错、导出配置和查看事件流 | 普通读取仅 secret_ref/已设置状态；无明文回显/日志泄漏，空白不误覆盖，切换按客户端生效计划进行 |
 | A-51 | 群命令在 Web 查看/批准、Web 操作期间断开群 Adapter 或页面刷新 | 当前权限下可查同 operation；跨入口身份需验证映射/原审批渠道约束或重新批准，Web 不伪造群消息；断连不重复或取消操作 |
 
-实现测试分三层：纯 reducer 的性质/置换测试；真实 PostgreSQL 的事务与多进程竞争测试；假平台/假 Provider 的故障注入端到端测试。关键并发用 barrier 控制交错，不依赖 sleep 猜竞态。当前仅交付设计，没有声称这些测试已经运行。
+实现测试分三层：纯 reducer 的性质/置换测试；真实 PostgreSQL 的事务与多进程竞争测试；假平台/假 Provider 的故障注入端到端测试。关键并发用 barrier 控制交错，不依赖 sleep 猜竞态。本节只定义验收方法，不声明当前完成度；已经运行的测试、失败和缺口统一记录在[实现状态](implementation-status.md)。
 
 Shell 与 WebUI 的完整行为验收矩阵见[09](09-group-shell-command-system.md)及[12](12-webui-administration.md)，上述条目侧重持久事务、鉴权与恢复边界。
 
@@ -467,12 +469,10 @@ src/forest/
   contracts/    envelope, bot, conversation, agent, memory, effect
   sdk/          plugin decorators, context, service handles, resource scope
   drivers/      python_worker, ipc
-  storage/      scoped repositories, commit guards, migrations
+  storage/      kernel bootstrap, bundle installer, scoped repositories, commit guards
   management/   typed actions, configuration plans, request admission, query projections
   web/          HTTP API, authentication, setup, bounded event subscriptions
-  modules/
-    bot_directory/ conversation/ pipeline/ agent/ memory/ delivery/
-    adapters/ providers/ tools/ renderers/ jobs/
+  modules/      official component packages; each owns descriptor, repository, schema and UI
   cli/
 plugins/        普通 Python 用户插件与示例
 webui/          后台页面、schema 表单、配置差异与操作中心

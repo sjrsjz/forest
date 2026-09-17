@@ -26,7 +26,9 @@ forest-agent/
   contracts/
     agent-v1.schema.json
   python/forest_agent/
-  migrations/
+  schema/
+    baseline.sql
+  ui/
   lock/
   checksums.json
 ```
@@ -48,6 +50,13 @@ state_mode = "durable"
 state_schema = 1
 checkpoint_schema = 1
 reload_mode = "drain"
+
+[components.storage]
+schema_id = "forest.agent.runtime"
+schema_version = "1.0.0"
+baseline = "schema/baseline.sql"
+baseline_sha256 = "..."
+repository_contract = "forest.agent.repository/1"
 
 [[components.provides]]
 name = "agent.run"
@@ -82,7 +91,7 @@ stop_timeout_s = 10
 requests = ["memory.recall", "context.commit", "provider.generate", "tool.invoke", "reply.propose"]
 ```
 
-校验顺序：包摘要/信任策略 → manifest 格式 → 内核 API 兼容 → 运行时可用 → schema 完整 → 服务依赖解析 → 状态迁移可用 → 资源容量 → 能力授予。任何必需项失败都不能发布部分服务。
+校验顺序：包摘要/信任策略 → manifest 格式 → 内核 API 兼容 → 运行时可用 → schema bundle 身份与 Repository contract 完整 → 服务依赖解析 → 可序列化组件状态转换可用 → 资源容量 → 能力授予。任何必需项失败都不能发布部分服务。Forest 首次发布前，一个模块只有从空 namespace 安装的内容寻址 baseline；包里不存在按开发历史累积的 SQL migration 目录。首次发布后的 schema 升级边才随模块独立定义，不能重新形成宿主级编号迁移链。
 
 声明 `capabilities.requests` 只是申请，实际集合为 manifest、部署授予、Bot 策略和请求身份的交集。`required=false` 的依赖缺失必须产生显式降级能力清单，不能在运行中随机 `ImportError`。
 
@@ -180,7 +189,7 @@ stateDiagram-v2
 2. **PREPARE**：建立候选 Worker，加载完整代码和 schema，解析依赖、恢复可用的只读快照、执行无副作用健康检查。旧代继续服务。
 3. **FREEZE**：在该 Bot 的协调账本冻结受影响路由的顶层 admission。相关业务命令保留在有界持久队列，查询按策略返回 `SERVICE_RELOADING` 或等待至 deadline。独立核心控制入口继续接收取消、状态与维护意图；若其具体目标正被升级占有，目标操作等待资源协调，不能直接调用已冻结 Worker。
 4. **DRAIN**：旧代停止计时器和新消息领取，完成已入场调用树；长 Agent 在模型/工具步骤之间写 checkpoint，进入绑定本次 operation_id 的 `RELOAD_WAIT` 后释放执行租约。内核在准入锁下确认在途计数归零，再签发排空证据并关闭全部旧调用入口；QUIESCENT 后不能新增子调用。仍可能调用目标的外部调用方必须完成原调用树或暂停于可重试边界。外部结果未知的调用转交账本，不能谎报已取消。
-5. **SNAPSHOT**：确认旧代没有可提交的用户任务，导出带 schema、revision、checksum 的状态；候选进行确定性迁移并验证不变量，输出只写候选 shadow 状态。持久业务 schema 仅允许前后兼容的 expand 预备步骤，不能先覆盖正式状态再宣称可以恢复旧代。
+5. **SNAPSHOT**：确认旧代没有可提交的用户任务，导出带 state schema、revision、checksum 的有界组件状态；候选执行纯确定性状态转换并验证不变量，输出只写候选 shadow 状态。这一步不执行 SQL、不安装或修改业务 schema。持久 schema bundle 的安装/升级是独立生命周期资源；首次发布前只允许在空 namespace 安装完整 baseline，发布后才允许经明确升级边准备前后兼容的 expand 版本。
 6. **COMMIT**：一个 Bot 数据库事务锁定相关 `component_routes`，确认操作所有权、旧 epoch/代际、源 revision 及排空证据，递增 epoch，替换候选路由和可迁移状态指针，写 `route_committed` 日志。任何旧写事务也必须锁定/验证这些 fence 行，二者形成确定先后顺序。
 7. **PUBLISH**：宿主从已提交账本更新不可变路由快照，按当前 Bot 维护策略发放新 admission token，解冻允许执行的队列。COMMIT、PUBLISH 和失败后的 RESUME 均复核最新 `maintenance_epoch/data_admission`，不凭 PLAN 时的旧快照重新开放已被管理员暂停的业务。即使内存缓存仍暂存旧路由，Worker/写网关也会因旧 epoch 拒绝请求并触发重解析。
 8. **RETIRE**：停止并回收旧代；记录健康观察和资源差额。旧包在回滚保留期内可缓存，旧实例不保留写权。
@@ -258,10 +267,10 @@ dynamic字段以新的不可变请求配置覆盖层发布，Generation的构造
 | 无状态/可重建缓存 | schema 缓存、只读索引句柄 | 丢弃并预热，不要求 snapshot |
 | 会话临时状态 | Prompt 视图、stream 缓冲 | 在安全边界结束/取消后重建；不迁移活跃流 |
 | 小型组件状态 | 有界游标、计数快照 | 序列化 snapshot，检查基准 revision 与 checksum |
-| 持久业务状态 | Context、记忆、Job、工具结果 | 保留外部事实库，按 schema 兼容性迁移 |
+| 持久业务状态 | Context、记忆、Job、工具结果 | 保留模块 Repository 中的事实；随准确 schema bundle 身份重新挂载，不混入 Generation snapshot |
 | 外部资源 | WebSocket、浏览器、模型流 | 原实例关闭，新实例重建；必要时交接持久游标 |
 
-snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source_revision, captured_at, checksum, payload_ref`。禁止序列化凭据、Python 对象引用、锁和执行栈。迁移函数输入旧值对象输出新值对象，不访问模型、网络或真实平台；重复迁移应得到相同结果。
+snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source_revision, captured_at, checksum, payload_ref`。禁止序列化凭据、Python 对象引用、锁、执行栈或模块数据库。状态转换函数输入旧值对象、输出新值对象，不访问数据库、模型、网络或真实平台；重复转换应得到相同结果。持久事实的 schema 兼容性由 bundle ledger、Repository contract 和独立升级计划证明，不能借 snapshot 回调绕过。
 
 ## 8. 资源所有权与监督
 
