@@ -309,15 +309,20 @@ def _shell(platform, modules: dict[str, Any]):
 
 
 def _jobs(platform, modules: dict[str, Any]):
-    from forest.job_scheduler import JobDispatcher
+    from forest.job_scheduler import JobAuthorizationPort, JobDispatcher
     from forest.storage.jobs import JobStore
 
     store = JobStore(modules["adapter.onebot"].messages)
     scheduler = modules["conversation.scheduler"]
+    authorization = (
+        JobAuthorizationPort(platform.job_authority, platform.bot.store.bot_id, store)
+        if platform.job_authority is not None
+        else None
+    )
     return JobDispatcher(
         store,
         platform.kernel._authority,
-        authorize=platform._authorize_job if platform.job_authority is not None else None,
+        authorize=authorization.authorize if authorization is not None else None,
         on_change=scheduler.notify,
     )
 

@@ -48,18 +48,6 @@ class BindingRuntime:
         """Wake durable business workers after an out-of-band control change."""
         self._notify_work()
 
-    async def _authorize_job(self, claim):
-        grant = claim.delegation
-        if grant["issuer_id"] != self.job_authority.issuer_id:
-            raise ForestError("JOB_DELEGATION_REVOKED", "Job authority issuer changed", 403)
-        request = self.module("scheduler.jobs").store.authorization_request(claim)
-        return await self.job_authority.issue_delegation(
-            subject_id=grant["subject_id"], bot_id=self.bot.store.bot_id,
-            operation_id=request["operation_id"], payload=request["payload"],
-            policy_revision=grant["policy_revision"], delegation_id=grant["delegation_id"],
-            expected_account_revision=grant["account_revision"], expected_key_revision=grant["key_revision"],
-        )
-
     @property
     def failure(self):
         return self._failure

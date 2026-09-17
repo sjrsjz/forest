@@ -8,6 +8,31 @@ from uuid import uuid4
 from forest.errors import ForestError
 
 
+class JobAuthorizationPort:
+    """Translate a durable Job delegation into the deployment authority contract."""
+
+    def __init__(self, authority, bot_id: str, store) -> None:
+        self.authority = authority
+        self.bot_id = bot_id
+        self.store = store
+
+    async def authorize(self, claim):
+        grant = claim.delegation
+        if grant["issuer_id"] != self.authority.issuer_id:
+            raise ForestError("JOB_DELEGATION_REVOKED", "Job authority issuer changed", 403)
+        request = self.store.authorization_request(claim)
+        return await self.authority.issue_delegation(
+            subject_id=grant["subject_id"],
+            bot_id=self.bot_id,
+            operation_id=request["operation_id"],
+            payload=request["payload"],
+            policy_revision=grant["policy_revision"],
+            delegation_id=grant["delegation_id"],
+            expected_account_revision=grant["account_revision"],
+            expected_key_revision=grant["key_revision"],
+        )
+
+
 class JobDispatcher:
     def __init__(self, store, lease, *, authorize=None, on_change=None,
                  max_concurrency=4, poll_interval=1, operation_timeout=10):
