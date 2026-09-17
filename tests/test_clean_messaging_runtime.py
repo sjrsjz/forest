@@ -10,8 +10,10 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
+from forest.clean_provider_module import bootstrap_clean_provider
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
+from forest.models import ModelResult
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
@@ -47,6 +49,28 @@ class FakeWebSocketClient:
 
     def owned_tasks(self):
         return ()
+
+
+class FakeModelClient:
+    def __init__(self, _url, api_key, *, deployment_id, **_limits):
+        assert api_key == "test-model-key"
+        self.deployment_id = deployment_id
+        self.closed = False
+        self.permitted = False
+
+    async def dispatch(self, prepared, *, permitcheck):
+        await permitcheck(prepared)
+        self.permitted = True
+        return ModelResult(
+            "RESPONDED",
+            prepared.request_id,
+            prepared.transport_attempt_id,
+            prepared.payload_digest,
+            text="<ModelTurn><Assistant>ok</Assistant></ModelTurn>",
+        )
+
+    async def aclose(self):
+        self.closed = True
 
 
 async def _payload(payloads, *, owner_kind, owner_id, value) -> OneBotPayloadRef:
@@ -107,6 +131,20 @@ async def _agent_payload(payloads, *, owner_kind, owner_id, value) -> AgentPaylo
 async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_authority):
     store, installer = clean_authority
     kernel = await bootstrap_clean_kernel(store, installer)
+    model_clients = []
+
+    def create_model_client(*args, **kwargs):
+        client = FakeModelClient(*args, **kwargs)
+        model_clients.append(client)
+        return client
+
+    provider = await bootstrap_clean_provider(
+        store,
+        installer,
+        kernel=kernel,
+        credential_resolver=lambda _revision: "test-model-key",
+        client_factory=create_model_client,
+    )
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
     clients = []
 
@@ -174,7 +212,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         generation_authority=kernel.runtime,
     )
     registry = RuntimeModuleRegistry(
-        host, kernel.descriptors + (agent.descriptor,) + messaging.descriptors
+        host,
+        kernel.descriptors
+        + (provider.descriptor, agent.descriptor)
+        + messaging.descriptors,
     )
     await registry.start()
     try:
@@ -185,6 +226,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "kernel.authorization",
             "kernel.effect",
             "kernel.audit",
+            "provider.chat-completions",
             "agent.runtime",
             "conversation.scheduler",
             "adapter.onebot",
@@ -192,11 +234,13 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         adapter_runtime = registry.get("adapter.onebot")
         conversation_runtime = registry.get("conversation.scheduler")
         agent_runtime = registry.get("agent.runtime")
+        provider_runtime = registry.get("provider.chat-completions")
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
         )
         assert conversation_runtime.active is True
         assert agent_runtime.active is True
+        assert provider_runtime.active is True
         assert len(clients) == 1 and clients[0].handler is not None
 
         body = json.dumps(
@@ -283,9 +327,66 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         )
         assert started["run_id"] == "agent/run/test"
         assert started["core_prompt_digest"].startswith("sha256:")
+
+        request = await provider_runtime.prepare_request(
+            {
+                "bot_id": store.bot_id,
+                "run_id": "agent/run/test",
+                "logical_step_id": "agent/step/test",
+                "input_revision": 1,
+                "context_revision": 1,
+                "context_view_revision": 0,
+                "selected_input_end_seq": 1,
+                "trigger_ids": ["trigger:onebot:88"],
+                "input_batch_ids": ["batch:test"],
+                "units": [
+                    {
+                        "unit_id": "message:88",
+                        "role": "user",
+                        "source": {
+                            "conversation_id": "onebot:group:933179609",
+                            "group_source_id": "qq-group:933179609",
+                            "platform": "onebot-v11",
+                            "channel_kind": "group",
+                            "channel_id": "933179609",
+                        },
+                        "author": {
+                            "principal_ref": "qq:42",
+                            "external_user_id": "42",
+                            "display_name": "Alice",
+                        },
+                        "parts": [
+                            {"type": "text", "text": "look"},
+                            {
+                                "type": "image",
+                                "media_ref": "media:88",
+                                "url": "https://secret.invalid/image-token",
+                            },
+                        ],
+                    }
+                ],
+            },
+            request_id="model-request:test",
+            transport_attempt_id="model-attempt:test",
+            stream=False,
+        )
+        assert request.component_id == "provider.chat-completions"
+        assert request.generation_id == registry.graph_identity.generations[
+            "provider.chat-completions"
+        ]
+        assert "secret.invalid" not in request.prepared.body.decode()
+        permitted = []
+
+        async def permit(_conn, *, request):
+            permitted.append(request.prepared.request_id)
+
+        response = await provider_runtime.dispatch(request, permit_in=permit)
+        assert response.status == "RESPONDED"
+        assert permitted == ["model-request:test"]
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True
+    assert model_clients[0].closed is True
     assert set(registry.states.values()) == {ModuleLifecycleState.STOPPED}
     with pytest.raises(ForestError) as caught:
         await conversation_runtime.claimable_conversations()

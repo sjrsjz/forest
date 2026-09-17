@@ -83,7 +83,13 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
 
     descriptor = RuntimeModuleDescriptor(
         "agent.runtime",
-        ("kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect"),
+        (
+            "kernel.runtime",
+            "kernel.payload",
+            "kernel.authorization",
+            "kernel.effect",
+            "provider.chat-completions",
+        ),
         factory,
         official_artifact("bot"),
         storage=storage,

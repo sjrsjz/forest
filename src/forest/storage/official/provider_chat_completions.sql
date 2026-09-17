@@ -1,0 +1,2 @@
+-- This Provider owns no business facts. Its durable state is the standard
+-- module configuration ledger prepended by official_storage_bundle().

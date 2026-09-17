@@ -42,8 +42,10 @@
 
 新工作通过 `verify_active_generation_in()` 在最终事务内复核准确组件、Generation、RuntimeGraph、Route epoch 和 DATA/CONTROL admission；已经领取的排空工作只能通过 `verify_generation_member_in()` 继续，并同时复核自己的 actor/run/call lease。绑定身份失败、预热失败、图提交失败、本地 activation 不变量失败和 freeze 后新准入拒绝都有回收测试，不会遗留可接纳工作的部分图。
 
-### Agent、Conversation 与 OneBot Messaging 图
-
+### Provider、Agent、Conversation 与 OneBot Messaging 图
+`provider.chat-completions`、`agent.runtime`、`conversation.scheduler` 和 `adapter.onebot` 已经作为四个平级业务模块与五个内核模块共同进入一张九成员 RuntimeGraph：
+- `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
+- text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
 `agent.runtime`、`conversation.scheduler` 和 `adapter.onebot` 已经作为三个平级业务模块与五个内核模块共同进入一张八成员 RuntimeGraph：
 
 - `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
@@ -101,8 +103,8 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 - 文档权威链与 CorePrompt：`14 passed`。
 - Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：上一基线 `183 passed`。
-- Agent/Conversation Worker、持久调度 Repository、八成员 Messaging RuntimeGraph 与生命周期相关定向组合：`73 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入和后继 Run，PostgreSQL 用例验证 Agent/Conversation Generation fence、同 Session 后继 Run、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
-- 八成员 Kernel + Agent + Conversation + OneBot RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、延迟开放 WebSocket、作者/群来源和逆序关闭。
+- Agent/Conversation Worker、持久调度 Repository、九成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`82 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复和后继 Run，PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
+- 九成员 Kernel + Provider + Agent + Conversation + OneBot RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、发送前许可、延迟开放 WebSocket、作者/群来源和逆序关闭。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
 - 最近一次无 PostgreSQL 全套证据仍为 `747 passed, 36 skipped, 1184 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
