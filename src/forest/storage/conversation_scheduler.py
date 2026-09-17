@@ -1145,6 +1145,7 @@ class ConversationSchedulerRepository:
         run_ref: str | None = None,
         answer_trigger_ids=(),
         reply_ref: str | None = None,
+        _connection=None,
     ) -> dict:
         if type(actor) is not ConversationActor:
             raise ForestError("STALE_CONVERSATION_ACTOR", "Invalid conversation actor", 409)
@@ -1206,7 +1207,7 @@ class ConversationSchedulerRepository:
                 "reply_ref": reply_ref,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock_operation(conn, operation_id)
             replay = await (
                 await conn.execute(
@@ -1343,6 +1344,11 @@ class ConversationSchedulerRepository:
                 "answered_trigger_ids": list(trigger_ids),
                 "reply_ref": reply_ref,
             }
+
+    async def append_context_in(self, conn, actor: ConversationActor, **values) -> dict:
+        """Append Context inside a caller-owned UnitOfWork transaction."""
+
+        return await self.append_context(actor, _connection=conn, **values)
 
     async def requeue_run(
         self,

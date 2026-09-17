@@ -604,8 +604,10 @@ class KernelEffectRepository:
             effect is None
             or attempt is None
             or attempt["effect_operation_id"] != effect_operation_id
-            or effect["current_attempt_id"] != attempt_id
         ):
+            raise ForestError("EFFECT_ATTEMPT_NOT_FOUND", "Effect attempt is unavailable", 404)
+        is_current = effect["current_attempt_id"] == attempt_id
+        if not is_current and attempt["state"] not in ("SUCCEEDED", "NOT_APPLIED"):
             raise ForestError("EFFECT_ATTEMPT_NOT_FOUND", "Effect attempt is unavailable", 404)
         existing = await (
             await conn.execute(
@@ -625,9 +627,9 @@ class KernelEffectRepository:
         conflict_code = "EFFECT_EVIDENCE_CONFLICT"
         resulting = previous
         transition = False
-        if previous == "DISPATCHING":
+        if is_current and previous == "DISPATCHING":
             accepted, conflict_code, resulting, transition = True, None, status, True
-        elif previous == "UNKNOWN" and evidence_kind == "reconciliation" and status in (
+        elif is_current and previous == "UNKNOWN" and evidence_kind == "reconciliation" and status in (
             "SUCCEEDED",
             "NOT_APPLIED",
         ):

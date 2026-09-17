@@ -1165,6 +1165,54 @@ class OneBotAdapterRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self._head(conn, binding_id)
 
+    async def verify_transport_fence_in(
+        self,
+        conn,
+        *,
+        binding_ref: str,
+        binding_epoch: int,
+        connection_epoch: int,
+        client_incarnation: str,
+        adapter_generation_id: str,
+        executor_fence_digest: str,
+    ) -> dict:
+        for value, field in (
+            (binding_ref, "binding_ref"),
+            (client_incarnation, "client_incarnation"),
+            (adapter_generation_id, "adapter_generation_id"),
+        ):
+            _bounded(value, field, 256)
+        if type(binding_epoch) is not int or binding_epoch <= 0:
+            raise ForestError("ONEBOT_AUTHORITY_INPUT_INVALID", "Invalid Binding epoch", 422)
+        if type(connection_epoch) is not int or connection_epoch <= 0:
+            raise ForestError("ONEBOT_AUTHORITY_INPUT_INVALID", "Invalid connection epoch", 422)
+        _validated_digest(executor_fence_digest, "executor_fence_digest")
+        head = await self._head(conn, binding_ref, lock="share")
+        client = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s").format(
+                    self._table("binding_clients")
+                ),
+                (self.store.bot_id, client_incarnation),
+            )
+        ).fetchone()
+        if (
+            head["state"] != "ONLINE"
+            or not head["effective_enabled"]
+            or head["binding_epoch"] != binding_epoch
+            or head["connection_epoch"] != connection_epoch
+            or head["current_client_incarnation"] != client_incarnation
+            or client is None
+            or client["state"] != "ACTIVE"
+            or client["binding_id"] != binding_ref
+            or client["published_binding_epoch"] != binding_epoch
+            or client["connection_epoch"] != connection_epoch
+            or client["adapter_generation_id"] != adapter_generation_id
+            or client["executor_fence_digest"] != executor_fence_digest
+        ):
+            raise ForestError("STALE_BINDING", "OneBot transport fence changed", 409)
+        return {"binding_id": binding_ref, "client_incarnation": client_incarnation}
+
     async def list_bindings(self) -> list[dict]:
         async with self.store.pool.connection() as conn, conn.transaction():
             rows = await (

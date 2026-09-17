@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-18。本页覆盖干净 Conversation、Agent 与 OneBot authority 候选的实现事实。
+更新日期：2026-09-18。本页覆盖干净 Conversation、Agent、OneBot 与 Delivery authority 候选的实现事实。
 
 ## 结论
 
@@ -87,6 +87,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `kernel.payload` 的干净 baseline 与 Repository 已建立：规范化保存来源 manifest、正文、派生边、删除 epoch、精确遗忘选择和 scrub 状态；载荷接纳与遗忘按同一 clock 行收敛，先接纳会被随后遗忘闭包撤销，先遗忘会拒绝晚到正文。`kernel.audit` 候选只保存可筛选的脱敏 envelope，详情必须经 payload 端口复核，不保存 JSONB 正文或跨模块 join。`kernel.authorization` 候选只保存规范化能力授予集、最长 30 秒的精确票据、一次性消费、撤销事实、单调策略 revision 与通用批准；票据消费和撤销按同一 policy clock 合流，不吞入 Web 会话、OneBot 管理员、Agent 工具或模块策略正文。`kernel.effect` 候选通过 Payload、Authorization 与执行器 fence 端口形成通用 permit/handoff/outcome 状态机：已交接结果丢失保持 `UNKNOWN`，只有显式对账证据可解析，冲突证据留账且不覆盖，未交接 attempt 才能放弃、重试或取消；它不持有 Delivery SendIntent、OneBot action、Agent ToolCall 或 Provider 状态。这四个候选仍未接入生产启动链与旧生产者，下一步是补齐各业务模块 bundle 后执行一次性 provisioning/cutover，不能建立双写兼容桥。
 - `conversation.scheduler` 干净 baseline 与 Repository 已实现连续分类水位、同群 actor lease、三种安全边界、最后 trigger 切口、普通尾部静默排空、原子 reply/trigger 提交和恢复领取；`agent.runtime` 候选已实现单 Agent Session/Run、CorePrompt/Preset 冻结、模型 attempt/UNKNOWN 对账、原子 ModelTurn、工具主体绑定与 checkpoint。两者没有子 Agent 表或互相写表。
 - `adapter.onebot` 干净 baseline 与 Repository 已实现 Binding 配置 plan/apply、连接候选/发布/退役、不可变冲突观察和平台事件接纳；事件与 Conversation Inbox 使用同一事务，重复平台消息不会再次分配 ingress。该候选不含 MessageStore、Shell、Delivery、Agent 或凭据正文，尚未替换生产 `OneBotRuntime` 组合根。
+- `delivery` 干净 baseline 与 Repository 已实现 CHAT/CONTROL 独立 lane、CHAT 顺序、短租约 claim、Effect 与 Adapter 双重 fence、prepare/handoff 边界、UNKNOWN 显式对账、取消和晚到冲突证据留账。CHAT 意图只接受 `conversation.scheduler` 已提交的正式回复作为 cause；Agent 只能提供候选回复载荷，不能直接创建发送意图。Conversation 的 REPLY、trigger ANSWERED 与 Delivery SendIntent 已通过同一调用方事务验证整体提交或整体回滚。该候选尚未替换旧发送 Worker。
 - 不能把历史 001…087 迁移压成包含全部业务表的单一“官方 bundle”；模块只能拥有自己的 namespace 和 Repository。
 - 干净库拒绝旧迁移账本、未知业务表和非空升级路径；开发数据库直接重建。
 - 现有 `OneBotRuntime` 仍直接构造 `BindingStore`、`MessageStore`、`ShellIngressGuard`、`DeliveryStore` 和发送 Worker，是尚未删除的旧平台组合根。目标 `adapter.onebot` 只保留 Binding/连接/平台事件与 OneBot action 传输端口；Conversation、Shell、Delivery 的 Repository、队列、attempt 和 UI 分别由对应模块拥有。切换时直接删除旧组合，不增加转发兼容层或双写。
@@ -116,7 +117,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 当前工作区的验证证据：
 
-- 无 PostgreSQL 全套：`839 passed, 1087 skipped`；
+- 无 PostgreSQL 全套：`839 passed, 1093 skipped`；
 - `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - `command.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；密码重新鉴权、载荷脱敏、热重载失效和并发 CAS 均包含在内。
 - `message.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；Binding 目录、密码脱敏、Handler 恢复幂等和并发 CAS 均包含在内。
@@ -131,7 +132,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - host scope：稳定 identity、独立 Registry 生命周期和静态 UI 定向组 `49 passed`；隔离 PostgreSQL 17 下 host provider、模块发现、运行投影和错误 scope 拒绝为 `1 passed`，管理会话/账号/配置整组为 `9 passed`。
 - `deployment.backup`、`deployment.restore`、`host.storage`：隔离 PostgreSQL 17 下完成创建备份、网关文件流下载、网关流式导入、只读校验、隔离恢复、宿主回收、权限边界和旧端点 404 的端到端链路 `1 passed`；作用域发现、包制品回归与基础管理整组 `14 passed`。
 - Schema bundle 与干净 kernel 模块候选：隔离 PostgreSQL 17 下 bootstrap、第三方声明式 SQL、官方函数/触发器执行、档位账本身份、并发安装、回滚、Runtime 通用事实、Audit 筛选/幂等/不可变/payload-port、Payload 来源闭包/遗忘/scrub/双锁序收敛、Authorization 精确票据/撤销/幂等消费/双锁序收敛，以及 Effect 许可/交接/UNKNOWN/对账/放弃重试整组 `49 passed`；Payload 相同 owner 的双共享锁幂等准入另连续回归 `10 × 1 passed`，已消除正文触发器共享锁升级造成的死锁；Effect 相反对账并发另连续回归 `10 × 1 passed`，每次只接纳一个最终结果。第三方描述符冒充 `official` 在 SQL 执行前拒绝。
-- 干净 Conversation/Agent/OneBot 组合：隔离 PostgreSQL 17 下 bundle、连续 trigger cut、同群串行、模型/工具 UNKNOWN 对账、单 Agent principal 绑定、Binding 配置并发 CAS、连接单向发布/退役、Adapter 与 Inbox 原子提交及平台消息并发去重共 `40 passed`；同平台消息相反并发接纳另连续回归 `10 × 1 passed`，每次只有一个 Adapter 事件和一个 Inbox ingress。
+- 干净 Conversation/Agent/OneBot/Delivery 组合：隔离 PostgreSQL 17 下 bundle、连续 trigger cut、同群串行、模型/工具 UNKNOWN 对账、单 Agent principal 绑定、Binding 配置并发 CAS、连接单向发布/退役、Adapter 与 Inbox 原子提交、平台消息并发去重、CHAT/CONTROL lane、正式回复与 SendIntent 原子提交、Effect/Adapter fence、UNKNOWN 对账与取消共 `47 passed`；同平台消息相反并发接纳与 Delivery 相反对账各连续回归 `10 × 1 passed`，分别只产生一个 Inbox ingress 和一个最终发送结果。
 - PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
 - 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
 - Ruff、Python compileall、四个受影响 ES module 的 `node --check` 和 `git diff --check` 通过；
