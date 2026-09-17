@@ -190,7 +190,7 @@ final_candidate_ref, final_input_revision
 
 ### 5.1 Agent runtime 的物理边界
 
-干净 `agent.runtime` schema 只包含 `agent_sessions`、`agent_runs`、`run_inputs`、`run_input_triggers`、`run_checkpoints`、`model_requests`、`model_transport_attempts`、`model_turns`、`tool_calls` 和 `tool_observations`。正文、候选、参数、结果、配置和 checkpoint body 只保存为经 `kernel.payload` 复核的 PayloadRef。Conversation 的 Inbox、trigger 当前状态、InputBatch 成员和 Context 顺序仍归 `conversation.scheduler`；Agent 表只保存收到的不可变引用和当时冻结的 trigger/principal 清单。
+干净 `agent.runtime` schema 只包含 `agent_sessions`、`agent_runs`、`run_inputs`、`run_input_triggers`、`run_checkpoints`、`model_requests`、`model_transport_attempts`、`model_observations`、`model_turns`、`tool_calls` 和 `tool_observations`。正文、候选、参数、结果、配置和 checkpoint body 只保存为经 `kernel.payload` 复核的 PayloadRef。Conversation 的 Inbox、trigger 当前状态、InputBatch 成员和 Context 顺序仍归 `conversation.scheduler`；Agent 表只保存收到的不可变引用和当时冻结的 trigger/principal 清单。
 
 Session/Run 引用由调用方预先稳定生成，不意味着调度器创建 Agent。Agent runtime 以幂等 start operation 接受已提交 InputBatch，建立本模块自己的 Session/Run 事实；同一 Conversation 只有一个 `ACTIVE` Session，同一 Session 只有一个未终结 Run。运行 lease 的 `owner_epoch` 只保护 Agent step/checkpoint，不能代替 Conversation actor epoch、Kernel Generation fence 或 Effect attempt fence。
 
