@@ -348,6 +348,12 @@ def _component_workers(runtime, _: dict[str, Any]):
     return ComponentWorkerHost(runtime.kernel, runtime.packages)
 
 
+def _kernel_runtime(runtime, _: dict[str, Any]):
+    from forest.management.kernel_runtime_contract import KernelRuntimeManagementRuntime
+
+    return KernelRuntimeManagementRuntime(runtime)
+
+
 def _contract_router(runtime, modules: dict[str, Any]):
     from forest.contract_router import ContractExecutionRouter
 
@@ -418,6 +424,21 @@ _OFFICIAL_ARTIFACT = official_artifact("bot")
 
 
 OFFICIAL_MODULES = (
+    RuntimeModuleDescriptor(
+        "kernel.runtime",
+        (),
+        _kernel_runtime,
+        _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "runtime",
+            "运行与业务接纳",
+            ("bot",),
+            "/static/modules/kernel.runtime.html",
+            "/static/kernel-runtime.js",
+            group="runtime",
+            order=10,
+        ),),
+    ),
     RuntimeModuleDescriptor("component.worker-host", (), _component_workers, _OFFICIAL_ARTIFACT),
     RuntimeModuleDescriptor(
         "adapter.onebot",

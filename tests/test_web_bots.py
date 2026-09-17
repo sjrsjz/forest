@@ -279,7 +279,10 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
         assert initial[0]["result"] == {"value": 6, "revision": 1, "label": "Alpha"}
         assert initial[1]["result"] == {"value": 9, "revision": 1, "label": "Beta"}
 
-        runtime_path = f"/management/v1/bots/{created[0]['bot_id']}/runtime"
+        runtime_root = (
+            f"/management/v1/scopes/bot/{created[0]['bot_id']}/modules/kernel.runtime"
+        )
+        runtime_path = runtime_root + "/queries/runtime"
         runtime = (await client.get(runtime_path)).json()
         assert runtime["data_admission"] and runtime["maintenance_epoch"] == 1
         ingress = runtime["supervisor"]["ingress"]
@@ -288,7 +291,7 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
             for lane in ("ORDINARY", "PRIVILEGED_CONTROL", "REJECTION")
         }
         assert ingress["qualification_cache"] == {"hits": 0, "misses": 0, "entries": 0}
-        maintenance_path = f"/management/v1/bots/{created[0]['bot_id']}/maintenance"
+        maintenance_path = runtime_root + "/actions/maintenance"
         paused = await post(client, maintenance_path, {
             "expected_maintenance_epoch": 1, "data_admission": False,
             "reason": "provider maintenance",
@@ -310,6 +313,12 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
             "reason": "provider recovered",
         }, "resume-alpha", status=202)
         assert restored["maintenance_epoch"] == 3 and restored["data_admission"]
+        assert (
+            await client.get(f"/management/v1/bots/{created[0]['bot_id']}/runtime")
+        ).status_code == 404
+        assert (
+            await client.post(f"/management/v1/bots/{created[0]['bot_id']}/maintenance")
+        ).status_code == 404
 
         # Two editor tabs both preview the same target revision. Only the first
         # accepted plan advances desired; the second gets a concrete CAS conflict.
@@ -376,8 +385,9 @@ async def test_web_module_validate_disable_edit_and_enable_is_atomic(
 
         module = (await client.get(base + "/module")).json()["modules"][0]
         assert module["state"] == "ACTIVE" and module["admission"]
-        runtime_path = f"/management/v1/bots/{bot['bot_id']}/runtime"
-        maintenance_path = f"/management/v1/bots/{bot['bot_id']}/maintenance"
+        runtime_root = f"/management/v1/scopes/bot/{bot['bot_id']}/modules/kernel.runtime"
+        runtime_path = runtime_root + "/queries/runtime"
+        maintenance_path = runtime_root + "/actions/maintenance"
         runtime = (await client.get(runtime_path)).json()
         await post(client, maintenance_path, {
             "expected_maintenance_epoch": runtime["maintenance_epoch"],

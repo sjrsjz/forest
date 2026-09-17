@@ -130,19 +130,17 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   runtimeViews.reset();
   deploymentViews.reset();
   backupsPanel.reset();
-  selectedBot = null; botConfig = null; botRuntime = null; packageRows = [];
-  selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
+  selectedBot = null; botConfig = null; packageRows = [];
+  selectionEpoch++; packageReadSeq++;
   clearBotPlan(); invokeKey = null;
   $('bot-detail').classList.add('hidden');
   setIdentity(null); setBranding();
   $('notice').classList.add('hidden'); show('login');
 }));
-let selectedBot = null, botConfig = null, botRuntime = null, packageRows = [];
+let selectedBot = null, botConfig = null, packageRows = [];
 let botPlan = null, botApplyKey = null, componentReload = null, moduleStateRequest = null;
 let invokeKey = null;
-let maintenanceKey = null;
-const maintenanceWrites = new Map();
-let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0, runtimeReadSeq = 0;
+let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0;
 let readConfigFields, readInvokeFields, historyBefore = null;
 let mountedModuleUi = null;
 let componentReplacementRequired = false, componentReplacementDraft = false;
@@ -302,20 +300,6 @@ function resetComponent() {
 function botStatus(state) {
   return ({ PENDING: '等待创建存储', PROVISIONING: '正在创建存储', READY: '存储就绪', FAILED: '创建未完成' })[state] || state;
 }
-function renderBotRuntime(state) {
-  botRuntime = state;
-  $('bot-maintenance-form').classList.remove('hidden');
-  $('bot-maintenance-status').textContent =
-    `${state.data_admission ? '正在处理业务' : '业务已暂停'} · 维护版本 ${state.maintenance_epoch}`;
-  $('bot-maintenance-toggle').textContent = state.data_admission ? '暂停业务处理' : '恢复业务处理';
-}
-async function readBotRuntime() {
-  if (!selectedBot || selectedBot.stage !== 'READY' || maintenanceWrites.has(selectedBot.bot_id)) return;
-  const epoch = selectionEpoch, seq = ++runtimeReadSeq;
-  const state = await api(`/bots/${encodeURIComponent(selectedBot.bot_id)}/runtime`);
-  if (epoch !== selectionEpoch || seq !== runtimeReadSeq) return;
-  renderBotRuntime(state);
-}
 async function loadPackages(force = false) {
   if (packageRows.length && !force) return;
   const seq = ++packageReadSeq;
@@ -456,8 +440,6 @@ async function openBotWorkspace(row, modules) {
   runtimeViews.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
-  maintenanceKey = null; botRuntime = null;
-  $('bot-maintenance-form').classList.add('hidden'); $('bot-maintenance-form').reset();
   selectedBot = row; $('bot-detail').classList.remove('hidden');
   show('bots');
   showBotWorkspacePane('status');
@@ -465,7 +447,6 @@ async function openBotWorkspace(row, modules) {
   $('bot-status').textContent = `${botStatus(row.stage)}${row.error_code ? ` · ${row.error_code}` : ''}`;
   $('bot-components').classList.toggle('hidden', row.stage !== 'READY');
   if (row.stage === 'READY') {
-    await readBotRuntime(); if (epoch !== selectionEpoch) return;
     await loadPackages(); if (epoch !== selectionEpoch) return;
     const pkg = selectedPackage();
     runtimeViews.update(
@@ -495,40 +476,6 @@ $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => {
 $('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
   show('backups'); await backupsPanel.load();
 }));
-$('bot-maintenance-form').addEventListener('input', () => { maintenanceKey = null; });
-$('bot-maintenance-refresh').addEventListener('click', () => busy($('bot-maintenance-refresh'), readBotRuntime));
-$('bot-maintenance-form').addEventListener('submit', (event) => {
-  event.preventDefault(); const form = event.currentTarget;
-  if (!botRuntime || !form.reportValidity()) return;
-  busy($('bot-maintenance-toggle'), async () => {
-    runtimeReadSeq++;
-    maintenanceKey ||= crypto.randomUUID();
-    const epoch = selectionEpoch, sentKey = maintenanceKey, botId = selectedBot.bot_id;
-    const write = {epoch, key: sentKey};
-    maintenanceWrites.set(botId, write);
-    try {
-      const state = await api(`/bots/${encodeURIComponent(botId)}/maintenance`, {
-        expected_maintenance_epoch: botRuntime.maintenance_epoch,
-        data_admission: !botRuntime.data_admission,
-        reason: form.elements.reason.value,
-      }, {'Idempotency-Key': sentKey});
-      if (epoch !== selectionEpoch || sentKey !== maintenanceKey) return;
-      maintenanceKey = null; form.reset(); renderBotRuntime(state);
-      notice(state.data_admission ? 'Bot 已恢复业务处理。' : 'Bot 已暂停业务处理。', true);
-    } catch (error) {
-      if (epoch === selectionEpoch && error.code === 'MAINTENANCE_CONFLICT') {
-        if (maintenanceWrites.get(botId) === write) maintenanceWrites.delete(botId);
-        await readBotRuntime();
-      }
-      throw error;
-    } finally {
-      if (maintenanceWrites.get(botId) === write) {
-        maintenanceWrites.delete(botId);
-        if (epoch !== selectionEpoch && selectedBot?.bot_id === botId) await readBotRuntime();
-      }
-    }
-  });
-});
 $('bot-package').addEventListener('change', () => {
   selectionEpoch++; clearBotPlan(); resetComponent();
   busy($('reload-bot-config'), readBotConfig);
@@ -684,7 +631,6 @@ setInterval(async () => {
   polling = true;
   try {
     if (selectedBot?.stage === 'READY' && selectedPackage()) {
-      await readBotRuntime();
       const epoch = selectionEpoch, state = await api(`${componentPath()}/configuration`);
       if (epoch === selectionEpoch) updateBotState(state);
     }

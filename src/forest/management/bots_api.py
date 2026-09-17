@@ -36,14 +36,6 @@ class Invoke(Body):
     payload: dict[str, Any]
 
 
-class Maintenance(Body):
-    expected_maintenance_epoch: int = Field(ge=0, le=10**18 - 1, strict=True)
-    data_admission: bool = Field(strict=True)
-    reason: str = Field(
-        min_length=1, max_length=256, pattern=r"^[^\x00-\x1f]*[^\s\x00-\x1f][^\x00-\x1f]*$"
-    )
-
-
 class ModuleValidate(Body):
     expected_config_revision: int = Field(ge=1, le=2**63 - 1, strict=True)
     expected_state_revision: int = Field(ge=0, le=2**63 - 1, strict=True)
@@ -94,33 +86,6 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
                                        payload=payload, plan_digest=plan_digest,
                                        policy_revision=(await bot.store.runtime())["policy_revision"])
         return bot, operation_id, signed
-
-    @app.get("/management/v1/bots/{bot_id}/runtime")
-    async def bot_runtime(bot_id: str, request: Request):
-        from forest.storage.bot_runtime import BotRuntimeAdministration
-
-        bot, operation, signed = await ticket(
-            request, bot_id, "bot.runtime.read", {}, write=False
-        )
-        state = await BotRuntimeAdministration(bot.store, control=bot.control).read(
-            signed, operation, {}
-        )
-        return {**state, "supervisor": services()[1].status(bot_id)}
-
-    @app.post("/management/v1/bots/{bot_id}/maintenance", status_code=202)
-    async def bot_maintenance(bot_id: str, body: Maintenance, request: Request):
-        from forest.storage.bot_runtime import BotRuntimeAdministration
-
-        payload = body.model_dump()
-        bot, operation, signed = await ticket(
-            request, bot_id, "bot.maintenance", payload
-        )
-        result = await BotRuntimeAdministration(bot.store, control=bot.control).set_maintenance(
-            signed, operation, payload, lease=bot.kernel._authority()
-        )
-        if bot.runtime is not None and result is not None and not bot.control.is_unavailable(result):
-            bot.runtime.notify()
-        return result
 
     @app.get("/management/v1/bots/{bot_id}/components/{component_id}/configuration")
     async def configuration(bot_id: str, component_id: str, request: Request):

@@ -311,6 +311,7 @@ def test_registry_rejects_artifact_from_another_scope():
 
 def test_official_management_contributions_are_declared_by_module_descriptors():
     descriptors = {item.component_id: item for item in OFFICIAL_MODULES}
+    runtime, = descriptors["kernel.runtime"].management
     onebot, = descriptors["adapter.onebot"].management
     agent, = descriptors["agent.runtime"].management
     memory, = descriptors["memory.graph"].management
@@ -319,6 +320,10 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
     command, = descriptors["command.router"].management
     message, = descriptors["message.router"].management
     schedules, = descriptors["scheduler.jobs"].management
+    assert (runtime.label, runtime.template, runtime.module) == (
+        "运行与业务接纳", "/static/modules/kernel.runtime.html", "/static/kernel-runtime.js"
+    )
+    assert runtime.scope_kinds == ("bot",) and runtime.contribution_id == "runtime"
     assert (agent.label, agent.template, agent.module) == (
         "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js"
     )
@@ -356,7 +361,7 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
         item.management == ()
         for component_id, item in descriptors.items()
         if component_id not in {
-            "adapter.onebot", "agent.runtime", "command.router", "kernel.audit", "memory.graph",
+            "adapter.onebot", "agent.runtime", "command.router", "kernel.audit", "kernel.runtime", "memory.graph",
             "message.router", "routing.graph", "scheduler.jobs"
         }
     )

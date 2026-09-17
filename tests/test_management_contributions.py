@@ -56,6 +56,15 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         assert modules["kernel.audit"]["management_contract"]["operations"] == [
             {"operation_id": "records", "kind": "query", "authority": "audit.read"}
         ]
+        runtime, = modules["kernel.runtime"]["management_contributions"]
+        assert runtime["contribution_id"] == "runtime"
+        assert runtime["surface"]["template"] == "/static/modules/kernel.runtime.html"
+        assert runtime["surface"]["module"] == "/static/kernel-runtime.js"
+        assert modules["kernel.runtime"]["management_contract"]["operations"] == [
+            {"operation_id": "runtime", "kind": "query", "authority": "bot.runtime.read"},
+            {"operation_id": "maintenance", "kind": "action",
+             "authority": "bot.maintenance", "principal": "admin"},
+        ]
         commands, = modules["command.router"]["management_contributions"]
         assert commands["contribution_id"] == "commands"
         assert commands["surface"]["template"] == "/static/modules/command.router.html"

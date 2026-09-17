@@ -117,6 +117,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         )["runtime"]
         modules = {row["component_id"]: row for row in runtime["runtime_modules"]}
         assert set(modules) == {
+            "kernel.runtime",
             "component.worker-host",
             "adapter.onebot",
             "agent.runtime",
@@ -143,6 +144,11 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         assert modules["command.router"]["requires"] == ["adapter.onebot", "routing.graph"]
         assert modules["message.router"]["requires"] == ["adapter.onebot", "routing.graph"]
         assert modules["shell.command"]["requires"] == ["adapter.onebot", "kernel.audit"]
+        assert modules["kernel.runtime"]["management_contract"]["operations"] == [
+            {"operation_id": "runtime", "kind": "query", "authority": "bot.runtime.read"},
+            {"operation_id": "maintenance", "kind": "action",
+             "authority": "bot.maintenance", "principal": "admin"},
+        ]
         assert modules["kernel.audit"]["management_contract"]["operations"] == [
             {"operation_id": "records", "kind": "query", "authority": "audit.read"}
         ]

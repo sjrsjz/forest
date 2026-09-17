@@ -1,0 +1,18 @@
+<section id="bot-runtime-admission" class="card" aria-labelledby="bot-runtime-admission-title">
+  <h2 id="bot-runtime-admission-title">运行与业务接纳</h2>
+  <p class="hint">这里控制当前 Bot 的整体业务接纳。暂停后仍保留可靠入站记录与受权管理命令；可安装组件的配置和启停由 component.worker-host 单独管理。</p>
+  <p id="kernel-runtime-status" class="muted" role="status"></p>
+  <dl class="status-grid">
+    <div><dt>宿主</dt><dd id="kernel-runtime-host">—</dd></div>
+    <div><dt>存储代际</dt><dd id="kernel-runtime-storage">—</dd></div>
+    <div><dt>业务接纳</dt><dd id="kernel-runtime-admission">—</dd></div>
+    <div><dt>维护版本</dt><dd id="kernel-runtime-epoch">—</dd></div>
+  </dl>
+  <form id="kernel-runtime-maintenance-form">
+    <label>操作原因<input name="reason" required maxlength="256" placeholder="例如：上游接口维护"></label>
+    <div class="actions">
+      <button id="kernel-runtime-maintenance-toggle" type="submit">暂停业务处理</button>
+      <button id="kernel-runtime-refresh" type="button" class="subtle">刷新运行状态</button>
+    </div>
+  </form>
+</section>
