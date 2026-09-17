@@ -57,7 +57,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 ### 控制面
 
 - 运行时描述符支持多个带作用域的 `management_contributions`；Bot scope 可从统一目录发现，并经通用 query/action 网关调用模块契约。
-- Agent、Memory、Routing、Command Router、Message Router、Scheduler 与 OneBot 已贡献各自的 UI 工件；Routing 的 Event/ComponentJob、两类 Router 的策略/容量/诊断，以及 OneBot 的 Binding/配置/会话/Delivery 均已迁入模块契约。
+- Agent、Memory、Routing、Command Router、Message Router、Scheduler 与 OneBot 已贡献现有 UI 工件；Routing 的 Event/ComponentJob 与两类 Router 的策略/容量/诊断已进入模块契约。当前 OneBot 贡献仍把 Binding/连接与 Delivery 观察放在同一页面，这只是旧实现事实，不能据此让 Adapter 取得 Delivery 数据所有权；干净基线必须拆成 `adapter.onebot` 与 `delivery` 两个贡献。
 - 旧 OneBot 管理路由与 `bindings_api.py` 已删除；凭据在 Adapter 内加密暂存，通用授权票据只携带摘要。
 - 控制台具备摘要绑定的受限 iframe 和有界 `MessageChannel` 原型，但官方可信静态贡献与可安装包沙箱仍使用两条装载路径，尚未统一为最终协议。
 
@@ -87,6 +87,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `kernel.payload` 的干净 baseline 与 Repository 已建立：规范化保存来源 manifest、正文、派生边、删除 epoch、精确遗忘选择和 scrub 状态；载荷接纳与遗忘按同一 clock 行收敛，先接纳会被随后遗忘闭包撤销，先遗忘会拒绝晚到正文。`kernel.audit` 候选只保存可筛选的脱敏 envelope，详情必须经 payload 端口复核，不保存 JSONB 正文或跨模块 join。`kernel.authorization` 候选只保存规范化能力授予集、最长 30 秒的精确票据、一次性消费、撤销事实、单调策略 revision 与通用批准；票据消费和撤销按同一 policy clock 合流，不吞入 Web 会话、OneBot 管理员、Agent 工具或模块策略正文。`kernel.effect` 候选通过 Payload、Authorization 与执行器 fence 端口形成通用 permit/handoff/outcome 状态机：已交接结果丢失保持 `UNKNOWN`，只有显式对账证据可解析，冲突证据留账且不覆盖，未交接 attempt 才能放弃、重试或取消；它不持有 Delivery SendIntent、OneBot action、Agent ToolCall 或 Provider 状态。这四个候选仍未接入生产启动链与旧生产者，下一步是补齐各业务模块 bundle 后执行一次性 provisioning/cutover，不能建立双写兼容桥。
 - 不能把历史 001…087 迁移压成包含全部业务表的单一“官方 bundle”；模块只能拥有自己的 namespace 和 Repository。
 - 干净库拒绝旧迁移账本、未知业务表和非空升级路径；开发数据库直接重建。
+- 现有 `OneBotRuntime` 仍直接构造 `BindingStore`、`MessageStore`、`ShellIngressGuard`、`DeliveryStore` 和发送 Worker，是尚未删除的旧平台组合根。目标 `adapter.onebot` 只保留 Binding/连接/平台事件与 OneBot action 传输端口；Conversation、Shell、Delivery 的 Repository、队列、attempt 和 UI 分别由对应模块拥有。切换时直接删除旧组合，不增加转发兼容层或双写。
 
 ### P0：完成模块化控制台
 

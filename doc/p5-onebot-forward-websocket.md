@@ -2,7 +2,7 @@
 
 ## 1. 目标与边界
 
-Forest 的 Binding 继续表示一个固定 OneBot 账号与一个 Bot 实体的绑定。本切片在既有“HTTP API + HTTP POST 事件上报”之外增加 OneBot v11 正向 Universal WebSocket：同一条由 Forest 主动建立的 `/` 连接既接收事件，也发送 API action。它用于 AliceBot/NapCat 常见的本机部署方式，不改变消息、Shell、Agent、发送账本或多 Bot 隔离语义。
+Forest 的 Binding 继续表示一个固定 OneBot 账号与一个 Bot 实体的绑定。本切片在 HTTP API + HTTP POST 事件上报之外增加 OneBot v11 正向 Universal WebSocket：同一条由 Forest 主动建立的 `/` 连接既接收事件，也执行获得许可的 API action。它用于 AliceBot/NapCat 常见的本机部署方式，不改变 Conversation、Shell、Agent、Delivery 或多 Bot 隔离语义。
 
 首版不实现反向 WebSocket 服务端，也不把 WebSocket 放进插件 Worker。握手凭据、socket、echo waiter 和入站队列都由宿主持有；`adapter.onebot` Worker 仍只做无凭据的纯规范化和出站编码。OneBot v11 正向 WebSocket 的 `/api`、`/event` 与 Universal `/` 语义来自[标准通信说明](https://github.com/botuniverse/onebot-11/blob/master/communication/ws.md)。
 
@@ -39,7 +39,7 @@ NEW -> CONNECTING -> BUFFERING -> ACTIVE -> RETIRING -> CLOSED
 3. 将旧 Binding 置为 `DRAINING`，停止旧连接的新业务接纳并关闭旧传输；
 4. 以 CAS 推进 `binding_epoch`、`connection_epoch` 和 `client_incarnation`；
 5. 本地登记新 `Connection`，再原子打开候选的 ACTIVE gate；
-6. 候选队列按接收顺序逐条进入既有 `MessageStore.ingest` 流程。
+6. 候选队列按接收顺序逐条提交 Adapter 入站观察，再经 UnitOfWork 进入 `conversation.scheduler` 接纳端口。
 
 NapCat 会把事件广播给同一账号的多个正向连接，因此切换重叠窗口可能出现重复事件。Forest 依赖既有 `(binding, platform_message_id)` 幂等事实去重；不得用“只让一条连接接收”换取无法证明的无缝切换。若发布 ACK 丢失，候选保持 BUFFERING，先读取数据库确认新 incarnation 是否已成为 head：是则采用并打开 gate，否则关闭并丢弃。未成为 head 的客户端永远不能写 Bot 数据。
 
@@ -57,7 +57,7 @@ NapCat 会把事件广播给同一账号的多个正向连接，因此切换重�
 
 ## 5. 入站顺序与现有 Agent 语义
 
-ACTIVE 后只有一个事件消费协程，严格按 socket 接收顺序调用既有接入流程。接入仍执行：宿主预解析、Shell P0/P1 接纳判断、原始平台正文持久化、纯 Worker 投影一致性核对、回声识别、触发分类和 Inbox 提交。
+ACTIVE 后只有一个事件消费协程，严格按 socket 接收顺序调用接入协调器。Adapter 只完成宿主预解析、原始平台帧与规范化事件 Payload 接纳、纯 Worker 投影一致性核对、回声识别和平台事件幂等。协调器随后在有界 UnitOfWork 中调用 Shell 优先级端口与 `conversation.scheduler` Inbox 接纳端口；触发分类由路由模块完成。任何一步都通过稳定引用交换，不能由 Adapter 直接写其他模块的表。
 
 WebSocket 握手已经用 Binding 的 access token 认证，因此不再伪造 HTTP `X-Signature`。代码必须调用单独的“已认证传输帧”入口，不能传入虚构签名绕过校验。该入口仍校验当前 `Connection` 对象、`client_incarnation` 和 `binding_epoch`，候选或退役连接不能借旧回调写入。
 
@@ -65,14 +65,14 @@ WebSocket 握手已经用 Binding 的 access token 认证，因此不再伪造 H
 
 ## 6. 出站不确定性
 
-WebSocket action 使用既有 `PreparedSend` 的精确 `wire_body` 作为 `params`，仅在外层增加 `action` 与 echo。一次 Delivery attempt 至多写一次 socket：
+WebSocket action 使用 Delivery 通过传输端口交付的冻结 `wire_payload` 作为 `params`，仅在外层增加 `action` 与 echo。一次 Delivery attempt 至多调用一次 Adapter 端口、一次 socket write：
 
 - 在取得当前连接前失败，或在任何字节写入前已知连接关闭：`NOT_SENT`；
 - 完整响应为 `status=ok, retcode=0` 且含合法 `message_id`：`SENT`；
 - 明确平台拒绝码：`NOT_SENT`；
 - 写入开始后的取消、超时、断线、未知/重复 echo、畸形响应：`UNKNOWN`。
 
-客户端禁止自动重发 action。连接监督器可以重建传输，但 Delivery 的 `UNKNOWN` 仍由既有人工对账协议处理。关闭连接时，所有已写入的 pending waiter 结算为 `UNKNOWN`，未发送的新调用直接拒绝。
+客户端禁止自动重发 action。连接监督器可以重建传输，但 Adapter 只返回类型化传输观察；Delivery 与 `kernel.effect` 负责持久化 `UNKNOWN` 和显式对账。关闭连接时，所有已写入的 pending waiter 返回 `UNKNOWN`，未发送的新调用返回 `NOT_APPLIED`。
 
 ## 7. 关闭、失败与热切换
 

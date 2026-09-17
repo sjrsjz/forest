@@ -20,7 +20,7 @@
 | `kernel.authorization` | 精确能力授予集、短寿命票据、一次性消费、撤销事实、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台账号、OneBot 管理员列表 |
 | `kernel.effect` | 通用 Effect identity、dispatch fence、attempt/outcome 与 UNKNOWN 对账 | Delivery SendIntent、OneBot wire body、Agent 工具上下文副本 |
 | `kernel.audit` | 通用审计 envelope、来源 operation/call 引用、脱敏查询索引 | 模块业务正文、密钥、跨模块复制的完整 payload |
-| `adapter.onebot` | Binding、连接事实、规范化入站、平台媒体引用、发送 attempt/receipt | Agent Run、记忆向量、其他 Adapter 的连接状态 |
+| `adapter.onebot` | Binding、配置引用、连接代际、规范化平台入站观察与媒体引用 | Inbox/Context、Shell 命令、SendIntent/发送 attempt/receipt、Agent Run、记忆向量 |
 | `conversation.scheduler` | Conversation lane、Inbox、ingress 顺序、分类水位、trigger、InputBatch 成员、Context 顺序与确定性裁剪事实 | Agent Session/Run/ModelTurn/ToolCall、模型 Provider 私有状态、长期记忆图、消息正文 |
 | `agent.runtime` | Session/Run/ModelTurn/ToolCall/checkpoint、模型请求与结果载荷引用 | 平台连接、Memory 内部索引、内核路由 head |
 | `memory.graph` | source/trunk、payload、media capture、graph、embedding、retrieval evidence、deletion epoch | Agent 执行所有权、平台发送状态 |
@@ -39,6 +39,10 @@
 Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot 群管理员和平台身份解析属于 Adapter/Shell；Agent 工具定义、参数验证和工具审批的业务上下文属于 Agent。它们可把稳定主体引用、策略结果或批准依据交给授权端口，但不能把这些业务表搬进 `kernel.authorization`，也不能让通用票据携带密码、平台令牌或任意策略正文。授权模块不跨 schema 建外键或 join，涉及正文的限制条件必须使用经 `kernel.payload` 端口复核的载荷引用。
 
 `kernel.effect` 只负责不可撤回外部副作用的通用派发边界。Delivery 仍拥有 SendIntent、群聊顺序、Binding 和平台回执语义；Agent 仍拥有 ToolCall、工具 schema 与 Run 续调；模型 Provider 仍拥有请求投影、用量和 fallback。它们以稳定 `effect_operation_id`、精确目标、语义输入摘要和受管 payload 引用请求 Effect Gateway，不得把自己的业务状态机搬入内核效果表。效果记录不得出现 `tool_id`、`intent_id`、`binding_id`、群号、Provider 名称或 OneBot action 等业务字段。
+
+`adapter.onebot` 的干净 bundle 物理拥有 Binding 身份与配置 revision、连接发布 head、不可变 client incarnation、平台事件观察和入站接纳 operation。配置正文与凭据不进入 Adapter 表：普通值是 `kernel.payload` 引用，密钥是宿主 Secret Resolver 的 opaque ref。Adapter 先把原始帧和规范化事件保存为受管 payload，再通过一次 UnitOfWork 把稳定 `platform_event_ref` 交给 `conversation.scheduler`；重放同一 `(binding, platform_message_id)` 返回原观察，不能重新分配 Inbox 顺序。Adapter 不持有 Conversation lane、Shell 请求、Agent Run、Memory source、Delivery intent/attempt 或平台发送回执账本。
+
+OneBot action 是 `adapter.onebot` 暴露的传输端口，不是 Adapter 自己的持久发送队列。`delivery` 在自己的事务中冻结目标、wire payload、当前 Binding/connection fence 与 effect operation，取得通用 Effect 许可后才调用该端口。Adapter 对一次调用至多写 socket 一次并返回 `SUCCEEDED`、`NOT_APPLIED` 或 `UNKNOWN` 的类型化执行观察；Delivery 和 `kernel.effect` 各自在自己的 schema 记录业务结算与通用效果结算。socket、echo waiter、Bearer token 和 webhook secret 永不进入 Delivery schema。
 
 `conversation.scheduler` 的干净 bundle 物理拥有 `conversation_lanes`、`inbox_messages`、`conversation_triggers`、`selection_operations`、`input_batches`、`input_batch_events`、`input_batch_triggers`、`trigger_requeues`、`trigger_requeue_items`、`context_units`、`context_append_operations` 与 `context_compactions`。它只对 `forest_kernel.bot_identity` 建立 bootstrap 外键；对 Adapter event、Payload、Agent Session/Run、Delivery reply 和业务路由结果一律保存稳定引用及必要摘要，并通过对应端口复核。正文、作者快照和结构化分类依据只存在于 `kernel.payload`，调度器表不得出现任意 JSONB 正文列。
 
