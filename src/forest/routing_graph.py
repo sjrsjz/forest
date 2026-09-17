@@ -372,12 +372,20 @@ class RouteGraphStore:
 
 
 class RouteGraphRuntime:
-    def __init__(self, platform):
+    def __init__(self, runtime):
         from forest.dispatch_trace import DispatchTraceStore
+        from forest.storage.component_jobs import ComponentJobStore
+        from forest.storage.events import EventStore
 
         self.graph = RouteGraphStore(
-            platform.bot.store, control=getattr(platform.bot, "control", None)
+            runtime.bot.store, control=getattr(runtime.bot, "control", None)
         )
         self.traces = DispatchTraceStore(
-            platform.bot.store, control=getattr(platform.bot, "control", None)
+            runtime.bot.store, control=getattr(runtime.bot, "control", None)
+        )
+        self.events = EventStore(
+            runtime.bot.store, control=getattr(runtime.bot, "control", None)
+        )
+        self.component_jobs = ComponentJobStore(
+            runtime.bot.store, control=getattr(runtime.bot, "control", None)
         )

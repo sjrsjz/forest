@@ -1,5 +1,3 @@
-import { eventsPanel } from './events-panel.js';
-import { componentJobsPanel } from './component-jobs-panel.js';
 import { commandPoliciesPanel } from './command-policies.js';
 import { messageHandlerPoliciesPanel } from './message-handler-policies.js';
 import { messageHandlerDiagnosticsPanel } from './message-handler-diagnostics.js';
@@ -147,8 +145,6 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   runtimeViews.reset();
-  componentEventsPanel.reset();
-  durableJobsPanel.reset();
   commandPolicyPanel.reset();
   handlerPolicyPanel.reset();
   handlerDiagnosticsPanel.reset();
@@ -205,8 +201,6 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   componentSourceRevision = null;
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
-const componentEventsPanel = eventsPanel(api, busy, notice);
-const durableJobsPanel = componentJobsPanel(api, busy, notice);
 const commandPolicyPanel = commandPoliciesPanel(api, busy, notice);
 const handlerPolicyPanel = messageHandlerPoliciesPanel(api, busy, notice);
 const handlerDiagnosticsPanel = messageHandlerDiagnosticsPanel(api, busy, notice);
@@ -237,13 +231,12 @@ botComponentHistory.id = 'bot-component-history';
 const botWorkspacePanes = new Map([
   ['status', [botOverview]],
   ['modules', [$('bot-components'), botComponentHistory]],
-  ['tasks', [$('bot-component-jobs'), $('bot-events')]],
   ['observability', [$('bot-handler-diagnostics'), $('bot-command-diagnostics'), $('bot-audit')]],
   ['security', [$('bot-command-policies'), $('bot-handler-policies')]],
 ]);
 const botWorkspaceLabels = new Map([
   ['status', '状态'], ['modules', '模块'],
-  ['tasks', '任务'], ['observability', '观测'], ['security', '安全与授权'],
+  ['observability', '观测'], ['security', '安全与授权'],
 ]);
 const botWorkspaceContainers = new Map();
 for (const [name, elements] of botWorkspacePanes) {
@@ -332,7 +325,7 @@ function invalidateControl(scope) {
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
   runtimeViews.invalidateContent(scope);
-  for (const panel of [componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
+  for (const panel of [commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -525,8 +518,6 @@ async function readBotConfig() {
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
   runtimeViews.reset();
-  componentEventsPanel.reset();
-  durableJobsPanel.reset();
   commandPolicyPanel.reset();
   handlerPolicyPanel.reset();
   handlerDiagnosticsPanel.reset();
@@ -558,10 +549,6 @@ async function selectBot(id) {
     await loadPackages(); if (epoch !== selectionEpoch) return;
     await readBotConfig(); if (epoch !== selectionEpoch) return;
     await runtimeViews.select(row); if (epoch !== selectionEpoch) return;
-    await componentEventsPanel.select(row);
-    if (epoch !== selectionEpoch) return;
-    await durableJobsPanel.select(row);
-    if (epoch !== selectionEpoch) return;
     await commandPolicyPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await handlerPolicyPanel.select(row);

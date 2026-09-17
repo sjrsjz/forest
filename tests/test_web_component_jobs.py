@@ -22,7 +22,7 @@ async def managed_bot(app, client, name):
     )
     await ready(client, bot)
     managed = await app.state.runtime.fleet.attach(bot["bot_id"])
-    return bot, managed, "/management/v1/bots/" + bot["bot_id"] + "/component-jobs"
+    return bot, managed, "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/routing.graph"
 
 
 async def test_web_replays_dead_job_with_new_epoch_and_stable_operation(
@@ -66,7 +66,7 @@ async def test_web_replays_dead_job_with_new_epoch_and_stable_operation(
             managed.kernel._component_job_dispatcher, return_exceptions=True
         )
 
-        view = await client.get(root + "?status=DEAD&limit=10")
+        view = await client.get(root + "/queries/component-jobs?status=DEAD&limit=10")
         assert view.status_code == 200, view.text
         public = view.json()["jobs"][0]
         assert public["job_id"] == receipt["job_id"]
@@ -77,7 +77,7 @@ async def test_web_replays_dead_job_with_new_epoch_and_stable_operation(
         attempts = await asyncio.gather(
             *(
                 client.post(
-                    root + "/replays",
+                    root + "/actions/component-job.replay",
                     json=request,
                     headers={"idempotency-key": key},
                 )
@@ -98,11 +98,11 @@ async def test_web_replays_dead_job_with_new_epoch_and_stable_operation(
         )
         accepted = accepted_response.json()
         assert rejected_response.json()["code"] == "COMPONENT_JOB_REVISION_CONFLICT"
-        assert await post(client, root + "/replays", request, accepted_key) == accepted
+        assert await post(client, root + "/actions/component-job.replay", request, accepted_key) == accepted
         assert accepted["replay_epoch"] == 1
         assert accepted["management_revision"] == 1
         conflict = await post(
-            client, root + "/replays", request, "job-replay-after-race", status=409
+            client, root + "/actions/component-job.replay", request, "job-replay-after-race", status=409
         )
         assert conflict["code"] == "COMPONENT_JOB_REVISION_CONFLICT"
 
@@ -120,10 +120,10 @@ async def test_web_replays_dead_job_with_new_epoch_and_stable_operation(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=ORIGIN
         ) as outsider:
-            assert (await outsider.get(root)).status_code == 401
-        assert (await client.post(root + "/replays", json=request)).status_code == 422
+            assert (await outsider.get(root + "/queries/component-jobs")).status_code == 401
+        assert (await client.post(root + "/actions/component-job.replay", json=request)).status_code == 422
         invalid = await client.post(
-            root + "/replays",
+            root + "/actions/component-job.replay",
             json={**request, "unexpected": True},
             headers={"idempotency-key": "invalid-job-replay"},
         )
@@ -166,7 +166,7 @@ async def test_retirement_fences_old_generation_and_allows_only_removal_deployme
 
         proposal = await post(
             client,
-            root + "/retirement-plans",
+            root + "/actions/component-job.retirement.plan",
             {
                 "component_id": "component.jobs",
                 "handler_id": "work.persist",
@@ -181,14 +181,14 @@ async def test_retirement_fences_old_generation_and_allows_only_removal_deployme
             "plan_digest": proposal["plan_digest"],
         }
         busy_result = await post(
-            client, root + "/retirement-requests", request, "retire-busy", status=409
+            client, root + "/actions/component-job.retirement.apply", request, "retire-busy", status=409
         )
         assert busy_result["code"] == "COMPONENT_JOB_HANDLER_BUSY"
         await jobs.defer(managed.kernel.lease, claimed, delay_seconds=60)
 
         proposal = await post(
             client,
-            root + "/retirement-plans",
+            root + "/actions/component-job.retirement.plan",
             {
                 "component_id": "component.jobs",
                 "handler_id": "work.persist",
@@ -203,10 +203,10 @@ async def test_retirement_fences_old_generation_and_allows_only_removal_deployme
             "plan_digest": proposal["plan_digest"],
         }
         retired = await post(
-            client, root + "/retirement-requests", request, "retire-ready"
+            client, root + "/actions/component-job.retirement.apply", request, "retire-ready"
         )
         assert await post(
-            client, root + "/retirement-requests", request, "retire-ready"
+            client, root + "/actions/component-job.retirement.apply", request, "retire-ready"
         ) == retired
         assert retired["management_revision"] == 1
         assert retired["retired_job_count"] == 2
@@ -247,6 +247,6 @@ async def test_retirement_fences_old_generation_and_allows_only_removal_deployme
             await managed.kernel.install(restored, grants=grants)
         assert reactivation.value.code == "JOB_HANDLER_REACTIVATION_REQUIRES_MANAGEMENT"
 
-        view = (await client.get(root + "?limit=20")).json()
+        view = (await client.get(root + "/queries/component-jobs?limit=20")).json()
         assert view["handlers"][0]["active"] is False
         assert [row["status"] for row in view["jobs"]] == ["RETIRED", "RETIRED"]

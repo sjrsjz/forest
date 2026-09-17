@@ -50,6 +50,19 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             "delivery.reconcile",
         }
         assert modules["conversation.scheduler"]["management_contributions"] == []
+        assert {
+            item["operation_id"]
+            for item in modules["routing.graph"]["management_contract"]["operations"]
+        } >= {
+            "events",
+            "event.replay",
+            "event.retirement.plan",
+            "event.retirement.apply",
+            "component-jobs",
+            "component-job.replay",
+            "component-job.retirement.plan",
+            "component-job.retirement.apply",
+        }
         schedules, = modules["scheduler.jobs"]["management_contributions"]
         assert schedules["contribution_id"] == "schedules"
         assert {
@@ -79,6 +92,12 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         ).status_code == 404
         assert (
             await client.get(f"/management/v1/bots/{bot['bot_id']}/bindings")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/events")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/component-jobs")
         ).status_code == 404
 
         graph = await client.get(

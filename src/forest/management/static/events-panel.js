@@ -5,8 +5,10 @@ export function eventsPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, retirementPlan = null;
   let retirementApplyKey = null;
   const valid = own => bot !== null && own === epoch;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/events`;
-  const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
+  const post = (operation, body, key) => api(action(operation), body, {'Idempotency-Key':key});
   function facts(root, entries) {
     const list = document.createElement('dl');
     for (const [name, value] of entries) {
@@ -21,9 +23,9 @@ export function eventsPanel(api, busy, notice) {
     $('event-retirement-diff').replaceChildren();
   }
   async function previewRetirement(row, button) {
-    const own = epoch, prefix = base(), key = crypto.randomUUID();
+    const own = epoch, key = crypto.randomUUID();
     await busy(button, async () => {
-      const result = await post(prefix + '/retirement-plans', {
+      const result = await post('event.retirement.plan', {
         subscriber_id:row.subscriber_id,
         contract_major:row.contract_major,
         expected_revision:row.management_revision,
@@ -73,9 +75,9 @@ export function eventsPanel(api, busy, notice) {
         ['错误码',row.last_error_code], ['发布时间',row.published_at]]);
       if (row.replay_allowed) {
         const button = document.createElement('button'); button.type = 'button';
-        button.textContent = '回放死信'; const key = crypto.randomUUID(), own = epoch, prefix = base();
+        button.textContent = '回放死信'; const key = crypto.randomUUID(), own = epoch;
         button.addEventListener('click', () => busy(button, async () => {
-          await post(prefix + '/replays', {
+          await post('event.replay', {
             delivery_id:row.delivery_id, expected_revision:row.management_revision,
           }, key);
           if (!valid(own)) return;
@@ -89,8 +91,8 @@ export function eventsPanel(api, busy, notice) {
   async function refresh() {
     if (!bot) return;
     const own = epoch, seq = ++readSeq, status = $('event-status-filter').value;
-    const query = new URLSearchParams({limit:'200'}); if (status) query.set('status', status);
-    const result = await api(base() + '?' + query.toString());
+    const values = {limit:'200'}; if (status) values.status = status;
+    const result = await api(query('events', values));
     if (!valid(own) || seq !== readSeq) return;
     renderSubscriptions(result.subscriptions || []); renderDeliveries(result.deliveries || []);
     $('event-status').textContent = `${result.subscriptions?.length || 0} 个订阅 · ${result.deliveries?.length || 0} 条投递`;
@@ -99,9 +101,9 @@ export function eventsPanel(api, busy, notice) {
   $('event-status-filter').addEventListener('change', event => busy(event.currentTarget, refresh));
   $('event-retirement-apply').addEventListener('click', event => {
     if (!retirementPlan || !bot) return;
-    const own = epoch, plan = retirementPlan, key = retirementApplyKey, prefix = base();
+    const own = epoch, plan = retirementPlan, key = retirementApplyKey;
     busy(event.currentTarget, async () => {
-      const result = await post(prefix + '/retirement-requests', {
+      const result = await post('event.retirement.apply', {
         expected_revision:plan.expected_revision,
         plan_id:plan.plan_id,
         plan_digest:plan.plan_digest,
@@ -114,6 +116,7 @@ export function eventsPanel(api, busy, notice) {
   });
   function reset() {
     epoch++; readSeq++; bot = null; clearPlan();
+    $('bot-events').open = false;
     $('bot-events').classList.add('hidden'); $('event-status').textContent = '';
     $('event-subscriptions').replaceChildren(); $('event-deliveries').replaceChildren();
     $('event-status-filter').value = '';
@@ -123,7 +126,7 @@ export function eventsPanel(api, busy, notice) {
     await refresh(); if (!valid(own)) return;
   }
   function invalidateContent(scope) {
-    if (!bot || scope !== base()) return;
+    if (!bot || !scope.startsWith(base())) return;
     epoch++; readSeq++; clearPlan();
     $('event-status').textContent = '相关管理正文已不可用，请重新读取事件状态。';
   }

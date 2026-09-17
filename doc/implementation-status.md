@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-17。本页覆盖截至本次 `BotRuntimeSupervisor` 收口工作区的实现事实。
+更新日期：2026-09-17。本页覆盖截至本次 `routing.graph` 管理面收口工作区的实现事实。
 
 ## 结论
 
@@ -10,7 +10,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 1. Bot 创建、挂载和恢复仍调用巨型 `BotStore.migrate()`，多数官方模块业务表仍位于历史 `public` schema；
 2. 可安装 Worker 仍由官方 `component.worker-host` 模块内部管理，尚未完成与官方模块一致的代际热替换、失租恢复和按依赖边故障隔离；
-3. Web 壳仍安装一批 Bot/Event/ComponentJob/策略/诊断/审计/备份/账号专用路由与面板，尚未完全由作用域和 `ManagementContribution` 驱动。
+3. Web 壳仍安装 Bot 身份管理、命令/消息策略、诊断、审计、备份、账号等专用路由与面板，尚未完全由作用域和 `ManagementContribution` 驱动。
 
 因此，能在 WebUI 中创建 Bot、配置 Agent、查看 Memory 或运行 OneBot，不能作为微内核完成的证据。
 
@@ -35,6 +35,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - command、message handler、service、event、job 和官方 runtime module 已进入同一 RouteGraph；消息入场冻结 `graph_digest`。
 - `component.worker-host` 拥有可安装 Worker 的准备与启动；`contract.router` 拥有冻结后的命令、Handler、Agent 和模板 responder 分派。
 - `scheduler.jobs` 拥有 JobStore、授权适配、六项管理操作和自己的管理 UI；旧 Job 专用管理路由与壳层面板已删除。
+- `routing.graph` 拥有组件 Event 与 ComponentJob 的持久存储、查询、失败重放和 Handler 退役操作；对应页面由该模块贡献，旧专用管理路由和壳层 DOM 已删除。
 
 ### Agent、群聊与 Shell
 
@@ -51,7 +52,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 ### 控制面
 
 - 运行时描述符支持多个带作用域的 `management_contributions`；Bot scope 可从统一目录发现，并经通用 query/action 网关调用模块契约。
-- Agent、Memory、Routing、Scheduler 与 OneBot 已贡献各自的 UI 工件；OneBot 的 Binding、配置、会话和 Delivery 共九项操作已迁入模块契约。
+- Agent、Memory、Routing、Scheduler 与 OneBot 已贡献各自的 UI 工件；Routing 的 Event/ComponentJob 查询、重放和退役共八项操作，以及 OneBot 的 Binding、配置、会话和 Delivery 共九项操作，均已迁入模块契约。
 - 旧 OneBot 管理路由与 `bindings_api.py` 已删除；凭据在 Adapter 内加密暂存，通用授权票据只携带摘要。
 - 控制台具备摘要绑定的受限 iframe 和有界 `MessageChannel` 原型，但官方可信静态贡献与可安装包沙箱仍使用两条装载路径，尚未统一为最终协议。
 
@@ -82,7 +83,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 ### P0：完成模块化控制台
 
-- 将 Event、ComponentJob、命令/消息策略、诊断、审计、备份、账号和其余固定页面迁入所有者模块贡献。
+- 将命令/消息策略、诊断、审计、备份、账号和其余固定页面迁入所有者模块贡献；Event 与 ComponentJob 已完成迁移，不得重新放回壳层。
 - 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。
@@ -96,12 +97,14 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 ## 最近可信验证
 
-本次运行时收口的验证证据：
+当前工作区的验证证据：
 
 - 无 PostgreSQL 全套：`736 passed, 36 skipped, 1116 deselected`；
+- `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
 - 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
-- Ruff、Python compileall 和 `git diff --check` 通过；
+- Ruff、Python compileall、四个受影响 ES module 的 `node --check` 和 `git diff --check` 通过；
+- Embedding 连接拒绝测试改为占用但不监听的真实 TCP 端口，消除了 Windows accept backlog 把连接前失败误测为发送后断开的竞态；产品的 `NOT_SENT/UNKNOWN` 判定未改动。
 - 旧升级夹具仍把 001–022 当成历史快照，但当前 001 已是改写后的干净开发基线；该冲突没有被伪装成兼容迁移，必须随存储拆分删除旧迁移链与升级夹具。
 - 验证使用隔离的临时 PostgreSQL 17 容器；常驻 `forest-forest-1` 与 `forest-postgres-1` 未被改动。
 

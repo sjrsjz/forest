@@ -120,6 +120,42 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
                 "kind": "query",
                 "authority": "module.read",
             },
+            {"operation_id": "events", "kind": "query", "authority": "event.read"},
+            {
+                "operation_id": "event.replay",
+                "kind": "action",
+                "authority": "event.replay",
+            },
+            {
+                "operation_id": "event.retirement.plan",
+                "kind": "action",
+                "authority": "event.retire.plan",
+            },
+            {
+                "operation_id": "event.retirement.apply",
+                "kind": "action",
+                "authority": "event.retire.apply",
+            },
+            {
+                "operation_id": "component-jobs",
+                "kind": "query",
+                "authority": "component_job.read",
+            },
+            {
+                "operation_id": "component-job.replay",
+                "kind": "action",
+                "authority": "component_job.replay",
+            },
+            {
+                "operation_id": "component-job.retirement.plan",
+                "kind": "action",
+                "authority": "component_job.retire.plan",
+            },
+            {
+                "operation_id": "component-job.retirement.apply",
+                "kind": "action",
+                "authority": "component_job.retire.apply",
+            },
         ]
         agent_contribution, = modules["agent.runtime"]["management_contributions"]
         memory_contribution, = modules["memory.graph"]["management_contributions"]

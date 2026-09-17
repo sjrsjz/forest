@@ -30,4 +30,25 @@
     <p id="dispatch-trace-status" role="status"></p>
     <div id="dispatch-traces" class="dispatch-traces" aria-live="polite"></div>
   </details>
+
+
+<details id="bot-component-jobs" class="card hidden" aria-labelledby="component-jobs-title">
+          <summary id="component-jobs-title"><strong>组件持久任务</strong></summary>
+          <p class="hint">这里管理插件组件自己的持久工作，不是群会话 Agent 的计划任务。任务只调用声明它的组件处理器，不读取群上下文，也不会创建另一条模型响应链。</p>
+          <div class="actions"><label>任务状态<select id="component-job-status-filter"><option value="">全部</option><option value="PENDING">排队中</option><option value="INFLIGHT">处理中</option><option value="RETRY_WAIT">等待重试</option><option value="ACKED">已确认</option><option value="DEAD">死信</option><option value="RETIRED">已退役</option></select></label><button id="component-job-refresh" type="button" class="subtle">刷新组件任务</button></div>
+          <p id="component-job-status" role="status"></p>
+          <h3>持久处理器</h3><div id="component-job-handlers" aria-live="polite"></div>
+          <div id="component-job-retirement-preview" class="hidden"><h3>确认处理器退役</h3><pre id="component-job-retirement-diff"></pre><p class="hint">预览后任务状态变化会使计划失效；正在运行的处理器必须先结束。退役会终结尚未开始的任务。</p><button id="component-job-retirement-apply" type="button">提交处理器退役</button></div>
+          <h3>最近任务</h3><div id="component-job-items" aria-live="polite"></div>
+        </details>
+
+<details id="bot-events" class="card hidden" aria-labelledby="events-title">
+          <summary id="events-title"><strong>组件事件</strong></summary>
+          <p class="hint">这里显示组件间持久事件的订阅与投递元数据，不读取事件正文。死信回放保留原事件身份并建立新的回放轮次；订阅退役需要先预览，且不会抢断正在执行的处理器。</p>
+          <div class="actions"><label>投递状态<select id="event-status-filter"><option value="">全部</option><option value="PENDING">排队中</option><option value="INFLIGHT">处理中</option><option value="RETRY_WAIT">等待重试</option><option value="ACKED">已确认</option><option value="DEAD">死信</option><option value="RETIRED">已退役</option></select></label><button id="event-refresh" type="button" class="subtle">刷新事件状态</button></div>
+          <p id="event-status" role="status"></p>
+          <h3>持久订阅</h3><div id="event-subscriptions" aria-live="polite"></div>
+          <div id="event-retirement-preview" class="hidden"><h3>确认订阅退役</h3><pre id="event-retirement-diff"></pre><p class="hint">若预览后出现新投递或处理状态变化，提交会要求重新预览。正在执行的处理器必须先结束。</p><button id="event-retirement-apply" type="button">提交订阅退役</button></div>
+          <h3>最近投递</h3><div id="event-deliveries" aria-live="polite"></div>
+        </details>
 </section>

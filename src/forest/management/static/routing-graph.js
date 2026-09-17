@@ -1,12 +1,18 @@
+import {componentJobsPanel} from './component-jobs-panel.js';
+import {eventsPanel} from './events-panel.js';
+
 const $ = id => document.getElementById(id);
 
 export function createModulePanel(api, busy, notice) {
   let bot = null, epoch = 0, snapshot = null, traces = [], traceQuery = null, nextBefore = null;
+  const componentEvents = eventsPanel(api, busy, notice);
+  const durableJobs = componentJobsPanel(api, busy, notice);
   const path = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph/queries/snapshot`;
   const operationPath = name => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph/queries/${name}`;
 
   function reset() {
     epoch++; bot = null; snapshot = null; traces = []; traceQuery = null; nextBefore = null;
+    componentEvents.reset(); durableJobs.reset();
     $('bot-route-graph').classList.add('hidden');
     $('route-graph-summary').replaceChildren();
     $('route-graph-nodes').replaceChildren();
@@ -137,11 +143,18 @@ export function createModulePanel(api, busy, notice) {
   async function select(row) {
     reset(); bot = row; const own = epoch;
     $('bot-route-graph').classList.remove('hidden');
-    try { await refresh(); } catch (error) { if (bot && own === epoch) notice(error.message); }
+    try {
+      await refresh();
+      if (!bot || own !== epoch) return;
+      await componentEvents.select(row);
+      if (!bot || own !== epoch) return;
+      await durableJobs.select(row);
+    } catch (error) { if (bot && own === epoch) notice(error.message); }
   }
 
   function invalidateContent(scope) {
-    if (bot && scope.startsWith(`/bots/${encodeURIComponent(bot.bot_id)}/`)) {
+    componentEvents.invalidateContent(scope); durableJobs.invalidateContent(scope);
+    if (bot && scope.startsWith(`/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph`)) {
       snapshot = null; $('route-graph-status').textContent = '路由事实已变化，请刷新快照。';
     }
   }

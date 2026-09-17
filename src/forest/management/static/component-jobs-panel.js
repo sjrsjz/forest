@@ -4,8 +4,10 @@ const labels = {PENDING:'排队中', INFLIGHT:'处理中', RETRY_WAIT:'等待重
 export function componentJobsPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, retirementPlan = null, retirementApplyKey = null;
   const valid = own => bot !== null && own === epoch;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/component-jobs`;
-  const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
+  const post = (operation, body, key) => api(action(operation), body, {'Idempotency-Key':key});
   function facts(root, entries) {
     const list = document.createElement('dl');
     for (const [name, value] of entries) {
@@ -20,9 +22,9 @@ export function componentJobsPanel(api, busy, notice) {
     $('component-job-retirement-diff').replaceChildren();
   }
   async function previewRetirement(row, button) {
-    const own = epoch, prefix = base(), key = crypto.randomUUID();
+    const own = epoch, key = crypto.randomUUID();
     await busy(button, async () => {
-      const result = await post(prefix + '/retirement-plans', {
+      const result = await post('component-job.retirement.plan', {
         component_id:row.component_id, handler_id:row.handler_id,
         expected_revision:row.management_revision,
       }, key);
@@ -70,9 +72,9 @@ export function componentJobsPanel(api, busy, notice) {
         ['错误码',row.last_error_code], ['首次可用',row.first_available_at], ['创建时间',row.created_at]]);
       if (row.replay_allowed) {
         const button = document.createElement('button'); button.type = 'button';
-        button.textContent = '重放死信'; const key = crypto.randomUUID(), own = epoch, prefix = base();
+        button.textContent = '重放死信'; const key = crypto.randomUUID(), own = epoch;
         button.addEventListener('click', () => busy(button, async () => {
-          await post(prefix + '/replays', {
+          await post('component-job.replay', {
             job_id:row.job_id, expected_revision:row.management_revision,
           }, key);
           if (!valid(own)) return;
@@ -86,8 +88,8 @@ export function componentJobsPanel(api, busy, notice) {
   async function refresh() {
     if (!bot) return;
     const own = epoch, seq = ++readSeq, status = $('component-job-status-filter').value;
-    const query = new URLSearchParams({limit:'200'}); if (status) query.set('status', status);
-    const result = await api(base() + '?' + query.toString());
+    const values = {limit:'200'}; if (status) values.status = status;
+    const result = await api(query('component-jobs', values));
     if (!valid(own) || seq !== readSeq) return;
     renderHandlers(result.handlers || []); renderJobs(result.jobs || []);
     $('component-job-status').textContent = `${result.handlers?.length || 0} 个处理器 · ${result.jobs?.length || 0} 个任务`;
@@ -96,9 +98,9 @@ export function componentJobsPanel(api, busy, notice) {
   $('component-job-status-filter').addEventListener('change', event => busy(event.currentTarget, refresh));
   $('component-job-retirement-apply').addEventListener('click', event => {
     if (!retirementPlan || !bot) return;
-    const own = epoch, plan = retirementPlan, key = retirementApplyKey, prefix = base();
+    const own = epoch, plan = retirementPlan, key = retirementApplyKey;
     busy(event.currentTarget, async () => {
-      const result = await post(prefix + '/retirement-requests', {
+      const result = await post('component-job.retirement.apply', {
         expected_revision:plan.expected_revision, plan_id:plan.plan_id,
         plan_digest:plan.plan_digest,
       }, key);
@@ -110,6 +112,7 @@ export function componentJobsPanel(api, busy, notice) {
   });
   function reset() {
     epoch++; readSeq++; bot = null; clearPlan();
+    $('bot-component-jobs').open = false;
     $('bot-component-jobs').classList.add('hidden'); $('component-job-status').textContent = '';
     $('component-job-handlers').replaceChildren(); $('component-job-items').replaceChildren();
     $('component-job-status-filter').value = '';
@@ -119,7 +122,7 @@ export function componentJobsPanel(api, busy, notice) {
     await refresh(); if (!valid(own)) return;
   }
   function invalidateContent(scope) {
-    if (!bot || scope !== base()) return;
+    if (!bot || !scope.startsWith(base())) return;
     epoch++; readSeq++; clearPlan();
     $('component-job-status').textContent = '相关管理正文已不可用，请重新读取组件任务状态。';
   }

@@ -130,24 +130,8 @@
         <div id="bot-components" class="hidden columns"><div class="card"><h2>模块配置</h2><form id="bot-config-form"><label>注册模块<select id="bot-package"></select></label><div id="bot-module-ui" class="hidden" aria-label="模块提供的配置界面"></div><div id="bot-config-fields"></div><label class="check"><input id="bot-grants" type="checkbox" required><span id="bot-grants-label">允许模块读取和写入本 Bot 的持久状态</span></label><label class="check"><input id="bot-handler-takeover" type="checkbox"><span id="bot-handler-takeover-label">允许兼容版本接管尚未执行的群消息 Handler</span></label><div class="actions"><button type="submit">预览模块变更</button><button id="reload-bot-config" type="button" class="subtle">读取最新配置</button><button id="restart-bot-component" type="button" class="subtle">重载当前代际</button><button id="validate-bot-component" type="button" class="subtle">验证模块</button></div><label>启停原因<input id="bot-module-reason" maxlength="256" placeholder="启用或停用时必填"></label><div class="actions"><button id="enable-bot-component" type="button" class="subtle">启用模块</button><button id="disable-bot-component" type="button" class="danger">停用模块</button></div></form><p class="hint">配置和启停状态分别修订。管理请求接纳后由生命周期协调器冻结路由、排空调用并发布；effective state 追上前仍未完成。</p><div id="bot-config-preview" class="hidden"><h3>待应用配置</h3><pre id="bot-config-diff"></pre><button id="bot-config-apply">应用模块变更</button></div></div>
         <div class="card"><h2>运行状态</h2><dl><dt>期望修订</dt><dd id="bot-desired">0</dd><dt>生效修订</dt><dd id="bot-effective">0</dd><dt>消息接入容量</dt><dd id="bot-ingress-status">尚未连接</dd></dl><p id="bot-runtime-status" role="status" class="muted"></p><p class="hint">配置通过检查并完成组件切换后才标记生效。等待期间可继续使用已有组件。</p><h3>调用组件服务</h3><form id="bot-invoke-form"><label>服务<select id="bot-service"></select></label><div id="bot-invoke-fields"></div><button type="submit">调用组件</button></form><p id="bot-invoke-result" role="status"></p></div></div>
         <div class="card"><h2>配置历史与切换进度</h2><p class="hint">历史配置会作为新的修订提交；状态迁移失败时，当前生效版本继续提供服务。</p><button id="read-bot-history" class="subtle">读取配置历史</button><div id="bot-history"></div><button id="bot-history-more" class="subtle hidden">更早的修订</button><details><summary>最近组件切换操作</summary><ol id="bot-operations"></ol></details></div>
-        <section id="bot-component-jobs" class="card hidden" aria-labelledby="component-jobs-title">
-          <h2 id="component-jobs-title">组件持久任务</h2>
-          <p class="hint">这里管理插件组件自己的持久工作，不是群会话 Agent 的计划任务。任务只调用声明它的组件处理器，不读取群上下文，也不会创建另一条模型响应链。</p>
-          <div class="actions"><label>任务状态<select id="component-job-status-filter"><option value="">全部</option><option value="PENDING">排队中</option><option value="INFLIGHT">处理中</option><option value="RETRY_WAIT">等待重试</option><option value="ACKED">已确认</option><option value="DEAD">死信</option><option value="RETIRED">已退役</option></select></label><button id="component-job-refresh" type="button" class="subtle">刷新组件任务</button></div>
-          <p id="component-job-status" role="status"></p>
-          <h3>持久处理器</h3><div id="component-job-handlers" aria-live="polite"></div>
-          <div id="component-job-retirement-preview" class="hidden"><h3>确认处理器退役</h3><pre id="component-job-retirement-diff"></pre><p class="hint">预览后任务状态变化会使计划失效；正在运行的处理器必须先结束。退役会终结尚未开始的任务。</p><button id="component-job-retirement-apply" type="button">提交处理器退役</button></div>
-          <h3>最近任务</h3><div id="component-job-items" aria-live="polite"></div>
-        </section>
-        <section id="bot-events" class="card hidden" aria-labelledby="events-title">
-          <h2 id="events-title">组件事件</h2>
-          <p class="hint">这里显示组件间持久事件的订阅与投递元数据，不读取事件正文。死信回放保留原事件身份并建立新的回放轮次；订阅退役需要先预览，且不会抢断正在执行的处理器。</p>
-          <div class="actions"><label>投递状态<select id="event-status-filter"><option value="">全部</option><option value="PENDING">排队中</option><option value="INFLIGHT">处理中</option><option value="RETRY_WAIT">等待重试</option><option value="ACKED">已确认</option><option value="DEAD">死信</option><option value="RETIRED">已退役</option></select></label><button id="event-refresh" type="button" class="subtle">刷新事件状态</button></div>
-          <p id="event-status" role="status"></p>
-          <h3>持久订阅</h3><div id="event-subscriptions" aria-live="polite"></div>
-          <div id="event-retirement-preview" class="hidden"><h3>确认订阅退役</h3><pre id="event-retirement-diff"></pre><p class="hint">若预览后出现新投递或处理状态变化，提交会要求重新预览。正在执行的处理器必须先结束。</p><button id="event-retirement-apply" type="button">提交订阅退役</button></div>
-          <h3>最近投递</h3><div id="event-deliveries" aria-live="polite"></div>
-        </section>
+
+
         <section id="bot-audit" class="card hidden" aria-labelledby="bot-audit-title">
           <h2 id="bot-audit-title">Bot 审计元数据</h2>
           <p class="hint">按稳定时间游标查看当前 Bot 的运行与控制事实。这里只返回动作、来源类型、时间和不可变标识；审计详情、操作者身份、消息正文及控制正文不会发送到浏览器。</p>

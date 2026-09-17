@@ -1,6 +1,7 @@
 """Module-owned management contract for the authoritative RouteGraph."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -46,6 +47,57 @@ class DispatchTraceInput(BaseModel):
         return value
 
 
+DeliveryStatus = Literal["PENDING", "INFLIGHT", "RETRY_WAIT", "ACKED", "DEAD", "RETIRED"]
+
+
+class EventReadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    subscriber_id: str | None = Field(default=None, min_length=1, max_length=128)
+    topic: str | None = Field(default=None, min_length=1, max_length=128)
+    status: DeliveryStatus | None = None
+    limit: int = Field(default=100, ge=1, le=200)
+
+
+class EventReplayInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    delivery_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class EventRetirementPlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    subscriber_id: str = Field(min_length=1, max_length=128)
+    contract_major: int = Field(ge=1, le=2**31 - 1, strict=True)
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class RetirementApplyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=0, strict=True)
+    plan_id: str = Field(min_length=1, max_length=128)
+    plan_digest: str = Field(min_length=1, max_length=128)
+
+
+class ComponentJobReadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    component_id: str | None = Field(default=None, min_length=1, max_length=128)
+    handler_id: str | None = Field(default=None, min_length=1, max_length=128)
+    status: DeliveryStatus | None = None
+    limit: int = Field(default=100, ge=1, le=200)
+
+
+class ComponentJobReplayInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class ComponentJobRetirementPlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    component_id: str = Field(min_length=1, max_length=128)
+    handler_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0, strict=True)
+
 class RoutingManagementContract(ModuleManagementContract):
     def __init__(self):
         super().__init__((
@@ -57,6 +109,35 @@ class RoutingManagementContract(ModuleManagementContract):
             ModuleOperation(
                 "dispatch-traces", "query", "module.read", DispatchTraceInput,
                 self.dispatch_traces,
+            ),
+            ModuleOperation("events", "query", "event.read", EventReadInput, self.events),
+            ModuleOperation(
+                "event.replay", "action", "event.replay", EventReplayInput,
+                self.replay_event,
+            ),
+            ModuleOperation(
+                "event.retirement.plan", "action", "event.retire.plan",
+                EventRetirementPlanInput, self.plan_event_retirement,
+            ),
+            ModuleOperation(
+                "event.retirement.apply", "action", "event.retire.apply",
+                RetirementApplyInput, self.apply_event_retirement,
+            ),
+            ModuleOperation(
+                "component-jobs", "query", "component_job.read", ComponentJobReadInput,
+                self.component_jobs,
+            ),
+            ModuleOperation(
+                "component-job.replay", "action", "component_job.replay",
+                ComponentJobReplayInput, self.replay_component_job,
+            ),
+            ModuleOperation(
+                "component-job.retirement.plan", "action", "component_job.retire.plan",
+                ComponentJobRetirementPlanInput, self.plan_component_job_retirement,
+            ),
+            ModuleOperation(
+                "component-job.retirement.apply", "action", "component_job.retire.apply",
+                RetirementApplyInput, self.apply_component_job_retirement,
             ),
         ))
 
@@ -72,3 +153,51 @@ class RoutingManagementContract(ModuleManagementContract):
         return await request.module.traces.read(
             request.ticket, request.operation_id, body.model_dump(exclude_none=True)
         )
+
+    async def events(self, request, body):
+        return await request.module.events.read(
+            request.ticket, request.operation_id, body.model_dump(exclude_none=True)
+        )
+
+    async def replay_event(self, request, body):
+        result = await request.module.events.replay(
+            request.ticket, request.operation_id, body.model_dump()
+        )
+        request.bot.kernel.notify_events()
+        return result
+
+    async def plan_event_retirement(self, request, body):
+        return await request.module.events.plan_retirement(
+            request.ticket, request.operation_id, body.model_dump()
+        )
+
+    async def apply_event_retirement(self, request, body):
+        result = await request.module.events.apply_retirement(
+            request.ticket, request.operation_id, body.model_dump()
+        )
+        request.bot.kernel.notify_events()
+        return result
+
+    async def component_jobs(self, request, body):
+        return await request.module.component_jobs.read(
+            request.ticket, request.operation_id, body.model_dump(exclude_none=True)
+        )
+
+    async def replay_component_job(self, request, body):
+        result = await request.module.component_jobs.replay(
+            request.ticket, request.operation_id, body.model_dump()
+        )
+        request.bot.kernel.notify_component_jobs()
+        return result
+
+    async def plan_component_job_retirement(self, request, body):
+        return await request.module.component_jobs.plan_retirement(
+            request.ticket, request.operation_id, body.model_dump()
+        )
+
+    async def apply_component_job_retirement(self, request, body):
+        result = await request.module.component_jobs.apply_retirement(
+            request.ticket, request.operation_id, body.model_dump()
+        )
+        request.bot.kernel.notify_component_jobs()
+        return result

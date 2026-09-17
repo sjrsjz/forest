@@ -22,7 +22,7 @@ async def managed_bot(tmp_path, app, client, name):
     )
     await ready(client, bot)
     managed = await app.state.runtime.fleet.attach(bot["bot_id"])
-    return bot, managed, "/management/v1/bots/" + bot["bot_id"] + "/events"
+    return bot, managed, "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/routing.graph"
 
 
 async def test_web_replays_dead_delivery_with_new_epoch_and_stable_operation(
@@ -57,7 +57,7 @@ async def test_web_replays_dead_delivery_with_new_epoch_and_stable_operation(
         managed.kernel._event_dispatcher.cancel()
         await asyncio.gather(managed.kernel._event_dispatcher, return_exceptions=True)
 
-        view = await client.get(root + "?status=DEAD&limit=10")
+        view = await client.get(root + "/queries/events?status=DEAD&limit=10")
         assert view.status_code == 200, view.text
         public = view.json()["deliveries"][0]
         assert public["replay_allowed"] is True
@@ -66,7 +66,7 @@ async def test_web_replays_dead_delivery_with_new_epoch_and_stable_operation(
         request = {"delivery_id": dead["delivery_id"], "expected_revision": 0}
         attempts = await asyncio.gather(*(
             client.post(
-                root + "/replays", json=request, headers={"idempotency-key": key}
+                root + "/actions/event.replay", json=request, headers={"idempotency-key": key}
             )
             for key in ("replay-race-a", "replay-race-b")
         ))
@@ -78,10 +78,10 @@ async def test_web_replays_dead_delivery_with_new_epoch_and_stable_operation(
         )
         accepted = accepted_response.json()
         assert rejected_response.json()["code"] == "EVENT_DELIVERY_REVISION_CONFLICT"
-        assert await post(client, root + "/replays", request, accepted_key) == accepted
+        assert await post(client, root + "/actions/event.replay", request, accepted_key) == accepted
         assert accepted["replay_epoch"] == 1 and accepted["management_revision"] == 1
         conflict = await post(
-            client, root + "/replays", request, "replay-after-race", status=409
+            client, root + "/actions/event.replay", request, "replay-after-race", status=409
         )
         assert conflict["code"] == "EVENT_DELIVERY_REVISION_CONFLICT"
 
@@ -98,10 +98,10 @@ async def test_web_replays_dead_delivery_with_new_epoch_and_stable_operation(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=ORIGIN
         ) as outsider:
-            assert (await outsider.get(root)).status_code == 401
-        assert (await client.post(root + "/replays", json=request)).status_code == 422
+            assert (await outsider.get(root + "/queries/events")).status_code == 401
+        assert (await client.post(root + "/actions/event.replay", json=request)).status_code == 422
         invalid = await client.post(
-            root + "/replays",
+            root + "/actions/event.replay",
             json={**request, "unexpected": True},
             headers={"idempotency-key": "invalid-event-replay"},
         )
@@ -139,7 +139,7 @@ async def test_retirement_fences_claims_and_allows_only_removal_deployment(
 
         proposal = await post(
             client,
-            root + "/retirement-plans",
+            root + "/actions/event.retirement.plan",
             {"subscriber_id": subscriber_id, "contract_major": 1, "expected_revision": 0},
             "retire-busy-plan",
         )
@@ -149,14 +149,14 @@ async def test_retirement_fences_claims_and_allows_only_removal_deployment(
             "plan_digest": proposal["plan_digest"],
         }
         busy_result = await post(
-            client, root + "/retirement-requests", request, "retire-busy", status=409
+            client, root + "/actions/event.retirement.apply", request, "retire-busy", status=409
         )
         assert busy_result["code"] == "EVENT_SUBSCRIPTION_BUSY"
         await events.defer(managed.kernel.lease, claimed, delay_seconds=60)
 
         proposal = await post(
             client,
-            root + "/retirement-plans",
+            root + "/actions/event.retirement.plan",
             {"subscriber_id": subscriber_id, "contract_major": 1, "expected_revision": 0},
             "retire-ready-plan",
         )
@@ -166,10 +166,10 @@ async def test_retirement_fences_claims_and_allows_only_removal_deployment(
             "plan_digest": proposal["plan_digest"],
         }
         retired = await post(
-            client, root + "/retirement-requests", request, "retire-ready"
+            client, root + "/actions/event.retirement.apply", request, "retire-ready"
         )
         assert await post(
-            client, root + "/retirement-requests", request, "retire-ready"
+            client, root + "/actions/event.retirement.apply", request, "retire-ready"
         ) == retired
         assert retired["management_revision"] == 1
         assert retired["retired_delivery_count"] == 1
@@ -193,6 +193,6 @@ async def test_retirement_fences_claims_and_allows_only_removal_deployment(
             "publisher", "publisher.run", {"value": 42}, operation_id="after-retirement"
         )
         assert len(await events.deliveries()) == 1
-        view = (await client.get(root + "?limit=20")).json()
+        view = (await client.get(root + "/queries/events?limit=20")).json()
         assert view["subscriptions"][0]["active"] is False
         assert view["deliveries"][0]["status"] == "RETIRED"
