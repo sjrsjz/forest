@@ -198,6 +198,10 @@ async def test_clean_agent_runtime_freezes_core_prompt_and_converges_start(
         "principal/a",
         "principal/b",
     ]
+    recovery = await agent.recoverable_runs()
+    assert [(item["session_id"], item["active_run_id"], item["run_state"]) for item in recovery] == [
+        ("session/one", "run/one", "PREPARING_MODEL")
+    ]
 
     conflict, _config, _preset = await _start(
         agent, payloads, suffix="other", conversation="group/one"

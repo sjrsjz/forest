@@ -58,7 +58,7 @@
 - raw event、normalized parts 和 author snapshot 先成为带来源闭包的 payload，再由一个调用方 UoW 原子提交 Adapter platform event 和 Conversation Inbox；
 - Binding head、client 和事件接纳已统一锁序，同一账号不同群可以并行。
 
-Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。领取、续租、选择、Context 追加、失败重排和释放都在调用方事务内复核 Conversation Generation。当前 Agent authority 已进入 RuntimeGraph，但 Worker 仍只用确定性假 Agent 端口验证调度协议；真实 Provider/工具循环、Delivery 和最终回复跨模块 participant UnitOfWork 尚未接入，因此生产启动图没有启用 Worker 任务。
+Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。领取、续租、选择、Context 追加、失败重排和释放都在调用方事务内复核 Conversation Generation。活跃 Session 本身已作为恢复候选；Worker 重启后读取持久 `session_ref/run_ref` 并恢复原执行链，Agent authority 也能枚举包含已完成但尚未排空 Session 的活动 Run 头。完成端口必须显式返回实际回答的 trigger 集合，不能依赖丢失即不可恢复的进程内累计列表。当前 Agent authority 已进入 RuntimeGraph，但 Worker 仍只用确定性假 Agent 端口验证调度协议；真实 Provider/工具循环、Delivery 和最终回复跨模块 participant UnitOfWork 尚未接入，因此生产启动图没有启用 Worker 任务。
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 

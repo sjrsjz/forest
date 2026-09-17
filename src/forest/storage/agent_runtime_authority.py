@@ -2082,3 +2082,32 @@ class AgentRuntimeRepository:
         _bounded(run_id, "run_id", 256)
         async with self._transaction(_connection) as conn:
             return await self._expanded_run(conn, run_id)
+
+    async def recoverable_runs(self, *, limit: int = 64, _connection=None) -> tuple[dict, ...]:
+        """List active Session heads that must resume or be explicitly closed.
+
+        A completed Run remains the head until Conversation either installs a
+        successor or confirms that the group queue was silently drained.  It is
+        therefore intentionally included in recovery discovery.
+        """
+
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid recovery limit", 422)
+        async with self._transaction(_connection) as conn:
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT s.session_id,s.conversation_ref,s.session_epoch,"
+                        "s.active_run_id,r.state AS run_state,r.owner_id,r.owner_epoch,"
+                        "r.owner_expires_at,r.absolute_deadline,r.checkpoint_seq,r.updated_at "
+                        "FROM {} s JOIN {} r ON r.bot_id=s.bot_id AND r.run_id=s.active_run_id "
+                        "WHERE s.bot_id=%s AND s.state='ACTIVE' "
+                        "ORDER BY r.updated_at,r.run_id LIMIT %s"
+                    ).format(
+                        self._table("agent_sessions"),
+                        self._table("agent_runs"),
+                    ),
+                    (self.store.bot_id, limit),
+                )
+            ).fetchall()
+            return tuple(dict(row) for row in rows)

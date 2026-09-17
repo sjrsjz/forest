@@ -27,7 +27,7 @@ def _batch(conversation: str, *trigger_ids: str, kind: str = "TRIGGER_INPUT") ->
     }
 
 
-def _reply(run_ref: str) -> AgentExecutionCompletion:
+def _reply(run_ref: str, *trigger_ids: str) -> AgentExecutionCompletion:
     reply_ref = f"reply/{run_ref}"
     payload = SchedulerPayloadRef(
         payload_id=f"payload/{run_ref}",
@@ -48,6 +48,7 @@ def _reply(run_ref: str) -> AgentExecutionCompletion:
             ),
         ),
         reply_ref=reply_ref,
+        answered_trigger_ids=tuple(trigger_ids),
     )
 
 
@@ -56,6 +57,8 @@ class Lane:
     initial: dict
     safe: list[dict] = field(default_factory=list)
     ending: list[dict] = field(default_factory=lambda: [{"status": "IDLE"}])
+    active: tuple[str, str] | None = None
+    claimed: tuple[str, ...] = ()
 
 
 class FakeScheduler:
@@ -82,6 +85,19 @@ class FakeScheduler:
     async def renew_actor(self, actor, *, lease_seconds):
         assert actor.conversation_id in self.actors
         return actor
+
+    async def execution_state(self, actor):
+        lane = self.lanes[actor.conversation_id]
+        if lane.active is None:
+            return {"active": False, "session_ref": None, "run_ref": None}
+        return {
+            "active": True,
+            "session_ref": lane.active[0],
+            "run_ref": lane.active[1],
+            "claimed_triggers": [
+                {"trigger_id": item} for item in lane.claimed
+            ],
+        }
 
     async def release_actor(self, actor):
         self.actors.remove(actor.conversation_id)
@@ -122,8 +138,13 @@ class SafePointAgent:
 
     async def execute(self, request):
         self.requests.append(request)
-        await request.next_model_input()
-        return _reply(request.run_ref)
+        trigger_ids = [] if request.initial_batch is None else list(
+            request.initial_batch["trigger_ids"]
+        )
+        selected = await request.next_model_input()
+        if selected is not None:
+            trigger_ids.extend(selected["trigger_ids"])
+        return _reply(request.run_ref, *trigger_ids)
 
 
 @pytest.mark.asyncio
@@ -142,6 +163,7 @@ async def test_next_model_call_absorbs_through_last_trigger_in_same_run():
     await worker.run_once("group/a")
 
     assert len(agent.requests) == 1
+    assert not agent.requests[0].recovery
     assert scheduler.appends[0]["answer_trigger_ids"] == ("trigger/1", "trigger/2")
     assert [item[1] for item in scheduler.selections] == [
         "IDLE",
@@ -187,7 +209,7 @@ class ParallelAgent:
         if len(self.entered) == self.expected:
             self.all_entered.set()
         await self.release.wait()
-        return _reply(request.run_ref)
+        return _reply(request.run_ref, *request.initial_batch["trigger_ids"])
 
 
 @pytest.mark.asyncio
@@ -211,3 +233,34 @@ async def test_same_group_is_serial_and_different_groups_run_in_parallel():
     agent.release.set()
     await asyncio.gather(first_a, group_b)
 
+
+@pytest.mark.asyncio
+async def test_active_lane_resumes_same_session_and_run_without_idle_selection():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/existing",),
+            )
+        }
+    )
+
+    class RecoveryAgent:
+        def __init__(self):
+            self.request = None
+
+        async def execute(self, request):
+            self.request = request
+            return _reply(request.run_ref, "trigger/existing")
+
+    agent = RecoveryAgent()
+    worker = ConversationWorker(scheduler, agent, owner_id="generation/two")
+    await worker.run_once("group/a")
+
+    assert agent.request.recovery
+    assert agent.request.initial_batch is None
+    assert agent.request.session_ref == "session/existing"
+    assert agent.request.run_ref == "run/existing"
+    assert all(boundary != "IDLE" for _, boundary, _, _ in scheduler.selections)
+    assert scheduler.appends[0]["answer_trigger_ids"] == ("trigger/existing",)

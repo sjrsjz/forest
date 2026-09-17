@@ -32,7 +32,8 @@ class AgentExecutionRequest:
     conversation_id: str
     session_ref: str
     run_ref: str
-    initial_batch: dict
+    initial_batch: dict | None
+    recovery: bool
     next_model_input: Callable[[], Awaitable[dict | None]]
 
 
@@ -40,6 +41,7 @@ class AgentExecutionRequest:
 class AgentExecutionCompletion:
     facts: tuple[SchedulerContextFact, ...]
     reply_ref: str
+    answered_trigger_ids: tuple[str, ...]
 
 
 class AgentExecutionPort(Protocol):
@@ -193,20 +195,26 @@ class ConversationWorker:
             name=f"{self.owner_id}:{conversation_id}:lease",
         )
         try:
-            session_ref = _ref("session")
-            run_ref = _ref("run")
-            initial = await self.scheduler.select_input(
-                actor,
-                _operation("idle", conversation_id, actor.epoch, session_ref, run_ref),
-                boundary="IDLE",
-                session_ref=session_ref,
-                run_ref=run_ref,
-            )
-            if initial.get("kind") != "TRIGGER_INPUT":
-                return
+            execution = await self.scheduler.execution_state(actor)
+            recovery = bool(execution["active"])
+            if recovery:
+                session_ref = execution["session_ref"]
+                run_ref = execution["run_ref"]
+                initial = None
+            else:
+                session_ref = _ref("session")
+                run_ref = _ref("run")
+                initial = await self.scheduler.select_input(
+                    actor,
+                    _operation("idle", conversation_id, actor.epoch, session_ref, run_ref),
+                    boundary="IDLE",
+                    session_ref=session_ref,
+                    run_ref=run_ref,
+                )
+                if initial.get("kind") != "TRIGGER_INPUT":
+                    return
             batch = initial
             while True:
-                claimed = list(batch["trigger_ids"])
                 safe_point_index = 0
 
                 async def next_model_input() -> dict | None:
@@ -230,7 +238,6 @@ class ConversationWorker:
                             await self._wait_input()
                             continue
                         if selection.get("kind") == "TRIGGER_INPUT":
-                            claimed.extend(selection["trigger_ids"])
                             return selection
                         return None
 
@@ -241,6 +248,7 @@ class ConversationWorker:
                             session_ref=session_ref,
                             run_ref=run_ref,
                             initial_batch=batch,
+                            recovery=recovery,
                             next_model_input=next_model_input,
                         )
                     )
@@ -248,6 +256,13 @@ class ConversationWorker:
                         raise ForestError(
                             "AGENT_EXECUTION_RESULT_INVALID",
                             "Agent execution returned an invalid completion",
+                            500,
+                        )
+                    answered = tuple(dict.fromkeys(completion.answered_trigger_ids))
+                    if not answered or len(answered) != len(completion.answered_trigger_ids):
+                        raise ForestError(
+                            "AGENT_EXECUTION_RESULT_INVALID",
+                            "Agent completion must identify each answered trigger once",
                             500,
                         )
                     await self.scheduler.append_context(
@@ -258,7 +273,7 @@ class ConversationWorker:
                         facts=completion.facts,
                         session_ref=session_ref,
                         run_ref=run_ref,
-                        answer_trigger_ids=tuple(dict.fromkeys(claimed)),
+                        answer_trigger_ids=answered,
                         reply_ref=completion.reply_ref,
                     )
                 except BaseException:
@@ -298,6 +313,7 @@ class ConversationWorker:
                     if end.get("kind") == "TRIGGER_INPUT":
                         run_ref = successor_run_ref
                         batch = end
+                        recovery = False
                         break
                     return
         finally:
@@ -308,4 +324,3 @@ class ConversationWorker:
             except ForestError as exc:
                 if exc.code not in {"STALE_CONVERSATION_ACTOR", "RUNTIME_GENERATION_NOT_ACTIVE"}:
                     raise
-

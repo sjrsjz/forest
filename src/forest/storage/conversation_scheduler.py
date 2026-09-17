@@ -748,6 +748,7 @@ class ConversationSchedulerRepository:
                 await conn.execute(
                     sql.SQL(
                         "SELECT l.conversation_id FROM {} l WHERE l.bot_id=%s AND ("
+                        "l.active_session_ref IS NOT NULL OR "
                         "l.context_applied_seq < l.classified_through_seq OR EXISTS ("
                         "SELECT 1 FROM {} t WHERE t.bot_id=l.bot_id "
                         "AND t.conversation_id=l.conversation_id AND t.status='PENDING' "
@@ -764,6 +765,53 @@ class ConversationSchedulerRepository:
 
     async def claimable_conversations_in(self, conn, *, limit: int = 64):
         return await self.claimable_conversations(limit=limit, _connection=conn)
+
+    async def execution_state(self, actor: ConversationActor, *, _connection=None) -> dict:
+        """Load the durable Session/Run fence held by one acquired group actor.
+
+        An active fence is itself recoverable work, even when every currently
+        classified message has already entered Context.  The caller uses this
+        projection to resume the same Agent chain after process loss instead
+        of attempting an ``IDLE`` selection with fresh identities.
+        """
+
+        if type(actor) is not ConversationActor:
+            raise ForestError("STALE_CONVERSATION_ACTOR", "Invalid conversation actor", 409)
+        async with self._transaction(_connection) as conn:
+            lane = await self._guard_actor(conn, actor)
+            claimed = []
+            if lane["active_session_ref"] is not None:
+                claimed = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT trigger_id,principal_ref,ingress_seq FROM {} "
+                            "WHERE bot_id=%s AND conversation_id=%s AND status='CLAIMED' "
+                            "AND claimed_session_ref=%s AND claimed_run_ref=%s "
+                            "ORDER BY ingress_seq,trigger_id"
+                        ).format(self._table("conversation_triggers")),
+                        (
+                            self.store.bot_id,
+                            actor.conversation_id,
+                            lane["active_session_ref"],
+                            lane["active_run_ref"],
+                        ),
+                    )
+                ).fetchall()
+            return {
+                "conversation_id": actor.conversation_id,
+                "active": lane["active_session_ref"] is not None,
+                "session_ref": lane["active_session_ref"],
+                "run_ref": lane["active_run_ref"],
+                "context_revision": lane["context_revision"],
+                "context_view_revision": lane["context_view_revision"],
+                "context_applied_seq": lane["context_applied_seq"],
+                "classified_through_seq": lane["classified_through_seq"],
+                "mailbox_revision": lane["mailbox_revision"],
+                "claimed_triggers": [dict(row) for row in claimed],
+            }
+
+    async def execution_state_in(self, conn, actor: ConversationActor) -> dict:
+        return await self.execution_state(actor, _connection=conn)
 
     async def _selection_result(self, conn, receipt) -> dict:
         result = {

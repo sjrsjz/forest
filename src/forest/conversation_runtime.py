@@ -224,6 +224,13 @@ class CleanConversationSchedulerRuntime:
             **values,
         )
 
+    async def execution_state(self, actor):
+        return await self._repository_call(
+            "execution_state_in",
+            actor=actor,
+            owned_work=True,
+        )
+
     async def append_context(self, actor, **values):
         return await self._repository_call(
             "append_context_in",

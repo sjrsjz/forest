@@ -194,3 +194,8 @@ class CleanAgentRuntime:
 
     async def load(self, run_id: str):
         return await self._call("load", run_id=run_id, owned_work=True)
+
+    async def recoverable_runs(self, *, limit: int = 64):
+        return await self._call(
+            "recoverable_runs", limit=limit, owned_work=True
+        )

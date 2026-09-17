@@ -382,6 +382,38 @@ async def test_active_agent_absorbs_only_through_new_last_trigger_and_recovery_d
 
 
 @pytest.mark.postgres
+async def test_active_session_is_a_recovery_candidate_even_without_new_mail(
+    clean_scheduler,
+):
+    _store, _storage, payloads, scheduler = clean_scheduler
+    conversation = "group/restart"
+    await _admit(scheduler, payloads, conversation, 1, "user/a")
+    await _classify(scheduler, conversation, 1, "TRIGGER", "user/a")
+    actor = await scheduler.acquire_actor(conversation, "worker/before-restart")
+    selected = await scheduler.select_input(
+        actor,
+        "select/restart/initial",
+        boundary="IDLE",
+        session_ref="session/restart",
+        run_ref="run/restart",
+    )
+    assert selected["kind"] == "TRIGGER_INPUT"
+
+    execution = await scheduler.execution_state(actor)
+    assert execution["active"]
+    assert (execution["session_ref"], execution["run_ref"]) == (
+        "session/restart",
+        "run/restart",
+    )
+    assert [item["trigger_id"] for item in execution["claimed_triggers"]] == [
+        "trigger/group/restart/1"
+    ]
+    await scheduler.release_actor(actor)
+
+    assert conversation in await scheduler.claimable_conversations()
+
+
+@pytest.mark.postgres
 async def test_admission_and_selection_converge_and_other_lanes_do_not_share_row_lock(
     clean_scheduler,
 ):
