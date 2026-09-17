@@ -18,7 +18,7 @@ from forest.embeddings import (
     EmbeddingVector,
 )
 from forest.errors import ForestError
-from forest.memory_embedding_worker import MemoryEmbeddingWorker
+from forest.memory_embedding_worker import EmbeddingBatchItem, MemoryEmbeddingWorker
 from forest.runtime_modules import official_storage_bundle
 from forest.storage.bot import BotStore
 from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
@@ -1307,3 +1307,174 @@ async def test_clean_vl_worker_uses_handoff_fence_and_payload_lineage(clean_memo
             )
         ).fetchone()
     assert lineage["parent_payload_id"] == image_facet["input_payload_id"]
+
+
+@pytest.mark.postgres
+async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memory_graph):
+    store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    profile = EmbeddingProfile(
+        deployment_id="qiyu-vl",
+        model_revision="qiyu-docker-v1",
+        model=SILICONFLOW_VL_MODEL,
+        dimensions=1024,
+    )
+    await memory.initialize_domain(
+        operation_id="memory/domain/initialize/batch",
+        space_id=profile.space_id,
+        embedding_model_kind=profile.model,
+        model_revision_digest="sha256:" + "d" * 64,
+        dimensions=profile.dimensions,
+        normalization="L2",
+        fusion_policy_revision="fusion/1",
+    )
+    await _register(memory, "batch")
+    source = await _unit_values(
+        payloads, source_suffix="batch", unit_suffix="batch-mixed", mixed=True
+    )
+    await _capture_and_qualify(memory, payloads, batches, source, suffix="batch-mixed")
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    prepared = await retrieval.prepare_source_facets(
+        operation_id="facets/batch-mixed",
+        source_unit_id="unit/batch-mixed",
+        expected_deletion_epoch=0,
+    )
+
+    class BatchClient:
+        calls = 0
+
+        async def dispatch(self, request, *, permitcheck):
+            self.calls += 1
+            await permitcheck(request)
+            facets = request.manifest["facets"]
+            return EmbeddingResult(
+                "RESPONDED",
+                request.request_id,
+                request.transport_attempt_id,
+                request.payload_digest,
+                request.space_id,
+                vectors=tuple(
+                    EmbeddingVector(facet["facet_id"], index, tuple(_vector(index)))
+                    for index, facet in enumerate(facets)
+                ),
+                usage_json='{"total_tokens":2}',
+                http_status=200,
+            )
+
+    client = BatchClient()
+    worker = MemoryEmbeddingWorker(
+        retrieval=retrieval,
+        payloads=payloads,
+        client=client,
+        profile=profile,
+        component_id="embedding.qiyu-vl",
+        generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+    )
+    items = tuple(
+        EmbeddingBatchItem(
+            facet["facet_id"],
+            f"embedding/batch/attempt/{index}",
+            f"embedding/batch/prepare/{index}",
+        )
+        for index, facet in enumerate(prepared["facets"])
+    )
+    results = await worker.execute_batch(
+        items=items,
+        batch_attempt_id="embedding/batch/transport/1",
+        expected_deletion_epoch=0,
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert client.calls == 1
+    assert len(results) == 2
+    assert {result["state"] for result in results} == {"SUCCEEDED"}
+    async with store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT modality,state FROM {}.embedding_facets WHERE bot_id=%s "
+                    "AND source_unit_id=%s ORDER BY modality"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id, "unit/batch-mixed"),
+            )
+        ).fetchall()
+    assert [(row["modality"], row["state"]) for row in rows] == [
+        ("IMAGE", "READY"),
+        ("TEXT", "READY"),
+    ]
+
+
+@pytest.mark.postgres
+async def test_batch_handoff_rolls_back_when_one_facet_is_no_longer_dispatchable(
+    clean_memory_graph,
+):
+    store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "batch-rollback")
+    source = await _unit_values(
+        payloads,
+        source_suffix="batch-rollback",
+        unit_suffix="batch-rollback",
+        mixed=True,
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, source, suffix="batch-rollback"
+    )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    facets = (
+        await retrieval.prepare_source_facets(
+            operation_id="facets/batch-rollback",
+            source_unit_id="unit/batch-rollback",
+            expected_deletion_epoch=0,
+        )
+    )["facets"]
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=2)
+    permits = []
+    for index, facet in enumerate(facets):
+        permits.append(
+            await retrieval.prepare_attempt(
+                operation_id=f"embedding/batch-rollback/prepare/{index}",
+                attempt_id=f"embedding/batch-rollback/attempt/{index}",
+                facet_id=facet["facet_id"],
+                executor_component_id="embedding.qiyu-vl",
+                executor_generation_id="generation/qiyu-vl/1",
+                route_revision="route/qiyu-vl/1",
+                deadline_at=deadline,
+            )
+        )
+    await retrieval.settle_attempt(
+        permits[1],
+        settlement_operation_id="embedding/batch-rollback/settle/1",
+        outcome="NOT_SENT",
+        expected_deletion_epoch=0,
+        error_code="EMBEDDING_CONNECTION_UNAVAILABLE",
+    )
+    with pytest.raises(ForestError) as caught:
+        await retrieval.mark_batch_handoff(
+            permits,
+            batch_operation_id="embedding/batch-rollback/handoff",
+        )
+    assert caught.value.code == "MEMORY_EMBEDDING_NOT_DISPATCHABLE"
+    async with store.pool.connection() as conn:
+        first = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,handoff_operation_id FROM {}.embedding_attempts "
+                    "WHERE bot_id=%s AND attempt_id=%s"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id, permits[0].attempt_id),
+            )
+        ).fetchone()
+    assert first["state"] == "PREPARED"
+    assert first["handoff_operation_id"] is None

@@ -988,6 +988,124 @@ class MemoryRetrievalRepository:
             )
             return dict(attempt)
 
+    async def mark_batch_handoff(
+        self,
+        permits,
+        *,
+        batch_operation_id: str,
+    ) -> tuple[dict, ...]:
+        """Commit every facet handoff or none before one Provider request."""
+        _bounded(batch_operation_id, "batch_operation_id", 256)
+        permits = tuple(permits)
+        if (
+            not 1 <= len(permits) <= 32
+            or any(type(permit) is not EmbeddingPermit for permit in permits)
+            or any(permit.bot_id != self.store.bot_id for permit in permits)
+            or len({permit.attempt_id for permit in permits}) != len(permits)
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding permit batch", 422)
+        handoff_ids = {
+            permit.attempt_id: "batch-handoff:"
+            + hashlib.sha256(
+                f"{batch_operation_id}:{permit.attempt_id}".encode("utf-8")
+            ).hexdigest()
+            for permit in permits
+        }
+        ordered = tuple(sorted(permits, key=lambda permit: permit.attempt_id))
+        async with self.store.pool.connection() as conn, conn.transaction():
+            attempts = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND attempt_id=ANY(%s) "
+                        "ORDER BY attempt_id FOR UPDATE"
+                    ).format(self._table("embedding_attempts")),
+                    (self.store.bot_id, [permit.attempt_id for permit in ordered]),
+                )
+            ).fetchall()
+            if len(attempts) != len(ordered):
+                raise ForestError("MEMORY_STALE_EMBEDDING_PERMIT", "Embedding attempt is missing", 409)
+            by_attempt = {row["attempt_id"]: row for row in attempts}
+            replay = True
+            for permit in ordered:
+                attempt = by_attempt[permit.attempt_id]
+                if not self._permit_matches(attempt, permit):
+                    raise ForestError(
+                        "MEMORY_STALE_EMBEDDING_PERMIT", "Embedding permit differs", 409
+                    )
+                expected_handoff = handoff_ids[permit.attempt_id]
+                if attempt["state"] == "DISPATCHED":
+                    if attempt["handoff_operation_id"] != expected_handoff:
+                        raise ForestError(
+                            "MEMORY_EMBEDDING_HANDOFF_CONFLICT",
+                            "Embedding batch handoff differs",
+                            409,
+                        )
+                    continue
+                replay = False
+                if attempt["state"] != "PREPARED":
+                    raise ForestError(
+                        "MEMORY_EMBEDDING_NOT_DISPATCHABLE",
+                        "Embedding batch contains a terminal attempt",
+                        409,
+                    )
+                if datetime.now(timezone.utc) >= permit.deadline_at:
+                    raise ForestError(
+                        "MEMORY_EMBEDDING_PERMIT_EXPIRED", "Embedding permit expired", 409
+                    )
+                await self._verify_fence(conn, permit)
+                facet = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT * FROM {} WHERE bot_id=%s AND facet_id=%s FOR UPDATE"
+                        ).format(self._table("embedding_facets")),
+                        (self.store.bot_id, permit.facet_id),
+                    )
+                ).fetchone()
+                if (
+                    facet is None
+                    or facet["state"] != "PREPARED"
+                    or facet["current_attempt_id"] != permit.attempt_id
+                ):
+                    raise ForestError(
+                        "MEMORY_STALE_EMBEDDING_PERMIT", "Embedding facet moved", 409
+                    )
+                await self._epoch(conn, expected=permit.accepted_deletion_epoch)
+                await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
+            if replay:
+                return tuple(dict(by_attempt[permit.attempt_id]) for permit in permits)
+            if any(by_attempt[permit.attempt_id]["state"] == "DISPATCHED" for permit in ordered):
+                raise ForestError(
+                    "MEMORY_EMBEDDING_HANDOFF_CONFLICT",
+                    "Embedding batch was only partially handed off",
+                    409,
+                )
+            result = []
+            for permit in ordered:
+                attempt = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET state='DISPATCHED',handoff_operation_id=%s,"
+                            "dispatched_at=clock_timestamp() WHERE bot_id=%s AND attempt_id=%s "
+                            "RETURNING *"
+                        ).format(self._table("embedding_attempts")),
+                        (
+                            handoff_ids[permit.attempt_id],
+                            self.store.bot_id,
+                            permit.attempt_id,
+                        ),
+                    )
+                ).fetchone()
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='DISPATCHED',updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND facet_id=%s"
+                    ).format(self._table("embedding_facets")),
+                    (self.store.bot_id, permit.facet_id),
+                )
+                result.append(dict(attempt))
+            by_result = {row["attempt_id"]: row for row in result}
+            return tuple(dict(by_result[permit.attempt_id]) for permit in permits)
+
     async def settle_attempt(
         self,
         permit: EmbeddingPermit,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import dataclass
 
 from forest.embeddings import (
     EmbeddingCancelled,
@@ -20,6 +21,13 @@ from forest.storage.payload_authority import PayloadSource
 
 def _operation(prefix: str, identity: str) -> str:
     return prefix + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class EmbeddingBatchItem:
+    facet_id: str
+    attempt_id: str
+    prepare_operation_id: str
 
 
 class MemoryEmbeddingWorker:
@@ -97,53 +105,123 @@ class MemoryEmbeddingWorker:
         expected_deletion_epoch: int,
         deadline_at,
     ) -> dict:
-        materialized = await self.retrieval.materialize_facet(
-            facet_id,
+        results = await self.execute_batch(
+            items=(EmbeddingBatchItem(facet_id, attempt_id, prepare_operation_id),),
+            batch_attempt_id=attempt_id,
             expected_deletion_epoch=expected_deletion_epoch,
+            deadline_at=deadline_at,
         )
-        if materialized["space_id"] != self.profile.space_id:
+        return results[0]
+
+    async def execute_batch(
+        self,
+        *,
+        items,
+        batch_attempt_id: str,
+        expected_deletion_epoch: int,
+        deadline_at,
+    ) -> tuple[dict, ...]:
+        items = tuple(items)
+        if (
+            not 1 <= len(items) <= 32
+            or any(type(item) is not EmbeddingBatchItem for item in items)
+            or len({item.facet_id for item in items}) != len(items)
+            or len({item.attempt_id for item in items}) != len(items)
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding batch", 422)
+        materialized = tuple(
+            [
+                await self.retrieval.materialize_facet(
+                    item.facet_id,
+                    expected_deletion_epoch=expected_deletion_epoch,
+                )
+                for item in items
+            ]
+        )
+        if any(value["space_id"] != self.profile.space_id for value in materialized):
             raise ForestError(
                 "EMBEDDING_ROUTE_MISMATCH", "Embedding profile belongs to another Bot space", 409
             )
+        purposes = {value["purpose"].lower() for value in materialized}
+        if len(purposes) != 1:
+            raise ForestError(
+                "MEMORY_EMBEDDING_BATCH_MIXED_PURPOSE",
+                "Document and query facets need separate requests",
+                422,
+            )
         prepared = prepare_embedding_request(
             self.profile,
-            (self._input(materialized),),
-            request_id="request:" + attempt_id,
-            transport_attempt_id=attempt_id,
-            purpose=materialized["purpose"].lower(),
+            tuple(self._input(value) for value in materialized),
+            request_id="request:" + batch_attempt_id,
+            transport_attempt_id=batch_attempt_id,
+            purpose=next(iter(purposes)),
         )
-        permit = await self.retrieval.prepare_attempt(
-            operation_id=prepare_operation_id,
-            attempt_id=attempt_id,
-            facet_id=facet_id,
-            executor_component_id=self.component_id,
-            executor_generation_id=self.generation_id,
-            route_revision=self.route_revision,
-            deadline_at=deadline_at,
-        )
-        handoff_id = _operation("embedding-handoff:", attempt_id)
+        permits = []
+        try:
+            for item in items:
+                permits.append(
+                    await self.retrieval.prepare_attempt(
+                        operation_id=item.prepare_operation_id,
+                        attempt_id=item.attempt_id,
+                        facet_id=item.facet_id,
+                        executor_component_id=self.component_id,
+                        executor_generation_id=self.generation_id,
+                        route_revision=self.route_revision,
+                        deadline_at=deadline_at,
+                    )
+                )
+        except Exception:
+            await self._abort_prepared(tuple(permits), "EMBEDDING_BATCH_PREPARATION_ABORTED")
+            raise
+        handoff_id = _operation("embedding-batch-handoff:", batch_attempt_id)
 
         async def permitcheck(actual):
             if actual is not prepared:
                 raise ForestError(
                     "EMBEDDING_REQUEST_CHANGED", "Embedding transport changed its request", 409
                 )
-            await self.retrieval.mark_handoff(permit, handoff_operation_id=handoff_id)
+            await self.retrieval.mark_batch_handoff(
+                tuple(permits), batch_operation_id=handoff_id
+            )
 
         try:
             result = await self.client.dispatch(prepared, permitcheck=permitcheck)
         except EmbeddingCancelled as exc:
-            await asyncio.shield(self._settle(permit, materialized, exc.result))
+            await asyncio.shield(
+                self._settle_batch(tuple(permits), materialized, exc.result)
+            )
             raise
-        return await self._settle(permit, materialized, result)
+        return await self._settle_batch(tuple(permits), materialized, result)
+
+    async def _abort_prepared(self, permits, error_code):
+        for permit in permits:
+            await self.retrieval.settle_attempt(
+                permit,
+                settlement_operation_id=_operation(
+                    "embedding-settlement:", permit.attempt_id
+                ),
+                outcome="NOT_SENT",
+                expected_deletion_epoch=permit.accepted_deletion_epoch,
+                error_code=error_code,
+            )
+
+    async def _settle_batch(self, permits, materialized, result):
+        return tuple(
+            [
+                await self._settle(permit, value, result)
+                for permit, value in zip(permits, materialized, strict=True)
+            ]
+        )
 
     async def _settle(self, permit, materialized, result) -> dict:
         settlement_id = _operation("embedding-settlement:", permit.attempt_id)
         if result.status == "RESPONDED":
-            if (
-                len(result.vectors) != 1
-                or result.vectors[0].facet_id != materialized["facet_id"]
-            ):
+            vectors = [
+                vector
+                for vector in result.vectors
+                if vector.facet_id == materialized["facet_id"]
+            ]
+            if len(vectors) != 1:
                 raise ForestError(
                     "EMBEDDING_RESPONSE_INVALID", "Embedding response facet differs", 502
                 )
@@ -184,7 +262,7 @@ class MemoryEmbeddingWorker:
                     "embedding.result",
                     permit.attempt_id,
                 ),
-                vector=result.vectors[0].values,
+                vector=vectors[0].values,
             )
         outcome = {
             "NOT_SENT": "NOT_SENT",
