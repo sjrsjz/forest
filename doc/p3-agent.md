@@ -232,7 +232,7 @@ parse FunctionCall
   → next model safe boundary
 ```
 
-Kernel 内部服务可以再调用其他组件。所有调用继承根 `agent_tool_id`、调用树预算、代次和权限衰减；它仍是同一个工具效果，不产生新的 Agent Prompt、Context、memory query 或群回复。
+Kernel 内部服务可以再调用其他组件。所有调用继承根 ToolCall 的 `effect_operation_id`、调用树预算、代次和衰减后的能力授予；它仍是同一个工具效果，不产生新的 Agent Prompt、Context、memory query 或群回复。`kernel.runtime` 不保存 Agent 专用工具字段，Agent 只在自己的 schema 中保存 ToolCall 与该通用 effect 引用。
 
 ## 8. 记忆、裁剪和多模态
 

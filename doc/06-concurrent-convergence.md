@@ -447,7 +447,7 @@ Bot 级 deletion epoch 是首版保守屏障，会使其他正在计算的派生
 
 群聊 Shell 复用这些仲裁入口，不通过独立管理内存对象修改状态。取消与最终回复提交使用同一 Run/效果事务边界：取消先提交时迟到正常回复失败，回复先提交时取消不能抹去已完成事实。批准在唯一 `approval_requests` 记录中对固定命令/计划单次决定，不能将多个批准令牌集合并成更宽的权限；授权变更仍由目标 Bot 当前 policy 事务决定。
 
-暂停/恢复按 `bot_runtime_state.maintenance_epoch` 和显式 admission 期望仲裁。例：重载 L 读取维护版本 m，随后暂停命令 P 提交 m+1 并关闭 data admission；L 的路由切换可以完成自身合法阶段，但其收尾不能恢复 m 所记住的旧准入。旧 resume 也必须因版本变化重新检查最新期望。P0 取消/暂停只能快速提交控制意图；正在重载的资源 lease 不被抢走，不因高优先级将旧操作伪装成已排空。资源的冻结、排空、取消/恢复仍以[生命周期设计](02-kernel-lifecycle.md)与[05 的统一锁序](05-storage-security-operations.md#3-事务与锁顺序)为准。
+暂停/恢复按 `kernel.runtime/runtime_state.maintenance_epoch` 和显式 admission 期望仲裁。例：重载 L 读取维护版本 m，随后暂停命令 P 提交 m+1 并关闭 data admission；L 的路由切换可以完成自身合法阶段，但其收尾不能恢复 m 所记住的旧准入。旧 resume 也必须因版本变化重新检查最新期望。P0 取消/暂停只能快速提交控制意图；正在重载的资源 lease 不被抢走，不因高优先级将旧操作伪装成已排空。资源的冻结、排空、取消/恢复仍以[生命周期设计](02-kernel-lifecycle.md)与[05 的统一锁序](05-storage-security-operations.md#3-事务与锁顺序)为准。
 
 同一 shell 请求的重试固定 `command_id`、规范 `input_digest`、注册表/契约快照与目标；生命周期/Job/效果使用稳定的 `operation_ref={kind,id}`。跨 Bot 在来源库持久请求、目标库幂等操作和来源 CONTROL 回执之间恢复，不存在覆盖两库的隐式事务。目标操作已成功而来源回执未提交，只能查询/续接原操作，不能以新 ID 再执行；这保证可追踪的恢复，不把多目标的部分成功说成合流或原子完成。
 

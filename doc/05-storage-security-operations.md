@@ -29,11 +29,11 @@ PostgreSQL 作为首版持久事实与协调账本。每个 Bot 的共享图包�
 | `bot_catalog` | bot_id、status、profile_ref、storage_generation、config_revision、observed_at | 部署库；bot_id 不复用；config_revision 是带观测版本的目标配置投影，不能作为 Bot 配置 CAS；profile_ref/storage_generation 是部署目录的存储定位/迁移切换权威，按 2.5 与 Bot 库 ACTIVE/SEALED 及写入 fence 协调 |
 | `binding_catalog` | binding_id、bot_id、platform、external_account、status | 部署库；活动 `(platform, external_account)` 唯一 |
 | `module_packages` | package_id、version、digest、trust、artifact_ref | 三元组不可变；摘要校验 |
-| `component_routes` | bot_id、component_id、service、major、generation_id、route_epoch、admission、state_ref | 路由键唯一；epoch 递增 |
-| `bot_runtime_state` | bot_id、registry_revision、storage_generation、status、data_admission、control_admission、maintenance_epoch | registry_revision 仅做配置/路由集合 CAS；维护意图提升 maintenance_epoch，旧恢复流程不得覆盖新决定 |
-| `policy_state` | bot_id、policy_revision、grants_revision、revoked_at | Bot 授权变更与执行检查使用同一权威行 |
+| `kernel.runtime/routes` | bot_id、component_id、service_name、service_major、generation_id、route_epoch、admission | 路由键唯一；epoch 递增；不携带 Agent/Adapter 业务字段 |
+| `kernel.runtime/runtime_state` | bot_id、runtime_revision、storage_generation、status、data_admission、control_admission、maintenance_epoch | runtime_revision 只仲裁运行封印；维护意图提升 maintenance_epoch，旧恢复流程不得覆盖新决定 |
+| `kernel.authorization/policy_clock` | bot_id、policy_revision | 授权撤销事实与 revision 同事务单调推进；授予集、票据和消费事实在 Authorization 自有表中，不塞入 Runtime |
 | `lifecycle_operations` | operation_id、affected_resources、phase、owner_id、op_epoch、lease_until、old/new_plan、error | 相交资源独占；阶段迁移 CAS |
-| `resource_owners` | owner_id、scope、generation_id、kind、resource_ref、status | owner 外键与资源唯一归属 |
+| `kernel.runtime/module_resource_leases` | resource_key、operation_id、op_epoch、owner_id、generation_id、lease_until | 相交生命周期资源唯一归属；按规范 resource_key 顺序获取 |
 | `binding_sessions` | binding_id、connection_epoch、owner_id、lease_until、capabilities | 每绑定最多一个获准发送的所有者 |
 | `command_requests` | command_id、source_event_id、raw_ref、origin_bot_id、origin_binding_id、origin_conversation_id、origin_principal_ref、origin_auth_ref、target_bot_id、target_resource、target_principal_ref、target_auth_ref、command_key、command_version、schema_digest、registry_snapshot_id、argv_ref、argv_digest、input_digest、service_class、state、operation_ref、approval_ref、reply_route、created_at、deadline_at | 单Shell入口`(origin_bot_id, source_event_id)`唯一；RECEIVED冻结来源/原文引用/路由/快照，PARSED再冻结规范命令/参数/目标；operation_ref为`{kind,id}`，approval_ref为`{bot_id,approval_id}` |
 | `command_registry_snapshots` | snapshot_id、scope、revision、digest、entries_ref、created_at | 不可变的名称/别名/契约/实现代际解析快照；核心前缀不可由插件覆盖 |
@@ -91,7 +91,9 @@ Web 来源使用 `origin_ref={kind:web,management_request_id,web_subject_ref,ses
 
 | 表 | 主要字段 | 关键约束 |
 |---|---|---|
-| `effect_operations` | operation_id、run_id?、command_id?、step_id?、tool_id、contract/schema、input_digest、target、grant_ref、state、owner_epoch、receipt | 相同逻辑操作唯一；Run/命令来源分支约束；UNKNOWN 不自动重发 |
+| `kernel.effect/effect_operations` | effect_operation_id、input_digest、effect_kind、target_kind/id、producer generation、root operation ref、input payload ref、state、current_attempt_id、attempt_count、revision | 相同语义效果唯一；不知道 Run/命令/工具/发送业务分支；正文只作 PayloadRef |
+| `kernel.effect/effect_attempts` | attempt_id/no、permit_operation_id、wire payload ref、authorization basis、executor generation、fence identity/epoch、deadline、handoff_operation_id、state/timestamps | 最长 30 秒许可；`PREPARED` 交接前可放弃，`DISPATCHING` 结果丢失只能进入 UNKNOWN |
+| `kernel.effect/effect_observations` / `attempt_abandonments` | 幂等 operation、attempt、evidence payload ref、observed/resulting state、accepted/conflict；reason、cancel flag | 观察与放弃事实不可变；UNKNOWN 只由显式 reconciliation 解析，相反晚到证据留账但不覆盖 |
 | `send_intents` | intent_id、operation_id、send_lane、run_id?、session_id?、conversation_id、response_seq?、command_id?、control_seq?、addressed_trigger_ids、ReplyRoute、contract/schema、content_ref、state、policy_dependencies | CHAT 与 CONTROL 分支 CHECK；分别约束会话 response_seq、命令 control_seq 唯一；意图可恢复，产生代际仅为审计信息 |
 | `send_parts` | intent_id、part_index、content_digest、state、platform_message_id、delivery_owner_epoch | 子项唯一；部分成功单独对账 |
 | `domain_outbox` | event_id、topic、aggregate_id、aggregate_revision、payload_ref、created_at | 与源事实同事务；事件内容不可变 |
