@@ -133,6 +133,7 @@ class EmbeddingClaim:
     accepted_deletion_epoch: int
     deadline_at: datetime
     permits: tuple[EmbeddingPermit, ...]
+    prepare_operation_ids: tuple[str, ...]
 
 
 class MemoryRetrievalRepository:
@@ -833,6 +834,7 @@ class MemoryRetrievalRepository:
             row["accepted_deletion_epoch"],
             row["deadline_at"],
             tuple(self._permit(item) for item in items),
+            tuple(item["operation_id"] for item in items),
         )
 
     async def claim_pending_batch(
@@ -1412,6 +1414,223 @@ class MemoryRetrievalRepository:
                 )
                 result.append(dict(attempt))
             by_result = {row["attempt_id"]: row for row in result}
+            return tuple(dict(by_result[permit.attempt_id]) for permit in permits)
+
+    async def settle_batch(
+        self,
+        permits,
+        *,
+        batch_attempt_id: str,
+        settlement_operation_id: str,
+        outcome: str,
+        expected_deletion_epoch: int,
+        result: MemoryPayloadRef | None = None,
+        vectors=None,
+        error_code: str | None = None,
+        _connection=None,
+    ) -> tuple[dict, ...]:
+        """Publish one Provider result for every claimed facet or none of them."""
+        _bounded(batch_attempt_id, "batch_attempt_id", 256)
+        _bounded(settlement_operation_id, "settlement_operation_id", 256)
+        permits = tuple(permits)
+        if (
+            not 1 <= len(permits) <= 32
+            or any(type(permit) is not EmbeddingPermit for permit in permits)
+            or any(permit.bot_id != self.store.bot_id for permit in permits)
+            or len({permit.attempt_id for permit in permits}) != len(permits)
+            or len({permit.facet_id for permit in permits}) != len(permits)
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding permit batch", 422)
+        if outcome not in {"SUCCEEDED", "NOT_SENT", "UNKNOWN", "FAILED"}:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding batch outcome", 422)
+        if error_code is not None and (
+            not isinstance(error_code, str) or _ERROR_RE.fullmatch(error_code) is None
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding error code", 422)
+        vector_values = dict(vectors or {})
+        if outcome == "SUCCEEDED":
+            if (
+                type(result) is not MemoryPayloadRef
+                or error_code is not None
+                or set(vector_values) != {permit.facet_id for permit in permits}
+            ):
+                raise ForestError("MEMORY_INPUT_INVALID", "Embedding success batch is incomplete", 422)
+            result.validate("embedding.batch_response")
+            executor_ids = {permit.executor_component_id for permit in permits}
+            if (
+                len(executor_ids) != 1
+                or result.owner_component_id not in executor_ids
+                or result.owner_kind != "embedding.batch-response"
+                or result.owner_id != batch_attempt_id
+            ):
+                raise ForestError(
+                    "MEMORY_EMBEDDING_RESULT_CONFLICT",
+                    "Embedding batch response has another owner",
+                    409,
+                )
+        elif result is not None or vector_values or error_code is None:
+            raise ForestError("MEMORY_INPUT_INVALID", "Embedding failure batch is invalid", 422)
+        ordered = tuple(sorted(permits, key=lambda permit: permit.attempt_id))
+        async with self._transaction(_connection) as conn:
+            attempts = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND attempt_id=ANY(%s) "
+                        "ORDER BY attempt_id FOR UPDATE"
+                    ).format(self._table("embedding_attempts")),
+                    (self.store.bot_id, [permit.attempt_id for permit in ordered]),
+                )
+            ).fetchall()
+            if len(attempts) != len(ordered):
+                raise ForestError("MEMORY_STALE_EMBEDDING_PERMIT", "Embedding attempt is missing", 409)
+            by_attempt = {row["attempt_id"]: row for row in attempts}
+            if any(
+                not self._permit_matches(by_attempt[permit.attempt_id], permit)
+                for permit in ordered
+            ):
+                raise ForestError("MEMORY_STALE_EMBEDDING_PERMIT", "Embedding permit differs", 409)
+            facets = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND facet_id=ANY(%s) "
+                        "ORDER BY facet_id FOR UPDATE"
+                    ).format(self._table("embedding_facets")),
+                    (self.store.bot_id, [permit.facet_id for permit in ordered]),
+                )
+            ).fetchall()
+            if len(facets) != len(ordered):
+                raise ForestError("MEMORY_STALE_EMBEDDING_PERMIT", "Embedding facet is missing", 409)
+            by_facet = {row["facet_id"]: row for row in facets}
+            terminal = [
+                by_attempt[permit.attempt_id]["settlement_operation_id"] is not None
+                for permit in ordered
+            ]
+            if any(terminal) and not all(terminal):
+                raise ForestError(
+                    "MEMORY_EMBEDDING_SETTLEMENT_CONFLICT",
+                    "Embedding batch was only partially settled",
+                    409,
+                )
+            domain = await self._domain_in(conn)
+            stored_vectors = {}
+            vector_digests = {}
+            if outcome == "SUCCEEDED":
+                for permit in ordered:
+                    stored = _float32_vector(
+                        vector_values[permit.facet_id],
+                        dimensions=domain["dimensions"],
+                        normalization=domain["normalization"],
+                    )
+                    stored_vectors[permit.attempt_id] = stored
+                    vector_digests[permit.attempt_id] = _digest(list(stored))
+            if all(terminal):
+                for permit in ordered:
+                    attempt = by_attempt[permit.attempt_id]
+                    if (
+                        attempt["state"] != outcome
+                        or attempt["settlement_operation_id"] != settlement_operation_id
+                        or attempt["result_payload_id"]
+                        != (result.payload_id if result is not None else None)
+                        or attempt["result_payload_digest"]
+                        != (result.digest if result is not None else None)
+                        or attempt["vector_digest"] != vector_digests.get(permit.attempt_id)
+                        or attempt["error_code"] != error_code
+                    ):
+                        raise ForestError(
+                            "MEMORY_EMBEDDING_SETTLEMENT_CONFLICT",
+                            "Embedding batch settlement differs",
+                            409,
+                        )
+                return tuple(dict(by_attempt[permit.attempt_id]) for permit in permits)
+            if outcome == "SUCCEEDED":
+                await self._epoch(conn, expected=expected_deletion_epoch)
+                await self._verify_payload(conn, result)
+                units = {}
+                for source_unit_id in sorted(
+                    {by_facet[permit.facet_id]["source_unit_id"] for permit in ordered}
+                ):
+                    units[source_unit_id], _ = await self._source_parts_in(
+                        conn, source_unit_id, lock=True
+                    )
+                for permit in ordered:
+                    facet = by_facet[permit.facet_id]
+                    unit = units[facet["source_unit_id"]]
+                    if unit["source_revision"] != facet["source_revision"]:
+                        raise ForestError(
+                            "MEMORY_SOURCE_UNAVAILABLE", "Embedding source changed", 409
+                        )
+            expected_attempt_states = (
+                {"PREPARED", "DISPATCHED"} if outcome == "NOT_SENT" else {"DISPATCHED"}
+            )
+            expected_facet_states = expected_attempt_states
+            for permit in ordered:
+                attempt = by_attempt[permit.attempt_id]
+                facet = by_facet[permit.facet_id]
+                if (
+                    attempt["state"] not in expected_attempt_states
+                    or facet["state"] not in expected_facet_states
+                    or facet["current_attempt_id"] != permit.attempt_id
+                ):
+                    raise ForestError(
+                        "MEMORY_EMBEDDING_NOT_SETTLEABLE",
+                        "Embedding batch state differs",
+                        409,
+                    )
+                await self._verify_fence(conn, permit)
+            result_rows = []
+            for permit in ordered:
+                attempt = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET state=%s,settlement_operation_id=%s,"
+                            "result_payload_id=%s,result_payload_digest=%s,vector_digest=%s,"
+                            "error_code=%s,settled_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND attempt_id=%s RETURNING *"
+                        ).format(self._table("embedding_attempts")),
+                        (
+                            outcome,
+                            settlement_operation_id,
+                            result.payload_id if result is not None else None,
+                            result.digest if result is not None else None,
+                            vector_digests.get(permit.attempt_id),
+                            error_code,
+                            self.store.bot_id,
+                            permit.attempt_id,
+                        ),
+                    )
+                ).fetchone()
+                if outcome == "SUCCEEDED":
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET state='READY',vector=%s,vector_digest=%s,"
+                            "result_payload_id=%s,result_payload_digest=%s,"
+                            "published_at=clock_timestamp(),updated_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND facet_id=%s"
+                        ).format(self._table("embedding_facets")),
+                        (
+                            list(stored_vectors[permit.attempt_id]),
+                            vector_digests[permit.attempt_id],
+                            result.payload_id,
+                            result.digest,
+                            self.store.bot_id,
+                            permit.facet_id,
+                        ),
+                    )
+                else:
+                    facet_state = {
+                        "NOT_SENT": "PENDING",
+                        "UNKNOWN": "UNKNOWN",
+                        "FAILED": "FAILED",
+                    }[outcome]
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET state=%s,current_attempt_id=NULL,"
+                            "updated_at=clock_timestamp() WHERE bot_id=%s AND facet_id=%s"
+                        ).format(self._table("embedding_facets")),
+                        (facet_state, self.store.bot_id, permit.facet_id),
+                    )
+                result_rows.append(dict(attempt))
+            by_result = {row["attempt_id"]: row for row in result_rows}
             return tuple(dict(by_result[permit.attempt_id]) for permit in permits)
 
     async def settle_attempt(

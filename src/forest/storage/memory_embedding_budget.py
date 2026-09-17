@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
 from psycopg import sql
@@ -49,6 +50,14 @@ class MemoryEmbeddingBudgetRepository:
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
 
+    @asynccontextmanager
+    async def _transaction(self, connection=None):
+        if connection is not None:
+            yield connection
+            return
+        async with self.store.pool.connection() as conn, conn.transaction():
+            yield conn
+
     @staticmethod
     def _validate_day(value):
         if type(value) is not date:
@@ -66,6 +75,7 @@ class MemoryEmbeddingBudgetRepository:
         token_limit: int,
         reserved_tokens: int,
         deadline_at: datetime,
+        _connection=None,
     ) -> dict:
         for value, field in (
             (operation_id, "operation_id"),
@@ -98,7 +108,7 @@ class MemoryEmbeddingBudgetRepository:
                 "deadline_at": deadline_at.isoformat(),
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             replay = await (
                 await conn.execute(
                     sql.SQL(
@@ -213,6 +223,7 @@ class MemoryEmbeddingBudgetRepository:
         outcome: str,
         charged_tokens: int | None = None,
         error_code: str | None = None,
+        _connection=None,
     ) -> dict:
         _bounded(reservation_id, "reservation_id", 256)
         _bounded(settlement_operation_id, "settlement_operation_id", 256)
@@ -228,7 +239,7 @@ class MemoryEmbeddingBudgetRepository:
             not isinstance(error_code, str) or _ERROR_RE.fullmatch(error_code) is None
         ):
             raise ForestError("MEMORY_INPUT_INVALID", "Invalid budget error code", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             located = await (
                 await conn.execute(
                     sql.SQL(

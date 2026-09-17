@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import date
 
@@ -17,6 +18,7 @@ from forest.embeddings import (
 from forest.errors import ForestError
 from forest.models import MediaSnapshot
 from forest.storage.memory_graph_authority import MemoryPayloadRef
+from forest.storage.memory_retrieval_authority import EmbeddingClaim
 from forest.storage.payload_authority import PayloadSource
 
 
@@ -129,6 +131,36 @@ class MemoryEmbeddingWorker:
         )
         return results[0]
 
+    async def execute_claim(
+        self,
+        claim: EmbeddingClaim,
+        *,
+        budget_claim: EmbeddingBudgetClaim | None = None,
+    ) -> tuple[dict, ...]:
+        if (
+            type(claim) is not EmbeddingClaim
+            or claim.bot_id != self.retrieval.store.bot_id
+            or not claim.permits
+            or len(claim.permits) != len(claim.prepare_operation_ids)
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding claim", 422)
+        return await self.execute_batch(
+            items=tuple(
+                EmbeddingBatchItem(
+                    permit.facet_id,
+                    permit.attempt_id,
+                    operation_id,
+                )
+                for permit, operation_id in zip(
+                    claim.permits, claim.prepare_operation_ids, strict=True
+                )
+            ),
+            batch_attempt_id=claim.claim_id,
+            expected_deletion_epoch=claim.accepted_deletion_epoch,
+            deadline_at=claim.deadline_at,
+            budget_claim=budget_claim,
+        )
+
     async def execute_batch(
         self,
         *,
@@ -233,19 +265,25 @@ class MemoryEmbeddingWorker:
         try:
             result = await self.client.dispatch(prepared, permitcheck=permitcheck)
         except EmbeddingCancelled as exc:
-            if budget_claim is not None:
-                await asyncio.shield(
-                    self._settle_budget(budget_claim, batch_attempt_id, exc.result)
-                )
             await asyncio.shield(
-                self._settle_batch(tuple(permits), materialized, exc.result)
+                self._settle_batch(
+                    tuple(permits),
+                    materialized,
+                    exc.result,
+                    batch_attempt_id=batch_attempt_id,
+                    budget_claim=budget_claim,
+                )
             )
             raise
-        if budget_claim is not None:
-            await self._settle_budget(budget_claim, batch_attempt_id, result)
-        return await self._settle_batch(tuple(permits), materialized, result)
+        return await self._settle_batch(
+            tuple(permits),
+            materialized,
+            result,
+            batch_attempt_id=batch_attempt_id,
+            budget_claim=budget_claim,
+        )
 
-    async def _settle_budget(self, claim, batch_attempt_id, result):
+    async def _settle_budget(self, claim, batch_attempt_id, result, *, connection=None):
         settlement_operation_id = _operation(
             "embedding-budget-settlement:", batch_attempt_id
         )
@@ -260,6 +298,7 @@ class MemoryEmbeddingWorker:
                 settlement_operation_id=settlement_operation_id,
                 outcome="CHARGED",
                 charged_tokens=usage["total_tokens"],
+                _connection=connection,
             )
         if result.status == "NOT_SENT":
             outcome = "RELEASED"
@@ -273,6 +312,7 @@ class MemoryEmbeddingWorker:
             outcome=outcome,
             charged_tokens=0 if outcome == "CHARGED" else None,
             error_code=result.error_code or "EMBEDDING_PROVIDER_FAILURE",
+            _connection=connection,
         )
 
     async def _abort_prepared(self, permits, error_code):
@@ -287,74 +327,176 @@ class MemoryEmbeddingWorker:
                 error_code=error_code,
             )
 
-    async def _settle_batch(self, permits, materialized, result):
-        return tuple(
-            [
-                await self._settle(permit, value, result)
-                for permit, value in zip(permits, materialized, strict=True)
-            ]
-        )
-
-    async def _settle(self, permit, materialized, result) -> dict:
-        settlement_id = _operation("embedding-settlement:", permit.attempt_id)
-        if result.status == "RESPONDED":
-            vectors = [
-                vector
-                for vector in result.vectors
-                if vector.facet_id == materialized["facet_id"]
-            ]
-            if len(vectors) != 1:
+    def _validate_response(self, materialized, result):
+        usage = result.usage
+        if (
+            not isinstance(usage, dict)
+            or type(usage.get("total_tokens")) is not int
+            or usage["total_tokens"] < 0
+        ):
+            raise ForestError(
+                "MEMORY_USAGE_INVALID", "Embedding response has no valid token receipt", 422
+            )
+        vectors = {vector.facet_id: vector.values for vector in result.vectors}
+        expected = {value["facet_id"] for value in materialized}
+        if len(vectors) != len(result.vectors) or set(vectors) != expected:
+            raise ForestError(
+                "EMBEDDING_RESPONSE_INVALID", "Embedding response facets differ", 502
+            )
+        for vector in vectors.values():
+            if (
+                not isinstance(vector, (tuple, list))
+                or len(vector) != self.profile.dimensions
+                or any(type(value) not in {int, float} or not math.isfinite(value) for value in vector)
+            ):
                 raise ForestError(
-                    "EMBEDDING_RESPONSE_INVALID", "Embedding response facet differs", 502
+                    "EMBEDDING_RESPONSE_INVALID", "Embedding response vector is invalid", 502
                 )
-            body = json.dumps(
-                result.as_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-            saved = await self.payloads.put_bytes(
-                owner_component_id=self.component_id,
-                owner_kind="embedding.result",
-                owner_id=permit.attempt_id,
-                media_type="application/json",
-                content=body,
-                sources=(
-                    PayloadSource(
-                        source_component_id="memory.graph",
-                        source_kind="embedding.facet",
-                        source_id=materialized["facet_id"],
-                        source_revision=1,
-                        part_id=materialized["part_id"],
+            norm = math.sqrt(sum(float(value) * float(value) for value in vector))
+            if not 0.999 <= norm <= 1.001:
+                raise ForestError(
+                    "EMBEDDING_RESPONSE_INVALID", "Embedding response vector is not normalized", 502
+                )
+        return vectors
+
+    async def _settle_invalid_response(
+        self, permits, result, *, batch_attempt_id, budget_claim
+    ):
+        if budget_claim is not None:
+            try:
+                usage = result.usage
+                valid_usage = (
+                    isinstance(usage, dict)
+                    and type(usage.get("total_tokens")) is int
+                    and usage["total_tokens"] >= 0
+                )
+            except ForestError:
+                valid_usage = False
+            if valid_usage:
+                await self._settle_budget(budget_claim, batch_attempt_id, result)
+            else:
+                await self.budget.settle(
+                    reservation_id=budget_claim.reservation_id,
+                    settlement_operation_id=_operation(
+                        "embedding-budget-settlement:", batch_attempt_id
                     ),
+                    outcome="UNKNOWN",
+                    error_code="EMBEDDING_USAGE_INVALID",
+                )
+        try:
+            await self.retrieval.settle_batch(
+                permits,
+                batch_attempt_id=batch_attempt_id,
+                settlement_operation_id=_operation(
+                    "embedding-batch-settlement:", batch_attempt_id
                 ),
-                parents=(materialized["input_payload_id"],),
-                expected_deletion_epoch=permit.accepted_deletion_epoch,
+                outcome="FAILED",
+                expected_deletion_epoch=permits[0].accepted_deletion_epoch,
+                error_code="EMBEDDING_RESPONSE_INVALID",
             )
-            return await self.retrieval.settle_attempt(
-                permit,
-                settlement_operation_id=settlement_id,
-                outcome="SUCCEEDED",
-                expected_deletion_epoch=permit.accepted_deletion_epoch,
-                result=MemoryPayloadRef(
-                    saved.payload_id,
-                    saved.content_digest,
-                    self.component_id,
-                    "embedding.result",
-                    permit.attempt_id,
-                ),
-                vector=vectors[0].values,
-            )
-        outcome = {
-            "NOT_SENT": "NOT_SENT",
-            "UNKNOWN": "UNKNOWN",
-            "REJECTED": "FAILED",
-        }[result.status]
-        return await self.retrieval.settle_attempt(
-            permit,
-            settlement_operation_id=settlement_id,
-            outcome=outcome,
-            expected_deletion_epoch=permit.accepted_deletion_epoch,
-            error_code=result.error_code or "EMBEDDING_PROVIDER_FAILURE",
-        )
+        except ForestError as exc:
+            if exc.code not in {
+                "MEMORY_EMBEDDING_NOT_SETTLEABLE",
+                "MEMORY_EMBEDDING_SETTLEMENT_CONFLICT",
+                "MEMORY_STALE_EMBEDDING_PERMIT",
+            }:
+                raise
+
+    async def _settle_batch(
+        self,
+        permits,
+        materialized,
+        result,
+        *,
+        batch_attempt_id,
+        budget_claim,
+    ):
+        settlement_id = _operation("embedding-batch-settlement:", batch_attempt_id)
+        vectors = {}
+        response_ref = None
+        if result.status == "RESPONDED":
+            try:
+                vectors = self._validate_response(materialized, result)
+            except ForestError:
+                await asyncio.shield(
+                    self._settle_invalid_response(
+                        permits,
+                        result,
+                        batch_attempt_id=batch_attempt_id,
+                        budget_claim=budget_claim,
+                    )
+                )
+                raise
+        try:
+            async with self.retrieval.store.pool.connection() as conn, conn.transaction():
+                settlement_epoch = permits[0].accepted_deletion_epoch
+                if result.status == "RESPONDED":
+                    settlement_epoch = await self.payloads.epoch_in(conn)
+                    body = json.dumps(
+                        result.as_dict(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ).encode("utf-8")
+                    saved = await self.payloads.put_bytes_in(
+                        conn,
+                        owner_component_id=self.component_id,
+                        owner_kind="embedding.batch-response",
+                        owner_id=batch_attempt_id,
+                        media_type="application/json",
+                        content=body,
+                        sources=tuple(
+                            PayloadSource(
+                                source_component_id="memory.graph",
+                                source_kind="embedding.facet",
+                                source_id=value["facet_id"],
+                                source_revision=value["source_revision"],
+                                part_id=value["part_id"],
+                            )
+                            for value in materialized
+                        ),
+                        parents=tuple(value["input_payload_id"] for value in materialized),
+                        expected_deletion_epoch=settlement_epoch,
+                    )
+                    response_ref = MemoryPayloadRef(
+                        saved.payload_id,
+                        saved.content_digest,
+                        self.component_id,
+                        "embedding.batch-response",
+                        batch_attempt_id,
+                    )
+                if budget_claim is not None:
+                    await self._settle_budget(
+                        budget_claim,
+                        batch_attempt_id,
+                        result,
+                        connection=conn,
+                    )
+                outcome = {
+                    "RESPONDED": "SUCCEEDED",
+                    "NOT_SENT": "NOT_SENT",
+                    "UNKNOWN": "UNKNOWN",
+                    "REJECTED": "FAILED",
+                }[result.status]
+                return await self.retrieval.settle_batch(
+                    permits,
+                    batch_attempt_id=batch_attempt_id,
+                    settlement_operation_id=settlement_id,
+                    outcome=outcome,
+                    expected_deletion_epoch=settlement_epoch,
+                    result=response_ref,
+                    vectors=vectors,
+                    error_code=(
+                        None
+                        if result.status == "RESPONDED"
+                        else result.error_code or "EMBEDDING_PROVIDER_FAILURE"
+                    ),
+                    _connection=conn,
+                )
+        except BaseException:
+            if budget_claim is not None:
+                await asyncio.shield(
+                    self._settle_budget(budget_claim, batch_attempt_id, result)
+                )
+            raise

@@ -1383,19 +1383,18 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         route_revision="route/qiyu-vl/1",
         budget=budget,
     )
-    items = tuple(
-        EmbeddingBatchItem(
-            facet["facet_id"],
-            f"embedding/batch/attempt/{index}",
-            f"embedding/batch/prepare/{index}",
-        )
-        for index, facet in enumerate(prepared["facets"])
-    )
-    results = await worker.execute_batch(
-        items=items,
-        batch_attempt_id="embedding/batch/transport/1",
-        expected_deletion_epoch=0,
+    claim = await retrieval.claim_pending_batch(
+        operation_id="embedding/batch/claim/1",
+        claim_id="embedding/batch/transport/1",
+        purpose="DOCUMENT",
+        executor_component_id="embedding.qiyu-vl",
+        executor_generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
         deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert len(claim.permits) == len(prepared["facets"])
+    results = await worker.execute_claim(
+        claim,
         budget_claim=EmbeddingBudgetClaim(
             reservation_id="budget/batch-worker/1",
             operation_id="budget/batch-worker/reserve/1",
@@ -1417,7 +1416,8 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         rows = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT modality,state FROM {}.embedding_facets WHERE bot_id=%s "
+                    "SELECT modality,state,result_payload_id FROM {}.embedding_facets "
+                    "WHERE bot_id=%s "
                     "AND source_unit_id=%s ORDER BY modality"
                 ).format(sql.Identifier(memory.namespace)),
                 (store.bot_id, "unit/batch-mixed"),
@@ -1427,6 +1427,364 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         ("IMAGE", "READY"),
         ("TEXT", "READY"),
     ]
+    assert len({row["result_payload_id"] for row in rows}) == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("invalid_kind", ["vector", "usage"])
+async def test_invalid_batch_response_settles_cost_and_fails_all_facets(
+    clean_memory_graph, invalid_kind
+):
+    store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    profile = EmbeddingProfile(
+        deployment_id="qiyu-vl",
+        model_revision="qiyu-docker-v1",
+        model=SILICONFLOW_VL_MODEL,
+        dimensions=1024,
+    )
+    await memory.initialize_domain(
+        operation_id="memory/domain/initialize/atomic-batch",
+        space_id=profile.space_id,
+        embedding_model_kind=profile.model,
+        model_revision_digest="sha256:" + "e" * 64,
+        dimensions=profile.dimensions,
+        normalization="L2",
+        fusion_policy_revision="fusion/1",
+    )
+    await _register(memory, "atomic-batch")
+    source = await _unit_values(
+        payloads,
+        source_suffix="atomic-batch",
+        unit_suffix="atomic-batch",
+        mixed=True,
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, source, suffix="atomic-batch"
+    )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    facets = (
+        await retrieval.prepare_source_facets(
+            operation_id="facets/atomic-batch",
+            source_unit_id="unit/atomic-batch",
+            expected_deletion_epoch=0,
+        )
+    )["facets"]
+
+    class InvalidOnceClient:
+        calls = 0
+
+        async def dispatch(self, request, *, permitcheck):
+            self.calls += 1
+            await permitcheck(request)
+            request_facets = request.manifest["facets"]
+            vectors = []
+            for index, facet in enumerate(request_facets):
+                value = tuple(_vector(index))
+                if invalid_kind == "vector" and index == 1:
+                    value = (1.0,)
+                vectors.append(EmbeddingVector(facet["facet_id"], index, value))
+            return EmbeddingResult(
+                "RESPONDED",
+                request.request_id,
+                request.transport_attempt_id,
+                request.payload_digest,
+                request.space_id,
+                vectors=tuple(vectors),
+                usage_json=(
+                    '{"total_tokens":2}'
+                    if invalid_kind == "vector"
+                    else '{"total_tokens":"unknown"}'
+                ),
+                http_status=200,
+            )
+
+    client = InvalidOnceClient()
+    budget = MemoryEmbeddingBudgetRepository(store, namespace=memory.namespace)
+    worker = MemoryEmbeddingWorker(
+        retrieval=retrieval,
+        payloads=payloads,
+        client=client,
+        profile=profile,
+        component_id="embedding.qiyu-vl",
+        generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+        budget=budget,
+    )
+    items = tuple(
+        EmbeddingBatchItem(
+            facet["facet_id"],
+            f"embedding/atomic-batch/attempt/{index}",
+            f"embedding/atomic-batch/prepare/{index}",
+        )
+        for index, facet in enumerate(facets)
+    )
+    claim = EmbeddingBudgetClaim(
+        reservation_id="budget/atomic-batch/1",
+        operation_id="budget/atomic-batch/reserve/1",
+        policy_revision="budget-policy/atomic-batch",
+        budget_day=date(2026, 9, 18),
+        request_limit=10,
+        token_limit=1000,
+        reserved_tokens=100,
+    )
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=2)
+    with pytest.raises(ForestError) as caught:
+        await worker.execute_batch(
+            items=items,
+            batch_attempt_id="embedding/atomic-batch/transport/1",
+            expected_deletion_epoch=0,
+            deadline_at=deadline,
+            budget_claim=claim,
+        )
+    assert caught.value.code == (
+        "EMBEDDING_RESPONSE_INVALID" if invalid_kind == "vector" else "MEMORY_USAGE_INVALID"
+    )
+    charged = await budget.snapshot(date(2026, 9, 18))
+    assert charged["reserved_requests"] == 0
+    if invalid_kind == "vector":
+        assert charged["settled_requests"] == 1
+        assert charged["charged_tokens"] == 2
+    else:
+        assert charged["unknown_requests"] == 1
+        assert charged["unknown_tokens"] == 100
+    async with store.pool.connection() as conn:
+        attempt_states = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state FROM {}.embedding_attempts WHERE bot_id=%s "
+                    "ORDER BY attempt_id"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id,),
+            )
+        ).fetchall()
+        response_count = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT count(*) AS value FROM {}.payload_headers WHERE bot_id=%s "
+                    "AND owner_kind='embedding.batch-response'"
+                ).format(sql.Identifier(payloads.namespace)),
+                (store.bot_id,),
+            )
+        ).fetchone()
+    assert [row["state"] for row in attempt_states] == ["FAILED", "FAILED"]
+    assert response_count["value"] == 0
+    async with store.pool.connection() as conn:
+        published = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,result_payload_id FROM {}.embedding_facets "
+                    "WHERE bot_id=%s ORDER BY facet_id"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id,),
+            )
+        ).fetchall()
+    assert {row["state"] for row in published} == {"FAILED"}
+    assert {row["result_payload_id"] for row in published} == {None}
+
+
+@pytest.mark.postgres
+async def test_unrelated_forget_during_provider_call_keeps_valid_batch_publishable(
+    clean_memory_graph,
+):
+    store, _storage, payloads, memory, forget, batches, _scheduler = clean_memory_graph
+    profile = EmbeddingProfile(
+        deployment_id="qiyu-vl",
+        model_revision="qiyu-docker-v1",
+        model=SILICONFLOW_VL_MODEL,
+        dimensions=1024,
+    )
+    await memory.initialize_domain(
+        operation_id="memory/domain/initialize/inflight-forget",
+        space_id=profile.space_id,
+        embedding_model_kind=profile.model,
+        model_revision_digest="sha256:" + "f" * 64,
+        dimensions=profile.dimensions,
+        normalization="L2",
+        fusion_policy_revision="fusion/1",
+    )
+    await _register(memory, "inflight-removed")
+    await _register(memory, "inflight-survivor")
+    await _register(memory, "inflight-forgotten")
+    removed = await _unit_values(
+        payloads,
+        source_suffix="inflight-removed",
+        unit_suffix="inflight-removed",
+    )
+    survivor = await _unit_values(
+        payloads,
+        source_suffix="inflight-survivor",
+        unit_suffix="inflight-survivor",
+    )
+    forgotten = await _unit_values(
+        payloads,
+        source_suffix="inflight-forgotten",
+        unit_suffix="inflight-forgotten",
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, removed, suffix="inflight-removed"
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, survivor, suffix="inflight-survivor"
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, forgotten, suffix="inflight-forgotten"
+    )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    facet = (
+        await retrieval.prepare_source_facets(
+            operation_id="facets/inflight-survivor",
+            source_unit_id="unit/inflight-survivor",
+            expected_deletion_epoch=0,
+        )
+    )["facets"][0]
+
+    class ForgetDuringDispatch:
+        async def dispatch(self, request, *, permitcheck):
+            await permitcheck(request)
+            await forget.apply(
+                operation_id="forget/inflight-unrelated",
+                source_unit_ids=("unit/inflight-removed",),
+                expected_deletion_epoch=0,
+                reason_code="ADMIN_REQUEST",
+            )
+            return EmbeddingResult(
+                "RESPONDED",
+                request.request_id,
+                request.transport_attempt_id,
+                request.payload_digest,
+                request.space_id,
+                vectors=(EmbeddingVector(facet["facet_id"], 0, tuple(_vector(0))),),
+                usage_json='{"total_tokens":1}',
+                http_status=200,
+            )
+
+    worker = MemoryEmbeddingWorker(
+        retrieval=retrieval,
+        payloads=payloads,
+        client=ForgetDuringDispatch(),
+        profile=profile,
+        component_id="embedding.qiyu-vl",
+        generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+    )
+    result = await worker.execute(
+        facet_id=facet["facet_id"],
+        attempt_id="embedding/inflight-survivor/attempt",
+        prepare_operation_id="embedding/inflight-survivor/prepare",
+        expected_deletion_epoch=0,
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert result["state"] == "SUCCEEDED"
+    assert result["accepted_deletion_epoch"] == 0
+    async with store.pool.connection() as conn:
+        saved = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT accepted_deletion_epoch FROM {}.payload_headers "
+                    "WHERE bot_id=%s AND payload_id=%s"
+                ).format(sql.Identifier(payloads.namespace)),
+                (store.bot_id, result["result_payload_id"]),
+            )
+        ).fetchone()
+    assert saved["accepted_deletion_epoch"] == 1
+
+    forgotten_facet = (
+        await retrieval.prepare_source_facets(
+            operation_id="facets/inflight-forgotten",
+            source_unit_id="unit/inflight-forgotten",
+            expected_deletion_epoch=1,
+        )
+    )["facets"][0]
+
+    class ForgetOwnSourceDuringDispatch:
+        async def dispatch(self, request, *, permitcheck):
+            await permitcheck(request)
+            await forget.apply(
+                operation_id="forget/inflight-own-source",
+                source_unit_ids=("unit/inflight-forgotten",),
+                expected_deletion_epoch=1,
+                reason_code="ADMIN_REQUEST",
+            )
+            return EmbeddingResult(
+                "RESPONDED",
+                request.request_id,
+                request.transport_attempt_id,
+                request.payload_digest,
+                request.space_id,
+                vectors=(
+                    EmbeddingVector(forgotten_facet["facet_id"], 0, tuple(_vector(0))),
+                ),
+                usage_json='{"total_tokens":3}',
+                http_status=200,
+            )
+
+    budget = MemoryEmbeddingBudgetRepository(store, namespace=memory.namespace)
+    forgotten_worker = MemoryEmbeddingWorker(
+        retrieval=retrieval,
+        payloads=payloads,
+        client=ForgetOwnSourceDuringDispatch(),
+        profile=profile,
+        component_id="embedding.qiyu-vl",
+        generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+        budget=budget,
+    )
+    with pytest.raises(ForestError) as caught:
+        await forgotten_worker.execute(
+            facet_id=forgotten_facet["facet_id"],
+            attempt_id="embedding/inflight-forgotten/attempt",
+            prepare_operation_id="embedding/inflight-forgotten/prepare",
+            expected_deletion_epoch=1,
+            deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+            budget_claim=EmbeddingBudgetClaim(
+                reservation_id="budget/inflight-forgotten/1",
+                operation_id="budget/inflight-forgotten/reserve/1",
+                policy_revision="budget-policy/inflight-forgotten",
+                budget_day=date(2026, 9, 18),
+                request_limit=10,
+                token_limit=1000,
+                reserved_tokens=100,
+            ),
+        )
+    assert caught.value.code in {"SOURCE_SUPPRESSED", "PAYLOAD_PARENT_UNAVAILABLE"}
+    charged = await budget.snapshot(date(2026, 9, 18))
+    assert charged["settled_requests"] == 1
+    assert charged["charged_tokens"] == 3
+    async with store.pool.connection() as conn:
+        attempt = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,error_code FROM {}.embedding_attempts "
+                    "WHERE bot_id=%s AND attempt_id=%s"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id, "embedding/inflight-forgotten/attempt"),
+            )
+        ).fetchone()
+        forgotten_state = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,result_payload_id FROM {}.embedding_facets "
+                    "WHERE bot_id=%s AND facet_id=%s"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id, forgotten_facet["facet_id"]),
+            )
+        ).fetchone()
+    assert attempt["state"] == "UNKNOWN"
+    assert attempt["error_code"] == "SOURCE_SUPPRESSED"
+    assert forgotten_state["state"] == "SUPPRESSED"
+    assert forgotten_state["result_payload_id"] is None
 
 
 @pytest.mark.postgres
