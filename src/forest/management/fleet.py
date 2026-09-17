@@ -159,6 +159,7 @@ class BotFleet:
     @staticmethod
     def describe_package(p: PackageSnapshot) -> dict:
         management_ui = p.management_ui()
+        storage_bundle = p.storage_bundle()
         return {
                 "package_digest": p.digest,
                 "package_id": p.manifest["package_id"],
@@ -171,6 +172,7 @@ class BotFleet:
                 ),
                 "config_schema": p.schema(p.component["config_schema"]),
                 "management_ui": management_ui[0] if management_ui else None,
+                "storage": storage_bundle[0] if storage_bundle else None,
                 "grants": p.component.get("capabilities", {}).get("requests", []),
                 "services": [
                     {"name": s["name"], "input_schema": p.schema(s["input_schema"])}

@@ -16,6 +16,7 @@ from typing import Any
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.schema_bundles import StorageBundleSpec, validate_storage_baseline
 
 
 @dataclass(frozen=True)
@@ -51,11 +52,23 @@ class RuntimeManagementView:
 
 
 @dataclass(frozen=True)
+class RuntimeStorageBundle:
+    """Verified immutable SQL owned by one runtime module generation."""
+
+    spec: StorageBundleSpec
+    baseline: bytes
+
+    def __post_init__(self) -> None:
+        validate_storage_baseline(self.baseline, self.spec.baseline_sha256)
+
+
+@dataclass(frozen=True)
 class RuntimeModuleDescriptor:
     component_id: str
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
     management_view: RuntimeManagementView | None = None
+    storage: RuntimeStorageBundle | None = None
 
 
 class ModuleLifecycleState(StrEnum):
@@ -71,7 +84,11 @@ class ModuleLifecycleState(StrEnum):
 
 _TRANSITIONS = {
     ModuleLifecycleState.DISCOVERED: {ModuleLifecycleState.VALIDATED},
-    ModuleLifecycleState.VALIDATED: {ModuleLifecycleState.PREPARED, ModuleLifecycleState.FAILED},
+    ModuleLifecycleState.VALIDATED: {
+        ModuleLifecycleState.PREPARED,
+        ModuleLifecycleState.STOPPED,
+        ModuleLifecycleState.FAILED,
+    },
     ModuleLifecycleState.PREPARED: {
         ModuleLifecycleState.ACTIVE,
         ModuleLifecycleState.STOPPED,
@@ -271,7 +288,9 @@ class BotModuleRegistry:
         facts = []
         for descriptor in self.descriptors:
             view = descriptor.management_view
-            contract = getattr(self.instances[descriptor.component_id], "management_contract", None)
+            contract = getattr(
+                self.instances.get(descriptor.component_id), "management_contract", None
+            )
             fact = {
                 "protocol": "forest.runtime-module/1",
                 "component_id": descriptor.component_id,
@@ -291,6 +310,11 @@ class BotModuleRegistry:
                     else None
                 ),
                 "management_contract": contract.describe() if contract is not None else None,
+                "storage": (
+                    descriptor.storage.spec.as_fact()
+                    if descriptor.storage is not None
+                    else None
+                ),
             }
             facts.append({**fact, "descriptor_digest": digest_json(fact)})
         return facts
@@ -347,15 +371,20 @@ class BotModuleRegistry:
                 or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in identity)
                 or len(set(descriptor.requires)) != len(descriptor.requires)
                 or identity in descriptor.requires
+                or (
+                    descriptor.storage is not None
+                    and descriptor.storage.spec.component_id != identity
+                )
             ):
                 raise ForestError(
                     "RUNTIME_MODULE_DESCRIPTOR_INVALID", "Runtime module descriptor is invalid"
                 )
             self._transition(identity, ModuleLifecycleState.VALIDATED)
+        resolved = set()
         while remaining:
             ready = sorted(
                 (item for item in remaining.values()
-                 if all(required in self.instances for required in item.requires)),
+                 if all(required in resolved for required in item.requires)),
                 key=lambda item: item.component_id,
             )
             if not ready:
@@ -364,15 +393,58 @@ class BotModuleRegistry:
                     "Runtime module dependencies are missing or cyclic",
                 )
             for descriptor in ready:
-                try:
-                    instance = descriptor.factory(self.platform, self.instances)
-                except BaseException:
-                    self._transition(descriptor.component_id, ModuleLifecycleState.FAILED)
-                    raise
-                self.instances[descriptor.component_id] = instance
                 self.order.append(descriptor.component_id)
-                self._transition(descriptor.component_id, ModuleLifecycleState.PREPARED)
+                resolved.add(descriptor.component_id)
                 remaining.pop(descriptor.component_id)
+
+    async def _install_storage(self, descriptor: RuntimeModuleDescriptor) -> None:
+        if descriptor.storage is None:
+            return
+        installer = getattr(self.platform, "schema_bundle_installer", None)
+        install = getattr(installer, "install", None)
+        if install is None:
+            raise ForestError(
+                "SCHEMA_BUNDLE_INSTALLER_UNAVAILABLE",
+                "A storage-owning runtime module requires the host schema installer",
+                503,
+            )
+        await install(descriptor.storage.spec, descriptor.storage.baseline)
+
+    async def _prepare_modules(self) -> None:
+        for component_id in self.order:
+            if self.states[component_id] == ModuleLifecycleState.PREPARED:
+                continue
+            if self.states[component_id] != ModuleLifecycleState.VALIDATED:
+                raise ForestError(
+                    "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                    "Runtime module graph cannot be prepared from its current state",
+                )
+            descriptor = next(
+                item for item in self.descriptors if item.component_id == component_id
+            )
+            try:
+                await self._install_storage(descriptor)
+                instance = descriptor.factory(self.platform, self.instances)
+                self.instances[component_id] = instance
+                self._transition(component_id, ModuleLifecycleState.PREPARED)
+            except BaseException:
+                self._transition(component_id, ModuleLifecycleState.FAILED)
+                raise
+
+    async def _rollback_preparation(self) -> list[Exception]:
+        errors = []
+        for component_id in reversed(self.order):
+            state = self.states[component_id]
+            if state == ModuleLifecycleState.PREPARED:
+                try:
+                    await self._cleanup(component_id)
+                except Exception as exc:
+                    errors.append(exc)
+            elif state == ModuleLifecycleState.FAILED and component_id not in self.instances:
+                self._transition(component_id, ModuleLifecycleState.STOPPED)
+            elif state == ModuleLifecycleState.VALIDATED:
+                self._transition(component_id, ModuleLifecycleState.STOPPED)
+        return errors
 
     def get(self, component_id: str):
         return self.instances[component_id]
@@ -388,12 +460,24 @@ class BotModuleRegistry:
             if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
                 return
             lease = None
-            if self.graph_store is not None:
-                lease = self._lease()
-                if self.graph_identity is None:
-                    self.graph_identity = await self.graph_store.prepare(
-                        lease, self._descriptor_facts()
-                    )
+            try:
+                await self._prepare_modules()
+                if self.graph_store is not None:
+                    lease = self._lease()
+                    if self.graph_identity is None:
+                        self.graph_identity = await self.graph_store.prepare(
+                            lease, self._descriptor_facts()
+                        )
+            except BaseException as exc:
+                rollback_errors = await self._rollback_preparation()
+                if rollback_errors:
+                    raise ForestError(
+                        "RUNTIME_MODULE_PREPARE_ROLLBACK_FAILED",
+                        "Runtime module preparation failed and resources remain owned",
+                        503,
+                        details={"cleanup_errors": len(rollback_errors)},
+                    ) from exc
+                raise
             started = []
             current = None
             try:
@@ -486,7 +570,12 @@ class BotModuleRegistry:
                         ModuleLifecycleState.FAILED,
                         ModuleLifecycleState.QUIESCENT,
                     }:
-                        await self._cleanup(component_id)
+                        if component_id in self.instances:
+                            await self._cleanup(component_id)
+                        else:
+                            self._transition(component_id, ModuleLifecycleState.STOPPED)
+                    elif state == ModuleLifecycleState.VALIDATED:
+                        self._transition(component_id, ModuleLifecycleState.STOPPED)
                 except Exception as exc:
                     errors.append(exc)
             if lease is not None:
@@ -583,8 +672,13 @@ class BotModuleRegistry:
                 "management_contract": (
                     contract.describe()
                     if (contract := getattr(
-                        self.instances[descriptor.component_id], "management_contract", None
+                        self.instances.get(descriptor.component_id), "management_contract", None
                     )) is not None
+                    else None
+                ),
+                "storage": (
+                    descriptor.storage.spec.as_fact()
+                    if descriptor.storage is not None
                     else None
                 ),
             }

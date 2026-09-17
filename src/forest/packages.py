@@ -37,6 +37,11 @@ from forest.command_contract import (
 )
 from forest.errors import ForestError
 from forest.plugin_declarations import synthesize_manifest, verify_checksums, with_checksums
+from forest.schema_bundles import (
+    MAX_STORAGE_BASELINE_BYTES,
+    StorageBundleSpec,
+    validate_storage_baseline,
+)
 from forest.security import private_directory
 
 SKIPPED = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
@@ -183,6 +188,24 @@ MANIFEST_SCHEMA = {
                         "properties": {
                             "entrypoint": {"type": "string"},
                             "protocol": {"const": "forest.management-ui/1"},
+                        },
+                    },
+                    "storage": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "schema_id",
+                            "schema_version",
+                            "baseline",
+                            "baseline_sha256",
+                            "repository_contract",
+                        ],
+                        "properties": {
+                            "schema_id": {"type": "string"},
+                            "schema_version": {"type": "string"},
+                            "baseline": {"type": "string"},
+                            "baseline_sha256": {"type": "string"},
+                            "repository_contract": {"type": "string"},
                         },
                     },
                     "publishes": {
@@ -548,6 +571,47 @@ def _management_ui(files: dict[str, bytes], component: dict) -> dict | None:
     }
 
 
+def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
+    declaration = component.get("storage")
+    if declaration is None:
+        return None
+    schema_id = declaration["schema_id"]
+    reference = declaration["baseline"]
+    path = PurePosixPath(reference)
+    if (
+        not isinstance(reference, str)
+        or not reference.startswith("schema/")
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.suffix.lower() != ".sql"
+        or reference not in files
+    ):
+        _fail(
+            "INVALID_STORAGE_BUNDLE",
+            "Storage baseline must be a packaged schema/*.sql file",
+        )
+    content = files[reference]
+    if not content or len(content) > MAX_STORAGE_BASELINE_BYTES:
+        _fail("INVALID_STORAGE_BUNDLE", "Storage baseline exceeds its byte limit")
+    spec = StorageBundleSpec(
+        component["id"],
+        schema_id,
+        declaration["schema_version"],
+        declaration["baseline_sha256"],
+        declaration["repository_contract"],
+    )
+    validate_storage_baseline(content, spec.baseline_sha256)
+    return {
+        "schema_id": spec.schema_id,
+        "schema_version": spec.schema_version,
+        "namespace": spec.namespace,
+        "baseline": reference,
+        "baseline_sha256": spec.baseline_sha256,
+        "repository_contract": spec.repository_contract,
+        "bytes": len(content),
+    }
+
+
 def _manifest(files: dict[str, bytes]) -> dict:
     verify_checksums(files)
     try:
@@ -617,6 +681,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         dependency_names.add(name)
     _schema(files, component.get("config_schema"))
     _management_ui(files, component)
+    _storage_bundle(files, component)
     services = component.get("provides", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
@@ -778,6 +843,13 @@ class PackageSnapshot:
         if metadata is None:
             return None
         return metadata, files[metadata["entrypoint"]]
+
+    def storage_bundle(self) -> tuple[dict, bytes] | None:
+        files = self._verified_files()
+        metadata = _storage_bundle(files, self.component)
+        if metadata is None:
+            return None
+        return metadata, files[metadata["baseline"]]
 
     def _verified_files(self) -> dict[str, bytes]:
         files = _capture(self.root)

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import pytest
 from forest import packages
 from forest.errors import ForestError
 from forest.packages import PackageCatalog
+from forest.schema_bundles import module_schema_namespace
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "counter"
 
@@ -165,6 +167,74 @@ def test_management_ui_is_immutable_package_content(tmp_path):
     with pytest.raises(ForestError) as caught:
         snapshot.management_ui()
     assert caught.value.code == "PACKAGE_TAMPERED"
+
+
+def test_storage_bundle_is_content_addressed_package_content(tmp_path):
+    root = source(tmp_path)
+    schema = root / "schema" / "baseline.sql"
+    schema.parent.mkdir()
+    sql = b"CREATE TABLE owned_state (key text PRIMARY KEY, value jsonb NOT NULL);\n"
+    schema.write_bytes(sql)
+    digest = hashlib.sha256(sql).hexdigest()
+    with (root / "module.toml").open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n[components.storage]\n"
+            'schema_id = "counter.state"\n'
+            'schema_version = "1.0.0"\n'
+            'baseline = "schema/baseline.sql"\n'
+            f'baseline_sha256 = "{digest}"\n'
+            'repository_contract = "counter.repository/1"\n'
+        )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(root)
+    metadata, content = snapshot.storage_bundle()
+    assert content == sql
+    assert metadata == {
+        "schema_id": "counter.state",
+        "schema_version": "1.0.0",
+        "namespace": module_schema_namespace("counter.state"),
+        "baseline": "schema/baseline.sql",
+        "baseline_sha256": digest,
+        "repository_contract": "counter.repository/1",
+        "bytes": len(sql),
+    }
+    copied = snapshot.root / "schema" / "baseline.sql"
+    copied.chmod(0o600)
+    copied.write_text("CREATE TABLE changed(id int);", encoding="utf-8")
+    with pytest.raises(ForestError) as caught:
+        snapshot.storage_bundle()
+    assert caught.value.code == "PACKAGE_TAMPERED"
+
+
+@pytest.mark.parametrize(
+    "baseline,digest,contract,code",
+    [
+        ("../baseline.sql", "0" * 64, "counter.repository/1", "INVALID_STORAGE_BUNDLE"),
+        ("schema/baseline.sql", "0" * 64, "counter.repository/1", "INVALID_STORAGE_BUNDLE"),
+        ("schema/baseline.sql", None, "counter.repository/1", "INVALID_STORAGE_BUNDLE"),
+        ("schema/baseline.sql", None, "counter repository", "INVALID_STORAGE_BUNDLE"),
+    ],
+)
+def test_invalid_storage_bundle_declarations_are_rejected(
+    tmp_path, baseline, digest, contract, code
+):
+    root = source(tmp_path)
+    schema = root / "schema" / "baseline.sql"
+    schema.parent.mkdir()
+    sql = b"CREATE ROLE forbidden;\n" if digest is None and " " not in contract else b"SELECT 1;\n"
+    schema.write_bytes(sql)
+    actual = hashlib.sha256(sql).hexdigest()
+    with (root / "module.toml").open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n[components.storage]\n"
+            'schema_id = "counter.state"\n'
+            'schema_version = "1.0.0"\n'
+            f'baseline = "{baseline}"\n'
+            f'baseline_sha256 = "{digest or actual}"\n'
+            f'repository_contract = "{contract}"\n'
+        )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert caught.value.code == code
 
 
 @pytest.mark.parametrize("entrypoint,protocol,body", [

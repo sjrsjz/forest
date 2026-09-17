@@ -9,7 +9,9 @@ from forest.runtime_modules import (
     ModuleLifecycleState,
     RuntimeManagementView,
     RuntimeModuleDescriptor,
+    RuntimeStorageBundle,
 )
+from forest.schema_bundles import StorageBundleSpec
 
 
 class Module:
@@ -53,7 +55,8 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
         descriptor("independent", (), events),
         descriptor("provider", (), events),
     ))
-    assert set(registry.states.values()) == {ModuleLifecycleState.PREPARED}
+    assert set(registry.states.values()) == {ModuleLifecycleState.VALIDATED}
+    assert registry.instances == {}
     assert registry.order.index("provider") < registry.order.index("consumer")
     assert not hasattr(platform, "consumer")
     await registry.start()
@@ -63,6 +66,100 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
     starts = [name for action, name in events if action == "start"]
     closes = [name for action, name in events if action == "close"]
     assert closes == list(reversed(starts))
+
+
+@pytest.mark.asyncio
+async def test_storage_is_installed_before_factory_and_prepared_state():
+    import hashlib
+
+    events = []
+    baseline = b"CREATE TABLE records (record_id text PRIMARY KEY);"
+    spec = StorageBundleSpec(
+        component_id="owned",
+        schema_id="owned.records",
+        schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract="owned.records/1",
+    )
+
+    class Installer:
+        async def install(self, installed_spec, installed_baseline):
+            events.append(("install", installed_spec, installed_baseline))
+
+    platform = SimpleNamespace(schema_bundle_installer=Installer())
+
+    def factory(_platform, _modules):
+        events.append(("factory",))
+        return Module("owned", events)
+
+    registry = BotModuleRegistry(
+        platform,
+        (RuntimeModuleDescriptor("owned", (), factory, storage=RuntimeStorageBundle(spec, baseline)),),
+    )
+    assert registry.states["owned"] == ModuleLifecycleState.VALIDATED
+    await registry.start()
+    assert [event[0] for event in events] == ["install", "factory", "start"]
+    assert registry.states["owned"] == ModuleLifecycleState.ACTIVE
+    await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_install_failure_never_constructs_module():
+    import hashlib
+
+    baseline = b"CREATE TABLE records (record_id text PRIMARY KEY);"
+    spec = StorageBundleSpec(
+        component_id="owned",
+        schema_id="owned.records",
+        schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract="owned.records/1",
+    )
+    constructed = []
+
+    class Installer:
+        async def install(self, _spec, _baseline):
+            raise ForestError("SCHEMA_BUNDLE_MISMATCH", "wrong bundle", 409)
+
+    registry = BotModuleRegistry(
+        SimpleNamespace(schema_bundle_installer=Installer()),
+        (
+            RuntimeModuleDescriptor(
+                "owned",
+                (),
+                lambda _platform, _modules: constructed.append(True),
+                storage=RuntimeStorageBundle(spec, baseline),
+            ),
+        ),
+    )
+    with pytest.raises(ForestError) as caught:
+        await registry.start()
+    assert caught.value.code == "SCHEMA_BUNDLE_MISMATCH"
+    assert constructed == []
+    assert registry.instances == {}
+    assert registry.states["owned"] == ModuleLifecycleState.STOPPED
+
+
+def test_storage_bundle_must_be_owned_by_descriptor():
+    import hashlib
+
+    baseline = b"CREATE TABLE records (record_id text PRIMARY KEY);"
+    storage = RuntimeStorageBundle(
+        StorageBundleSpec(
+            component_id="other",
+            schema_id="other.records",
+            schema_version="1.0.0",
+            baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract="other.records/1",
+        ),
+        baseline,
+    )
+    with pytest.raises(ForestError) as caught:
+        BotModuleRegistry(
+            SimpleNamespace(),
+            (RuntimeModuleDescriptor("owned", (), lambda *_: object(), storage=storage),),
+        )
+    assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"
 
 
 def test_registry_rejects_missing_or_cyclic_dependencies():
