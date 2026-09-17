@@ -59,21 +59,25 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 
 图片消息在规范化时即保留有序image part、可信来源和受管媒体获取引用；图片字节尚未到达不等于空消息或无触发。获取作业有独立deadline及PENDING_FETCH/READY/UNAVAILABLE等明确状态，完整枚举见[11](11-multimodal-memory-and-model-projection.md#4-图片接纳归档和可恢复性)。分类可在已知类型/身份和有界获取结果下终结，不能永久等待图片/OCR而阻塞连续水位。迟到媒体作为版本化materialization/enrichment记录保存，只能由下一次合法安全点请求选入；不能在已发请求中补图、修改原ingress_seq或触发第二个同群Agent。
 
-### 2.2 Session、Run、输入批次与触发记录
+### 2.2 物理所有权、Session、Run、输入批次与触发记录
 
-逻辑表沿用[05 的接入与执行表](05-storage-security-operations.md#22-接入会话与执行)，关键字段如下：
+下表是物理所有权契约，不是可以合并进同一 Repository 的概念清单。`conversation.scheduler` 只拥有消息连续序、分类水位、触发领取、输入切口与 Context 提交顺序；`agent.runtime` 才拥有 QiYu Agentlib 语义下的单一 Agent 执行状态机。调度器不能创建模型步骤、工具调用或“子 Agent”，Agent 也不能自行扫描 Inbox 改写切口。
 
-| 记录 | 关键字段与含义 |
-|---|---|
-| `conversation_sessions` | `session_id, conversation_id, status, active_run_id, session_epoch`；承载同群持续工作期间的逻辑独占 |
-| `conversation_triggers` | `trigger_id, event_id, ingress_seq, status, principal_ref, claimed_session_id, claimed_run_id, input_batch_id, answered_reply_id` |
-| `context_input_batches` | `input_batch_id, conversation_id, session_id?, run_id?, start_seq?, end_seq?, trigger_ids, kind, context_revision`；固定来源切口与输入语义 |
-| `run_inputs` | 追加关联 Run、InputBatch 与源事件；新增批次不覆盖早期输入 |
-| `run_steps / run_checkpoints` | 持久保存每个模型请求的输入版本、已闭合步骤、工具操作和 continuation |
-| `context_units` | 输入、已完成步骤和最终回复的不可变单元；保存来源、身份及所属批次 |
-| `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
-| `model_request_manifests` | 实际模型/能力快照、projection_version、固定输入切口、包含/省略parts、媒体修订、语义输入/投影digest与预算；不修改CanonicalContext |
-| `model_transport_attempts` | request_id、实际请求体payload_digest、serializer_revision、短效许可及预算预留引用；派发状态与回执沿用RunStep/checkpoint |
+| 所有者 | 记录 | 关键字段与含义 |
+|---|---|---|
+| `conversation.scheduler` | `conversation_lanes` | `conversation_id, next_ingress_seq, classified_through_seq, context_applied_seq, mailbox_revision, context_revision, context_view_revision, actor_owner_id, actor_epoch, actor_expires_at`；可保留 `active_session_ref/active_run_ref`，但它们只是不可解引用的稳定引用 |
+| `conversation.scheduler` | `inbox_messages` | 不可变来源身份、`ingress_seq`、正文/作者 PayloadRef、分类状态、触发决定；每条已接纳消息都存在，不因 `NO_TRIGGER` 或控制命令而删除 |
+| `conversation.scheduler` | `conversation_triggers` | `trigger_id, event_id, ingress_seq, status, principal_ref, claimed_session_ref, claimed_run_ref, input_batch_id, answered_reply_ref` |
+| `conversation.scheduler` | `input_batches` | `input_batch_id, kind, start_seq?, end_seq?, trigger_cut_seq?, selected_input_end_seq, session_ref?, run_ref?, context_revision`；固定来源切口与输入语义 |
+| `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
+| `conversation.scheduler` | `context_units` | 输入及其他模块已提交事实的有序 PayloadRef；保存来源、作者、所属批次和 `commit_seq/unit_index`，不复制正文 |
+| `conversation.scheduler` | `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
+| `agent.runtime` | `conversation_sessions` | `session_id, conversation_id, status, active_run_id, session_epoch`；承载同群持续工作期间的 Agent 逻辑独占 |
+| `agent.runtime` | `runs / run_inputs` | Run 生命周期及追加的 InputBatch 引用；新增批次不覆盖早期输入 |
+| `agent.runtime` | `run_steps / run_checkpoints` | 持久保存每个模型请求的输入版本、已闭合步骤、工具操作和 continuation |
+| `agent.runtime` | `model_request_manifests / model_transport_attempts` | 模型能力投影、实际请求载荷摘要、派发状态和回执 |
+
+两个模块之间只交换类型化引用和带摘要的消息，不建立跨 schema 外键或 join。调度器提交 InputBatch 后发布 `InputBatchCommitted`；Agent 以幂等 operation 接受该引用并更新自己的 Session/Run。Agent 最终回答、闭合步骤或取消结果再经调度器端口追加 Context 单元、终结所领取 trigger。任一侧崩溃时重放同一 operation；不得用双写表或定时扫描猜测另一侧是否成功。
 
 一个模型调用固定`input_revision, context_revision, context_view_revision, selected_input_end_seq, trigger_ids, source_manifest_digest`及ModelRequestManifest。后者记录实际Provider/model、能力快照、included_part_refs/omitted_part_refs、媒体revision与projected_content_digest；精确载荷在事务外构建后，由最终许可事务另存ModelTransportAttempt的payload_digest，结合派发/回执状态说明该模型实际收到哪些内容。input_revision随同一Run新增InputBatch递增，媒体物化/模型投影另行版本化，不能冒充新增群输入；正在进行的调用不更改自己的版本。trigger_ids包含该Run为完整回复累计领取、尚未终结的触发，不只保存最近一批。
 
@@ -82,6 +86,14 @@ InputBatch 的 `kind` 分为：
 - `TRIGGER_INPUT`：选择触发后增加新的来源前缀，并把对应触发领取给当前 Session/Run。
 - `SILENT_DRAIN`：无触发时只追加普通来源前缀；`run_id = null`，不产生回复型 Run。
 - `RECOVERY_CLAIM`：恢复尚未完成的触发，而其来源已经提交过；`start_seq = end_seq = null`，引用既有 Context 单元，不重复追加消息。
+
+输入选择端口必须显式带边界原因，不能用一个含糊的“拉取下一条”接口：
+
+- `IDLE`：没有活动 Session 时，若连续头内有 trigger，则截到最后一个 trigger 并返回 `TRIGGER_INPUT`；只有普通尾部时直接提交 `SILENT_DRAIN`，不创建 Session/Run。
+- `MODEL_SAFE_POINT`：仅在当前模型调用和工具因果组已经闭合、下一次模型调用尚未冻结时使用。有 trigger 就截到最后一个 trigger；无 trigger 时返回 `WAIT_INPUT` 或 `CONTINUE`，绝不吸收普通尾部。
+- `SESSION_END`：Agent 已结束本次回答且没有可领取 trigger 时，把连续普通尾部提交为 `SILENT_DRAIN`；若已有 trigger，则返回新的 `TRIGGER_INPUT`，由同群串行状态机继续工作。
+
+旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。选择事务只锁本 Conversation lane，再按 `ingress_seq/trigger_id` 稳定顺序写入批次成员；不同 Conversation 不共享行锁，因此可以并行。
 
 ### 2.3 触发状态独立于消费游标
 
