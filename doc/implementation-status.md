@@ -48,6 +48,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - `routing.graph` 已作为官方模块注册，通过通用 management contract 输出 `REPEATABLE READ` 的确定性 RouteGraph；WebUI 视图由模块描述符装载，可筛选节点并查看依赖/事件边及缺失、不兼容、歧义状态。
 - 新消息接纳会在既有 Bot runtime/注册表锁序下保存不可变 `graph_digest`；稳定路由按 registry revision 与 route 摘要直接复用内容寻址快照，只有路由键变化才重建全图。`routing.graph` 可按会话、Binding、群、消息、组件、代际、结果和时间读取由现有权威事实投影的 dispatch trace，并回看消息当时的冻结图。Trace 已沿显式身份扩展 Kernel call 树、component event/delivery、component job/执行 call 和外部 SendPart/attempt/resolution；SendIntent 强制保存类型化 `cause_kind/cause_id`，不再从字符串或载荷猜来源，UNKNOWN 发送状态保持不确定。
 - 官方运行时模块已拥有持久 RuntimeGraph/Generation、依赖边、追加式生命周期事实和原子 graph head。启动全部成功后才发布整图；失败启动不暴露部分模块；关闭先撤下 head 再逆序排空。RouteGraph 冻结 runtime revision，Adapter/Shell/Agent trace 从消息旧快照解析代际，宿主换代后不会改写历史。
+- 模块包已能声明内容寻址的 `components.storage`，入包时校验 schema 身份、版本、Repository 契约、基线摘要、路径、大小和禁止 DDL；管理投影只暴露经过验证的 bundle 元数据。Runtime 描述符把同一存储身份纳入代际摘要，注册表构造阶段只验证依赖图并保持 `VALIDATED`，启动阶段严格按“安装准确 bundle → 构造实例 → `PREPARED` → `ACTIVE`”执行；安装失败不会构造业务模块。实际 PostgreSQL 最小 Kernel baseline、bundle 账本与官方模块 schema 拆分仍属于 P0 阻断项，不能把这项描述符工作解释成数据库切分已经完成。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
 这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、旧 `bot_outbox_events` 的来源归一与资源归属尚未全部迁完；trace 的深层筛选已经改用不可变调用因果根和数据库关联键精确选根，并通过绑定筛选条件的稳定游标跨页读取，不再采用近期消息候选扫描。
