@@ -182,6 +182,8 @@ Bot 运行工作区的剩余固定页面必须拆成两个 authority，不能整
 
 `component.worker-host` 的管理契约使用稳定操作名：`packages`、`configuration`、`configuration-history`、`module`、`module.validate`、`configuration.plan`、`configuration.apply`、`module.enable`、`module.disable` 和 `service.invoke`。启用与停用必须是两个声明不同 authority 的 action，不能由 handler 根据布尔字段在签票后动态换权限。配置预览先根据当前包工件快照校验 schema/能力/接管声明，apply 仍由 Bot 库的 revision、plan digest 和内容来源围栏裁决。`module.validate` 是无持久效果的类型化 query；`service.invoke` 是可能产生组件效果的幂等 action。页面、schema 表单、包内 UI iframe 和历史列表全部随 `component.worker-host` Generation 发布；卸载贡献时壳层不得留下一套可绕过的旧表单。
 
+这两个 authority 也规定了群聊 Shell 的归属：Bot 整体的 pause/resume 只能调用 `kernel.runtime`；某个可安装组件的 validate/enable/disable/reload 只能调用 `component.worker-host`。Shell、WebUI 和 CLI 只是同一类型化 operation 的入口，不各自实现维护或组件生命周期。历史文档中的 `kernel.lifecycle`、`kernel.events`、`kernel.jobs` 和 `audit.bot` 不是目标模块 ID；相应资源分别归 `component.worker-host`、`routing.graph` 与 `kernel.audit`，后续代码不得据这些旧名称建立新模块或兼容路由。
+
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。

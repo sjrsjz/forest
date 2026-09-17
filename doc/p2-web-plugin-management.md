@@ -1,25 +1,34 @@
 # P2 Web 插件与配置管理
 
-本页描述当前实现，后台目标范围仍见 [12](12-webui-administration.md)。插件包与依赖格式见 [插件包说明](p2-plugin-packages.md)，持久状态迁移见 [状态迁移说明](p2-state-migration.md)。
+> **文档级别：实现切片。** 本页只描述包工件与可安装组件的管理协议。控制台结构、作用域和 UI 所有权以 [12](12-webui-administration.md) 与 [13](13-microkernel-control-plane-redesign.md) 为准。不存在一个拥有包仓库、Bot 目录、运行维护和全部组件配置的“模块管理后台”。旧专用包 API 和固定壳层页面已经删除，后续实现不得恢复。
+
+插件包与依赖格式见 [插件包说明](p2-plugin-packages.md)，持久状态迁移见 [状态迁移说明](p2-state-migration.md)。
 
 ## 操作流程
 
-1. 在「运行实例与模块 → 模块注册表」上传完整 ZIP。导入只登记插件，随后在目标 Bot 选择组件与版本，配置字段、勾选所需能力并预览。
-2. 预览固定包摘要、配置、能力和预期修订；应用先增加 desired。候选准备、在途调用排空、迁移与健康检查成功后，目标 Bot 数据库同一事务发布状态、路由与 effective。
-3. 「调用组件服务」按所选服务的输入 schema 显示字段，结果由实际 Worker 返回。各 Bot 的组件状态独立。
-4. 「读取配置历史」按修订倒序分页，每页 50 条。「载入此配置」只填入草稿，预览和应用后创建新修订。历史包需仍可用；若状态格式不同，目标包必须声明并实现从当前格式的迁移。
+1. 管理员先进入 deployment scope 的 `deployment.package-registry` 贡献，通过它的 `package.import` artifact operation 上传完整 ZIP。导入只把内容寻址工件登记到部署包仓库，不选择任何 Bot 的运行版本。
+2. 管理员再通过通用 scope opener 进入目标 Bot。该 Bot 的 `component.worker-host` 贡献从受限包目录端口读取可选工件，用 `packages`、`configuration` 和 `configuration-history` query 展示候选与当前状态。
+3. `configuration.plan` 固定包摘要、配置、能力、接管声明和预期修订；`configuration.apply` 只提交这一不可变计划。候选准备、在途调用排空、迁移与健康检查成功后，目标 Bot 数据库在受围栏事务中发布路由与 effective。
+4. `module.validate` 只做无持久副作用的验证；`module.enable` 与 `module.disable` 是两个权限固定的 action，不能用一个布尔字段在 handler 内动态选择 authority。`service.invoke` 依据已发布服务 schema 调用实际 Worker。
+5. 配置历史按稳定游标分页。载入历史只生成新草稿，重新 plan/apply 后创建新修订；不会倒退 revision。历史包必须仍可按摘要取得，状态格式不同则由目标包声明迁移。
 
-常见的闭合对象 schema 使用字段表单，支持文本、数值、布尔、枚举和可选字段。数组、复合字段及复杂根 schema 提供页面内 JSON 编辑，最终由服务端 schema 校验。日常配置保存在数据库，管理员无需编辑服务器配置文件。
+常见的闭合对象 schema 可以由宿主兜底表单编辑。包也可以携带与摘要、Generation 和 schema revision 绑定的管理 UI；该 UI 在受限 iframe 中只交换草稿补丁、校验和计划请求，不能持有管理 Cookie、拼接 API URL 或直接调用任意管理动作。最终始终由服务端 schema 和模块契约校验。日常配置保存在权威存储中，管理员无需编辑服务器配置文件。
 
-配置读取期间的新增输入、应用期间的新草稿、组件选择，以及调用期间切换服务或修改参数，都有独立的界面版本检查。切换 Bot 或组件时旧字段先移除，避免旧表单参与新的请求。
+配置读取期间的新增输入、应用期间的新草稿、组件选择，以及调用期间切换服务或修改参数，都有独立的界面版本检查。切换 scope、组件或 Generation 时旧控制器必须销毁其状态和未完成响应，避免旧表单参与新的请求。壳层只挂载 `ManagementContribution`，不识别包字段、组件业务语义或上述 operation 的页面布局。
 
 ## 登记与启用的边界
 
-`POST /management/v1/packages` 接收 `application/zip`，要求当前管理员、同源 Origin、CSRF 和幂等键；在读取大请求前检查会话。上传最多 32 MiB、同时最多两个请求。JSON 接口仍限制为 64 KiB。
+上传使用通用 artifact 路由：
+
+```text
+POST /management/v1/scopes/deployment/{deployment_id}/modules/deployment.package-registry/uploads/package.import
+```
+
+`deployment.package-registry` 的描述符固定 `application/zip`、最大字节数、管理员主体和幂等要求。通用网关在读取正文前完成 scope、ACTIVE Generation、会话、Origin、CSRF、`Content-Length` 和并发门禁，再把有界流交给模块。JSON action 仍受独立的小正文上限约束。旧 `POST /management/v1/packages` 不存在，也不提供兼容别名。
 
 保留命名空间 `forest.*`、`adapter.*`、`core.*` 在任何工件发布前拒绝。完整内容可以先写入本机内容寻址缓存，随后部署数据库在同一事务复检当前会话、固定 `(package_id, version) → digest` 并记录审计。拒绝或取消的请求可能留下孤儿缓存，但不能占用版本名，也不会进入 Fleet 可用包列表。
 
-当前部署最多登记 256 个外部版本。没有自动删除历史包或缓存 GC；这部分属于后续容量管理。插件版本一经登记不可替换，修复插件须发布新版本。包导出仅对已登记的可用包开放，下载也要求登录管理员。
+当前部署最多登记 256 个外部版本。没有自动删除历史包或缓存 GC；这部分属于后续容量管理。插件版本一经登记不可替换，修复插件须发布新版本。包导出通过同一模块声明的 download artifact operation 完成，只对已登记的可用摘要开放并重新校验当前管理主体。
 
 原生 Python 插件需要可信来源。独立 Worker、SDK 权限和锁定依赖管理运行协议与生命周期，不是对恶意本机 Python 代码的操作系统沙箱。
 
@@ -31,4 +40,4 @@
 
 升级失败保留当前生效实例。宿主死亡后，新的有效宿主可终结原宿主遗留的操作；同一有效宿主也可以受限地终结自己已过期、仍精确持有资源与 op epoch 的失败操作，恢复旧入口。过期权限仍不能发布或续租。
 
-页面展示期望与生效修订、运行错误，以及最近十条持久组件切换操作。该列表不是完整日志系统；通用 Job、审批、模型/记忆配置与备份恢复仍在后续阶段实现。
+`component.worker-host` 的贡献展示期望与生效修订、运行错误和有界的持久组件切换记录。该投影不是完整日志系统；Agent、Memory、Routing、审计、备份和恢复由各自模块/控制面服务贡献，不得汇总回一个固定组件后台。

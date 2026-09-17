@@ -12,12 +12,13 @@
 | `jobs` | `scheduler.jobs` | 会话触发 Job、occurrence、委托与重放 |
 | `memory` | `memory.graph` | 当前群主干来源、关系、遗忘 plan/apply |
 | `context` | `conversation.scheduler` | 当前会话视图 inspect/compact/reset |
-| `event` | `kernel.events` | 组件事件 delivery、DEAD 重放、订阅退役 |
-| `component-job` | `kernel.jobs` | 组件持久任务、DEAD 重放、handler 退役 |
-| `module` | `kernel.lifecycle` | validate/enable/disable/reload 与 desired/effective 状态 |
-| `audit` | `audit.bot` | 当前 Bot 的脱敏审计元数据 |
+| `event` | `routing.graph` | 组件事件 delivery、DEAD 重放、订阅退役 |
+| `component-job` | `routing.graph` | 组件持久任务、DEAD 重放、handler 退役 |
+| `module` | `component.worker-host` | 可安装组件的 validate/enable/disable、配置与 desired/effective 状态 |
+| `runtime` | `kernel.runtime` | Bot runtime/admission 投影、维护 revision 与暂停/恢复业务接纳 |
+| `audit` | `kernel.audit` | 当前 Bot 的脱敏审计元数据 |
 
-Shell 控制器不能直接持有 `AgentStore`、`MemoryStore`、`JobStore` 或模块数据库连接。它从冻结 RouteGraph 解析准确 management operation，经 Contract Router 调用，并由目标模块执行最终授权、revision、lease 和资源所有权检查。
+Shell 控制器不能直接持有 `AgentStore`、`MemoryStore`、`JobStore` 或模块数据库连接。它从冻结 RouteGraph 解析准确 management operation，经 Contract Router 调用，并由目标模块执行最终授权、revision、lease 和资源所有权检查。Event 与 ComponentJob 是 `routing.graph` 的两类资源，不是两个伪内核模块；Bot 审计也只能通过 `kernel.audit` 端口读取。`kernel.runtime` 不代理可安装组件，`component.worker-host` 也不能改写 Bot admission。
 
 ## 2. 典型操作
 
@@ -37,6 +38,8 @@ Shell 控制器不能直接持有 `AgentStore`、`MemoryStore`、`JobStore` 或�
 #forest context reset --expect-view <context_view_revision>
 #forest module validate <component_id> --expect-revision <revision>
 #forest module reload <component_id> --expect-revision <revision>
+#forest runtime pause --expect-maintenance-epoch <epoch> --reason "维护"
+#forest runtime resume --expect-maintenance-epoch <epoch> --reason "恢复"
 #forest audit list --action <action> --limit 20
 ```
 
