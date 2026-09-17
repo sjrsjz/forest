@@ -407,7 +407,10 @@ CREATE TABLE embedding_attempts (
         state IN ('PREPARED','DISPATCHED','SUCCEEDED','NOT_SENT','UNKNOWN','RETRYABLE_FAILURE','FAILED')
     ),
     handoff_operation_id text,
-    settlement_operation_id text,
+    settlement_operation_id text CHECK (
+        settlement_operation_id IS NULL
+        OR octet_length(settlement_operation_id) BETWEEN 1 AND 256
+    ),
     result_payload_id text,
     result_payload_digest text CHECK (
         result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
@@ -436,6 +439,49 @@ CREATE TABLE embedding_attempts (
     CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (vector_digest IS NOT NULL))
+);
+
+CREATE TABLE embedding_budget_days (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    budget_day date NOT NULL,
+    reserved_requests integer NOT NULL DEFAULT 0 CHECK (reserved_requests >= 0),
+    settled_requests bigint NOT NULL DEFAULT 0 CHECK (settled_requests >= 0),
+    unknown_requests bigint NOT NULL DEFAULT 0 CHECK (unknown_requests >= 0),
+    reserved_tokens bigint NOT NULL DEFAULT 0 CHECK (reserved_tokens >= 0),
+    charged_tokens bigint NOT NULL DEFAULT 0 CHECK (charged_tokens >= 0),
+    unknown_tokens bigint NOT NULL DEFAULT 0 CHECK (unknown_tokens >= 0),
+    revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,budget_day)
+);
+
+CREATE TABLE embedding_budget_reservations (
+    bot_id text NOT NULL,
+    reservation_id text NOT NULL CHECK (octet_length(reservation_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    batch_ref text NOT NULL CHECK (octet_length(batch_ref) BETWEEN 1 AND 256),
+    policy_revision text NOT NULL CHECK (octet_length(policy_revision) BETWEEN 1 AND 256),
+    budget_day date NOT NULL,
+    request_limit integer NOT NULL CHECK (request_limit BETWEEN 1 AND 1000000),
+    token_limit bigint NOT NULL CHECK (token_limit BETWEEN 1 AND 1000000000000),
+    reserved_tokens bigint NOT NULL CHECK (reserved_tokens BETWEEN 1 AND 1000000000),
+    deadline_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'RESERVED' CHECK (
+        state IN ('RESERVED','RELEASED','CHARGED','UNKNOWN')
+    ),
+    settlement_operation_id text,
+    charged_tokens bigint CHECK (charged_tokens IS NULL OR charged_tokens >= 0),
+    error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    settled_at timestamptz,
+    PRIMARY KEY (bot_id,reservation_id),
+    UNIQUE (bot_id,operation_id),
+    UNIQUE (bot_id,settlement_operation_id),
+    FOREIGN KEY (bot_id,budget_day) REFERENCES embedding_budget_days(bot_id,budget_day),
+    CHECK ((state='RESERVED') = (settled_at IS NULL)),
+    CHECK ((state='RESERVED') = (settlement_operation_id IS NULL)),
+    CHECK ((state='CHARGED') = (charged_tokens IS NOT NULL))
 );
 
 CREATE TABLE retrieval_bundles (
@@ -524,6 +570,9 @@ CREATE INDEX embedding_facets_query_idx ON embedding_facets(
 );
 CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
     bot_id,space_id,purpose,state,published_at,facet_id
+);
+CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reservations(
+    bot_id,state,budget_day,reservation_id
 );
 
 CREATE FUNCTION reject_immutable_row() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -692,6 +741,25 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION guard_embedding_budget_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.reservation_id,NEW.operation_id,NEW.input_digest,
+           NEW.batch_ref,NEW.policy_revision,NEW.budget_day,NEW.request_limit,
+           NEW.token_limit,NEW.reserved_tokens,NEW.deadline_at,NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.reservation_id,OLD.operation_id,OLD.input_digest,
+           OLD.batch_ref,OLD.policy_revision,OLD.budget_day,OLD.request_limit,
+           OLD.token_limit,OLD.reserved_tokens,OLD.deadline_at,OLD.created_at) THEN
+        RAISE EXCEPTION 'Embedding budget reservation identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='RESERVED' AND NEW.state IN ('RELEASED','CHARGED','UNKNOWN') THEN
+        RETURN NEW;
+    END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid embedding budget transition' USING ERRCODE='55000';
+END;
+$$;
+
 CREATE TRIGGER memory_domain_immutable BEFORE UPDATE OR DELETE ON memory_domains
     FOR EACH ROW EXECUTE FUNCTION guard_memory_domain();
 CREATE TRIGGER memory_source_guard BEFORE UPDATE OR DELETE ON memory_sources
@@ -708,6 +776,9 @@ CREATE TRIGGER embedding_facet_guard BEFORE UPDATE OR DELETE ON embedding_facets
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_facet();
 CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_attempts
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
+CREATE TRIGGER embedding_budget_reservation_guard
+    BEFORE UPDATE OR DELETE ON embedding_budget_reservations
+    FOR EACH ROW EXECUTE FUNCTION guard_embedding_budget_reservation();
 CREATE TRIGGER memory_trunks_immutable BEFORE UPDATE OR DELETE ON memory_trunks
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER source_registration_operations_immutable

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -18,7 +18,11 @@ from forest.embeddings import (
     EmbeddingVector,
 )
 from forest.errors import ForestError
-from forest.memory_embedding_worker import EmbeddingBatchItem, MemoryEmbeddingWorker
+from forest.memory_embedding_worker import (
+    EmbeddingBatchItem,
+    EmbeddingBudgetClaim,
+    MemoryEmbeddingWorker,
+)
 from forest.runtime_modules import official_storage_bundle
 from forest.storage.bot import BotStore
 from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
@@ -26,6 +30,7 @@ from forest.storage.conversation_scheduler import (
     ConversationSchedulerRepository,
     SchedulerPayloadRef,
 )
+from forest.storage.memory_embedding_budget import MemoryEmbeddingBudgetRepository
 from forest.storage.memory_graph_authority import (
     MemoryEvidenceRef,
     MemoryForgetUnitOfWork,
@@ -1367,6 +1372,7 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
             )
 
     client = BatchClient()
+    budget = MemoryEmbeddingBudgetRepository(store, namespace=memory.namespace)
     worker = MemoryEmbeddingWorker(
         retrieval=retrieval,
         payloads=payloads,
@@ -1375,6 +1381,7 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
         route_revision="route/qiyu-vl/1",
+        budget=budget,
     )
     items = tuple(
         EmbeddingBatchItem(
@@ -1389,10 +1396,23 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         batch_attempt_id="embedding/batch/transport/1",
         expected_deletion_epoch=0,
         deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+        budget_claim=EmbeddingBudgetClaim(
+            reservation_id="budget/batch-worker/1",
+            operation_id="budget/batch-worker/reserve/1",
+            policy_revision="budget-policy/1",
+            budget_day=date(2026, 9, 18),
+            request_limit=10,
+            token_limit=1000,
+            reserved_tokens=100,
+        ),
     )
     assert client.calls == 1
     assert len(results) == 2
     assert {result["state"] for result in results} == {"SUCCEEDED"}
+    budget_state = await budget.snapshot(date(2026, 9, 18))
+    assert budget_state["settled_requests"] == 1
+    assert budget_state["charged_tokens"] == 2
+    assert budget_state["reserved_requests"] == 0
     async with store.pool.connection() as conn:
         rows = await (
             await conn.execute(
@@ -1478,3 +1498,115 @@ async def test_batch_handoff_rolls_back_when_one_facet_is_no_longer_dispatchable
         ).fetchone()
     assert first["state"] == "PREPARED"
     assert first["handoff_operation_id"] is None
+
+
+@pytest.mark.postgres
+async def test_embedding_budget_converges_and_keeps_unknown_exposure(clean_memory_graph):
+    store, storage, _payloads, _memory, _forget, _batches, _scheduler = clean_memory_graph
+    budget = MemoryEmbeddingBudgetRepository(store, namespace=storage.spec.namespace)
+    budget_day = date(2026, 9, 18)
+    replay_deadline = datetime.now(timezone.utc) + timedelta(minutes=2)
+
+    async def reserve_same():
+        return await budget.reserve(
+            operation_id="budget/reserve/one",
+            reservation_id="budget/one",
+            batch_ref="embedding/batch/one",
+            policy_revision="budget-policy/1",
+            budget_day=budget_day,
+            request_limit=1,
+            token_limit=1000,
+            reserved_tokens=100,
+            deadline_at=replay_deadline,
+        )
+
+    first, replay = await asyncio.gather(reserve_same(), reserve_same())
+    assert {first["duplicate"], replay["duplicate"]} == {False, True}
+    with pytest.raises(ForestError) as caught:
+        await budget.reserve(
+            operation_id="budget/reserve/two",
+            reservation_id="budget/two",
+            batch_ref="embedding/batch/two",
+            policy_revision="budget-policy/1",
+            budget_day=budget_day,
+            request_limit=1,
+            token_limit=1000,
+            reserved_tokens=100,
+            deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+        )
+    assert caught.value.code == "MEMORY_EMBEDDING_REQUEST_BUDGET_EXHAUSTED"
+
+    unknown = await budget.settle(
+        reservation_id="budget/one",
+        settlement_operation_id="budget/settle/one",
+        outcome="UNKNOWN",
+        error_code="EMBEDDING_TIMEOUT",
+    )
+    assert unknown["day"]["reserved_requests"] == 0
+    assert unknown["day"]["unknown_requests"] == 1
+    assert unknown["day"]["unknown_tokens"] == 100
+    duplicate = await budget.settle(
+        reservation_id="budget/one",
+        settlement_operation_id="budget/settle/one",
+        outcome="UNKNOWN",
+        error_code="EMBEDDING_TIMEOUT",
+    )
+    assert duplicate["duplicate"] is True
+
+    released = await budget.reserve(
+        operation_id="budget/reserve/released",
+        reservation_id="budget/released",
+        batch_ref="embedding/batch/released",
+        policy_revision="budget-policy/2",
+        budget_day=budget_day,
+        request_limit=3,
+        token_limit=200,
+        reserved_tokens=50,
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert released["state"] == "RESERVED"
+    await budget.settle(
+        reservation_id="budget/released",
+        settlement_operation_id="budget/settle/released",
+        outcome="RELEASED",
+        error_code="EMBEDDING_CONNECTION_UNAVAILABLE",
+    )
+    charged = await budget.reserve(
+        operation_id="budget/reserve/charged",
+        reservation_id="budget/charged",
+        batch_ref="embedding/batch/charged",
+        policy_revision="budget-policy/2",
+        budget_day=budget_day,
+        request_limit=3,
+        token_limit=200,
+        reserved_tokens=50,
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert charged["state"] == "RESERVED"
+    receipt = await budget.settle(
+        reservation_id="budget/charged",
+        settlement_operation_id="budget/settle/charged",
+        outcome="CHARGED",
+        charged_tokens=70,
+    )
+    assert receipt["day"]["charged_tokens"] == 70
+    assert receipt["day"]["unknown_tokens"] == 100
+    assert receipt["day"]["reserved_tokens"] == 0
+
+    recovery_day = date(2026, 9, 19)
+    await budget.reserve(
+        operation_id="budget/reserve/recovery",
+        reservation_id="budget/recovery",
+        batch_ref="embedding/batch/recovery",
+        policy_revision="budget-policy/3",
+        budget_day=recovery_day,
+        request_limit=2,
+        token_limit=200,
+        reserved_tokens=40,
+        deadline_at=datetime.now(timezone.utc) + timedelta(milliseconds=100),
+    )
+    await asyncio.sleep(0.2)
+    assert await budget.recover_expired() == 1
+    recovered = await budget.snapshot(recovery_day)
+    assert recovered["unknown_requests"] == 1
+    assert recovered["unknown_tokens"] == 40

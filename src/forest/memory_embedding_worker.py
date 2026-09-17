@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import date
 
 from forest.embeddings import (
     EmbeddingCancelled,
@@ -30,6 +31,17 @@ class EmbeddingBatchItem:
     prepare_operation_id: str
 
 
+@dataclass(frozen=True)
+class EmbeddingBudgetClaim:
+    reservation_id: str
+    operation_id: str
+    policy_revision: str
+    budget_day: date
+    request_limit: int
+    token_limit: int
+    reserved_tokens: int
+
+
 class MemoryEmbeddingWorker:
     """Execute a frozen facet without owning Memory source or visibility facts.
 
@@ -48,6 +60,7 @@ class MemoryEmbeddingWorker:
         component_id: str,
         generation_id: str,
         route_revision: str,
+        budget=None,
     ) -> None:
         if not isinstance(profile, EmbeddingProfile):
             raise ForestError("EMBEDDING_CONFIG_INVALID", "Embedding profile is invalid", 422)
@@ -58,6 +71,7 @@ class MemoryEmbeddingWorker:
         self.component_id = component_id
         self.generation_id = generation_id
         self.route_revision = route_revision
+        self.budget = budget
 
     def _input(self, materialized: dict) -> EmbeddingInput:
         source = {
@@ -104,12 +118,14 @@ class MemoryEmbeddingWorker:
         prepare_operation_id: str,
         expected_deletion_epoch: int,
         deadline_at,
+        budget_claim: EmbeddingBudgetClaim | None = None,
     ) -> dict:
         results = await self.execute_batch(
             items=(EmbeddingBatchItem(facet_id, attempt_id, prepare_operation_id),),
             batch_attempt_id=attempt_id,
             expected_deletion_epoch=expected_deletion_epoch,
             deadline_at=deadline_at,
+            budget_claim=budget_claim,
         )
         return results[0]
 
@@ -120,6 +136,7 @@ class MemoryEmbeddingWorker:
         batch_attempt_id: str,
         expected_deletion_epoch: int,
         deadline_at,
+        budget_claim: EmbeddingBudgetClaim | None = None,
     ) -> tuple[dict, ...]:
         items = tuple(items)
         if (
@@ -156,6 +173,26 @@ class MemoryEmbeddingWorker:
             transport_attempt_id=batch_attempt_id,
             purpose=next(iter(purposes)),
         )
+        if (self.budget is None) != (budget_claim is None):
+            raise ForestError(
+                "MEMORY_EMBEDDING_BUDGET_REQUIRED",
+                "Embedding worker and request budget configuration differ",
+                422,
+            )
+        if budget_claim is not None:
+            if type(budget_claim) is not EmbeddingBudgetClaim:
+                raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding budget claim", 422)
+            await self.budget.reserve(
+                operation_id=budget_claim.operation_id,
+                reservation_id=budget_claim.reservation_id,
+                batch_ref=batch_attempt_id,
+                policy_revision=budget_claim.policy_revision,
+                budget_day=budget_claim.budget_day,
+                request_limit=budget_claim.request_limit,
+                token_limit=budget_claim.token_limit,
+                reserved_tokens=budget_claim.reserved_tokens,
+                deadline_at=deadline_at,
+            )
         permits = []
         try:
             for item in items:
@@ -172,6 +209,15 @@ class MemoryEmbeddingWorker:
                 )
         except Exception:
             await self._abort_prepared(tuple(permits), "EMBEDDING_BATCH_PREPARATION_ABORTED")
+            if budget_claim is not None:
+                await self.budget.settle(
+                    reservation_id=budget_claim.reservation_id,
+                    settlement_operation_id=_operation(
+                        "embedding-budget-settlement:", batch_attempt_id
+                    ),
+                    outcome="RELEASED",
+                    error_code="EMBEDDING_BATCH_PREPARATION_ABORTED",
+                )
             raise
         handoff_id = _operation("embedding-batch-handoff:", batch_attempt_id)
 
@@ -187,11 +233,47 @@ class MemoryEmbeddingWorker:
         try:
             result = await self.client.dispatch(prepared, permitcheck=permitcheck)
         except EmbeddingCancelled as exc:
+            if budget_claim is not None:
+                await asyncio.shield(
+                    self._settle_budget(budget_claim, batch_attempt_id, exc.result)
+                )
             await asyncio.shield(
                 self._settle_batch(tuple(permits), materialized, exc.result)
             )
             raise
+        if budget_claim is not None:
+            await self._settle_budget(budget_claim, batch_attempt_id, result)
         return await self._settle_batch(tuple(permits), materialized, result)
+
+    async def _settle_budget(self, claim, batch_attempt_id, result):
+        settlement_operation_id = _operation(
+            "embedding-budget-settlement:", batch_attempt_id
+        )
+        if result.status == "RESPONDED":
+            usage = result.usage
+            if not isinstance(usage, dict) or type(usage.get("total_tokens")) is not int:
+                raise ForestError(
+                    "MEMORY_USAGE_INVALID", "Embedding response has no token receipt", 422
+                )
+            return await self.budget.settle(
+                reservation_id=claim.reservation_id,
+                settlement_operation_id=settlement_operation_id,
+                outcome="CHARGED",
+                charged_tokens=usage["total_tokens"],
+            )
+        if result.status == "NOT_SENT":
+            outcome = "RELEASED"
+        elif result.status == "REJECTED":
+            outcome = "CHARGED"
+        else:
+            outcome = "UNKNOWN"
+        return await self.budget.settle(
+            reservation_id=claim.reservation_id,
+            settlement_operation_id=settlement_operation_id,
+            outcome=outcome,
+            charged_tokens=0 if outcome == "CHARGED" else None,
+            error_code=result.error_code or "EMBEDDING_PROVIDER_FAILURE",
+        )
 
     async def _abort_prepared(self, permits, error_code):
         for permit in permits:

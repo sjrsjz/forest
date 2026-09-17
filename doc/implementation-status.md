@@ -53,7 +53,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 - 旧生产路径曾实现 Bot 全局域、每群主干、图文媒体和嵌入管线；它仍建立在 `public` schema、旧组合根和固定管理实现上，只能作为待删除的行为参考，不能作为干净微内核基线已经完成的证据。
 - 干净 `memory.graph` 候选现在拥有 Bot 级冻结语义空间、每群独立主干、稳定来源单元、一次来源的多次平台观察、图文 payload 引用、来源作者/群标记、跨主干关系贡献与证据、抑制和删除 epoch 防复活。来源资格只能由 `conversation.scheduler` 已提交的精确 `InputBatch` 授予，二者通过同一调用方事务整体提交或回滚。
-- 干净查询端已经提供服务端来源筛选、固定可见性快照、复合键集分页、关系端点/证据查询和管理员抑制视图。新的多模态检索权威还实现了文本确定性分块、原图 facet、QUERY/DOCUMENT 分离、单次外部交接与 `UNKNOWN` 状态、冻结查询切口、text→image/image→text/mixed 精确候选融合、来源明确的 EvidenceBundle、晚到索引隔离和遗忘时派生向量/回执撤销；它没有生成 caption 或裁剪摘要。VL Worker 原语已经能把同一 purpose 的最多 32 个原图/文本 facet 合并为一次受限 HTTP 请求，在最终网络 fence 处原子 handoff 全批，并把响应分别作为各输入 payload 的派生回执发布；持久批次调度、预算/费用、真实 QiYu endpoint 联调、ANN 索引、Agent 调用链、模块管理贡献及大规模容量证明仍未完成。
+- 干净查询端已经提供服务端来源筛选、固定可见性快照、复合键集分页、关系端点/证据查询和管理员抑制视图。新的多模态检索权威还实现了文本确定性分块、原图 facet、QUERY/DOCUMENT 分离、单次外部交接与 `UNKNOWN` 状态、冻结查询切口、text→image/image→text/mixed 精确候选融合、来源明确的 EvidenceBundle、晚到索引隔离和遗忘时派生向量/回执撤销；它没有生成 caption 或裁剪摘要。VL Worker 原语已经能把同一 purpose 的最多 32 个原图/文本 facet 合并为一次受限 HTTP 请求，在最终网络 fence 处原子 handoff 全批，并把响应分别作为各输入 payload 的派生回执发布。Bot 日预算采用持久 reservation：明确未发送释放额度，已知响应按实际 usage 计费，`UNKNOWN` 保留预留 token 暴露，过期未结算 reservation 保守恢复为 `UNKNOWN`。持久待处理批次扫描、真实 QiYu endpoint 联调、ANN 索引、Agent 调用链、模块管理贡献及大规模容量证明仍未完成。
 
 ### 控制面
 
@@ -121,7 +121,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 当前工作区的验证证据：
 
 - 无 PostgreSQL 全套：`839 passed, 1116 skipped, 1 warning`；
-- 干净 `memory.graph` 与 Conversation-Memory 组合：隔离 PostgreSQL 17 下来源注册/并发收敛、图文 part、资格门禁、稳定快照分页、跨主干关系、复合关系游标、删除防复活、双方事务回滚、text→image、image→text、mixed 查询、完整模态门禁、晚到索引隔离、embedding 重放合流、单请求图文批处理、批 handoff 整体回滚、真实 transport handoff 原语、payload lineage 和遗忘撤销共 `22 passed`；同一 embedding prepare/handoff 并发重放另连续 `10 × 1 passed`，上一来源图切片的 Memory 定向组曾连续十轮均为 `8 passed`。
+- 干净 `memory.graph` 与 Conversation-Memory 组合：隔离 PostgreSQL 17 下来源注册/并发收敛、图文 part、资格门禁、稳定快照分页、跨主干关系、复合关系游标、删除防复活、双方事务回滚、text→image、image→text、mixed 查询、完整模态门禁、晚到索引隔离、embedding 重放合流、单请求图文批处理、批 handoff 整体回滚、真实 transport handoff 原语、预算并发 reservation/UNKNOWN 暴露/过期恢复、payload lineage 和遗忘撤销共 `23 passed`；同一 embedding prepare/handoff 并发重放与预算 reservation/结算/恢复均另连续 `10 × 1 passed`，上一来源图切片的 Memory 定向组曾连续十轮均为 `8 passed`。
 - `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - `command.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；密码重新鉴权、载荷脱敏、热重载失效和并发 CAS 均包含在内。
 - `message.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；Binding 目录、密码脱敏、Handler 恢复幂等和并发 CAS 均包含在内。
