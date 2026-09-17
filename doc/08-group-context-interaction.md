@@ -69,6 +69,7 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 | `conversation.scheduler` | `inbox_messages` | 不可变来源身份、`ingress_seq`、正文/作者 PayloadRef、分类状态、触发决定；每条已接纳消息都存在，不因 `NO_TRIGGER` 或控制命令而删除 |
 | `conversation.scheduler` | `conversation_triggers` | `trigger_id, event_id, ingress_seq, status, principal_ref, claimed_session_ref, claimed_run_ref, input_batch_id, answered_reply_ref` |
 | `conversation.scheduler` | `input_batches` | `input_batch_id, kind, start_seq?, end_seq?, trigger_cut_seq?, selected_input_end_seq, session_ref?, run_ref?, context_revision`；固定来源切口与输入语义 |
+| `conversation.scheduler` | `selection_operations` | 每次选择 operation 的输入摘要、边界、冻结结果和可选 InputBatch 引用；`WAIT_INPUT/CONTINUE/IDLE` 也有可重放回执 |
 | `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
 | `conversation.scheduler` | `context_units` | 输入及其他模块已提交事实的有序 PayloadRef；保存来源、作者、所属批次和 `commit_seq/unit_index`，不复制正文 |
 | `conversation.scheduler` | `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
@@ -93,7 +94,7 @@ InputBatch 的 `kind` 分为：
 - `MODEL_SAFE_POINT`：仅在当前模型调用和工具因果组已经闭合、下一次模型调用尚未冻结时使用。有 trigger 就截到最后一个 trigger；无 trigger 时返回 `WAIT_INPUT` 或 `CONTINUE`，绝不吸收普通尾部。
 - `SESSION_END`：Agent 已结束本次回答且没有可领取 trigger 时，把连续普通尾部提交为 `SILENT_DRAIN`；若已有 trigger，则返回新的 `TRIGGER_INPUT`，由同群串行状态机继续工作。
 
-旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。选择事务只锁本 Conversation lane，再按 `ingress_seq/trigger_id` 稳定顺序写入批次成员；不同 Conversation 不共享行锁，因此可以并行。
+旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。每次选择都先写不可变 `selection_operations` 回执，包括不产生批次的 `WAIT_INPUT/CONTINUE/IDLE`；同一 operation 永远重放第一次观察到的结果，状态变化后调用者必须使用新 operation。选择事务只锁本 Conversation lane，再按 `ingress_seq/trigger_id` 稳定顺序写入批次成员；不同 Conversation 不共享行锁，因此可以并行。
 
 ### 2.3 触发状态独立于消费游标
 
