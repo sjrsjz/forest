@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import re
 import secrets
 import time
@@ -17,7 +15,6 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from jsonschema import Draft202012Validator
 from psycopg import OperationalError
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field
@@ -34,6 +31,7 @@ from forest.management.backups import BackupManager
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
 from forest.management.cleanup import StorageCleanupManager
+from forest.management.deployment_configuration_contract import DEFAULT_VALUES
 from forest.management.deployment_modules import (
     OFFICIAL_DEPLOYMENT_MODULES,
     DeploymentModuleHost,
@@ -50,25 +48,6 @@ from forest.management.verifications import BackupVerificationManager
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.security import SecretVault, digest_token, hash_password, random_token, verify_password
 from forest.storage.postgres import PostgresStore
-
-DEFAULT_VALUES = {"display_name": "Forest", "session_ttl_minutes": 480}
-CONFIG_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["display_name", "session_ttl_minutes"],
-    "properties": {
-        "display_name": {"type": "string", "minLength": 1, "maxLength": 80},
-        "session_ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 1440},
-    },
-}
-
-
-def canonical_digest(value: Any) -> str:
-    data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(data.encode()).hexdigest()
-
-
-SCHEMA_DIGEST = canonical_digest(CONFIG_SCHEMA)
 
 
 @dataclass(frozen=True)
@@ -96,17 +75,6 @@ class SetupBody(StrictBody):
 class LoginBody(StrictBody):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=1024)
-
-
-class PlanBody(StrictBody):
-    values: dict[str, Any]
-    expected_revision: int = Field(ge=0, strict=True)
-
-
-class ApplyBody(StrictBody):
-    plan_id: str = Field(min_length=1, max_length=128)
-    plan_digest: str = Field(min_length=1, max_length=128)
-    expected_revision: int = Field(ge=0, strict=True)
 
 
 class BodyLimit:
@@ -587,7 +555,14 @@ def create_app(settings: WebSettings) -> FastAPI:
             account["id"],
             datetime.now(UTC) + timedelta(minutes=ttl),
         )
-        response = JSONResponse({"username": account["username"], "role": account["role"]})
+        response = JSONResponse({
+            "account_id": account["id"],
+            "username": account["username"],
+            "role": account["role"],
+            "can_write": account["role"] == "admin",
+            "deployment_id": runtime.deployment_id,
+            "display_name": values["display_name"],
+        })
         response.set_cookie(
             "forest_session",
             token,
@@ -611,9 +586,12 @@ def create_app(settings: WebSettings) -> FastAPI:
     @app.get("/management/v1/session")
     async def session(request: Request):
         value = await runtime.principal(request)
+        config = await runtime.require_store().read_config("deployment")
+        values = config["effective"]["values"] if config["effective"] else DEFAULT_VALUES
         return {"account_id": value["account_id"], "username": value["username"],
                 "role": value["role"], "can_write": value["role"] == "admin",
-                "deployment_id": runtime.deployment_id}
+                "deployment_id": runtime.deployment_id,
+                "display_name": values["display_name"]}
 
     @app.post("/management/v1/logout")
     async def logout(request: Request):
@@ -625,92 +603,6 @@ def create_app(settings: WebSettings) -> FastAPI:
         response.delete_cookie("forest_session", path="/")
         response.delete_cookie("forest_csrf", path="/")
         return response
-
-    @app.get("/management/v1/configuration")
-    async def configuration(request: Request):
-        await runtime.principal(request)
-        state = await runtime.require_store().read_config("deployment")
-        return {
-            **state,
-            "schema": CONFIG_SCHEMA,
-            "schema_digest": SCHEMA_DIGEST,
-            "defaults": DEFAULT_VALUES,
-        }
-
-    @app.post("/management/v1/change-plans")
-    async def plan(body: PlanBody, request: Request):
-        session = await runtime.principal(request, write=True)
-        issues = list(Draft202012Validator(CONFIG_SCHEMA).iter_errors(body.values))
-        if issues:
-            raise ForestError(
-                "VALIDATION_FAILED",
-                "配置字段不符合要求。",
-                422,
-                [{"path": list(issue.path), "rule": issue.validator} for issue in issues],
-            )
-        current = await runtime.require_store().read_config("deployment")
-        if current["head_revision"] != body.expected_revision:
-            raise ForestError(
-                "REVISION_CONFLICT",
-                "配置已被修改，请先重新读取。",
-                409,
-                {"head_revision": current["head_revision"]},
-            )
-        plan_id = "plan_" + secrets.token_hex(16)
-        digest = canonical_digest(
-            {
-                "resource_key": "deployment",
-                "values": body.values,
-                "expected_revision": body.expected_revision,
-                "schema_digest": SCHEMA_DIGEST,
-                "subject_id": session["account_id"],
-            }
-        )
-        await runtime.require_store().save_plan(
-            plan_id,
-            session["account_id"],
-            "deployment",
-            body.expected_revision,
-            body.values,
-            SCHEMA_DIGEST,
-            digest,
-            datetime.now(UTC) + timedelta(minutes=10),
-        )
-        before = current["effective"]["values"] if current["effective"] else DEFAULT_VALUES
-        diff = [
-            {"field": key, "before": before[key], "after": value}
-            for key, value in body.values.items()
-            if before[key] != value
-        ]
-        return {
-            "plan_id": plan_id,
-            "plan_digest": digest,
-            "expected_revision": body.expected_revision,
-            "diff": diff,
-            "effect": "显示名称立即用于后台；会话时长用于后续登录。",
-        }
-
-    @app.post("/management/v1/management-requests")
-    async def apply(body: ApplyBody, request: Request):
-        session = await runtime.principal(request, write=True)
-        key = request.headers.get("idempotency-key", "")
-        if not key or len(key) > 128:
-            raise ForestError("IDEMPOTENCY_KEY_REQUIRED", "提交需要稳定的幂等键。", 422)
-        store = runtime.require_store()
-        saved = await store.get_plan(body.plan_id, session["account_id"])
-        if saved is None:
-            raise ForestError("PLAN_NOT_FOUND", "变更计划不存在或不可访问。", 404)
-        return await store.apply_config(
-            "deployment",
-            saved["values"],
-            body.expected_revision,
-            key,
-            session["account_id"],
-            body.plan_digest,
-            plan_id=body.plan_id,
-            schema_digest=SCHEMA_DIGEST,
-            session_token_hash=digest_token(request.cookies["forest_session"]),
-        )
 
     install_backup_routes(app, runtime)
     install_bot_routes(app, runtime)

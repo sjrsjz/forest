@@ -178,6 +178,24 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         deployment_modules = {
             row["component_id"]: row for row in deployment.json()["modules"]
         }
+        configuration = deployment_modules["deployment.configuration"]
+        assert configuration["artifact"]["scope"] == "deployment"
+        assert configuration["state"] == "ACTIVE"
+        assert configuration["management_contributions"][0]["surface"] == {
+            "kind": "trusted-module",
+            "protocol": "forest.trusted-management-view/1",
+            "template": "/static/modules/deployment.configuration.html",
+            "module": "/static/deployment-configuration.js",
+            "style": None,
+        }
+        assert configuration["management_contract"]["operations"] == [
+            {"operation_id": "configuration", "kind": "query",
+             "authority": "deployment.configuration.read"},
+            {"operation_id": "configuration.plan", "kind": "action",
+             "authority": "deployment.configuration.plan", "principal": "admin"},
+            {"operation_id": "configuration.apply", "kind": "action",
+             "authority": "deployment.configuration.apply", "principal": "admin"},
+        ]
         accounts = deployment_modules["deployment.accounts"]
         assert accounts["artifact"]["scope"] == "deployment"
         assert accounts["state"] == "ACTIVE"

@@ -28,12 +28,6 @@
       <form id="login-form"><label>账号<input name="username" autocomplete="username" required maxlength="80"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label><button type="submit">登录</button></form>
     </section>
     <section id="configuration" class="hidden">
-      <div class="summary"><div><span class="dot"></span> 管理服务在线</div><div>配置版本 <strong id="revision">0</strong></div><div>当前状态 <strong id="config-state">默认配置</strong></div></div>
-      <div class="columns"><div class="card">
-        <h2>部署设置</h2><p class="muted">先预览变更，再应用到当前部署。</p>
-        <form id="config-form"><label>后台显示名称<input name="display_name" required maxlength="80"></label><label>新登录会话有效时长（分钟）<input name="session_ttl_minutes" type="number" required min="5" max="1440"></label><p class="hint">时长修改用于后续登录，不改变已经建立的会话。</p><div class="actions"><button type="submit">预览变更</button><button id="reload" type="button" class="subtle">读取最新配置</button></div></form>
-      </div><div class="card"><h2>生效状态</h2><p class="muted">保存与生效由服务端事务确认。其他窗口同时修改时，当前提交会提示冲突。</p><dl><dt>期望修订</dt><dd id="desired">—</dd><dt>生效修订</dt><dd id="effective">—</dd></dl><p class="hint">在「运行实例与模块」中创建 Bot 并配置组件。</p></div></div>
-      <div id="preview" class="card hidden"><h2>确认变更</h2><ul id="diff"></ul><p id="effect" class="muted"></p><button id="apply">应用变更</button></div>
       <div class="card"><h2>部署服务</h2><div id="deployment-module-registry" class="module-registry-list"></div><nav id="deployment-module-nav" class="module-surface-nav" aria-label="部署服务模块"></nav><div id="deployment-module-views" class="management-contribution-views"></div></div>
     </section>
     <section id="backups" class="hidden">

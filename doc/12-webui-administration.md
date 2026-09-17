@@ -173,10 +173,10 @@ API 使用 `/management/v1` 等显式大版本路径和版本化 DTO；下表是
 | 方法与路径示意 | 输入/返回与语义 |
 |---|---|
 | `GET /capabilities` | API/schema 能力、当前身份可执行动作及前端兼容范围；不代替动作授权 |
-| `GET /scopes/{scope_kind}/{scope_id}/configuration` | 当前作用域内通用配置头、desired/effective 引用、继承来源、状态与 ETag；模块字段仍按 contribution/schema 分区 |
+| `GET /scopes/{scope_kind}/{scope_id}/modules/{component_id}/queries/configuration` | 由目标模块返回自己的配置头、desired/effective 引用、继承来源、状态和 schema；控制面不虚构跨模块配置对象 |
 | `PUT /drafts/{draft_id}` | 有版本的结构化编辑，不触发运行变更 |
-| `POST /change-plans` | 类型化 action/target/patch/expected_revisions → 固定计划和字段校验 |
-| `POST /management-requests` | plan_ref/digest 与幂等键 → 入口 request_ref、可查询子引用 |
+| `POST /scopes/{scope_kind}/{scope_id}/modules/{component_id}/actions/configuration.plan` | 模块类型化配置与 expected revision → 固定计划和字段校验 |
+| `POST /scopes/{scope_kind}/{scope_id}/modules/{component_id}/actions/configuration.apply` | plan_ref/digest 与幂等键 → 模块权威提交结果；跨模块编排另用显式 orchestration contract |
 | `GET /management-requests/{management_request_id}` | 授权后的入口事实和逐目标 operation_ref/approval_ref |
 | `GET /operations/{kind}/{id}` | 权威账本的阶段、结果、可取消性和状态版本 |
 | `POST /approvals/{approval_id}/decisions` | 带目标 authority 的固定批准/拒绝，当前主体重新验证 |

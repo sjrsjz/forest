@@ -22,6 +22,7 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="nav-audit"' not in index
     assert 'id="nav-accounts"' not in index
     assert 'id="accounts"' not in index
+    assert 'id="config-form"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
@@ -58,6 +59,9 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     deployment_accounts = (STATIC / "modules/deployment.accounts.html").read_text(
         encoding="utf-8"
     )
+    deployment_configuration = (
+        STATIC / "modules/deployment.configuration.html"
+    ).read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
     memory_style = (STATIC / "modules/memory.graph.css").read_text(encoding="utf-8")
@@ -98,6 +102,12 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     accounts_controller = (STATIC / "accounts-panel.js").read_text(encoding="utf-8")
     assert "createModulePanel" in accounts_controller
     assert "/modules/deployment.accounts" in accounts_controller
+    assert 'id="deployment-configuration"' in deployment_configuration
+    configuration_controller = (
+        STATIC / "deployment-configuration.js"
+    ).read_text(encoding="utf-8")
+    assert "createModulePanel" in configuration_controller
+    assert "/modules/deployment.configuration" in configuration_controller
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host

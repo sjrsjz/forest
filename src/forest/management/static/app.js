@@ -7,9 +7,6 @@ import { managementContributions } from './management-contributions.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
-let configuration = null;
-let pendingPlan = null;
-let applyKey = null;
 let activeView = 'loading';
 let currentUser = null;
 const readReceipt = controlReceipts(invalidateControl);
@@ -17,6 +14,10 @@ const readReceipt = controlReceipts(invalidateControl);
 function notice(text, success = false) {
   $('notice').textContent = text;
   $('notice').className = `notice${success ? ' success' : ''}`;
+}
+function setBranding(displayName = 'Forest') {
+  $('page-title').textContent = displayName;
+  document.title = `${displayName} · 管理后台`;
 }
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
@@ -73,6 +74,7 @@ function setIdentity(user) {
   $('username').textContent = user?.username || '';
   $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
   $('nav-backups').classList.toggle('hidden', user?.role !== 'admin');
+  if (user?.display_name) setBranding(user.display_name);
   $('identity').classList.toggle('hidden', !user);
 }
 async function busy(button, work) {
@@ -80,19 +82,7 @@ async function busy(button, work) {
   try { await work(); } catch (error) { notice(error.message); }
   finally { button.disabled = false; }
 }
-async function readConfiguration() {
-  configuration = await api('/configuration');
-  const values = configuration.effective?.values || configuration.defaults;
-  const fields = $('config-form').elements;
-  fields.display_name.value = values.display_name;
-  fields.session_ttl_minutes.value = values.session_ttl_minutes;
-  $('page-title').textContent = values.display_name;
-  document.title = `${values.display_name} · 管理后台`;
-  $('revision').textContent = configuration.head_revision;
-  $('desired').textContent = configuration.desired?.revision || '默认';
-  $('effective').textContent = configuration.effective?.revision || '默认';
-  $('config-state').textContent = configuration.effective ? '已生效' : '默认配置';
-  pendingPlan = null; applyKey = null; $('preview').classList.add('hidden');
+async function readDeploymentWorkspace() {
   show('configuration');
   await readDeploymentModules();
 }
@@ -110,7 +100,7 @@ async function start() {
     try {
       const user = await api('/session');
       setIdentity(user);
-      await readConfiguration();
+      await readDeploymentWorkspace();
     } catch (error) {
       if (error.code === 'UNAUTHENTICATED') show('login'); else throw error;
     }
@@ -131,11 +121,12 @@ $('login-form').addEventListener('submit', (event) => {
   const form = event.currentTarget;
   busy(form.querySelector('button'), async () => {
     const user = await api('/login', Object.fromEntries(new FormData(form)));
-    form.reset(); $('notice').classList.add('hidden'); setIdentity(user); await readConfiguration();
+    form.reset(); $('notice').classList.add('hidden'); setIdentity(user);
+    await readDeploymentWorkspace();
   });
 });
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
-  await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
+  await api('/logout', {});
   runtimeViews.reset();
   deploymentViews.reset();
   backupsPanel.reset();
@@ -143,34 +134,9 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
   clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
   $('bot-detail').classList.add('hidden'); botCatalog.open = true; $('create-bot-form').reset();
-  $('config-form').reset(); $('diff').replaceChildren(); setIdentity(null);
+  setIdentity(null); setBranding();
   $('notice').classList.add('hidden'); show('login');
 }));
-$('config-form').addEventListener('input', () => { pendingPlan = null; applyKey = null; $('preview').classList.add('hidden'); });
-$('config-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  busy(event.currentTarget.querySelector('button'), async () => {
-    const fields = $('config-form').elements;
-    pendingPlan = await api('/change-plans', { expected_revision: configuration.head_revision,
-      values: { display_name: fields.display_name.value, session_ttl_minutes: Number(fields.session_ttl_minutes.value) } });
-    applyKey = crypto.randomUUID(); $('diff').replaceChildren();
-    for (const change of pendingPlan.diff) {
-      const li = document.createElement('li');
-      li.textContent = `${change.field === 'display_name' ? '显示名称' : '会话时长'}：${change.before} → ${change.after}`;
-      $('diff').append(li);
-    }
-    $('effect').textContent = pendingPlan.effect;
-    $('preview').classList.remove('hidden');
-    $('notice').classList.add('hidden');
-  });
-});
-$('apply').addEventListener('click', () => busy($('apply'), async () => {
-  if (!pendingPlan) return;
-  await api('/management-requests', { plan_id: pendingPlan.plan_id, plan_digest: pendingPlan.plan_digest,
-    expected_revision: pendingPlan.expected_revision }, { 'Idempotency-Key': applyKey });
-  await readConfiguration(); notice('配置已提交并生效。', true);
-}));
-$('reload').addEventListener('click', () => busy($('reload'), readConfiguration));
 let botRows = [], selectedBot = null, botConfig = null, botRuntime = null, packageRows = [];
 let botPlan = null, botApplyKey = null, componentReload = null, moduleStateRequest = null;
 let createKey = null, invokeKey = null, renameKey = null, retryKey = null;
@@ -188,7 +154,7 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
 function sessionEnded(message) {
-  deploymentViews.reset(); configuration = null; pendingPlan = null;
+  deploymentViews.reset();
   setIdentity(null); show('login'); notice(message, true);
 }
 const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
@@ -196,17 +162,21 @@ const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
 const deploymentViews = managementContributions({
   api, busy, notice, scopeKind: 'deployment', scopeIdentity: row => row.scope_id,
   nav: $('deployment-module-nav'), registry: $('deployment-module-registry'),
-  root: $('deployment-module-views'), sessionEnded,
+  root: $('deployment-module-views'), sessionEnded, setBranding,
 });
 async function readDeploymentModules() {
   deploymentViews.reset();
-  if (!currentUser?.deployment_id || currentUser.role !== 'admin') {
+  if (!currentUser?.deployment_id) {
     deploymentViews.update([]); return;
   }
   const scope = {scope_kind:'deployment', scope_id:currentUser.deployment_id,
     account_id:currentUser.account_id};
   const result = await api(`/scopes/deployment/${encodeURIComponent(scope.scope_id)}/modules`);
-  deploymentViews.update(result.modules || []);
+  const modules = currentUser.role === 'admin' ? (result.modules || [])
+    : (result.modules || []).filter(row =>
+      row.management_contract?.operations?.some(operation =>
+        operation.kind === 'query' && operation.principal !== 'admin'));
+  deploymentViews.update(modules);
   await deploymentViews.select(scope);
 }
 
@@ -540,7 +510,8 @@ async function selectBot(id) {
     await runtimeViews.select(row);
   }
 }
-$('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));
+$('nav-deployment').addEventListener('click', () =>
+  busy($('nav-deployment'), readDeploymentWorkspace));
 $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
 $('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
   show('backups'); await backupsPanel.load();

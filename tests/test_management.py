@@ -59,6 +59,27 @@ async def login(client):
     client.headers["x-csrf-token"] = client.cookies["forest_csrf"]
 
 
+async def configuration_root(client):
+    session = (await client.get("/management/v1/session")).json()
+    return (
+        f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+        "deployment.configuration"
+    )
+
+
+async def read_configuration(client):
+    return await client.get(await configuration_root(client) + "/queries/configuration")
+
+
+async def configuration_action(client, operation, body, key, *, headers=None):
+    supplied = {"idempotency-key": key, **(headers or {})}
+    return await client.post(
+        await configuration_root(client) + f"/actions/{operation}",
+        json=body,
+        headers=supplied,
+    )
+
+
 @pytest.mark.postgres
 async def test_browser_management_transactions_survive_restart(tmp_path, web_database):
     token = BootstrapState(tmp_path / "state").initialize()
@@ -73,54 +94,52 @@ async def test_browser_management_transactions_survive_restart(tmp_path, web_dat
             headers={"origin": ORIGIN},
         ) as client,
     ):
-        assert (await client.get("/management/v1/configuration")).status_code == 401
+        assert (await client.get("/management/v1/configuration")).status_code == 404
+        assert (
+            await client.get(
+                "/management/v1/scopes/deployment/missing/modules/"
+                "deployment.configuration/queries/configuration"
+            )
+        ).status_code == 401
         await initialize(client, token, web_database)
         await login(client)
-        first = await client.get("/management/v1/configuration")
+        assert (await client.post("/management/v1/change-plans", json={})).status_code == 404
+        assert (
+            await client.post("/management/v1/management-requests", json={})
+        ).status_code == 404
+        config_query = await configuration_root(client) + "/queries/configuration"
+        first = await read_configuration(client)
         assert first.json()["head_revision"] == 0
         values = {"display_name": "我的 Forest", "session_ttl_minutes": 90}
-        plan = (
-            await client.post(
-                "/management/v1/change-plans",
-                json={
-                    "values": values,
-                    "expected_revision": 0,
-                },
-            )
-        ).json()
-        rival = (
-            await client.post(
-                "/management/v1/change-plans",
-                json={
-                    "values": {**values, "display_name": "另一个窗口"},
-                    "expected_revision": 0,
-                },
-            )
-        ).json()
+        plan = (await configuration_action(
+            client, "configuration.plan",
+            {"values": values, "expected_revision": 0}, "first-plan",
+        )).json()
+        rival = (await configuration_action(
+            client, "configuration.plan",
+            {"values": {**values, "display_name": "另一个窗口"},
+             "expected_revision": 0}, "rival-plan",
+        )).json()
         payload = {k: plan[k] for k in ("plan_id", "plan_digest", "expected_revision")}
-        accepted = await client.post(
-            "/management/v1/management-requests",
-            json=payload,
-            headers={"Idempotency-Key": "first-apply"},
+        accepted = await configuration_action(
+            client, "configuration.apply", payload, "first-apply"
         )
         assert accepted.status_code == 200, accepted.text
-        repeated = await client.post(
-            "/management/v1/management-requests",
-            json=payload,
-            headers={"Idempotency-Key": "first-apply"},
+        repeated = await configuration_action(
+            client, "configuration.apply", payload, "first-apply"
         )
         assert repeated.json() == accepted.json()
-        conflict = await client.post(
-            "/management/v1/management-requests",
-            json={k: rival[k] for k in ("plan_id", "plan_digest", "expected_revision")},
-            headers={"Idempotency-Key": "rival-apply"},
+        conflict = await configuration_action(
+            client, "configuration.apply",
+            {k: rival[k] for k in ("plan_id", "plan_digest", "expected_revision")},
+            "rival-apply",
         )
         assert conflict.status_code == 409, conflict.text
         assert conflict.json()["code"] == "REVISION_CONFLICT"
         cookie = client.cookies["forest_session"]
         assert (await client.post("/management/v1/logout", json={})).status_code == 200
         client.cookies.set("forest_session", cookie)
-        assert (await client.get("/management/v1/configuration")).status_code == 401
+        assert (await client.get(config_query)).status_code == 401
     restored = create_app(settings)
     async with (
         restored.router.lifespan_context(restored),
@@ -132,7 +151,7 @@ async def test_browser_management_transactions_survive_restart(tmp_path, web_dat
     ):
         assert not (await client.get("/management/v1/setup")).json()["setup_required"]
         await login(client)
-        value = (await client.get("/management/v1/configuration")).json()
+        value = (await read_configuration(client)).json()
         assert value["head_revision"] == 1
         assert value["effective"]["values"] == values
 
@@ -156,25 +175,23 @@ async def test_csrf_validation_and_secrets_are_not_echoed(tmp_path, web_database
         assert token not in bad.text and "leak-me" not in bad.text
         await initialize(client, token, web_database)
         await login(client)
-        response = await client.post(
-            "/management/v1/change-plans",
-            json={
+        response = await configuration_action(
+            client, "configuration.plan", {
                 "values": {"display_name": "bad", "session_ttl_minutes": 5},
                 "expected_revision": 0,
             },
-            headers={"x-csrf-token": "wrong"},
+            "wrong-csrf-plan", headers={"x-csrf-token": "wrong"},
         )
         assert response.status_code == 403
         response = await client.post(
             "/management/v1/logout", json={}, headers={"origin": "https://attacker.invalid"}
         )
         assert response.status_code == 403
-        response = await client.post(
-            "/management/v1/change-plans",
-            json={
+        response = await configuration_action(
+            client, "configuration.plan", {
                 "values": {"display_name": "bad", "session_ttl_minutes": True},
                 "expected_revision": 0,
-            },
+            }, "invalid-plan",
         )
         assert response.status_code == 422
         response = await client.post("/management/v1/login", content=b"x" * 65537)
@@ -234,19 +251,20 @@ async def test_database_failure_is_safe_and_session_can_retry(tmp_path, web_data
     ):
         await initialize(client, token, web_database)
         await login(client)
+        config_url = await configuration_root(client) + "/queries/configuration"
 
         async def unavailable(*args):
             raise psycopg.OperationalError("private connection details password=do-not-echo")
 
         with monkeypatch.context() as patch:
             patch.setattr(PostgresStore, "get_session", unavailable)
-            failed = await client.get("/management/v1/configuration")
+            failed = await client.get(config_url)
             assert failed.status_code == 503
             assert failed.json()["code"] == "DATABASE_UNAVAILABLE"
             assert "do-not-echo" not in failed.text
             assert "private connection" not in failed.text
         # An availability error did not delete the durable session or mutate config.
-        recovered = await client.get("/management/v1/configuration")
+        recovered = await client.get(config_url)
         assert recovered.status_code == 200
         assert recovered.json()["head_revision"] == 0
 
@@ -363,11 +381,11 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
             assert logged_in.status_code == 200
             session = (await viewer.get("/management/v1/session")).json()
             assert session["role"] == "viewer" and not session["can_write"]
-            assert (await viewer.get("/management/v1/configuration")).status_code == 200
+            assert (await read_configuration(viewer)).status_code == 200
             assert (await viewer.get("/management/v1/bots")).status_code == 200
-            denied = await viewer.post(
-                "/management/v1/change-plans",
-                json={"expected_revision": 0, "values": {}},
+            denied = await configuration_action(
+                viewer, "configuration.plan",
+                {"expected_revision": 0, "values": {}}, "viewer-plan",
             )
             assert denied.status_code == 403 and denied.json()["code"] == "PERMISSION_DENIED"
             assert (await list_accounts(viewer)).status_code == 403

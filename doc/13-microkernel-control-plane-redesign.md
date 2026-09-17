@@ -160,7 +160,7 @@ deployment/host 管理服务也有描述符、工件身份和
 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`
 生命周期；注册表必须整体准备成功后再发布给 scope provider，恢复数据库、替换部署 authority 或
 关闭宿主时先撤下目录再反向排空。首个 deployment 切片 `deployment.audit` 已落地：它只拥有部署审计
-脱敏查询与 UI，继续由部署数据库事务在查询前后复核管理员会话。`deployment.accounts` 也已接管账号目录、创建、变更计划/提交和 UI，并保留自我降权后的幂等回执恢复。备份、Bot 目录和存储供应
+脱敏查询与 UI，继续由部署数据库事务在查询前后复核管理员会话。`deployment.accounts` 也已接管账号目录、创建、变更计划/提交和 UI，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 必须由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应
 随后各自成为 deployment/host 服务；不能把已有 `ManagementRuntime` 字段列表当作最终注册表，
 也不能为了共用 transport 给 deployment 操作伪造 Bot ID 或 Bot ticket。
 

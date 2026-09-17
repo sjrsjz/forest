@@ -10,6 +10,9 @@ from forest.management.deployment_accounts_contract import (
     DeploymentAccountsManagementContract,
 )
 from forest.management.deployment_audit_contract import DeploymentAuditManagementContract
+from forest.management.deployment_configuration_contract import (
+    DeploymentConfigurationManagementContract,
+)
 from forest.runtime_modules import (
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
@@ -41,6 +44,11 @@ class DeploymentAccountsRuntime:
         self.management_contract = DeploymentAccountsManagementContract(self)
 
 
+class DeploymentConfigurationRuntime:
+    def __init__(self, store):
+        self.management_contract = DeploymentConfigurationManagementContract(store)
+
+
 def _audit(host, _modules):
     return DeploymentAuditRuntime(host.store)
 
@@ -49,7 +57,28 @@ def _accounts(host, _modules):
     return DeploymentAccountsRuntime(host)
 
 
+def _configuration(host, _modules):
+    return DeploymentConfigurationRuntime(host.store)
+
+
 OFFICIAL_DEPLOYMENT_MODULES = (
+    RuntimeModuleDescriptor(
+        "deployment.configuration",
+        (),
+        _configuration,
+        official_artifact("deployment"),
+        management=(
+            RuntimeManagementContribution(
+                "configuration",
+                "部署设置",
+                ("deployment",),
+                "/static/modules/deployment.configuration.html",
+                "/static/deployment-configuration.js",
+                group="configuration",
+                order=10,
+            ),
+        ),
+    ),
     RuntimeModuleDescriptor(
         "deployment.accounts",
         (),
