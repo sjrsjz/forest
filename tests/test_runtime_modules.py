@@ -284,6 +284,7 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
     agent, = descriptors["agent.runtime"].management
     memory, = descriptors["memory.graph"].management
     routing, = descriptors["routing.graph"].management
+    audit, = descriptors["kernel.audit"].management
     command, = descriptors["command.router"].management
     message, = descriptors["message.router"].management
     schedules, = descriptors["scheduler.jobs"].management
@@ -300,6 +301,10 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
         "路由与执行图", "/static/modules/routing.graph.html", "/static/routing-graph.js"
     )
     assert routing.style == "/static/modules/routing.graph.css"
+    assert (audit.label, audit.template, audit.module) == (
+        "审计元数据", "/static/modules/kernel.audit.html", "/static/kernel-audit.js"
+    )
+    assert audit.scope_kinds == ("bot",) and audit.contribution_id == "audit"
     assert (schedules.contribution_id, schedules.scope_kinds, schedules.module) == (
         "schedules", ("bot",), "/static/jobs-panel.js"
     )
@@ -320,7 +325,7 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
         item.management == ()
         for component_id, item in descriptors.items()
         if component_id not in {
-            "adapter.onebot", "agent.runtime", "command.router", "memory.graph",
+            "adapter.onebot", "agent.runtime", "command.router", "kernel.audit", "memory.graph",
             "message.router", "routing.graph", "scheduler.jobs"
         }
     )

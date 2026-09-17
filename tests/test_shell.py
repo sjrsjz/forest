@@ -12,6 +12,7 @@ from test_group_scheduler import row, until
 from test_messages import event, receive
 from test_messages import messages as messages
 
+from forest.audit_runtime import AuditRuntime
 from forest.errors import ForestError
 from forest.group_scheduler import GroupScheduler
 from forest.shell import ShellDispatcher
@@ -44,7 +45,8 @@ async def allow(repository, *users, binding_id="binding-a"):
 
 def dispatcher(repository, lease):
     return ShellDispatcher(repository, repository.bindings, DeliveryStore(repository.store),
-                           lease, poll_interval=0.02, command_timeout=1)
+                           lease, audit=AuditRuntime(repository.store),
+                           poll_interval=0.02, command_timeout=1)
 
 
 async def shell_records(repository):

@@ -1,16 +1,16 @@
 const $ = id => document.getElementById(id);
 
-export function botAuditPanel(api, busy) {
+export function createModulePanel(api, busy) {
   let bot = null, epoch = 0, readSeq = 0, records = [], nextBefore = null;
   const valid = own => bot !== null && own === epoch;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/audit`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/kernel.audit`;
 
   function query(before = null) {
     const params = new URLSearchParams({limit: '50'});
     const action = $('bot-audit-action').value.trim();
     if (action) params.set('action', action);
     if (before) params.set('before', before);
-    return `${base()}?${params}`;
+    return `${base()}/queries/records?${params}`;
   }
 
   function render() {
@@ -48,13 +48,10 @@ export function botAuditPanel(api, busy) {
 
   function reset() {
     epoch++; readSeq++; bot = null; records = []; nextBefore = null;
-    $('bot-audit').classList.add('hidden'); $('bot-audit-filter').reset();
-    $('bot-audit-list').replaceChildren(); $('bot-audit-empty').classList.add('hidden');
-    $('bot-audit-more').classList.add('hidden');
+    $('bot-audit-filter').reset(); $('bot-audit-list').replaceChildren();
+    $('bot-audit-empty').classList.add('hidden'); $('bot-audit-more').classList.add('hidden');
   }
-  async function select(row) {
-    reset(); bot = row; $('bot-audit').classList.remove('hidden'); await refresh();
-  }
+  async function select(row) { reset(); bot = row; await refresh(); }
   function invalidateContent(scope) {
     if (!bot || scope !== base()) return;
     epoch++; readSeq++; records = []; nextBefore = null; render();

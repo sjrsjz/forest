@@ -366,6 +366,15 @@ def _routing_graph(runtime, _: dict[str, Any]):
     return module
 
 
+def _audit(runtime, _: dict[str, Any]):
+    from forest.audit_runtime import AuditRuntime
+    from forest.management.audit_contract import AuditManagementContract
+
+    module = AuditRuntime(runtime.bot.store, control=getattr(runtime.bot, "control", None))
+    module.management_contract = AuditManagementContract()
+    return module
+
+
 def _shell(runtime, modules: dict[str, Any]):
     from forest.shell import ShellDispatcher
 
@@ -375,6 +384,7 @@ def _shell(runtime, modules: dict[str, Any]):
         adapter.bindings,
         adapter.delivery,
         runtime.kernel._authority,
+        audit=modules["kernel.audit"],
         on_change=runtime.notify,
         module_packages=runtime.module_packages,
     )
@@ -483,6 +493,21 @@ OFFICIAL_MODULES = (
         ),),
     ),
     RuntimeModuleDescriptor(
+        "kernel.audit",
+        (),
+        _audit,
+        _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "audit",
+            "审计元数据",
+            ("bot",),
+            "/static/modules/kernel.audit.html",
+            "/static/kernel-audit.js",
+            group="runtime",
+            order=40,
+        ),),
+    ),
+    RuntimeModuleDescriptor(
         "message.router",
         ("adapter.onebot", "routing.graph"),
         _message_routing,
@@ -517,7 +542,9 @@ OFFICIAL_MODULES = (
         wakes_on_work=True,
         work_notify_order=10,
     ),
-    RuntimeModuleDescriptor("shell.command", ("adapter.onebot",), _shell, _OFFICIAL_ARTIFACT),
+    RuntimeModuleDescriptor(
+        "shell.command", ("adapter.onebot", "kernel.audit"), _shell, _OFFICIAL_ARTIFACT
+    ),
     RuntimeModuleDescriptor(
         "scheduler.jobs",
         ("adapter.onebot", "conversation.scheduler"),

@@ -24,6 +24,7 @@ class ShellDispatcher:
         delivery: DeliveryStore,
         lease: HostLease | Callable[[], HostLease],
         *,
+        audit,
         runtime: BotStore | None = None,
         max_concurrency: int = 4,
         poll_interval: float = 0.2,
@@ -38,6 +39,7 @@ class ShellDispatcher:
                 and type(scan_page_size) is int and 1 <= scan_page_size <= 256):
             raise ValueError("Invalid Shell resource bounds")
         self.messages, self.bindings, self.delivery = messages, bindings, delivery
+        self.audit = audit
         self.runtime = runtime or messages.store
         self._lease_source = lease
         self.max_concurrency, self.poll_interval = max_concurrency, poll_interval
@@ -222,9 +224,7 @@ class ShellDispatcher:
 
             repository = ComponentJobStore(self.messages.store, control=control)
         elif spec.execution_target == "audit":
-            from forest.storage.bot_audit import BotAuditStore
-
-            repository = BotAuditStore(self.messages.store, control=control)
+            repository = self.audit.for_control(control)
         elif spec.execution_target == "context":
             from forest.storage.context_administration import ContextAdministration
 

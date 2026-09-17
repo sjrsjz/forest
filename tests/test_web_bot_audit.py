@@ -36,7 +36,10 @@ async def test_bot_audit_endpoint_exposes_only_allowlisted_metadata(
                 {"secret": "http-secret", "message": "must-not-reach-browser"},
             )
 
-        root = f"/management/v1/bots/{bot['bot_id']}/audit"
+        root = (
+            f"/management/v1/scopes/bot/{bot['bot_id']}/modules/"
+            "kernel.audit/queries/records"
+        )
         response = await client.get(root + "?action=fixture.http&limit=1")
         assert response.status_code == 200, response.text
         result = response.json()
@@ -51,4 +54,7 @@ async def test_bot_audit_endpoint_exposes_only_allowlisted_metadata(
 
         unknown = await client.get(root + "?details=true")
         assert unknown.status_code == 422
-        assert unknown.json()["code"] == "AUDIT_QUERY_INVALID"
+        assert unknown.json()["code"] == "MODULE_MANAGEMENT_INPUT_INVALID"
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/audit")
+        ).status_code == 404

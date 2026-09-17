@@ -90,6 +90,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             "command.router",
             "conversation.scheduler",
             "contract.router",
+            "kernel.audit",
             "memory.graph",
             "message.router",
             "routing.graph",
@@ -108,6 +109,10 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         ]
         assert modules["command.router"]["requires"] == ["adapter.onebot", "routing.graph"]
         assert modules["message.router"]["requires"] == ["adapter.onebot", "routing.graph"]
+        assert modules["shell.command"]["requires"] == ["adapter.onebot", "kernel.audit"]
+        assert modules["kernel.audit"]["management_contract"]["operations"] == [
+            {"operation_id": "records", "kind": "query", "authority": "audit.read"}
+        ]
         assert modules["command.router"]["management_contract"]["operations"] == [
             {"operation_id": "bindings", "kind": "query", "authority": "binding.read"},
             {

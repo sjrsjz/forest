@@ -3,7 +3,6 @@ import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
 import { accountsPanel } from './accounts-panel.js';
 import { auditPanel } from './audit-panel.js';
-import { botAuditPanel } from './bot-audit-panel.js';
 import { backupPanel as createBackupPanel } from './backup-panel.js';
 import { mountModuleUi } from './module-ui-host.js';
 import { managementContributions } from './management-contributions.js';
@@ -141,7 +140,6 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   runtimeViews.reset();
-  botAudit.reset();
   accountPanel.reset();
   deploymentAudit.reset();
   backupsPanel.reset();
@@ -198,7 +196,6 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
   setIdentity(null); show('login'); notice(message, true);
 });
 const deploymentAudit = auditPanel(api, busy);
-const botAudit = botAuditPanel(api, busy);
 const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
 
 // A Bot is a runtime scope. The workspace is organized around kernel concepts;
@@ -219,11 +216,9 @@ botComponentHistory.id = 'bot-component-history';
 const botWorkspacePanes = new Map([
   ['status', [botOverview]],
   ['modules', [$('bot-components'), botComponentHistory]],
-  ['observability', [$('bot-audit')]],
 ]);
 const botWorkspaceLabels = new Map([
   ['status', '状态'], ['modules', '模块'],
-  ['observability', '观测'],
 ]);
 const botWorkspaceContainers = new Map();
 for (const [name, elements] of botWorkspacePanes) {
@@ -312,7 +307,6 @@ function invalidateControl(scope) {
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
   runtimeViews.invalidateContent(scope);
-  botAudit.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -505,7 +499,6 @@ async function readBotConfig() {
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
   runtimeViews.reset();
-  botAudit.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
   renameKey = null; retryKey = null; maintenanceKey = null; botRuntime = null;
@@ -531,8 +524,7 @@ async function selectBot(id) {
     await readBotRuntime(); if (epoch !== selectionEpoch) return;
     await loadPackages(); if (epoch !== selectionEpoch) return;
     await readBotConfig(); if (epoch !== selectionEpoch) return;
-    await runtimeViews.select(row); if (epoch !== selectionEpoch) return;
-    await botAudit.select(row);
+    await runtimeViews.select(row);
   }
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));

@@ -50,6 +50,12 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             "delivery.reconcile",
         }
         assert modules["conversation.scheduler"]["management_contributions"] == []
+        audit, = modules["kernel.audit"]["management_contributions"]
+        assert audit["contribution_id"] == "audit"
+        assert audit["surface"]["template"] == "/static/modules/kernel.audit.html"
+        assert modules["kernel.audit"]["management_contract"]["operations"] == [
+            {"operation_id": "records", "kind": "query", "authority": "audit.read"}
+        ]
         commands, = modules["command.router"]["management_contributions"]
         assert commands["contribution_id"] == "commands"
         assert commands["surface"]["template"] == "/static/modules/command.router.html"
@@ -143,6 +149,9 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         ).status_code == 404
         assert (
             await client.get(f"/management/v1/bots/{bot['bot_id']}/message-handlers/diagnostics")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/audit")
         ).status_code == 404
         assert (
             await client.get(

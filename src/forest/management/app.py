@@ -33,7 +33,6 @@ from forest.management.authority import WebAuthority
 from forest.management.backup_api import install_backup_routes
 from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
-from forest.management.bot_audit_api import install_bot_audit_routes
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
 from forest.management.cleanup import StorageCleanupManager
@@ -689,7 +688,6 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_bot_routes(app, runtime)
     install_onebot_protocol_route(app, runtime)
     install_module_routes(app, runtime)
-    install_bot_audit_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")
 

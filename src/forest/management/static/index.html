@@ -132,17 +132,6 @@
         <div class="card"><h2>配置历史与切换进度</h2><p class="hint">历史配置会作为新的修订提交；状态迁移失败时，当前生效版本继续提供服务。</p><button id="read-bot-history" class="subtle">读取配置历史</button><div id="bot-history"></div><button id="bot-history-more" class="subtle hidden">更早的修订</button><details><summary>最近组件切换操作</summary><ol id="bot-operations"></ol></details></div>
 
 
-        <section id="bot-audit" class="card hidden" aria-labelledby="bot-audit-title">
-          <h2 id="bot-audit-title">Bot 审计元数据</h2>
-          <p class="hint">按稳定时间游标查看当前 Bot 的运行与控制事实。这里只返回动作、来源类型、时间和不可变标识；审计详情、操作者身份、消息正文及控制正文不会发送到浏览器。</p>
-          <form id="bot-audit-filter" class="actions"><label>动作<input id="bot-audit-action" maxlength="128" pattern="[A-Za-z0-9_.:-]+" placeholder="例如 agent.cancel"></label><button type="submit" class="subtle">筛选</button><button id="bot-audit-refresh" type="button" class="subtle">刷新</button><button id="bot-audit-more" type="button" class="subtle hidden">更早记录</button></form>
-          <p id="bot-audit-empty" class="hint hidden">当前筛选条件下没有审计记录。</p><div id="bot-audit-list" aria-live="polite"></div>
-        </section>
-
-
-
-
-
       </div>
     </section>
   </main>
