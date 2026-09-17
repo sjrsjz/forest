@@ -24,7 +24,11 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.schema_bundles import StorageBundleSpec, validate_storage_baseline
+from forest.schema_bundles import (
+    StorageBundleSpec,
+    validate_official_storage_baseline,
+    validate_storage_baseline,
+)
 
 
 @dataclass(frozen=True)
@@ -176,9 +180,17 @@ class RuntimeStorageBundle:
     spec: StorageBundleSpec
     baseline: bytes
     package_digest: str
+    execution_profile: str = "declarative"
 
     def __post_init__(self) -> None:
-        validate_storage_baseline(self.baseline, self.spec.baseline_sha256)
+        if self.execution_profile == "declarative":
+            validate_storage_baseline(self.baseline, self.spec.baseline_sha256)
+        elif self.execution_profile == "official":
+            validate_official_storage_baseline(self.baseline, self.spec.baseline_sha256)
+        else:
+            raise ForestError(
+                "INVALID_STORAGE_BUNDLE", "Storage execution profile is invalid", 422
+            )
         if not isinstance(self.package_digest, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", self.package_digest
         ):
@@ -187,7 +199,11 @@ class RuntimeStorageBundle:
             )
 
     def as_fact(self) -> dict:
-        return {**self.spec.as_fact(), "package_digest": self.package_digest}
+        return {
+            **self.spec.as_fact(),
+            "package_digest": self.package_digest,
+            "execution_profile": self.execution_profile,
+        }
 
 
 @dataclass(frozen=True)
@@ -722,6 +738,10 @@ class RuntimeModuleRegistry:
                         descriptor.storage.spec.component_id != identity
                         or descriptor.storage.package_digest
                         != descriptor.artifact.package_digest
+                        or (
+                            descriptor.storage.execution_profile == "official"
+                            and descriptor.artifact.trust_level != "official"
+                        )
                     )
                 )
             ):
@@ -761,6 +781,7 @@ class RuntimeModuleRegistry:
             descriptor.storage.spec,
             descriptor.storage.baseline,
             descriptor.storage.package_digest,
+            execution_profile=descriptor.storage.execution_profile,
         )
 
     async def _prepare_modules(self) -> None:

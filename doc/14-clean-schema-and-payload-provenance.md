@@ -41,6 +41,8 @@ repository_contract = "forest.memory.repository/1"
 
 `package_digest` 不写入 manifest，因为包不能稳定地自引用自己的摘要；宿主在完整包快照通过校验后派生该值，并把它与上述字段、Runtime Generation、Repository contract 和管理 UI 摘要一起写入描述符事实及安装账本。缺少包摘要或任一字段不一致都不能按幂等安装处理。
 
+Schema bundle 使用两个不可混淆的执行档位。可安装包固定为 `declarative`，只允许宿主审计器接受的表、类型、索引、序列和注释，不能声明函数、触发器、`ALTER`、跨 namespace 引用或数据语句。随 Forest 官方 distribution 摘要发布且描述符 `trust_level=official` 的模块可以使用 `official` 档位承载函数、触发器和完整约束；该档位是对已经能够执行宿主 Python 的官方代码做完整性校验，不是 SQL 沙箱。Runtime registry 必须复核 artifact trust level，安装器把 `execution_profile` 写入不可变 bundle 账本；第三方描述符选择 `official` 时在执行任何 SQL 前拒绝。
+
 首发前只允许以下安装状态：
 
 ```text

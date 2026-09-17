@@ -19,6 +19,7 @@ CREATE TABLE forest_kernel.schema_bundles (
     baseline_sha256 text NOT NULL CHECK (baseline_sha256 ~ '^[0-9a-f]{64}$'),
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[0-9a-f]{64}$'),
     repository_contract text NOT NULL,
+    execution_profile text NOT NULL CHECK (execution_profile IN ('declarative', 'official')),
     state text NOT NULL CHECK (state IN ('READY', 'DETACHED')),
     installed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     detached_at timestamptz,

@@ -164,8 +164,23 @@ async def test_storage_is_installed_before_factory_and_prepared_state():
     package_digest = "sha256:" + "1" * 64
 
     class Installer:
-        async def install(self, installed_spec, installed_baseline, installed_package):
-            events.append(("install", installed_spec, installed_baseline, installed_package))
+        async def install(
+            self,
+            installed_spec,
+            installed_baseline,
+            installed_package,
+            *,
+            execution_profile,
+        ):
+            events.append(
+                (
+                    "install",
+                    installed_spec,
+                    installed_baseline,
+                    installed_package,
+                    execution_profile,
+                )
+            )
 
     platform = SimpleNamespace(schema_bundle_installer=Installer())
 
@@ -204,7 +219,10 @@ async def test_storage_install_failure_never_constructs_module():
     constructed = []
 
     class Installer:
-        async def install(self, _spec, _baseline, _package_digest):
+        async def install(
+            self, _spec, _baseline, _package_digest, *, execution_profile
+        ):
+            assert execution_profile == "declarative"
             raise ForestError("SCHEMA_BUNDLE_MISMATCH", "wrong bundle", 409)
 
     registry = RuntimeModuleRegistry(
@@ -274,6 +292,34 @@ def test_storage_bundle_must_match_descriptor_package_digest():
             (
                 RuntimeModuleDescriptor(
                     "owned", (), lambda *_: object(), artifact("5"), storage=storage
+                ),
+            ),
+        )
+    assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"
+
+
+def test_installed_module_cannot_select_official_storage_execution():
+    import hashlib
+
+    baseline = b"CREATE FUNCTION owned() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;"
+    storage = RuntimeStorageBundle(
+        StorageBundleSpec(
+            component_id="owned",
+            schema_id="owned.records",
+            schema_version="1.0.0",
+            baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract="owned.records/1",
+        ),
+        baseline,
+        "sha256:" + "6" * 64,
+        execution_profile="official",
+    )
+    with pytest.raises(ForestError) as caught:
+        RuntimeModuleRegistry(
+            SimpleNamespace(),
+            (
+                RuntimeModuleDescriptor(
+                    "owned", (), lambda *_: object(), artifact("6"), storage=storage
                 ),
             ),
         )

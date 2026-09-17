@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from forest.errors import ForestError
 
 MAX_STORAGE_BASELINE_BYTES = 1024 * 1024
+MAX_OFFICIAL_STORAGE_BASELINE_BYTES = 8 * 1024 * 1024
 _IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 _VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
 _REPOSITORY_CONTRACT = re.compile(r"[a-z][a-z0-9_.-]*/[1-9]\d*\Z")
@@ -91,19 +92,7 @@ class StorageBundleSpec:
 
 
 def validate_storage_baseline(source: bytes, expected_sha256: str) -> str:
-    if not isinstance(source, bytes) or not source or len(source) > MAX_STORAGE_BASELINE_BYTES:
-        _invalid("Storage baseline exceeds its byte limit")
-    actual = hashlib.sha256(source).hexdigest()
-    if not isinstance(expected_sha256, str) or not _DIGEST.fullmatch(expected_sha256):
-        _invalid("Storage baseline digest is invalid")
-    if actual != expected_sha256:
-        _invalid("Storage baseline digest does not match its bytes")
-    try:
-        sql = source.decode("utf-8")
-    except UnicodeError as exc:
-        raise ForestError(
-            "INVALID_STORAGE_BUNDLE", "Storage baseline must be UTF-8 SQL", 422
-        ) from exc
+    sql = _verified_source(source, expected_sha256, MAX_STORAGE_BASELINE_BYTES)
     code = _lexical_sql(sql)
     statements = [statement.strip() for statement in code.split(";") if statement.strip()]
     if (
@@ -116,6 +105,38 @@ def validate_storage_baseline(source: bytes, expected_sha256: str) -> str:
     ):
         _invalid("Storage baseline contains forbidden SQL")
     return sql
+
+
+def validate_official_storage_baseline(source: bytes, expected_sha256: str) -> str:
+    """Verify immutable SQL carried by the trusted Forest distribution.
+
+    Official modules require triggers, functions and ALTER statements to keep
+    their database invariants. This profile is an integrity check rather than a
+    SQL sandbox: the same signed distribution already executes trusted Python in
+    the host process. Runtime admission prevents installed packages from
+    selecting this profile.
+    """
+
+    sql = _verified_source(source, expected_sha256, MAX_OFFICIAL_STORAGE_BASELINE_BYTES)
+    if "\x00" in sql or re.search(r"(?m)^\s*\\", sql) or not sql.strip():
+        _invalid("Official storage baseline contains invalid SQL input")
+    return sql
+
+
+def _verified_source(source: bytes, expected_sha256: str, limit: int) -> str:
+    if not isinstance(source, bytes) or not source or len(source) > limit:
+        _invalid("Storage baseline exceeds its byte limit")
+    actual = hashlib.sha256(source).hexdigest()
+    if not isinstance(expected_sha256, str) or not _DIGEST.fullmatch(expected_sha256):
+        _invalid("Storage baseline digest is invalid")
+    if actual != expected_sha256:
+        _invalid("Storage baseline digest does not match its bytes")
+    try:
+        return source.decode("utf-8")
+    except UnicodeError as exc:
+        raise ForestError(
+            "INVALID_STORAGE_BUNDLE", "Storage baseline must be UTF-8 SQL", 422
+        ) from exc
 
 
 def _lexical_sql(sql: str) -> str:

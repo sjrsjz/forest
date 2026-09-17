@@ -12,7 +12,11 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.errors import ForestError
-from forest.schema_bundles import StorageBundleSpec, validate_storage_baseline
+from forest.schema_bundles import (
+    StorageBundleSpec,
+    validate_official_storage_baseline,
+    validate_storage_baseline,
+)
 from forest.storage.bot import BotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
@@ -57,6 +61,21 @@ def test_storage_baseline_accepts_declarative_owned_objects():
         b"COMMENT ON TABLE records IS 'module-owned';\n"
     )
     assert validate_storage_baseline(source, hashlib.sha256(source).hexdigest()) == source.decode()
+
+
+def test_only_official_profile_accepts_invariant_functions_and_triggers():
+    source = (
+        b"CREATE TABLE records(record_id text PRIMARY KEY);\n"
+        b"CREATE FUNCTION reject_change() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+        b"BEGIN RAISE EXCEPTION 'immutable'; END $$;\n"
+        b"CREATE TRIGGER records_immutable BEFORE UPDATE ON records "
+        b"FOR EACH ROW EXECUTE FUNCTION reject_change();\n"
+    )
+    digest = hashlib.sha256(source).hexdigest()
+    with pytest.raises(ForestError) as caught:
+        validate_storage_baseline(source, digest)
+    assert caught.value.code == "INVALID_STORAGE_BUNDLE"
+    assert validate_official_storage_baseline(source, digest) == source.decode()
 
 
 @pytest_asyncio.fixture
@@ -118,6 +137,49 @@ async def test_bundle_install_is_exact_idempotent_and_concurrent(clean_authority
     with pytest.raises(ForestError) as caught:
         await installer.install(spec, baseline, "sha256:" + "2" * 64)
     assert caught.value.code == "SCHEMA_BUNDLE_MISMATCH"
+
+
+@pytest.mark.postgres
+async def test_official_bundle_profile_is_persisted_and_part_of_identity(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    baseline = b"CREATE TABLE records(record_id text PRIMARY KEY);"
+    spec = bundle(baseline, schema_id="example.official")
+    package_digest = "sha256:" + "5" * 64
+    row = await installer.install(
+        spec, baseline, package_digest, execution_profile="official"
+    )
+    assert row["execution_profile"] == "official"
+    with pytest.raises(ForestError) as caught:
+        await installer.install(spec, baseline, package_digest)
+    assert caught.value.code == "SCHEMA_BUNDLE_MISMATCH"
+
+    invariant_baseline = (
+        b"CREATE TABLE records(record_id text PRIMARY KEY);\n"
+        b"CREATE FUNCTION reject_change() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+        b"BEGIN RAISE EXCEPTION 'immutable'; END $$;\n"
+        b"CREATE TRIGGER records_immutable BEFORE UPDATE ON records "
+        b"FOR EACH ROW EXECUTE FUNCTION reject_change();\n"
+    )
+    invariant_spec = bundle(invariant_baseline, schema_id="example.invariants")
+    await installer.install(
+        invariant_spec,
+        invariant_baseline,
+        "sha256:" + "6" * 64,
+        execution_profile="official",
+    )
+    async with store.pool.connection() as conn:
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.records(record_id) VALUES ('one')").format(
+                sql.Identifier(invariant_spec.namespace)
+            )
+        )
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("UPDATE {}.records SET record_id='two'").format(
+                    sql.Identifier(invariant_spec.namespace)
+                )
+            )
 
 
 @pytest.mark.postgres

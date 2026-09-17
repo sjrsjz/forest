@@ -10,7 +10,11 @@ import psycopg
 from psycopg import sql
 
 from forest.errors import ForestError
-from forest.schema_bundles import StorageBundleSpec, validate_storage_baseline
+from forest.schema_bundles import (
+    StorageBundleSpec,
+    validate_official_storage_baseline,
+    validate_storage_baseline,
+)
 
 _PACKAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KERNEL_SCHEMA = "forest_kernel"
@@ -82,10 +86,19 @@ class SchemaBundleInstaller:
         spec: StorageBundleSpec,
         baseline: bytes,
         package_digest: str,
+        *,
+        execution_profile: str = "declarative",
     ) -> dict:
         """Install an exact bundle or prove that the exact bundle is already READY."""
 
-        source = validate_storage_baseline(baseline, spec.baseline_sha256)
+        if execution_profile == "declarative":
+            source = validate_storage_baseline(baseline, spec.baseline_sha256)
+        elif execution_profile == "official":
+            source = validate_official_storage_baseline(baseline, spec.baseline_sha256)
+        else:
+            raise ForestError(
+                "INVALID_STORAGE_BUNDLE", "Storage execution profile is invalid", 422
+            )
         if not isinstance(package_digest, str) or not _PACKAGE_DIGEST.fullmatch(package_digest):
             raise ForestError("INVALID_STORAGE_BUNDLE", "Storage package digest is invalid", 422)
         async with self.store.pool.connection() as conn:
@@ -112,6 +125,7 @@ class SchemaBundleInstaller:
                         "baseline_sha256": spec.baseline_sha256,
                         "package_digest": package_digest,
                         "repository_contract": spec.repository_contract,
+                        "execution_profile": execution_profile,
                         "state": "READY",
                     }
                     if existing is not None:
@@ -154,8 +168,9 @@ class SchemaBundleInstaller:
                         await conn.execute(
                             "INSERT INTO forest_kernel.schema_bundles("
                             "bot_id,schema_id,component_id,schema_version,scope,namespace,"
-                            "baseline_sha256,package_digest,repository_contract,state) "
-                            "VALUES (%s,%s,%s,%s,'bot',%s,%s,%s,%s,'READY') RETURNING *",
+                            "baseline_sha256,package_digest,repository_contract,"
+                            "execution_profile,state) "
+                            "VALUES (%s,%s,%s,%s,'bot',%s,%s,%s,%s,%s,'READY') RETURNING *",
                             (
                                 self.store.bot_id,
                                 spec.schema_id,
@@ -165,6 +180,7 @@ class SchemaBundleInstaller:
                                 spec.baseline_sha256,
                                 package_digest,
                                 spec.repository_contract,
+                                execution_profile,
                             ),
                         )
                     ).fetchone()
