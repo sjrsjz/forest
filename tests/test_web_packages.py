@@ -14,6 +14,7 @@ from test_web_bots import (
     ORIGIN,
     apply,
     catalog_query,
+    component_target,
     effective,
     invoke,
     login,
@@ -109,7 +110,20 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         assert imported.digest == first["package_digest"]
         bot = await post(client, "/management/v1/bots", {"display_name": "Packages"}, "bot", status=202)
         await ready(client, bot)
-        base = f"/management/v1/bots/{bot['bot_id']}/components/demo.counter"
+        base = component_target(bot["bot_id"], "demo.counter")
+        component_packages = await client.get(base[0] + "/queries/packages")
+        assert component_packages.status_code == 200, component_packages.text
+        builtin = next(
+            package for package in component_packages.json()["packages"]
+            if package["package_id"] == "forest.counter"
+        )
+        component_ui = await client.get(
+            base[0] + "/downloads/package.management-ui",
+            params={"package_digest": builtin["package_digest"]},
+        )
+        assert component_ui.status_code == 200, component_ui.text
+        assert component_ui.headers["content-type"].startswith("text/html")
+        assert "forest.management-ui/1" in component_ui.text
         await apply(client, base, await make_plan(client, base, first, "Original", 2, 0, "p1"), "a1")
         await effective(client, base, 1)
         runtime = (
@@ -148,6 +162,14 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             {"operation_id": "runtime", "kind": "query", "authority": "bot.runtime.read"},
             {"operation_id": "maintenance", "kind": "action",
              "authority": "bot.maintenance", "principal": "admin"},
+        ]
+        assert [
+            item["operation_id"]
+            for item in modules["component.worker-host"]["management_contract"]["operations"]
+        ] == [
+            "packages", "configuration", "configuration-history", "module",
+            "module.validate", "configuration.plan", "configuration.apply",
+            "module.enable", "module.disable", "service.invoke", "package.management-ui",
         ]
         assert modules["kernel.audit"]["management_contract"]["operations"] == [
             {"operation_id": "records", "kind": "query", "authority": "audit.read"}
@@ -349,10 +371,15 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         # A failed candidate must leave the old durable effective revision/Worker live.
         async with asyncio.timeout(30):
             while True:
-                state = (await client.get(base + "/configuration")).json()
+                state = (
+                    await client.get(
+                        base[0] + "/queries/configuration",
+                        params={"component_id": base[1]},
+                    )
+                ).json()
                 if any(op["phase"] in {"FAILED", "ABANDONED"} for op in state["operations"]):
                     break
-                if any(row["error_code"] for row in state["runtime"]["components"]):
+                if state["component"]["error_code"]:
                     break
                 await asyncio.sleep(0.1)
         assert state["desired_revision"] == 2 and state["effective_revision"] == 1
@@ -360,13 +387,24 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         await apply(client, base, await make_plan(client, base, third, "New", 5, 2, "p3"), "a3")
         await effective(client, base, 3)
         assert (await invoke(client, base, 1, "call-new"))["result"]["value"] == 11
-        history = (await client.get(base + "/configuration/history")).json()
+        history = (
+            await client.get(
+                base[0] + "/queries/configuration-history",
+                params={"component_id": base[1]},
+            )
+        ).json()
         assert [r["revision"] for r in history["revisions"]] == [3, 2, 1]
         assert history["next_before"] is None
-        older = (await client.get(base + "/configuration/history?before=2")).json()
+        older = (
+            await client.get(
+                base[0] + "/queries/configuration-history",
+                params={"component_id": base[1], "before": 2},
+            )
+        ).json()
         assert [r["revision"] for r in older["revisions"]] == [1]
-        restored = await post(client, base + "/change-plans", {
-            "expected_revision": 3, "values": history["revisions"][-1]["values"],
+        restored = await post(client, base[0] + "/actions/configuration.plan", {
+            "component_id": base[1], "expected_revision": 3,
+            "values": history["revisions"][-1]["values"],
         }, "restore-plan")
         await apply(client, base, restored, "restore")
         await effective(client, base, 4)
@@ -457,7 +495,7 @@ async def test_restart_restores_last_effective_while_new_desired_is_broken(tmp_p
         broken = await upload(client, archive(tmp_path, "2.0.0", broken=True), "broken")
         bot = await post(client, "/management/v1/bots", {"display_name": "Recovery"}, "bot", status=202)
         await ready(client, bot)
-        base = f"/management/v1/bots/{bot['bot_id']}/components/demo.counter"
+        base = component_target(bot["bot_id"], "demo.counter")
         await apply(client, base, await make_plan(client, base, first, "Old", 2, 0, "p1"), "a1")
         await effective(client, base, 1)
         assert (await invoke(client, base, 3, "before"))["result"]["value"] == 6
@@ -466,9 +504,16 @@ async def test_restart_restores_last_effective_while_new_desired_is_broken(tmp_p
         await login(client)
         async with asyncio.timeout(30):
             while True:
-                state = (await client.get(base + "/configuration")).json()
-                if any(row["loaded_revision"] == 1 and row["worker_state"] == "ACTIVE"
-                       for row in state["runtime"]["components"]):
+                state = (
+                    await client.get(
+                        base[0] + "/queries/configuration",
+                        params={"component_id": base[1]},
+                    )
+                ).json()
+                if (
+                    state["component"]["loaded_revision"] == 1
+                    and state["component"]["worker_state"] == "ACTIVE"
+                ):
                     break
                 await asyncio.sleep(0.1)
         assert state["desired_revision"] == 2 and state["effective_revision"] == 1

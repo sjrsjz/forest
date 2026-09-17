@@ -8,6 +8,7 @@ from test_memory_config_payloads import forget_input
 from test_web_bots import (
     ORIGIN,
     apply,
+    component_target,
     effective,
     make_plan,
     package_query,
@@ -35,7 +36,7 @@ async def test_http_history_copy_tracks_real_revision_and_erasure(tmp_path, web_
         await ready(client, created)
         packages = (await package_query(client))["packages"]
         package = next(row for row in packages if row["component_id"] == "forest.counter")
-        base = f"/management/v1/bots/{created['bot_id']}/components/forest.counter"
+        base = component_target(created["bot_id"], "forest.counter")
         first = await make_plan(client, base, package, "original", 2, 0, "initial-plan")
         await apply(client, base, first, "initial-apply")
         await effective(client, base, 1)
@@ -51,21 +52,26 @@ async def test_http_history_copy_tracks_real_revision_and_erasure(tmp_path, web_
                 )
             ).fetchone()
         assert "source_revision" not in json.loads(bytes(original["content"]))["value"]
-        history = await client.get(base + "/configuration/history")
+        history = await client.get(
+            base[0] + "/queries/configuration-history",
+            params={"component_id": base[1]},
+        )
         assert history.status_code == 200, history.text
         historical = history.json()["revisions"][0]
         values = historical["values"]
         values["config"]["label"] = "edited-history"
-        body = {"expected_revision": 1, "values": values, "source_revision": historical["revision"]}
+        body = {"component_id": base[1], "expected_revision": 1, "values": values,
+                "source_revision": historical["revision"]}
         for invalid in (
             {**body, "source_revision": True},
             {**body, "source_family": "agent.config"},
         ):
             rejected = await client.post(
-                base + "/change-plans", json=invalid, headers={"idempotency-key": "invalid-source"}
+                base[0] + "/actions/configuration.plan", json=invalid,
+                headers={"idempotency-key": "invalid-source"}
             )
             assert rejected.status_code == 422, rejected.text
-        copied = await post(client, base + "/change-plans", body, "copy-plan")
+        copied = await post(client, base[0] + "/actions/configuration.plan", body, "copy-plan")
         await apply(client, base, copied, "copy-apply")
         current = await effective(client, base, 2)
         assert current["effective_values"]["config"]["label"] == "edited-history"
@@ -86,7 +92,9 @@ async def test_http_history_copy_tracks_real_revision_and_erasure(tmp_path, web_
             SimpleNamespace(store=bot.store, lease=bot.kernel._authority()),
             original["operation_id"],
         )
-        read = await client.get(base + "/configuration")
+        read = await client.get(
+            base[0] + "/queries/configuration", params={"component_id": base[1]}
+        )
         assert read.status_code == 200, read.text
         assert read.json()["desired_revision"] == read.json()["effective_revision"] == 2
         assert read.json()["desired_values"] is read.json()["effective_values"] is None
@@ -95,14 +103,14 @@ async def test_http_history_copy_tracks_real_revision_and_erasure(tmp_path, web_
             == read.json()["effective_values_payload_state"]
             == "UNAVAILABLE"
         )
-        replay = await post(client, base + "/change-plans", body, "copy-plan")
+        replay = await post(client, base[0] + "/actions/configuration.plan", body, "copy-plan")
         assert (
             replay["operation_status"] == "RECORDED"
             and replay["result_payload_state"] == "UNAVAILABLE"
         )
         rejected = await post(
             client,
-            base + "/change-plans",
+            base[0] + "/actions/configuration.plan",
             {**body, "expected_revision": 2},
             "late-copy",
             status=409,

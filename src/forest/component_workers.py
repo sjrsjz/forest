@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from uuid import uuid4
 
 from forest.errors import ForestError
+from forest.module_validation import validate_component_values
+from forest.package_projection import describe_package
 
 
 class ComponentWorkerHost:
-    def __init__(self, kernel, packages: dict) -> None:
+    def __init__(self, kernel, packages: dict, *, module_packages: dict | None = None) -> None:
         self.kernel = kernel
         self.packages = dict(packages)
+        self.module_packages = {} if module_packages is None else module_packages
         self.errors: dict[str, str] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._closed = False
@@ -69,3 +73,16 @@ class ComponentWorkerHost:
     async def close(self) -> None:
         self._closed = True
 
+    def available_packages(self) -> list[dict]:
+        return copy.deepcopy(
+            [describe_package(package) for package in self.module_packages.values()]
+        )
+
+    def validate(self, component_id: str, values: dict) -> None:
+        validate_component_values(self.module_packages, component_id, values)
+
+    def package(self, digest: str):
+        package = self.module_packages.get(digest)
+        if package is None:
+            raise ForestError("PACKAGE_UNAVAILABLE", "Package is not available to this Bot", 404)
+        return package

@@ -146,16 +146,28 @@ async def ready(client, bot):
             await asyncio.sleep(0.1)
 
 
+def component_target(bot_id: str, component_id: str) -> tuple[str, str]:
+    return (
+        f"/management/v1/scopes/bot/{bot_id}/modules/component.worker-host",
+        component_id,
+    )
+
+
 async def effective(client, base, revision):
+    root, component_id = base
     result = None
     try:
         async with asyncio.timeout(40):
             while True:
-                response = await client.get(base + "/configuration")
+                response = await client.get(
+                    root + "/queries/configuration", params={"component_id": component_id}
+                )
                 assert response.status_code == 200, response.text
                 result = response.json()
-                loaded = any(row["loaded_revision"] == revision and not row["error_code"]
-                             for row in result["runtime"]["components"])
+                loaded = (
+                    result["component"]["loaded_revision"] == revision
+                    and not result["component"]["error_code"]
+                )
                 if result["effective_revision"] == revision and loaded:
                     return result
                 await asyncio.sleep(0.1)
@@ -164,16 +176,20 @@ async def effective(client, base, revision):
 
 
 async def module_effective(client, base, state_revision, enabled, config_revision):
+    root, component_id = base
     result = None
     try:
         async with asyncio.timeout(40):
             while True:
-                response = await client.get(base + "/configuration")
+                response = await client.get(
+                    root + "/queries/configuration", params={"component_id": component_id}
+                )
                 assert response.status_code == 200, response.text
                 result = response.json()
-                loaded = any(
-                    row["component_id"] == "forest.counter" and not row["error_code"]
-                    for row in result["runtime"]["components"]
+                loaded = (
+                    result["component"]["component_id"] == component_id
+                    and result["component"]["worker_state"] == "ACTIVE"
+                    and not result["component"]["error_code"]
                 )
                 if (
                     result["desired_state_revision"] == state_revision
@@ -190,7 +206,9 @@ async def module_effective(client, base, state_revision, enabled, config_revisio
 
 
 async def make_plan(client, base, package, label, multiplier, revision, key):
-    return await post(client, base + "/change-plans", {
+    root, component_id = base
+    return await post(client, root + "/actions/configuration.plan", {
+        "component_id": component_id,
         "expected_revision": revision,
         "values": {"package_digest": package["package_digest"], "grants": package["grants"],
                    "config": {"label": label, "multiplier": multiplier}},
@@ -198,14 +216,20 @@ async def make_plan(client, base, package, label, multiplier, revision, key):
 
 
 async def apply(client, base, plan, key, *, status=202):
-    return await post(client, base + "/management-requests",
-                      {k: plan[k] for k in ("plan_id", "plan_digest", "expected_revision")}, key,
+    root, component_id = base
+    return await post(client, root + "/actions/configuration.apply",
+                      {"component_id": component_id, **{
+                          k: plan[k]
+                          for k in ("plan_id", "plan_digest", "expected_revision")
+                      }}, key,
                       status=status)
 
 
 async def invoke(client, base, increment, key, *, status=200):
-    return await post(client, base + "/invoke",
-                      {"service": "counter.increment", "payload": {"increment": increment}}, key,
+    root, component_id = base
+    return await post(client, root + "/actions/service.invoke",
+                      {"component_id": component_id, "service": "counter.increment",
+                       "payload": {"increment": increment}}, key,
                       status=status)
 
 
@@ -266,9 +290,20 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
         assert (
             await client.get(f"/management/v1/provision-jobs/{created[0]['job_id']}")
         ).status_code == 404
+        legacy_component = (
+            f"/management/v1/bots/{created[0]['bot_id']}/components/forest.counter"
+        )
+        assert (await client.get(legacy_component + "/configuration")).status_code == 404
+        assert (
+            await client.post(
+                legacy_component + "/change-plans",
+                json={},
+                headers={"idempotency-key": "removed-component-api"},
+            )
+        ).status_code == 404
         packages = (await package_query(client))["packages"]
         package = next(item for item in packages if item["component_id"] == "forest.counter")
-        bases = [f"/management/v1/bots/{bot['bot_id']}/components/forest.counter" for bot in created]
+        bases = [component_target(bot["bot_id"], "forest.counter") for bot in created]
         plans = [await make_plan(client, base, package, label, multiplier, 0, "initial-plan")
                  for base, label, multiplier in zip(bases, ("Alpha", "Beta"), (2, 3), strict=True)]
         accepted = [await apply(client, base, plan, "initial-apply")
@@ -377,13 +412,17 @@ async def test_web_module_validate_disable_edit_and_enable_is_atomic(
             row for row in (await package_query(client))["packages"]
             if row["component_id"] == "forest.counter"
         )
-        base = f"/management/v1/bots/{bot['bot_id']}/components/forest.counter"
+        base = component_target(bot["bot_id"], "forest.counter")
         plan = await make_plan(client, base, package, "Before disable", 1, 0, "module-plan")
         await apply(client, base, plan, "module-apply")
         await effective(client, base, 1)
         assert (await invoke(client, base, 2, "module-before"))["result"]["value"] == 2
 
-        module = (await client.get(base + "/module")).json()["modules"][0]
+        module = (
+            await client.get(
+                base[0] + "/queries/module", params={"component_id": base[1]}
+            )
+        ).json()["modules"][0]
         assert module["state"] == "ACTIVE" and module["admission"]
         runtime_root = f"/management/v1/scopes/bot/{bot['bot_id']}/modules/kernel.runtime"
         runtime_path = runtime_root + "/queries/runtime"
@@ -394,7 +433,11 @@ async def test_web_module_validate_disable_edit_and_enable_is_atomic(
             "data_admission": False,
             "reason": "module projection check",
         }, "module-pause", status=202)
-        paused_module = (await client.get(base + "/module")).json()["modules"][0]
+        paused_module = (
+            await client.get(
+                base[0] + "/queries/module", params={"component_id": base[1]}
+            )
+        ).json()["modules"][0]
         assert paused_module["state"] == "ACTIVE" and paused_module["admission"], paused_module
         paused_runtime = (await client.get(runtime_path)).json()
         await post(client, maintenance_path, {
@@ -403,16 +446,22 @@ async def test_web_module_validate_disable_edit_and_enable_is_atomic(
             "reason": "module projection check complete",
         }, "module-resume", status=202)
 
-        validated = await post(client, base + "/module/validate", {
-            "expected_config_revision": 1, "expected_state_revision": 0,
-        }, "ignored-read-key")
+        validated_response = await client.get(
+            base[0] + "/queries/module.validate",
+            params={"component_id": base[1], "expected_config_revision": 1,
+                    "expected_state_revision": 0},
+        )
+        assert validated_response.status_code == 200, validated_response.text
+        validated = validated_response.json()
         assert validated["status"] == "VALID" and validated["required_components"] == []
 
-        disabled = await post(client, base + "/module/state", {
-            "expected_state_revision": 0, "enabled": False, "reason": "isolate failure",
+        disabled = await post(client, base[0] + "/actions/module.disable", {
+            "component_id": base[1], "expected_state_revision": 0,
+            "reason": "isolate failure",
         }, "module-disable", status=202)
-        assert await post(client, base + "/module/state", {
-            "expected_state_revision": 0, "enabled": False, "reason": "isolate failure",
+        assert await post(client, base[0] + "/actions/module.disable", {
+            "component_id": base[1], "expected_state_revision": 0,
+            "reason": "isolate failure",
         }, "module-disable", status=202) == disabled
         assert disabled["desired_state_revision"] == 1
         await module_effective(client, base, 1, False, 1)
@@ -422,12 +471,17 @@ async def test_web_module_validate_disable_edit_and_enable_is_atomic(
         )
         await apply(client, base, next_plan, "disabled-config-apply")
         await asyncio.sleep(0.25)
-        pending = (await client.get(base + "/configuration")).json()
+        pending = (
+            await client.get(
+                base[0] + "/queries/configuration", params={"component_id": base[1]}
+            )
+        ).json()
         assert pending["desired_revision"] == 2 and pending["effective_revision"] == 1
         assert not pending["effective_enabled"]
 
-        enabled = await post(client, base + "/module/state", {
-            "expected_state_revision": 1, "enabled": True, "reason": "validated recovery",
+        enabled = await post(client, base[0] + "/actions/module.enable", {
+            "component_id": base[1], "expected_state_revision": 1,
+            "reason": "validated recovery",
         }, "module-enable", status=202)
         assert enabled["desired_state_revision"] == 2
         final = await module_effective(client, base, 2, True, 2)
@@ -454,7 +508,7 @@ async def test_bot_endpoints_reject_csrf_cross_target_plan_and_revoked_replay(tm
                 for key in ("first", "second")]
         await asyncio.gather(*(ready(client, bot) for bot in bots))
         package = (await package_query(client))["packages"][0]
-        bases = [f"/management/v1/bots/{bot['bot_id']}/components/{package['component_id']}" for bot in bots]
+        bases = [component_target(bot["bot_id"], package["component_id"]) for bot in bots]
         plan = await make_plan(client, bases[0], package, "First", 1, 0, "plan")
         moved = await apply(client, bases[1], plan, "cross-target", status=404)
         assert moved["code"] == "PLAN_NOT_FOUND"
@@ -464,8 +518,9 @@ async def test_bot_endpoints_reject_csrf_cross_target_plan_and_revoked_replay(tm
         cookie = client.cookies["forest_session"]
         assert (await client.post("/management/v1/logout", json={})).status_code == 200
         client.cookies.set("forest_session", cookie)
-        response = await client.post(bases[0] + "/invoke", json={
-            "service": "counter.increment", "payload": {"increment": 1},
+        response = await client.post(bases[0][0] + "/actions/service.invoke", json={
+            "component_id": bases[0][1], "service": "counter.increment",
+            "payload": {"increment": 1},
         }, headers={"idempotency-key": "invoke"})
         assert response.status_code == 401
         public = response.text + (await client.get("/management/v1/setup")).text

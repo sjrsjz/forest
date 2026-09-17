@@ -41,3 +41,5 @@ POST /management/v1/scopes/deployment/{deployment_id}/modules/deployment.package
 升级失败保留当前生效实例。宿主死亡后，新的有效宿主可终结原宿主遗留的操作；同一有效宿主也可以受限地终结自己已过期、仍精确持有资源与 op epoch 的失败操作，恢复旧入口。过期权限仍不能发布或续租。
 
 `component.worker-host` 的贡献展示期望与生效修订、运行错误和有界的持久组件切换记录。该投影不是完整日志系统；Agent、Memory、Routing、审计、备份和恢复由各自模块/控制面服务贡献，不得汇总回一个固定组件后台。
+
+包自带配置界面通过 Bot scope 的只读 `package.management-ui` download artifact 取得。它是 `component.worker-host` 的工件传输操作，不是 deployment 包仓库的浏览器旁路，也不是可以修改状态的管理 action。连同该 artifact，当前契约共有十一项稳定操作；前十项 query/action 的业务语义仍以上述列表为准。

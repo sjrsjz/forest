@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from forest.management.module_api import EmptyInput, ModuleManagementContract, ModuleOperation
@@ -98,4 +97,4 @@ class KernelRuntimeManagementContract(ModuleManagementContract):
             and not request.bot.control.is_unavailable(result)
         ):
             request.bot.runtime.notify()
-        return JSONResponse(result, status_code=202)
+        return result

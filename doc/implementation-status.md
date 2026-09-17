@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-17。本页覆盖截至 `kernel.runtime` 管理面收口的实现事实。
+更新日期：2026-09-17。本页覆盖截至 `component.worker-host` 管理面收口的实现事实。
 
 ## 结论
 
@@ -10,7 +10,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 1. Bot 创建、挂载和恢复仍调用巨型 `BotStore.migrate()`，多数官方模块业务表仍位于历史 `public` schema；
 2. 可安装 Worker 仍由官方 `component.worker-host` 模块内部管理，尚未完成与官方模块一致的代际热替换、失租恢复和按依赖边故障隔离；
-3. Web 壳仍硬编码可安装组件配置和备份恢复等专用路由与面板；Bot 的运行维护已迁入 `kernel.runtime`，deployment 注册表已包含 `deployment.configuration`、`deployment.audit`、`deployment.accounts`、`deployment.bot-catalog` 与 `deployment.package-registry`，host 作用域注册表尚未落地。
+3. Web 壳仍硬编码备份恢复等专用路由与面板；Bot 的运行维护与可安装组件管理已分别迁入 `kernel.runtime` 和 `component.worker-host`，deployment 注册表已包含 `deployment.configuration`、`deployment.audit`、`deployment.accounts`、`deployment.bot-catalog` 与 `deployment.package-registry`，host 作用域注册表尚未落地。
 
 因此，能在 WebUI 中创建 Bot、配置 Agent、查看 Memory 或运行 OneBot，不能作为微内核完成的证据。
 
@@ -39,7 +39,8 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `command.router` 通过声明的 Adapter 依赖拥有 Binding 目录投影、命令策略、容量、脱敏诊断和恢复共九项管理操作；对应 UI 由模块贡献，旧命令专用路由和壳层 DOM 已删除。
 - `message.router` 通过声明的 Adapter 依赖拥有 Binding 目录投影、普通消息 Handler 策略、容量、脱敏诊断和恢复共九项管理操作；对应 UI 由模块贡献，旧消息路由专用管理面已删除。
 - `kernel.audit` 已拥有脱敏查询契约和 Bot 级 UI；专用 Web API、壳层 DOM/JavaScript 已删除，`shell.command` 通过显式依赖端口读取，不再构造审计 Store。各生产者的动作语义仍归生产者；历史写入路径尚待随 schema bundle 拆分收口为该模块的显式写入端口。
-- 不可卸载的 `kernel.runtime` 已拥有 Bot runtime/admission 投影、维护 revision 与暂停/恢复 action，并携带自己的管理 UI；旧 `/bots/{bot_id}/runtime`、`/maintenance`、壳层维护 DOM 和 JavaScript 已删除。可安装组件的配置与启停仍留待 `component.worker-host` 收口。
+- 不可卸载的 `kernel.runtime` 已拥有 Bot runtime/admission 投影、维护 revision 与暂停/恢复 action，并携带自己的管理 UI；旧 `/bots/{bot_id}/runtime`、`/maintenance`、壳层维护 DOM 和 JavaScript 已删除。
+- `component.worker-host` 已拥有 Bot 可选包投影、组件配置与历史、验证、显式启停、重载、服务调用和包内管理 UI 工件；固定组件 DOM、壳层业务控制器和旧 `/bots/{bot_id}/components/*` API 已删除。壳层只按当前 Bot 注册表装载该模块贡献，不读取 deployment 包目录或识别组件字段。
 
 ### Agent、群聊与 Shell
 
@@ -93,8 +94,8 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `deployment.configuration` 已接管 schema、当前投影、计划/提交契约和 UI；旧 `/configuration`、`/change-plans`、`/management-requests` 与固定表单已删除。登录与 session 端点只读取生效配置以计算会话 TTL 和壳层品牌文字。
 - `deployment.bot-catalog` 已接管列表、创建、重命名、供应重试和供应 Job；旧 `/management/v1/bots` 目录 CRUD、`/management/v1/provision-jobs/*`、固定目录 DOM 和壳层表单处理已删除。目录选择只调用壳层通用 `openScope({kind:'bot',id,row})`，其中 `row` 只是显示提示；壳层必须再经 `/scopes/{kind}/{id}/modules` 和 Bot provider 解析真实 ACTIVE 注册表。Bot 维护、组件配置和 Agent/Memory 模块仍经目标 Bot authority 处理。
 - 通用管理传输已增加受限 `upload`/`download` 操作：模块描述符固定媒体类型、字节上限、处置方式、主体和幂等语义，网关在读流前完成 scope/Generation/会话/CSRF 解析，下载只接受有界 `ArtifactResult`。`deployment.package-registry` 已接管包列表、ZIP 导入、导出和包内管理 UI 工件；旧 `/management/v1/packages*`、固定导入表单和包列表已删除。某个 Bot 选择哪个包代际仍属于 Bot scope 的 `component.worker-host`。
-- 下一步建立 `component.worker-host` 管理贡献，使其拥有包选择、组件配置/历史/验证/启停/调用。可选工件必须经 BotRuntimeSupervisor 的受限包目录端口提供；壳层不应继续直接查询 `deployment.package-registry`。
-- 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
+- `component.worker-host` 管理贡献已完成：可选工件经 BotRuntimeSupervisor 的受限包目录端口提供，浏览器只调用 Bot scope 的类型化 query/action/download，不跨作用域读取 `deployment.package-registry`。
+- 下一步删除备份恢复等剩余壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域继续使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。
 
@@ -120,6 +121,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `deployment.bot-catalog`：隔离 PostgreSQL 17 下目录创建幂等、供应 Job、单项/列表查询、重命名回放、重启恢复、viewer 读取、CSRF、模块发现和旧目录端点消失的首轮为 `16 passed, 1 failed`；失败仅因一个包测试仍读旧 Bot 详情投影，改为读目录模块后定向重跑为 `1 passed`。第二次整组重跑前 15 个通过后在无日志的 Worker 退出阶段停滞，已主动中断，不计作整组通过。
 - `deployment.package-registry` 与 artifact 传输：隔离 PostgreSQL 17 下 ZIP 导入幂等、原工件导出、包内 UI、包版本恢复、模块发现、配置历史和跨边界回执组为 `7 passed`；契约与 UI 所有权定向组为 `9 passed`。Bot 主回归重跑的首个双 Bot/热重载场景通过后再次停在 Windows Worker 退出阶段，已主动中断，不计作该组通过。
 - `kernel.runtime`：运行描述符与 UI 所有权定向组 `26 passed`；隔离 PostgreSQL 17 下模块发现、运行投影、维护 CAS/幂等、旧端点消失、双 Bot 配置与重启组合为 `2 passed`，组件启停与维护隔离另有 `1 passed`。包升级长场景再次在 Windows Worker 退出阶段无输出停滞并被中断，不计作通过。
+- `component.worker-host`：契约、贡献发现、UI 所有权和载荷定向组为 `26 passed`；隔离 PostgreSQL 17 下双 Bot 配置/调用/重启、组件验证与启停、历史正文清理、跨边界回执、跨 Bot 计划隔离、包升级失败恢复、Bot scope 包内 UI 工件和旧组件端点消失共 `10 passed`，随后对新增 artifact 与旧端点断言各自重跑为 `1 passed`。
 - PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
 - 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
 - Ruff、Python compileall、四个受影响 ES module 的 `node --check` 和 `git diff --check` 通过；

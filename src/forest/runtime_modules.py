@@ -344,8 +344,13 @@ def _onebot(runtime, modules: dict[str, Any]):
 
 def _component_workers(runtime, _: dict[str, Any]):
     from forest.component_workers import ComponentWorkerHost
+    from forest.management.component_worker_contract import ComponentWorkerManagementContract
 
-    return ComponentWorkerHost(runtime.kernel, runtime.packages)
+    module = ComponentWorkerHost(
+        runtime.kernel, runtime.packages, module_packages=runtime.module_packages
+    )
+    module.management_contract = ComponentWorkerManagementContract()
+    return module
 
 
 def _kernel_runtime(runtime, _: dict[str, Any]):
@@ -439,7 +444,21 @@ OFFICIAL_MODULES = (
             order=10,
         ),),
     ),
-    RuntimeModuleDescriptor("component.worker-host", (), _component_workers, _OFFICIAL_ARTIFACT),
+    RuntimeModuleDescriptor(
+        "component.worker-host",
+        (),
+        _component_workers,
+        _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "components",
+            "可安装组件",
+            ("bot",),
+            "/static/modules/component.worker-host.html",
+            "/static/component-worker-host.js",
+            group="runtime",
+            order=20,
+        ),),
+    ),
     RuntimeModuleDescriptor(
         "adapter.onebot",
         ("component.worker-host",),

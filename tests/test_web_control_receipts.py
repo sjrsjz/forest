@@ -7,6 +7,7 @@ from test_web_bots import (
     BootstrapState,
     WebSettings,
     apply,
+    component_target,
     effective,
     invoke,
     make_plan,
@@ -63,7 +64,7 @@ async def test_erased_web_service_admission_and_binding_reservation_do_not_finis
         )
         await ready(client, created)
         root = "/management/v1/bots/" + created["bot_id"]
-        base = root + "/components/forest.counter"
+        base = component_target(created["bot_id"], "forest.counter")
         package = next(
             item
             for item in (await package_query(client))["packages"]

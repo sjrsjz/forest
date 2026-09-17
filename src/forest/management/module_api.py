@@ -334,7 +334,10 @@ def install_module_routes(app, runtime):
             runtime, target.resource, module, who, operation, ticket, authorized_payload, prepared,
             target.kind, target.identity,
         )
-        return await contract.invoke(context, declared, body)
+        result = await contract.invoke(context, declared, body)
+        if kind == "action" and declared.success_status != 200:
+            return JSONResponse(result, status_code=declared.success_status)
+        return result
 
     async def artifact_target(
         scope_kind, scope_id, component_id, operation_id, request, kind

@@ -65,6 +65,18 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             {"operation_id": "maintenance", "kind": "action",
              "authority": "bot.maintenance", "principal": "admin"},
         ]
+        components, = modules["component.worker-host"]["management_contributions"]
+        assert components["contribution_id"] == "components"
+        assert components["surface"]["template"] == "/static/modules/component.worker-host.html"
+        assert components["surface"]["module"] == "/static/component-worker-host.js"
+        assert [
+            item["operation_id"]
+            for item in modules["component.worker-host"]["management_contract"]["operations"]
+        ] == [
+            "packages", "configuration", "configuration-history", "module",
+            "module.validate", "configuration.plan", "configuration.apply",
+            "module.enable", "module.disable", "service.invoke", "package.management-ui",
+        ]
         commands, = modules["command.router"]["management_contributions"]
         assert commands["contribution_id"] == "commands"
         assert commands["surface"]["template"] == "/static/modules/command.router.html"

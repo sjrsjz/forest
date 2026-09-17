@@ -582,13 +582,18 @@ async def test_history_identity_is_strict_and_database_rejects_dropped_source_pa
 ):
     from pydantic import ValidationError
 
-    from forest.management.bots_api import ConfigPlan
+    from forest.management.component_worker_contract import ConfigPlan
 
     env = environment
     await env.apply(await env.plan(operation="history-original"))
     for revision in (True, False, 0, -1, "1", 1.0, 2**63):
         with pytest.raises(ValidationError):
-            ConfigPlan(expected_revision=1, values={}, source_revision=revision)
+            ConfigPlan(
+                component_id="forest.counter",
+                expected_revision=1,
+                values={},
+                source_revision=revision,
+            )
         with pytest.raises(ForestError) as invalid:
             await historical_plan(env, source_revision=revision)
         assert invalid.value.code == "CONFIGURATION_SOURCE_INVALID"

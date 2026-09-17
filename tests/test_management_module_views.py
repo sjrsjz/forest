@@ -31,6 +31,10 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="package-import-form"' not in index
     assert 'id="package-list"' not in index
     assert 'id="bot-maintenance-form"' not in index
+    assert 'id="bot-config-form"' not in index
+    assert 'id="bot-package"' not in index
+    assert 'id="bot-invoke-form"' not in index
+    assert 'id="bot-history"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
@@ -65,6 +69,9 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     message = (STATIC / "modules/message.router.html").read_text(encoding="utf-8")
     audit = (STATIC / "modules/kernel.audit.html").read_text(encoding="utf-8")
     kernel_runtime = (STATIC / "modules/kernel.runtime.html").read_text(encoding="utf-8")
+    component_worker = (
+        STATIC / "modules/component.worker-host.html"
+    ).read_text(encoding="utf-8")
     deployment_audit = (STATIC / "modules/deployment.audit.html").read_text(encoding="utf-8")
     deployment_accounts = (STATIC / "modules/deployment.accounts.html").read_text(
         encoding="utf-8"
@@ -118,6 +125,21 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert "/queries/runtime" in kernel_runtime_controller
     assert "/actions/maintenance" in kernel_runtime_controller
     assert "/bots/" not in kernel_runtime_controller
+    assert 'id="component-worker-management"' in component_worker
+    assert 'id="bot-config-form"' in component_worker
+    assert 'id="bot-package"' in component_worker
+    assert 'id="bot-invoke-form"' in component_worker
+    assert 'id="bot-history"' in component_worker
+    component_controller = (STATIC / "component-worker-host.js").read_text(
+        encoding="utf-8"
+    )
+    assert "createModulePanel" in component_controller
+    assert "/modules/component.worker-host" in component_controller
+    assert "/queries/packages" in component_controller
+    assert "/actions/configuration.plan" in component_controller
+    assert "/actions/module.${enabled ? 'enable' : 'disable'}" in component_controller
+    assert "/actions/service.invoke" in component_controller
+    assert "/bots/" not in component_controller
     assert 'id="deployment-audit"' in deployment_audit
     deployment_audit_controller = (STATIC / "deployment-audit.js").read_text(encoding="utf-8")
     assert "createModulePanel" in deployment_audit_controller

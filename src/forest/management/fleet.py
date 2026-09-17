@@ -18,6 +18,7 @@ from forest.management.authority import WebAuthority
 from forest.management.catalog import BotCatalog
 from forest.management.packages import PackageRegistry
 from forest.module_validation import validate_component_values
+from forest.package_projection import describe_package
 from forest.packages import PackageCatalog, PackageSnapshot
 from forest.storage.bot import BotStore
 from forest.storage.control import BotControl
@@ -156,27 +157,7 @@ class BotFleet:
 
     @staticmethod
     def describe_package(p: PackageSnapshot) -> dict:
-        management_ui = p.management_ui()
-        storage_bundle = p.storage_bundle()
-        return {
-                "package_digest": p.digest,
-                "package_id": p.manifest["package_id"],
-                "version": p.manifest["version"],
-                "component_id": p.component["id"],
-                "state_schema": p.component["state_schema"],
-                "state_migrations": p.component.get("state_migrations", []),
-                "message_handler_takeover": p.component.get(
-                    "message_handler_takeover", "none"
-                ),
-                "config_schema": p.schema(p.component["config_schema"]),
-                "management_ui": management_ui[0] if management_ui else None,
-                "storage": storage_bundle[0] if storage_bundle else None,
-                "grants": p.component.get("capabilities", {}).get("requests", []),
-                "services": [
-                    {"name": s["name"], "input_schema": p.schema(s["input_schema"])}
-                    for s in p.component["provides"]
-                ],
-            }
+        return describe_package(p)
 
     def available_packages(self) -> list[dict]:
         return copy.deepcopy(list(self.package_metadata.values()))
