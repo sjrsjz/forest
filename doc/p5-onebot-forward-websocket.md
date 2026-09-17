@@ -76,9 +76,9 @@ WebSocket action 使用既有 `PreparedSend` 的精确 `wire_body` 作为 `param
 
 ## 7. 关闭、失败与热切换
 
-`Connection.close()` 是幂等、可屏蔽调用方取消的所有权收口：关闭新发送接纳，终止 socket，结算 pending，停止入站读取和消费，最后释放网络资源。BindingRuntime 持有所有候选与已发布客户端；本地关闭未完成时不得清空 `_clients` 所有权集合。
+`Connection.close()` 是幂等、可屏蔽调用方取消的所有权收口：关闭新发送接纳，终止 socket，结算 pending，停止入站读取和消费，最后释放网络资源。`adapter.onebot` Generation 持有所有候选与已发布客户端；本地关闭未完成时不得清空 `_clients` 所有权集合。`BotRuntimeSupervisor` 只观察模块健康和生命周期终态，不取得客户端所有权。
 
-读取循环意外结束后，`client.is_closed` 必须立即可见。现有 Binding supervisor 在下一次扫描发现 owner 不再健康，按同一配置建立新 incarnation；不在客户端内部悄悄重连，以免绕过数据库代际与身份探针。配置热切换同样建立候选、探针、DRAIN、CAS、采用，不修改单 Agent 或插件代际。
+读取循环意外结束后，`client.is_closed` 必须立即可见。`adapter.onebot` 的连接监督器在下一次扫描发现 owner 不再健康，按同一配置建立新 incarnation；不在客户端内部悄悄重连，以免绕过数据库代际与身份探针。配置热切换同样建立候选、探针、DRAIN、CAS、采用，不修改单 Agent 或插件代际。
 
 ## 8. 验收
 

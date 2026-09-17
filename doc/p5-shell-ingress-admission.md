@@ -66,7 +66,7 @@ BotStore 当前最多持有 8 条数据库连接。若普通消息和明显无�
 
 ## 5. 可观察性与生命周期
 
-Guard 随 BindingRuntime 创建和销毁，不跨 Bot 共享身份。运行时状态提供以下无主体聚合计数：
+Guard 由 `adapter.onebot` Generation 创建和销毁，并绑定准确的 Bot/Binding 作用域，不跨 Bot 共享身份。`BotRuntimeSupervisor` 不持有 Guard；Adapter 的管理贡献提供以下无主体聚合计数：
 
 - 三通道当前占用、累计接纳和累计 overload；
 - 资格缓存 hit/miss、当前条目数；

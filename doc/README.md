@@ -17,7 +17,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 5 | [04 多 Bot、Agent 与记忆](04-bot-agent-memory.md)、[07 Python 插件](07-python-plugin-development.md)、[P3 单 Agent 协议](p3-agent.md) | 可替换模块的详细行为；Agent 仅是模块，不能成为框架主循环 |
 | 状态证据 | [实现状态与验证记录](implementation-status.md) | 唯一的当前完成度来源；不定义目标架构 |
 
-任何实现若需要新增顶层 Agent/Memory/Bot 业务页面、在 `BindingRuntime` 上持有业务对象、引入产品子 Agent、按旧未发布表增加兼容迁移，或绕过注册表直接调用模块，均应视为设计错误并先修改方案。
+任何实现若需要新增顶层 Agent/Memory/Bot 业务页面、恢复已废弃的 `BindingRuntime` 组合根、在通用 Supervisor 上持有业务对象、引入产品子 Agent、按旧未发布表增加兼容迁移，或绕过注册表直接调用模块，均应视为设计错误并先修改方案。
 
 ## 实现切片文档
 

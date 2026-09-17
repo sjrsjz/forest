@@ -67,7 +67,9 @@ flowchart LR
 
 当前 `BotModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次宿主 incarnation 为完整官方描述符集建立一个不可变 RuntimeGraph，并为每个官方模块建立 Generation；描述符摘要覆盖依赖、factory 身份、管理契约、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`。当前官方模块仍同属一个 Forest Python distribution，所以共享由该 distribution 全部 Python、SQL、HTML、CSS、JavaScript、JSON 和 TOML 资源派生的内容摘要；这比伪造独立包身份更准确，待物理拆包后再自然变为各包摘要。存储 bundle 的 `package_digest` 必须等于描述符工件摘要。所有模块启动成功后，数据库在一个事务中追加 ACTIVE 生命周期事实并切换 runtime graph head；任一启动失败只记录 FAILED/STOPPED，不能发布部分图。关闭先原子撤下 head，再按逆依赖序排空并追加终态；消息冻结的旧图仍保留旧代际。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 仍使用不同的运行驱动和代际事实表，后续需统一健康检查、恢复和按依赖边隔离的故障策略，不能把二者误称为已经共用同一 Worker 生命周期实现。
 
-官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询契约和管理视图；`command.router`、`message.router` 依赖它并分别拥有业务命令和普通消息 Handler 的策略/容量存储。`component.worker-host` 独占可安装包 Worker 的启动锁、错误状态和 Kernel install 调用，OneBot 通过依赖端口请求 codec，不再反向调用宿主私有方法。`contract.router` 独占冻结消息分派、命令/Handler 调用、Agent 选择和模板 responder，Conversation Scheduler 只持有它的 `execute` 端口。`scheduler.jobs` 自己构造授权端口并把冻结委派翻译为部署 authority 请求。`BindingRuntime` 不再暴露这些便利入口；它当前仍持有 Bot 级启动/关闭、唤醒汇总和笼统健康循环，后续继续收口到通用 supervisor 和能力端口。
+官方 `adapter.onebot` 模块拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询契约和管理视图；`command.router`、`message.router` 依赖它并分别拥有业务命令和普通消息 Handler 的策略/容量存储。`component.worker-host` 独占可安装包 Worker 的启动锁、错误状态和 Kernel install 调用，OneBot 通过依赖端口请求 codec。`contract.router` 独占冻结消息分派、命令/Handler 调用、Agent 选择和模板 responder，Conversation Scheduler 只持有它的 `execute` 端口。`scheduler.jobs` 自己构造授权端口并把冻结委派翻译为部署 authority 请求。
+
+`BindingRuntime` 是已废弃的错误抽象，目标代码中不得保留该类型或兼容别名。Bot 作用域的宿主由 `BotRuntimeSupervisor` 表达；它只监督冻结模块图、内核任务、宿主 lease、统一唤醒和故障传播。模块唤醒通过通用生命周期/工作通知端口汇总，健康状态从各 Generation 的监督结果归约。Supervisor 不得知道某次唤醒属于 Agent、Memory、OneBot 或 Job，也不得持有这些模块的 Store、客户端或业务回调。
 
 ## 4. 控制台是模块工作台，不是固定产品后台
 
@@ -154,7 +156,7 @@ POST /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/action
 
 ## 8. 完成判据
 
-- `BindingRuntime` 不再直接构造 Agent、Memory、Shell、Job 或具体平台客户端；这些组件由注册表和依赖图装配。
+- 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。
 - 删除顶层硬编码 Agent/Memory 页面；模块列表来自服务端注册投影。
 - 至少一个真实官方模块随包携带 UI，并通过沙箱协议完成读取草稿、产生补丁、预览与应用。
 - 不带 UI 的模块仍可用通用 schema 表单配置。
@@ -166,7 +168,7 @@ POST /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/action
 
 出现下列任一方案时应先停止编码并修正文档/任务：
 
-- 在 `BindingRuntime`、`BotRuntimeSupervisor` 或 Web 应用入口直接构造/保存 Agent、Memory、Adapter、Shell、Scheduler、Delivery 的具体对象；
+- 保留 `BindingRuntime` 兼容层，或在 `BotRuntimeSupervisor`、Fleet、Web 应用入口直接构造/保存 Agent、Memory、Adapter、Shell、Scheduler、Delivery 的具体对象；
 - 为 Agent、Memory、LLM、Embedding 或 OneBot 新增控制台顶层页面、专用宿主表单或绕过通用模块路由的 HTTP 端点；
 - 把 Agent 的下一次模型调用实现成另一个 Agent、私有分支调度器或独立 Prompt/预算树；
 - 为已删除的 Child 表、旧页面、旧 DTO、旧 handler 或未发布数据库增加兼容迁移、fallback 读取或双写；
