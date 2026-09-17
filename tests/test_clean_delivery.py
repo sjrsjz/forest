@@ -123,7 +123,6 @@ async def clean_delivery():
         store,
         namespace=storage["adapter.onebot"].spec.namespace,
         payload_verifier=payloads.verify_in,
-        conversation_admitter=scheduler.admit_message_in,
     )
     delivery = DeliveryRepository(
         store,

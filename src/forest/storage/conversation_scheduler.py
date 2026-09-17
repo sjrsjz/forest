@@ -423,6 +423,7 @@ class ConversationSchedulerRepository:
         route_ref: str | None = None,
         trigger_id: str | None = None,
         principal_ref: str | None = None,
+        _connection=None,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -458,7 +459,7 @@ class ConversationSchedulerRepository:
                 "principal_ref": principal_ref,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock_operation(conn, operation_id)
             lane = await self._lane(conn, conversation_id, update=True)
             other = await (
@@ -605,6 +606,11 @@ class ConversationSchedulerRepository:
                 "classified_through_seq": classified,
                 "duplicate": False,
             }
+
+    async def complete_classification_in(self, conn, **values) -> dict:
+        """Finalize classification inside a caller-owned UnitOfWork."""
+
+        return await self.complete_classification(_connection=conn, **values)
 
     async def expire_classifications(self, *, limit: int = 128) -> int:
         if type(limit) is not int or not 1 <= limit <= 1024:

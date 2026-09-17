@@ -284,19 +284,11 @@ CREATE TABLE platform_events (
     author_owner_id text NOT NULL CHECK (
         octet_length(author_owner_id) BETWEEN 1 AND 512
     ),
-    scheduler_operation_id text NOT NULL CHECK (
-        octet_length(scheduler_operation_id) BETWEEN 1 AND 256
-    ),
-    scheduler_event_id text NOT NULL CHECK (
-        octet_length(scheduler_event_id) BETWEEN 1 AND 256
-    ),
-    scheduler_ingress_seq bigint NOT NULL CHECK (scheduler_ingress_seq > 0),
     sent_at timestamptz,
     received_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,event_id),
     UNIQUE (bot_id,binding_id,platform_message_ref),
-    UNIQUE (bot_id,scheduler_operation_id),
     FOREIGN KEY (bot_id,binding_id) REFERENCES binding_heads(bot_id,binding_id),
     FOREIGN KEY (bot_id,client_incarnation)
         REFERENCES binding_clients(bot_id,client_incarnation)

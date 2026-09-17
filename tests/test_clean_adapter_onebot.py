@@ -21,6 +21,7 @@ from forest.storage.adapter_onebot_authority import (
 )
 from forest.storage.bot import BotStore
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
+from forest.storage.ingress_unit_of_work import OneBotIngressUnitOfWork
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
@@ -74,7 +75,6 @@ async def clean_onebot():
         store,
         namespace=onebot_storage.spec.namespace,
         payload_verifier=payloads.verify_in,
-        conversation_admitter=scheduler.admit_message_in,
     )
     try:
         yield store, onebot_storage, scheduler_storage, payloads, scheduler, adapter
@@ -236,6 +236,7 @@ async def test_clean_onebot_schema_excludes_conversation_delivery_shell_and_secr
         b"delivery_attempt",
         b"conversation_lane",
         b"context_unit",
+        b"scheduler_ingress_seq",
         b"shell_command",
         b"access_token",
         b"webhook_secret",
@@ -383,18 +384,19 @@ async def test_connection_publication_retirement_and_late_observation_are_one_wa
 
 @pytest.mark.postgres
 async def test_platform_event_and_conversation_inbox_commit_atomically_and_dedupe(clean_onebot):
-    store, storage, scheduler_storage, _payloads, _scheduler, _adapter = clean_onebot
+    store, storage, scheduler_storage, _payloads, scheduler, _adapter = clean_onebot
     payloads, adapter, publication = await _active(clean_onebot)
+    ingress = OneBotIngressUnitOfWork(store, adapter=adapter, conversation=scheduler)
     event = await _event(payloads)
     one, two = await asyncio.gather(
-        adapter.admit_platform_event(
+        ingress.admit(
             operation_id="event/admit/a",
             binding_id="binding/main",
             expected_binding_epoch=publication["resulting_binding_epoch"],
             client_incarnation="client/main/1",
             event=event,
         ),
-        adapter.admit_platform_event(
+        ingress.admit(
             operation_id="event/admit/b",
             binding_id="binding/main",
             expected_binding_epoch=publication["resulting_binding_epoch"],
@@ -402,8 +404,8 @@ async def test_platform_event_and_conversation_inbox_commit_atomically_and_dedup
             event=event,
         ),
     )
-    assert {one["duplicate"], two["duplicate"]} == {False, True}
-    assert one["scheduler_ingress_seq"] == two["scheduler_ingress_seq"] == 1
+    assert {one["adapter"]["duplicate"], two["adapter"]["duplicate"]} == {False, True}
+    assert one["conversation"]["ingress_seq"] == two["conversation"]["ingress_seq"] == 1
     async with store.pool.connection() as conn:
         adapter_count = await (
             await conn.execute(
@@ -430,17 +432,16 @@ async def test_failed_conversation_participant_rolls_back_adapter_event(clean_on
     payloads, adapter, publication = await _active(clean_onebot)
     event = await _event(payloads, 2)
 
-    async def fail(_conn, **_values):
-        raise ForestError("TEST_PARTICIPANT_FAILED", "forced", 503)
+    class FailingConversation:
+        @staticmethod
+        async def admit_message_in(_conn, **_values):
+            raise ForestError("TEST_PARTICIPANT_FAILED", "forced", 503)
 
-    failing = OneBotAdapterRepository(
-        store,
-        namespace=storage.spec.namespace,
-        payload_verifier=payloads.verify_in,
-        conversation_admitter=fail,
+    ingress = OneBotIngressUnitOfWork(
+        store, adapter=adapter, conversation=FailingConversation()
     )
     with pytest.raises(ForestError) as caught:
-        await failing.admit_platform_event(
+        await ingress.admit(
             operation_id="event/admit/fail",
             binding_id="binding/main",
             expected_binding_epoch=publication["resulting_binding_epoch"],

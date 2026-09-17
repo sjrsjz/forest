@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
@@ -13,7 +14,6 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.conversation_scheduler import SchedulerPayloadRef
 
 _SHA256_RE = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _SELF_ID_RE = re.compile(r"[1-9][0-9]{0,18}\Z")
@@ -96,16 +96,6 @@ class OneBotPayloadRef:
             "owner_id": self.owner_id,
         }
 
-    def scheduler_ref(self) -> SchedulerPayloadRef:
-        return SchedulerPayloadRef(
-            self.payload_id,
-            self.digest,
-            self.owner_component_id,
-            self.owner_kind,
-            self.owner_id,
-        )
-
-
 @dataclass(frozen=True)
 class OneBotPlatformEvent:
     event_id: str
@@ -183,7 +173,7 @@ class OneBotPlatformEvent:
 
 
 class OneBotAdapterRepository:
-    """Own Adapter facts while delegating Inbox ordering to Conversation Scheduler."""
+    """Own only Binding, connection and authenticated platform-event facts."""
 
     def __init__(
         self,
@@ -191,12 +181,10 @@ class OneBotAdapterRepository:
         *,
         namespace: str | None = None,
         payload_verifier: Callable[..., Awaitable[object]] | None = None,
-        conversation_admitter: Callable[..., Awaitable[dict]] | None = None,
     ) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.adapter.onebot")
         self.payload_verifier = payload_verifier
-        self.conversation_admitter = conversation_admitter
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
@@ -206,6 +194,14 @@ class OneBotAdapterRepository:
             "SELECT pg_advisory_xact_lock(%s)",
             (_lock_key(self.store.bot_id, identity),),
         )
+
+    @asynccontextmanager
+    async def _transaction(self, connection=None):
+        if connection is not None:
+            yield connection
+            return
+        async with self.store.pool.connection() as conn, conn.transaction():
+            yield conn
 
     async def _verify_payload(self, conn, reference: OneBotPayloadRef) -> None:
         if self.payload_verifier is None:
@@ -959,7 +955,7 @@ class OneBotAdapterRepository:
                     )
             return dict(row)
 
-    async def admit_platform_event(
+    async def record_platform_event(
         self,
         *,
         operation_id: str,
@@ -967,6 +963,7 @@ class OneBotAdapterRepository:
         expected_binding_epoch: int,
         client_incarnation: str,
         event: OneBotPlatformEvent,
+        _connection=None,
     ) -> dict:
         for value, field in (
             (operation_id, "operation_id"),
@@ -993,21 +990,13 @@ class OneBotAdapterRepository:
                 "classification_deadline": deadline.isoformat(),
             }
         )
-        if self.conversation_admitter is None:
-            raise ForestError(
-                "CONVERSATION_AUTHORITY_MISSING",
-                "OneBot conversation admission port is unavailable",
-                503,
-            )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "event-operation:" + operation_id)
             replay = await (
                 await conn.execute(
-                    sql.SQL("SELECT o.*,e.scheduler_ingress_seq,e.scheduler_event_id "
-                            "FROM {} o JOIN {} e ON e.bot_id=o.bot_id AND e.event_id=o.event_id "
+                    sql.SQL("SELECT o.* FROM {} o "
                             "WHERE o.bot_id=%s AND o.operation_id=%s").format(
-                        self._table("event_admission_operations"),
-                        self._table("platform_events"),
+                        self._table("event_admission_operations")
                     ),
                     (self.store.bot_id, operation_id),
                 )
@@ -1043,11 +1032,7 @@ class OneBotAdapterRepository:
                         (self.store.bot_id, operation_id, input_digest, existing["event_id"]),
                     )
                 ).fetchone()
-                return {
-                    **dict(row),
-                    "scheduler_ingress_seq": existing["scheduler_ingress_seq"],
-                    "scheduler_event_id": existing["scheduler_event_id"],
-                }
+                return dict(row)
             # Shared head lock lets unrelated events run concurrently while fencing retirement.
             head = await self._head(conn, binding_id, lock="share")
             if (
@@ -1074,28 +1059,6 @@ class OneBotAdapterRepository:
                 (event.raw, event.normalized, event.author), key=lambda item: item.payload_id
             ):
                 await self._verify_payload(conn, reference)
-            scheduler_operation_id = "onebot-event:" + event.event_id
-            scheduler_event_id = "onebot:" + event.event_id
-            admitted = await self.conversation_admitter(
-                conn,
-                operation_id=scheduler_operation_id,
-                conversation_id=event.conversation_ref,
-                source_component_id="adapter.onebot",
-                binding_ref=binding_id,
-                platform="onebot-v11",
-                channel_ref=event.channel_ref,
-                thread_ref=None,
-                event_id=scheduler_event_id,
-                source_event_ref=event.event_id,
-                event_kind=event.event_kind,
-                platform_message_ref=event.platform_message_ref,
-                author_subject_ref=event.author_subject_ref,
-                content=event.normalized.scheduler_ref(),
-                author=event.author.scheduler_ref(),
-                sent_at=sent,
-                received_at=received,
-                classification_deadline=deadline,
-            )
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,event_id,semantic_digest,binding_id,binding_epoch,"
@@ -1105,10 +1068,9 @@ class OneBotAdapterRepository:
                     "normalized_payload_digest,normalized_owner_component_id,"
                     "normalized_owner_kind,normalized_owner_id,author_payload_id,"
                     "author_payload_digest,author_owner_component_id,author_owner_kind,"
-                    "author_owner_id,scheduler_operation_id,scheduler_event_id,"
-                    "scheduler_ingress_seq,sent_at,received_at) VALUES "
+                    "author_owner_id,sent_at,received_at) VALUES "
                     "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                    "%s,%s,%s,%s,%s,%s,%s)"
                 ).format(self._table("platform_events")),
                 (
                     self.store.bot_id,
@@ -1138,9 +1100,6 @@ class OneBotAdapterRepository:
                     event.author.owner_component_id,
                     event.author.owner_kind,
                     event.author.owner_id,
-                    scheduler_operation_id,
-                    scheduler_event_id,
-                    admitted["ingress_seq"],
                     sent,
                     received,
                 ),
@@ -1154,11 +1113,12 @@ class OneBotAdapterRepository:
                     (self.store.bot_id, operation_id, input_digest, event.event_id),
                 )
             ).fetchone()
-            return {
-                **dict(row),
-                "scheduler_ingress_seq": admitted["ingress_seq"],
-                "scheduler_event_id": scheduler_event_id,
-            }
+            return dict(row)
+
+    async def record_platform_event_in(self, conn, **values) -> dict:
+        """Record one authenticated event inside a caller-owned UnitOfWork."""
+
+        return await self.record_platform_event(_connection=conn, **values)
 
     async def load_binding(self, binding_id: str) -> dict:
         _bounded(binding_id, "binding_id", 256)
