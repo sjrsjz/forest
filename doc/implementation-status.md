@@ -92,7 +92,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `deployment.configuration` 已接管 schema、当前投影、计划/提交契约和 UI；旧 `/configuration`、`/change-plans`、`/management-requests` 与固定表单已删除。登录与 session 端点只读取生效配置以计算会话 TTL 和壳层品牌文字。
 - `deployment.bot-catalog` 已接管列表、创建、重命名、供应重试和供应 Job；旧 `/management/v1/bots` 目录 CRUD、`/management/v1/provision-jobs/*`、固定目录 DOM 和壳层表单处理已删除。目录选择只调用壳层通用 `openScope({kind:'bot',id,row})`，其中 `row` 只是显示提示；壳层必须再经 `/scopes/{kind}/{id}/modules` 和 Bot provider 解析真实 ACTIVE 注册表。Bot 维护、组件配置和 Agent/Memory 模块仍经目标 Bot authority 处理。
 - 通用管理传输已增加受限 `upload`/`download` 操作：模块描述符固定媒体类型、字节上限、处置方式、主体和幂等语义，网关在读流前完成 scope/Generation/会话/CSRF 解析，下载只接受有界 `ArtifactResult`。`deployment.package-registry` 已接管包列表、ZIP 导入、导出和包内管理 UI 工件；旧 `/management/v1/packages*`、固定导入表单和包列表已删除。某个 Bot 选择哪个包代际仍属于 Bot scope 的 `component.worker-host`。
-- 下一步把 Bot 组件配置/启停/调用界面迁入 `component.worker-host` 贡献，并让它通过明确的包目录依赖端口获得可选工件；壳层不应继续直接查询 `deployment.package-registry`。
+- 下一步分别建立 `kernel.runtime` 与 `component.worker-host` 管理贡献：前者只拥有 runtime/admission 与维护修订，后者拥有包选择、组件配置/历史/验证/启停/调用。可选工件必须经 BotRuntimeSupervisor 的受限包目录端口提供；壳层不应继续直接查询 `deployment.package-registry`。
 - 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。

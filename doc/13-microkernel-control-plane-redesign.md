@@ -178,6 +178,10 @@ UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `ope
 
 `deployment.package-registry` 已拥有全部署的包列表、ZIP 导入、原工件导出、校验结果和导入错误投影，并通过上述 artifact 操作传输 ZIP 与包内管理 UI。它不决定某个 Bot 的组件代际；该选择与配置属于 Bot scope 的 `component.worker-host`。类似地，备份容器的导入/下载应迁入 artifact 传输，但备份 Job、恢复、激活和存储回收必须由各自 deployment/host 模块声明独立操作与生命周期，不得建成一个再次集中所有资源的“存储后台”。
 
+Bot 运行工作区的剩余固定页面必须拆成两个 authority，不能整体改名为一个“Bot 模块”。不可卸载的 `kernel.runtime` 只拥有 Bot runtime/admission 投影、维护修订和暂停/恢复业务接纳；它不读取包配置，不启停可安装组件，也不代理 Agent/Memory/Adapter 动作。`component.worker-host` 拥有可选包投影、某个 component 的 desired/effective 配置、历史、验证、显式启用/停用、Generation 重建请求和服务调用。它从 BotRuntimeSupervisor 获得受限包目录端口和当前 Bot control/store 端口，不能持有 deployment Web 会话或跨过模块直接查 `web_packages`。
+
+`component.worker-host` 的管理契约使用稳定操作名：`packages`、`configuration`、`configuration-history`、`module`、`module.validate`、`configuration.plan`、`configuration.apply`、`module.enable`、`module.disable` 和 `service.invoke`。启用与停用必须是两个声明不同 authority 的 action，不能由 handler 根据布尔字段在签票后动态换权限。配置预览先根据当前包工件快照校验 schema/能力/接管声明，apply 仍由 Bot 库的 revision、plan digest 和内容来源围栏裁决。`module.validate` 是无持久效果的类型化 query；`service.invoke` 是可能产生组件效果的幂等 action。页面、schema 表单、包内 UI iframe 和历史列表全部随 `component.worker-host` Generation 发布；卸载贡献时壳层不得留下一套可绕过的旧表单。
+
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。
