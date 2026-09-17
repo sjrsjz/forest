@@ -303,7 +303,7 @@ async def test_run_owner_checkpoint_safe_boundary_and_new_input_are_monotonic(
 
 
 @pytest.mark.postgres
-async def test_final_candidate_is_fenced_and_terminal_transition_closes_session(
+async def test_final_candidate_is_fenced_and_session_closes_only_after_drain_decision(
     clean_agent_runtime,
 ):
     store, storage, payloads, agent = clean_agent_runtime
@@ -371,6 +371,21 @@ async def test_final_candidate_is_fenced_and_terminal_transition_closes_session(
     completed = await agent.load("run/one")
     assert completed["state"] == "COMPLETED"
     assert completed["final_candidate_payload_id"] == candidate.payload_id
+    assert completed["session"]["state"] == "ACTIVE"
+    assert completed["session"]["active_run_id"] == "run/one"
+
+    closed = await agent.close_session(
+        operation_id="close/session/one",
+        session_id="session/one",
+        completed_run_id="run/one",
+    )
+    assert closed["completed_run_id"] == "run/one"
+    assert await agent.close_session(
+        operation_id="close/session/one",
+        session_id="session/one",
+        completed_run_id="run/one",
+    ) == closed
+    completed = await agent.load("run/one")
     assert completed["session"]["state"] == "CLOSED"
     assert completed["session"]["active_run_id"] is None
 
@@ -385,6 +400,91 @@ async def test_final_candidate_is_fenced_and_terminal_transition_closes_session(
                 ),
                 ("sha256:" + "0" * 64, store.bot_id),
             )
+
+
+@pytest.mark.postgres
+async def test_completed_run_can_start_one_successor_in_the_same_session(clean_agent_runtime):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/successor")
+    state = await _payload(
+        payloads,
+        owner_kind="checkpoint.state",
+        owner_id="successor/final-ready",
+        body=b'{"phase":"FINAL_READY"}',
+        source_id="run/one",
+    )
+    candidate = await _payload(
+        payloads,
+        owner_kind="final.candidate",
+        owner_id="successor/reply",
+        body=b'{"assistant":"done"}',
+        source_id="run/one",
+    )
+    phase = "PREPARING_MODEL"
+    for index, target in enumerate(("MODEL_PENDING", "PARSING", "SAFE_BOUNDARY"), 1):
+        checkpoint = await _payload(
+            payloads,
+            owner_kind="checkpoint.state",
+            owner_id=f"successor/phase/{index}",
+            body=(f'{{"phase":"{target}"}}').encode(),
+            source_id="run/one",
+        )
+        await agent.transition(
+            owner,
+            checkpoint_id=f"successor/phase/{index}",
+            expected_phase=phase,
+            target_phase=target,
+            state=checkpoint,
+        )
+        phase = target
+    await agent.transition(
+        owner,
+        checkpoint_id="successor/final-ready",
+        expected_phase="SAFE_BOUNDARY",
+        target_phase="FINAL_READY",
+        state=state,
+        final_candidate=candidate,
+    )
+    completed_state = await _payload(
+        payloads,
+        owner_kind="checkpoint.state",
+        owner_id="successor/completed",
+        body=b'{"phase":"COMPLETED"}',
+        source_id="run/one",
+    )
+    await agent.transition(
+        owner,
+        checkpoint_id="successor/completed",
+        expected_phase="FINAL_READY",
+        target_phase="COMPLETED",
+        state=completed_state,
+    )
+
+    second = _batch(2, ("trigger/one/3", "principal/c", 3))
+    successor = await agent.start_successor_run(
+        operation_id="start/successor",
+        session_id="session/one",
+        completed_run_id="run/one",
+        run_id="run/two",
+        input_batch=second,
+        absolute_deadline=datetime.now(timezone.utc) + timedelta(minutes=20),
+    )
+    assert successor["run_id"] == "run/two"
+    assert successor["session_id"] == "session/one"
+    assert successor["session"]["state"] == "ACTIVE"
+    assert successor["session"]["active_run_id"] == "run/two"
+    assert successor["session"]["session_epoch"] == 2
+    assert successor["config_payload_id"] == values["config"].payload_id
+    assert await agent.start_successor_run(
+        operation_id="start/successor",
+        session_id="session/one",
+        completed_run_id="run/one",
+        run_id="run/two",
+        input_batch=second,
+        absolute_deadline=successor["absolute_deadline"],
+    ) == successor
 
 
 async def _prepare_dispatched(agent, payloads, owner, suffix: str):

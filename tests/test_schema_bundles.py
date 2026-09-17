@@ -563,8 +563,36 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
         if item["generation_id"] in graph_v2.generations.values()
     } == {"ACTIVE"}
 
+    active_route = await repository.verify_active_generation(
+        component_id="example.consumer",
+        generation_id=graph_v2.generations["example.consumer"],
+    )
+    assert active_route.graph_id == graph_v2.graph_id
+    await repository.freeze_graph_admission(renewed, graph_v2)
+    with pytest.raises(ForestError) as caught:
+        await repository.verify_active_generation(
+            component_id="example.consumer",
+            generation_id=graph_v2.generations["example.consumer"],
+        )
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    async with store.pool.connection() as conn, conn.transaction():
+        draining = await repository.verify_generation_member_in(
+            conn,
+            component_id="example.consumer",
+            generation_id=graph_v2.generations["example.consumer"],
+        )
+    assert draining == graph_v2
+
     retired_revision = await repository.retire_graph(renewed, graph_v2)
     assert retired_revision > graph_v2.graph_revision
+    async with store.pool.connection() as conn, conn.transaction():
+        with pytest.raises(ForestError) as caught:
+            await repository.verify_generation_member_in(
+                conn,
+                component_id="example.consumer",
+                generation_id=graph_v2.generations["example.consumer"],
+            )
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_CURRENT"
     await repository.record_states(
         renewed,
         graph_v2,

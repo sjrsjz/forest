@@ -1245,7 +1245,9 @@ class RuntimeModuleRegistry:
                 try:
                     lease = self._lease(allow_closing=True)
                     if self.generation_authority is not None:
-                        await self.generation_authority.retire_graph(lease, self.graph_identity)
+                        await self.generation_authority.freeze_graph_admission(
+                            lease, self.graph_identity
+                        )
                     else:
                         await self.graph_store.retire(lease, self.graph_identity)
                 except ForestError as exc:
@@ -1274,6 +1276,14 @@ class RuntimeModuleRegistry:
                         self._transition(component_id, ModuleLifecycleState.STOPPED)
                 except Exception as exc:
                     errors.append(exc)
+            if lease is not None:
+                if self.generation_authority is not None:
+                    try:
+                        await self.generation_authority.retire_graph(lease, self.graph_identity)
+                    except ForestError as exc:
+                        if not self._lost_persistence_authority(exc):
+                            errors.append(exc)
+                        lease = None
             if lease is not None:
                 failure_code = (
                     errors[0].code

@@ -56,7 +56,7 @@ SendIntent 只保存 cause、目标、顺序和受管 part PayloadRef；最终�
 
 非输入 Context 单元只能通过幂等追加 operation 写入。最终 `REPLY` 单元与其回答的 trigger 状态必须在同一调度器事务提交；不存在绕过 Context 单独把 trigger 标为 `ANSWERED` 的 Repository 方法。Delivery 仍只接收 reply/send-intent 引用并独立记录外部送达，不能反向改写 Context 或 trigger。
 
-`agent.runtime` 的干净 bundle 物理拥有 `agent_sessions`、`agent_runs`、`run_inputs`、`run_input_triggers`、`run_checkpoints`、`model_requests`、`model_transport_attempts`、`model_observations`、`model_turns`、`tool_calls` 与 `tool_observations`。它不拥有 Conversation Inbox/trigger/InputBatch/Context 顺序，不拥有 Provider 客户端、Delivery SendIntent、Memory 图、Kernel Call/Effect 或审批 authority。来自这些模块的对象只保存稳定引用、摘要、冻结 revision 和当时验证结果；不得跨 schema 外键或 join。
+`agent.runtime` 的干净 bundle 物理拥有 `agent_sessions`、`agent_runs`、`session_close_operations`、`run_inputs`、`run_input_triggers`、`run_checkpoints`、`model_requests`、`model_transport_attempts`、`model_observations`、`model_turns`、`tool_calls` 与 `tool_observations`。`COMPLETED` Run 只结束该 Run，不自行关闭 Session；Conversation 的排空裁决随后显式关闭 Session，或以唯一后继 Run 推进同一 Session。它不拥有 Conversation Inbox/trigger/InputBatch/Context 顺序，不拥有 Provider 客户端、Delivery SendIntent、Memory 图、Kernel Call/Effect 或审批 authority。来自这些模块的对象只保存稳定引用、摘要、冻结 revision 和当时验证结果；不得跨 schema 外键或 join。
 
 `agent_sessions` 表示一个 Conversation 的单 Agent 逻辑响应链，活动状态对 `conversation_ref` 具有唯一约束；它不是“子 Agent registry”。一个 Session 内的 Run 和一个 Run 内的 ModelTurn/ToolCall 都按顺序推进，不能让同群两个 Run 同时取得执行 lease。调度器先产生稳定 `session_ref/run_ref` 并提交 trigger cut，Agent runtime 再以幂等 start operation 接受 InputBatch 引用；两边通过类型化事件/回执收敛，不双写对方表。
 

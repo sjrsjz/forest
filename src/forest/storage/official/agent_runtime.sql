@@ -109,6 +109,19 @@ CREATE UNIQUE INDEX one_unfinished_agent_run
 CREATE INDEX agent_run_recovery_idx
     ON agent_runs(bot_id,state,owner_expires_at,updated_at);
 
+CREATE TABLE session_close_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    session_id text NOT NULL,
+    completed_run_id text NOT NULL,
+    closed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,session_id),
+    FOREIGN KEY (bot_id,session_id) REFERENCES agent_sessions(bot_id,session_id),
+    FOREIGN KEY (bot_id,completed_run_id) REFERENCES agent_runs(bot_id,run_id)
+);
+
 CREATE TABLE run_inputs (
     bot_id text NOT NULL,
     run_id text NOT NULL,

@@ -23,7 +23,12 @@ _DEFINITIONS = {
         "schema_id": "forest.conversation.scheduler",
         "repository_contract": "forest.conversation-scheduler.repository/1",
         "resource": "storage/official/conversation_scheduler.sql",
-        "requires": ("kernel.runtime", "kernel.payload", "kernel.authorization"),
+        "requires": (
+            "kernel.runtime",
+            "kernel.payload",
+            "kernel.authorization",
+            "agent.runtime",
+        ),
         "capabilities": ("conversation.admit", "conversation.classify"),
     },
     "adapter.onebot": {
@@ -133,6 +138,7 @@ async def bootstrap_clean_messaging(
             module_configuration=configurations["conversation.scheduler"],
             grants=grants["conversation.scheduler"],
             generation_verifier=kernel.runtime.verify_active_generation_in,
+            generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
 
     def adapter_factory(_runtime, modules):

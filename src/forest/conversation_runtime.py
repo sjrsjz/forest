@@ -34,6 +34,7 @@ class CleanConversationSchedulerRuntime:
         module_configuration,
         grants,
         generation_verifier,
+        generation_member_verifier=None,
         agent_execution_port=None,
         worker_options=None,
     ):
@@ -41,6 +42,7 @@ class CleanConversationSchedulerRuntime:
         self.module_configuration = module_configuration
         self.grants = grants
         self.generation_verifier = generation_verifier
+        self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
         self.agent_execution_port = agent_execution_port
@@ -140,6 +142,22 @@ class CleanConversationSchedulerRuntime:
             admission_lane=admission_lane,
         )
 
+    async def _verify_member(self, conn) -> None:
+        if not self.active or self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Conversation Generation is not executing owned work",
+                409,
+            )
+        if self.generation_member_verifier is None:
+            await self._verify(conn, admission_lane="DATA")
+            return
+        await self.generation_member_verifier(
+            conn,
+            component_id="conversation.scheduler",
+            generation_id=self.generation_identity.generation_id,
+        )
+
     async def admit_message_in(self, conn, **values):
         await self._verify(conn, admission_lane="DATA")
         result = await self.repository.admit_message_in(conn, **values)
@@ -154,9 +172,19 @@ class CleanConversationSchedulerRuntime:
             self.worker.wake()
         return result
 
-    async def _repository_call(self, method_name: str, *, admission_lane: str = "DATA", **values):
+    async def _repository_call(
+        self,
+        method_name: str,
+        *,
+        admission_lane: str = "DATA",
+        owned_work: bool = False,
+        **values,
+    ):
         async with self.repository.store.pool.connection() as conn, conn.transaction():
-            await self._verify(conn, admission_lane=admission_lane)
+            if owned_work:
+                await self._verify_member(conn)
+            else:
+                await self._verify(conn, admission_lane=admission_lane)
             method = getattr(self.repository, method_name)
             return await method(conn, **values)
 
@@ -178,17 +206,21 @@ class CleanConversationSchedulerRuntime:
         return await self._repository_call(
             "renew_actor_in",
             actor=actor,
+            owned_work=True,
             **values,
         )
 
     async def release_actor(self, actor):
-        return await self._repository_call("release_actor_in", actor=actor)
+        return await self._repository_call(
+            "release_actor_in", actor=actor, owned_work=True
+        )
 
     async def select_input(self, actor, operation_id: str, **values):
         return await self._repository_call(
             "select_input_in",
             actor=actor,
             operation_id=operation_id,
+            owned_work=True,
             **values,
         )
 
@@ -196,6 +228,7 @@ class CleanConversationSchedulerRuntime:
         return await self._repository_call(
             "append_context_in",
             actor=actor,
+            owned_work=True,
             **values,
         )
 
@@ -203,6 +236,7 @@ class CleanConversationSchedulerRuntime:
         return await self._repository_call(
             "requeue_run_in",
             actor=actor,
+            owned_work=True,
             **values,
         )
 
@@ -210,4 +244,5 @@ class CleanConversationSchedulerRuntime:
         return await self._repository_call(
             "context_snapshot_in",
             actor=actor,
+            owned_work=True,
         )

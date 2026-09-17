@@ -213,6 +213,74 @@ class KernelRuntimeRepository:
             graph_revision=row["graph_revision"],
         )
 
+    async def verify_generation_member_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+    ) -> RuntimeGenerationGraph:
+        """Fence already-owned work to the current graph while admissions are frozen."""
+
+        if (
+            not isinstance(component_id, str)
+            or _IDENTIFIER.fullmatch(component_id) is None
+            or not isinstance(generation_id, str)
+            or not generation_id
+            or len(generation_id) > 512
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_FENCE_INVALID",
+                "Generation member fence identity is invalid",
+                422,
+            )
+        await self._identity_in(conn)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT h.graph_id,h.graph_revision,rg.graph_digest,rg.activation_id,"
+                    "rg.state,g.status AS generation_status,s.status AS runtime_status "
+                    "FROM {} s JOIN {} h ON h.bot_id=s.bot_id "
+                    "JOIN {} rg ON rg.bot_id=h.bot_id AND rg.graph_id=h.graph_id "
+                    "JOIN {} gm ON gm.bot_id=rg.bot_id AND gm.graph_id=rg.graph_id "
+                    "JOIN {} g ON g.bot_id=gm.bot_id AND g.generation_id=gm.generation_id "
+                    "AND g.component_id=gm.component_id WHERE s.bot_id=%s "
+                    "AND gm.component_id=%s AND gm.generation_id=%s "
+                    "FOR SHARE OF s,h,rg,gm,g"
+                ).format(
+                    self._table("runtime_state"),
+                    self._table("runtime_graph_head"),
+                    self._table("runtime_graphs"),
+                    self._table("runtime_graph_modules"),
+                    self._table("generations"),
+                ),
+                (self.store.bot_id, component_id, generation_id),
+            )
+        ).fetchone()
+        if (
+            row is None
+            or row["runtime_status"] != "ACTIVE"
+            or row["generation_status"] != "ACTIVE"
+            or row["state"] != "ACTIVE"
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_CURRENT",
+                "The Generation is not a current RuntimeGraph member",
+                409,
+                details={
+                    "component_id": component_id,
+                    "generation_id": generation_id,
+                },
+            )
+        members = await self._members_for_id_in(conn, row["graph_id"], lock=False)
+        return RuntimeGenerationGraph(
+            graph_id=row["graph_id"],
+            graph_revision=row["graph_revision"],
+            graph_digest=row["graph_digest"],
+            activation_id=row["activation_id"],
+            generations={item["component_id"]: item["generation_id"] for item in members},
+        )
+
     async def prepare_graph(
         self,
         lease: HostLease,
@@ -536,6 +604,40 @@ class KernelRuntimeRepository:
                 (self.store.bot_id, graph.graph_id, graph.graph_revision),
             )
             return graph.graph_revision
+
+    async def freeze_graph_admission(
+        self, lease: HostLease, graph: RuntimeGenerationGraph
+    ) -> None:
+        """Stop new route admission while keeping the exact graph current for draining work."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            await self._graph_in(conn, graph, lock=True)
+            head = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
+                        self._table("runtime_graph_head")
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            if head is None or head["graph_id"] != graph.graph_id:
+                raise ForestError(
+                    "RUNTIME_GRAPH_NOT_CURRENT",
+                    "Only the current RuntimeGraph can freeze admission",
+                    409,
+                )
+            members = await self._members_in(conn, graph, lock=True)
+            for item in members:
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET data_admission=false,control_admission=false,"
+                        "route_epoch=route_epoch+1 WHERE bot_id=%s AND component_id=%s "
+                        "AND generation_id=%s"
+                    ).format(self._table("routes")),
+                    (self.store.bot_id, item["component_id"], item["generation_id"]),
+                )
 
     async def retire_graph(
         self, lease: HostLease, graph: RuntimeGenerationGraph

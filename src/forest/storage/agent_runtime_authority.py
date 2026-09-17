@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
@@ -292,6 +293,14 @@ class AgentRuntimeRepository:
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
 
+    @asynccontextmanager
+    async def _transaction(self, connection=None):
+        if connection is not None:
+            yield connection
+            return
+        async with self.store.pool.connection() as conn, conn.transaction():
+            yield conn
+
     async def _lock(self, conn, identity: str) -> None:
         await conn.execute(
             "SELECT pg_advisory_xact_lock(%s)", (_lock_key(self.store.bot_id, identity),)
@@ -373,6 +382,7 @@ class AgentRuntimeRepository:
         preset_revision: str,
         preset: AgentPayloadRef,
         absolute_deadline: datetime,
+        _connection=None,
     ) -> dict:
         for value, field in (
             (operation_id, "operation_id"),
@@ -406,7 +416,7 @@ class AgentRuntimeRepository:
                 "parser_revision": PARSER_REVISION,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "operation:" + operation_id)
             replay = await (
                 await conn.execute(
@@ -538,14 +548,140 @@ class AgentRuntimeRepository:
                 ),
             )
 
+    async def start_successor_run(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        completed_run_id: str,
+        run_id: str,
+        input_batch: AgentInputBatch,
+        absolute_deadline: datetime,
+        _connection=None,
+    ) -> dict:
+        """Start the next serial Run without creating another Agent Session."""
+
+        for value, field in (
+            (operation_id, "operation_id"),
+            (session_id, "session_id"),
+            (completed_run_id, "completed_run_id"),
+            (run_id, "run_id"),
+        ):
+            _bounded(value, field, 256)
+        if type(input_batch) is not AgentInputBatch:
+            raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid InputBatch", 422)
+        input_batch.validate()
+        absolute_deadline = _timestamp(absolute_deadline, "absolute_deadline")
+        input_digest = _digest(
+            {
+                "session_id": session_id,
+                "completed_run_id": completed_run_id,
+                "run_id": run_id,
+                "input_batch": input_batch.canonical(),
+                "absolute_deadline": absolute_deadline.isoformat(),
+            }
+        )
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "operation:" + operation_id)
+            replay = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND start_operation_id=%s").format(
+                        self._table("agent_runs")
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "AGENT_START_OPERATION_CONFLICT", "Agent start input differs", 409
+                    )
+                return await self._expanded_run(conn, replay["run_id"])
+            await self._lock(conn, "session:" + session_id)
+            session = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND session_id=%s FOR UPDATE").format(
+                        self._table("agent_sessions")
+                    ),
+                    (self.store.bot_id, session_id),
+                )
+            ).fetchone()
+            previous = await self._run(conn, completed_run_id, update=True)
+            now = previous["database_now"]
+            if not now < absolute_deadline <= now + timedelta(hours=24):
+                raise ForestError(
+                    "AGENT_RUNTIME_INPUT_INVALID", "Run deadline is outside its bound", 422
+                )
+            if (
+                session is None
+                or session["state"] != "ACTIVE"
+                or session["active_run_id"] != completed_run_id
+                or previous["session_id"] != session_id
+                or previous["state"] != "COMPLETED"
+            ):
+                raise ForestError(
+                    "AGENT_SUCCESSOR_CONFLICT",
+                    "Session is not ready for the requested successor Run",
+                    409,
+                )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,run_id,session_id,start_operation_id,input_digest,state,"
+                    "agent_spec_revision,config_payload_id,config_payload_digest,"
+                    "config_owner_component_id,config_owner_kind,config_owner_id,preset_revision,"
+                    "preset_payload_id,preset_payload_digest,preset_owner_component_id,"
+                    "preset_owner_kind,preset_owner_id,core_protocol_id,core_protocol_version,"
+                    "core_prompt_digest,parser_revision,absolute_deadline,input_revision,"
+                    "selected_input_end_seq,context_revision,context_view_revision) VALUES "
+                    "(%s,%s,%s,%s,%s,'PREPARING_MODEL',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                    "%s,%s,%s,%s,%s,1,%s,%s,%s)"
+                ).format(self._table("agent_runs")),
+                (
+                    self.store.bot_id,
+                    run_id,
+                    session_id,
+                    operation_id,
+                    input_digest,
+                    previous["agent_spec_revision"],
+                    previous["config_payload_id"],
+                    previous["config_payload_digest"],
+                    previous["config_owner_component_id"],
+                    previous["config_owner_kind"],
+                    previous["config_owner_id"],
+                    previous["preset_revision"],
+                    previous["preset_payload_id"],
+                    previous["preset_payload_digest"],
+                    previous["preset_owner_component_id"],
+                    previous["preset_owner_kind"],
+                    previous["preset_owner_id"],
+                    previous["core_protocol_id"],
+                    previous["core_protocol_version"],
+                    previous["core_prompt_digest"],
+                    previous["parser_revision"],
+                    absolute_deadline,
+                    input_batch.selected_input_end_seq,
+                    input_batch.context_revision,
+                    input_batch.context_view_revision,
+                ),
+            )
+            await self._insert_input(conn, run_id, 1, input_batch)
+            await conn.execute(
+                sql.SQL("UPDATE {} SET active_run_id=%s,session_epoch=session_epoch+1,"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND session_id=%s").format(
+                    self._table("agent_sessions")
+                ),
+                (run_id, self.store.bot_id, session_id),
+            )
+            return await self._expanded_run(conn, run_id)
+
     async def acquire_run(
-        self, run_id: str, owner_id: str, *, lease_seconds: int = 30
+        self, run_id: str, owner_id: str, *, lease_seconds: int = 30, _connection=None
     ) -> AgentRunOwner:
         _bounded(run_id, "run_id", 256)
         _bounded(owner_id, "owner_id", 256)
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
             raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid Run lease", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             run = await self._run(conn, run_id, update=True)
             if run["state"] in _TERMINAL_RUN:
                 raise ForestError("AGENT_RUN_TERMINAL", "Agent Run is terminal", 409)
@@ -577,11 +713,11 @@ class AgentRuntimeRepository:
         return run
 
     async def renew_run(
-        self, owner: AgentRunOwner, *, lease_seconds: int = 30
+        self, owner: AgentRunOwner, *, lease_seconds: int = 30, _connection=None
     ) -> AgentRunOwner:
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
             raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid Run lease", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             run = await self._guard_owner(conn, owner)
             expires = run["database_now"] + timedelta(seconds=lease_seconds)
             await conn.execute(
@@ -591,8 +727,8 @@ class AgentRuntimeRepository:
             )
             return AgentRunOwner(owner.run_id, owner.owner_id, owner.epoch, expires)
 
-    async def release_run(self, owner: AgentRunOwner) -> None:
-        async with self.store.pool.connection() as conn, conn.transaction():
+    async def release_run(self, owner: AgentRunOwner, *, _connection=None) -> None:
+        async with self._transaction(_connection) as conn:
             await self._guard_owner(conn, owner)
             await conn.execute(
                 sql.SQL("UPDATE {} SET owner_id=NULL,owner_expires_at=NULL,"
@@ -602,11 +738,13 @@ class AgentRuntimeRepository:
                 (self.store.bot_id, owner.run_id),
             )
 
-    async def append_input(self, owner: AgentRunOwner, input_batch: AgentInputBatch) -> dict:
+    async def append_input(
+        self, owner: AgentRunOwner, input_batch: AgentInputBatch, *, _connection=None
+    ) -> dict:
         if type(input_batch) is not AgentInputBatch:
             raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid InputBatch", 422)
         input_batch.validate()
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             run = await self._guard_owner(conn, owner)
             existing = await (
                 await conn.execute(
@@ -692,12 +830,12 @@ class AgentRuntimeRepository:
         )
 
     async def prepare_model_request(
-        self, owner: AgentRunOwner, plan: ModelRequestPlan
+        self, owner: AgentRunOwner, plan: ModelRequestPlan, *, _connection=None
     ) -> dict:
         if type(plan) is not ModelRequestPlan:
             raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid model request", 422)
         plan.validate()
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "request:" + plan.request_id)
             existing = await (
                 await conn.execute(
@@ -789,6 +927,7 @@ class AgentRuntimeRepository:
         attempt_id: str,
         effect_operation_ref: str,
         wire: AgentPayloadRef,
+        _connection=None,
     ) -> dict:
         for value, field in (
             (request_id, "request_id"),
@@ -797,7 +936,7 @@ class AgentRuntimeRepository:
         ):
             _bounded(value, field, 256)
         wire.validate("wire")
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "attempt:" + attempt_id)
             existing = await (
                 await conn.execute(
@@ -888,11 +1027,11 @@ class AgentRuntimeRepository:
             return dict(row)
 
     async def mark_model_handoff(
-        self, owner: AgentRunOwner, *, request_id: str, attempt_id: str
+        self, owner: AgentRunOwner, *, request_id: str, attempt_id: str, _connection=None
     ) -> dict:
         _bounded(request_id, "request_id", 256)
         _bounded(attempt_id, "attempt_id", 256)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             run = await self._guard_owner(conn, owner)
             request = await (
                 await conn.execute(
@@ -960,6 +1099,7 @@ class AgentRuntimeRepository:
         effect_observation_ref: str,
         result: AgentPayloadRef | None = None,
         usage: AgentPayloadRef | None = None,
+        _connection=None,
     ) -> dict:
         for value, field in (
             (observation_operation_id, "observation_operation_id"),
@@ -989,7 +1129,7 @@ class AgentRuntimeRepository:
                 "usage": usage.canonical() if usage else None,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "model-observation:" + observation_operation_id)
             replay = await (
                 await conn.execute(
@@ -1145,6 +1285,7 @@ class AgentRuntimeRepository:
         assistant_payload: AgentPayloadRef | None = None,
         tool: ToolProposal | None = None,
         repair_of_request_id: str | None = None,
+        _connection=None,
     ) -> dict:
         _bounded(turn_id, "turn_id", 256)
         _bounded(request_id, "request_id", 256)
@@ -1210,7 +1351,7 @@ class AgentRuntimeRepository:
                 raise ForestError(
                     "AGENT_TOOL_AUTHORITY_INVALID", "FunctionCall authority trigger differs", 409
                 )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "turn:" + turn_id)
             existing = await (
                 await conn.execute(
@@ -1424,6 +1565,7 @@ class AgentRuntimeRepository:
         approval_ref: str | None = None,
         result: AgentPayloadRef | None = None,
         error_code: str | None = None,
+        _connection=None,
     ) -> dict:
         _bounded(observation_operation_id, "observation_operation_id", 256)
         _bounded(tool_call_id, "tool_call_id", 256)
@@ -1475,7 +1617,7 @@ class AgentRuntimeRepository:
                 "error_code": error_code,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "tool-observation:" + observation_operation_id)
             replay = await (
                 await conn.execute(
@@ -1602,10 +1744,11 @@ class AgentRuntimeRepository:
         *,
         checkpoint_id: str,
         state: AgentPayloadRef,
+        _connection=None,
     ) -> dict:
         _bounded(checkpoint_id, "checkpoint_id", 256)
         state.validate("state")
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "checkpoint:" + checkpoint_id)
             replay = await (
                 await conn.execute(
@@ -1701,6 +1844,7 @@ class AgentRuntimeRepository:
         state: AgentPayloadRef,
         error_code: str | None = None,
         final_candidate: AgentPayloadRef | None = None,
+        _connection=None,
     ) -> dict:
         _bounded(checkpoint_id, "checkpoint_id", 256)
         if expected_phase not in _RUN_PHASES or target_phase not in _RUN_PHASES:
@@ -1738,7 +1882,7 @@ class AgentRuntimeRepository:
                 "final_candidate": final_candidate.canonical() if final_candidate else None,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "checkpoint:" + checkpoint_id)
             replay = await (
                 await conn.execute(
@@ -1830,9 +1974,8 @@ class AgentRuntimeRepository:
                     owner.run_id,
                 ),
             )
-            if target_phase in _TERMINAL_RUN:
+            if target_phase in {"FAILED", "CANCELLED"}:
                 session_state = {
-                    "COMPLETED": "CLOSED",
                     "FAILED": "FAILED",
                     "CANCELLED": "CANCELLED",
                 }[target_phase]
@@ -1851,7 +1994,91 @@ class AgentRuntimeRepository:
                 )
             return dict(row)
 
-    async def load(self, run_id: str) -> dict:
+    async def close_session(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        completed_run_id: str,
+        _connection=None,
+    ) -> dict:
+        """Close an idle Session only after its final completed Run has no successor."""
+
+        for value, field in (
+            (operation_id, "operation_id"),
+            (session_id, "session_id"),
+            (completed_run_id, "completed_run_id"),
+        ):
+            _bounded(value, field, 256)
+        input_digest = _digest(
+            {
+                "session_id": session_id,
+                "completed_run_id": completed_run_id,
+            }
+        )
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "session-close:" + operation_id)
+            replay = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s").format(
+                        self._table("session_close_operations")
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "AGENT_SESSION_CLOSE_CONFLICT", "Session close input differs", 409
+                    )
+                return dict(replay)
+            await self._lock(conn, "session:" + session_id)
+            session = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND session_id=%s FOR UPDATE").format(
+                        self._table("agent_sessions")
+                    ),
+                    (self.store.bot_id, session_id),
+                )
+            ).fetchone()
+            run = await self._run(conn, completed_run_id, update=True)
+            if (
+                session is None
+                or session["state"] != "ACTIVE"
+                or session["active_run_id"] != completed_run_id
+                or run["session_id"] != session_id
+                or run["state"] != "COMPLETED"
+            ):
+                raise ForestError(
+                    "AGENT_SESSION_CLOSE_CONFLICT",
+                    "Session is not idle at the completed Run",
+                    409,
+                )
+            await conn.execute(
+                sql.SQL("UPDATE {} SET state='CLOSED',active_run_id=NULL,closed_at=clock_timestamp(),"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND session_id=%s").format(
+                    self._table("agent_sessions")
+                ),
+                (self.store.bot_id, session_id),
+            )
+            receipt = await (
+                await conn.execute(
+                    sql.SQL("INSERT INTO {}(bot_id,operation_id,input_digest,session_id,"
+                            "completed_run_id) VALUES (%s,%s,%s,%s,%s) RETURNING *").format(
+                        self._table("session_close_operations")
+                    ),
+                    (
+                        self.store.bot_id,
+                        operation_id,
+                        input_digest,
+                        session_id,
+                        completed_run_id,
+                    ),
+                )
+            ).fetchone()
+            return dict(receipt)
+
+    async def load(self, run_id: str, *, _connection=None) -> dict:
         _bounded(run_id, "run_id", 256)
-        async with self.store.pool.connection() as conn:
+        async with self._transaction(_connection) as conn:
             return await self._expanded_run(conn, run_id)

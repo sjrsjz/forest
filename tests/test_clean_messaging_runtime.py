@@ -8,11 +8,17 @@ import pytest
 from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
+from forest.storage.agent_runtime_authority import (
+    AgentInputBatch,
+    AgentPayloadRef,
+    AgentTriggerInput,
+)
 from forest.storage.payload_authority import PayloadSource
 
 
@@ -70,10 +76,38 @@ async def _payload(payloads, *, owner_kind, owner_id, value) -> OneBotPayloadRef
     )
 
 
+async def _agent_payload(payloads, *, owner_kind, owner_id, value) -> AgentPayloadRef:
+    epoch = await payloads.epoch()
+    saved = await payloads.put_bytes(
+        owner_component_id="agent.runtime",
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+        media_type="application/json",
+        content=json.dumps(value, separators=(",", ":")).encode(),
+        sources=(
+            PayloadSource(
+                source_component_id="agent.runtime",
+                source_kind="configuration",
+                source_id=owner_id,
+                source_revision=1,
+            ),
+        ),
+        expected_deletion_epoch=epoch,
+    )
+    return AgentPayloadRef(
+        saved.payload_id,
+        saved.content_digest,
+        "agent.runtime",
+        owner_kind,
+        owner_id,
+    )
+
+
 @pytest.mark.postgres
 async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_authority):
     store, installer = clean_authority
     kernel = await bootstrap_clean_kernel(store, installer)
+    agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
     clients = []
 
     async def create_client(_url, _token, **_limits):
@@ -139,7 +173,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, kernel.descriptors + messaging.descriptors)
+    registry = RuntimeModuleRegistry(
+        host, kernel.descriptors + (agent.descriptor,) + messaging.descriptors
+    )
     await registry.start()
     try:
         assert set(registry.states.values()) == {ModuleLifecycleState.ACTIVE}
@@ -149,15 +185,18 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "kernel.authorization",
             "kernel.effect",
             "kernel.audit",
+            "agent.runtime",
             "conversation.scheduler",
             "adapter.onebot",
         }
         adapter_runtime = registry.get("adapter.onebot")
         conversation_runtime = registry.get("conversation.scheduler")
+        agent_runtime = registry.get("agent.runtime")
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
         )
         assert conversation_runtime.active is True
+        assert agent_runtime.active is True
         assert len(clients) == 1 and clients[0].handler is not None
 
         body = json.dumps(
@@ -210,10 +249,47 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert await conversation_runtime.claimable_conversations() == (
             "onebot:group:933179609",
         )
+        agent_config = await _agent_payload(
+            kernel.payload,
+            owner_kind="agent.config",
+            owner_id="agent/config/test",
+            value={"model": "test"},
+        )
+        preset = await _agent_payload(
+            kernel.payload,
+            owner_kind="preset.context",
+            owner_id="agent/preset/test",
+            value={"system": ["test"]},
+        )
+        started = await agent_runtime.start_run(
+            operation_id="agent/start/test",
+            conversation_ref="onebot:group:933179609",
+            session_id="agent/session/test",
+            run_id="agent/run/test",
+            input_batch=AgentInputBatch(
+                input_batch_ref="batch:test",
+                input_batch_digest="sha256:" + "1" * 64,
+                selected_input_end_seq=1,
+                context_revision=1,
+                context_view_revision=0,
+                source_manifest_digest="sha256:" + "2" * 64,
+                triggers=(AgentTriggerInput("trigger:onebot:88", "qq:42", 1),),
+            ),
+            agent_spec_revision="agent-spec:test/1",
+            config=agent_config,
+            preset_revision="preset:test/1",
+            preset=preset,
+            absolute_deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        assert started["run_id"] == "agent/run/test"
+        assert started["core_prompt_digest"].startswith("sha256:")
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True
     assert set(registry.states.values()) == {ModuleLifecycleState.STOPPED}
     with pytest.raises(ForestError) as caught:
         await conversation_runtime.claimable_conversations()
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    with pytest.raises(ForestError) as caught:
+        await agent_runtime.load("run/missing")
     assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
