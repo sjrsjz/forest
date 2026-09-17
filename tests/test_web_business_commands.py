@@ -24,10 +24,10 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
     async with onebot_server(self_id="1000") as server:
         async with running(settings) as (app, client):
             await setup(client, token)
-            page = (await client.get("/")).text
+            page = (await client.get("/static/modules/command.router.html")).text
             assert "业务命令运行诊断" in page
-            module = (await client.get("/static/business-command-diagnostics.js")).text
-            assert "export function businessCommandDiagnosticsPanel" in module
+            controller = (await client.get("/static/business-command-diagnostics.js")).text
+            assert "export function businessCommandDiagnosticsPanel" in controller
 
             bot = await post(
                 client,
@@ -38,6 +38,11 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             )
             await ready(client, bot)
             root = "/management/v1/bots/" + bot["bot_id"]
+            module = (
+                "/management/v1/scopes/bot/"
+                + bot["bot_id"]
+                + "/modules/command.router"
+            )
             managed = await app.state.runtime.fleet.attach(bot["bot_id"])
             await managed.kernel.install(
                 PackageCatalog(tmp_path / "packages").build(command_source(tmp_path))
@@ -46,11 +51,12 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             binding_id = binding["binding_id"]
             binding_root = root + "/bindings/" + binding_id
             await configure(client, binding_root, server["origin"])
-            policy_root = binding_root + "/commands/actor"
             plan = await post(
                 client,
-                policy_root + "/policy-change-plans",
+                module + "/actions/policy.plan",
                 {
+                    "binding_id": binding_id,
+                    "command_id": "actor",
                     "expected_revision": 0,
                     "values": {"mode": "EVERYONE", "user_ids": []},
                     "current_password": PASSWORD,
@@ -59,8 +65,10 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             )
             await post(
                 client,
-                policy_root + "/policy-management-requests",
+                module + "/actions/policy.apply",
                 {
+                    "binding_id": binding_id,
+                    "command_id": "actor",
                     "expected_revision": 0,
                     "plan_id": plan["plan_id"],
                     "plan_digest": plan["plan_digest"],
@@ -105,7 +113,7 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
                 messages._business_plan_in = classify
             assert pending["trigger_decision"] == "PENDING"
 
-            response = await client.get(root + "/business-commands/diagnostics?limit=25")
+            response = await client.get(module + "/queries/diagnostics?limit=25")
             assert response.status_code == 200, response.text
             body = response.json()
             assert body["summary"]["failed_requests"] == 1
@@ -119,19 +127,19 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             assert "20001" not in response.text
 
             filtered = await client.get(
-                root + "/business-commands/diagnostics?binding_id=" + binding_id + "&limit=10"
+                module + "/queries/diagnostics?binding_id=" + binding_id + "&limit=10"
             )
             assert filtered.status_code == 200
             assert filtered.json()["filter"]["binding_id"] == binding_id
             missing = await client.get(
-                root + "/business-commands/diagnostics?binding_id=missing&limit=10"
+                module + "/queries/diagnostics?binding_id=missing&limit=10"
             )
             assert missing.status_code == 404
             assert missing.json()["code"] == "BINDING_NOT_FOUND"
-            unknown = await client.get(root + "/business-commands/diagnostics?unknown=1")
+            unknown = await client.get(module + "/queries/diagnostics?unknown=1")
             assert unknown.status_code == 422
 
-            recovery_url = root + "/business-commands/recovery"
+            recovery_url = module + "/actions/recovery"
             absent_key = await client.post(recovery_url, json={"limit": 8})
             assert absent_key.status_code == 422
             first = await post(client, recovery_url, {"limit": 8}, "recover-commands")
@@ -162,7 +170,7 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             assert created.status_code == 201, created.text
             await client.post("/management/v1/logout", json={})
             assert (await login_as(client, "command-viewer", viewer_password)).status_code == 200
-            assert (await client.get(root + "/business-commands/diagnostics")).status_code == 200
+            assert (await client.get(module + "/queries/diagnostics")).status_code == 200
             denied = await client.post(
                 recovery_url,
                 json={"limit": 8},

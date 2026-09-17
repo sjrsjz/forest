@@ -50,6 +50,16 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             "delivery.reconcile",
         }
         assert modules["conversation.scheduler"]["management_contributions"] == []
+        commands, = modules["command.router"]["management_contributions"]
+        assert commands["contribution_id"] == "commands"
+        assert commands["surface"]["template"] == "/static/modules/command.router.html"
+        assert {
+            item["operation_id"]
+            for item in modules["command.router"]["management_contract"]["operations"]
+        } == {
+            "bindings", "policies", "policy.plan", "policy.apply", "limits",
+            "limit.plan", "limit.apply", "diagnostics", "recovery",
+        }
         assert {
             item["operation_id"]
             for item in modules["routing.graph"]["management_contract"]["operations"]
@@ -87,6 +97,10 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         assert (await client.get(adapter + "/conversations")).json() == {
             "conversations": []
         }
+        command = (
+            f"/management/v1/scopes/bot/{bot['bot_id']}/modules/command.router/queries"
+        )
+        assert (await client.get(command + "/bindings")).json() == {"bindings": []}
         assert (
             await client.get(f"/management/v1/bots/{bot['bot_id']}/jobs")
         ).status_code == 404
@@ -98,6 +112,17 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         ).status_code == 404
         assert (
             await client.get(f"/management/v1/bots/{bot['bot_id']}/component-jobs")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/business-command-limits")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/business-commands/diagnostics")
+        ).status_code == 404
+        assert (
+            await client.get(
+                f"/management/v1/bots/{bot['bot_id']}/bindings/missing/command-policies"
+            )
         ).status_code == 404
 
         graph = await client.get(

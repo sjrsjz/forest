@@ -50,7 +50,9 @@ async def test_web_command_policy_requires_reauth_and_persists_source_body(
     token, settings = await provision(tmp_path, web_bots_database)
     async with running(settings) as (app, client):
         await setup(client, token)
-        assert "组件命令授权" in (await client.get("/")).text
+        assert "组件命令授权" in (
+            await client.get("/static/modules/command.router.html")
+        ).text
         assert "export function commandPoliciesPanel" in (
             await client.get("/static/command-policies.js")
         ).text
@@ -60,12 +62,15 @@ async def test_web_command_policy_requires_reauth_and_persists_source_body(
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/command.router"
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         package = PackageCatalog(tmp_path / "packages").build(command_source(tmp_path))
         await managed.kernel.install(package)
         binding = await create_binding(client, root, {"self_id": "10001", "display_name": "QQ"}, "create-command-policy-binding")
-        path = root + "/bindings/" + binding["binding_id"]
-        response = await client.get(path + "/command-policies")
+        directory = (await client.get(module + "/queries/bindings")).json()
+        assert [row["binding_id"] for row in directory["bindings"]] == [binding["binding_id"]]
+        policy_query = module + "/queries/policies?binding_id=" + binding["binding_id"]
+        response = await client.get(policy_query)
         assert response.status_code == 200, response.text
         initial = response.json()
         assert initial["registry_revision"] == 1
@@ -81,8 +86,10 @@ async def test_web_command_policy_requires_reauth_and_persists_source_body(
         command = initial["commands"][0]
         assert command["command_id"] == "hello" and command["name"] == "/hello"
 
-        plan_url = path + "/commands/hello/policy-change-plans"
+        plan_url = module + "/actions/policy.plan"
         plan_body = {
+            "binding_id": binding["binding_id"],
+            "command_id": "hello",
             "expected_revision": 0,
             "values": {"mode": "USER_SET", "user_ids": ["20002", "10003", "20002"]},
             "current_password": "wrong-password-value",
@@ -96,8 +103,9 @@ async def test_web_command_policy_requires_reauth_and_persists_source_body(
         plan = await post(client, plan_url, plan_body, "plan-command-policy")
         assert plan["values"] == {"mode": "USER_SET", "user_ids": ["10003", "20002"]}
         assert PASSWORD not in str(plan)
-        apply_url = path + "/commands/hello/policy-management-requests"
+        apply_url = module + "/actions/policy.apply"
         apply_body = {
+            "binding_id": binding["binding_id"], "command_id": "hello",
             "expected_revision": plan["expected_revision"], "plan_id": plan["plan_id"],
             "plan_digest": plan["plan_digest"], "current_password": PASSWORD,
         }
@@ -105,7 +113,7 @@ async def test_web_command_policy_requires_reauth_and_persists_source_body(
         assert applied["revision"] == 1 and applied["status"] == "APPLIED"
         assert await post(client, apply_url, apply_body, "apply-command-policy") == applied
 
-        saved = (await client.get(path + "/command-policies")).json()["commands"][0]
+        saved = (await client.get(policy_query)).json()["commands"][0]
         assert saved["revision"] == 1
         assert saved["values"] == plan["values"]
         assert saved["values_payload_state"] == "ACTIVE"
@@ -144,14 +152,15 @@ async def test_policy_preview_is_rejected_after_command_spec_hot_reload(
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/command.router"
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         catalog = PackageCatalog(tmp_path / "packages")
         await managed.kernel.install(catalog.build(command_source(tmp_path, version="0.1.0")))
         binding = await create_binding(client, root, {"self_id": "10002", "display_name": "QQ"}, "create-stale-policy-binding")
-        path = root + "/bindings/" + binding["binding_id"] + "/commands/hello"
         plan = await post(
-            client, path + "/policy-change-plans",
-            {"expected_revision": 0, "values": {"mode": "ADMINS", "user_ids": []},
+            client, module + "/actions/policy.plan",
+            {"binding_id": binding["binding_id"], "command_id": "hello",
+             "expected_revision": 0, "values": {"mode": "ADMINS", "user_ids": []},
              "current_password": PASSWORD},
             "stale-policy-plan",
         )
@@ -159,15 +168,16 @@ async def test_policy_preview_is_rejected_after_command_spec_hot_reload(
             tmp_path, version="0.2.0", permission="command.hello-v2"
         )))
         response = await client.post(
-            path + "/policy-management-requests",
-            json={"expected_revision": 0, "plan_id": plan["plan_id"],
+            module + "/actions/policy.apply",
+            json={"binding_id": binding["binding_id"], "command_id": "hello",
+                  "expected_revision": 0, "plan_id": plan["plan_id"],
                   "plan_digest": plan["plan_digest"], "current_password": PASSWORD},
             headers={"idempotency-key": "stale-policy-apply"},
         )
         assert response.status_code == 409
         assert response.json()["code"] == "COMMAND_POLICY_PLAN_STALE"
         policies = (await client.get(
-            root + "/bindings/" + binding["binding_id"] + "/command-policies"
+            module + "/queries/policies?binding_id=" + binding["binding_id"]
         )).json()
         assert policies["commands"][0]["revision"] == 0
         assert policies["commands"][0]["permission"] == "command.hello-v2"
@@ -183,22 +193,24 @@ async def test_command_policy_expected_revision_has_single_winner(tmp_path, web_
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/command.router"
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         await managed.kernel.install(PackageCatalog(tmp_path / "packages").build(command_source(tmp_path)))
         binding = await create_binding(client, root, {"self_id": "10003", "display_name": "QQ"}, "create-policy-race-binding")
-        path = root + "/bindings/" + binding["binding_id"] + "/commands/hello"
         plans = []
         for index, mode in enumerate(("EVERYONE", "ADMINS")):
             plans.append(await post(
-                client, path + "/policy-change-plans",
-                {"expected_revision": 0, "values": {"mode": mode, "user_ids": []},
+                client, module + "/actions/policy.plan",
+                {"binding_id": binding["binding_id"], "command_id": "hello",
+                 "expected_revision": 0, "values": {"mode": mode, "user_ids": []},
                  "current_password": PASSWORD},
                 f"race-plan-{index}",
             ))
         responses = await asyncio.gather(*(
             client.post(
-                path + "/policy-management-requests",
-                json={"expected_revision": 0, "plan_id": plan["plan_id"],
+                module + "/actions/policy.apply",
+                json={"binding_id": binding["binding_id"], "command_id": "hello",
+                      "expected_revision": 0, "plan_id": plan["plan_id"],
                       "plan_digest": plan["plan_digest"], "current_password": PASSWORD},
                 headers={"idempotency-key": f"race-apply-{index}"},
             )

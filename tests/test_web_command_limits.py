@@ -18,10 +18,10 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
     settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
     async with running(settings) as (app, client):
         await setup(client, token)
-        page = (await client.get("/")).text
+        page = (await client.get("/static/modules/command.router.html")).text
         assert "业务命令容量与调用者限流" in page
         script = (await client.get("/static/business-command-diagnostics.js")).text
-        assert "business-command-limit-change-plans" in script
+        assert "action('limit.plan')" in script
         bot = await post(
             client,
             "/management/v1/bots",
@@ -30,8 +30,8 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
             status=202,
         )
         await ready(client, bot)
-        root = "/management/v1/bots/" + bot["bot_id"]
-        initial = (await client.get(root + "/business-command-limits")).json()
+        module = "/management/v1/scopes/bot/" + bot["bot_id"] + "/modules/command.router"
+        initial = (await client.get(module + "/queries/limits")).json()
         assert initial == {
             "revision": 0,
             "values": DEFAULT_COMMAND_LIMITS,
@@ -46,7 +46,7 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
             "principal_burst": 3,
             "principal_refill_seconds": 15,
         }
-        plan_url = root + "/business-command-limit-change-plans"
+        plan_url = module + "/actions/limit.plan"
         denied = await client.post(
             plan_url,
             json={
@@ -72,11 +72,11 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
             "plan_digest": plan["plan_digest"],
             "current_password": PASSWORD,
         }
-        apply_url = root + "/business-command-limit-management-requests"
+        apply_url = module + "/actions/limit.apply"
         applied = await post(client, apply_url, apply_body, "apply-command-limits")
         assert applied == {"revision": 1, "status": "APPLIED"}
         assert await post(client, apply_url, apply_body, "apply-command-limits") == applied
-        saved = (await client.get(root + "/business-command-limits")).json()
+        saved = (await client.get(module + "/queries/limits")).json()
         assert saved["revision"] == 1
         assert saved["values"] == values
         assert saved["values_payload_state"] == "ACTIVE"
@@ -118,7 +118,7 @@ async def test_web_limit_preview_apply_reauth_and_payload_proof(tmp_path, web_bo
         assert created.status_code == 201, created.text
         await client.post("/management/v1/logout", json={})
         assert (await login_as(client, "limit-viewer", viewer_password)).status_code == 200
-        assert (await client.get(root + "/business-command-limits")).status_code == 200
+        assert (await client.get(module + "/queries/limits")).status_code == 200
         rejected = await client.post(
             plan_url,
             json={

@@ -4,10 +4,10 @@ import asyncio
 import base64
 import hashlib
 import json
-import socket
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from forest.embeddings import (
@@ -544,12 +544,12 @@ async def test_permit_rejection_and_foreign_profile_never_reach_network():
 
 
 async def test_connection_failure_is_unsent_but_received_then_disconnected_is_unknown():
-    # Keep the port reserved without listening so no Windows accept backlog can
-    # turn the intended connection-refused case into a post-send disconnect.
-    refusal_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    refusal_socket.bind(("127.0.0.1", 0))
-    endpoint = f"http://127.0.0.1:{refusal_socket.getsockname()[1]}/v1/embeddings"
-    client = EmbeddingClient(endpoint, "", profile())
+    async def refuse(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = EmbeddingClient("http://embedding.invalid/v1/embeddings", "", profile())
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(refuse), trust_env=False)
     try:
         result = await client.dispatch(prepared(), permitcheck=permit, timeout=2)
         assert (
@@ -557,7 +557,6 @@ async def test_connection_failure_is_unsent_but_received_then_disconnected_is_un
         )
     finally:
         await client.aclose()
-        refusal_socket.close()
 
     async def disconnect(writer, record):
         return

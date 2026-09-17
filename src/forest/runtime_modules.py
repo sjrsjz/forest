@@ -285,12 +285,20 @@ def _conversation(runtime, modules: dict[str, Any]):
 
 
 class _CommandRoutingRuntime:
-    def __init__(self, runtime):
+    def __init__(self, runtime, adapter):
+        from forest.storage.business_command_diagnostics import BusinessCommandDiagnosticsStore
         from forest.storage.command_limits import CommandLimitStore
         from forest.storage.command_policies import CommandPolicyStore
 
         self.policies = CommandPolicyStore(runtime.bot.store)
         self.limits = CommandLimitStore(runtime.bot.store)
+        self.bindings = adapter.bindings
+        self.diagnostics = BusinessCommandDiagnosticsStore(
+            runtime.bot.store,
+            messages=adapter.messages,
+            lease=runtime.kernel._authority(),
+            control=getattr(runtime.bot, "control", None),
+        )
 
 
 class _MessageRoutingRuntime:
@@ -302,8 +310,12 @@ class _MessageRoutingRuntime:
         self.limits = MessageHandlerLimitStore(runtime.bot.store)
 
 
-def _command_routing(runtime, _: dict[str, Any]):
-    return _CommandRoutingRuntime(runtime)
+def _command_routing(runtime, modules: dict[str, Any]):
+    from forest.management.command_contract import CommandRoutingManagementContract
+
+    module = _CommandRoutingRuntime(runtime, modules["adapter.onebot"])
+    module.management_contract = CommandRoutingManagementContract()
+    return module
 
 
 def _message_routing(runtime, _: dict[str, Any]):
@@ -447,7 +459,19 @@ OFFICIAL_MODULES = (
         ),),
     ),
     RuntimeModuleDescriptor(
-        "command.router", ("routing.graph",), _command_routing, _OFFICIAL_ARTIFACT
+        "command.router",
+        ("adapter.onebot", "routing.graph"),
+        _command_routing,
+        _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "commands",
+            "业务命令路由",
+            ("bot",),
+            "/static/modules/command.router.html",
+            "/static/command-router.js",
+            group="routing",
+            order=40,
+        ),),
     ),
     RuntimeModuleDescriptor(
         "message.router", ("routing.graph",), _message_routing, _OFFICIAL_ARTIFACT

@@ -106,8 +106,47 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         assert modules["contract.router"]["requires"] == [
             "component.worker-host", "adapter.onebot", "agent.runtime"
         ]
-        assert modules["command.router"]["requires"] == ["routing.graph"]
+        assert modules["command.router"]["requires"] == ["adapter.onebot", "routing.graph"]
         assert modules["message.router"]["requires"] == ["routing.graph"]
+        assert modules["command.router"]["management_contract"]["operations"] == [
+            {"operation_id": "bindings", "kind": "query", "authority": "binding.read"},
+            {
+                "operation_id": "policies",
+                "kind": "query",
+                "authority": "command.policy.read",
+            },
+            {
+                "operation_id": "policy.plan",
+                "kind": "action",
+                "authority": "command.policy.plan",
+            },
+            {
+                "operation_id": "policy.apply",
+                "kind": "action",
+                "authority": "command.policy.apply",
+            },
+            {"operation_id": "limits", "kind": "query", "authority": "command.limit.read"},
+            {
+                "operation_id": "limit.plan",
+                "kind": "action",
+                "authority": "command.limit.plan",
+            },
+            {
+                "operation_id": "limit.apply",
+                "kind": "action",
+                "authority": "command.limit.apply",
+            },
+            {
+                "operation_id": "diagnostics",
+                "kind": "query",
+                "authority": "command.execution.read",
+            },
+            {
+                "operation_id": "recovery",
+                "kind": "action",
+                "authority": "command.execution.recover",
+            },
+        ]
         assert modules["routing.graph"]["management_contract"]["operations"] == [
             {"operation_id": "snapshot", "kind": "query", "authority": "module.read"},
             {
@@ -159,6 +198,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         ]
         agent_contribution, = modules["agent.runtime"]["management_contributions"]
         memory_contribution, = modules["memory.graph"]["management_contributions"]
+        command_contribution, = modules["command.router"]["management_contributions"]
         assert agent_contribution["protocol"] == "forest.management-contribution/1"
         assert agent_contribution["scope_kinds"] == ["bot"]
         assert agent_contribution["surface"]["kind"] == "trusted-module"
@@ -170,6 +210,9 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         )
         assert memory_contribution["surface"]["style"].endswith(
             "/memory.graph.css"
+        )
+        assert command_contribution["surface"]["template"].endswith(
+            "/command.router.html"
         )
         assert modules["conversation.scheduler"]["management_contributions"] == []
         assert modules["agent.runtime"]["management_contract"]["protocol"] == (

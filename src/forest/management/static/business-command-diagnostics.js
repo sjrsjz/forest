@@ -4,11 +4,14 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, recoveryKey = null;
   let limitRevision = 0, limitPlan = null, limitApplyKey = null, limitReadSeq = 0;
   const valid = own => bot !== null && own === epoch;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/command.router`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
 
   function reset() {
     epoch++; readSeq++; limitReadSeq++; bot = null; recoveryKey = null;
     limitRevision = 0; limitPlan = null; limitApplyKey = null;
+    $('bot-command-diagnostics').open = false;
     $('bot-command-diagnostics').classList.add('hidden');
     $('command-diagnostic-binding').replaceChildren();
     $('command-diagnostic-summary').replaceChildren();
@@ -41,7 +44,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
   async function loadLimits() {
     if (!bot) return;
     const own = epoch, seq = ++limitReadSeq;
-    const data = await api(`${base()}/business-command-limits`);
+    const data = await api(query('limits'));
     if (!valid(own) || seq !== limitReadSeq) return;
     limitRevision = data.revision; clearLimitPlan();
     if (data.values === null) {
@@ -57,7 +60,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
   }
 
   async function loadBindings() {
-    const own = epoch, data = await api(`${base()}/bindings`);
+    const own = epoch, data = await api(query('bindings'));
     if (!valid(own)) return;
     const select = $('command-diagnostic-binding'), previous = select.value;
     select.replaceChildren();
@@ -137,7 +140,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
     const params = new URLSearchParams({limit: '50'});
     const binding = $('command-diagnostic-binding').value;
     if (binding) params.set('binding_id', binding);
-    const data = await api(`${base()}/business-commands/diagnostics?${params}`);
+    const data = await api(query('diagnostics', params));
     if (!valid(own) || seq !== readSeq) return;
     render(data);
   }
@@ -151,7 +154,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
     const own = epoch, key = recoveryKey;
     busy(event.currentTarget, async () => {
       const result = await api(
-        `${base()}/business-commands/recovery`, {limit: 128}, {'Idempotency-Key': key},
+        action('recovery'), {limit: 128}, {'Idempotency-Key': key},
       );
       if (!valid(own)) return;
       recoveryKey = null; await refresh();
@@ -179,7 +182,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
         current_password: $('command-limit-password').value,
       };
       const plan = await api(
-        `${base()}/business-command-limit-change-plans`, body, {'Idempotency-Key': key},
+        action('limit.plan'), body, {'Idempotency-Key': key},
       );
       if (!valid(own) || JSON.stringify(limitValues()) !== draft) return;
       limitPlan = plan; limitApplyKey = crypto.randomUUID();
@@ -196,7 +199,7 @@ export function businessCommandDiagnosticsPanel(api, busy, notice) {
     busy(event.currentTarget, async () => {
       const own = epoch, plan = limitPlan;
       const result = await api(
-        `${base()}/business-command-limit-management-requests`,
+        action('limit.apply'),
         {
           expected_revision: plan.expected_revision,
           plan_id: plan.plan_id,

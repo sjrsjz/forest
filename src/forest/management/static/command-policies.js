@@ -2,15 +2,18 @@ const $ = (id) => document.getElementById(id);
 
 export function commandPoliciesPanel(api, busy, notice) {
   let bot = null, epoch = 0, readSeq = 0, pending = null, applyKey = null;
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/command.router`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
   const password = () => $('command-policy-password').value;
-  const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
+  const post = (operation, body, key) => api(action(operation), body, {'Idempotency-Key':key});
   const valid = (own) => bot !== null && own === epoch;
   function clearPlan() {
     pending = null; applyKey = null; $('command-policy-preview').classList.add('hidden');
   }
   function reset() {
     epoch++; readSeq++; bot = null; clearPlan();
+    $('bot-command-policies').open = false;
     $('bot-command-policies').classList.add('hidden');
     $('command-policy-binding').replaceChildren();
     $('command-policy-list').replaceChildren();
@@ -18,7 +21,7 @@ export function commandPoliciesPanel(api, busy, notice) {
     $('command-policy-password').value = '';
   }
   async function loadBindings() {
-    const own = epoch, data = await api(`${base()}/bindings`);
+    const own = epoch, data = await api(query('bindings'));
     if (!valid(own)) return;
     const select = $('command-policy-binding'), previous = select.value;
     select.replaceChildren();
@@ -40,7 +43,7 @@ export function commandPoliciesPanel(api, busy, notice) {
     if (!binding) {
       $('command-policy-status').textContent = '还没有已登记的 Binding。'; return;
     }
-    const data = await api(`${base()}/bindings/${encodeURIComponent(binding)}/command-policies`);
+    const data = await api(query('policies', {binding_id:binding}));
     if (!valid(own) || sequence !== readSeq || binding !== $('command-policy-binding').value) return;
     $('command-policy-status').textContent =
       `Binding 策略 · 命令注册表修订 ${data.registry_revision} · ${data.commands.length} 条有效命令`;
@@ -77,9 +80,9 @@ export function commandPoliciesPanel(api, busy, notice) {
       const own = epoch, key = crypto.randomUUID();
       busy(button, async () => {
         const plan = await post(
-          `${base()}/bindings/${encodeURIComponent(binding)}/commands/` +
-          `${encodeURIComponent(command.command_id)}/policy-change-plans`,
-          {expected_revision:command.revision, values, current_password:password()}, key,
+          'policy.plan',
+          {binding_id:binding, command_id:command.command_id,
+            expected_revision:command.revision, values, current_password:password()}, key,
         );
         if (!valid(own)) return;
         pending = {binding, command, plan}; applyKey = crypto.randomUUID();
@@ -106,9 +109,9 @@ export function commandPoliciesPanel(api, busy, notice) {
     busy(event.currentTarget, async () => {
       const {binding, command, plan} = frozen;
       await post(
-        `${base()}/bindings/${encodeURIComponent(binding)}/commands/` +
-        `${encodeURIComponent(command.command_id)}/policy-management-requests`,
-        {expected_revision:plan.expected_revision, plan_id:plan.plan_id,
+        'policy.apply',
+        {binding_id:binding, command_id:command.command_id,
+          expected_revision:plan.expected_revision, plan_id:plan.plan_id,
           plan_digest:plan.plan_digest, current_password:password()}, key,
       );
       if (!valid(own)) return;

@@ -35,11 +35,8 @@ from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
 from forest.management.bot_audit_api import install_bot_audit_routes
 from forest.management.bots_api import install_bot_routes
-from forest.management.business_commands_api import install_business_command_routes
 from forest.management.catalog import BotCatalog
 from forest.management.cleanup import StorageCleanupManager
-from forest.management.command_limits_api import install_command_limit_routes
-from forest.management.command_policies_api import install_command_policy_routes
 from forest.management.fleet import BotFleet
 from forest.management.message_handler_diagnostics_api import (
     install_message_handler_diagnostic_routes,
@@ -362,6 +359,24 @@ class ManagementRuntime:
             raise ForestError("DATABASE_UNAVAILABLE", "管理数据库尚未就绪。", 503)
         return self.store
 
+    async def reauthenticate_admin(self, account_id: str, password: str) -> None:
+        """Verify a fresh administrator secret without exposing it to module tickets."""
+        store = self.require_store()
+        async with store.pool.connection() as conn:
+            account = await (
+                await conn.execute(
+                    "SELECT password_hash,disabled,role FROM web_accounts WHERE id=%s",
+                    (account_id,),
+                )
+            ).fetchone()
+        encoded = account["password_hash"] if account else "malformed"
+        async with self.password_slots:
+            valid = await asyncio.to_thread(verify_password, password, encoded)
+        if not valid or account is None or account["disabled"] or account["role"] != "admin":
+            raise ForestError(
+                "REAUTHENTICATION_FAILED", "Current password is incorrect", 403
+            )
+
     def origin(self, request: Request, *, content_type: str = "application/json") -> None:
         if request.headers.get("origin") != self.settings.public_origin:
             raise ForestError("ORIGIN_REJECTED", "请求来源不受信任。", 403)
@@ -679,12 +694,9 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_bot_routes(app, runtime)
     install_onebot_protocol_route(app, runtime)
     install_module_routes(app, runtime)
-    install_command_policy_routes(app, runtime)
     install_message_handler_policy_routes(app, runtime)
     install_message_handler_diagnostic_routes(app, runtime)
     install_message_handler_limit_routes(app, runtime)
-    install_command_limit_routes(app, runtime)
-    install_business_command_routes(app, runtime)
     install_bot_audit_routes(app, runtime)
     static = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static), name="static")

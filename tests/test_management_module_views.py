@@ -3,7 +3,7 @@ from pathlib import Path
 STATIC = Path(__file__).resolve().parents[1] / "src/forest/management/static"
 
 
-def test_control_shell_contains_no_agent_or_memory_product_pages():
+def test_control_shell_contains_no_module_owned_product_pages():
     index = (STATIC / "index.html").read_text(encoding="utf-8")
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     style = (STATIC / "style.css").read_text(encoding="utf-8")
@@ -13,9 +13,13 @@ def test_control_shell_contains_no_agent_or_memory_product_pages():
     assert 'id="bot-bindings"' not in index
     assert 'id="bot-events"' not in index
     assert 'id="bot-component-jobs"' not in index
+    assert 'id="bot-command-policies"' not in index
+    assert 'id="bot-command-diagnostics"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
+    assert "commandPoliciesPanel" not in app
+    assert "businessCommandDiagnosticsPanel" not in app
     assert "moduleSurfaces" not in app
     assert "'agent.runtime'" not in app
     assert "'memory.graph'" not in app
@@ -35,6 +39,7 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     routing = (STATIC / "modules/routing.graph.html").read_text(encoding="utf-8")
     jobs = (STATIC / "modules/scheduler.jobs.html").read_text(encoding="utf-8")
     onebot = (STATIC / "modules/adapter.onebot.html").read_text(encoding="utf-8")
+    command = (STATIC / "modules/command.router.html").read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
     memory_style = (STATIC / "modules/memory.graph.css").read_text(encoding="utf-8")
@@ -52,6 +57,11 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert "componentJobsPanel" in routing_controller
     assert 'id="bot-jobs"' in jobs and 'id="job-config"' in jobs
     assert 'id="bot-bindings"' in onebot and 'id="binding-config"' in onebot
+    assert '<details id="bot-command-policies"' in command
+    assert '<details id="bot-command-diagnostics"' in command
+    command_controller = (STATIC / "command-router.js").read_text(encoding="utf-8")
+    assert "commandPoliciesPanel" in command_controller
+    assert "businessCommandDiagnosticsPanel" in command_controller
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host
