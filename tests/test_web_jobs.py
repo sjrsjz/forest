@@ -193,7 +193,7 @@ async def test_web_retry_never_enqueued_failure_keeps_occurrence_identity(tmp_pa
         # Hold automatic claims at its documented no-authority boundary. Use
         # the same host storage methods as a dispatcher to checkpoint a known
         # failure before durable ingress, then exercise the real Web retry.
-        jobs = managed.platform.module("scheduler.jobs")
+        jobs = managed.runtime.module("scheduler.jobs")
         jobs.authorize = None
         values = definition(group["conversation_id"])
         await applied(client, root, await planned(client, root, values))

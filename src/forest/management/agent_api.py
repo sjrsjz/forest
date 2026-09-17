@@ -118,7 +118,7 @@ class AgentManagementContract(ModuleManagementContract):
             request.ticket, request.operation_id, request.payload
         )
         if result is not None and not request.bot.control.is_unavailable(result):
-            request.bot.platform.module("conversation.scheduler").notify()
+            request.bot.runtime.module("conversation.scheduler").notify()
         return result
 
     async def approval(self, request, body):
@@ -139,5 +139,5 @@ class AgentManagementContract(ModuleManagementContract):
     async def _advance(self, request, method, payload):
         result = await method(request.ticket, request.operation_id, payload)
         if result is not None and not request.bot.control.is_unavailable(result):
-            request.bot.platform.module("conversation.scheduler").notify()
+            request.bot.runtime.module("conversation.scheduler").notify()
         return result

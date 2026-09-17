@@ -148,7 +148,7 @@ async def _signed(runtime, bot, who, authority, operation, payload):
 
 def _contract(bot, component_id: str) -> tuple[Any, ModuleManagementContract]:
     try:
-        module = bot.platform.module_registry.get(component_id)
+        module = bot.runtime.module_registry.get(component_id)
     except KeyError:
         raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Runtime module not found", 404) from None
     contract = getattr(module, "management_contract", None)
@@ -189,7 +189,7 @@ def install_module_routes(app, runtime):
         _, bot = await _target(runtime, request, scope_kind, scope_id)
         return {
             "scope": {"kind": scope_kind, "id": scope_id},
-            "modules": bot.platform.module_registry.describe(),
+            "modules": bot.runtime.module_registry.describe(),
         }
 
     @app.get(

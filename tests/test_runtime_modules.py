@@ -32,6 +32,11 @@ class Module:
         self.close_failures = close_failures
         self.task = None
         self.failure = None
+        self.notifications = 0
+
+    def notify(self):
+        self.notifications += 1
+        self.events.append(("notify", self.name))
 
     async def start(self):
         self.events.append(("start", self.name))
@@ -82,6 +87,35 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
     starts = [name for action, name in events if action == "start"]
     closes = [name for action, name in events if action == "close"]
     assert closes == list(reversed(starts))
+
+
+@pytest.mark.asyncio
+async def test_registry_routes_generic_work_notifications_from_descriptors():
+    events = []
+    registry = BotModuleRegistry(
+        SimpleNamespace(),
+        (
+            RuntimeModuleDescriptor(
+                "idle", (), lambda *_: Module("idle", events), artifact()
+            ),
+            RuntimeModuleDescriptor(
+                "worker", (), lambda *_: Module("worker", events), artifact(),
+                wakes_on_work=True, work_notify_order=20,
+            ),
+            RuntimeModuleDescriptor(
+                "first", (), lambda *_: Module("first", events), artifact(),
+                wakes_on_work=True, work_notify_order=10,
+            ),
+        ),
+    )
+    await registry.start()
+    events.clear()
+    registry.notify_work()
+    assert registry.get("idle").notifications == 0
+    assert registry.get("worker").notifications == 1
+    assert registry.get("first").notifications == 1
+    assert events == [("notify", "first"), ("notify", "worker")]
+    await registry.close()
 
 
 @pytest.mark.asyncio

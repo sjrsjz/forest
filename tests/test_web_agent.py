@@ -484,7 +484,7 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
             response_mode="agent",
         )
         final_ready, release = asyncio.Event(), asyncio.Event()
-        scheduler = managed.platform.module("conversation.scheduler")
+        scheduler = managed.runtime.module("conversation.scheduler")
         finalize = scheduler.finalize_agent
         commits = []
 

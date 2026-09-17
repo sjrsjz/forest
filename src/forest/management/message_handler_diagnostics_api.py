@@ -93,5 +93,5 @@ def install_message_handler_diagnostic_routes(app, runtime):
         )
         result = await store(bot).recover(ticket, operation, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.notify()
+            bot.runtime.notify()
         return result

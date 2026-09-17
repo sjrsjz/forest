@@ -216,13 +216,13 @@ async def test_dispatch_trace_keeps_frozen_native_generation_after_host_restart(
     }
     descriptor = {**descriptor, "descriptor_digest": digest_json(descriptor)}
     graphs = RuntimeModuleGraphStore(store)
-    first = await graphs.prepare(first_lease, [descriptor])
+    first = await graphs.prepare(first_lease, [descriptor], str(uuid4()))
     await graphs.publish(first_lease, first)
     received = await receive(repository, first_lease, "native-generation-before-restart")
 
     await store.release_host(first_lease)
     second_lease = await store.acquire_host("host-b", "incarnation-b", ttl_seconds=300)
-    second = await graphs.prepare(second_lease, [descriptor])
+    second = await graphs.prepare(second_lease, [descriptor], str(uuid4()))
     await graphs.publish(second_lease, second)
     assert first.generations["adapter.onebot"] != second.generations["adapter.onebot"]
 

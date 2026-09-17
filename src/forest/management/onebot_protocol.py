@@ -22,7 +22,7 @@ def install_onebot_protocol_route(app: FastAPI, runtime: Any):
             raise ForestError("BINDING_NOT_FOUND", "Binding is unavailable", 404)
         registry, fleet = services()
         bot = await fleet.attach(await registry.resolve(binding_id))
-        await bot.platform.module("adapter.onebot").receive(
+        await bot.runtime.module("adapter.onebot").receive(
             binding_id, await request.body(), request.headers.get("x-signature")
         )
         # OneBot treats this as an empty quick-operation response. ACK follows commit.

@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-17。当前提交基线：`01300ca`。
+更新日期：2026-09-17。本页覆盖截至本次 `BotRuntimeSupervisor` 收口工作区的实现事实。
 
 ## 结论
 
@@ -9,7 +9,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 当前代码已经具备多 Bot、群聊单执行链、Agentlib 风格 Agent、Shell、记忆图、模块代际和部分模块化控制面，但仍有三个根本阻断项：
 
 1. Bot 创建、挂载和恢复仍调用巨型 `BotStore.migrate()`，多数官方模块业务表仍位于历史 `public` schema；
-2. 通用宿主仍残留旧组合根留下的唤醒、健康和资源耦合，尚未完全收口为不理解业务模块的 `BotRuntimeSupervisor`；
+2. 可安装 Worker 仍由官方 `component.worker-host` 模块内部管理，尚未完成与官方模块一致的代际热替换、失租恢复和按依赖边故障隔离；
 3. Web 壳仍安装一批 Bot/Event/ComponentJob/策略/诊断/审计/备份/账号专用路由与面板，尚未完全由作用域和 `ManagementContribution` 驱动。
 
 因此，能在 WebUI 中创建 Bot、配置 Agent、查看 Memory 或运行 OneBot，不能作为微内核完成的证据。
@@ -61,14 +61,17 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - 查询可按消息、群、组件、代际、结果和时间从不可变因果根精确选根，并使用绑定筛选条件的稳定游标分页。
 - 权威事实采用幂等操作、修订、CAS、短事务和 outbox；最近修复了并发同修订命令策略应用泄漏 `CONTROL_CONTENT_REVOKED` 的竞态，使其收敛为 `REVISION_CONFLICT`。
 
+### 通用运行时监督
+
+- `BindingRuntime` 类型、兼容别名和 `forest.platform` 组合根已删除；`BotRuntimeSupervisor` 只监督模块图、宿主 lease、内核任务、通用工作通知和归约健康状态。
+- 唤醒由描述符声明 `wakes_on_work/work_notify_order`，Supervisor 不再按 Agent、Memory、Job 或 OneBot 分支；Fleet 只读取公开 `healthy` 状态。
+- 每次 Registry 激活分配独立 UUID；同一宿主关闭后重启会创建新的 RuntimeGraph 和 Generation，不能把已 `STOPPED` 的代际重新激活。
+
 ## 当前阻断项
 
-### P0：清除业务组合根
+### P1：统一可安装 Worker 生命周期
 
-- 删除 `BindingRuntime` 类型及兼容别名，完成 `BotRuntimeSupervisor` 收口。
-- Supervisor 只持有冻结模块图、内核级任务、宿主 lease、统一工作通知与归约健康状态；不得 import 或保存具体 Agent、Memory、Adapter、Shell、Job、Delivery 实例或 Store。
-- 模块工作通知、失败和健康必须经通用端口上报；Fleet 不读取模块私有任务集合。
-- 官方模块与可安装 Worker 仍需统一监督、失租恢复和按依赖边故障隔离语义。
+- `component.worker-host` 已是普通官方模块，但其内部 Worker 尚需获得与官方模块一致的代际热替换、失租恢复和按依赖边故障隔离语义。
 
 ### P0：拆分存储所有权
 
@@ -93,14 +96,16 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 ## 最近可信验证
 
-提交 `01300ca` 的验证基线：
+本次运行时收口的验证证据：
 
-- 无 PostgreSQL 全套：`735 passed, 36 skipped, 1115 deselected`；
-- PostgreSQL 17：受影响的 contribution、Binding、Delivery、Job、Agent、Memory、策略、诊断和控制回执共 29 个定向场景均取得通过结果；
-- Ruff、Python compileall、JavaScript 语法检查和 `git diff --check` 通过；
-- 临时 PostgreSQL 容器已删除，常驻 `forest-forest-1` 与 `forest-postgres-1` 未被该验证改动。
+- 无 PostgreSQL 全套：`736 passed, 36 skipped, 1116 deselected`；
+- PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
+- 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
+- Ruff、Python compileall 和 `git diff --check` 通过；
+- 旧升级夹具仍把 001–022 当成历史快照，但当前 001 已是改写后的干净开发基线；该冲突没有被伪装成兼容迁移，必须随存储拆分删除旧迁移链与升级夹具。
+- 验证使用隔离的临时 PostgreSQL 17 容器；常驻 `forest-forest-1` 与 `forest-postgres-1` 未被改动。
 
-这些结果只证明该提交所覆盖的切片，没有覆盖完整 PostgreSQL 套件、真实 QQ 低频验收、长时连接抖动、十万级记忆容量或正在进行的运行时组合根重构。工作区未提交变更不计入本节证据。
+这些结果只证明本次运行时监督切片，没有覆盖完整 PostgreSQL 套件、真实 QQ 低频验收、长时连接抖动或十万级记忆容量。长批次停止推进仍需在后续资源隔离工作中复现和消除。
 
 ## 发布判据
 

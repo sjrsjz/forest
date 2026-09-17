@@ -1,4 +1,4 @@
-"""Per-Bot microkernel composition and cross-module conversation execution."""
+"""Generic supervision for one Bot-scoped immutable module graph."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def _observe(task):
         task.exception()
 
 
-class BindingRuntime:
+class BotRuntimeSupervisor:
     def __init__(self, bot, vault, packages: dict, *, global_slots=None, job_authority=None,
                  global_model_slots=None, module_packages=None):
         self.bot, self.kernel, self.vault = bot, bot.kernel, vault
@@ -37,24 +37,29 @@ class BindingRuntime:
         """Resolve a runtime capability owner by its stable component identity."""
         return self.module_registry.get(component_id)
 
-    def _notify_work(self):
-        self.module("conversation.scheduler").notify()
-        self.module("scheduler.jobs").notify()
-        self.module("memory.graph").notify()
+    def notify(self):
+        """Wake durable work through descriptor-declared module ports."""
+        self.module_registry.notify_work()
         self.kernel.notify_events()
         self.kernel.notify_component_jobs()
-
-    def notify(self):
-        """Wake durable business workers after an out-of-band control change."""
-        self._notify_work()
 
     @property
     def failure(self):
         return self._failure
 
+    @property
+    def healthy(self) -> bool:
+        """Report host health without exposing owned task internals to Fleet."""
+        return (
+            self._started
+            and not self._closed.is_set()
+            and self._failure is None
+            and all(not task.done() for task in self._tasks)
+        )
+
     def _fatal(self, code):
         if self._failure is None:
-            self._failure = ForestError(code, "Platform supervisor requires recovery", 503)
+            self._failure = ForestError(code, "Bot runtime supervisor requires recovery", 503)
         self._closed.set()
         adapter = self.module_registry.instances.get("adapter.onebot")
         if adapter is not None:
@@ -68,7 +73,7 @@ class BindingRuntime:
     async def start(self):
         async with self._start_lock:
             if self._closed.is_set():
-                raise ForestError("BINDING_RUNTIME_CLOSED", "Platform runtime is closed", 503)
+                raise ForestError("BOT_RUNTIME_CLOSED", "Bot runtime is closed", 503)
             if self._started:
                 return
             await self.module_registry.start()
@@ -85,7 +90,7 @@ class BindingRuntime:
             if (
                 self.module_registry.failures()
             ):
-                self._fatal("PLATFORM_SUBTASK_FAILED")
+                self._fatal("RUNTIME_SUBTASK_FAILED")
                 return
             await asyncio.sleep(0.1)
 
@@ -104,7 +109,7 @@ class BindingRuntime:
             self._close_task.done()
             and (self._close_task.cancelled() or self._close_task.exception())
         ):
-            self._close_task = asyncio.create_task(self._close(), name="close:binding-runtime")
+            self._close_task = asyncio.create_task(self._close(), name="close:bot-runtime")
             self._close_task.add_done_callback(_observe)
         await asyncio.shield(self._close_task)
 
@@ -114,5 +119,5 @@ class BindingRuntime:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         errors = await self.module_registry.close()
         if errors:
-            raise ForestError("PLATFORM_CLEANUP_FAILED", "Runtime modules remain owned", 503)
+            raise ForestError("RUNTIME_CLEANUP_FAILED", "Runtime modules remain owned", 503)
         self._tasks.clear()

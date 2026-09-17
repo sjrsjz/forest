@@ -28,9 +28,9 @@ _LOST_AUTHORITY = {"STALE_HOST", "STORAGE_SEALED", "KERNEL_UNAVAILABLE", "BOT_SC
 
 
 class MemoryRuntime:
-    def __init__(self, platform, *, messages):
-        self.platform, self.store = platform, platform.bot.store
-        self.config = MemoryConfig(self.store, platform.vault)
+    def __init__(self, runtime, *, messages):
+        self.runtime, self.store = runtime, runtime.bot.store
+        self.config = MemoryConfig(self.store, runtime.vault)
         self.media = MemoryMediaStore(messages, config=self.config)
         self.index = MemoryIndexStore(messages, self.media)
         self.queries = MemoryQueryStore(self.index)
@@ -74,7 +74,7 @@ class MemoryRuntime:
             try:
                 async with asyncio.timeout(5):
                     result = await self.sources.backfill(
-                        self.platform.kernel._authority(), limit=32
+                        self.runtime.kernel._authority(), limit=32
                     )
                 self.errors.pop("memory_sources", None)
                 delay = 0.25 if result["more_possible"] else 5
@@ -112,7 +112,7 @@ class MemoryRuntime:
             delay = 2
             self._wake.clear()
             try:
-                lease = self.platform.kernel._authority()
+                lease = self.runtime.kernel._authority()
                 if "scrub:payloads" not in self.workers:
                     self._spawn("scrub:payloads", lambda: self._scrub(lease))
                 # Attempt identities carry enough accounting facts to recover
@@ -181,7 +181,7 @@ class MemoryRuntime:
                             )
                     if (
                         cfg["values"]["semantic_associations_enabled"]
-                        and not self.platform.module(
+                        and not self.runtime.module(
                             "conversation.scheduler"
                         ).active_conversations
                         and "semantic:reconcile" not in self.workers
@@ -299,7 +299,7 @@ class MemoryRuntime:
             raise ForestError("MEMORY_RUNTIME_CLOSED", "Memory runtime closed before dispatch", 503)
         client = EmbeddingClient(
             cfg["values"]["endpoint"],
-            self.platform.vault.decrypt(cfg["secret_ciphertext"]),
+            self.runtime.vault.decrypt(cfg["secret_ciphertext"]),
             profile(cfg["values"]),
             timeout_seconds=min(cfg["values"]["request_timeout"], cfg["values"]["query_timeout"])
             if conversation_id

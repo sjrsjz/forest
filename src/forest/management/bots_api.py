@@ -162,8 +162,8 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
         result = await BotRuntimeAdministration(bot.store, control=bot.control).set_maintenance(
             signed, operation, payload, lease=bot.kernel._authority()
         )
-        if bot.platform is not None and result is not None and not bot.control.is_unavailable(result):
-            bot.platform.notify()
+        if bot.runtime is not None and result is not None and not bot.control.is_unavailable(result):
+            bot.runtime.notify()
         return result
 
     @app.get("/management/v1/provision-jobs/{job_id}")
@@ -282,8 +282,8 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
         result = await ModuleAdministration(
             bot.store, control=bot.control, packages=services()[1].packages
         ).set_state(signed, operation, payload)
-        if bot.platform is not None and not bot.control.is_unavailable(result):
-            bot.platform.notify()
+        if bot.runtime is not None and not bot.control.is_unavailable(result):
+            bot.runtime.notify()
         return result
 
     @app.post("/management/v1/bots/{bot_id}/components/{component_id}/change-plans")

@@ -91,13 +91,13 @@ class PendingActivation:
     transport: str
 
 class OneBotRuntime:
-    def __init__(self, platform, *, component_host):
-        self.platform = platform
+    def __init__(self, runtime, *, component_host):
+        self.runtime = runtime
         self.component_host = component_host
-        self.bindings = BindingStore(platform.bot.store)
-        self.messages = MessageStore(platform.bot.store, self.bindings)
-        self.shell_ingress = ShellIngressGuard(platform.bot.store.bot_id)
-        self.delivery = DeliveryStore(platform.bot.store, self.bindings)
+        self.bindings = BindingStore(runtime.bot.store)
+        self.messages = MessageStore(runtime.bot.store, self.bindings)
+        self.shell_ingress = ShellIngressGuard(runtime.bot.store.bot_id)
+        self.delivery = DeliveryStore(runtime.bot.store, self.bindings)
         self.errors: dict[str, str] = {}
         self.connections: dict[str, Connection] = {}
         self._applied: dict[str, tuple[int, str]] = {}
@@ -113,7 +113,7 @@ class OneBotRuntime:
         self.delivery_task: asyncio.Task | None = None
         self.worker = DeliveryWorker(
             self.delivery,
-            platform.kernel._authority,
+            runtime.kernel._authority,
             self.prepare,
             on_error=self._delivery_error,
         )
@@ -134,7 +134,7 @@ class OneBotRuntime:
         if self._failure is None:
             self._failure = ForestError(code, "OneBot adapter requires recovery", 503)
         self.stop_admission()
-        self.platform._fatal(code)
+        self.runtime._fatal(code)
 
     async def start(self):
         if self._closed.is_set():
@@ -194,7 +194,7 @@ class OneBotRuntime:
             except Exception as exc:
                 errors.append(exc)
         if errors or self._clients or self._pending or self.connections:
-            raise ForestError("PLATFORM_CLEANUP_FAILED", "OneBot resources remain owned", 503)
+            raise ForestError("ONEBOT_CLEANUP_FAILED", "OneBot resources remain owned", 503)
         self._jobs.clear()
         self._component_jobs.clear()
     async def _close_client(self, client):
@@ -204,7 +204,7 @@ class OneBotRuntime:
     async def _disconnect(self, connection):
         try:
             await self.bindings.disconnect(
-                self.platform._cleanup_lease(),
+                self.runtime._cleanup_lease(),
                 connection.row["binding_id"],
                 client_incarnation=connection.row["client_incarnation"],
                 expected_binding_epoch=connection.row["binding_epoch"],
@@ -217,7 +217,7 @@ class OneBotRuntime:
         async with asyncio.timeout(5):
             try:
                 row = await self.bindings.current(
-                    self.platform._cleanup_lease(), pending.binding_id
+                    self.runtime._cleanup_lease(), pending.binding_id
                 )
             except ForestError as exc:
                 if exc.code not in _LOST_AUTHORITY | {"BINDING_NOT_FOUND"}:
@@ -234,7 +234,7 @@ class OneBotRuntime:
                 return True
             if ours:
                 await self.bindings.disconnect(
-                    self.platform._cleanup_lease(),
+                    self.runtime._cleanup_lease(),
                     pending.binding_id,
                     client_incarnation=pending.client_incarnation,
                     expected_binding_epoch=row["binding_epoch"],
@@ -277,11 +277,11 @@ class OneBotRuntime:
                 if self._closed.is_set():
                     return
                 saved = await self.bindings.candidate_config(
-                    self.platform.kernel._authority(), binding_id, revision,
+                    self.runtime.kernel._authority(), binding_id, revision,
                     expected_desired_revision=desired["revision"], recover_effective=recover,
                 )
                 values = saved["values"]
-                secrets = json.loads(self.platform.vault.decrypt(saved["secret_ciphertext"]))
+                secrets = json.loads(self.runtime.vault.decrypt(saved["secret_ciphertext"]))
                 transport = values.get("transport", "http-post")
                 websocket_url = values.get("websocket_url", "ws://127.0.0.1:8080")
                 webhook = secrets.get("webhook_secret", "")
@@ -313,7 +313,7 @@ class OneBotRuntime:
                             "ONEBOT_IDENTITY_MISMATCH", "API account differs from binding", 409
                         )
                 drained = await self.bindings.drain(
-                    self.platform.kernel._authority(), binding_id, desired["revision"]
+                    self.runtime.kernel._authority(), binding_id, desired["revision"]
                 )
                 old = self.connections.get(binding_id)
                 if old is not None:
@@ -335,7 +335,7 @@ class OneBotRuntime:
                 )
                 self._pending[pending.client_incarnation] = pending
                 row = await self.bindings.activate(
-                    self.platform.kernel._authority(),
+                    self.runtime.kernel._authority(),
                     binding_id,
                     revision,
                     enabled=values["enabled"],
@@ -375,7 +375,7 @@ class OneBotRuntime:
                 self._fatal(code)
             try:
                 await self.bindings.report_error(
-                    self.platform.kernel._authority(), binding_id, desired["revision"], code
+                    self.runtime.kernel._authority(), binding_id, desired["revision"], code
                 )
             except Exception:
                 self.errors["store"] = "BINDING_REPORT_UNAVAILABLE"
@@ -392,7 +392,7 @@ class OneBotRuntime:
         while not self._closed.is_set():
             try:
                 desired = await self.bindings.desired(
-                    self.platform.kernel._authority()
+                    self.runtime.kernel._authority()
                 )
                 for row in desired:
                     binding_id = row["binding_id"]
@@ -484,11 +484,11 @@ class OneBotRuntime:
 
     def connection(self, binding_id: str) -> Connection:
         if self._closed.is_set() or self._failure is not None:
-            raise ForestError("BINDING_RUNTIME_CLOSED", "Platform runtime requires recovery", 503)
+            raise ForestError("ONEBOT_RUNTIME_CLOSED", "OneBot adapter requires recovery", 503)
         connection = self.connections.get(binding_id)
         if connection is None or not connection.accepting:
             raise ForestError("BINDING_OFFLINE", "Binding has no active connection", 503)
-        self.platform.kernel._authority()
+        self.runtime.kernel._authority()
         return connection
 
     async def receive(self, binding_id: str, body: bytes, signature: str | None) -> dict:
@@ -524,7 +524,7 @@ class OneBotRuntime:
         try:
             async with adapter.shell_ingress.enter(ingress_plan) as priority_proof:
                 staged = await adapter.messages.stage_platform_input(
-                    self.platform.kernel._authority(), binding_id, body,
+                    self.runtime.kernel._authority(), binding_id, body,
                     expected_binding_epoch=connection.row["binding_epoch"],
                 )
                 if staged.kind == "NON_MESSAGE":
@@ -543,7 +543,7 @@ class OneBotRuntime:
                     # Retrying a failed pure codec call is safe. The durable
                     # Inbox owns deduplication; reserved Shell syntax stays on
                     # the fixed host parser so a broken Adapter can be rescued.
-                    normalized = await self.platform.kernel.invoke_control_with_receipt(
+                    normalized = await self.runtime.kernel.invoke_control_with_receipt(
                         "adapter.onebot",
                         "onebot.normalize",
                         {
@@ -562,7 +562,7 @@ class OneBotRuntime:
                         )
                 if event["author"].get("is_self"):
                     echo = await adapter.delivery.find_echo(
-                        self.platform.kernel._authority(),
+                        self.runtime.kernel._authority(),
                         binding_id,
                         event["platform_message_id"],
                         event["channel_kind"],
@@ -573,7 +573,7 @@ class OneBotRuntime:
                 trigger = False
                 if priority_proof is None:
                     current = await adapter.bindings.execution_config(
-                        self.platform.kernel._authority(), binding_id,
+                        self.runtime.kernel._authority(), binding_id,
                         expected_binding_epoch=connection.row["binding_epoch"],
                     )
                     config = current["config"]
@@ -601,7 +601,7 @@ class OneBotRuntime:
                         )
                     )
                 receipt = await adapter.messages.ingest(
-                    self.platform.kernel._authority(),
+                    self.runtime.kernel._authority(),
                     binding_id,
                     event,
                     expected_binding_epoch=connection.row["binding_epoch"],
@@ -611,7 +611,7 @@ class OneBotRuntime:
                 )
                 if receipt.get("kind") == "SUPPRESSED_OCCURRENCE":
                     return {"accepted": True, **receipt}
-                self.platform.notify()
+                self.runtime.notify()
                 return {"accepted": True, "event_id": receipt["event_id"]}
         finally:
             connection.tasks.discard(task)
@@ -625,11 +625,11 @@ class OneBotRuntime:
         ):
             raise ForestError("STALE_BINDING", "Delivery belongs to an old connection", 409)
         current = await self.bindings.execution_config(
-            self.platform.kernel._authority(), claim.route["binding_id"], expected_binding_epoch=claim.binding_epoch,
+            self.runtime.kernel._authority(), claim.route["binding_id"], expected_binding_epoch=claim.binding_epoch,
         )
         await self.component_host.ensure(("adapter.onebot",))
         operation = "format:" + str(uuid4())
-        receipt = await self.platform.kernel.invoke_control_with_receipt(
+        receipt = await self.runtime.kernel.invoke_control_with_receipt(
             "adapter.onebot",
             "onebot.prepare",
             {
@@ -642,7 +642,7 @@ class OneBotRuntime:
             input_parent_ids=(claim.payload_id, current["config_payload_id"]),
         )
         value = receipt.value
-        call = await self.platform.bot.store.read_call(operation)
+        call = await self.runtime.bot.store.read_call(operation)
         if call is None or call["status"] != "COMPLETED":
             raise ForestError(
                 "FORMAT_RECEIPT_MISSING", "Adapter output has no durable receipt", 503

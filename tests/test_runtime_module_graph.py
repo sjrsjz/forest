@@ -175,6 +175,44 @@ async def test_registry_atomically_publishes_native_generations_and_dependency_e
                 )
 
 
+async def test_reactivation_under_same_host_allocates_fresh_generations(runtime_store):
+    store, lease = runtime_store
+    host = SimpleNamespace(
+        bot=SimpleNamespace(store=store),
+        kernel=KernelAuthority(lease),
+    )
+    first = BotModuleRegistry(host, (descriptor("owned", (), []),))
+    await first.start()
+    first_generation = first.graph_identity.generations["owned"]
+    await first.close()
+
+    second = BotModuleRegistry(host, (descriptor("owned", (), []),))
+    await second.start()
+    second_generation = second.graph_identity.generations["owned"]
+    assert second.graph_identity.graph_id != first.graph_identity.graph_id
+    assert second_generation != first_generation
+
+    async with store.pool.connection() as conn:
+        states = await (
+            await conn.execute(
+                "SELECT generation_id,state FROM public.bot_runtime_module_lifecycle_facts "
+                "WHERE bot_id=%s ORDER BY created_at,sequence",
+                (store.bot_id,),
+            )
+        ).fetchall()
+    assert {row["generation_id"] for row in states} == {
+        first_generation,
+        second_generation,
+    }
+    assert [row["state"] for row in states if row["generation_id"] == first_generation] == [
+        "PREPARED", "ACTIVE", "QUIESCING", "STOPPED"
+    ]
+    assert [row["state"] for row in states if row["generation_id"] == second_generation] == [
+        "PREPARED", "ACTIVE"
+    ]
+    await second.close()
+
+
 async def test_failed_start_never_publishes_partial_runtime_graph(runtime_store):
     store, lease = runtime_store
     events = []

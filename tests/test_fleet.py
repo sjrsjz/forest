@@ -70,7 +70,7 @@ class FakeControl:
         return []
 
 
-class FakeBindingRuntime:
+class FakeBotRuntimeSupervisor:
     def __init__(self, bot, vault, packages, **kwargs):
         self.bot, self.vault, self.packages = bot, vault, packages
         self._tasks = []
@@ -82,6 +82,10 @@ class FakeBindingRuntime:
         }
         self.failure = None
         self.started = self.closed = False
+
+    @property
+    def healthy(self):
+        return self.started and not self.closed and self.failure is None
 
     def module(self, component_id):
         return self._modules[component_id]
@@ -104,7 +108,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(fleet_module, "BotStore", FakeStore)
     monkeypatch.setattr(fleet_module, "Kernel", FakeKernel)
     monkeypatch.setattr(fleet_module, "BotControl", FakeControl)
-    monkeypatch.setattr(fleet_module, "BindingRuntime", FakeBindingRuntime)
+    monkeypatch.setattr(fleet_module, "BotRuntimeSupervisor", FakeBotRuntimeSupervisor)
     return SimpleNamespace(issuer_id="test", key_revision=1, public_key="synthetic")
 
 

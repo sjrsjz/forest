@@ -32,11 +32,11 @@ from test_p4_upgrade import MEMORY_TABLES, P3_RELEASED, snapshot
 from test_upgrade import upgrade_database as upgrade_database
 
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
+from forest.bot_runtime import BotRuntimeSupervisor
 from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.models import ModelCapabilities, prepare_model_request
 from forest.packages import digest_json
-from forest.platform import BindingRuntime
 from forest.security import SecretVault
 from forest.storage.agent_config import AgentConfig
 from forest.storage.bindings import BindingStore
@@ -659,7 +659,7 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
         await upgrade(env)
         kernel = Kernel(env.store)
         kernel.lease = env.lease
-        runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
+        runtime = BotRuntimeSupervisor(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
         try:
             await runtime.module_registry.prepare()
             actor = await owner(

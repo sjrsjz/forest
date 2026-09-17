@@ -1,7 +1,7 @@
 """Dependency-ordered official modules for a Bot runtime.
 
 The supervisor consumes descriptors and lifecycle operations; concrete module
-construction lives here instead of in the platform adapter composition root.
+construction lives here instead of in the runtime adapter composition root.
 Official and packaged modules can converge on this registry contract without
 making Agent or Memory kernel types.
 """
@@ -18,6 +18,7 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 from typing import Any
+from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
@@ -195,11 +196,17 @@ class RuntimeModuleDescriptor:
     artifact: RuntimeArtifactIdentity
     management: tuple[RuntimeManagementContribution, ...] = ()
     storage: RuntimeStorageBundle | None = None
+    wakes_on_work: bool = False
+    work_notify_order: int = 100
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
         if len(identities) != len(set(identities)):
             raise ValueError("Runtime management contribution identities must be unique")
+        if type(self.wakes_on_work) is not bool:
+            raise ValueError("Runtime work notification declaration must be boolean")
+        if type(self.work_notify_order) is not int or not 0 <= self.work_notify_order <= 10_000:
+            raise ValueError("Runtime work notification order is invalid")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -242,103 +249,103 @@ _TRANSITIONS = {
 }
 
 
-def _memory(platform, modules: dict[str, Any]):
+def _memory(runtime, modules: dict[str, Any]):
     from forest.management.memory_api import MemoryManagementContract
     from forest.memory_runtime import MemoryRuntime
 
     adapter = modules["adapter.onebot"]
-    runtime = MemoryRuntime(platform, messages=adapter.messages)
-    runtime.management_contract = MemoryManagementContract()
-    return runtime
+    module = MemoryRuntime(runtime, messages=adapter.messages)
+    module.management_contract = MemoryManagementContract()
+    return module
 
 
-def _agent(platform, modules: dict[str, Any]):
+def _agent(runtime, modules: dict[str, Any]):
     from forest.agent_runtime import AgentRuntime
     from forest.management.agent_api import AgentManagementContract
 
-    runtime = AgentRuntime(platform, messages=modules["adapter.onebot"].messages)
-    runtime.management_contract = AgentManagementContract()
-    return runtime
+    module = AgentRuntime(runtime, messages=modules["adapter.onebot"].messages)
+    module.management_contract = AgentManagementContract()
+    return module
 
 
-def _conversation(platform, modules: dict[str, Any]):
+def _conversation(runtime, modules: dict[str, Any]):
     from forest.group_scheduler import GroupScheduler
 
     agent = modules["agent.runtime"]
     adapter = modules["adapter.onebot"]
     return GroupScheduler(
         adapter.messages,
-        lease=platform.kernel._authority,
+        lease=runtime.kernel._authority,
         execute=modules["contract.router"].execute,
         delivery=adapter.delivery,
-        global_slots=platform.global_slots,
+        global_slots=runtime.global_slots,
         finalize_agent=agent.runner.finalize,
         execution_timeout=3600,
     )
 
 
 class _CommandRoutingRuntime:
-    def __init__(self, platform):
+    def __init__(self, runtime):
         from forest.storage.command_limits import CommandLimitStore
         from forest.storage.command_policies import CommandPolicyStore
 
-        self.policies = CommandPolicyStore(platform.bot.store)
-        self.limits = CommandLimitStore(platform.bot.store)
+        self.policies = CommandPolicyStore(runtime.bot.store)
+        self.limits = CommandLimitStore(runtime.bot.store)
 
 
 class _MessageRoutingRuntime:
-    def __init__(self, platform):
+    def __init__(self, runtime):
         from forest.storage.message_handler_limits import MessageHandlerLimitStore
         from forest.storage.message_handler_policies import MessageHandlerPolicyStore
 
-        self.policies = MessageHandlerPolicyStore(platform.bot.store)
-        self.limits = MessageHandlerLimitStore(platform.bot.store)
+        self.policies = MessageHandlerPolicyStore(runtime.bot.store)
+        self.limits = MessageHandlerLimitStore(runtime.bot.store)
 
 
-def _command_routing(platform, _: dict[str, Any]):
-    return _CommandRoutingRuntime(platform)
+def _command_routing(runtime, _: dict[str, Any]):
+    return _CommandRoutingRuntime(runtime)
 
 
-def _message_routing(platform, _: dict[str, Any]):
-    return _MessageRoutingRuntime(platform)
+def _message_routing(runtime, _: dict[str, Any]):
+    return _MessageRoutingRuntime(runtime)
 
 
-def _onebot(platform, modules: dict[str, Any]):
+def _onebot(runtime, modules: dict[str, Any]):
     from forest.management.onebot_contract import OneBotManagementContract
     from forest.onebot_runtime import OneBotRuntime
 
-    runtime = OneBotRuntime(platform, component_host=modules["component.worker-host"])
-    runtime.management_contract = OneBotManagementContract()
-    return runtime
+    module = OneBotRuntime(runtime, component_host=modules["component.worker-host"])
+    module.management_contract = OneBotManagementContract()
+    return module
 
 
-def _component_workers(platform, _: dict[str, Any]):
+def _component_workers(runtime, _: dict[str, Any]):
     from forest.component_workers import ComponentWorkerHost
 
-    return ComponentWorkerHost(platform.kernel, platform.packages)
+    return ComponentWorkerHost(runtime.kernel, runtime.packages)
 
 
-def _contract_router(platform, modules: dict[str, Any]):
+def _contract_router(runtime, modules: dict[str, Any]):
     from forest.contract_router import ContractExecutionRouter
 
     return ContractExecutionRouter(
-        platform,
+        runtime,
         modules["component.worker-host"],
         modules["adapter.onebot"],
         modules["agent.runtime"],
     )
 
 
-def _routing_graph(platform, _: dict[str, Any]):
+def _routing_graph(runtime, _: dict[str, Any]):
     from forest.management.routing_api import RoutingManagementContract
     from forest.routing_graph import RouteGraphRuntime
 
-    runtime = RouteGraphRuntime(platform)
-    runtime.management_contract = RoutingManagementContract()
-    return runtime
+    module = RouteGraphRuntime(runtime)
+    module.management_contract = RoutingManagementContract()
+    return module
 
 
-def _shell(platform, modules: dict[str, Any]):
+def _shell(runtime, modules: dict[str, Any]):
     from forest.shell import ShellDispatcher
 
     adapter = modules["adapter.onebot"]
@@ -346,13 +353,13 @@ def _shell(platform, modules: dict[str, Any]):
         adapter.messages,
         adapter.bindings,
         adapter.delivery,
-        platform.kernel._authority,
-        on_change=platform._notify_work,
-        module_packages=platform.module_packages,
+        runtime.kernel._authority,
+        on_change=runtime.notify,
+        module_packages=runtime.module_packages,
     )
 
 
-def _jobs(platform, modules: dict[str, Any]):
+def _jobs(runtime, modules: dict[str, Any]):
     from forest.job_scheduler import JobAuthorizationPort, JobDispatcher
     from forest.management.job_contract import JobManagementContract
     from forest.storage.jobs import JobStore
@@ -360,18 +367,18 @@ def _jobs(platform, modules: dict[str, Any]):
     store = JobStore(modules["adapter.onebot"].messages)
     scheduler = modules["conversation.scheduler"]
     authorization = (
-        JobAuthorizationPort(platform.job_authority, platform.bot.store.bot_id, store)
-        if platform.job_authority is not None
+        JobAuthorizationPort(runtime.job_authority, runtime.bot.store.bot_id, store)
+        if runtime.job_authority is not None
         else None
     )
-    runtime = JobDispatcher(
+    module = JobDispatcher(
         store,
-        platform.kernel._authority,
+        runtime.kernel._authority,
         authorize=authorization.authorize if authorization is not None else None,
         on_change=scheduler.notify,
     )
-    runtime.management_contract = JobManagementContract()
-    return runtime
+    module.management_contract = JobManagementContract()
+    return module
 
 
 _OFFICIAL_ARTIFACT = _official_artifact()
@@ -423,6 +430,8 @@ OFFICIAL_MODULES = (
             group="business",
             order=30,
         ),),
+        wakes_on_work=True,
+        work_notify_order=30,
     ),
     RuntimeModuleDescriptor(
         "agent.runtime",
@@ -460,6 +469,8 @@ OFFICIAL_MODULES = (
         ),
         _conversation,
         _OFFICIAL_ARTIFACT,
+        wakes_on_work=True,
+        work_notify_order=10,
     ),
     RuntimeModuleDescriptor("shell.command", ("adapter.onebot",), _shell, _OFFICIAL_ARTIFACT),
     RuntimeModuleDescriptor(
@@ -477,6 +488,8 @@ OFFICIAL_MODULES = (
             group="automation",
             order=20,
         ),),
+        wakes_on_work=True,
+        work_notify_order=20,
     ),
 )
 
@@ -484,8 +497,8 @@ OFFICIAL_MODULES = (
 class BotModuleRegistry:
     """Build and supervise modules from an acyclic descriptor graph."""
 
-    def __init__(self, platform, descriptors=OFFICIAL_MODULES):
-        self.platform = platform
+    def __init__(self, runtime, descriptors=OFFICIAL_MODULES):
+        self.runtime = runtime
         self.descriptors = tuple(descriptors)
         self.instances: dict[str, Any] = {}
         self.order: list[str] = []
@@ -496,7 +509,8 @@ class BotModuleRegistry:
         self._lifecycle_lock = None
         self._closed = False
         self.graph_identity = None
-        store = getattr(getattr(platform, "bot", None), "store", None)
+        self.activation_id = str(uuid4())
+        store = getattr(getattr(runtime, "bot", None), "store", None)
         if store is None:
             self.graph_store = None
         else:
@@ -528,14 +542,16 @@ class BotModuleRegistry:
                     if descriptor.storage is not None
                     else None
                 ),
+                "wakes_on_work": descriptor.wakes_on_work,
+                "work_notify_order": descriptor.work_notify_order,
             }
             facts.append({**fact, "descriptor_digest": digest_json(fact)})
         return facts
 
     def _lease(self, *, allow_closing=False):
-        if allow_closing and hasattr(self.platform, "_cleanup_lease"):
-            return self.platform._cleanup_lease()
-        return self.platform.kernel._authority(allow_closing=allow_closing)
+        if allow_closing and hasattr(self.runtime, "_cleanup_lease"):
+            return self.runtime._cleanup_lease()
+        return self.runtime.kernel._authority(allow_closing=allow_closing)
 
     @staticmethod
     def _lost_persistence_authority(exc):
@@ -617,7 +633,7 @@ class BotModuleRegistry:
     async def _install_storage(self, descriptor: RuntimeModuleDescriptor) -> None:
         if descriptor.storage is None:
             return
-        installer = getattr(self.platform, "schema_bundle_installer", None)
+        installer = getattr(self.runtime, "schema_bundle_installer", None)
         install = getattr(installer, "install", None)
         if install is None:
             raise ForestError(
@@ -645,7 +661,7 @@ class BotModuleRegistry:
             )
             try:
                 await self._install_storage(descriptor)
-                instance = descriptor.factory(self.platform, self.instances)
+                instance = descriptor.factory(self.runtime, self.instances)
                 self.instances[component_id] = instance
                 self._transition(component_id, ModuleLifecycleState.PREPARED)
             except BaseException:
@@ -670,6 +686,17 @@ class BotModuleRegistry:
     def get(self, component_id: str):
         return self.instances[component_id]
 
+    def notify_work(self) -> None:
+        """Wake active modules that declared the generic durable-work signal."""
+
+        declared = sorted(
+            (item for item in self.descriptors if item.wakes_on_work),
+            key=lambda item: (item.work_notify_order, item.component_id),
+        )
+        for descriptor in declared:
+            if self.states[descriptor.component_id] == ModuleLifecycleState.ACTIVE:
+                self.instances[descriptor.component_id].notify()
+
     async def _prepare_graph(self):
         lease = None
         try:
@@ -678,7 +705,7 @@ class BotModuleRegistry:
                 lease = self._lease()
                 if self.graph_identity is None:
                     self.graph_identity = await self.graph_store.prepare(
-                        lease, self._descriptor_facts()
+                        lease, self._descriptor_facts(), self.activation_id
                     )
             return lease
         except BaseException as exc:

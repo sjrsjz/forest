@@ -93,7 +93,7 @@ async def test_two_bots_memory_secrets_cas_and_restart(tmp_path, web_bots_databa
             "test-private-memory-key" not in status.text and "secret_ciphertext" not in status.text
         )
         bot = await app.state.runtime.fleet.attach(bots[0]["bot_id"])
-        runtime = await bot.platform.module("memory.graph").config.runtime(
+        runtime = await bot.runtime.module("memory.graph").config.runtime(
             bot.kernel._authority()
         )
         assert (

@@ -68,9 +68,9 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
                 },
                 "apply-command-diagnostic-policy",
             )
-            scheduler = managed.platform.module("conversation.scheduler")
+            scheduler = managed.runtime.module("conversation.scheduler")
             await scheduler._tick_lock.acquire()
-            messages = managed.platform.module("adapter.onebot").messages
+            messages = managed.runtime.module("adapter.onebot").messages
 
             secret_argument = "private-command-argument"
             accepted = await messages.ingest(

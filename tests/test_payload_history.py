@@ -12,11 +12,11 @@ from test_messages import event, owner
 from test_models import completion, respond, server
 from test_upgrade import upgrade_database as upgrade_database
 
+from forest.bot_runtime import BotRuntimeSupervisor
 from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.memory_types import SourceRef
 from forest.packages import PackageCatalog
-from forest.platform import BindingRuntime
 from forest.storage import payload_history
 from forest.storage.agent import AgentStore
 from forest.storage.payload_scope import guard_payload_scope_in
@@ -252,7 +252,7 @@ async def test_two_published_legacy_replies_continue_after_the_first_view_is_cli
         await env.messages.release_actor(actor)
         kernel = Kernel(env.store)
         kernel.lease = env.lease
-        runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
+        runtime = BotRuntimeSupervisor(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
         try:
             await runtime.module_registry.prepare()
             received = await runtime.module("adapter.onebot").messages.ingest(env.lease, "binding-a",

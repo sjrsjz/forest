@@ -13,11 +13,11 @@ from test_onebot import encoded, event, response, signature, socket_api
 from test_web_authority import environment  # noqa: F401
 
 import forest
+from forest.bot_runtime import BotRuntimeSupervisor
 from forest.errors import ForestError
 from forest.kernel import Kernel
 from forest.management.fleet import BotFleet
 from forest.packages import PackageCatalog
-from forest.platform import BindingRuntime
 from forest.shell_ingress import ShellIngressGuard
 from forest.storage.input_payloads import InputContentStore
 
@@ -67,7 +67,7 @@ async def platform(environment, tmp_path):  # noqa: F811
             "admin_user_ids": ["20001"],
         }
         await binding.apply(await binding.plan(values=values))
-        runtime = BindingRuntime(
+        runtime = BotRuntimeSupervisor(
             SimpleNamespace(store=env.store, kernel=kernel), env.vault, packages
         )
         await runtime.module_registry.prepare()
@@ -385,7 +385,7 @@ async def test_supervisor_failure_is_visible_to_fleet_and_closes_local_admission
         return p.runtime.failure
 
     assert (await wait_for(failed)).code == "BINDING_SUPERVISOR_FAILED"
-    bot = SimpleNamespace(ready=True, cleanup_task=None, platform=p.runtime, kernel=p.kernel)
+    bot = SimpleNamespace(ready=True, cleanup_task=None, runtime=p.runtime, kernel=p.kernel)
     assert not BotFleet._usable(bot)
     with pytest.raises(ForestError):
         p.runtime.module("adapter.onebot").connection(p.binding.binding_id)

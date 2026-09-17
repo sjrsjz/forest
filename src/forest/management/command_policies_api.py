@@ -96,7 +96,7 @@ def install_command_policy_routes(app, runtime):
         ticket, operation = await signed(
             request, bot, who, "command.policy.read", payload, write=False
         )
-        policies = bot.platform.module("command.router").policies
+        policies = bot.runtime.module("command.router").policies
         return await policies.read(ticket, operation, binding_id)
 
     @app.post(
@@ -113,7 +113,7 @@ def install_command_policy_routes(app, runtime):
             "values": body.values.model_dump(),
         }
         ticket, operation = await signed(request, bot, who, "command.policy.plan", payload)
-        policies = bot.platform.module("command.router").policies
+        policies = bot.runtime.module("command.router").policies
         return await policies.plan(ticket, operation, payload)
 
     @app.post(
@@ -130,8 +130,8 @@ def install_command_policy_routes(app, runtime):
             "plan_id": body.plan_id, "plan_digest": body.plan_digest,
         }
         ticket, operation = await signed(request, bot, who, "command.policy.apply", payload)
-        policies = bot.platform.module("command.router").policies
+        policies = bot.runtime.module("command.router").policies
         result = await policies.apply(ticket, operation, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.notify()
+            bot.runtime.notify()
         return result

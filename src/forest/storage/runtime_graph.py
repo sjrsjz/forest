@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
@@ -25,17 +26,30 @@ class RuntimeModuleGraphStore:
         self.store = store
 
     @staticmethod
-    def identity(lease: HostLease, descriptors: list[dict]) -> RuntimeGraphIdentity:
+    def identity(
+        lease: HostLease, descriptors: list[dict], activation_id: str
+    ) -> RuntimeGraphIdentity:
+        try:
+            UUID(activation_id)
+        except (TypeError, ValueError, AttributeError):
+            raise ForestError(
+                "RUNTIME_ACTIVATION_ID_INVALID",
+                "Runtime activation identity must be a UUID",
+            ) from None
         ordered = sorted(descriptors, key=lambda item: item["component_id"])
         set_digest = digest_json(ordered)
-        graph_id = f"runtime-graph:{lease.incarnation}:{set_digest[-16:]}"
+        graph_id = f"runtime-graph:{lease.incarnation}:{activation_id}"
         generations = {
-            item["component_id"]: f"runtime:{lease.incarnation}:{item['descriptor_digest'][-32:]}"
+            item["component_id"]: (
+                f"runtime:{activation_id}:{item['descriptor_digest'][-16:]}"
+            )
             for item in ordered
         }
         return RuntimeGraphIdentity(graph_id, set_digest, generations)
 
-    async def prepare(self, lease: HostLease, descriptors: list[dict]) -> RuntimeGraphIdentity:
+    async def prepare(
+        self, lease: HostLease, descriptors: list[dict], activation_id: str
+    ) -> RuntimeGraphIdentity:
         ordered = sorted(descriptors, key=lambda item: item["component_id"])
         components = {item["component_id"] for item in ordered}
         if len(components) != len(ordered):
@@ -54,7 +68,7 @@ class RuntimeModuleGraphStore:
                 "RUNTIME_MODULE_DEPENDENCY_CYCLE",
                 "Runtime module dependencies are missing or cyclic",
             )
-        identity = self.identity(lease, ordered)
+        identity = self.identity(lease, ordered, activation_id)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.store._identity(conn)
             await self.store._host(conn, lease)

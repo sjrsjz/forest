@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from psycopg.errors import RaiseException
 
+from forest.bot_runtime import BotRuntimeSupervisor
 from forest.errors import ForestError
 from forest.kernel import DependencyPlan, Kernel, resolve_dependencies
 from forest.management.authority import WebAuthority
@@ -18,7 +19,6 @@ from forest.management.catalog import BotCatalog
 from forest.management.packages import PackageRegistry
 from forest.module_validation import validate_component_values
 from forest.packages import PackageCatalog, PackageSnapshot
-from forest.platform import BindingRuntime
 from forest.storage.bot import BotStore
 from forest.storage.control import BotControl
 
@@ -35,7 +35,7 @@ class ManagedBot:
     cleanup_task: asyncio.Task | None = None
     ready: bool = False
     retries: dict[str, tuple[int, int, float]] = field(default_factory=dict)
-    platform: BindingRuntime | None = None
+    runtime: BotRuntimeSupervisor | None = None
     directory_generation: int = 1
 
 
@@ -91,9 +91,7 @@ class BotFleet:
     def _usable(bot: ManagedBot) -> bool:
         if not bot.ready or bot.cleanup_task is not None:
             return False
-        if bot.platform is not None and (
-            getattr(bot.platform, "failure", None) or any(task.done() for task in bot.platform._tasks)
-        ):
+        if bot.runtime is not None and not bot.runtime.healthy:
             return False
         try:
             lease = bot.kernel._authority()
@@ -109,8 +107,8 @@ class BotFleet:
         if bot.task and bot.task is not asyncio.current_task():
             bot.task.cancel()
             await asyncio.gather(bot.task, return_exceptions=True)
-        if bot.platform is not None:
-            await bot.platform.close()
+        if bot.runtime is not None:
+            await bot.runtime.close()
         await bot.kernel.close()
         if bot.kernel._workers:
             raise ForestError("WORKER_CLEANUP_FAILED", "Old Worker resources remain owned", 503)
@@ -259,14 +257,14 @@ class BotFleet:
                             key_revision=self.authority.key_revision,
                             public_key=self.authority.public_key,
                         )
-                        managed.platform = BindingRuntime(
+                        managed.runtime = BotRuntimeSupervisor(
                             managed, self.catalog.vault, self.infrastructure_packages,
                             global_slots=self.group_slots,
                             job_authority=self.authority,
                             global_model_slots=self.model_slots,
                             module_packages=self.packages,
                         )
-                        await managed.platform.start()
+                        await managed.runtime.start()
                         if self._closed:
                             raise ForestError("RUNTIME_STOPPING", "Bot supervisor is stopping", 503)
                     except BaseException:
@@ -588,8 +586,8 @@ class BotFleet:
         bot = self.bots.get(bot_id)
         attached = bot is not None and self._usable(bot)
         ingress = (
-            bot.platform.module("adapter.onebot").shell_ingress
-            if bot is not None and bot.platform is not None
+            bot.runtime.module("adapter.onebot").shell_ingress
+            if bot is not None and bot.runtime is not None
             else None
         )
         return {
@@ -599,8 +597,8 @@ class BotFleet:
             or ("BOT_RECOVERING" if bot is not None and not attached else None),
             "ingress": ingress.snapshot() if ingress is not None else None,
             "runtime_modules": []
-            if bot is None or bot.platform is None
-            else bot.platform.module_registry.describe(),
+            if bot is None or bot.runtime is None
+            else bot.runtime.module_registry.describe(),
             "components": []
             if bot is None
             else [

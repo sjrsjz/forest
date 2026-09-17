@@ -15,9 +15,9 @@ from test_platform import receive
 from test_web_authority import environment as environment
 
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
+from forest.bot_runtime import BotRuntimeSupervisor
 from forest.memory_runtime import MemoryRuntime
 from forest.memory_settings import DEFAULT_MEMORY_SETTINGS
-from forest.platform import BindingRuntime
 
 pytestmark = pytest.mark.postgres
 EMBEDDING_KEY = "local-memory-test-key"
@@ -370,7 +370,9 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
                 p,
                 "SELECT facet_id,state,vector_payload_id FROM public.bot_memory_index_facets ORDER BY facet_id",
             )
-            restarted = BindingRuntime(original_runtime.bot, p.env.vault, original_runtime.packages)
+            restarted = BotRuntimeSupervisor(
+                original_runtime.bot, p.env.vault, original_runtime.packages
+            )
             p.runtime = restarted
             await restarted.module_registry.prepare()
             await restarted.module("adapter.onebot")._replace((await restarted.module("adapter.onebot").bindings.desired(p.kernel._authority()))[0])

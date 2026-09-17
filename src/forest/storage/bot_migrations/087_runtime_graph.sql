@@ -311,8 +311,7 @@ CREATE TABLE public.bot_runtime_graphs (
  host_incarnation text NOT NULL,
  host_owner_epoch bigint NOT NULL CHECK(host_owner_epoch>0),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
- PRIMARY KEY(bot_id,graph_id),
- UNIQUE(bot_id,host_incarnation,descriptor_set_digest)
+ PRIMARY KEY(bot_id,graph_id)
 );
 
 CREATE TABLE public.bot_runtime_module_generations (

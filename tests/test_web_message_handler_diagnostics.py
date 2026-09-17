@@ -75,24 +75,24 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
                     "apply-handler-diagnostic-policy-" + handler_id,
                 )
 
-            scheduler = managed.platform.module("conversation.scheduler")
+            scheduler = managed.runtime.module("conversation.scheduler")
             await scheduler._tick_lock.acquire()
             actor = None
             try:
                 secret = "private-handler-message"
-                accepted = await managed.platform.module("adapter.onebot").messages.ingest(
+                accepted = await managed.runtime.module("adapter.onebot").messages.ingest(
                     managed.kernel.lease,
                     binding_id,
                     event(9201, group="diagnostic-group", user="sensitive-user", text=secret),
                     decision="NO_TRIGGER",
                 )
-                actor = await managed.platform.module("adapter.onebot").messages.acquire_actor(
+                actor = await managed.runtime.module("adapter.onebot").messages.acquire_actor(
                     managed.kernel.lease,
                     accepted["conversation_id"],
                     "handler-diagnostic-owner",
                     ttl_seconds=30,
                 )
-                selected = await managed.platform.module("adapter.onebot").messages.select_input(
+                selected = await managed.runtime.module("adapter.onebot").messages.select_input(
                     actor, "claim-handler-diagnostic"
                 )
                 assert selected["status"] == "MESSAGE_HANDLER"
@@ -143,7 +143,7 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
                 assert operations["n"] == 1
             finally:
                 if actor is not None:
-                    await managed.platform.module("adapter.onebot").messages.release_actor(actor)
+                    await managed.runtime.module("adapter.onebot").messages.release_actor(actor)
                 scheduler._tick_lock.release()
 
             viewer_password = "handler-diagnostic-viewer-password"

@@ -43,15 +43,15 @@ class _ScopedClient:
 
 
 class AgentRuntime:
-    def __init__(self, platform, *, messages):
-        self.platform = platform
-        self.kernel, self.messages = platform.kernel, messages
-        self.config = AgentConfig(platform.bot.store, platform.vault)
+    def __init__(self, runtime, *, messages):
+        self.runtime = runtime
+        self.kernel, self.messages = runtime.kernel, messages
+        self.config = AgentConfig(runtime.bot.store, runtime.vault)
         self.clients = set()
         self.client_lock = asyncio.Lock()
         self.model_slots = asyncio.Semaphore(4)
         self.global_model_slots = getattr(
-            platform, "global_model_slots", None
+            runtime, "global_model_slots", None
         ) or asyncio.Semaphore(32)
         self.closed = False
         self.runner = AgentRunner(
@@ -159,7 +159,7 @@ class AgentRuntime:
                 raise ForestError("AGENT_RUNTIME_CLOSED", "Model runtime is closing", 503)
             row = await self.config.runtime(actor.host, revision=spec["config_revision"])
             return _ScopedClient(
-                self, values["endpoint"], self.platform.vault.decrypt(row["secret_ciphertext"])
+                self, values["endpoint"], self.runtime.vault.decrypt(row["secret_ciphertext"])
             ), capabilities
 
     async def materialize_context(self, actor, spec, snapshot):
@@ -177,7 +177,7 @@ class AgentRuntime:
         return snapshot, media
 
     async def retrieve_memory(self, actor, spec, snapshot):
-        memory = self.platform.module("memory.graph")
+        memory = self.runtime.module("memory.graph")
         return await memory.retrieve_for_step(actor, snapshot, self.runner.state)
 
     async def authorize_tool(self, actor, spec, tool, trigger):

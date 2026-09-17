@@ -59,7 +59,7 @@ def install_business_command_routes(app, runtime):
     def store(bot):
         return BusinessCommandDiagnosticsStore(
             bot.store,
-            messages=bot.platform.module("adapter.onebot").messages,
+            messages=bot.runtime.module("adapter.onebot").messages,
             lease=bot.kernel._authority(),
             control=bot.control,
         )
@@ -93,5 +93,5 @@ def install_business_command_routes(app, runtime):
         )
         result = await store(bot).recover(ticket, operation, payload)
         if result is not None and not bot.control.is_unavailable(result):
-            bot.platform.notify()
+            bot.runtime.notify()
         return result

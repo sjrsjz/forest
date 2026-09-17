@@ -137,12 +137,12 @@ class DeliveryResolution(Body):
     reason: str = Field(min_length=1, max_length=2000)
 
 
-def operational(row: dict, platform) -> dict:
+def operational(row: dict, runtime) -> dict:
     """A durable old ONLINE fact alone is not a live connection after restart."""
     result = {**row, "persisted_state": row["state"]}
-    connection = platform.module("adapter.onebot").connections.get(row["binding_id"])
+    connection = runtime.module("adapter.onebot").connections.get(row["binding_id"])
     try:
-        platform.kernel._authority()
+        runtime.kernel._authority()
         current_host = True
     except ForestError:
         current_host = False
@@ -235,7 +235,7 @@ class OneBotManagementContract(ModuleManagementContract):
 
     async def bindings(self, request, body):
         rows = {
-            row["binding_id"]: operational(row, request.bot.platform)
+            row["binding_id"]: operational(row, request.bot.runtime)
             for row in await request.module.bindings.list(request.ticket, request.operation_id)
         }
         reservations = await self._catalog(request).list(
@@ -258,7 +258,7 @@ class OneBotManagementContract(ModuleManagementContract):
             request.ticket, request.operation_id, body.binding_id
         )
         return {
-            **operational(row, request.bot.platform),
+            **operational(row, request.bot.runtime),
             "webhook_url": request.web.settings.public_origin
             + "/adapters/onebot/v11/"
             + body.binding_id,
