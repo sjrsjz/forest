@@ -12,8 +12,19 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.final_reply_uow import (
+    FinalReplyPlan,
+    FinalReplyUnitOfWork,
+    RuntimeParticipant,
+)
 from forest.runtime_modules import official_storage_bundle
 from forest.storage.adapter_onebot_authority import OneBotAdapterRepository, OneBotPayloadRef
+from forest.storage.agent_runtime_authority import (
+    AgentInputBatch,
+    AgentPayloadRef,
+    AgentRuntimeRepository,
+    AgentTriggerInput,
+)
 from forest.storage.authorization_authority import CapabilityGrant, KernelAuthorizationRepository
 from forest.storage.bot import BotStore
 from forest.storage.conversation_scheduler import (
@@ -471,6 +482,24 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
     store, storage, payloads, _authorization, _effects, scheduler, _adapter, delivery, _grant = (
         clean_delivery
     )
+    agent_storage = official_storage_bundle(
+        "agent.runtime",
+        "forest.agent.runtime",
+        "forest.agent-runtime.repository/1",
+        "storage/official/agent_runtime.sql",
+    )
+    await SchemaBundleInstaller(store).install(
+        agent_storage.spec,
+        agent_storage.baseline,
+        agent_storage.package_digest,
+        execution_profile=agent_storage.execution_profile,
+    )
+    storage["agent.runtime"] = agent_storage
+    agent = AgentRuntimeRepository(
+        store,
+        namespace=agent_storage.spec.namespace,
+        payload_verifier=payloads.verify_in,
+    )
     message = await _put(
         payloads,
         component="adapter.test",
@@ -529,13 +558,62 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
         principal_ref="user/1",
     )
     actor = await scheduler.acquire_actor("conversation/main", "conversation-worker")
-    await scheduler.select_input(
+    selected = await scheduler.select_input(
         actor,
         "select/1",
         boundary="IDLE",
         session_ref="session/1",
         run_ref="run/1",
     )
+    config = await _put(
+        payloads,
+        component="agent.runtime",
+        kind="agent.config",
+        owner_id="config/1",
+        body=b'{"model":"test"}',
+        source_id="config/1",
+    )
+    preset = await _put(
+        payloads,
+        component="agent.runtime",
+        kind="preset.context",
+        owner_id="preset/1",
+        body=b'{"identity":"Forest"}',
+        source_id="preset/1",
+    )
+    await agent.start_run(
+        operation_id="agent/start/1",
+        conversation_ref="conversation/main",
+        session_id="session/1",
+        run_id="run/1",
+        input_batch=AgentInputBatch(
+            input_batch_ref=selected["input_batch_id"],
+            input_batch_digest="sha256:" + "1" * 64,
+            selected_input_end_seq=selected["selected_input_end_seq"],
+            context_revision=selected["context_revision"],
+            context_view_revision=0,
+            source_manifest_digest="sha256:" + "2" * 64,
+            triggers=(AgentTriggerInput("trigger/1", "user/1", 1),),
+        ),
+        agent_spec_revision="agent-spec/1",
+        config=AgentPayloadRef(
+            config.payload_id,
+            config.content_digest,
+            "agent.runtime",
+            "agent.config",
+            "config/1",
+        ),
+        preset_revision="preset/1",
+        preset=AgentPayloadRef(
+            preset.payload_id,
+            preset.content_digest,
+            "agent.runtime",
+            "preset.context",
+            "preset/1",
+        ),
+        absolute_deadline=now + timedelta(minutes=20),
+    )
+    owner = await agent.acquire_run("run/1", "agent-worker/1")
     reply = await _put(
         payloads,
         component="agent.runtime",
@@ -556,6 +634,96 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
         "effect/reply/atomic",
         _delivery_ref(reply, "agent.runtime", "final.reply", "reply/atomic"),
     )
+    reply_agent = AgentPayloadRef(
+        reply.payload_id,
+        reply.content_digest,
+        "agent.runtime",
+        "final.reply",
+        "reply/atomic",
+    )
+    for index, (expected, target) in enumerate(
+        (
+            ("PREPARING_MODEL", "MODEL_PENDING"),
+            ("MODEL_PENDING", "PARSING"),
+            ("PARSING", "SAFE_BOUNDARY"),
+            ("SAFE_BOUNDARY", "FINAL_READY"),
+        ),
+        1,
+    ):
+        state = await _put(
+            payloads,
+            component="agent.runtime",
+            kind="checkpoint.state",
+            owner_id=f"checkpoint/final/{index}",
+            body=(f'{{"phase":"{target}"}}').encode(),
+            source_id="run/1",
+        )
+        await agent.transition(
+            owner,
+            checkpoint_id=f"checkpoint/final/{index}",
+            expected_phase=expected,
+            target_phase=target,
+            state=AgentPayloadRef(
+                state.payload_id,
+                state.content_digest,
+                "agent.runtime",
+                "checkpoint.state",
+                f"checkpoint/final/{index}",
+            ),
+            final_candidate=reply_agent if target == "FINAL_READY" else None,
+        )
+    completed_state = await _put(
+        payloads,
+        component="agent.runtime",
+        kind="checkpoint.state",
+        owner_id="checkpoint/completed/1",
+        body=b'{"phase":"COMPLETED"}',
+        source_id="run/1",
+    )
+    plan = FinalReplyPlan(
+        session_ref="session/1",
+        run_ref="run/1",
+        completion_checkpoint_id="checkpoint/completed/1",
+        completion_state=AgentPayloadRef(
+            completed_state.payload_id,
+            completed_state.content_digest,
+            "agent.runtime",
+            "checkpoint.state",
+            "checkpoint/completed/1",
+        ),
+        context_operation_id="final/context/1",
+        facts=(
+            SchedulerContextFact(
+                "unit/reply/1",
+                "REPLY",
+                "agent.runtime",
+                "final.reply",
+                "reply/atomic",
+                reply_scheduler,
+            ),
+        ),
+        answered_trigger_ids=("trigger/1",),
+        reply_ref="reply/atomic",
+        delivery_operation_id="intent/create/atomic",
+        intent_id="intent/atomic",
+        binding_ref="binding/main",
+        ordering_key="conversation/main",
+        channel_kind="GROUP",
+        channel_ref="933179609",
+        delivery_generation_id="generation/delivery/1",
+        parts=(part,),
+    )
+    participants = (
+        RuntimeParticipant("agent.runtime", "generation/agent/1"),
+        RuntimeParticipant("conversation.scheduler", "generation/conversation/1"),
+        RuntimeParticipant("delivery", "generation/delivery/1"),
+    )
+
+    verified_members = []
+
+    async def verify_member(_conn, **_identity):
+        verified_members.append((_identity["component_id"], _identity["generation_id"]))
+        return {"member": True}
 
     async def fail_effect(_conn, **_values):
         raise ForestError("TEST_EFFECT_FAILED", "forced", 503)
@@ -566,44 +734,16 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
         payload_verifier=payloads.verify_in,
         effect_admitter=fail_effect,
     )
+    failing_uow = FinalReplyUnitOfWork(
+        store=store,
+        agent_repository=agent,
+        conversation_repository=scheduler,
+        delivery_repository=failing,
+        generation_member_verifier=verify_member,
+        participants=participants,
+    )
     with pytest.raises(ForestError) as caught:
-        async with store.pool.connection() as conn, conn.transaction():
-            await scheduler.append_context_in(
-                conn,
-                actor,
-                operation_id="final/context/1",
-                facts=(
-                    SchedulerContextFact(
-                        "unit/reply/1",
-                        "REPLY",
-                        "agent.runtime",
-                        "final.reply",
-                        "reply/atomic",
-                        reply_scheduler,
-                    ),
-                ),
-                session_ref="session/1",
-                run_ref="run/1",
-                answer_trigger_ids=("trigger/1",),
-                reply_ref="reply/atomic",
-            )
-            await failing.create_intent_in(
-                conn,
-                operation_id="intent/create/atomic",
-                intent_id="intent/atomic",
-                binding_ref="binding/main",
-                lane_kind="CHAT",
-                ordering_key="conversation/main",
-                conversation_ref="conversation/main",
-                channel_kind="GROUP",
-                channel_ref="933179609",
-                cause_component_id="conversation.scheduler",
-                cause_kind="context.reply",
-                cause_id="reply/atomic",
-                delivery_generation_id="generation/delivery/1",
-                reply_ref="reply/atomic",
-                parts=(part,),
-            )
+        await failing_uow.commit(actor=actor, agent_owner=owner, plan=plan)
     assert caught.value.code == "TEST_EFFECT_FAILED"
     async with store.pool.connection() as conn:
         trigger = await (
@@ -616,43 +756,26 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
             )
         ).fetchone()
         assert trigger["status"] == "CLAIMED"
-    async with store.pool.connection() as conn, conn.transaction():
-        await scheduler.append_context_in(
-            conn,
-            actor,
-            operation_id="final/context/1",
-            facts=(
-                SchedulerContextFact(
-                    "unit/reply/1",
-                    "REPLY",
-                    "agent.runtime",
-                    "final.reply",
-                    "reply/atomic",
-                    reply_scheduler,
-                ),
-            ),
-            session_ref="session/1",
-            run_ref="run/1",
-            answer_trigger_ids=("trigger/1",),
-            reply_ref="reply/atomic",
-        )
-        await delivery.create_intent_in(
-            conn,
-            operation_id="intent/create/atomic",
-            intent_id="intent/atomic",
-            binding_ref="binding/main",
-            lane_kind="CHAT",
-            ordering_key="conversation/main",
-            conversation_ref="conversation/main",
-            channel_kind="GROUP",
-            channel_ref="933179609",
-            cause_component_id="conversation.scheduler",
-            cause_kind="context.reply",
-            cause_id="reply/atomic",
-            delivery_generation_id="generation/delivery/1",
-            reply_ref="reply/atomic",
-            parts=(part,),
-        )
+    assert (await agent.load("run/1"))["state"] == "FINAL_READY"
+
+    uow = FinalReplyUnitOfWork(
+        store=store,
+        agent_repository=agent,
+        conversation_repository=scheduler,
+        delivery_repository=delivery,
+        generation_member_verifier=verify_member,
+        participants=participants,
+    )
+    committed = await uow.commit(actor=actor, agent_owner=owner, plan=plan)
+    assert committed["agent"]["phase"] == "COMPLETED"
+    assert committed["context"]["answered_trigger_ids"] == ["trigger/1"]
+    assert committed["delivery"]["intent_id"] == "intent/atomic"
+    assert verified_members[-3:] == [
+        ("agent.runtime", "generation/agent/1"),
+        ("conversation.scheduler", "generation/conversation/1"),
+        ("delivery", "generation/delivery/1"),
+    ]
+    assert (await agent.load("run/1"))["state"] == "COMPLETED"
     assert (await delivery.load_intent("intent/atomic"))["state"] == "QUEUED"
 
 
