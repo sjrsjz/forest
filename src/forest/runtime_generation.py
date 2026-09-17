@@ -26,6 +26,27 @@ class RuntimeStorageBinding:
 
 
 @dataclass(frozen=True)
+class PreparedGenerationContext:
+    """Registry-owned identities a module must echo in its prepared binding."""
+
+    activation_id: str
+    component_id: str
+    requires: tuple[str, ...]
+    package_id: str
+    package_version: str
+    package_digest: str
+    driver: str
+    trust_level: str
+    descriptor_digest: str
+    route_contract_digest: str
+    management_contract_digest: str
+    management_ui_digest: str
+    state_schema: int
+    state_contract_digest: str
+    storage: RuntimeStorageBinding | None
+
+
+@dataclass(frozen=True)
 class PreparedGenerationBinding:
     """Facts a prepared module freezes before it can enter a runtime graph."""
 
@@ -91,4 +112,3 @@ class RuntimeGenerationGraph:
     graph_digest: str
     activation_id: str
     generations: dict[str, str]
-

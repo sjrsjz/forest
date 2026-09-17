@@ -246,6 +246,20 @@ async def test_storage_install_failure_never_constructs_module():
     assert registry.states["owned"] == ModuleLifecycleState.STOPPED
 
 
+@pytest.mark.asyncio
+async def test_clean_generation_authority_rejects_modules_without_prepare_contract():
+    events = []
+    registry = RuntimeModuleRegistry(
+        SimpleNamespace(generation_authority=object()),
+        (descriptor("legacy", (), events),),
+    )
+    with pytest.raises(ForestError) as caught:
+        await registry.prepare()
+    assert caught.value.code == "RUNTIME_GENERATION_PREPARE_UNAVAILABLE"
+    assert registry.states["legacy"] == ModuleLifecycleState.STOPPED
+    assert events == [("close", "legacy")]
+
+
 def test_storage_bundle_must_be_owned_by_descriptor():
     import hashlib
 

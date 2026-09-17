@@ -5,6 +5,7 @@ import hashlib
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -18,7 +19,12 @@ from forest.runtime_generation import (
     PreparedGenerationBinding,
     RuntimeStorageBinding,
 )
-from forest.runtime_modules import official_storage_bundle
+from forest.runtime_modules import (
+    RuntimeModuleDescriptor,
+    RuntimeModuleRegistry,
+    official_artifact,
+    official_storage_bundle,
+)
 from forest.schema_bundles import (
     StorageBundleSpec,
     validate_official_storage_baseline,
@@ -666,6 +672,127 @@ async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_au
     with pytest.raises(ForestError) as caught:
         await repository.claim_host("host-a", "inc-a")
     assert caught.value.code == "STALE_HOST"
+
+
+@pytest.mark.postgres
+async def test_runtime_registry_requires_and_publishes_prepared_generation_binding(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    runtime_storage = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    await installer.install(
+        runtime_storage.spec,
+        runtime_storage.baseline,
+        runtime_storage.package_digest,
+        execution_profile=runtime_storage.execution_profile,
+    )
+    repository = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
+    lease = await repository.claim_host("host-a", "inc-a")
+    events = []
+
+    class CleanModule:
+        runtime_contract = {"services": []}
+        state_schema = 1
+        state_contract = {"type": "object", "additionalProperties": False}
+
+        def __init__(self, *, mismatch=False):
+            self.mismatch = mismatch
+
+        async def prepare_generation(self, context):
+            events.append(("prepare", context.component_id))
+            digest = context.package_digest
+            return PreparedGenerationBinding(
+                component_id=("wrong.component" if self.mismatch else context.component_id),
+                requires=context.requires,
+                package_id=context.package_id,
+                package_version=context.package_version,
+                package_digest=context.package_digest,
+                driver=context.driver,
+                trust_level=context.trust_level,
+                descriptor_digest=context.descriptor_digest,
+                route_contract_digest=context.route_contract_digest,
+                management_contract_digest=context.management_contract_digest,
+                management_ui_digest=context.management_ui_digest,
+                config_revision=1,
+                config_payload_id="config:kernel.runtime:1",
+                config_payload_digest=digest,
+                instance_id="instance:kernel.runtime:1",
+                worker_incarnation="worker:kernel.runtime:1",
+                state_schema=context.state_schema,
+                state_contract_digest=context.state_contract_digest,
+                capability_grants_digest=digest,
+                data_admission=True,
+                control_admission=True,
+                storage=context.storage,
+            )
+
+        async def start(self):
+            events.append(("start", "kernel.runtime"))
+
+        async def quiesce(self):
+            events.append(("quiesce", "kernel.runtime"))
+
+        async def close(self):
+            events.append(("close", "kernel.runtime"))
+
+    kernel = SimpleNamespace(_authority=lambda **_kwargs: lease)
+    runtime = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=kernel,
+        schema_bundle_installer=installer,
+        generation_authority=repository,
+    )
+    descriptor = RuntimeModuleDescriptor(
+        "kernel.runtime",
+        (),
+        lambda *_: CleanModule(),
+        official_artifact("bot"),
+        storage=runtime_storage,
+    )
+    registry = RuntimeModuleRegistry(runtime, (descriptor,))
+    await registry.start()
+    assert registry.graph_identity is not None
+    assert registry.generation_bindings["kernel.runtime"].config_revision == 1
+    assert await registry.close() == []
+    assert events == [
+        ("prepare", "kernel.runtime"),
+        ("start", "kernel.runtime"),
+        ("quiesce", "kernel.runtime"),
+        ("close", "kernel.runtime"),
+    ]
+    async with store.pool.connection() as conn:
+        generation = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.generations").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+        graph = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.runtime_graphs").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+    assert generation["config_revision"] == 1 and generation["status"] == "DISPOSED"
+    assert graph["state"] == "STOPPED"
+
+    mismatch_descriptor = replace(
+        descriptor,
+        factory=lambda *_: CleanModule(mismatch=True),
+    )
+    mismatch_registry = RuntimeModuleRegistry(runtime, (mismatch_descriptor,))
+    with pytest.raises(ForestError) as caught:
+        await mismatch_registry.prepare()
+    assert caught.value.code == "RUNTIME_GENERATION_BINDING_MISMATCH"
 
 
 @pytest.mark.postgres

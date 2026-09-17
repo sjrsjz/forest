@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +25,11 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.runtime_generation import (
+    PreparedGenerationBinding,
+    PreparedGenerationContext,
+    RuntimeStorageBinding,
+)
 from forest.schema_bundles import (
     StorageBundleSpec,
     validate_official_storage_baseline,
@@ -656,6 +662,7 @@ class RuntimeModuleRegistry:
         self.runtime = runtime
         self.descriptors = tuple(descriptors)
         self.instances: dict[str, Any] = {}
+        self.generation_bindings: dict[str, PreparedGenerationBinding] = {}
         self.order: list[str] = []
         self.states: dict[str, ModuleLifecycleState] = {
             descriptor.component_id: ModuleLifecycleState.DISCOVERED
@@ -666,8 +673,11 @@ class RuntimeModuleRegistry:
         self.graph_identity = None
         self.activation_id = str(uuid4())
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
+        self.generation_authority = getattr(runtime, "generation_authority", None)
         store = getattr(getattr(runtime, "bot", None), "store", None)
-        if store is None:
+        if self.generation_authority is not None:
+            self.graph_store = self.generation_authority
+        elif store is None:
             self.graph_store = None
         else:
             from forest.storage.runtime_graph import RuntimeModuleGraphStore
@@ -675,34 +685,110 @@ class RuntimeModuleRegistry:
             self.graph_store = RuntimeModuleGraphStore(store)
         self._build()
 
+    def _descriptor_fact(self, descriptor: RuntimeModuleDescriptor) -> dict:
+        instance = self.instances.get(descriptor.component_id)
+        contract = getattr(instance, "management_contract", None)
+        fact = {
+            "protocol": "forest.runtime-module/1",
+            "component_id": descriptor.component_id,
+            "requires": list(descriptor.requires),
+            "factory_ref": descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__,
+            "artifact": descriptor.artifact.as_fact(),
+            "management_contributions": [
+                contribution.as_fact() for contribution in descriptor.management
+            ],
+            "management_contract": contract.describe() if contract is not None else None,
+            "runtime_contract": getattr(instance, "runtime_contract", None),
+            "state_schema": getattr(instance, "state_schema", None),
+            "state_contract": getattr(instance, "state_contract", None),
+            "storage": descriptor.storage.as_fact() if descriptor.storage is not None else None,
+            "wakes_on_work": descriptor.wakes_on_work,
+            "work_notify_order": descriptor.work_notify_order,
+        }
+        return {**fact, "descriptor_digest": digest_json(fact)}
+
     def _descriptor_facts(self) -> list[dict]:
-        facts = []
-        for descriptor in self.descriptors:
-            contract = getattr(
-                self.instances.get(descriptor.component_id), "management_contract", None
+        return [self._descriptor_fact(descriptor) for descriptor in self.descriptors]
+
+    async def _prepare_generation_binding(
+        self, descriptor: RuntimeModuleDescriptor, instance: Any
+    ) -> PreparedGenerationBinding:
+        prepare = getattr(instance, "prepare_generation", None)
+        if (
+            prepare is None
+            or not hasattr(instance, "runtime_contract")
+            or not hasattr(instance, "state_contract")
+            or not hasattr(instance, "state_schema")
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_PREPARE_UNAVAILABLE",
+                f"Module {descriptor.component_id} does not expose the clean preparation contract",
+                503,
             )
-            fact = {
-                "protocol": "forest.runtime-module/1",
-                "component_id": descriptor.component_id,
-                "requires": list(descriptor.requires),
-                "factory_ref": (
-                    descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__
-                ),
-                "artifact": descriptor.artifact.as_fact(),
-                "management_contributions": [
-                    contribution.as_fact() for contribution in descriptor.management
-                ],
-                "management_contract": contract.describe() if contract is not None else None,
-                "storage": (
-                    descriptor.storage.as_fact()
-                    if descriptor.storage is not None
-                    else None
-                ),
-                "wakes_on_work": descriptor.wakes_on_work,
-                "work_notify_order": descriptor.work_notify_order,
-            }
-            facts.append({**fact, "descriptor_digest": digest_json(fact)})
-        return facts
+        fact = self._descriptor_fact(descriptor)
+        management_contract = fact["management_contract"]
+        contributions = fact["management_contributions"]
+        storage = (
+            RuntimeStorageBinding(
+                descriptor.storage.spec.schema_id,
+                descriptor.storage.spec.schema_version,
+                descriptor.storage.spec.namespace,
+                descriptor.storage.spec.baseline_sha256,
+                descriptor.storage.spec.repository_contract,
+                descriptor.storage.execution_profile,
+            )
+            if descriptor.storage is not None
+            else None
+        )
+        context = PreparedGenerationContext(
+            activation_id=self.activation_id,
+            component_id=descriptor.component_id,
+            requires=descriptor.requires,
+            package_id=descriptor.artifact.package_id,
+            package_version=descriptor.artifact.package_version,
+            package_digest=descriptor.artifact.package_digest,
+            driver=descriptor.artifact.driver,
+            trust_level=descriptor.artifact.trust_level,
+            descriptor_digest=fact["descriptor_digest"],
+            route_contract_digest=digest_json(instance.runtime_contract),
+            management_contract_digest=digest_json(management_contract),
+            management_ui_digest=digest_json(contributions),
+            state_schema=instance.state_schema,
+            state_contract_digest=digest_json(instance.state_contract),
+            storage=storage,
+        )
+        binding = prepare(context)
+        if inspect.isawaitable(binding):
+            binding = await binding
+        if not isinstance(binding, PreparedGenerationBinding):
+            raise ForestError(
+                "RUNTIME_GENERATION_BINDING_INVALID",
+                f"Module {descriptor.component_id} returned no prepared Generation binding",
+                503,
+            )
+        expected = {
+            "component_id": context.component_id,
+            "requires": context.requires,
+            "package_id": context.package_id,
+            "package_version": context.package_version,
+            "package_digest": context.package_digest,
+            "driver": context.driver,
+            "trust_level": context.trust_level,
+            "descriptor_digest": context.descriptor_digest,
+            "route_contract_digest": context.route_contract_digest,
+            "management_contract_digest": context.management_contract_digest,
+            "management_ui_digest": context.management_ui_digest,
+            "state_schema": context.state_schema,
+            "state_contract_digest": context.state_contract_digest,
+            "storage": context.storage,
+        }
+        if any(getattr(binding, key) != value for key, value in expected.items()):
+            raise ForestError(
+                "RUNTIME_GENERATION_BINDING_MISMATCH",
+                f"Module {descriptor.component_id} changed Registry-owned Generation facts",
+                409,
+            )
+        return binding
 
     def _lease(self, *, allow_closing=False):
         if allow_closing and hasattr(self.runtime, "_cleanup_lease"):
@@ -825,6 +911,10 @@ class RuntimeModuleRegistry:
                 await self._install_storage(descriptor)
                 instance = descriptor.factory(self.runtime, self.instances)
                 self.instances[component_id] = instance
+                if self.generation_authority is not None:
+                    self.generation_bindings[component_id] = (
+                        await self._prepare_generation_binding(descriptor, instance)
+                    )
                 self._transition(component_id, ModuleLifecycleState.PREPARED)
             except BaseException:
                 self._transition(component_id, ModuleLifecycleState.FAILED)
@@ -839,8 +929,14 @@ class RuntimeModuleRegistry:
                     await self._cleanup(component_id)
                 except Exception as exc:
                     errors.append(exc)
-            elif state == ModuleLifecycleState.FAILED and component_id not in self.instances:
-                self._transition(component_id, ModuleLifecycleState.STOPPED)
+            elif state == ModuleLifecycleState.FAILED:
+                if component_id in self.instances:
+                    try:
+                        await self._cleanup(component_id)
+                    except Exception as exc:
+                        errors.append(exc)
+                else:
+                    self._transition(component_id, ModuleLifecycleState.STOPPED)
             elif state == ModuleLifecycleState.VALIDATED:
                 self._transition(component_id, ModuleLifecycleState.STOPPED)
         return errors
@@ -866,9 +962,16 @@ class RuntimeModuleRegistry:
             if self.graph_store is not None:
                 lease = self._lease()
                 if self.graph_identity is None:
-                    self.graph_identity = await self.graph_store.prepare(
-                        lease, self._descriptor_facts(), self.activation_id
-                    )
+                    if self.generation_authority is not None:
+                        self.graph_identity = await self.generation_authority.prepare_graph(
+                            lease,
+                            [self.generation_bindings[item] for item in self.order],
+                            self.activation_id,
+                        )
+                    else:
+                        self.graph_identity = await self.graph_store.prepare(
+                            lease, self._descriptor_facts(), self.activation_id
+                        )
             return lease
         except BaseException as exc:
             rollback_errors = await self._rollback_preparation()
@@ -927,7 +1030,10 @@ class RuntimeModuleRegistry:
                     self._transition(component_id, ModuleLifecycleState.ACTIVE)
                     started.append(component_id)
                 if self.graph_store is not None:
-                    await self.graph_store.publish(lease, self.graph_identity)
+                    if self.generation_authority is not None:
+                        await self.generation_authority.publish_graph(lease, self.graph_identity)
+                    else:
+                        await self.graph_store.publish(lease, self.graph_identity)
             except BaseException as exc:
                 failure_code = (
                     exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
@@ -983,7 +1089,10 @@ class RuntimeModuleRegistry:
             if self.graph_store is not None and self.graph_identity is not None:
                 try:
                     lease = self._lease(allow_closing=True)
-                    await self.graph_store.retire(lease, self.graph_identity)
+                    if self.generation_authority is not None:
+                        await self.generation_authority.retire_graph(lease, self.graph_identity)
+                    else:
+                        await self.graph_store.retire(lease, self.graph_identity)
                 except ForestError as exc:
                     if not self._lost_persistence_authority(exc):
                         raise
