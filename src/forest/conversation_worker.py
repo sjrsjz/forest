@@ -18,6 +18,10 @@ from forest.errors import ForestError
 from forest.storage.conversation_scheduler import ConversationActor, SchedulerContextFact
 
 
+class _WorkerQuiescing(Exception):
+    pass
+
+
 def _ref(kind: str) -> str:
     return f"{kind}:{secrets.token_hex(16)}"
 
@@ -48,6 +52,28 @@ class AgentExecutionPort(Protocol):
     async def execute(self, request: AgentExecutionRequest) -> AgentExecutionCompletion: ...
 
 
+class ConversationCompletionPort(Protocol):
+    async def commit(
+        self,
+        *,
+        actor: ConversationActor,
+        request: AgentExecutionRequest,
+        completion: AgentExecutionCompletion,
+    ) -> dict: ...
+
+
+class SessionDecisionPort(Protocol):
+    async def decide(
+        self,
+        *,
+        actor: ConversationActor,
+        session_ref: str,
+        completed_run_ref: str,
+        successor_run_ref: str,
+        decision_index: int,
+    ) -> dict: ...
+
+
 class ConversationWorker:
     """Poll durable lanes, serialize each group, and run groups in parallel."""
 
@@ -55,6 +81,8 @@ class ConversationWorker:
         self,
         scheduler,
         agent: AgentExecutionPort,
+        completion: ConversationCompletionPort,
+        session_decision: SessionDecisionPort,
         *,
         owner_id: str,
         poll_interval: float = 0.1,
@@ -74,6 +102,8 @@ class ConversationWorker:
             raise ValueError("candidate_limit is invalid")
         self.scheduler = scheduler
         self.agent = agent
+        self.completion = completion
+        self.session_decision = session_decision
         self.owner_id = owner_id
         self.poll_interval = poll_interval
         self.actor_lease_seconds = actor_lease_seconds
@@ -161,6 +191,8 @@ class ConversationWorker:
                 self.failures.pop(conversation_id, None)
             except asyncio.CancelledError:
                 raise
+            except _WorkerQuiescing:
+                self.failures.pop(conversation_id, None)
             except ForestError as exc:
                 if exc.code != "CONVERSATION_ACTOR_BUSY":
                     self.failures[conversation_id] = exc
@@ -180,6 +212,8 @@ class ConversationWorker:
 
     async def _wait_input(self) -> None:
         await self._wait_for_wake()
+        if not self._admission.is_set() or self._closing:
+            raise _WorkerQuiescing
 
     async def run_once(self, conversation_id: str) -> None:
         """Process one lane until it is idle or waiting for external classification."""
@@ -241,81 +275,60 @@ class ConversationWorker:
                             return selection
                         return None
 
-                try:
-                    completion = await self.agent.execute(
-                        AgentExecutionRequest(
-                            conversation_id=conversation_id,
-                            session_ref=session_ref,
-                            run_ref=run_ref,
-                            initial_batch=batch,
-                            recovery=recovery,
-                            next_model_input=next_model_input,
-                        )
+                request = AgentExecutionRequest(
+                    conversation_id=conversation_id,
+                    session_ref=session_ref,
+                    run_ref=run_ref,
+                    initial_batch=batch,
+                    recovery=recovery,
+                    next_model_input=next_model_input,
+                )
+                completion = await self.agent.execute(request)
+                if type(completion) is not AgentExecutionCompletion:
+                    raise ForestError(
+                        "AGENT_EXECUTION_RESULT_INVALID",
+                        "Agent execution returned an invalid completion",
+                        500,
                     )
-                    if type(completion) is not AgentExecutionCompletion:
-                        raise ForestError(
-                            "AGENT_EXECUTION_RESULT_INVALID",
-                            "Agent execution returned an invalid completion",
-                            500,
-                        )
-                    answered = tuple(dict.fromkeys(completion.answered_trigger_ids))
-                    if not answered or len(answered) != len(completion.answered_trigger_ids):
-                        raise ForestError(
-                            "AGENT_EXECUTION_RESULT_INVALID",
-                            "Agent completion must identify each answered trigger once",
-                            500,
-                        )
-                    await self.scheduler.append_context(
-                        actor,
-                        operation_id=_operation(
-                            "reply", conversation_id, session_ref, run_ref, completion.reply_ref
-                        ),
-                        facts=completion.facts,
-                        session_ref=session_ref,
-                        run_ref=run_ref,
-                        answer_trigger_ids=answered,
-                        reply_ref=completion.reply_ref,
+                answered = tuple(dict.fromkeys(completion.answered_trigger_ids))
+                if not answered or len(answered) != len(completion.answered_trigger_ids):
+                    raise ForestError(
+                        "AGENT_EXECUTION_RESULT_INVALID",
+                        "Agent completion must identify each answered trigger once",
+                        500,
                     )
-                except BaseException:
-                    await self.scheduler.requeue_run(
-                        actor,
-                        operation_id=_operation(
-                            "requeue", conversation_id, session_ref, run_ref
-                        ),
-                        session_ref=session_ref,
-                        run_ref=run_ref,
-                        reason_code="agent_execution_failed",
-                    )
-                    raise
+                await self.completion.commit(
+                    actor=actor,
+                    request=request,
+                    completion=completion,
+                )
 
                 successor_run_ref = _ref("run")
                 end_index = 0
                 while True:
                     end_index += 1
-                    end = await self.scheduler.select_input(
-                        actor,
-                        _operation(
-                            "end",
-                            conversation_id,
-                            session_ref,
-                            run_ref,
-                            successor_run_ref,
-                            end_index,
-                        ),
-                        boundary="SESSION_END",
+                    end = await self.session_decision.decide(
+                        actor=actor,
                         session_ref=session_ref,
-                        run_ref=run_ref,
-                        next_run_ref=successor_run_ref,
+                        completed_run_ref=run_ref,
+                        successor_run_ref=successor_run_ref,
+                        decision_index=end_index,
                     )
-                    if end["status"] == "WAIT_INPUT":
+                    if end["action"] == "WAIT_INPUT":
                         await self._wait_input()
                         continue
-                    if end.get("kind") == "TRIGGER_INPUT":
+                    if end["action"] == "SUCCESSOR":
                         run_ref = successor_run_ref
-                        batch = end
+                        batch = end["selection"]
                         recovery = False
                         break
-                    return
+                    if end["action"] == "CLOSED":
+                        return
+                    raise ForestError(
+                        "SESSION_HANDOFF_RESULT_INVALID",
+                        "Session decision returned an invalid action",
+                        500,
+                    )
         finally:
             stopped.set()
             await asyncio.gather(heartbeat, return_exceptions=True)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from forest.conversation_worker import ConversationWorker
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 
@@ -35,8 +34,6 @@ class CleanConversationSchedulerRuntime:
         grants,
         generation_verifier,
         generation_member_verifier=None,
-        agent_execution_port=None,
-        worker_options=None,
     ):
         self.repository = repository
         self.module_configuration = module_configuration
@@ -45,9 +42,6 @@ class CleanConversationSchedulerRuntime:
         self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
-        self.agent_execution_port = agent_execution_port
-        self.worker_options = dict(worker_options or {})
-        self.worker: ConversationWorker | None = None
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired()
@@ -98,35 +92,18 @@ class CleanConversationSchedulerRuntime:
                 "Conversation Generation identity was not bound",
                 503,
             )
-        if self.agent_execution_port is not None:
-            self.worker = ConversationWorker(
-                self,
-                self.agent_execution_port,
-                owner_id=(
-                    "conversation.scheduler/"
-                    + self.generation_identity.generation_id.split(":")[-1]
-                )[:256],
-                **self.worker_options,
-            )
-            self.worker.start()
 
     def activate_generation(self) -> None:
         self.active = True
-        if self.worker is not None:
-            self.worker.activate()
 
     async def quiesce(self) -> None:
-        if self.worker is not None:
-            await self.worker.quiesce()
         self.active = False
 
     async def close(self) -> None:
-        if self.worker is not None:
-            await self.worker.close()
         self.active = False
 
     def owned_tasks(self) -> tuple:
-        return self.worker.owned_tasks() if self.worker is not None else ()
+        return ()
 
     async def _verify(self, conn, *, admission_lane: str) -> None:
         if not self.active or self.generation_identity is None:
@@ -160,17 +137,11 @@ class CleanConversationSchedulerRuntime:
 
     async def admit_message_in(self, conn, **values):
         await self._verify(conn, admission_lane="DATA")
-        result = await self.repository.admit_message_in(conn, **values)
-        if self.worker is not None:
-            self.worker.wake()
-        return result
+        return await self.repository.admit_message_in(conn, **values)
 
     async def complete_classification_in(self, conn, **values):
         await self._verify(conn, admission_lane="DATA")
-        result = await self.repository.complete_classification_in(conn, **values)
-        if self.worker is not None:
-            self.worker.wake()
-        return result
+        return await self.repository.complete_classification_in(conn, **values)
 
     async def _repository_call(
         self,

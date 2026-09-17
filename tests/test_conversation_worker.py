@@ -132,6 +132,60 @@ class FakeScheduler:
         return ()
 
 
+class FakeCompletionPort:
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+    async def commit(self, *, actor, request, completion):
+        return await self.scheduler.append_context(
+            actor,
+            operation_id=f"reply/{completion.reply_ref}",
+            facts=completion.facts,
+            session_ref=request.session_ref,
+            run_ref=request.run_ref,
+            answer_trigger_ids=completion.answered_trigger_ids,
+            reply_ref=completion.reply_ref,
+        )
+
+
+class FakeSessionDecisionPort:
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+    async def decide(
+        self,
+        *,
+        actor,
+        session_ref,
+        completed_run_ref,
+        successor_run_ref,
+        decision_index,
+    ):
+        selection = await self.scheduler.select_input(
+            actor,
+            f"session-end/{decision_index}",
+            boundary="SESSION_END",
+            session_ref=session_ref,
+            run_ref=completed_run_ref,
+            next_run_ref=successor_run_ref,
+        )
+        if selection["status"] == "WAIT_INPUT":
+            return {"action": "WAIT_INPUT", "selection": selection}
+        if selection.get("kind") == "TRIGGER_INPUT":
+            return {"action": "SUCCESSOR", "selection": selection}
+        return {"action": "CLOSED", "selection": selection}
+
+
+def _worker(scheduler, agent, owner_id):
+    return ConversationWorker(
+        scheduler,
+        agent,
+        FakeCompletionPort(scheduler),
+        FakeSessionDecisionPort(scheduler),
+        owner_id=owner_id,
+    )
+
+
 class SafePointAgent:
     def __init__(self):
         self.requests = []
@@ -159,7 +213,7 @@ async def test_next_model_call_absorbs_through_last_trigger_in_same_run():
         }
     )
     agent = SafePointAgent()
-    worker = ConversationWorker(scheduler, agent, owner_id="generation/one")
+    worker = _worker(scheduler, agent, "generation/one")
     await worker.run_once("group/a")
 
     assert len(agent.requests) == 1
@@ -186,7 +240,7 @@ async def test_trigger_after_final_candidate_uses_successor_run_in_same_session(
         }
     )
     agent = SafePointAgent()
-    worker = ConversationWorker(scheduler, agent, owner_id="generation/one")
+    worker = _worker(scheduler, agent, "generation/one")
     await worker.run_once("group/a")
 
     assert len(agent.requests) == 2
@@ -221,7 +275,7 @@ async def test_same_group_is_serial_and_different_groups_run_in_parallel():
         }
     )
     agent = ParallelAgent(expected=2)
-    worker = ConversationWorker(scheduler, agent, owner_id="generation/one")
+    worker = _worker(scheduler, agent, "generation/one")
     first_a = asyncio.create_task(worker.run_once("group/a"))
     second_a = asyncio.create_task(worker.run_once("group/a"))
     group_b = asyncio.create_task(worker.run_once("group/b"))
@@ -255,7 +309,7 @@ async def test_active_lane_resumes_same_session_and_run_without_idle_selection()
             return _reply(request.run_ref, "trigger/existing")
 
     agent = RecoveryAgent()
-    worker = ConversationWorker(scheduler, agent, owner_id="generation/two")
+    worker = _worker(scheduler, agent, "generation/two")
     await worker.run_once("group/a")
 
     assert agent.request.recovery
@@ -264,3 +318,27 @@ async def test_active_lane_resumes_same_session_and_run_without_idle_selection()
     assert agent.request.run_ref == "run/existing"
     assert all(boundary != "IDLE" for _, boundary, _, _ in scheduler.selections)
     assert scheduler.appends[0]["answer_trigger_ids"] == ("trigger/existing",)
+
+
+@pytest.mark.asyncio
+async def test_quiesce_releases_actor_waiting_for_session_input():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "trigger/one"),
+                ending=[{"status": "WAIT_INPUT"}],
+            )
+        }
+    )
+    worker = _worker(scheduler, SafePointAgent(), "generation/quiesce")
+    worker.start()
+    worker.activate()
+    for _ in range(100):
+        if scheduler.appends:
+            break
+        await asyncio.sleep(0.01)
+    assert scheduler.appends
+    await asyncio.wait_for(worker.quiesce(), timeout=1)
+    assert scheduler.actors == set()
+    assert worker.failures == {}
+    await worker.close()
