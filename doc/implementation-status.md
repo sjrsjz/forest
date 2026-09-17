@@ -43,7 +43,7 @@
 新工作通过 `verify_active_generation_in()` 在最终事务内复核准确组件、Generation、RuntimeGraph、Route epoch 和 DATA/CONTROL admission；已经领取的排空工作只能通过 `verify_generation_member_in()` 继续，并同时复核自己的 actor/run/call lease。绑定身份失败、预热失败、图提交失败、本地 activation 不变量失败和 freeze 后新准入拒绝都有回收测试，不会遗留可接纳工作的部分图。
 
 ### Provider、Agent、Conversation 与 OneBot Messaging 图
-`provider.chat-completions`、`agent.runtime`、`conversation.scheduler` 和 `adapter.onebot` 已经作为四个平级业务模块与五个内核模块共同进入一张九成员 RuntimeGraph：
+`provider.chat-completions`、`agent.runtime`、`conversation.scheduler`、`adapter.onebot` 和 `delivery` 已经作为五个平级业务模块与五个内核模块共同进入一张十成员 RuntimeGraph：
 - `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
 - text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
 - `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
@@ -51,6 +51,8 @@
 - `conversation.scheduler` 的接纳与分类端口检查自身准确 Generation；
 - `adapter.onebot` 只拥有 Binding、配置修订、客户端代际、平台事件、网络客户端和 OneBot transport；
 - Adapter 不拥有 Conversation lane、Shell、Agent、Memory、Delivery 或发送账本；
+- Delivery 已有独立 schema、配置、grant set、Generation 和 Repository，依赖 Adapter 的公开 transport-fence 端口与 Kernel Effect 端口，不读取 Adapter 私有表；当前尚未挂载发送 Worker。
+- `kernel.effect` 的 fence verifier 已按 `fence_kind` 注册且禁止覆盖；工具走 `runtime.graph`，Delivery 走 `adapter.binding`。Adapter 从持久 client incarnation 反查 binding、generation、epoch 与 fence digest 后再复核当前 head，调用方不能自行拼出一张连接 fence。
 - OneBot 客户端先以 `BUFFERING` 绑定配置 revision、Adapter Generation 和 executor fence；
 - Binding client publication 作为 RuntimeGraph 事务 participant，与 Adapter Route 一起提交；
 - WebSocket 在预热期只缓存，图提交后才打开事件流；
@@ -88,7 +90,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 ## 当前阻断项
 
-1. 将 `memory.graph`、`delivery`、`shell.command` 和必要的 Provider/Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议。
+1. 将 `memory.graph`、`shell.command` 和必要的 Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议，并为已发布的 Delivery Generation 挂载发送 Worker。
 2. 将已验证的 `conversation.scheduler` Worker 接到 `DurableAgentModelExecutor`、`DurableAgentToolExecutor`、真实工具授权/Effect 端口、具体工具服务路由、Delivery 与最终回复/Session 交接 UnitOfWork，不得用测试端口或旧组合根进入生产图。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
@@ -101,8 +103,8 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 - 文档权威链与 CorePrompt：`14 passed`。
 - Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：上一基线 `183 passed`。
-- Agent/Conversation Worker、持久调度 Repository、九成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`121 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
-- 九成员 Kernel + Provider + Agent + Conversation + OneBot RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、发送前许可、延迟开放 WebSocket、作者/群来源和逆序关闭。
+- Agent/Conversation Worker、持久调度 Repository、十成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`121 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、Adapter 持久 binding fence、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
+- 十成员 Kernel + Provider + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、发送前许可、延迟开放 WebSocket、作者/群来源和逆序关闭。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
 - 最近一次无 PostgreSQL 全套证据仍为 `747 passed, 36 skipped, 1184 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 

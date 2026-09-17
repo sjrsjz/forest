@@ -1228,6 +1228,50 @@ class OneBotAdapterRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.verify_transport_fence_in(conn, **values)
 
+    async def verify_effect_fence_in(
+        self,
+        conn,
+        *,
+        executor_component_id: str,
+        executor_generation_id: str,
+        fence_kind: str,
+        fence_id: str,
+        fence_epoch: int,
+    ) -> dict:
+        if executor_component_id != "adapter.onebot" or fence_kind != "adapter.binding":
+            raise ForestError(
+                "ONEBOT_EFFECT_FENCE_INVALID", "Effect fence belongs to another authority", 422
+            )
+        _bounded(executor_generation_id, "executor_generation_id", 256)
+        _bounded(fence_id, "fence_id", 256)
+        if type(fence_epoch) is not int or fence_epoch <= 0:
+            raise ForestError(
+                "ONEBOT_EFFECT_FENCE_INVALID", "Effect connection epoch is invalid", 422
+            )
+        client = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s FOR SHARE"
+                ).format(self._table("binding_clients")),
+                (self.store.bot_id, fence_id),
+            )
+        ).fetchone()
+        if (
+            client is None
+            or client["adapter_generation_id"] != executor_generation_id
+            or client["connection_epoch"] != fence_epoch
+        ):
+            raise ForestError("STALE_BINDING", "OneBot Effect fence changed", 409)
+        return await self.verify_transport_fence_in(
+            conn,
+            binding_ref=client["binding_id"],
+            binding_epoch=client["published_binding_epoch"],
+            connection_epoch=fence_epoch,
+            client_incarnation=fence_id,
+            adapter_generation_id=executor_generation_id,
+            executor_fence_digest=client["executor_fence_digest"],
+        )
+
     async def verify_transport_fence_in(
         self,
         conn,

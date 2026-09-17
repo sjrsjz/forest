@@ -116,15 +116,11 @@ async def clean_delivery():
         store, namespace=storage["kernel.authorization"].spec.namespace
     )
 
-    async def verify_effect_fence(_conn, **_identity):
-        return None
-
     effects = KernelEffectRepository(
         store,
         namespace=storage["kernel.effect"].spec.namespace,
         payload_verifier=payloads.verify_in,
         authorization_consumer=authorization.consume_ticket_in,
-        fence_verifier=verify_effect_fence,
     )
     scheduler = ConversationSchedulerRepository(
         store,
@@ -147,6 +143,9 @@ async def clean_delivery():
         namespace=storage["adapter.onebot"].spec.namespace,
         payload_verifier=payloads.verify_in,
         generation_verifier=verify_adapter_generation,
+    )
+    effects.register_fence_verifier(
+        "adapter.binding", adapter.verify_effect_fence_in
     )
     delivery = DeliveryRepository(
         store,

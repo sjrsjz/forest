@@ -19,6 +19,7 @@ from forest.agent_tool_executor import (
     ToolDispatchResult,
 )
 from forest.clean_agent_module import bootstrap_clean_agent
+from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.core_runtime import bootstrap_clean_kernel
@@ -254,6 +255,12 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         secret_resolver=resolve_secret,
         websocket_client_factory=create_client,
     )
+    delivery = await bootstrap_clean_delivery(
+        store,
+        installer,
+        kernel=kernel,
+        adapter=messaging.adapter,
+    )
     display = await _payload(
         kernel.payload,
         owner_kind="binding.display",
@@ -304,7 +311,8 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         host,
         kernel.descriptors
         + (provider.descriptor, agent.descriptor)
-        + messaging.descriptors,
+        + messaging.descriptors
+        + (delivery.descriptor,),
     )
     await registry.start()
     try:
@@ -319,17 +327,20 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "agent.runtime",
             "conversation.scheduler",
             "adapter.onebot",
+            "delivery",
         }
         adapter_runtime = registry.get("adapter.onebot")
         conversation_runtime = registry.get("conversation.scheduler")
         agent_runtime = registry.get("agent.runtime")
         provider_runtime = registry.get("provider.chat-completions")
+        delivery_runtime = registry.get("delivery")
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
         )
         assert conversation_runtime.active is True
         assert agent_runtime.active is True
         assert provider_runtime.active is True
+        assert delivery_runtime.active is True
         assert len(clients) == 1 and clients[0].handler is not None
 
         body = json.dumps(

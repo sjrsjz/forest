@@ -131,6 +131,9 @@ async def bootstrap_clean_messaging(
         payload_verifier=kernel.payload.verify_in,
         generation_verifier=kernel.runtime.verify_active_generation_in,
     )
+    kernel.effect.register_fence_verifier(
+        "adapter.binding", adapter_repository.verify_effect_fence_in
+    )
 
     def conversation_factory(_runtime, _modules):
         return CleanConversationSchedulerRuntime(

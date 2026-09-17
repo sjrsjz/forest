@@ -250,6 +250,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         payload_verifier=payload.verify_in,
         authorization_consumer=authorization.consume_ticket_in,
         fence_verifier=verify_effect_fence,
+        fence_kind="runtime.graph",
     )
     audit = KernelAuditRepository(
         store,

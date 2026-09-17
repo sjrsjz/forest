@@ -1772,6 +1772,7 @@ async def test_tool_effect_port_commits_handoff_and_reconciles_unknown_without_r
         payload_verifier=payloads.verify_in,
         authorization_consumer=authorization.consume_ticket_in,
         fence_verifier=verify_fence,
+        fence_kind="runtime.graph",
     )
     agent_grants = await authorization.create_grant_set(
         grantee_kind="component",
@@ -2061,6 +2062,7 @@ async def test_clean_kernel_effect_preserves_unknown_and_reconciles_explicitly(
         payload_verifier=payloads.verify_in,
         authorization_consumer=authorization.consume_ticket_in,
         fence_verifier=verify_fence,
+        fence_kind="connection",
     )
     effect_operation_id = "effect/send-one"
     attempt_id = "attempt/send-one/1"

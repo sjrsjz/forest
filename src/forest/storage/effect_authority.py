@@ -83,15 +83,31 @@ class KernelEffectRepository:
         payload_verifier=None,
         authorization_consumer=None,
         fence_verifier=None,
+        fence_kind: str | None = None,
     ) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.kernel.effect")
         self.payload_verifier = payload_verifier
         self.authorization_consumer = authorization_consumer
-        self.fence_verifier = fence_verifier
+        self.fence_verifiers = {}
+        if (fence_verifier is None) != (fence_kind is None):
+            raise ValueError("Effect fence verifier and kind must be supplied together")
+        if fence_verifier is not None:
+            self.register_fence_verifier(fence_kind, fence_verifier)
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
+
+    def register_fence_verifier(self, fence_kind: str, verifier) -> None:
+        _bounded(fence_kind, "fence_kind", 64)
+        if verifier is None:
+            raise ValueError("Effect fence verifier is required")
+        existing = self.fence_verifiers.get(fence_kind)
+        if existing is not None and existing is not verifier:
+            raise ForestError(
+                "EFFECT_FENCE_KIND_CONFLICT", "Effect fence kind already has an owner", 409
+            )
+        self.fence_verifiers[fence_kind] = verifier
 
     async def _verify_payload(self, conn, *, payload_id, digest, owner_kind, owner_id):
         if self.payload_verifier is None:
@@ -107,10 +123,13 @@ class KernelEffectRepository:
         )
 
     async def _verify_fence(self, conn, permit: EffectPermit) -> None:
-        if self.fence_verifier is None:
-            raise ForestError("EFFECT_FENCE_PORT_REQUIRED", "Executor fence authority is unavailable", 503)
+        verifier = self.fence_verifiers.get(permit.fence_kind)
+        if verifier is None:
+            raise ForestError(
+                "EFFECT_FENCE_PORT_REQUIRED", "Executor fence authority is unavailable", 503
+            )
         await _call(
-            self.fence_verifier,
+            verifier,
             conn,
             executor_component_id=permit.executor_component_id,
             executor_generation_id=permit.executor_generation_id,
