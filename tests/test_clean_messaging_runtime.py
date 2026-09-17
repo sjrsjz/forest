@@ -8,6 +8,7 @@ import pytest
 from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.agent_model_executor import AgentModelStep, DurableAgentModelExecutor
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
@@ -66,7 +67,12 @@ class FakeModelClient:
             prepared.request_id,
             prepared.transport_attempt_id,
             prepared.payload_digest,
-            text="<ModelTurn><Assistant>ok</Assistant></ModelTurn>",
+            text=(
+                '<valid_agent_protocol_content_block block_type="ModelTurn">'
+                '<payload><blocks><block block_type="Assistant"><content>'
+                '<text>ok</text></content></block></blocks></payload>'
+                '</valid_agent_protocol_content_block>'
+            ),
         )
 
     async def aclose(self):
@@ -328,8 +334,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert started["run_id"] == "agent/run/test"
         assert started["core_prompt_digest"].startswith("sha256:")
 
-        request = await provider_runtime.prepare_request(
-            {
+        model_snapshot = {
                 "bot_id": store.bot_id,
                 "run_id": "agent/run/test",
                 "logical_step_id": "agent/step/test",
@@ -365,7 +370,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                         ],
                     }
                 ],
-            },
+            }
+        request = await provider_runtime.prepare_request(
+            model_snapshot,
             request_id="model-request:test",
             transport_attempt_id="model-attempt:test",
             stream=False,
@@ -383,6 +390,47 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         response = await provider_runtime.dispatch(request, permit_in=permit)
         assert response.status == "RESPONDED"
         assert permitted == ["model-request:test"]
+
+        owner = await agent_runtime.acquire_run("agent/run/test", "agent-worker/test")
+        executor = DurableAgentModelExecutor(
+            agent=agent_runtime,
+            provider=provider_runtime,
+            payloads=kernel.payload,
+        )
+        with pytest.raises(ForestError) as caught:
+            await executor.execute(
+                owner,
+                AgentModelStep(
+                    request_id="model-request:stale:test",
+                    attempt_id="model-attempt:stale:test",
+                    effect_operation_ref="effect:model:stale:test",
+                    turn_id="model-turn:stale:test",
+                    final_reply_ref="reply:stale:test",
+                ),
+                {**model_snapshot, "selected_input_end_seq": 2},
+                stream=False,
+            )
+        assert caught.value.code == "AGENT_MODEL_INPUT_FENCE_MISMATCH"
+
+        model_step = await executor.execute(
+            owner,
+            AgentModelStep(
+                request_id="model-request:agent:test",
+                attempt_id="model-attempt:agent:test",
+                effect_operation_ref="effect:model:agent:test",
+                turn_id="model-turn:agent:test",
+                final_reply_ref="reply:agent:test",
+            ),
+            model_snapshot,
+            stream=False,
+        )
+        assert model_step.status == "FINAL_READY"
+        assert model_step.text == "ok"
+        durable_run = await agent_runtime.load("agent/run/test")
+        assert durable_run["state"] == "FINAL_READY"
+        assert durable_run["final_candidate_payload_id"] == (
+            model_step.final_candidate.payload_id
+        )
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True

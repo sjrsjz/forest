@@ -172,6 +172,32 @@ class CleanAgentRuntime:
             "mark_model_handoff", owner=owner, owned_work=True, **values
         )
 
+    async def mark_model_handoff_in(self, conn, owner, **values):
+        if not self.active or self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Agent Generation is not executing owned work",
+                409,
+            )
+        if self.generation_member_verifier is not None:
+            await self.generation_member_verifier(
+                conn,
+                component_id="agent.runtime",
+                generation_id=self.generation_identity.generation_id,
+            )
+        else:
+            await self.generation_verifier(
+                conn,
+                component_id="agent.runtime",
+                generation_id=self.generation_identity.generation_id,
+                admission_lane="DATA",
+            )
+        return await self.repository.mark_model_handoff(
+            owner,
+            _connection=conn,
+            **values,
+        )
+
     async def observe_model(self, owner, **values):
         return await self._call("observe_model", owner=owner, owned_work=True, **values)
 
