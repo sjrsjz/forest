@@ -259,7 +259,11 @@ class KernelRuntimeRepository:
         )
 
     async def publish_graph(
-        self, lease: HostLease, graph: RuntimeGenerationGraph
+        self,
+        lease: HostLease,
+        graph: RuntimeGenerationGraph,
+        *,
+        configuration_activators: dict[str, object] | None = None,
     ) -> int:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
@@ -297,6 +301,33 @@ class KernelRuntimeRepository:
                     "Every graph Generation must be READY under the current Host fence",
                     409,
                 )
+            if configuration_activators is not None:
+                components = {item["component_id"] for item in members}
+                if set(configuration_activators) != components:
+                    raise ForestError(
+                        "RUNTIME_CONFIGURATION_PARTICIPANTS_INVALID",
+                        "Every graph member must provide exactly one configuration activator",
+                        503,
+                    )
+                for item in members:
+                    activator = configuration_activators[item["component_id"]]
+                    activate = getattr(activator, "activate_in", None)
+                    if activate is None:
+                        raise ForestError(
+                            "RUNTIME_CONFIGURATION_PARTICIPANTS_INVALID",
+                            "Configuration participant does not expose activate_in",
+                            503,
+                        )
+                    await activate(
+                        conn,
+                        operation_id=(
+                            f"runtime-publish:{graph.graph_id}:{item['component_id']}"
+                        ),
+                        revision=item["config_revision"],
+                        generation_id=item["generation_id"],
+                        expected_payload_id=item["config_payload_id"],
+                        expected_payload_digest=item["config_payload_digest"],
+                    )
             old_components: set[str] = set()
             if head is not None and head["graph_id"] is not None:
                 old_members = await self._members_for_id_in(conn, head["graph_id"], lock=True)
@@ -636,7 +667,8 @@ class KernelRuntimeRepository:
         return await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT m.*,g.status,g.host_incarnation,g.host_owner_epoch "
+                    "SELECT m.*,g.status,g.host_incarnation,g.host_owner_epoch,"
+                    "g.config_revision,g.config_payload_id,g.config_payload_digest "
                     "FROM {} m JOIN {} g ON (g.bot_id,g.generation_id)="
                     "(m.bot_id,m.generation_id) WHERE m.bot_id=%s AND m.graph_id=%s "
                     "ORDER BY m.component_id"

@@ -220,7 +220,11 @@ def official_storage_bundle(
 ) -> RuntimeStorageBundle:
     """Bind one packaged official baseline to the complete distribution identity."""
 
-    baseline = files("forest").joinpath(resource).read_bytes()
+    common = files("forest").joinpath(
+        "storage/official/module_configuration.sql"
+    ).read_bytes()
+    owned = files("forest").joinpath(resource).read_bytes()
+    baseline = common + b"\n" + owned
     artifact = official_artifact("bot")
     spec = StorageBundleSpec(
         component_id=component_id,
@@ -719,6 +723,7 @@ class RuntimeModuleRegistry:
             or not hasattr(instance, "runtime_contract")
             or not hasattr(instance, "state_contract")
             or not hasattr(instance, "state_schema")
+            or not hasattr(instance, "module_configuration")
         ):
             raise ForestError(
                 "RUNTIME_GENERATION_PREPARE_UNAVAILABLE",
@@ -1031,7 +1036,14 @@ class RuntimeModuleRegistry:
                     started.append(component_id)
                 if self.graph_store is not None:
                     if self.generation_authority is not None:
-                        await self.generation_authority.publish_graph(lease, self.graph_identity)
+                        await self.generation_authority.publish_graph(
+                            lease,
+                            self.graph_identity,
+                            configuration_activators={
+                                component_id: self.instances[component_id].module_configuration
+                                for component_id in self.order
+                            },
+                        )
                     else:
                         await self.graph_store.publish(lease, self.graph_identity)
             except BaseException as exc:

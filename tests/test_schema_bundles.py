@@ -38,6 +38,7 @@ from forest.storage.bot import BotStore
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
+from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import (
     KernelPayloadRepository,
     PayloadSource,
@@ -413,11 +414,36 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
         "forest.kernel-runtime.repository/1",
         "storage/official/kernel_runtime.sql",
     )
+    payload_storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    await installer.install(
+        payload_storage.spec,
+        payload_storage.baseline,
+        payload_storage.package_digest,
+        execution_profile=payload_storage.execution_profile,
+    )
     await installer.install(
         runtime_storage.spec,
         runtime_storage.baseline,
         runtime_storage.package_digest,
         execution_profile=runtime_storage.execution_profile,
+    )
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    configuration = ModuleConfigurationRepository(
+        store,
+        component_id="kernel.runtime",
+        namespace=runtime_storage.spec.namespace,
+        payloads=payloads,
+    )
+    validation_digest = "sha256:" + "9" * 64
+    await configuration.initialize(
+        operation_id="initialize:kernel.runtime",
+        value={},
+        validation_digest=validation_digest,
     )
     repository = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
     lease, renewed = await asyncio.gather(
@@ -686,11 +712,35 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         "forest.kernel-runtime.repository/1",
         "storage/official/kernel_runtime.sql",
     )
+    payload_storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    await installer.install(
+        payload_storage.spec,
+        payload_storage.baseline,
+        payload_storage.package_digest,
+        execution_profile=payload_storage.execution_profile,
+    )
     await installer.install(
         runtime_storage.spec,
         runtime_storage.baseline,
         runtime_storage.package_digest,
         execution_profile=runtime_storage.execution_profile,
+    )
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    configuration = ModuleConfigurationRepository(
+        store,
+        component_id="kernel.runtime",
+        namespace=runtime_storage.spec.namespace,
+        payloads=payloads,
+    )
+    await configuration.initialize(
+        operation_id="initialize:kernel.runtime",
+        value={},
+        validation_digest="sha256:" + "9" * 64,
     )
     repository = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
     lease = await repository.claim_host("host-a", "inc-a")
@@ -703,10 +753,11 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
 
         def __init__(self, *, mismatch=False):
             self.mismatch = mismatch
+            self.module_configuration = configuration
 
         async def prepare_generation(self, context):
             events.append(("prepare", context.component_id))
-            digest = context.package_digest
+            effective = await self.module_configuration.desired()
             return PreparedGenerationBinding(
                 component_id=("wrong.component" if self.mismatch else context.component_id),
                 requires=context.requires,
@@ -719,14 +770,14 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
                 route_contract_digest=context.route_contract_digest,
                 management_contract_digest=context.management_contract_digest,
                 management_ui_digest=context.management_ui_digest,
-                config_revision=1,
-                config_payload_id="config:kernel.runtime:1",
-                config_payload_digest=digest,
+                config_revision=effective.revision,
+                config_payload_id=effective.payload_id,
+                config_payload_digest=effective.payload_digest,
                 instance_id="instance:kernel.runtime:1",
                 worker_incarnation="worker:kernel.runtime:1",
                 state_schema=context.state_schema,
                 state_contract_digest=context.state_contract_digest,
-                capability_grants_digest=digest,
+                capability_grants_digest=context.package_digest,
                 data_admission=True,
                 control_admission=True,
                 storage=context.storage,
@@ -793,6 +844,172 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     with pytest.raises(ForestError) as caught:
         await mismatch_registry.prepare()
     assert caught.value.code == "RUNTIME_GENERATION_BINDING_MISMATCH"
+
+
+@pytest.mark.postgres
+async def test_module_configuration_and_runtime_publication_are_one_transaction(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    payload_storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    runtime_storage = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    for storage_bundle in (payload_storage, runtime_storage):
+        await installer.install(
+            storage_bundle.spec,
+            storage_bundle.baseline,
+            storage_bundle.package_digest,
+            execution_profile=storage_bundle.execution_profile,
+        )
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    configuration = ModuleConfigurationRepository(
+        store,
+        component_id="kernel.runtime",
+        namespace=runtime_storage.spec.namespace,
+        payloads=payloads,
+    )
+    validation_digest = "sha256:" + "7" * 64
+    initial = await asyncio.gather(
+        configuration.initialize(
+            operation_id="configuration.initialize",
+            value={"label": "one"},
+            validation_digest=validation_digest,
+        ),
+        configuration.initialize(
+            operation_id="configuration.initialize",
+            value={"label": "one"},
+            validation_digest=validation_digest,
+        ),
+    )
+    assert initial[0] == initial[1]
+
+    plans = await asyncio.gather(
+        configuration.plan(
+            operation_id="configuration.plan.2",
+            expected_desired_revision=1,
+            value={"label": "two"},
+            validation_digest=validation_digest,
+        ),
+        configuration.plan(
+            operation_id="configuration.plan.2",
+            expected_desired_revision=1,
+            value={"label": "two"},
+            validation_digest=validation_digest,
+        ),
+    )
+    assert plans[0]["plan_id"] == plans[1]["plan_id"]
+    applied = await asyncio.gather(
+        configuration.apply(
+            operation_id="configuration.apply.2",
+            plan_id=plans[0]["plan_id"],
+            expected_desired_revision=1,
+        ),
+        configuration.apply(
+            operation_id="configuration.apply.2",
+            plan_id=plans[0]["plan_id"],
+            expected_desired_revision=1,
+        ),
+    )
+    assert applied[0] == applied[1]
+    assert (await configuration.effective(include_value=True)).value == {"label": "one"}
+    desired = await configuration.desired(include_value=True)
+    assert desired.revision == 2 and desired.value == {"label": "two"}
+    with pytest.raises(ForestError) as caught:
+        await configuration.plan(
+            operation_id="configuration.plan.while-pending",
+            expected_desired_revision=2,
+            value={"label": "three"},
+            validation_digest=validation_digest,
+        )
+    assert caught.value.code == "MODULE_CONFIGURATION_CONFLICT"
+
+    runtime = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
+    lease = await runtime.claim_host("host-a", "inc-a")
+    storage_binding = RuntimeStorageBinding(
+        runtime_storage.spec.schema_id,
+        runtime_storage.spec.schema_version,
+        runtime_storage.spec.namespace,
+        runtime_storage.spec.baseline_sha256,
+        runtime_storage.spec.repository_contract,
+        runtime_storage.execution_profile,
+    )
+    candidate = replace(
+        runtime_binding("kernel.runtime", marker="7", storage=storage_binding),
+        package_digest=runtime_storage.package_digest,
+        config_revision=desired.revision,
+        config_payload_id=desired.payload_id,
+        config_payload_digest=desired.payload_digest,
+    )
+    graph = await runtime.prepare_graph(lease, [candidate], str(uuid4()))
+    await runtime.publish_graph(
+        lease,
+        graph,
+        configuration_activators={"kernel.runtime": configuration},
+    )
+    effective = await configuration.effective(include_value=True)
+    assert effective.revision == 2 and effective.value == {"label": "two"}
+
+    plan_v3 = await configuration.plan(
+        operation_id="configuration.plan.3",
+        expected_desired_revision=2,
+        value={"label": "three"},
+        validation_digest=validation_digest,
+    )
+    desired_v3 = await configuration.apply(
+        operation_id="configuration.apply.3",
+        plan_id=plan_v3["plan_id"],
+        expected_desired_revision=2,
+    )
+    candidate_v3 = replace(
+        runtime_binding("kernel.runtime", marker="8", storage=storage_binding),
+        package_digest=runtime_storage.package_digest,
+        config_revision=desired_v3.revision,
+        config_payload_id=desired_v3.payload_id,
+        config_payload_digest=desired_v3.payload_digest,
+    )
+    graph_v3 = await runtime.prepare_graph(lease, [candidate_v3], str(uuid4()))
+    epoch = await payloads.epoch()
+    await payloads.forget(
+        operation_id="forget.configuration.3",
+        payload_ids=(desired_v3.payload_id,),
+        expected_deletion_epoch=epoch,
+    )
+    with pytest.raises(ForestError) as caught:
+        await runtime.publish_graph(
+            lease,
+            graph_v3,
+            configuration_activators={"kernel.runtime": configuration},
+        )
+    assert caught.value.code == "PAYLOAD_REVOKED"
+    assert (await configuration.effective()).revision == 2
+    async with store.pool.connection() as conn:
+        head = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+        failed_candidate = await (
+            await conn.execute(
+                sql.SQL("SELECT state FROM {}.runtime_graphs WHERE graph_id=%s").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                ),
+                (graph_v3.graph_id,),
+            )
+        ).fetchone()
+    assert head["graph_id"] == graph.graph_id
+    assert failed_candidate["state"] == "PREPARED"
 
 
 @pytest.mark.postgres

@@ -165,6 +165,8 @@ participant 集合、顺序、输入摘要和结果摘要写入 operation；重�
 
 `kernel.runtime.generations` 必须保存明确的 `config_revision`，并与 `config_payload_id/config_payload_digest`、package digest、状态契约摘要、能力授予集摘要、实例/Worker/Host incarnation 一起构成不可变代际身份。`runtime_graph_modules` 必须保存 `generation_id`，以 `(bot_id, generation_id)` 外键引用 `generations`，并约束该 Generation 的 `component_id` 等于图成员；图中重复保存的 package/storage identity 只是可独立核验的封印，不能替代 Generation 引用。图摘要必须覆盖该引用以及依赖和契约摘要。没有配置的模块也必须由其所属 Repository 发布一个内容寻址的空配置修订，禁止由内核填写空字符串、全零摘要或隐式默认值。这样管理 UI 显示的 effective 配置、调用准入使用的 Generation 和消息冻结的 RuntimeGraph 才指向同一份事实。
 
+官方 bundle 通过同一 `module_configuration` Repository contract 在各自私有 namespace 中拥有独立的 head、plan、revision 和 activation 表；共享的是协议代码，不是表或配置所有权。配置正文由 `kernel.payload` 保存，模块验证后形成 plan；apply 只推进 desired revision，当前 Generation 继续引用 effective revision。候选模块 PREPARE 必须读取并冻结当前 desired 的 payload identity。RuntimeGraph 发布事务把每个模块的配置 activation 作为必需 participant：先复验载荷仍 ACTIVE、revision/payload 与候选 Generation 完全一致，再与 Generation ACTIVE、Route epoch 和 graph head 一起提交 effective 指针。缺少 participant、配置已遗忘、身份不一致或任一 participant 失败都回滚整张图；不允许在图发布后用第二个事务“补写 effective”。
+
 密钥正文直接写入 Secret Resolver，配置载荷只保存 opaque `secret_ref`。读取配置不回显密钥；修改计划只记录“是否变化”和不可逆摘要。VL embedding 的模型种类、输出维度、归一化和融合语义属于 Bot 创建时冻结的 Memory schema identity；创建 Bot 后只能更换协议兼容 endpoint/凭据。改变模型种类必须创建新的 Bot 记忆域或执行未来明确设计的全量重建操作，不能通过普通配置 apply 偷换向量空间。
 
 ## 8. 干净基线验收
