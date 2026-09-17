@@ -1,4 +1,4 @@
-"""Job administration through HTTP, private Bot storage and real provider sockets."""
+﻿"""Job administration through HTTP, private Bot storage and real provider sockets."""
 
 import json
 from contextlib import asynccontextmanager
@@ -15,6 +15,10 @@ from forest.bootstrap import BootstrapState
 from forest.management.app import WebSettings
 
 pytestmark = pytest.mark.postgres
+
+
+def module_scope(root):
+    return root.replace("/management/v1/bots/", "/management/v1/scopes/bot/", 1) + "/modules"
 
 
 def definition(conversation_id, **changes):
@@ -44,12 +48,12 @@ async def configured(tmp_path, dsn):
                          "bot", status=202)
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
-        plan = await post(client, root + "/runtime-modules/agent.runtime/actions/configuration.plan", {
+        plan = await post(client, module_scope(root) + "/agent.runtime/actions/configuration.plan", {
             "expected_revision": 0, "api_key": MODEL_KEY,
             "values": {"enabled": True, "endpoint": model["endpoint"],
                        "model": "test-model", "stream": False},
         }, "agent-plan")
-        await post(client, root + "/runtime-modules/agent.runtime/actions/configuration.apply", {
+        await post(client, module_scope(root) + "/agent.runtime/actions/configuration.apply", {
             key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")
         }, "agent-apply")
         binding = await post(client, root + "/bindings", {

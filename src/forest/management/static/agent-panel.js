@@ -10,7 +10,7 @@ export function agentPanel(api, busy, notice) {
     if (!configuration?.defaults) return;
     showConfiguration({...configuration, values:structuredClone(configuration.defaults), values_payload_state:'DRAFT'});
   });
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/agent.runtime`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/agent.runtime`;
   const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
   const valid = (own) => bot !== null && own === epoch;
   function clearPlan() {

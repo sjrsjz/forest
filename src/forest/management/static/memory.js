@@ -82,7 +82,7 @@ export function memoryPanel(api, busy, notice) {
     }
     $('memory-fields').append(section);
   }
-  const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/memory.graph`;
+  const path = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/memory.graph`;
   const valid = own => bot && own === epoch;
   function clearPlan() {
     edit++; pending = null; planKey = null; applyKey = null;

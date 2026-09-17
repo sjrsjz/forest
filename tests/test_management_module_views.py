@@ -12,7 +12,12 @@ def test_control_shell_contains_no_agent_or_memory_product_pages():
     assert "moduleSurfaces" not in app
     assert "'agent.runtime'" not in app
     assert "'memory.graph'" not in app
-    assert "runtimeModuleViews" in app
+    assert "managementContributions" in app
+    assert "runtime-module-views" not in app
+    assert "/scopes/bot/" in (STATIC / "agent-panel.js").read_text(encoding="utf-8")
+    assert "/runtime-modules/" not in "".join(
+        path.read_text(encoding="utf-8") for path in STATIC.glob("*.js")
+    )
     assert "bot-agent" not in style and "memory-association" not in style
 
 
@@ -20,7 +25,7 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     agent = (STATIC / "modules/agent.runtime.html").read_text(encoding="utf-8")
     memory = (STATIC / "modules/memory.graph.html").read_text(encoding="utf-8")
     routing = (STATIC / "modules/routing.graph.html").read_text(encoding="utf-8")
-    host = (STATIC / "runtime-module-views.js").read_text(encoding="utf-8")
+    host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
     memory_style = (STATIC / "modules/memory.graph.css").read_text(encoding="utf-8")
     routing_style = (STATIC / "modules/routing.graph.css").read_text(encoding="utf-8")
@@ -29,7 +34,8 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert 'id="bot-route-graph"' in routing
     assert 'id="dispatch-trace-panel"' in routing
     assert "createModulePanel" in host
-    assert "descriptor.management_view" in host
+    assert "descriptor.management_contributions" in host
+    assert "forest.management-contribution/1" in host
     assert "#bot-agent" in agent_style
     assert ".memory-association" in memory_style
     assert ".route-graph-nodes" in routing_style

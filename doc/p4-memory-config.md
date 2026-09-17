@@ -24,15 +24,15 @@ Memory 模块首次安装时不从通用权限名猜测或扩大授权。部署�
 
 ## HTTP 接口与界面并发
 
-- `GET /management/v1/bots/{bot_id}/runtime-modules/memory.graph/queries/configuration`
-- `POST .../runtime-modules/memory.graph/actions/configuration.plan`
-- `POST .../runtime-modules/memory.graph/actions/configuration.apply`
-- `GET .../runtime-modules/memory.graph/queries/status`
-- `GET .../runtime-modules/memory.graph/queries/trunks`
-- `GET .../runtime-modules/memory.graph/queries/sources`
-- `GET .../runtime-modules/memory.graph/queries/associations`
-- `GET .../runtime-modules/memory.graph/queries/graph.scopes`
-- `GET .../runtime-modules/memory.graph/queries/graph.scope`
+- `GET /management/v1/scopes/bot/{bot_id}/modules/memory.graph/queries/configuration`
+- `POST .../modules/memory.graph/actions/configuration.plan`
+- `POST .../modules/memory.graph/actions/configuration.apply`
+- `GET .../modules/memory.graph/queries/status`
+- `GET .../modules/memory.graph/queries/trunks`
+- `GET .../modules/memory.graph/queries/sources`
+- `GET .../modules/memory.graph/queries/associations`
+- `GET .../modules/memory.graph/queries/graph.scopes`
+- `GET .../modules/memory.graph/queries/graph.scope`
 
 这些 operation 由 Memory 模块的 `forest.module-management/1` 契约声明，通用宿主路由不含 Memory 分支。所有调用经过当前会话、Bot 可见性和签名权限；action 另需 CSRF 与稳定 `Idempotency-Key`。签名 ticket 不交给浏览器。运行时状态从 `ModuleRegistry` 解析 `memory.graph` 后调用模块的 `inspect`，不拼造后端成功状态。配置密钥在签名权限载荷中只保留变化标志和不可逆摘要，原文只进入凭据加密路径。
 

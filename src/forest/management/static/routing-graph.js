@@ -2,8 +2,8 @@ const $ = id => document.getElementById(id);
 
 export function createModulePanel(api, busy, notice) {
   let bot = null, epoch = 0, snapshot = null, traces = [], traceQuery = null, nextBefore = null;
-  const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/snapshot`;
-  const operationPath = name => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/${name}`;
+  const path = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph/queries/snapshot`;
+  const operationPath = name => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/routing.graph/queries/${name}`;
 
   function reset() {
     epoch++; bot = null; snapshot = null; traces = []; traceQuery = null; nextBefore = null;

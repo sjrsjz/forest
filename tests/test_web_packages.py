@@ -84,20 +84,27 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         runtime = (await client.get(f"/management/v1/bots/{bot['bot_id']}")).json()["runtime"]
         modules = {row["component_id"]: row for row in runtime["runtime_modules"]}
         assert set(modules) == {
+            "component.worker-host",
             "adapter.onebot",
             "agent.runtime",
             "command.router",
             "conversation.scheduler",
+            "contract.router",
             "memory.graph",
             "message.router",
             "routing.graph",
             "scheduler.jobs",
             "shell.command",
         }
+        assert modules["adapter.onebot"]["requires"] == ["component.worker-host"]
         assert modules["memory.graph"]["requires"] == ["adapter.onebot"]
         assert modules["agent.runtime"]["requires"] == ["adapter.onebot", "memory.graph"]
         assert modules["conversation.scheduler"]["requires"] == [
-            "adapter.onebot", "agent.runtime", "command.router", "message.router"
+            "adapter.onebot", "agent.runtime", "command.router", "message.router",
+            "contract.router",
+        ]
+        assert modules["contract.router"]["requires"] == [
+            "component.worker-host", "adapter.onebot", "agent.runtime"
         ]
         assert modules["command.router"]["requires"] == ["routing.graph"]
         assert modules["message.router"]["requires"] == ["routing.graph"]
@@ -114,17 +121,21 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
                 "authority": "module.read",
             },
         ]
-        assert modules["agent.runtime"]["management_view"]["kind"] == "trusted-module"
-        assert modules["agent.runtime"]["management_view"]["protocol"] == (
+        agent_contribution, = modules["agent.runtime"]["management_contributions"]
+        memory_contribution, = modules["memory.graph"]["management_contributions"]
+        assert agent_contribution["protocol"] == "forest.management-contribution/1"
+        assert agent_contribution["scope_kinds"] == ["bot"]
+        assert agent_contribution["surface"]["kind"] == "trusted-module"
+        assert agent_contribution["surface"]["protocol"] == (
             "forest.trusted-management-view/1"
         )
-        assert modules["memory.graph"]["management_view"]["template"].endswith(
+        assert memory_contribution["surface"]["template"].endswith(
             "/memory.graph.html"
         )
-        assert modules["memory.graph"]["management_view"]["style"].endswith(
+        assert memory_contribution["surface"]["style"].endswith(
             "/memory.graph.css"
         )
-        assert modules["conversation.scheduler"]["management_view"] is None
+        assert modules["conversation.scheduler"]["management_contributions"] == []
         assert modules["agent.runtime"]["management_contract"]["protocol"] == (
             "forest.module-management/1"
         )
@@ -146,7 +157,8 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         ).status_code == 404
         assert (await invoke(client, base, 2, "call-1"))["result"]["value"] == 4
         graph_response = await client.get(
-            f"/management/v1/bots/{bot['bot_id']}/runtime-modules/routing.graph/queries/snapshot"
+            f"/management/v1/scopes/bot/{bot['bot_id']}/modules/"
+            "routing.graph/queries/snapshot"
         )
         assert graph_response.status_code == 200, graph_response.text
         graph = graph_response.json()
@@ -158,7 +170,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
             for node in graph["nodes"]
         )
         trace_response = await client.get(
-            f"/management/v1/bots/{bot['bot_id']}/runtime-modules/"
+            f"/management/v1/scopes/bot/{bot['bot_id']}/modules/"
             "routing.graph/queries/dispatch-traces?limit=5"
         )
         assert trace_response.status_code == 200, trace_response.text

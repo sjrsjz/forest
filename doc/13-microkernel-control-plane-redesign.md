@@ -51,7 +51,7 @@ flowchart LR
 
 运行时代码只能按稳定 `component_id` 从 `ModuleRegistry` 解析能力，禁止在 Bot/Binding 对象上重新暴露 `agent`、`memory`、`scheduler`、`shell`、`jobs` 等便利属性。模块拥有自己的内部资源，例如 `scheduler.jobs` 拥有 JobStore；调用者不得越过模块边界持有该资源。这样删除或替换模块时，内核与业务模块之间不会留下隐式对象图，依赖关系也能由注册表完整描述和校验。
 
-官方受信模块可在描述符中声明 `management_view`，包含显示名、协议版本、HTML 模板、CSS 和 ES module 控制器资产。控制台壳只能从运行时注册表枚举并装载这些声明，不能按模块 ID 建立页面映射。受信资产必须随 Forest 发行并限制在 `/static/`；可安装包不获得这一执行级别，仍使用下节的摘要绑定沙箱 iframe。
+官方受信模块可在描述符中声明一个或多个 `management_contributions`，每项包含稳定 contribution ID、适用作用域、排序组、显示名、协议版本、HTML 模板、CSS 和 ES module 控制器资产。控制台壳只能从运行时注册表枚举并装载这些声明，不能按模块 ID 建立页面映射。受信资产必须随 Forest 发行并限制在 `/static/`；可安装包不获得这一执行级别，仍使用下节的摘要绑定沙箱 iframe。
 
 模块描述包含：
 
@@ -138,8 +138,8 @@ Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模�
 宿主只提供两条通用传输路由：
 
 ```text
-GET  /management/v1/bots/{bot_id}/runtime-modules/{component_id}/queries/{operation_id}
-POST /management/v1/bots/{bot_id}/runtime-modules/{component_id}/actions/{operation_id}
+GET  /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/queries/{operation_id}
+POST /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/actions/{operation_id}
 ```
 
 通用路由负责会话、CSRF、Bot 作用域、从 `ModuleRegistry` 解析模块、输入规范化、权限票据和 action 幂等键；业务字段、权限名和执行函数都归模块契约所有。query 拒绝重复查询字段，输入先经模块模型转成规范类型再参与签名。action 必须提供稳定幂等键。浏览器控制器只能使用模块预先声明的 operation，不能提交 URL、HTTP 方法或权限名来扩大能力。

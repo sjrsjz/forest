@@ -14,7 +14,7 @@ import { auditPanel } from './audit-panel.js';
 import { botAuditPanel } from './bot-audit-panel.js';
 import { backupPanel as createBackupPanel } from './backup-panel.js';
 import { mountModuleUi } from './module-ui-host.js';
-import { runtimeModuleViews } from './runtime-module-views.js';
+import { managementContributions } from './management-contributions.js';
 
 const $ = (id) => document.getElementById(id);
 const csrf = () => document.cookie.split('; ').find((v) => v.startsWith('forest_csrf='))?.split('=')[1] || '';
@@ -310,11 +310,11 @@ moduleSurfaceNav.setAttribute('aria-label', '当前实例模块');
 const moduleRegistryList = document.createElement('div');
 moduleRegistryList.className = 'module-registry-list';
 const runtimeModuleViewRoot = document.createElement('div');
-runtimeModuleViewRoot.className = 'runtime-module-views';
+runtimeModuleViewRoot.className = 'management-contribution-views';
 botWorkspaceContainers.get('modules').prepend(
   moduleRegistryList, moduleSurfaceNav, runtimeModuleViewRoot,
 );
-const runtimeViews = runtimeModuleViews({
+const runtimeViews = managementContributions({
   api, busy, notice,
   nav: moduleSurfaceNav,
   registry: moduleRegistryList,

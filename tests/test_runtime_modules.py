@@ -8,7 +8,7 @@ from forest.runtime_modules import (
     BotModuleRegistry,
     ModuleLifecycleState,
     RuntimeArtifactIdentity,
-    RuntimeManagementView,
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
     RuntimeStorageBundle,
 )
@@ -244,15 +244,16 @@ def test_registry_rejects_missing_or_cyclic_dependencies():
     assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
 
 
-def test_official_management_views_are_declared_by_module_descriptors():
+def test_official_management_contributions_are_declared_by_module_descriptors():
     descriptors = {item.component_id: item for item in OFFICIAL_MODULES}
-    agent = descriptors["agent.runtime"].management_view
-    memory = descriptors["memory.graph"].management_view
-    routing = descriptors["routing.graph"].management_view
+    agent, = descriptors["agent.runtime"].management
+    memory, = descriptors["memory.graph"].management
+    routing, = descriptors["routing.graph"].management
     assert (agent.label, agent.template, agent.module) == (
         "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js"
     )
     assert agent.style == "/static/modules/agent.runtime.css"
+    assert agent.scope_kinds == ("bot",) and agent.contribution_id == "agent"
     assert (memory.label, memory.template, memory.module) == (
         "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js"
     )
@@ -262,7 +263,7 @@ def test_official_management_views_are_declared_by_module_descriptors():
     )
     assert routing.style == "/static/modules/routing.graph.css"
     assert all(
-        item.management_view is None
+        item.management == ()
         for component_id, item in descriptors.items()
         if component_id not in {"agent.runtime", "memory.graph", "routing.graph"}
     )
@@ -295,15 +296,27 @@ def test_policy_stores_are_owned_by_routing_modules_not_platform_attributes():
         ("/static/view.html", "/static/view.js", "forest.trusted-management-view/2"),
     ],
 )
-def test_runtime_management_view_rejects_untrusted_assets(template, module, protocol):
+def test_runtime_management_contribution_rejects_untrusted_assets(template, module, protocol):
     with pytest.raises(ValueError):
-        RuntimeManagementView("view", template, module, protocol)
+        RuntimeManagementContribution("view", "view", ("bot",), template, module, protocol)
 
 
-def test_runtime_management_view_rejects_untrusted_style():
+def test_runtime_management_contribution_rejects_untrusted_style():
     with pytest.raises(ValueError):
-        RuntimeManagementView(
-            "view", "/static/view.html", "/static/view.js", style="/static/../view.css"
+        RuntimeManagementContribution(
+            "view", "view", ("bot",), "/static/view.html", "/static/view.js",
+            style="/static/../view.css"
+        )
+
+
+def test_runtime_descriptor_rejects_duplicate_management_contributions():
+    contribution = RuntimeManagementContribution(
+        "view", "View", ("bot",), "/static/view.html", "/static/view.js"
+    )
+    with pytest.raises(ValueError, match="identities must be unique"):
+        RuntimeModuleDescriptor(
+            "owned", (), lambda *_: object(), artifact(),
+            management=(contribution, contribution),
         )
 
 

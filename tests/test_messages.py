@@ -211,7 +211,7 @@ async def test_dispatch_trace_keeps_frozen_native_generation_after_host_restart(
         "component_id": "adapter.onebot",
         "requires": [],
         "factory_ref": "forest.onebot_runtime:OneBotRuntime",
-        "management_view": None,
+        "management_contributions": [],
         "management_contract": None,
     }
     descriptor = {**descriptor, "descriptor_digest": digest_json(descriptor)}

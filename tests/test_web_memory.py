@@ -1,4 +1,4 @@
-"""Actual management HTTP -> independent Bot configuration -> restart recovery."""
+﻿"""Actual management HTTP -> independent Bot configuration -> restart recovery."""
 
 import asyncio
 import json
@@ -15,8 +15,12 @@ from forest.management.app import WebSettings
 pytestmark = pytest.mark.postgres
 
 
+def module_scope(root):
+    return root.replace("/management/v1/bots/", "/management/v1/scopes/bot/", 1) + "/modules"
+
+
 async def read(client, root):
-    response = await client.get(root + "/runtime-modules/memory.graph/queries/configuration")
+    response = await client.get(module_scope(root) + "/memory.graph/queries/configuration")
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -24,7 +28,7 @@ async def read(client, root):
 async def preview(client, root, *, revision=0, key="plan", **changes):
     return await post(
         client,
-        root + "/runtime-modules/memory.graph/actions/configuration.plan",
+        module_scope(root) + "/memory.graph/actions/configuration.plan",
         {
             "expected_revision": revision,
             "values": {"enabled": False, **changes},
@@ -37,7 +41,7 @@ async def preview(client, root, *, revision=0, key="plan", **changes):
 async def apply(client, root, plan, key="apply", status=200):
     return await post(
         client,
-        root + "/runtime-modules/memory.graph/actions/configuration.apply",
+        module_scope(root) + "/memory.graph/actions/configuration.apply",
         {name: plan[name] for name in ("expected_revision", "plan_id", "plan_digest")},
         key,
         status=status,
@@ -75,7 +79,7 @@ async def test_two_bots_memory_secrets_cas_and_restart(tmp_path, web_bots_databa
         saved = await read(client, roots[0])
         assert saved["revision"] == 2 and saved["values"]["batch_size"] == 12
         assert saved["has_api_key"] and saved["secret_revision"] == 1
-        status = await client.get(roots[0] + "/runtime-modules/memory.graph/queries/status")
+        status = await client.get(module_scope(roots[0]) + "/memory.graph/queries/status")
         assert status.status_code == 200, status.text
         assert (
             "test-private-memory-key" not in status.text and "secret_ciphertext" not in status.text
@@ -94,7 +98,7 @@ async def test_two_bots_memory_secrets_cas_and_restart(tmp_path, web_bots_databa
         assert (await read(client, roots[1]))["revision"] == 0
         clear = await post(
             client,
-            roots[0] + "/runtime-modules/memory.graph/actions/configuration.plan",
+            module_scope(roots[0]) + "/memory.graph/actions/configuration.plan",
             {
                 "expected_revision": 2,
                 "values": saved["values"],
@@ -123,15 +127,15 @@ async def test_memory_http_requires_session_csrf_exact_schema_and_idempotency(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=ORIGIN
         ) as outsider:
-            result = await outsider.get(root + "/runtime-modules/memory.graph/queries/configuration")
+            result = await outsider.get(module_scope(root) + "/memory.graph/queries/configuration")
             assert result.status_code == 401
         denied = await client.post(
-            root + "/runtime-modules/memory.graph/actions/configuration.plan",
+            module_scope(root) + "/memory.graph/actions/configuration.plan",
             json=body,
             headers={"x-csrf-token": "invalid", "idempotency-key": "csrf"},
         )
         assert denied.status_code == 403
-        assert (await client.post(root + "/runtime-modules/memory.graph/actions/configuration.plan", json=body)).status_code == 422
+        assert (await client.post(module_scope(root) + "/memory.graph/actions/configuration.plan", json=body)).status_code == 422
         for extra in (
             {"api_key": "plaintext-invalid\nkey"},
             {"api_key": "replacement", "clear_api_key": True},
@@ -140,7 +144,7 @@ async def test_memory_http_requires_session_csrf_exact_schema_and_idempotency(
             {"values": {"secret": "forbidden"}},
         ):
             rejected = await client.post(
-                root + "/runtime-modules/memory.graph/actions/configuration.plan",
+                module_scope(root) + "/memory.graph/actions/configuration.plan",
                 json={**body, **extra},
                 headers={"idempotency-key": "invalid"},
             )
@@ -185,7 +189,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 and len(value["conversations"]) == 2
                 and all(row["context_applied_seq"] == 1 for row in value["conversations"]),
             )
-            listed = await get(client, root + "/runtime-modules/memory.graph/queries/sources?limit=50")
+            listed = await get(client, module_scope(root) + "/memory.graph/queries/sources?limit=50")
             assert listed["deletion_epoch"] == 0 and len(listed["sources"]) == 2
             source = next(
                 row for row in listed["sources"] if row["source"]["channel_id"] == "31001"
@@ -196,12 +200,12 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             assert source["source"]["channel_id"] == "31001"
             assert source["author"]["external_user_id"] == "20001"
             trunks = await get(
-                client, root + "/runtime-modules/memory.graph/queries/trunks?limit=100"
+                client, module_scope(root) + "/memory.graph/queries/trunks?limit=100"
             )
             assert {item["channel_id"] for item in trunks["trunks"]} == {"31001", "31002"}
             association = await post(
                 client,
-                root + "/runtime-modules/memory.graph/actions/association.plan",
+                module_scope(root) + "/memory.graph/actions/association.plan",
                 {
                     "expected_deletion_epoch": 0,
                     "expected_revision": 0,
@@ -216,18 +220,18 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             }
             associated = await post(
                 client,
-                root + "/runtime-modules/memory.graph/actions/association.apply",
+                module_scope(root) + "/memory.graph/actions/association.apply",
                 association_request,
                 "association-apply",
             )
             assert await post(
                 client,
-                root + "/runtime-modules/memory.graph/actions/association.apply",
+                module_scope(root) + "/memory.graph/actions/association.apply",
                 association_request,
                 "association-apply",
             ) == associated
             current_associations = await wait_for(
-                lambda: get(client, root + "/runtime-modules/memory.graph/queries/associations?limit=50"),
+                lambda: get(client, module_scope(root) + "/memory.graph/queries/associations?limit=50"),
                 lambda value: len(value["associations"]) == 1
                 and value["associations"][0]["projection_state"] == "CURRENT",
             )
@@ -236,14 +240,14 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 for side in ("left", "right")
             } == {"31001", "31002"}
             scopes = await get(
-                client, root + "/runtime-modules/memory.graph/queries/graph.scopes?limit=25"
+                client, module_scope(root) + "/memory.graph/queries/graph.scopes?limit=25"
             )
             association_scope = next(
                 item for item in scopes["scopes"]
                 if item["coverage"]["partition"] == "associations-v1"
             )
             graph_response = await client.get(
-                root + "/runtime-modules/memory.graph/queries/graph.scope",
+                module_scope(root) + "/memory.graph/queries/graph.scope",
                 params={
                     "scope_id": association_scope["scope_id"],
                     "graph_revision": scopes["graph_revision"],
@@ -256,7 +260,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             ]
             proposal = await post(
                 client,
-                root + "/runtime-modules/memory.graph/actions/forget.plan",
+                module_scope(root) + "/memory.graph/actions/forget.plan",
                 {"expected_deletion_epoch": 0, "source_unit_ids": [source["source_unit_id"]]},
                 "forget-plan",
             )
@@ -264,24 +268,24 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 "expected_deletion_epoch", "plan_id", "plan_digest"
             )}
             applied = await post(
-                client, root + "/runtime-modules/memory.graph/actions/forget.apply", request, "forget-apply"
+                client, module_scope(root) + "/memory.graph/actions/forget.apply", request, "forget-apply"
             )
             assert await post(
-                client, root + "/runtime-modules/memory.graph/actions/forget.apply", request, "forget-apply"
+                client, module_scope(root) + "/memory.graph/actions/forget.apply", request, "forget-apply"
             ) == applied
             assert applied["deletion_epoch"] == 1
-            current = await get(client, root + "/runtime-modules/memory.graph/queries/sources?limit=50")
+            current = await get(client, module_scope(root) + "/memory.graph/queries/sources?limit=50")
             assert current["deletion_epoch"] == 1
             assert {row["source"]["channel_id"] for row in current["sources"]} == {"31002"}
-            assert (await get(client, root + "/runtime-modules/memory.graph/queries/associations?limit=50"))[
+            assert (await get(client, module_scope(root) + "/memory.graph/queries/associations?limit=50"))[
                 "associations"
             ] == []
             drained = await wait_for(
-                lambda: get(client, root + "/runtime-modules/memory.graph/queries/sources?limit=50"),
+                lambda: get(client, module_scope(root) + "/memory.graph/queries/sources?limit=50"),
                 lambda value: value["scrub"] == {"revoked_payloads": 0, "pending_links": 0},
             )
             assert drained["deletion_epoch"] == 1
-            bad = await client.get(root + "/runtime-modules/memory.graph/queries/sources?unexpected=true")
+            bad = await client.get(module_scope(root) + "/memory.graph/queries/sources?unexpected=true")
             assert bad.status_code == 422
-            bad = await client.get(root + "/runtime-modules/memory.graph/queries/associations?unexpected=true")
+            bad = await client.get(module_scope(root) + "/memory.graph/queries/associations?unexpected=true")
             assert bad.status_code == 422

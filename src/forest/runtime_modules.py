@@ -99,18 +99,35 @@ def _official_artifact() -> RuntimeArtifactIdentity:
 
 
 @dataclass(frozen=True)
-class RuntimeManagementView:
-    """Trusted management assets owned by an official runtime module."""
+class RuntimeManagementContribution:
+    """One generation-bound workspace contribution from a runtime module."""
 
+    contribution_id: str
     label: str
+    scope_kinds: tuple[str, ...]
     template: str
     module: str
-    protocol: str = "forest.trusted-management-view/1"
+    view_protocol: str = "forest.trusted-management-view/1"
     style: str | None = None
+    group: str = "module"
+    order: int = 100
 
     def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.contribution_id):
+            raise ValueError("Management contribution identity is invalid")
         if not self.label.strip() or any(ord(char) < 32 for char in self.label):
-            raise ValueError("Runtime management view labels must be printable")
+            raise ValueError("Management contribution labels must be printable")
+        if (
+            not self.scope_kinds
+            or len(set(self.scope_kinds)) != len(self.scope_kinds)
+            or any(scope not in {"deployment", "host", "bot", "binding", "component"}
+                   for scope in self.scope_kinds)
+        ):
+            raise ValueError("Management contribution scopes are invalid")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", self.group):
+            raise ValueError("Management contribution group is invalid")
+        if type(self.order) is not int or not -10_000 <= self.order <= 10_000:
+            raise ValueError("Management contribution order is invalid")
         for value, suffix in ((self.template, ".html"), (self.module, ".js")):
             if (
                 not value.startswith("/static/")
@@ -118,8 +135,8 @@ class RuntimeManagementView:
                 or ".." in value.split("/")
                 or "\\" in value
             ):
-                raise ValueError("Runtime management assets must use canonical /static paths")
-        if self.protocol != "forest.trusted-management-view/1":
+                raise ValueError("Management contribution assets must use canonical /static paths")
+        if self.view_protocol != "forest.trusted-management-view/1":
             raise ValueError("Unsupported runtime management view protocol")
         if self.style is not None and (
             not self.style.startswith("/static/")
@@ -128,6 +145,25 @@ class RuntimeManagementView:
             or "\\" in self.style
         ):
             raise ValueError("Runtime management styles must use canonical /static paths")
+
+    def as_fact(self, *, public: bool = False) -> dict:
+        surface = {
+            "kind": "trusted-module",
+            "protocol": self.view_protocol,
+            "template": self.template,
+            "module": self.module,
+            "style": self.style,
+        }
+        return {
+            "protocol": "forest.management-contribution/1",
+            "contribution_id": self.contribution_id,
+            "label": self.label,
+            "scope_kinds": list(self.scope_kinds),
+            "group": self.group,
+            "order": self.order,
+            "surface": surface if public else {key: value for key, value in surface.items()
+                                                  if key != "kind"},
+        }
 
 
 @dataclass(frozen=True)
@@ -157,8 +193,13 @@ class RuntimeModuleDescriptor:
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
     artifact: RuntimeArtifactIdentity
-    management_view: RuntimeManagementView | None = None
+    management: tuple[RuntimeManagementContribution, ...] = ()
     storage: RuntimeStorageBundle | None = None
+
+    def __post_init__(self) -> None:
+        identities = [item.contribution_id for item in self.management]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Runtime management contribution identities must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -340,32 +381,42 @@ OFFICIAL_MODULES = (
         (),
         _routing_graph,
         _OFFICIAL_ARTIFACT,
-        RuntimeManagementView(
+        management=(RuntimeManagementContribution(
+            "routing",
             "路由与执行图",
+            ("bot",),
             "/static/modules/routing.graph.html",
             "/static/routing-graph.js",
             style="/static/modules/routing.graph.css",
-        ),
+            group="runtime",
+            order=30,
+        ),),
     ),
     RuntimeModuleDescriptor(
         "memory.graph",
         ("adapter.onebot",),
         _memory,
         _OFFICIAL_ARTIFACT,
-        RuntimeManagementView(
-            "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js",
+        management=(RuntimeManagementContribution(
+            "memory",
+            "图文记忆", ("bot",), "/static/modules/memory.graph.html", "/static/memory.js",
             style="/static/modules/memory.graph.css",
-        ),
+            group="business",
+            order=30,
+        ),),
     ),
     RuntimeModuleDescriptor(
         "agent.runtime",
         ("adapter.onebot", "memory.graph"),
         _agent,
         _OFFICIAL_ARTIFACT,
-        RuntimeManagementView(
-            "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js",
+        management=(RuntimeManagementContribution(
+            "agent",
+            "Agent 与模型", ("bot",), "/static/modules/agent.runtime.html", "/static/agent-panel.js",
             style="/static/modules/agent.runtime.css",
-        ),
+            group="business",
+            order=20,
+        ),),
     ),
     RuntimeModuleDescriptor(
         "command.router", ("routing.graph",), _command_routing, _OFFICIAL_ARTIFACT
@@ -428,7 +479,6 @@ class BotModuleRegistry:
     def _descriptor_facts(self) -> list[dict]:
         facts = []
         for descriptor in self.descriptors:
-            view = descriptor.management_view
             contract = getattr(
                 self.instances.get(descriptor.component_id), "management_contract", None
             )
@@ -440,17 +490,9 @@ class BotModuleRegistry:
                     descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__
                 ),
                 "artifact": descriptor.artifact.as_fact(),
-                "management_view": (
-                    {
-                        "label": view.label,
-                        "template": view.template,
-                        "module": view.module,
-                        "protocol": view.protocol,
-                        "style": view.style,
-                    }
-                    if view is not None
-                    else None
-                ),
+                "management_contributions": [
+                    contribution.as_fact() for contribution in descriptor.management
+                ],
                 "management_contract": contract.describe() if contract is not None else None,
                 "storage": (
                     descriptor.storage.as_fact()
@@ -830,18 +872,10 @@ class BotModuleRegistry:
                     if self.graph_identity is not None
                     else None
                 ),
-                "management_view": (
-                    {
-                        "kind": "trusted-module",
-                        "label": descriptor.management_view.label,
-                        "template": descriptor.management_view.template,
-                        "module": descriptor.management_view.module,
-                        "protocol": descriptor.management_view.protocol,
-                        "style": descriptor.management_view.style,
-                    }
-                    if descriptor.management_view is not None
-                    else None
-                ),
+                "management_contributions": [
+                    contribution.as_fact(public=True)
+                    for contribution in descriptor.management
+                ],
                 "management_contract": (
                     contract.describe()
                     if (contract := getattr(

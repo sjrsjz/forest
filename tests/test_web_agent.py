@@ -23,6 +23,10 @@ pytestmark = pytest.mark.postgres
 MODEL_KEY = "only-a-test-model-key"
 
 
+def module_scope(root):
+    return root.replace("/management/v1/bots/", "/management/v1/scopes/bot/", 1) + "/modules"
+
+
 def _turn(*blocks):
     return serialize_model_turn(ModelTurn(tuple(blocks), "test-provider-candidate"))
 
@@ -123,7 +127,7 @@ async def model_server():
 async def configure_agent(client, root, endpoint, *, approval="never"):
     plan = await post(
         client,
-        root + "/runtime-modules/agent.runtime/actions/configuration.plan",
+        module_scope(root) + "/agent.runtime/actions/configuration.plan",
         {
             "expected_revision": 0,
             "api_key": MODEL_KEY,
@@ -149,12 +153,12 @@ async def configure_agent(client, root, endpoint, *, approval="never"):
     assert MODEL_KEY not in json.dumps(plan)
     applied = await post(
         client,
-        root + "/runtime-modules/agent.runtime/actions/configuration.apply",
+        module_scope(root) + "/agent.runtime/actions/configuration.apply",
         {key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")},
         "agent-apply",
     )
     assert applied["revision"] == 1
-    saved = await get(client, root + "/runtime-modules/agent.runtime/queries/configuration")
+    saved = await get(client, module_scope(root) + "/agent.runtime/queries/configuration")
     assert saved["has_api_key"] and MODEL_KEY not in json.dumps(saved)
 
 
@@ -197,7 +201,7 @@ async def test_web_approval_resumes_exact_tool_before_next_model_call(tmp_path, 
             await receive(client, binding["binding_id"], 1, "first request", mention=True)
         ).status_code == 200
         waiting = await wait_for(
-            lambda: get(client, root + "/runtime-modules/agent.runtime/queries/runs"),
+            lambda: get(client, module_scope(root) + "/agent.runtime/queries/runs"),
             lambda value: bool(value["approvals"]) and value["runs"][0]["phase"] == "WAIT_APPROVAL",
         )
         original = waiting["runs"][0]
@@ -217,7 +221,7 @@ async def test_web_approval_resumes_exact_tool_before_next_model_call(tmp_path, 
             "decision": "APPROVE",
             "arguments_digest": approval["arguments_digest"],
         }
-        accepted = await post(client, root + "/runtime-modules/agent.runtime/actions/approval.decide", decision, "approve")
+        accepted = await post(client, module_scope(root) + "/agent.runtime/actions/approval.decide", decision, "approve")
         assert accepted["run_id"] == original["run_id"]
         await wait_for(
             lambda: get(client, root + "/delivery"),
@@ -225,12 +229,12 @@ async def test_web_approval_resumes_exact_tool_before_next_model_call(tmp_path, 
         )
         assert len(model["requests"]) == 2 and not model["errors"]
         assert "latest trigger" in json.dumps(model["requests"][1])
-        saved = await get(client, root + "/runtime-modules/agent.runtime/queries/runs")
+        saved = await get(client, module_scope(root) + "/agent.runtime/queries/runs")
         assert saved["runs"][0]["run_id"] == original["run_id"]
         assert saved["runs"][0]["session_id"] == original["session_id"]
         assert saved["runs"][0]["input_revision"] == 2
         assert saved["runs"][0]["phase"] == "COMPLETED"
-        assert await post(client, root + "/runtime-modules/agent.runtime/actions/approval.decide", decision, "approve") == accepted
+        assert await post(client, module_scope(root) + "/agent.runtime/actions/approval.decide", decision, "approve") == accepted
         async with managed.store.pool.connection() as conn:
             rows = await (
                 await conn.execute(
@@ -424,23 +428,23 @@ async def test_web_tool_revocation_blocks_already_running_native_worker_write(
         ).status_code == 200
         try:
             await asyncio.wait_for(committing.wait(), 20)
-            settings_before = await get(client, root + "/runtime-modules/agent.runtime/queries/configuration")
+            settings_before = await get(client, module_scope(root) + "/agent.runtime/queries/configuration")
             values = {**settings_before["values"], "allowed_tools": []}
             plan = await post(
                 client,
-                root + "/runtime-modules/agent.runtime/actions/configuration.plan",
+                module_scope(root) + "/agent.runtime/actions/configuration.plan",
                 {"expected_revision": 1, "values": values},
                 "revoke-plan",
             )
             await post(
                 client,
-                root + "/runtime-modules/agent.runtime/actions/configuration.apply",
+                module_scope(root) + "/agent.runtime/actions/configuration.apply",
                 {key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")},
                 "revoke-apply",
             )
             release.set()
             result = await wait_for(
-                lambda: get(client, root + "/runtime-modules/agent.runtime/queries/runs"),
+                lambda: get(client, module_scope(root) + "/agent.runtime/queries/runs"),
                 lambda value: value["runs"][0]["phase"] == "BLOCKED_UNKNOWN",
             )
             assert result["unknown_tools"][0]["operation_id"] == attempts[0]
@@ -457,7 +461,6 @@ async def test_web_tool_revocation_blocks_already_running_native_worker_write(
                 assert tool["status"] == "UNKNOWN"
         finally:
             release.set()
-
 
 @pytest.mark.parametrize("change", ["disable", "rotate_key"])
 async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved_output(
@@ -513,7 +516,7 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
         ).status_code == 200
         try:
             await asyncio.wait_for(final_ready.wait(), 20)
-            original = (await get(client, root + "/runtime-modules/agent.runtime/queries/runs"))["runs"][0]
+            original = (await get(client, module_scope(root) + "/agent.runtime/queries/runs"))["runs"][0]
             assert original["phase"] == "FINAL_READY"
             payloads = AgentPayloadStore(managed.store)
             async with managed.store.pool.connection() as conn, conn.transaction():
@@ -527,22 +530,22 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
                 assert original_step["status"] == "FINAL_READY" and original_step["output"] is None
                 assert original_output["text"] == "other-final"
                 assert original_step["output_digest"] == digest_json(original_output)
-            saved = await get(client, root + "/runtime-modules/agent.runtime/queries/configuration")
+            saved = await get(client, module_scope(root) + "/agent.runtime/queries/configuration")
             body = {"expected_revision": 1, "values": saved["values"]}
             if change == "disable":
                 body["values"] = {**saved["values"], "enabled": False}
             else:
                 body["api_key"] = "replacement-test-model-key"
-            plan = await post(client, root + "/runtime-modules/agent.runtime/actions/configuration.plan", body, "revoke-final-plan")
+            plan = await post(client, module_scope(root) + "/agent.runtime/actions/configuration.plan", body, "revoke-final-plan")
             await post(
                 client,
-                root + "/runtime-modules/agent.runtime/actions/configuration.apply",
+                module_scope(root) + "/agent.runtime/actions/configuration.apply",
                 {key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")},
                 "revoke-final-apply",
             )
             release.set()
             finished = await wait_for(
-                lambda: get(client, root + "/runtime-modules/agent.runtime/queries/runs"),
+                lambda: get(client, module_scope(root) + "/agent.runtime/queries/runs"),
                 lambda value: value["runs"][0]["phase"] == "FAILED",
             )
             final = finished["runs"][0]

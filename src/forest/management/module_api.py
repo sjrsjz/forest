@@ -91,7 +91,16 @@ class ModuleManagementContract:
         return await operation.handler(request, body)
 
 
-async def _target(runtime, request, bot_id, *, write=False):
+def _bot_scope(scope_kind: str, scope_id: str) -> str:
+    if scope_kind != "bot":
+        raise ForestError(
+            "MANAGEMENT_SCOPE_NOT_FOUND", "The requested management scope is unavailable", 404
+        )
+    return scope_id
+
+
+async def _target(runtime, request, scope_kind, scope_id, *, write=False):
+    bot_id = _bot_scope(scope_kind, scope_id)
     session = await runtime.principal(request, write=write)
     if runtime.catalog is None or runtime.fleet is None or runtime.authority is None:
         raise ForestError("BOT_MANAGEMENT_UNAVAILABLE", "Bot management is initializing", 503)
@@ -143,9 +152,13 @@ def _contract(bot, component_id: str) -> tuple[Any, ModuleManagementContract]:
 
 
 def install_module_routes(app, runtime):
-    async def dispatch(bot_id, component_id, operation_id, request, payload, kind):
+    async def dispatch(
+        scope_kind, scope_id, component_id, operation_id, request, payload, kind
+    ):
         module_write = kind == "action"
-        who, bot = await _target(runtime, request, bot_id, write=module_write)
+        who, bot = await _target(
+            runtime, request, scope_kind, scope_id, write=module_write
+        )
         module, contract = _contract(bot, component_id)
         declared, body, authorized_payload = contract.prepare(operation_id, kind, payload)
         ticket, operation = await _signed(
@@ -160,28 +173,51 @@ def install_module_routes(app, runtime):
         context = ModuleRequest(runtime, bot, module, ticket, operation, authorized_payload)
         return await contract.invoke(context, declared, body)
 
+    @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/modules")
+    async def modules(scope_kind: str, scope_id: str, request: Request):
+        _, bot = await _target(runtime, request, scope_kind, scope_id)
+        return {
+            "scope": {"kind": scope_kind, "id": scope_id},
+            "modules": bot.platform.module_registry.describe(),
+        }
+
     @app.get(
-        "/management/v1/bots/{bot_id}/runtime-modules/{component_id}/queries/{operation_id}"
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/queries/{operation_id}"
     )
     async def query(
-        bot_id: str, component_id: str, operation_id: str, request: Request
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        operation_id: str,
+        request: Request,
     ):
         if any(len(request.query_params.getlist(key)) != 1 for key in request.query_params):
             raise ForestError(
                 "MODULE_MANAGEMENT_INPUT_INVALID", "Duplicate query fields are not allowed", 422
             )
         return await dispatch(
-            bot_id, component_id, operation_id, request, dict(request.query_params), "query"
+            scope_kind,
+            scope_id,
+            component_id,
+            operation_id,
+            request,
+            dict(request.query_params),
+            "query",
         )
 
     @app.post(
-        "/management/v1/bots/{bot_id}/runtime-modules/{component_id}/actions/{operation_id}"
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/actions/{operation_id}"
     )
     async def action(
-        bot_id: str,
+        scope_kind: str,
+        scope_id: str,
         component_id: str,
         operation_id: str,
         body: dict,
         request: Request,
     ):
-        return await dispatch(bot_id, component_id, operation_id, request, body, "action")
+        return await dispatch(
+            scope_kind, scope_id, component_id, operation_id, request, body, "action"
+        )
