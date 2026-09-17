@@ -531,6 +531,18 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
 
     retired_revision = await repository.retire_graph(renewed, graph_v2)
     assert retired_revision > graph_v2.graph_revision
+    await repository.record_states(
+        renewed,
+        graph_v2,
+        {component_id: ("STOPPED", None) for component_id in graph_v2.generations},
+    )
+    with pytest.raises(ForestError) as caught:
+        await repository.record_states(
+            renewed,
+            graph_v2,
+            {"kernel.runtime": ("ACTIVE", None)},
+        )
+    assert caught.value.code == "RUNTIME_LIFECYCLE_INVALID"
     async with store.pool.connection() as conn:
         head = await (
             await conn.execute(
@@ -546,7 +558,36 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
                 )
             )
         ).fetchall()
+        saved_graph = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.runtime_graphs WHERE graph_id=%s").format(
+                    sql.Identifier(namespace)
+                ),
+                (graph_v2.graph_id,),
+            )
+        ).fetchone()
+        lifecycle = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT component_id,state FROM {}.runtime_graph_lifecycle_facts "
+                    "WHERE graph_id=%s ORDER BY component_id,sequence"
+                ).format(sql.Identifier(namespace)),
+                (graph_v2.graph_id,),
+            )
+        ).fetchall()
     assert head["graph_id"] is None and head["graph_revision"] == retired_revision
+    assert saved_graph["state"] == "STOPPED"
+    assert {
+        item["component_id"]: [
+            fact["state"]
+            for fact in lifecycle
+            if fact["component_id"] == item["component_id"]
+        ]
+        for item in routes
+    } == {
+        "example.consumer": ["PREPARED", "ACTIVE", "QUIESCING", "QUIESCENT", "STOPPED"],
+        "kernel.runtime": ["PREPARED", "ACTIVE", "QUIESCING", "QUIESCENT", "STOPPED"],
+    }
     assert all(
         item["generation_id"] is None
         and not item["data_admission"]

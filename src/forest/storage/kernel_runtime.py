@@ -441,6 +441,78 @@ class KernelRuntimeRepository:
             )
             return revision
 
+    async def record_states(
+        self,
+        lease: HostLease,
+        graph: RuntimeGenerationGraph,
+        states: dict[str, tuple[str, str | None]],
+    ) -> None:
+        allowed = {"PREPARED", "ACTIVE", "QUIESCING", "QUIESCENT", "STOPPED", "FAILED"}
+        if set(states) - set(graph.generations) or any(
+            state not in allowed or (state != "FAILED" and error_code is not None)
+            for state, error_code in states.values()
+        ):
+            raise ForestError(
+                "RUNTIME_LIFECYCLE_INVALID", "Runtime lifecycle update is invalid", 422
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            await self._graph_in(conn, graph, lock=True)
+            members = {
+                item["component_id"]: item
+                for item in await self._members_in(conn, graph, lock=True)
+            }
+            for component_id, (state, error_code) in sorted(states.items()):
+                member = members[component_id]
+                latest = await self._latest_lifecycle_in(conn, graph.graph_id, component_id)
+                path = self._lifecycle_path(latest["state"], state)
+                for step in path:
+                    await self._append_lifecycle_in(
+                        conn,
+                        graph.graph_id,
+                        component_id,
+                        step,
+                        error_code=error_code if step == "FAILED" else None,
+                    )
+                generation_status = {
+                    "PREPARED": "READY",
+                    "ACTIVE": "ACTIVE",
+                    "QUIESCING": "QUIESCING",
+                    "QUIESCENT": "QUIESCENT",
+                    "STOPPED": "DISPOSED",
+                    "FAILED": "FAILED",
+                }[state]
+                await conn.execute(
+                    sql.SQL("UPDATE {} SET status=%s WHERE bot_id=%s AND generation_id=%s").format(
+                        self._table("generations")
+                    ),
+                    (generation_status, self.store.bot_id, member["generation_id"]),
+                )
+            final_states = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT DISTINCT ON (component_id) component_id,state FROM {} "
+                        "WHERE bot_id=%s AND graph_id=%s ORDER BY component_id,sequence DESC"
+                    ).format(self._table("runtime_graph_lifecycle_facts")),
+                    (self.store.bot_id, graph.graph_id),
+                )
+            ).fetchall()
+            if final_states and all(item["state"] == "STOPPED" for item in final_states):
+                await conn.execute(
+                    sql.SQL("UPDATE {} SET state='STOPPED' WHERE bot_id=%s AND graph_id=%s").format(
+                        self._table("runtime_graphs")
+                    ),
+                    (self.store.bot_id, graph.graph_id),
+                )
+            elif any(item["state"] == "FAILED" for item in final_states):
+                await conn.execute(
+                    sql.SQL("UPDATE {} SET state='FAILED' WHERE bot_id=%s AND graph_id=%s").format(
+                        self._table("runtime_graphs")
+                    ),
+                    (self.store.bot_id, graph.graph_id),
+                )
+
     async def _identity_in(self, conn) -> None:
         row = await (
             await conn.execute(
@@ -575,12 +647,37 @@ class KernelRuntimeRepository:
         ).fetchall()
 
     async def _append_lifecycle_in(
-        self, conn, graph_id: str, component_id: str, state: str
+        self,
+        conn,
+        graph_id: str,
+        component_id: str,
+        state: str,
+        *,
+        error_code: str | None = None,
     ) -> None:
+        latest = await self._latest_lifecycle_in(conn, graph_id, component_id)
+        if latest["state"] == state:
+            return
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}(bot_id,graph_id,component_id,sequence,state,error_code) "
+                "VALUES (%s,%s,%s,%s,%s,%s)"
+            ).format(self._table("runtime_graph_lifecycle_facts")),
+            (
+                self.store.bot_id,
+                graph_id,
+                component_id,
+                latest["sequence"] + 1,
+                state,
+                error_code,
+            ),
+        )
+
+    async def _latest_lifecycle_in(self, conn, graph_id: str, component_id: str):
         latest = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT sequence,state FROM {} WHERE bot_id=%s AND graph_id=%s "
+                    "SELECT sequence,state,error_code FROM {} WHERE bot_id=%s AND graph_id=%s "
                     "AND component_id=%s ORDER BY sequence DESC LIMIT 1 FOR UPDATE"
                 ).format(self._table("runtime_graph_lifecycle_facts")),
                 (self.store.bot_id, graph_id, component_id),
@@ -590,15 +687,33 @@ class KernelRuntimeRepository:
             raise ForestError(
                 "RUNTIME_GENERATION_NOT_PREPARED", "Generation lifecycle is absent", 409
             )
-        if latest["state"] == state:
-            return
-        await conn.execute(
-            sql.SQL(
-                "INSERT INTO {}(bot_id,graph_id,component_id,sequence,state) "
-                "VALUES (%s,%s,%s,%s,%s)"
-            ).format(self._table("runtime_graph_lifecycle_facts")),
-            (self.store.bot_id, graph_id, component_id, latest["sequence"] + 1, state),
-        )
+        return latest
+
+    @staticmethod
+    def _lifecycle_path(current: str, target: str) -> tuple[str, ...]:
+        if current == target:
+            return ()
+        if target == "FAILED" and current not in {"STOPPED", "FAILED"}:
+            return ("FAILED",)
+        paths = {
+            ("PREPARED", "ACTIVE"): ("ACTIVE",),
+            ("PREPARED", "STOPPED"): ("STOPPED",),
+            ("ACTIVE", "QUIESCING"): ("QUIESCING",),
+            ("ACTIVE", "QUIESCENT"): ("QUIESCING", "QUIESCENT"),
+            ("ACTIVE", "STOPPED"): ("QUIESCING", "QUIESCENT", "STOPPED"),
+            ("QUIESCING", "QUIESCENT"): ("QUIESCENT",),
+            ("QUIESCING", "STOPPED"): ("QUIESCENT", "STOPPED"),
+            ("QUIESCENT", "STOPPED"): ("STOPPED",),
+            ("FAILED", "STOPPED"): ("STOPPED",),
+        }
+        path = paths.get((current, target))
+        if path is None:
+            raise ForestError(
+                "RUNTIME_LIFECYCLE_INVALID",
+                f"Runtime lifecycle cannot move from {current} to {target}",
+                409,
+            )
+        return path
 
     @staticmethod
     def _lease(row) -> HostLease:
