@@ -72,6 +72,9 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
     assert registry.instances == {}
     assert registry.order.index("provider") < registry.order.index("consumer")
     assert not hasattr(platform, "consumer")
+    await registry.prepare()
+    assert set(registry.states.values()) == {ModuleLifecycleState.PREPARED}
+    assert not events
     await registry.start()
     assert set(registry.states.values()) == {ModuleLifecycleState.ACTIVE}
     await registry.close()

@@ -661,6 +661,7 @@ async def test_legacy_exact_retry_and_next_run_complete_with_memory_unconfigured
         kernel.lease = env.lease
         runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
         try:
+            await runtime.module_registry.prepare()
             actor = await owner(
                 runtime.module("adapter.onebot").messages, env.lease, env.retry.actor.conversation_id, "upgrade-recovery"
             )

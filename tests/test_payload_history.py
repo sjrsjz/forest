@@ -254,6 +254,7 @@ async def test_two_published_legacy_replies_continue_after_the_first_view_is_cli
         kernel.lease = env.lease
         runtime = BindingRuntime(SimpleNamespace(store=env.store, kernel=kernel), env.vault, {})
         try:
+            await runtime.module_registry.prepare()
             received = await runtime.module("adapter.onebot").messages.ingest(env.lease, "binding-a",
                 event(82, group="completed-group", text="continue after clipped legacy history"), decision="TRIGGER")
             actor = await owner(runtime.module("adapter.onebot").messages, env.lease, received["conversation_id"], "current-after-history")

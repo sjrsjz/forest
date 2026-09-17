@@ -372,6 +372,7 @@ async def test_silent_platform_indexes_original_images_and_text_without_llm_or_s
             )
             restarted = BindingRuntime(original_runtime.bot, p.env.vault, original_runtime.packages)
             p.runtime = restarted
+            await restarted.module_registry.prepare()
             await restarted.module("adapter.onebot")._replace((await restarted.module("adapter.onebot").bindings.desired(p.kernel._authority()))[0])
             await restarted.start()
             for _ in range(8):

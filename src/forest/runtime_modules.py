@@ -228,7 +228,7 @@ def _conversation(platform, modules: dict[str, Any]):
     return GroupScheduler(
         adapter.messages,
         lease=platform.kernel._authority,
-        execute=platform.execute,
+        execute=modules["contract.router"].execute,
         delivery=adapter.delivery,
         global_slots=platform.global_slots,
         finalize_agent=agent.runner.finalize,
@@ -262,10 +262,27 @@ def _message_routing(platform, _: dict[str, Any]):
     return _MessageRoutingRuntime(platform)
 
 
-def _onebot(platform, _: dict[str, Any]):
+def _onebot(platform, modules: dict[str, Any]):
     from forest.onebot_runtime import OneBotRuntime
 
-    return OneBotRuntime(platform)
+    return OneBotRuntime(platform, component_host=modules["component.worker-host"])
+
+
+def _component_workers(platform, _: dict[str, Any]):
+    from forest.component_workers import ComponentWorkerHost
+
+    return ComponentWorkerHost(platform.kernel, platform.packages)
+
+
+def _contract_router(platform, modules: dict[str, Any]):
+    from forest.contract_router import ContractExecutionRouter
+
+    return ContractExecutionRouter(
+        platform,
+        modules["component.worker-host"],
+        modules["adapter.onebot"],
+        modules["agent.runtime"],
+    )
 
 
 def _routing_graph(platform, _: dict[str, Any]):
@@ -309,7 +326,10 @@ _OFFICIAL_ARTIFACT = _official_artifact()
 
 
 OFFICIAL_MODULES = (
-    RuntimeModuleDescriptor("adapter.onebot", (), _onebot, _OFFICIAL_ARTIFACT),
+    RuntimeModuleDescriptor("component.worker-host", (), _component_workers, _OFFICIAL_ARTIFACT),
+    RuntimeModuleDescriptor(
+        "adapter.onebot", ("component.worker-host",), _onebot, _OFFICIAL_ARTIFACT
+    ),
     RuntimeModuleDescriptor(
         "routing.graph",
         (),
@@ -349,8 +369,20 @@ OFFICIAL_MODULES = (
         "message.router", ("routing.graph",), _message_routing, _OFFICIAL_ARTIFACT
     ),
     RuntimeModuleDescriptor(
+        "contract.router",
+        ("component.worker-host", "adapter.onebot", "agent.runtime"),
+        _contract_router,
+        _OFFICIAL_ARTIFACT,
+    ),
+    RuntimeModuleDescriptor(
         "conversation.scheduler",
-        ("adapter.onebot", "agent.runtime", "command.router", "message.router"),
+        (
+            "adapter.onebot",
+            "agent.runtime",
+            "command.router",
+            "message.router",
+            "contract.router",
+        ),
         _conversation,
         _OFFICIAL_ARTIFACT,
     ),
@@ -562,6 +594,46 @@ class BotModuleRegistry:
     def get(self, component_id: str):
         return self.instances[component_id]
 
+    async def _prepare_graph(self):
+        lease = None
+        try:
+            await self._prepare_modules()
+            if self.graph_store is not None:
+                lease = self._lease()
+                if self.graph_identity is None:
+                    self.graph_identity = await self.graph_store.prepare(
+                        lease, self._descriptor_facts()
+                    )
+            return lease
+        except BaseException as exc:
+            rollback_errors = await self._rollback_preparation()
+            if rollback_errors:
+                raise ForestError(
+                    "RUNTIME_MODULE_PREPARE_ROLLBACK_FAILED",
+                    "Runtime module preparation failed and resources remain owned",
+                    503,
+                    details={"cleanup_errors": len(rollback_errors)},
+                ) from exc
+            raise
+
+    async def prepare(self) -> None:
+        """Install storage and construct the graph without admitting runtime work."""
+
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise ForestError(
+                    "RUNTIME_MODULE_REGISTRY_CLOSED", "Runtime module registry is closed", 503
+                )
+            if all(
+                self.states[item]
+                in {ModuleLifecycleState.PREPARED, ModuleLifecycleState.ACTIVE}
+                for item in self.order
+            ):
+                return
+            await self._prepare_graph()
+
     async def start(self) -> None:
         if self._lifecycle_lock is None:
             self._lifecycle_lock = asyncio.Lock()
@@ -572,25 +644,7 @@ class BotModuleRegistry:
                 )
             if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
                 return
-            lease = None
-            try:
-                await self._prepare_modules()
-                if self.graph_store is not None:
-                    lease = self._lease()
-                    if self.graph_identity is None:
-                        self.graph_identity = await self.graph_store.prepare(
-                            lease, self._descriptor_facts()
-                        )
-            except BaseException as exc:
-                rollback_errors = await self._rollback_preparation()
-                if rollback_errors:
-                    raise ForestError(
-                        "RUNTIME_MODULE_PREPARE_ROLLBACK_FAILED",
-                        "Runtime module preparation failed and resources remain owned",
-                        503,
-                        details={"cleanup_errors": len(rollback_errors)},
-                    ) from exc
-                raise
+            lease = await self._prepare_graph()
             started = []
             current = None
             try:

@@ -70,6 +70,7 @@ async def platform(environment, tmp_path):  # noqa: F811
         runtime = BindingRuntime(
             SimpleNamespace(store=env.store, kernel=kernel), env.vault, packages
         )
+        await runtime.module_registry.prepare()
         row = (await runtime.module("adapter.onebot").bindings.desired(kernel._authority()))[0]
         try:
             yield SimpleNamespace(
@@ -403,12 +404,13 @@ async def test_reply_component_failure_does_not_interrupt_protocol_worker(platfo
 
     monkeypatch.setattr(p.kernel, "install", broken_reply)
     with pytest.raises(ForestError):
-        await p.runtime.ensure_components()
+        await p.runtime.module("component.worker-host").ensure()
     assert (await receive(p))["accepted"]
     assert p.kernel.components["adapter.onebot"].worker is adapter and adapter.alive
     monkeypatch.setattr(p.kernel, "install", install)
-    await p.runtime.ensure_components(("forest.reply",))
-    assert "forest.reply" not in p.runtime.errors
+    worker_host = p.runtime.module("component.worker-host")
+    await worker_host.ensure(("forest.reply",))
+    assert "forest.reply" not in worker_host.errors
 
 
 async def test_runtime_close_survives_waiter_cancellation_without_abandoning_client(

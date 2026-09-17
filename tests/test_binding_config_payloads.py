@@ -323,7 +323,7 @@ async def test_actual_template_worker_result_carries_config_without_tainting_ori
     )
     selected = await messages.select_input(actor, "template-input")
     context = await messages.context(actor, run_id=selected["run_id"])
-    result = await p.runtime.execute(actor, selected, context)
+    result = await p.runtime.module("contract.router").execute(actor, selected, context)
     current = p.runtime.module("adapter.onebot").connection(p.binding.binding_id).row
     call = (
         await rows(
@@ -361,7 +361,10 @@ async def test_actual_template_worker_result_carries_config_without_tainting_ori
         "SELECT 1 FROM public.bot_payload_bodies WHERE payload_id=ANY(%s)",
         ([call["input_payload_id"], result.result_parent_ids[0]],),
     )
-    await rejected("CONTROL_CONTENT_REVOKED", p.runtime.execute(actor, selected, context))
+    await rejected(
+        "CONTROL_CONTENT_REVOKED",
+        p.runtime.module("contract.router").execute(actor, selected, context),
+    )
 
 
 async def test_sql_metadata_and_missing_plan_receipt_are_rejected(binding):

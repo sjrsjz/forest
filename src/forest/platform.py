@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.runtime_modules import BotModuleRegistry
@@ -22,8 +21,6 @@ class BindingRuntime:
         self.global_model_slots = global_model_slots
         self.packages = dict(packages)
         self.module_packages = {} if module_packages is None else module_packages
-        self.errors: dict[str, str] = {}
-        self._component_locks: dict[str, asyncio.Lock] = {}
         self._closed = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._start_lock = asyncio.Lock()
@@ -104,123 +101,11 @@ class BindingRuntime:
                 return
             await asyncio.sleep(0.1)
 
-    async def ensure_components(self, component_ids=None):
-        ids = tuple(self.packages) if component_ids is None else tuple(component_ids)
-        results = await asyncio.gather(
-            *(self._ensure_component(key) for key in ids), return_exceptions=True
-        )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-
-    async def _ensure_component(self, component_id):
-        async with self._component_locks.setdefault(component_id, asyncio.Lock()):
-            if self._closed.is_set():
-                raise ForestError("BINDING_RUNTIME_CLOSED", "Platform runtime is closed", 503)
-            self.kernel._authority()
-            component = self.kernel.components.get(component_id)
-            if (
-                component is not None
-                and component.worker.alive
-                and component.worker.state == "ACTIVE"
-            ):
-                return
-            try:
-                await self.kernel.install(
-                    self.packages[component_id],
-                    config={},
-                    grants=frozenset(),
-                    operation_id="infrastructure:" + str(uuid4()),
-                )
-                self.errors.pop(component_id, None)
-            except Exception as exc:
-                self.errors[component_id] = (
-                    exc.code if isinstance(exc, ForestError) else "COMPONENT_START_FAILED"
-                )
-                raise
-
     def _cleanup_lease(self):
         # SQL validates this last lease even after local admission has closed.
         if self.kernel.lease is None:
             raise ForestError("STALE_HOST", "No host lease remains", 409)
         return self.kernel.lease
-
-    async def execute(self, actor, selected, context):
-        connection = self.module("adapter.onebot").connection(actor.binding_id)
-        if connection.row["binding_epoch"] != actor.binding_epoch:
-            raise ForestError("STALE_BINDING", "Conversation belongs to an old connection", 409)
-        if selected["status"] == "MESSAGE_HANDLER":
-            request = selected["request"]
-            await self.ensure_components((request["component_id"],))
-            call_operation_id = selected["attempt"]["call_operation_id"]
-            receipt = await self.kernel.invoke_message_handler_with_receipt(
-                request,
-                selected["event"],
-                operation_id=call_operation_id,
-                input_parent_ids=tuple(selected["input_parent_ids"]),
-            )
-            from forest.group_scheduler import MessageHandlerExecution
-
-            return MessageHandlerExecution(
-                call_operation_id,
-                receipt.value,
-                receipt.result_payload_id,
-                receipt.result_digest,
-            )
-        if selected["status"] == "BUSINESS_COMMAND":
-            request = selected["request"]
-            await self.ensure_components((request["component_id"],))
-            call_operation_id = "business-command-call:" + request["request_id"]
-            receipt = await self.kernel.invoke_business_command_with_receipt(
-                request,
-                selected["event"],
-                operation_id=call_operation_id,
-                input_parent_ids=tuple(selected["input_parent_ids"]),
-            )
-            from forest.group_scheduler import BusinessCommandExecution
-
-            return BusinessCommandExecution(
-                call_operation_id,
-                receipt.value,
-                receipt.result_payload_id,
-                receipt.result_digest,
-            )
-        current = await self.module("adapter.onebot").bindings.execution_config(
-            self.kernel._authority(), actor.binding_id, expected_binding_epoch=actor.binding_epoch, data=True,
-        )
-        config = current["config"]
-        if selected.get("agent_phase") is not None or config["response_mode"] == "agent":
-            return await self.module("agent.runtime").runner.advance(actor, selected, context)
-        if config["response_mode"] != "component":
-            raise ForestError("RESPONDER_DISABLED", "This Binding has no active responder", 409)
-        await self.ensure_components(("forest.reply",))
-        trigger_ids = {t["event_id"] for t in context["triggers"]}
-        units = [u for u in context["units"] if u.get("event_id") in trigger_ids]
-        if not units:
-            raise ForestError("TRIGGER_CONTEXT_MISSING", "Trigger source is not visible", 409)
-        unit = units[-1]
-        text = "".join(s.get("text", "") for s in unit["segments"] if s["type"] == "text")
-        # Explicit P1 template service; P3 owns durable model/provider attempts.
-        result = await self.kernel.invoke_with_receipt(
-            "forest.reply",
-            "reply.respond",
-            {
-                "template": config["response_template"],
-                "text": text[:8000],
-                "sender": unit["author"].get("display_name", unit["author"]["external_user_id"])[
-                    :160
-                ],
-                "group": context["conversation"]["channel_id"][:160],
-            },
-            operation_id="response:" + str(uuid4()),
-            expected_policy_revision=actor.policy_revision,
-            input_parent_ids=(*context["payload_ids"], current["config_payload_id"]),
-            causal_root_kind="CONVERSATION_RUN",
-            causal_root_id=selected["run_id"],
-        )
-        from forest.group_scheduler import ComponentReply
-
-        return ComponentReply(result.value["parts"], (result.result_payload_id,))
 
     async def close(self):
         self._closed.set()

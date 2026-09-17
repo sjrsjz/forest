@@ -91,8 +91,9 @@ class PendingActivation:
     transport: str
 
 class OneBotRuntime:
-    def __init__(self, platform):
+    def __init__(self, platform, *, component_host):
         self.platform = platform
+        self.component_host = component_host
         self.bindings = BindingStore(platform.bot.store)
         self.messages = MessageStore(platform.bot.store, self.bindings)
         self.shell_ingress = ShellIngressGuard(platform.bot.store.bot_id)
@@ -296,7 +297,7 @@ class OneBotRuntime:
                         raise ForestError("BINDING_SECRET_INVALID", "Invalid webhook secret", 422)
                     if webhook:
                         webhook.encode("utf-8")
-                    await self.platform.ensure_components(("adapter.onebot",))
+                    await self.component_host.ensure(("adapter.onebot",))
                     if transport == "forward-websocket":
                         candidate = await OneBotWebSocketClient.create(
                             websocket_url, secrets["access_token"]
@@ -428,13 +429,13 @@ class OneBotRuntime:
                     job.add_done_callback(_observe)
                     self._jobs[binding_id] = job
                 if self.connections:
-                    for key in self.platform.packages:
+                    for key in self.component_host.packages:
                         job = self._component_jobs.get(key)
                         if job is None or job.done():
                             if job is not None:
                                 _observe(job)
                             job = asyncio.create_task(
-                                self.platform._ensure_component(key), name="component:" + key
+                                self.component_host.ensure_one(key), name="component:" + key
                             )
                             job.add_done_callback(_observe)
                             self._component_jobs[key] = job
@@ -538,7 +539,7 @@ class OneBotRuntime:
                         409,
                     )
                 if priority_proof is None:
-                    await self.platform.ensure_components(("adapter.onebot",))
+                    await self.component_host.ensure(("adapter.onebot",))
                     # Retrying a failed pure codec call is safe. The durable
                     # Inbox owns deduplication; reserved Shell syntax stays on
                     # the fixed host parser so a broken Adapter can be rescued.
@@ -626,7 +627,7 @@ class OneBotRuntime:
         current = await self.bindings.execution_config(
             self.platform.kernel._authority(), claim.route["binding_id"], expected_binding_epoch=claim.binding_epoch,
         )
-        await self.platform.ensure_components(("adapter.onebot",))
+        await self.component_host.ensure(("adapter.onebot",))
         operation = "format:" + str(uuid4())
         receipt = await self.platform.kernel.invoke_control_with_receipt(
             "adapter.onebot",

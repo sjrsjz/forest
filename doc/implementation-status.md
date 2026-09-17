@@ -51,6 +51,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 模块包已能声明内容寻址的 `components.storage`，入包时校验 schema 身份、版本、Repository 契约、基线摘要、路径、大小和禁止 DDL；管理投影只暴露经过验证的 bundle 元数据。Runtime 描述符把同一存储身份纳入代际摘要，注册表构造阶段只验证依赖图并保持 `VALIDATED`，启动阶段严格按“安装准确 bundle → 构造实例 → `PREPARED` → `ACTIVE`”执行；安装失败不会构造业务模块。官方模块 schema 拆分与所有创建/恢复入口切换仍属于 P0 阻断项，不能把这项描述符工作解释成数据库切分已经完成。
 - 已增加独立的预发布 Kernel bootstrap 与事务化 schema bundle installer。空数据库基线当前只建立 `forest_kernel.bot_identity` 和 `forest_kernel.schema_bundles`；安装账本绑定 Bot、组件、schema/version/scope、宿主分配 namespace、SQL 摘要、完整包摘要和 Repository contract。SQL admission 只接受无 schema 限定的声明式对象，注释拆词、事务控制、DML、动态 SQL、函数/触发器、跨 schema 名称和越权 DDL 均拒绝；并发相同安装通过 advisory lock 收敛，冲突身份拒绝，执行失败在同一事务回滚 namespace 与账本。PostgreSQL 17 隔离容器中的 11 项测试覆盖最小表集合、幂等、并发、包冲突、占用 namespace 和失败回滚。现有 Bot 创建/恢复路径仍调用旧 `BotStore.migrate()`，官方业务表也尚未拆成 bundle，因此这只是干净切换入口，不代表 P0 数据库切分完成。
 - 官方 Runtime 描述符不再只用 factory 名称暗示版本，现已显式携带 `package_id/version/digest/scope/driver/trust_level`，并把完整工件身份纳入 Runtime Generation 摘要、管理投影和 RouteGraph 历史。因为官方模块当前尚未物理拆包，它们如实共享 Forest distribution 的内容摘要；摘要覆盖发行包内 Python、SQL、可信管理 UI 及声明资源。模块声明存储时，bundle 的包摘要必须和 Runtime 工件摘要一致，否则在依赖图验证阶段拒绝。物理拆分官方模块、统一官方/第三方运行驱动仍未完成。
+- 跨模块执行已从 `BindingRuntime` 移出。新增 `component.worker-host` 官方模块，拥有可安装包 Worker 的去重启动、Kernel install 和局部错误；OneBot 的 codec 恢复只调用该依赖端口。新增 `contract.router` 官方模块，拥有消息 Handler、业务命令、Agent 和模板 responder 的冻结执行分派；Conversation Scheduler 只调用其 `execute` 端口。注册表新增独立 `prepare()` 安全边界，测试或恢复流程可以在不启动后台接纳的情况下完成 schema 安装和实例构造。PostgreSQL 定向回归 5 项覆盖模块所有权、Worker 故障隔离、群回复/Shell 并行、配置正文撤销及模板结果因果，另有 3 项无数据库端口测试。`BindingRuntime` 仍持有 Job 授权适配、唤醒汇总和总体健康循环。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
 这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、旧 `bot_outbox_events` 的来源归一与资源归属尚未全部迁完；trace 的深层筛选已经改用不可变调用因果根和数据库关联键精确选根，并通过绑定筛选条件的稳定游标跨页读取，不再采用近期消息候选扫描。
@@ -72,7 +73,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 ### P0 微内核
 
 - 当前 PostgreSQL schema 仍把多数官方模块表放在同一历史 public 基线；必须按 14 号设计拆成最小 Kernel baseline 和内容寻址模块 bundle，并让 Lifecycle Coordinator 安装/核验准确 bundle。开发期旧 migration handler、legacy marker、fallback 和升级夹具全部删除；
-- `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
+- `BindingRuntime` 的跨模块会话执行和组件 Worker 启动已经移入注册模块；剩余 Job 授权适配、唤醒汇总和总体健康循环需要迁入能力端口及通用 supervisor；
 - 官方模块已发布独立的持久 RuntimeGraph/Generation 并进入同一 RouteGraph；它和可安装 Worker 仍使用不同运行驱动，需统一健康检查、按依赖边故障隔离、失租恢复和监督器接口；
 - command、message handler、service、event、job 与官方 runtime module 已进入同一可解释 RouteGraph，消息入场冻结精确 `graph_digest`；Kernel call、component event/job 与 Delivery 因果边已进入 trace，仍需归一旧 `bot_outbox_events` 来源；
 - dispatch trace 已能按消息、群、组件、代际、结果和时间通过不可变调用因果根精确选根，并以绑定筛选条件的稳定游标分页；仍需完成十万级容量与索引计划验证；
