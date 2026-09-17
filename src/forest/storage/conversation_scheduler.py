@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
@@ -159,6 +160,14 @@ class ConversationSchedulerRepository:
             (_operation_key(self.store.bot_id, operation_id),),
         )
 
+    @asynccontextmanager
+    async def _transaction(self, connection=None):
+        if connection is not None:
+            yield connection
+            return
+        async with self.store.pool.connection() as conn, conn.transaction():
+            yield conn
+
     async def _verify_payload(self, conn, reference: SchedulerPayloadRef) -> None:
         if self.payload_verifier is None:
             raise ForestError(
@@ -215,6 +224,7 @@ class ConversationSchedulerRepository:
         classification_deadline: datetime,
         sent_at: datetime | None = None,
         context_disposition: str = "MATERIALIZE",
+        _connection=None,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -271,7 +281,7 @@ class ConversationSchedulerRepository:
                 "context_disposition": context_disposition,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock_operation(conn, operation_id)
             operation = await (
                 await conn.execute(
@@ -393,6 +403,11 @@ class ConversationSchedulerRepository:
                 (self.store.bot_id, conversation_id),
             )
             return {**dict(row), "duplicate": False}
+
+    async def admit_message_in(self, conn, **values) -> dict:
+        """Participate in a caller-owned Bot transaction without changing ownership."""
+
+        return await self.admit_message(_connection=conn, **values)
 
     async def complete_classification(
         self,
