@@ -88,7 +88,7 @@ WebSocket action 使用 Delivery 通过传输端口交付的冻结 `wire_payload
 - 单读取者可以处理响应乱序和事件穿插，事件仍按到达顺序提交；
 - 候选激活前不写业务库，激活后排空；错误账号、队列溢出和畸形帧失败关闭；
 - action 发送一次，断线/超时为 `UNKNOWN`，明确拒绝为 `NOT_SENT`；
-- 旧 HTTP 配置不迁移也能继续启动，WebUI 可选择两种传输且不回显凭据；
+- 从空 namespace 安装的 `adapter.onebot` baseline 可明确选择 HTTP 或正向 WebSocket transport；不读取旧配置、不运行兼容迁移，WebUI 不回显凭据；
 - 重载、丢 ACK、取消和 runtime close 不泄漏 socket、reader、consumer 或 pending waiter；
 - 使用线上 AliceBot/NapCat 配置完成只读 `get_status`、`get_login_info`、获准群 `get_group_info`；真实发送若执行，只允许群 `933179609` 且保持单次低频。
 

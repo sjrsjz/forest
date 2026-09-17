@@ -1,12 +1,14 @@
 # OneBot、群聊调度与可靠发送实现说明
 
-本文件记录 P1 接入切片，不替代 01–12 的完整设计。当前接通 OneBot 11 HTTP API + HTTP POST 上报；未实现反向 WebSocket、平台事件重放或原生幂等发送。平台实现和登录态由部署者提供，Forest 不内置 QQ 客户端。
+> **文档级别：历史实现切片。** 本页只保留 OneBot 纵向验收证据，不定义目标所有权、schema 或组合根。实现必须以 01–14 和[当前实现状态](implementation-status.md)为准；旧类名、页面和 `public` 表不能成为兼容要求。
+
+平台实现和登录态由部署者提供，Forest 不内置 QQ 客户端。HTTP 与正向 WebSocket 都只是 `adapter.onebot` 可选择的 transport；实际完成情况见实现状态，不能从本页的旧 P1 阶段描述推断。
 
 ## 配置与连接归属
 
 从 WebUI 创建 Bot，再登记 QQ 账号。部署库唯一约束 `(platform,self_id)`，不允许两个 Bot 同时宣称拥有同一账号。登记先留下 `RESERVED` 事实，然后以新鲜 Web 票据向目标 Bot 提交固定 Binding ID/账号；目标成功才记 `REGISTERED`。跨库中断后页面仍展示待完成登记，原管理员点击该项即可继续固定操作。当前不支持转移或删除账号归属。
 
-Binding 配置包含启用状态、HTTP API origin、触发方式、模板及管理员账号列表；API token 和上报签名密钥只加密存储在目标库。随机密文先按操作冻结，再把密文摘要加入签名计划。同一 HTTP 幂等键重试不重复加密或生成不同配置。配置采用预览计划、CAS 接纳 desired revision、运行时推进 effective revision 的过程。不同旧版本的并发配置不会相互覆盖。
+Binding 配置包含启用状态、transport endpoint、触发方式和协议模板引用；管理员账号列表与 Shell 策略属于 `shell.command`。API token 和上报签名密钥进入 Secret Resolver，Adapter 配置只保存 opaque secret ref 和不可逆摘要。同一幂等操作重试不重复生成秘密或不同配置。配置采用预览计划、CAS 接纳 desired revision、运行时推进 effective revision 的过程。不同旧版本的并发配置不会相互覆盖。
 
 新连接先核对 API 真实账号，旧连接停止接纳新发送并排空/取消已持有资源，随后发布新 Binding/connection epoch。关闭或失权的连接不能偷偷借用新客户端完成旧发送。后台的在线状态同时校验当前宿主实际持有的连接，数据库里上次运行留下的 `ONLINE` 不代表重启恢复完成。
 
@@ -32,13 +34,13 @@ CHAT 按 Conversation/response_seq/part 排序，CONTROL 按独立 command/contr
 
 发送前先冻结 Worker 产生的具体 wire bytes，目标事务核验 Bot、Binding、连接、插件代际、原 policy、取消状态和期限后记录 permit。网络 I/O 在事务外，只使用许可对应的字节与客户端。记录 permit 后丢失响应、超时、取消或崩溃均保留可能已发送的事实；不能通过重连、代际更换或重启自动重发。
 
-后台逐项展示原消息、目标、分段 ID、状态和时间。UNKNOWN 可由当前管理员以预期 revision 核对为：平台已收到（SENT）、有依据确认未发送并重试（NOT_SENT）、跳过此条（SKIP）。SKIP 不抹掉旧尝试的不确定事实。确认未发送才允许同一语义分段的新尝试；确定失败的 NOT_SENT 本身不产生隐式重试循环。
+后台逐项展示目标、因果消息引用、分段 ID、状态和时间。UNKNOWN 只能由带证据的显式对账解析为平台已收到（SENT）或确定未应用（NOT_APPLIED）。不能用“跳过”绕过同一 lane 的不确定效果；确认未应用后才允许同一 effect operation 创建下一 attempt。
 
-当前后台队列和发送列表各取最近 100 条，不提供全历史分页或按状态检索。长期运行中旧 UNKNOWN 可能移出这个有限视图；账本保留事实，完整历史定位与容量治理属于 P5 必须补齐的管理能力。
+Delivery 的模块管理贡献必须支持按 Bot、Binding、Conversation、lane、状态、时间和稳定 ID 筛选，使用稳定键集分页并可展开 intent → part → attempt → observation/对账关系。长期运行不能依赖“最近 100 条”卡片；固定小窗口只能作为概览，不能成为唯一检索入口。
 
 ## 群聊管理入口
 
-固定完整前缀 `#forest` 在 Inbox 接纳时进入独立 CONTROL 路径。识别直接文本及可信的开头 Bot mention，不把引用、转发或 self echo 当命令。未知命令、坏语法和无权限请求均不回落普通 Agent。状态、Run/Job 管理和本群记忆来源遗忘分别由当前模块 Generation 注册；管理员来自有效 Binding 配置的显式 QQ ID，群 owner/admin 角色不自动授予框架权限。请求在接纳时冻结 RouteGraph、owner Generation、schema digest 和规范参数，Dispatcher 恢复时不重新解析群消息。
+固定完整前缀 `#forest` 在 Inbox 接纳时进入独立 CONTROL 路径。识别直接文本及可信的开头 Bot mention，不把引用、转发或 self echo 当命令。未知命令、坏语法和无权限请求均不回落普通 Agent。状态、Run/Job 管理和本群记忆来源遗忘分别由当前模块 Generation 注册；管理员策略来自 `shell.command`，群 owner/admin 角色不自动授予框架权限。请求在接纳时冻结 RouteGraph、owner Generation、schema digest 和规范参数，Dispatcher 恢复时不重新解析群消息。
 
 当前不执行任意系统命令、不开放 OS shell。敏感原始参数不写入普通 Context 或日志，未知命令只保存摘要和固定说明；已接入命令使用类型化参数、会话 scope 和 P0–P2 优先级，动态注册、运维 runbook 与完整授权委托仍按 09 文档实现。管理回执不占普通群 Actor，也不改正在执行的提示上下文。
 

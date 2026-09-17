@@ -22,7 +22,7 @@ Web 通过通用模块网关解析当前 ACTIVE Generation，不能直接构造 
 `BotAuditStore`。命令接纳时冻结 gate version 和规范参数。
 
 执行事务开始时检查持久命令 claim、route/action/类型化参数、Host lease、Binding epoch 和原消息
-的可信 principal；返回前再读取当前 Binding 配置并确认作者仍在 `admin_user_ids`。群主、昵称、
+的可信 principal；返回前再读取 `shell.command` 当前策略并确认作者仍有本群审计查询能力。群主、昵称、
 引用内容、OCR 和模型输出都不能授予权限。
 
 当前 Shell 恢复仍由新宿主的 `shell.command` 实例处理持久 claim，尚未把目标 `kernel.audit`

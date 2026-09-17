@@ -221,7 +221,7 @@ selected_input_end_seq = max(A, T)
 
 未完成、等待批准或结果为 UNKNOWN 的工具组尚未闭合，只有在结果确定或按已定义失败语义形成终态记录后，才进入下一次模型调用。授权确认走控制通道，不排在普通聊天队列后等待自己解除阻塞。
 
-闭合步骤先记录到 `run_steps` 和 checkpoint，尚未发布部分按稳定步骤序号保存。若下一安全点接入新 InputBatch，必须在同一 Context 提交中先追加之前尚未发布的完整执行步骤，再追加该批输入。若不接入消息，可继续使用已持久的私有步骤构造下一调用；最终提交时再一次性追加尚未发布部分。通用步骤 flush 只发布非最终步骤，最终候选由专用的 `ModelTurn + SendIntent` 入口按其同一 `logical_step_id` 幂等提交，不能先作为步骤追加一次、再作为最终回答追加一次。用逻辑步骤唯一键和 checkpoint 的已发布位置避免恢复重复追加。
+闭合步骤先由 `agent.runtime` 记录 ModelTurn/ToolCall 与 checkpoint，尚未发布到群 Context 的部分按稳定步骤序号保存。若确有下一次模型调用，Conversation Scheduler 在安全点先选择新 InputBatch；Context participant 先追加此前尚未发布的完整 `AGENT_STEP` 引用，再追加该批输入。若没有新模型调用，Agent 可以继续使用私有步骤构造最终候选。最终候选只能走 Conversation 的专用 reply UnitOfWork：它以同一 `logical_step_id` 引用 Agent ModelTurn，并同时创建 Delivery SendIntent；不能先作为普通步骤追加一次、再作为正式回答追加一次。逻辑步骤唯一键和 checkpoint 的已发布位置避免恢复重复追加。
 
 中间工具交互是“已发生的执行事实”，不是已向群里发出的正常回复；失败或取消后的已完成工具记录保留执行状态与归属，不伪造一条成功回答。未完成模型流、半截文本和未经提交的最终候选只进入受限执行记录，不进入正式回复历史。这里持久化的是协议允许保存的输出与工具事实，不要求提取或保存 Provider 的隐藏推理过程。
 
@@ -235,9 +235,9 @@ selected_input_end_seq = max(A, T)
 
 ### 5.1 最终回答的原子提交
 
-完整最终候选正常进入 `ModelTurn + SendIntent + outbox` 事务。仅有新触发排队不自动丢弃已生成的最终候选；这样持续来消息不会无限延迟当前回答。事务验证候选固定的输入版本，追加尚未发布的完整非最终步骤及最终 ModelTurn，并把本次实际纳入的触发关联到回复；确认该 Run 没有剩余 CLAIMED 触发后，才能终结 Run 并清空 Session 的 `active_run_id`。
+完整最终候选进入协调器主持的 participant UnitOfWork。它验证候选固定的输入版本和所答 trigger 集合：Agent participant 关闭准确 Run，Conversation participant 追加尚未发布步骤引用与正式 `REPLY`、把本次实际纳入的 trigger 标为 `ANSWERED` 并分配 `response_seq`，Delivery participant 创建 SendIntent。各模块只写自己的 schema。仅有新触发排队不丢弃已生成的最终候选；持续来消息不会无限延迟当前回答，新触发留给同一 Session 的后继串行 Run。
 
-该事务同时锁定会话协调行并决定后续：
+该 UnitOfWork 锁定 Conversation lane，并通过 Agent participant 核对 Session/Run fence 后决定后续：
 
 - 有可用待处理触发：保留当前 `active_session_id`，转 `READY_NEXT`，由同一 Session 建立后继 Run，在其第一次模型调用前选择新的触发切口。
 - 有尚在连续分类头之外的已分类触发：保留 Session，转 `WAIT_INPUT`，等待缺口终结。
@@ -302,131 +302,148 @@ context_applied_seq == classified_through_seq
 
 ## 7. 伪代码与事务边界
 
-以下是协议伪代码；`transaction`、Repository 和调度方法为设计接口，不表示已有实现。所有事务执行[05 的统一锁序](05-storage-security-operations.md#3-事务与锁顺序)，所有模型、工具和摘要 I/O 均在事务外。
+以下是协议伪代码；`BotUnitOfWork` 只负责同一数据库事务、participant 顺序和 operation 回执，不暴露万能 Store，也不允许 participant 写入其他模块 schema。所有模型、工具、Adapter 和媒体 I/O 均在事务外。
 
 ```python
-async def select_at_safe_point(conversation_id, session_id, run_id, actor_fence):
-    async with store.transaction() as tx:
-        c = await tx.lock_conversation_with_guards(conversation_id, actor_fence)
-        await tx.require_session_and_run(c, session_id, run_id)
-        await tx.require_closed_model_tool_group(run_id)
-        pending = await tx.pending_triggers(c.id)
-        eligible = [t for t in pending if t.ingress_seq <= c.classified_through_seq]
-
-        if not eligible and pending:
-            await tx.checkpoint_wait_for_classification(run_id, c.classified_through_seq)
-            await tx.set_session_state(session_id, "WAIT_INPUT")
-            return {"action": "WAIT_INPUT"}
-
-        if not eligible:
-            # Existing CLAIMED triggers still belong to the current response.
-            # Ordinary messages after the previous cut do not enter this model step.
-            return {"action": "CONTINUE_EXISTING_INPUT"}
-
-        previous_applied = c.context_applied_seq
-        recovery_sources = [t for t in eligible if t.ingress_seq <= previous_applied]
-        cut = max(t.ingress_seq for t in eligible)
-        batch_id = await tx.stable_batch_id(session_id, run_id, eligible)
-        await tx.flush_complete_unpublished_steps(run_id, exclude_final_steps=True)
-        if cut > c.context_applied_seq:
-            await tx.append_input_range(
-                batch_id=batch_id,
-                start=c.context_applied_seq + 1,
-                end=cut,
-                kind="TRIGGER_INPUT",
-                preserve_authors=True,
-            )
-            c.context_applied_seq = cut
-        else:
-            await tx.append_recovery_claim(batch_id, existing_sources=eligible)
-        # A mixed batch can contain both new input and previously applied triggers.
-        # Link/pin old sources even when the new-range branch above was taken.
-        await tx.attach_existing_trigger_sources(
-            run_id, batch_id, recovery_sources, pin_required_originals=True
+async def select_for_next_model_call(ids, actor_fence, operation_id):
+    async with bot_uow.transaction(
+        operation_id,
+        participants=[conversation, agent],
+    ) as uow:
+        lane = await conversation.lock_lane_in(uow, ids.conversation_id, actor_fence)
+        await agent.require_model_safe_point_in(
+            uow, ids.session_ref, ids.run_ref, actor_fence
         )
-        await tx.claim_exact_triggers(eligible, session_id, run_id, batch_id)
-        await tx.advance_input_revision_and_context(c, run_id, batch_id)
-        await tx.register_context_maintenance(c)
-        return {"action": "INPUT_APPLIED", "batch_id": batch_id,
-                "trigger_cut_seq": cut,
-                "selected_input_end_seq": max(previous_applied, cut)}
+
+        # Conversation 独占分类水位、trigger 和 Context 顺序。
+        selection = await conversation.select_input_batch_in(
+            uow,
+            lane=lane,
+            session_ref=ids.session_ref,
+            run_ref=ids.run_ref,
+            boundary="MODEL_SAFE_POINT",
+            operation_id=operation_id,
+        )
+        if selection.kind in {"WAIT_INPUT", "CONTINUE"}:
+            await agent.record_selection_receipt_in(uow, ids.run_ref, selection)
+            return selection
+
+        # 批次必为 (context_applied_seq, last_eligible_trigger] 的连续前缀；
+        # 较后的普通尾部留队，旧来源 trigger 以关系表显式 pin。
+        await conversation.append_complete_agent_steps_before_input_in(
+            uow,
+            run_ref=ids.run_ref,
+            step_refs=await agent.closed_unpublished_step_refs_in(uow, ids.run_ref),
+            input_batch_ref=selection.batch_ref,
+        )
+        await agent.attach_input_batch_in(
+            uow,
+            run_ref=ids.run_ref,
+            batch_ref=selection.batch_ref,
+            batch_digest=selection.batch_digest,
+            trigger_refs=selection.trigger_refs,
+            principal_refs=selection.principal_refs,
+            actor_fence=actor_fence,
+        )
+        return selection
 
 
-async def run_model_step(session, run, actor_fence):
-    saved = await load_run_checkpoint(run.id)
-    if saved and saved.phase == "FINAL_READY":
-        # Commit the saved final snapshot before selecting any newer input.
-        return await commit_final_and_choose_next(session, run, saved.final, actor_fence)
-    selection = await select_at_safe_point(
-        session.conversation_id, session.id, run.id, actor_fence
+async def run_model_step(ids, actor_fence):
+    saved = await agent.load_checkpoint(ids.run_ref)
+    if saved.phase == "FINAL_READY":
+        # 恢复时先提交原候选；新 trigger 留给后继 Run。
+        return await commit_final(ids, saved.final_candidate_ref, actor_fence)
+
+    if saved.requires_next_model_call:
+        selection = await select_for_next_model_call(
+            ids, actor_fence, operation_id=new_selection_operation(ids)
+        )
+        if selection.kind == "WAIT_INPUT":
+            return await agent.release_execution_keep_session(ids.run_ref, "WAIT_INPUT")
+
+    snapshot = await prepare_bounded_context_view(ids.run_ref, actor_fence)
+    prepared = await provider.prepare_projection_and_transport(snapshot)
+    permit = await agent.commit_model_dispatch_permit(
+        ids.run_ref, prepared.manifest_ref, actor_fence
     )
-    if selection["action"] == "WAIT_INPUT":
-        await release_execution_resources_keep_session(session, run, reason="WAIT_INPUT")
-        return "WAIT_INPUT"
-    # Build/crop only the committed input plus the run's complete private steps.
-    # Publication validates source coverage, view revision and deletion fences.
-    snapshot = await prepare_bounded_context_view(run.id, actor_fence)
-    # Independent projection includes recall, capability filtering and budgeting.
-    # Prepare exact wire bytes outside transactions; persist guards before dispatch.
-    prepared = await prepare_model_projection_and_transport(run.id, snapshot)
-    step, permit = await commit_model_dispatch_permit(run.id, prepared, actor_fence)
-    result = await provider.dispatch(prepared, permit)
-    await verify_current_model_call(step, result, actor_fence)
-    closed = await close_tool_group_or_checkpoint_wait(step, result)
+    observation = await provider.dispatch_once(prepared, permit)
+    closed = await agent.observe_and_checkpoint(ids.run_ref, observation, actor_fence)
     if closed.is_waiting:
-        return await release_execution_resources_keep_session(session, run, closed)
-    await persist_closed_step_checkpoint(run.id, closed)
+        return await agent.release_execution_keep_session(ids.run_ref, closed.reason)
     if closed.is_final:
-        # Final candidates are not discarded merely because newer triggers exist.
-        return await commit_final_and_choose_next(session, run, closed, actor_fence)
+        return await commit_final(ids, closed.final_candidate_ref, actor_fence)
     return "SCHEDULE_SAME_RUN_NEXT_SAFE_POINT"
 
 
-async def commit_final_and_choose_next(session, run, final, actor_fence):
-    async with store.transaction() as tx:
-        c = await tx.lock_conversation_with_guards(session.conversation_id, actor_fence)
-        await tx.verify_final_snapshot_and_run(session, run, final)
-        await tx.flush_complete_unpublished_steps(run.id, exclude_final_steps=True)
-        reply = await tx.append_final_turn_and_send_intent(
-            final, c.next_response_seq, logical_step_id=final.logical_step_id
+async def commit_final(ids, final_candidate_ref, actor_fence):
+    operation_id = stable_reply_operation(ids.run_ref, final_candidate_ref)
+    commit_plan = await runtime_graph.reply_commit_plan(
+        required_contracts=["agent.finalize/1", "conversation.reply/1", "delivery.intent/1"],
+        optional_contracts=["memory.committed-source/1"],
+    )
+    async with bot_uow.transaction(
+        operation_id,
+        participants=commit_plan.participants,
+    ) as uow:
+        final = await agent.verify_final_candidate_in(
+            uow, ids.run_ref, final_candidate_ref, actor_fence
         )
-        await tx.answer_only_snapshot_triggers(final.trigger_ids, run.id, reply.id)
-        await tx.require_no_remaining_claimed_triggers(run.id)
-        await tx.complete_run(run.id)
-        await tx.clear_active_run(session.id, expected_run_id=run.id)
-        pending = await tx.pending_triggers(c.id)
-        if any(t.ingress_seq <= c.classified_through_seq for t in pending):
-            await tx.set_session_state(session.id, "READY_NEXT")
-        elif pending:
-            await tx.set_session_state(session.id, "WAIT_INPUT")
-        else:
-            await tx.set_session_state(session.id, "DRAINING")
-        await tx.mark_mailbox_work_and_outbox(c)
+        step_refs = await agent.closed_unpublished_step_refs_in(uow, ids.run_ref)
+        reply = await conversation.commit_reply_in(
+            uow,
+            conversation_id=ids.conversation_id,
+            session_ref=ids.session_ref,
+            run_ref=ids.run_ref,
+            final_payload_ref=final.assistant_payload_ref,
+            model_turn_ref=final.model_turn_ref,
+            answered_trigger_refs=final.trigger_refs,
+            prior_step_refs=step_refs,
+            operation_id=operation_id,
+        )
+        await delivery.create_intent_in(
+            uow,
+            cause_ref=reply.context_unit_ref,
+            reply_route=reply.reply_route,
+            lane="CHAT",
+            sequence=reply.response_seq,
+            parts=final.reply_parts,
+            operation_id=operation_id,
+        )
+        if memory_source := commit_plan.optional("memory.committed-source/1"):
+            await memory_source.enqueue_in(
+                uow, source_ref=reply.context_unit_ref, operation_id=operation_id
+            )
+        await agent.complete_run_in(
+            uow, ids.run_ref, final.checkpoint_ref, actor_fence
+        )
+        await conversation.choose_post_reply_state_in(
+            uow, ids.conversation_id, ids.session_ref, ids.run_ref
+        )
+        return reply
 
 
-async def silent_drain_or_close(conversation_id, actor_fence):
-    async with store.transaction() as tx:
-        c = await tx.lock_conversation_with_guards(conversation_id, actor_fence)
-        await tx.require_idle_or_draining(c)
-        pending = await tx.pending_triggers(c.id)
-        if pending:
-            return await tx.schedule_trigger_work_preserving_session(c, pending)
-        await tx.require_no_unresolved_claim_or_continuation(c)
-        if c.context_applied_seq < c.classified_through_seq:
-            end = c.classified_through_seq
-            await tx.append_silent_input_range(c.context_applied_seq + 1, end)
-            c.context_applied_seq = end
-            await tx.register_context_maintenance(c)
+async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
+    async with bot_uow.transaction(
+        operation_id,
+        participants=[conversation],
+    ) as uow:
+        result = await conversation.select_input_batch_in(
+            uow,
+            lane=await conversation.lock_lane_in(uow, conversation_id, actor_fence),
+            boundary="SESSION_END",
+            operation_id=operation_id,
+        )
+        if result.kind == "TRIGGER_INPUT":
+            return await conversation.schedule_trigger_work_in(uow, result)
+        if result.kind == "SILENT_DRAIN":
+            await conversation.apply_silent_batch_in(uow, result.batch_ref)
+            await conversation.register_deterministic_compaction_in(uow, result.batch_ref)
             return "CONTINUE_MAINTENANCE"
-        if await tx.has_required_context_maintenance(c):
-            return "WAIT_MAINTENANCE"
-        # Admission/classification use this same coordination row.
-        await tx.close_session_if_present(c)
-        await tx.ack_only_observed_mailbox_revision(c)
+        await conversation.close_idle_lane_in(uow, conversation_id, actor_fence)
         return "IDLE"
 ```
 
-伪代码中的接入准备包含输入已提交、必要裁剪已完成、原始来源仍合法这三个条件；不得先发模型请求再补做这些检查。进程内 `asyncio.Lock` 可减少同进程竞争，但数据库 Session 唯一约束、lease 和 epoch 是恢复后的最终防线。
+`BotUnitOfWork` 在开始前冻结 participant 列表、contract version、调用顺序和输入摘要；重试复用同一 operation。Conversation 不能通过该对象写 Agent/Delivery 表，Agent 也不能直接回答 trigger。进程内 `asyncio.Lock` 只减少同进程竞争，数据库唯一约束、lease、epoch 和 participant 自己的最终检查才是恢复后的权威。
 
 ## 8. 无模型摘要的裁剪与历史顺序
 

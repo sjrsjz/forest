@@ -39,7 +39,7 @@ reload 不是“停止旧 Worker 后再试一次”的旁路。Shell 只授权�
 
 ```text
 群命令(module.reload, expected=N)
-  -> 在目标 Bot 库复验当前 Binding 管理员、policy、Host 和命令 lease
+  -> 复验 shell.command 当前管理员策略、kernel.authorization 票据、Binding/Host fence 和命令 lease
   -> 锁 config head，要求 desired_revision=N，读取不可变 revision N
   -> config.plan(expected=N, source_revision=N, values=Host 实际读取值)
   -> config.apply(expected=N, plan_id, plan_digest)

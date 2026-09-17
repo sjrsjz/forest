@@ -1,10 +1,12 @@
 # P5 群聊 Shell 接入容量与资格缓存
 
-状态：**首版已实现。** 本文处理 webhook 签名校验以后、消息写入 Bot Inbox 以前的容量隔离。Shell 的命令语法、持久优先级、执行前鉴权和结果发送继续由 [群聊 Shell 详细设计](09-group-shell-command-system.md)、[群管理协议](p3-control.md)与各管理权威定义。
+> **文档级别：目标协议与旧切片纠偏。** 旧实现把入口 Guard、Binding 管理员配置和 `MessageStore` 绑进 OneBot 组合根，该所有权已撤销。本文只保留入口容量算法；目标边界以 [09](09-group-shell-command-system.md)、[13](13-microkernel-control-plane-redesign.md)和[14](14-clean-schema-and-payload-provenance.md)为准，完成度只看[实现状态](implementation-status.md)。
+
+本文处理平台事件认证以后、Bot UnitOfWork 接纳以前的容量隔离。Shell 的管理员策略、命令请求、持久优先级和执行归 `shell.command`；Inbox/Context 归 `conversation.scheduler`；平台连接与事件观察归 Adapter。
 
 ## 1. 问题与不变量
 
-BotStore 当前最多持有 8 条数据库连接。若普通消息和明显无权的 `#forest` 请求可以无界并发进入原始正文、Adapter Worker 与 Inbox 事务，它们会先占满连接，再让真正的 P0 cancel/pause/disable 排队。执行调度器保留 P0 槽不能修复这个更早的入口拥塞。
+若普通消息和明显无权的 `#forest` 请求可以无界并发进入 Payload 与接纳 UnitOfWork，它们会先占满 Bot 数据库连接和入口任务，再让真正的 P0 cancel/pause/disable 排队。执行调度器保留 P0 槽不能修复这个更早的入口拥塞。入口预算必须从当前 Bot 的资源计划和连接池容量派生，不能把旧 `BotStore` 的固定数字写成协议。
 
 接入隔离必须同时保持这些不变量：
 
@@ -12,37 +14,37 @@ BotStore 当前最多持有 8 条数据库连接。若普通消息和明显无�
 - 宿主内置 OneBot 解析器只做有界预分类，不运行插件、不联网；
 - Forest 已返回成功 ACK 的每条群消息都写入 Inbox、保留作者与来源，并按 `ingress_seq` 进入 Context；
 - 容量不足发生在 Inbox 提交前时返回明确 429，不伪造成功 ACK，也不生成虚假的 `event_id`、`command_id` 或 Context 记录；平台重试仍由平台消息 ID 在正常接纳后幂等合流；
-- 资格缓存只选择入口通道和是否保留 P0，不能授予管理 action。ShellDispatcher 在执行前仍读取当前 Binding 配置并重新鉴权；
+- 资格缓存只选择入口通道和是否保留 P0，不能授予管理 action。`shell.command` 在接纳、claim、调用和结果提交前按自己的策略 revision 与 `kernel.authorization` 重新鉴权；
 - Binding 换代、配置生效修订变化、Bot 接管或进程重启自然使旧缓存失配，不能把过期管理员资格带入新连接；
 - 日志和 Web 状态只暴露聚合计数，不暴露被限速主体或命令正文。
 
 ## 2. 预分类与资格证明
 
-签名验证后，宿主以固定 OneBot 解析器生成与后续 `stage_platform_input` 相同的规范消息，再用当前冻结的 Shell registry 判断是否命中保留命名空间。非消息事件和普通消息不做 Shell 资格查询。命中保留命名空间的消息直接沿用两次宿主解析完全相等的投影，不调用可热替换 Adapter Worker；因此 Adapter 损坏时 Core 救援命令仍可进入持久 Shell 队列。普通消息继续要求 Worker 投影与宿主投影完全一致。
+平台事件通过 Adapter 认证后，稳定 ShellGate 对规范消息做有界前缀检查，再用当前冻结的 Shell registry 判断是否命中保留命名空间。非消息事件和普通消息不做 Shell 资格查询。Core 救援 grammar 由发行版冻结；模块命令路由来自 RuntimeGraph。任何路径都不能绕过 Adapter 的平台身份认证，也不能让 Adapter 解释管理员策略。
 
-每个在线 Connection 已绑定：
+每个在线 Connection 提供不可变 transport fence；Shell 策略由 `shell.command` 独立发布：
 
 ```text
-(bot_id, binding_id, binding_epoch, effective_config_revision,
- config_payload_digest, effective config)
+(bot_id, binding_id, connection_epoch, adapter_generation,
+ shell_policy_revision, route_graph_digest)
 ```
 
 资格缓存键固定为：
 
 ```text
-(binding_id, binding_epoch, effective_config_revision,
+(binding_id, connection_epoch, shell_policy_revision,
  principal_bucket, command_name, requested_priority)
 ```
 
 值只包含 `is_current_admin` 和按当前策略算出的实际 priority，默认 TTL 5 秒、最多 512 项，按最近使用淘汰。`principal_bucket` 对验证账号使用稳定 `principal_ref`；匿名主体按 Binding 与群形成共享桶，不能通过省略匿名 ID 为每条消息创建新额度。
 
-缓存命中产生宿主内部 `ShellPriorityProof`：绑定 Bot/Binding 修订、RouteGraph digest、owner Generation、命令名、声明 priority 与作者 principal。MessageStore 在 Inbox 事务中对当前 Binding 行、作者和重新解析出的命令逐字段复核；不一致返回 `SHELL_PRIORITY_PROOF_INVALID`。没有宿主证明的内部恢复调用必须从权威 Binding 与冻结 RouteGraph 重新计算，不能使用仅服务旧测试的旁路。
+缓存命中产生宿主内部 `ShellIngressProof`：Bot/Binding/connection fence、Shell policy revision、RouteGraph digest、owner Generation、命令名、声明 priority 与作者 principal。接纳 UnitOfWork 调用 `shell.command.admit_command_in`，由该 Repository 锁定策略 head 并逐字段复核 proof、作者和命令；`conversation.scheduler.admit_message_in` 独立提交 Inbox。任一 participant 失败则整体回滚。不一致返回 `SHELL_INGRESS_PROOF_INVALID`。恢复调用必须从权威 Adapter fence、Shell policy 与冻结 RouteGraph 重新计算，不能使用仅服务旧测试的旁路。
 
-该证明不是可序列化票据，不进入 Worker、HTTP、群输出或数据库。Python 插件拿不到 MessageStore 或 guard 对象；即使宿主进程内对象被错误复用，修订与作者复核也会拒绝跨 Binding/跨主体重定向。
+该证明不是授权票据，不进入 Worker、HTTP、群输出或持久事实。Python 插件拿不到 Conversation/Shell Repository 或 ingress guard；即使宿主进程内对象被错误复用，修订与作者复核也会拒绝跨 Binding/跨主体重定向。
 
 ## 3. 三条入口通道
 
-首版每 Bot 运行时使用以下默认值：
+每 Bot 的初始资源计划可采用以下默认值，启动时必须校验总并发小于数据库/任务容量并保留内核恢复余量：
 
 | 通道 | 内容 | 并发上限 | 等待上限 |
 |---|---|---:|---:|
@@ -50,7 +52,7 @@ BotStore 当前最多持有 8 条数据库连接。若普通消息和明显无�
 | `PRIVILEGED_CONTROL` | 当前管理员的声明 P0 Shell | 2 | 2 秒 |
 | `REJECTION` | 明显非管理员提交的任意 Shell 命令 | 1 | 50 毫秒 |
 
-三条 semaphore 在取得数据库连接、写原始正文和调用 Adapter Worker 以前领取，并覆盖直到 Inbox 提交。普通入口最多占用 4 条并发链，拒绝入口最多占用 1 条，因而在 BotStore 的 8 条连接中为紧急控制与其它内核工作留下余量。资格未知时按拒绝通道处理，不能乐观进入 `PRIVILEGED_CONTROL`。
+三条 semaphore 在取得数据库连接和写 Payload 以前领取，并覆盖直到 Adapter observation、Conversation Inbox 与可选 Shell request 的 UnitOfWork 提交。普通入口与拒绝入口都必须受配置上限约束，为紧急控制和内核恢复工作留下验证过的余量。资格未知时按拒绝通道处理，不能乐观进入 `PRIVILEGED_CONTROL`。
 
 通道互不借位。普通入口满载时，合格 P0 仍可进入自己的两条通道；P0 自身超过有界等待返回 `CONTROL_INGRESS_OVERLOADED`。普通消息等待 10 秒后返回 `INGRESS_OVERLOADED`，不会静默丢弃。拒绝入口忙时立即返回 `SHELL_REJECTION_OVERLOADED`。
 
@@ -66,7 +68,7 @@ BotStore 当前最多持有 8 条数据库连接。若普通消息和明显无�
 
 ## 5. 可观察性与生命周期
 
-Guard 由 `adapter.onebot` Generation 创建和销毁，并绑定准确的 Bot/Binding 作用域，不跨 Bot 共享身份。`BotRuntimeSupervisor` 不持有 Guard；Adapter 的管理贡献提供以下无主体聚合计数：
+Ingress guard 是稳定宿主入口资源，由通用资源监督器按 Bot/Binding scope 创建和销毁；它只持有容量计数及短期 proof cache，不持有 Adapter、Conversation 或 Shell Repository。`BotRuntimeSupervisor` 只观察其通用资源句柄和健康，不保存业务 guard 属性。聚合计数由 `shell.command` 的管理贡献经只读观测端口展示：
 
 - 三通道当前占用、累计接纳和累计 overload；
 - 资格缓存 hit/miss、当前条目数；
@@ -84,7 +86,7 @@ Guard 由 `adapter.onebot` Generation 创建和销毁，并绑定准确的 Bot/B
 - 同一 Binding/config/principal 命中缓存，Binding epoch 或 effective revision 变化后必定 miss；
 - 匿名事件不能通过轮换 event-scoped principal 绕过共享桶；
 - proof 不能跨 Bot、Binding、作者、命令、gate 或 revision 重放；
-- 没有 proof 的既有 MessageStore 测试继续从数据库计算 priority；
+- 缺失、过期或错误 proof 时，`shell.command` 只能按当前策略重新计算并形成新接纳操作，不能调用旧 `MessageStore` fallback；
 - Web runtime 状态只有聚合计数；关闭后没有 semaphore owner 或 receive task 泄漏；
 - 真实 PostgreSQL 并发测试证明普通入口饱和不阻塞 P0 的应用层接纳，fake Adapter 阻塞和失败不会泄漏槽；
 - Docker + 浏览器流程仍能提交真实 P0 Core 命令并读取新的入口统计。

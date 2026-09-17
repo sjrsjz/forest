@@ -61,7 +61,7 @@ priority = 0
 
 - `DISABLED`：默认值，命令不会认领消息；
 - `EVERYONE`：可信平台用户均可执行，机器人自身、匿名/缺失身份和回放内容仍拒绝；
-- `ADMINS`：发言者必须在 Binding 当前 `admin_user_ids`；
+- `ADMINS`：发言者必须在当前 Binding/群作用域拥有经 `shell.command` 策略与 `kernel.authorization` 共同确认的 `bot.admin` 能力；Adapter 不保存管理员名单；
 - `USER_SET`：发言者的规范平台 user ID 必须在策略的有界集合中。
 
 策略保存使用 Web 账号重新鉴权、preview/apply、expected revision 和 Bot 权限票据。策略正文进入受来源管理的配置 payload；读取只返回安全配置，不回显其他身份资料。应用后新消息使用新 revision，已接纳命令继续绑定其接纳时的 policy snapshot，并在执行和回复提交前重验“该 revision 仍可终结该工作”；撤销时未开始工作被取消，已产生外部意图按账本对账。

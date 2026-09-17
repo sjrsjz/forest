@@ -41,9 +41,10 @@ flowchart LR
   LC --> J[scheduler.jobs]
   A -->|InboundMessage 1.x| CR
   CR --> Q
-  Q -->|ConversationRun 1.x| G
+  Q -->|RunInput / safe-point batch 1.x| G
   G -->|memory.query 1.x| M
-  G -->|SendIntent 1.x| D
+  G -->|FinalCandidate / checkpoint 1.x| Q
+  Q -->|atomic Reply + SendIntent UoW| D
   D -->|adapter.send 1.x| A
 ```
 
@@ -67,7 +68,9 @@ flowchart LR
 
 当前 `RuntimeModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次 Registry 激活分配独立 activation UUID，为完整官方描述符集建立一个不可变 RuntimeGraph，并为每个官方模块建立 Generation；即使宿主 lease incarnation 未变化，关闭后再次启动也必须创建新图和新代际，绝不重新激活已经 `STOPPED` 的记录。描述符摘要覆盖依赖、factory 身份、管理契约、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`。当前官方模块仍同属一个 Forest Python distribution，所以共享由该 distribution 全部 Python、SQL、HTML、CSS、JavaScript、JSON 和 TOML 资源派生的内容摘要；这比伪造独立包身份更准确，待物理拆包后再自然变为各包摘要。存储 bundle 的 `package_digest` 必须等于描述符工件摘要。所有模块启动成功后，数据库在一个事务中追加 ACTIVE 生命周期事实并切换 runtime graph head；任一启动失败只记录 FAILED/STOPPED，不能发布部分图。关闭先原子撤下 head，再按逆依赖序排空并追加终态；消息冻结的旧图仍保留旧代际。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 仍使用不同的运行驱动和代际事实表，后续需统一健康检查、恢复和按依赖边隔离的故障策略，不能把二者误称为已经共用同一 Worker 生命周期实现。
 
-官方 `adapter.onebot` 模块只拥有 Binding 配置与账号身份、连接代际、候选发布/恢复、平台入站观察、网络客户端和连接监督任务，并向其他模块提供 Binding 目录、已认证入站和 OneBot action 传输端口。`conversation.scheduler` 拥有 Inbox、触发、输入切口和 Context；`shell.command` 拥有控制消息接纳与命令执行；`delivery` 拥有 SendIntent、发送分片、attempt、平台回执引用、UNKNOWN 与对账。Adapter 只执行 Delivery 已许可的一个 transport attempt 并返回类型化观察，不能持有 `MessageStore`、`DeliveryStore`、Shell guard、发送队列或回复顺序。
+官方 `adapter.onebot` 模块只拥有 Binding 配置与账号身份、连接代际、候选发布/恢复、平台入站观察、网络客户端和连接监督任务，并向其他模块提供 Binding 目录、已认证入站和 OneBot action 传输端口。Binding 配置只引用凭据与其他模块的策略身份；管理员名单、Shell 规则和命令权限属于 `shell.command`，不能因为它们按 Binding 生效就写进 Adapter。`conversation.scheduler` 拥有 Inbox、触发、输入切口和 Context；`shell.command` 拥有控制消息接纳、管理员策略、命令请求与执行；`delivery` 拥有 SendIntent、发送分片、attempt、平台回执引用、UNKNOWN 与对账。Adapter 只执行 Delivery 已许可的一个 transport attempt 并返回类型化观察，不能持有 `MessageStore`、`DeliveryStore`、Shell guard、发送队列或回复顺序。
+
+Agent 的最终候选不能直接创建 Delivery 记录。`agent.runtime` 先把带 checkpoint 和所答 trigger 集合的 `FinalCandidate` 交给 `conversation.scheduler`；协调器在同一 Bot UnitOfWork 中提交正式 `REPLY` Context、trigger `ANSWERED` 状态和 Delivery `SendIntent`。任一 participant 失败则整体回滚。Agent、Conversation 与 Delivery 都只能写自己的 schema，原子性由注册的 participant 端口实现，不靠跨模块直写或跨 schema 外键。
 
 `memory.graph` 拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询、组件 Event 和 ComponentJob 的持久存储及管理视图；事件/任务的查询、失败重放和 Handler 退役均通过该模块的类型化管理契约完成。`kernel.audit` 拥有 Bot 级不可变审计流的写入端口、脱敏元数据查询契约和管理 UI；它只保存并投影其他模块提交的审计事实，不接管这些事实所描述的业务资源，生产者仍负责动作语义和载荷 schema。审计查询不得直接穿过壳层访问共享表，Shell 也必须依赖该模块端口。`command.router` 与 `message.router` 依赖 `adapter.onebot` 的 Binding 目录、`conversation.scheduler` 的消息端口和 `routing.graph`，分别拥有业务命令与普通消息 Handler 的策略、容量、脱敏诊断、恢复操作和管理 UI。`component.worker-host` 独占可安装包 Worker 的准备、启动与停止资源，OneBot 通过依赖端口请求 codec。`contract.router` 独占冻结消息分派、命令/Handler 调用、Agent 选择和模板 responder，Conversation Scheduler 只持有它的 `execute` 端口。`scheduler.jobs` 自己构造授权端口并把冻结委派翻译为部署 authority 请求。
 
@@ -127,7 +130,7 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。它再沿不可变身份扩展 Kernel call 的 parent/root 树、调用发布的 component event、每个 subscriber delivery、调用创建的 component job、Job/Event 实际生成的后续 call，以及外部 SendIntent/SendPart/transport attempt/resolution。每条扩展记录必须携带类型化 `caused_by={kind,id}`；发送意图必须在创建事务中保存 `cause_kind/cause_id`，禁止用 operation 字符串前缀、正文或时间邻近猜测来源。
 
-控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；实际 Kernel call 使用其冻结 Generation；尚未执行的 Event/Job/Delivery 不借用当前 head 伪造代际。外部发送逐 part 显示 `PENDING/CLAIMED/DISPATCHING/SENT/FAILED/UNKNOWN/CANCELLED/SKIPPED`，`UNKNOWN` 只能由显式 resolution 收敛。Trace 只返回身份、状态、摘要、时间和因果引用，不返回消息正文、事件/任务载荷、wire body 或平台 receipt 正文。
+控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；实际 Kernel call 使用其冻结 Generation；尚未执行的 Event/Job/Delivery 不借用当前 head 伪造代际。外部发送逐 part 显示 `PENDING/CLAIMED/PREPARED/DISPATCHING/SENT/FAILED/UNKNOWN/CANCELLED`；`CANCELLED` 只适用于未交接 attempt，`UNKNOWN` 只能由带 evidence 的显式 resolution 收敛，不提供跳过 lane 的状态。Trace 只返回身份、状态、摘要、时间和因果引用，不返回消息正文、事件/任务载荷、wire body 或平台 receipt 正文。
 
 每个 Kernel 根调用在准入时固化 `causal_root_kind/causal_root_id`，嵌套调用继承同一根；允许的根是 Kernel operation、业务命令请求、消息 Handler chain 和 Conversation Run。Event 与 Job 的后继调用继承发布/调度调用的根，Agent 工具调用由 Agent 准入证明强制绑定 Conversation Run，调用者不能自行换根。`bot_calls_causal_root_idx` 和各权威事实表上的关联键让组件、代际与结果筛选先在数据库中精确选出消息根，不再扫描最近若干消息后做进程内猜测，也不再返回 `candidate_scan_truncated`。
 

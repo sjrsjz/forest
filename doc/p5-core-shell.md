@@ -11,7 +11,7 @@
 #forest core reload <component_id> --expect-revision <desired_revision>
 ```
 
-`core status/cancel/disable` 声明 P0；`core reload` 是 P1。只有可信发言主体命中当前 Binding 管理员名单时才保留声明的 P0，否则请求拒绝或按普通 P1 查询处理。核心命令 grammar 随当前 Forest distribution 固定并由 bootstrap 后装载的核心 ShellGate 提供；它不属于数据库 baseline，也不保留开发期 gate grammar、writer generation 或旧请求升级分派器。
+`core status/cancel/disable` 声明 P0；`core reload` 是 P1。Adapter 只证明平台事件和发言主体；只有该主体命中 `shell.command` 对当前 Binding/群发布的管理员策略，并通过精确能力检查时才保留声明的 P0，否则请求拒绝或按普通 P1 查询处理。核心命令 grammar 随当前 Forest distribution 固定并由 bootstrap 后装载的核心 ShellGate 提供；它不属于数据库 baseline，也不保留开发期 gate grammar、writer generation 或旧请求升级分派器。
 
 Core 不是服务器终端、交互式 Shell 或第二套管理框架。它不接受自由 argv、脚本、路径、环境变量、密钥、跨 Bot 目标或插件注册命令。解析只依赖发行版内的冻结 token、封闭参数 schema 和固定动作映射；业务插件及其 Worker 不能覆盖这些 form。
 
@@ -32,11 +32,11 @@ Core 不是服务器终端、交互式 Shell 或第二套管理框架。它不�
 
 控制调度器按持久 priority 排序，并在并发上限大于一时为 priority 0 保留至少一个执行槽。普通 P1 查询占满其份额时，通过接纳资格预检的 `core cancel`、`core disable` 和 `core status` 仍可被领取；它们不能抢断已经进入提交阶段的事务，也不能撤销已经提交的外部效果。`core reload` 需要候选准备和排空，保持 P1，不能借 Core 前缀占用紧急槽。
 
-所有 Core form 仍要求 Adapter 验证的真实发言主体位于当前 Binding 的 `admin_user_ids`。签名验证后，固定宿主解析器依据在线 Connection 冻结的 Binding epoch、生效配置修订与配置摘要生成短期资格证明；接纳事务锁定 Binding 后逐字段复核证明与作者、命令和当前修订，再把声明优先级、实际优先级、资格结果、策略名、Binding epoch 和 effective config revision 一起写成不可变事实。没有证明的 MessageStore 直调仍在事务内读取有效配置正文。每个执行事务再复核命令 claim/epoch/期限、Binding epoch、当前配置正文、Host incarnation、Bot policy 和目标业务版本；平台群主标记、昵称、引用消息、匿名身份和 Bot echo 都不能授权。`core status` 也完成相同最终检查，未授权只返回固定拒绝。接纳后撤权会拒绝操作；接纳后加权可以让请求执行，但不会追溯提升已经持久的 P1。
+所有 Core form 都要求 Adapter 验证真实发言主体，但管理员名单和优先级策略只由 `shell.command` 保存。固定宿主解析器依据在线 Connection fence、Shell 策略 revision、RouteGraph digest、命令名和主体生成短期 ingress proof；它只用于容量分流。接纳 UnitOfWork 分别调用 `conversation.scheduler.admit_message_in` 与 `shell.command.admit_command_in`，后者锁定自己的策略 head，逐字段复核 proof、作者、命令和当前 revision，再把声明优先级、实际优先级、资格结果与 fence 写成不可变事实。不存在 `MessageStore` 直调或 Adapter 管理员配置 fallback。每个执行事务再复核 command claim/epoch/期限、Shell 策略、Host/Binding fence、目标业务 revision 和 `kernel.authorization` 票据；平台群主标记、昵称、引用消息、匿名身份和 Bot echo 都不能授权。`core status` 也完成相同最终检查，未授权只返回固定拒绝。接纳后撤权会拒绝尚未发生的效果；接纳后加权不会追溯提升已经持久的 P1。
 
 P0 表示调度容量，不表示更高权限或数据库锁优先级。两条 `core disable` 基于相同 maintenance epoch 时只有一条成功；cancel 与最终回答提交按 Run 守卫决胜；Core 与普通 reload 基于相同 config revision 时只有一个能生成下一 revision。失败方收到现有的 `MAINTENANCE_CONFLICT`、Run 终态或 `REVISION_CONFLICT`，不能以到达顺序覆盖胜者。
 
-当前预检在取得 BotStore 连接前把普通消息、合格 P0 与明显无权 Shell 分入互不借位的 4/2/1 条并发通道。无权主体另受每桶突发 4 条、每 5 秒恢复 1 条的令牌预算；耗尽时在 raw payload 与 Inbox 前返回 429。资格缓存只决定入口容量，执行时仍重新鉴权。该隔离保护单个 Bot 进程主动发起的数据库工作，不能在数据库整体失效时提供救援；已获授权但失陷的管理员仍可能提交大量 P0，请求主体治理仍需后续策略。详见 [P5 Shell 接入容量](p5-shell-ingress-admission.md)。
+预检在取得 Bot 数据库连接前把普通消息、合格 P0 与明显无权 Shell 分入互不借位的有界通道；具体配额由 ingress 资源预算发布，不能写死为某个旧 `BotStore` 连接池大小。无权主体另受有界令牌预算；耗尽时在 Payload 与 Inbox 前返回 429。资格缓存只决定入口容量，执行时仍重新鉴权。该隔离保护单个 Bot 入口主动发起的数据库工作，不能在数据库整体失效时提供救援；已获授权但失陷的管理员仍受主体速率策略和审计告警约束。详见 [P5 Shell 接入容量](p5-shell-ingress-admission.md)。
 
 ## 4. 正文、恢复与验证
 

@@ -114,7 +114,7 @@ Run 状态机不负责释放整个群的响应资格：WAIT_TOOL、WAIT_APPROVAL
 4. 按 `forest-agent-protocol/v1` 将输出解析为一个原子 ModelTurn。协议错误最多进行一次有界修复；合法 FunctionCall 按其具体请求主体校验参数、权限、预算、幂等与目标，提交意图并等待结果或保存 checkpoint。模型不得直接产生可信 ControlProposal；管理控制继续走确定性 Shell/管理服务。
 5. 模型流和工具结果闭合后形成安全边界。完整步骤先保存有序 RunStep/checkpoint；若有新触发，在下一输入批次追加之前或同一事务中 flush 前序尚未发布的完整步骤，再按新切口接入消息。未闭合的工具调用与流之间禁止插入新群消息。
 6. 每次安全边界更新视图并检查裁剪预算；没有新触发时不吸收普通尾部，仅按当前任务决定是否继续调用模型。裁剪不能只在首次创建 Agent 时执行。
-7. 最终回复事务校验 epoch、Session、输入版本、Run 状态与证据权限，原子追加完整 ModelTurn、标记实际覆盖的触发、完成 Run、分配 CHAT response_seq、写回复 outbox 与记忆 Job。仅因为队列中有新触发，不默认丢弃当前已生成的合法回答。
+7. 终止 Assistant 先形成持久 `FinalCandidate` checkpoint。协调器随后主持同一 Bot UnitOfWork：`agent.runtime` 关闭准确 Run，`conversation.scheduler` 追加正式 `REPLY` Context、标记实际覆盖 trigger 并分配 CHAT `response_seq`，`delivery` 创建 SendIntent，Memory 只登记自己的整理工作。各 participant 只写自己的 schema，任一失败整体回滚。仅因为队列中有新触发，不丢弃当前已经生成且仍合法的回答；新触发进入后继串行 Run。
 8. Session 调度器再次检查持久队列：有触发则启动后继串行 Run；无触发则不再请求对话模型，静默追加剩余普通消息、归档/裁剪，最后原子检查水位并退出。并发入站或分类完成必须留下待调度工作，不能丢失唤醒。
 
 输入事实、完整模型/工具步骤、最终可见回复采用不同提交边界；ModelTurn 仍整体提交，不逐 token 写 Context。前序完整步骤在后来的用户输入之前发布，来源时间与 commit_seq 各自保留。取消/失败保留已经入库的群消息与工具事实，仅将未完成输出标记为失败分支，不把它们冒充群回复。恢复复用已确认工具结果，也不能重复追加同一 InputBatch。

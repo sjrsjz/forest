@@ -113,7 +113,7 @@ MemorySourceUnit
 
 Bot 生成文本已提交 ModelTurn 但尚未成功发送时，来源明确标为 Bot 输出及对应 Delivery 状态；不能写成“群成员已经看到的消息”。own echo 关联已有源单元与平台回执，不重复新建同一 Bot 发言。工具结果注明工具身份和发起关系，不冒充平台用户。
 
-FINAL_READY仅是私有最终候选checkpoint，不是正式ModelTurn，不因候选已保存就发布为主干记忆。最终候选只有通过正常最终事务后才获得正式来源归属；闭合非最终步骤按其稳定logical_step_id引用，后续flush/归档不新建第二个源单元。原消息和同消息的安全投影共用来源身份，投影不是第二次发言。
+FINAL_READY 只是引用 Agent 私有 ModelTurn 的最终候选 checkpoint，不是正式 `REPLY` Context 或可索引记忆源，不因候选已保存就发布到主干。最终候选只有通过 Conversation 的回复 UnitOfWork 后才获得正式来源归属；闭合非最终步骤按其稳定 `logical_step_id` 引用，后续 flush/归档不新建第二个源单元。原消息和同消息的安全投影共用来源身份，投影不是第二次发言。
 
 同一Bot的两个Binding可能观察到同一真实群事件。Adapter能提供可跨Binding验证的稳定事件ID时，规范来源身份采用`(bot_id, group_source_id, platform_event_id, event_kind)`，保留一份源单元及一个位置；每次接入另记`memory_source_occurrences(occurrence_id, source_unit_id, binding_id, inbox_message_id, source_conversation_id, source_ingress_seq, input_batch_refs, eligibility_state)`，不覆盖第一个观察位置。单源单元中的会话/ingress快捷字段不能代替完整occurrences集合。若平台不提供可对齐身份，则明确使用含Binding的较弱去重域并标注dedup_scope，不能按相同文本/时间猜测合并。
 

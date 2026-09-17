@@ -177,9 +177,9 @@ Agent 结束且没有待处理触发时，剩余消息按有限批次静默写�
 
 `ReplyRoute` 包含 `bot_id, binding_id, platform, channel_kind, channel_id, thread_id, reply_to_message_id, visibility`。由入站事实或已受权 Job 生成，进入 Run 后不可由共享全局变量改变。模型希望跨群发消息时必须提出新的工具意图并通过目标范围授权。
 
-发送经过：`ReplyProposal → 校验/分片/限流计划 → SendIntent → Delivery → Adapter → Receipt`。适配器负责 CQ/OneBot 等格式转换和平台上限，业务层只认识规范内容段。
+发送经过：`FinalCandidate/ReplyProposal → Conversation 正式 REPLY + SendIntent UnitOfWork → Delivery 分片/顺序/Effect → Adapter TransportAttempt → Observation`。Adapter 负责 CQ/OneBot 等平台编码和单次传输，Delivery 负责持久发送语义；Agent 或业务插件只认识规范内容段，不能直接调用 Adapter。
 
-持久意图固定 `operation_id, contract_version, schema_digest, implementation_compatibility, input_digest, ReplyRoute`。升级后的执行器必须能读取在途意图的旧契约，否则保留兼容执行器或阻止升级；禁止用新 schema 重新解释旧参数。
+持久意图固定 `operation_id, contract_version, schema_digest, owner_generation, input_digest, ReplyRoute`。在途工作绑定原 Generation；热重载必须先排空或由已验证的 takeover contract 接管，否则阻止切换。Forest 首发前不保留开发期 schema 兼容执行器，也禁止用新 schema 重新解释旧参数。
 
 群聊批次保留 `trigger_ids` 和逐条作者，回复的会话目标固定，引用锚点可取该批最后触发消息，同时记录实际覆盖的全部 trigger_id。不能把锚点用户当成其他消息的作者或授权主体。每次 CHAT 最终回复事务分配会话单调 `response_seq`，Delivery 按 `(conversation_id, response_seq, part_index)` 发出，同群后续轮次不能因独立 Worker 更快而抢先发送。
 
@@ -188,21 +188,21 @@ Agent 结束且没有待处理触发时，剩余消息按有限批次静默写�
 ### 9.2 发送状态
 
 ```text
-PENDING → CLAIMED → DISPATCHING → SENT
-                   ├─────────→ RETRY_WAIT（确定未发出且可重试）
-                   ├─────────→ UNKNOWN（可能已发出）
-                   └─────────→ FAILED（确定失败）
-PENDING / CLAIMED → CANCELLED（发出前被撤销）
-UNKNOWN → SENT / FAILED / MANUAL_RESOLUTION（对账）
+PENDING → CLAIMED → PREPARED → DISPATCHING → SENT
+                      │              ├────────→ UNKNOWN（可能已应用）
+                      │              └────────→ FAILED（确定拒绝且未应用）
+                      └─────────────→ CANCELLED（交接前撤销）
+DISPATCHING / UNKNOWN → SENT / NOT_APPLIED（仅带 evidence 的对账）
+NOT_APPLIED → 同一 part/effect 的新 attempt（策略允许时）
 ```
 
-claim 使用 `delivery_owner_epoch`。发送者在短事务中复核当前授权、绑定状态、目标和幂等键，并按统一锁序锁定 Run/意图确认没有生效的取消，再记录 DISPATCHING 后调用平台。已完成 Run 的合法回复仍允许发送；取消完成后的 Run 不回滚其已提交结果。此阶段是发送许可的线性化边界，不能保证稍后撤权会撤回已经批准且在途的网络请求。账本中记录许可时刻、开始调用、回执和撤权关系。
+claim 使用 `delivery_owner_epoch`，只授予准备权。Delivery 在短事务中锁定 lane/intent/part 与对应 `kernel.effect` operation，复核当前授权、Binding/client fence、目标、payload 和取消事实后建立 `PREPARED` attempt；实际 I/O 前再用第二个短事务把 effect 与 attempt 一起交接为 `DISPATCHING`，提交后才调用 Adapter。它不锁或修改 Agent Run；已完成 Run 的合法回复按已提交 cause 继续发送。交接是不可撤回边界，稍后撤权不能把在途网络请求改写成未执行。账本分别记录许可、交接、观察与对账。
 
 平台支持幂等键时传稳定 operation_id；支持查询时按平台消息标识对账。若两者都不支持，断线后 UNKNOWN 默认不自动重发，提供查询/人工决定。不能用“失败后换新 echo 再发”冒充可靠重试。
 
 一个 ReplyProposal 分成多个平台消息时，子项使用稳定 `(intent_id, part_index)`，据此派生各自的 `part_operation_id` 并作为平台幂等键，不能所有分片共用父键；记录部分成功。重试仅补确定未发送部分，UNKNOWN 子项先对账。
 
-同群 CHAT 先前 response_seq 处于 DISPATCHING/UNKNOWN 时，默认阻塞后续 CHAT 回复外发，直到回执/对账确定或形成显式 skip/继续决议；不能跳过未知结果再声称聊天回复严格有序。CONTROL 在同一 command_id 内遵守同样的分片和未知结果规则，其他独立命令的短回执仍可调度。未知状态不持有执行槽或数据库事务；两个通道共享的平台实际串行发送约束仍然有效。
+同群 CHAT 先前 response_seq 处于 DISPATCHING/UNKNOWN 时，阻塞后续 CHAT 回复外发，直到带证据的显式对账把原 attempt 解析为 `SENT` 或 `NOT_APPLIED`；不存在无证据的 skip/继续决议。确认 `NOT_APPLIED` 后才可为同一 part/effect 创建下一 attempt。CONTROL 在同一 command_id 内遵守同样的分片和未知结果规则，其他独立命令的短回执仍可调度。未知状态不持有执行槽或数据库事务；两个通道共享的平台实际串行发送约束仍然有效。
 
 ### 9.3 连接所有权
 

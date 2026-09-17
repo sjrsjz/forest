@@ -102,7 +102,7 @@ stateDiagram-v2
 
 ## 5. 内部触发与群交互
 
-`MessageStore.enqueue_job_trigger_in` 是宿主事务内部入口，不暴露成普通 OneBot 事件解析接口，也不伪造 QQ user_id。其作者包含：
+`conversation.scheduler` 的类型化 `admit_internal_trigger_in` participant 是同一 Bot UnitOfWork 的内部入口，不暴露成普通 OneBot 事件解析接口，也不伪造 QQ user_id。`scheduler.jobs` 只能提交规范 DTO 和 PayloadRef，不能取得 Conversation Repository。其作者包含：
 
 ```json
 {

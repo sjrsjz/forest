@@ -162,13 +162,12 @@ stateDiagram-v2
     WAIT_TOOL --> PREPARING_MODEL: 工具获得确定终态
     WAIT_TOOL --> WAIT_APPROVAL: 需要确认
     WAIT_TOOL --> BLOCKED_UNKNOWN: 外部效果不明
-    PARSING --> SAFE_BOUNDARY: 终止 Assistant
-    SAFE_BOUNDARY --> PREPARING_MODEL: 有新 trigger，接入截至最后 trigger 的前缀
-    SAFE_BOUNDARY --> FINAL_READY: 没有新 trigger
-    FINAL_READY --> COMPLETED: 回复与发送意图提交
-    FINAL_READY --> PREPARING_MODEL: 提交前同一事务裁定由新 trigger 继续
+    PARSING --> FINAL_READY: 终止 Assistant 候选完整且合法
+    FINAL_READY --> COMPLETED: Conversation 回复 UoW 提交
     COMPLETED --> [*]
 ```
+
+只有执行链本来就需要下一次模型调用时，才在该调用前的安全边界请求 Conversation Scheduler 选择截至最后新 trigger 的连续前缀。终止 Assistant 已形成合法 `FINAL_READY` 后，新到 trigger 不撤销候选，也不强造一次额外模型调用；先经 Conversation/Delivery UnitOfWork 提交当前回复，再由同一 Session 的后继串行 Run 处理新 trigger。
 
 `WAIT_TOOL`、`WAIT_APPROVAL` 和 `BLOCKED_UNKNOWN` 可以释放物理执行槽，但保留同群逻辑 Session 所有权，不能让第二个 Agent Run 越过它回复。不同群继续公平取得模型槽。
 

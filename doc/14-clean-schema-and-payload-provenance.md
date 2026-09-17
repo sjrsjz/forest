@@ -17,14 +17,14 @@
 | Kernel bootstrap (`forest_kernel`) | Bot 身份、schema bundle 账本 | RuntimeGraph、业务配置、调用、授权、效果、审计正文 |
 | `kernel.runtime` | Bot 运行封印、host/module lease、Generation、Route、Lifecycle、通用 Call、状态引用、RuntimeGraph | Agent/Adapter/Memory/Shell/Job 业务字段、业务 payload 正文 |
 | `kernel.payload` | Payload header/body、SourceManifest、派生父边、payload capability、删除 epoch 与 revoke/scrub 状态 | Memory 图、Context 顺序、业务可检索索引、模块私有配置 head |
-| `kernel.authorization` | 精确能力授予集、短寿命票据、一次性消费、撤销事实、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台账号、OneBot 管理员列表 |
+| `kernel.authorization` | 精确能力授予集、短寿命票据、一次性消费、撤销事实、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台账号、Shell 管理员名单 |
 | `kernel.effect` | 通用 Effect identity、dispatch fence、attempt/outcome 与 UNKNOWN 对账 | Delivery SendIntent、OneBot wire body、Agent 工具上下文副本 |
 | `kernel.audit` | 通用审计 envelope、来源 operation/call 引用、脱敏查询索引 | 模块业务正文、密钥、跨模块复制的完整 payload |
-| `adapter.onebot` | Binding、配置引用、连接代际、规范化平台入站观察与媒体引用 | Inbox/Context、Shell 命令、SendIntent/发送 attempt/receipt、Agent Run、记忆向量 |
+| `adapter.onebot` | Binding、配置引用、连接代际、规范化平台入站观察与媒体引用 | Inbox/Context、管理员名单与 Shell 策略/命令、SendIntent/发送 attempt/receipt、Agent Run、记忆向量 |
 | `conversation.scheduler` | Conversation lane、Inbox、ingress 顺序、分类水位、trigger、InputBatch 成员、Context 顺序与确定性裁剪事实 | Agent Session/Run/ModelTurn/ToolCall、模型 Provider 私有状态、长期记忆图、消息正文 |
 | `agent.runtime` | Session/Run/ModelTurn/ToolCall/checkpoint、模型请求与结果载荷引用 | 平台连接、Memory 内部索引、内核路由 head |
-| `memory.graph` | source/trunk、payload、media capture、graph、embedding、retrieval evidence、deletion epoch | Agent 执行所有权、平台发送状态 |
-| `shell.command` | 规范命令请求、类型化参数引用、回执引用和当前命令 registry | 任意管理 API 地址或管理员会话 |
+| `memory.graph` | source/trunk、payload/media 引用、capture、graph、embedding、retrieval evidence、记忆资格与 suppression 引用 | Payload 正文与 Bot deletion clock、Agent 执行所有权、平台发送状态 |
+| `shell.command` | 按 Binding/群/主体生效的管理员策略、规范命令请求、资格/接纳事实、claim、类型化参数与回执引用、当前命令 registry | 平台连接、Inbox/Context、任意管理 API 地址或 Web 管理员会话 |
 | `scheduler.jobs` | Job 定义、occurrence、lease 与触发结果引用 | 第二条 Agent 执行链或独立模型配置 |
 | `delivery` | SendIntent、part、attempt、resolution 与因果引用 | Adapter 私有 socket、Agent 历史副本 |
 

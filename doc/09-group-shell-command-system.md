@@ -12,21 +12,21 @@ Shell 不是任意系统终端。默认保留前缀为 `#forest`；内核只实�
 
 ```text
 可信 Adapter 帧与有界平台解析
-  -> Core ShellGate 前缀、作者资格和接入容量判断
+  -> Core ShellGate 前缀与接入容量判断
   -> Inbox/作者/来源/ingress_seq 持久接纳
-  -> 冻结当前 RouteGraph 中的 management/business/message routes
-  -> CONTROL durable request 或普通分类水位
+  -> shell.command 复核作者策略并冻结 management route
+  -> CONTROL durable request 或普通分类工作
   -> P0/P1 Control Scheduler 或 P2/P3/P4 Conversation Scheduler
   -> 类型化 operation / 模块 management contract
   -> CONTROL Delivery 回原会话
 ```
 
-ShellGate 位于稳定内核边界，只做有界本地工作：确认完整前缀 token、可信 Binding、当前作者资格、输入大小、Core grammar 或模块 registry 精确匹配，并把规范参数与路由身份写入持久请求。它不载入模块 Python、不联网、不访问 LLM。
+ShellGate 位于稳定内核边界，只做有界本地工作：确认完整前缀 token、已认证 Binding/principal、输入大小、Core grammar 形状和接入容量，并形成不可持久复用的 ingress proof。它不解释管理员名单、不拥有 Shell 策略或命令请求，也不载入模块 Python、不联网、不访问 LLM。`shell.command` 在同一 UnitOfWork 中用自己的当前策略与 RouteGraph 复核 proof，写自己的接纳事实；`conversation.scheduler` 同时写 Inbox。任一 participant 失败时两边都不提交。
 
 一条消息在接纳事务中冻结：
 
 - `bot_id/binding_id/conversation_id/event_id/ingress_seq`；
-- 原作者 principal 与当前 Binding 管理员资格证据；
+- Adapter 已认证的原作者 principal，以及 `shell.command` 当前管理员策略修订与资格结果；
 - `graph_digest`、命令 owner component/generation、operation ID 和 schema digest；
 - 规范化参数载荷引用、service class、目标作用域与所需能力；
 - idempotency key、接纳时限与输出目标。
@@ -44,7 +44,7 @@ ShellGate 位于稳定内核边界，只做有界本地工作：确认完整前�
 #forest core reload <component-id> --expect-revision <n>
 ```
 
-`status/cancel/disable` 可以声明 P0，`reload` 为 P1。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中当前 Binding 管理员集合且资格缓存仍有效的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
+`status/cancel/disable` 可以声明 P0，`reload` 为 P1。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中 `shell.command` 对当前 Binding/群生效的管理员策略，并通过 `kernel.authorization` 精确能力检查的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本或平台群角色取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
 
 Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycle 权威。它不复制 Agent/Memory/Scheduler 状态机，不直接停止线程或改数据库行。正常模块不可用时，Core 命令仍能撤下路由、请求取消或读取最小健康信息。
 

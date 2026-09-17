@@ -65,15 +65,17 @@ flowchart TB
     SG --> SH[可热重载 Shell 命令模块]
     SH --> CP
     SG --> RT
-    RT <--> BS[Bot / Conversation 调度模块]
-    BS <--> AG[Agent Worker]
+    RT <--> BS[Conversation 调度模块]
+    BS -->|InputBatch / safe point| AG[Agent Worker]
+    AG -->|FinalCandidate / checkpoint| BS
     AG <--> MD[Provider / Tool / Renderer 模块]
     AG <--> MM[Memory 模块]
     MM <--> DA[(Bot A 的事实库与派生索引)]
     MM <--> DB[(Bot B 的事实库与派生索引)]
-    AG --> EG[受控副作用与发送 Outbox]
-    EG --> AD
-    CAP -.约束每个边界.-> EG
+    AG -->|ToolIntent| CAP
+    BS -->|Reply + SendIntent UoW| DL[Delivery 模块]
+    DL -->|Effect permit / handoff| CAP
+    DL -->|TransportAttempt| AD
     KS --> CT[(部署目录与各 Bot 运行账本)]
 ```
 
@@ -108,11 +110,11 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 
 | 模块 | 核心输入/输出 | 状态所有者 | 缺失或故障行为 |
 |---|---|---|---|
-| `adapter.onebot` | 平台事件 → `InboundMessage`；`SendIntent` → 回执 | 连接与待回执映射归 Adapter 代际；绑定归 Bot 目录 | 绑定离线，持久发送排队；不拖垮其他绑定 |
-| `bot.directory` | Bot 配置快照、binding 解析 | 部署目录与 Bot 元数据 | 启动依赖；新绑定操作暂停 |
-| `conversation.scheduler` | 全量入站 → 分类流水、输入切口、会话 Session 与串行 Run | 每会话邮箱、输入游标、触发记录、lease 与 sequence | 暂停消费，Inbox/触发状态保留 |
-| `message.pipeline` | 规范化消息 → 过滤/命令/触发结果 | 不可变策略快照 | 错误按阶段策略隔离，禁止全链静默吞错 |
-| `agent.runtime` | Run 输入 → checkpoint、轮次提交、发送意图 | Bot 事实库中的 Run 与上下文 | 从安全边界恢复，其他会话继续 |
+| `adapter.onebot` | 平台帧 → 已认证 `InboundMessage`；获许可 `TransportAttempt` → 传输观察 | Binding 配置引用、连接/客户端代际、平台事件观察与待回执映射 | 绑定离线，Delivery 持久排队；不拖垮其他绑定 |
+| `bot.directory` | Bot 身份、账号归属预留与作用域解析 | 部署目录与 Bot 元数据；不拥有目标 Bot 的 Binding 配置 | 启动依赖；新账号归属操作暂停 |
+| `conversation.scheduler` | 全量入站 → 分类流水、输入切口、Context、Agent 启动/续跑请求、最终回复提交 | 每会话邮箱、actor lease、输入游标、触发、InputBatch、Context 与 reply sequence；只引用 Agent Session/Run | 暂停消费，Inbox/触发状态保留 |
+| `contract.router` / `command.router` / `message.router` | 冻结路由分派；业务命令与 Handler 策略/执行 → 分类结果 | RuntimeGraph 引用、各自策略、claim 与结果；不拥有 Inbox 或 Agent | 错误按阶段策略隔离，禁止全链静默吞错 |
+| `agent.runtime` | 冻结 Run 输入 → checkpoint、ModelTurn、ToolCall、最终候选 | Agent Session、Run、模型请求/观察、轮次、工具与 checkpoint；不拥有 Context、trigger 或 SendIntent | 从安全边界恢复，其他会话继续 |
 | `provider.*` | 实际模型能力快照、规范投影请求 → 规范流事件 | 客户端、限流器与逐请求manifest | 切换实际模型须重做模态投影/预算，不改完整历史；记录真正可见parts |
 | `embedding.*` | text/image/mixed输入 → 对齐空间向量 | 版本化EmbeddingProfile、异步批量任务与工件 | 图片索引失败显式降级/修复，不能用caption假装原生图片嵌入 |
 | `media.*` | 平台媒体引用 → Bot域受管不可变媒体与派生版本 | MediaAsset、来源关联、载荷引用与获取作业 | 原始来源不丢；限时获取失败保持明确不可用，不永久阻塞分类或控制入口 |
@@ -120,9 +122,9 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | `memory.*` | 存储、召回、整理、遗忘 | Bot 全局事实库；索引为派生数据 | 降级至授权后的事实检索；不切换其他 Bot 库 |
 | `scheduler.jobs` | 定时/事件触发 → 持久 Job/Run | job 表与 lease | 恢复后按 misfire 策略处理 |
 | `renderer.*` | 类型化文档 → 媒体引用 | 临时资源、媒体对象引用 | 返回明确失败或文本备选 |
-| `delivery` | outbox → Adapter 发送 → 结果 | 发送账本与绑定发送租约 | 平台限流、重连、UNKNOWN 对账 |
+| `delivery` | SendIntent → effect permit → Adapter transport attempt → 结算 | lane、intent、part、claim、attempt、observation 与 resolution；不拥有 socket 或 Context | 平台限流、重连、UNKNOWN 只按证据对账 |
 | `management.web` 与控制台宿主 | 模块注册投影、沙箱 UI 消息、HTTP查询与事件订阅 → 类型化控制操作 | 账号会话、配置修订与请求关联按05划定权威；复用既有执行账本 | 官方首版必需；不硬编码 Agent/Memory 业务语义；UI/API故障不影响已接纳操作和其他业务，CLI/可用Shell仍可维护 |
-| `shell.command` | 显式群命令 → 类型化控制操作、持久回执 | 命令注册快照、command_requests 与会话偏好 | 完整命令可暂停；核心救援入口独立存活，依赖在线 Adapter 与可写权威库 |
+| `shell.command` | 显式群命令 → 类型化控制操作、持久回执 | 按 Binding/群/主体生效的管理员策略、命令注册快照、request/claim/结果；不拥有 Inbox | 完整命令可暂停；核心救援入口独立存活，依赖在线 Adapter 与可写权威库 |
 
 Bot 和会话模块是首套官方发行配置的必需模块，但不成为通用内核类型系统的一部分。没有 Agent 时仍能提供命令型 Bot。
 
@@ -163,11 +165,11 @@ Bot 逻辑隔离是最低要求。默认部署为每 Bot 独立事实数据库/�
 ### 6.1 消息到回复
 
 1. Adapter 认证平台连接，使用绑定目录确定 `bot_id`；规范化消息、去重键与来源身份。
-2. 在对应 Bot 的事实库写入 Inbox 并分配会话 `ingress_seq`，同一短事务完成 ShellGate 最小分流、控制请求 RECEIVED 记录或普通分类工作与持久唤醒；提交成功才视为 Forest 已接收。协议不支持确认/回放时，记录其能力限制。
+2. 接入协调器在同一 Bot UnitOfWork 中让 Adapter 记录平台观察、Conversation Scheduler 写 Inbox 并分配 `ingress_seq`；命中保留前缀时再让 `shell.command` 写 RECEIVED 请求，否则登记普通分类工作与持久唤醒。各 participant 只能写自己的 schema，任一失败整体回滚；提交成功才视为 Forest 已接收。协议不支持确认/回放时，记录其能力限制。
 3. 控制命令的完整参数解析在事务外进行，解析结果冻结后独立授权入场，不等待 Agent 或前面尚未分类的记录。Pipeline 分别记录上下文可读性与触发决策；未触发、命令已消费仍保留群消息历史，敏感控制正文只提供安全投影。异步分类维护连续完成水位，不能改变 ingress_seq 顺序。
-4. 无活跃 Agent 且无触发时，Actor 静默追加群消息并裁剪；有触发则建立唯一 ConversationSession，在安全边界冻结截至最后触发记录的 InputBatch，持久追加输入后调用模型。
+4. 无活跃 Agent 且无触发时，Conversation Actor 静默追加群消息并裁剪；有触发则在安全边界冻结截至最后触发记录的 InputBatch，并请求 `agent.runtime` 建立或续接该 Conversation 唯一活动 Agent Session。Conversation 只保存 Session/Run 引用和 fence，不拥有 Agent 状态机。
 5. Agent先用合法文本/图片查询全局记忆，再按实际LLM能力投影输入并计算请求预算；文本LLM请求不含图片载荷。模型与工具串行推进；工具闭合后的下一安全点若出现新触发，先保存前序完整步骤，再追加截至该触发的消息前缀。普通尾部和迟到媒体不修改已冻结请求。
-6. 最终 ModelTurn、实际覆盖触发的处理状态、Run 状态、记忆整理任务与回复 outbox 同事务提交；群消息输入另有独立事务，Agent 失败不删除已入历史的消息。
+6. Agent 先提交完整 ModelTurn/checkpoint 并产出 `FinalCandidate`。随后协调器主持短 UnitOfWork：Agent 关闭准确 Run，Conversation 提交正式 `REPLY` Context 与实际覆盖 trigger 的 `ANSWERED` 状态，Delivery 创建 SendIntent，必要时 Memory 只登记自己的整理工作。各模块经 participant 端口写各自 schema；任一失败整体回滚。Agent 失败不删除已入历史的消息，也不能绕过 Conversation 直接发送。
 7. 若有待触发记录，同一 Session 继续下一个串行 Run；否则静默排空尾部并裁剪，在原子检查后退回空闲。Delivery 的 CHAT 通道按会话 response_seq 发送；CONTROL 回执按 command_id/control_seq 独立排序，两者均使用持久化 ReplyRoute 并遵守平台限流。
 
 群甲等待模型时，群乙可进入另一个 Actor；二者读同一 Bot 记忆域，但不共用可变 Prompt 列表。并发写记忆使用 revision/幂等键协调，不持有跨模型请求的全局记忆锁。
