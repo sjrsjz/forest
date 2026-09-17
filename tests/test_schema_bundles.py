@@ -12,6 +12,7 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.runtime_modules import official_storage_bundle
 from forest.schema_bundles import (
     StorageBundleSpec,
     validate_official_storage_baseline,
@@ -178,6 +179,74 @@ async def test_official_bundle_profile_is_persisted_and_part_of_identity(clean_a
             await conn.execute(
                 sql.SQL("UPDATE {}.records SET record_id='two'").format(
                     sql.Identifier(invariant_spec.namespace)
+                )
+            )
+
+
+@pytest.mark.postgres
+async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    row = await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    assert row["component_id"] == "kernel.runtime"
+    assert row["execution_profile"] == "official"
+    namespace = storage.spec.namespace
+    async with store.pool.connection() as conn:
+        tables = await (
+            await conn.execute(
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
+                "ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relkind IN ('r','p') "
+                "ORDER BY c.relname",
+                (namespace,),
+            )
+        ).fetchall()
+        names = {item["relname"] for item in tables}
+        assert {
+            "runtime_state",
+            "host_lease",
+            "generations",
+            "routes",
+            "lifecycle_operations",
+            "calls",
+            "state_heads",
+            "runtime_graphs",
+            "runtime_graph_modules",
+        } <= names
+        assert not any(
+            token in name
+            for name in names
+            for token in ("agent", "memory", "onebot", "binding", "job")
+        )
+        seeded = await (
+            await conn.execute(
+                sql.SQL("SELECT bot_id FROM {}.runtime_state").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchone()
+        assert seeded["bot_id"] == store.bot_id
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.host_incarnations"
+                "(bot_id,incarnation,host_id,owner_epoch) VALUES (%s,'inc','host',1)"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id,),
+        )
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("DELETE FROM {}.host_incarnations").format(
+                    sql.Identifier(namespace)
                 )
             )
 

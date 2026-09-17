@@ -206,6 +206,31 @@ class RuntimeStorageBundle:
         }
 
 
+def official_storage_bundle(
+    component_id: str,
+    schema_id: str,
+    repository_contract: str,
+    resource: str,
+) -> RuntimeStorageBundle:
+    """Bind one packaged official baseline to the complete distribution identity."""
+
+    baseline = files("forest").joinpath(resource).read_bytes()
+    artifact = official_artifact("bot")
+    spec = StorageBundleSpec(
+        component_id=component_id,
+        schema_id=schema_id,
+        schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract=repository_contract,
+    )
+    return RuntimeStorageBundle(
+        spec,
+        baseline,
+        artifact.package_digest,
+        execution_profile="official",
+    )
+
+
 @dataclass(frozen=True)
 class RuntimeModuleDescriptor:
     component_id: str

@@ -12,6 +12,8 @@ from forest.runtime_modules import (
     RuntimeModuleDescriptor,
     RuntimeModuleRegistry,
     RuntimeStorageBundle,
+    official_artifact,
+    official_storage_bundle,
 )
 from forest.schema_bundles import StorageBundleSpec
 
@@ -341,6 +343,21 @@ def test_official_modules_bind_distribution_artifact_into_projection():
     assert all(
         item["artifact"] == official.as_fact() for item in registry._descriptor_facts()
     )
+
+
+def test_official_kernel_runtime_bundle_is_distribution_bound_and_business_neutral():
+    storage = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    assert storage.package_digest == official_artifact("bot").package_digest
+    assert storage.execution_profile == "official"
+    assert storage.spec.namespace.startswith("forest_m_forest_kernel_runtime_")
+    lowered = storage.baseline.lower()
+    for forbidden in (b"agent", b"onebot", b"memory", b"bot_bindings", b"bot_jobs"):
+        assert forbidden not in lowered
 
 
 def test_registry_rejects_missing_or_cyclic_dependencies():
