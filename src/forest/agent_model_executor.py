@@ -54,6 +54,49 @@ class DurableAgentModelExecutor:
         self.provider = provider
         self.payloads = payloads
 
+    async def reconcile_after_restart(self, owner) -> AgentModelStepResult:
+        """Fence an unqueryable in-flight Chat Completions attempt as UNKNOWN."""
+
+        recovery = await self.agent.load_recovery(owner.run_id)
+        request = recovery["current_request"]
+        attempt = recovery["current_attempt"]
+        if (
+            recovery["state"] == "BLOCKED_UNKNOWN"
+            and request is not None
+            and attempt is not None
+            and request["state"] == "UNKNOWN"
+            and attempt["state"] == "UNKNOWN"
+        ):
+            return AgentModelStepResult(
+                "UNKNOWN",
+                error_code="MODEL_RESULT_UNQUERYABLE_AFTER_RESTART",
+            )
+        if (
+            recovery["state"] != "MODEL_PENDING"
+            or request is None
+            or attempt is None
+            or request["state"] != "DISPATCHING"
+            or attempt["state"] != "DISPATCHING"
+        ):
+            raise ForestError(
+                "AGENT_RECOVERY_BOUNDARY_INVALID",
+                "Run has no unqueryable in-flight model attempt",
+                409,
+            )
+        await self.agent.observe_model(
+            owner,
+            observation_operation_id=f"recover-unknown:{attempt['attempt_id']}",
+            request_id=request["request_id"],
+            attempt_id=attempt["attempt_id"],
+            observed_state="UNKNOWN",
+            evidence_kind="EXECUTOR",
+            effect_observation_ref=f"provider-restart:{attempt['attempt_id']}",
+        )
+        return AgentModelStepResult(
+            "UNKNOWN",
+            error_code="MODEL_RESULT_UNQUERYABLE_AFTER_RESTART",
+        )
+
     async def _payload(self, component: str, kind: str, owner_id: str, content: bytes):
         epoch = await self.payloads.epoch()
         saved = await self.payloads.put_bytes(

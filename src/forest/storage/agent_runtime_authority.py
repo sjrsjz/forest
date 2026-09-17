@@ -2083,6 +2083,59 @@ class AgentRuntimeRepository:
         async with self._transaction(_connection) as conn:
             return await self._expanded_run(conn, run_id)
 
+    async def load_recovery(self, run_id: str, *, _connection=None) -> dict:
+        """Load the current recoverable execution head without claiming it."""
+
+        _bounded(run_id, "run_id", 256)
+        async with self._transaction(_connection) as conn:
+            expanded = await self._expanded_run(conn, run_id)
+            request = None
+            attempt = None
+            tool = None
+            if expanded["current_model_request_id"] is not None:
+                request = await (
+                    await conn.execute(
+                        sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND request_id=%s").format(
+                            self._table("model_requests")
+                        ),
+                        (self.store.bot_id, expanded["current_model_request_id"]),
+                    )
+                ).fetchone()
+                if request is not None and request["current_attempt_id"] is not None:
+                    attempt = await (
+                        await conn.execute(
+                            sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s").format(
+                                self._table("model_transport_attempts")
+                            ),
+                            (self.store.bot_id, request["current_attempt_id"]),
+                        )
+                    ).fetchone()
+            if expanded["current_tool_call_id"] is not None:
+                tool = await (
+                    await conn.execute(
+                        sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND tool_call_id=%s").format(
+                            self._table("tool_calls")
+                        ),
+                        (self.store.bot_id, expanded["current_tool_call_id"]),
+                    )
+                ).fetchone()
+            checkpoint = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND run_id=%s "
+                        "ORDER BY checkpoint_seq DESC LIMIT 1"
+                    ).format(self._table("run_checkpoints")),
+                    (self.store.bot_id, run_id),
+                )
+            ).fetchone()
+            return {
+                **expanded,
+                "current_request": dict(request) if request is not None else None,
+                "current_attempt": dict(attempt) if attempt is not None else None,
+                "current_tool": dict(tool) if tool is not None else None,
+                "latest_checkpoint": dict(checkpoint) if checkpoint is not None else None,
+            }
+
     async def recoverable_runs(self, *, limit: int = 64, _connection=None) -> tuple[dict, ...]:
         """List active Session heads that must resume or be explicitly closed.
 

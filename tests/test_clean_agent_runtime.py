@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.agent_model_executor import DurableAgentModelExecutor
 from forest.agent_protocol import (
     CORE_PROMPT,
     CORE_PROMPT_SHA256,
@@ -627,17 +628,27 @@ async def test_model_unknown_requires_reconciliation_and_conflicting_late_eviden
     await agent.start_run(**values)
     owner = await agent.acquire_run("run/one", "worker/unknown")
     plan, attempt = await _prepare_dispatched(agent, payloads, owner, "unknown")
-    unknown = await agent.observe_model(
+    recovery = await agent.load_recovery("run/one")
+    assert recovery["current_request"]["request_id"] == plan.request_id
+    assert recovery["current_attempt"]["attempt_id"] == attempt["attempt_id"]
+    await agent.release_run(owner)
+    owner = await agent.acquire_run("run/one", "worker/restarted")
+    unknown = await DurableAgentModelExecutor(
+        agent=agent,
+        provider=None,
+        payloads=None,
+    ).reconcile_after_restart(owner)
+    assert unknown.status == "UNKNOWN"
+    assert unknown.error_code == "MODEL_RESULT_UNQUERYABLE_AFTER_RESTART"
+    replay = await DurableAgentModelExecutor(
+        agent=agent,
+        provider=None,
+        payloads=None,
+    ).reconcile_after_restart(
         owner,
-        observation_operation_id="observe/unknown",
-        request_id=plan.request_id,
-        attempt_id=attempt["attempt_id"],
-        observed_state="UNKNOWN",
-        evidence_kind="EXECUTOR",
-        effect_observation_ref="effect-observation/unknown",
     )
-    assert unknown["accepted"] is True
-    assert (await agent.load("run/one"))["state"] == "BLOCKED_UNKNOWN"
+    assert replay.status == "UNKNOWN"
+    assert (await agent.load_recovery("run/one"))["state"] == "BLOCKED_UNKNOWN"
 
     result = await _payload(
         payloads,
