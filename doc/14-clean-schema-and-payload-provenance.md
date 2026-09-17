@@ -163,6 +163,8 @@ participant 集合、顺序、输入摘要和结果摘要写入 operation；重�
 
 模块配置属于模块 schema。拥有该组件配置的模块 Repository 保存 revision、desired/effective 指针和配置载荷引用；`kernel.runtime` 只在 Generation/RuntimeGraph 中冻结本次实际采用的 revision、payload identity 与 digest，不维护另一套可写配置 head。字段 schema、默认值、验证、计划差异与生效动作由准确 Generation 的管理契约提供。WebUI 通过模块描述符加载 schema 或沙箱 UI，不建立 Agent/Memory/OneBot 专用表单。
 
+`kernel.runtime.generations` 必须保存明确的 `config_revision`，并与 `config_payload_id/config_payload_digest`、package digest、状态契约摘要、能力授予集摘要、实例/Worker/Host incarnation 一起构成不可变代际身份。`runtime_graph_modules` 必须保存 `generation_id`，以 `(bot_id, generation_id)` 外键引用 `generations`，并约束该 Generation 的 `component_id` 等于图成员；图中重复保存的 package/storage identity 只是可独立核验的封印，不能替代 Generation 引用。图摘要必须覆盖该引用以及依赖和契约摘要。没有配置的模块也必须由其所属 Repository 发布一个内容寻址的空配置修订，禁止由内核填写空字符串、全零摘要或隐式默认值。这样管理 UI 显示的 effective 配置、调用准入使用的 Generation 和消息冻结的 RuntimeGraph 才指向同一份事实。
+
 密钥正文直接写入 Secret Resolver，配置载荷只保存 opaque `secret_ref`。读取配置不回显密钥；修改计划只记录“是否变化”和不可逆摘要。VL embedding 的模型种类、输出维度、归一化和融合语义属于 Bot 创建时冻结的 Memory schema identity；创建 Bot 后只能更换协议兼容 endpoint/凭据。改变模型种类必须创建新的 Bot 记忆域或执行未来明确设计的全量重建操作，不能通过普通配置 apply 偷换向量空间。
 
 ## 8. 干净基线验收
