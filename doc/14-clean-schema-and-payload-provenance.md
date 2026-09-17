@@ -95,6 +95,8 @@ PayloadRef {
 
 异步写只有两种合法排列：新结果先提交，则 apply 必须在重算闭包时包含它；apply 先提交，则新结果在最终发布时观察更高 epoch 并被拒绝。下载、embedding、LLM、工具、图构建和平台发送均在外部 I/O 后、写入业务事实前复验来源、epoch、Generation、Host lease 和自身 operation 身份。已发生费用或外部结果可以结算元数据，不能重新发布正文。
 
+`kernel.payload` 的普通 admission 对 Bot deletion clock 取得共享事务锁，多个群和多个模块可以并行写不同 payload；遗忘 apply 取得同一行的排他锁并只把 epoch 推进一次。这样 apply 若后获得锁，会看见并撤销此前提交的正文及其派生闭包；apply 若先获得锁，晚到 admission 在锁释放后必须观察新 epoch 和 suppression 后失败。不得为了简化实现把每个 Bot 的全部 payload admission 都串行化到排他 clock 锁，也不得只在事务外比较 epoch。
+
 相同幂等 operation 重放返回原永久回执和“正文已撤销”状态，不重新调用 Worker、模型或平台。不同输入复用 operation ID 必须拒绝。UNKNOWN 外部效果保持 UNKNOWN，遗忘不能把它改写成确定未发送。
 
 ## 6. 多模块事务与通信

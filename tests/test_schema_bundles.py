@@ -20,6 +20,11 @@ from forest.schema_bundles import (
 )
 from forest.storage.bot import BotStore
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
+from forest.storage.payload_authority import (
+    KernelPayloadRepository,
+    PayloadSource,
+    SourceTarget,
+)
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
 
@@ -350,6 +355,370 @@ async def test_clean_kernel_audit_bundle_is_filterable_immutable_and_payload_onl
                 ),
                 (store.bot_id,),
             )
+
+
+@pytest.mark.postgres
+async def test_clean_kernel_payload_bundle_owns_content_lineage_and_deletion_clock(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    row = await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    assert row["component_id"] == "kernel.payload"
+    lowered = storage.baseline.lower()
+    for forbidden in (b"agent", b"onebot", b"memory", b"job"):
+        assert forbidden not in lowered
+
+    namespace = storage.spec.namespace
+    body = b"payload body"
+    body_digest = "sha256:" + hashlib.sha256(body).hexdigest()
+    manifest_digest = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+    manifest_id = "manifest:" + manifest_digest.removeprefix("sha256:")
+    payload_id = "payload:" + "1" * 64
+    async with store.pool.connection() as conn:
+        clock = await (
+            await conn.execute(
+                sql.SQL("SELECT deletion_epoch FROM {}.deletion_clock").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchone()
+        assert clock["deletion_epoch"] == 0
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.source_manifests"
+                "(bot_id,manifest_id,manifest_digest,item_count) VALUES (%s,%s,%s,0)"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, manifest_id, manifest_digest),
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.payload_headers("
+                "bot_id,payload_id,owner_component_id,owner_kind,owner_id,media_type,"
+                "byte_length,content_digest,input_digest,source_manifest_id,"
+                "source_manifest_digest,parent_count,accepted_deletion_epoch) "
+                "VALUES (%s,%s,'kernel.audit','audit.details','audit-1',"
+                "'application/json',%s,%s,%s,%s,%s,0,0)"
+            ).format(sql.Identifier(namespace)),
+            (
+                store.bot_id,
+                payload_id,
+                len(body),
+                body_digest,
+                "sha256:" + "2" * 64,
+                manifest_id,
+                manifest_digest,
+            ),
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.payload_bodies(bot_id,payload_id,content) VALUES (%s,%s,%s)"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, payload_id, body),
+        )
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("UPDATE {}.payload_bodies SET content='changed'").format(
+                    sql.Identifier(namespace)
+                )
+            )
+
+
+@pytest.mark.postgres
+async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    repository = KernelPayloadRepository(store, namespace=storage.spec.namespace)
+    source = PayloadSource(
+        source_component_id="conversation.scheduler",
+        source_kind="group.message",
+        source_id="message/1",
+        source_revision=1,
+        part_id="text/0",
+        source_trunk_id="group/933179609",
+        observation_conversation_id="conversation/1",
+        observation_binding_id="binding/1",
+        author_subject_id="qq/1234",
+    )
+    parent = await repository.put_bytes(
+        owner_component_id="conversation.scheduler",
+        owner_kind="context.input",
+        owner_id="unit/1",
+        media_type="text/plain",
+        content=b"parent",
+        sources=(source,),
+        expected_deletion_epoch=0,
+    )
+    child = await repository.put_bytes(
+        owner_component_id="agent.runtime",
+        owner_kind="model.request",
+        owner_id="request/1",
+        media_type="application/json",
+        content=b'{"request":1}',
+        parents=(parent.payload_id,),
+        expected_deletion_epoch=0,
+    )
+    assert child.source_manifest_digest == parent.source_manifest_digest
+    parallel = await asyncio.gather(
+        *(
+            repository.put_bytes(
+                owner_component_id="memory.graph",
+                owner_kind="retrieval.evidence",
+                owner_id="evidence/parallel",
+                media_type="application/json",
+                content=b'{"evidence":true}',
+                parents=(parent.payload_id,),
+                expected_deletion_epoch=0,
+            )
+            for _ in range(2)
+        )
+    )
+    assert parallel[0] == parallel[1]
+    receipt = await repository.forget(
+        operation_id="forget/1",
+        source_targets=(
+            SourceTarget(
+                source_component_id=source.source_component_id,
+                source_kind=source.source_kind,
+                source_id=source.source_id,
+                source_revision=source.source_revision,
+                part_id=source.part_id,
+            ),
+        ),
+        expected_deletion_epoch=0,
+    )
+    assert receipt["selected_count"] == 3
+    assert await repository.forget(
+        operation_id="forget/1",
+        source_targets=(
+            SourceTarget(
+                source_component_id=source.source_component_id,
+                source_kind=source.source_kind,
+                source_id=source.source_id,
+                source_revision=source.source_revision,
+                part_id=source.part_id,
+            ),
+        ),
+        expected_deletion_epoch=0,
+    ) == receipt
+    async with store.pool.connection() as conn, conn.transaction():
+        with pytest.raises(ForestError) as caught:
+            await repository.read_bytes_in(
+                conn, child.payload_id, expected_deletion_epoch=1
+            )
+        assert caught.value.code == "PAYLOAD_REVOKED"
+    with pytest.raises(ForestError) as caught:
+        await repository.put_bytes(
+            owner_component_id="memory.graph",
+            owner_kind="index.document",
+            owner_id="document/late",
+            media_type="text/plain",
+            content=b"late",
+            sources=(source,),
+            expected_deletion_epoch=1,
+        )
+    assert caught.value.code == "SOURCE_SUPPRESSED"
+    assert await repository.scrub(limit=10) == {"scrubbed": 3}
+
+
+@pytest.mark.postgres
+async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    repository = KernelPayloadRepository(store, namespace=storage.spec.namespace)
+    first_source = PayloadSource(
+        "conversation.scheduler", "group.message", "message/first", 1
+    )
+    first_target = SourceTarget(
+        first_source.source_component_id,
+        first_source.source_kind,
+        first_source.source_id,
+        first_source.source_revision,
+    )
+    admitted = asyncio.Event()
+    forget_started = asyncio.Event()
+    release_admission = asyncio.Event()
+
+    async def admit_first():
+        async with store.pool.connection() as conn, conn.transaction():
+            ref = await repository.put_bytes_in(
+                conn,
+                owner_component_id="conversation.scheduler",
+                owner_kind="context.input",
+                owner_id="race/first",
+                media_type="text/plain",
+                content=b"first",
+                sources=(first_source,),
+                expected_deletion_epoch=0,
+            )
+            admitted.set()
+            await release_admission.wait()
+            return ref
+
+    async def forget_first():
+        await admitted.wait()
+        forget_started.set()
+        return await repository.forget(
+            operation_id="forget/race-first",
+            source_targets=(first_target,),
+            expected_deletion_epoch=0,
+        )
+
+    admission_task = asyncio.create_task(admit_first())
+    forget_task = asyncio.create_task(forget_first())
+    await forget_started.wait()
+    release_admission.set()
+    first_ref, first_receipt = await asyncio.gather(admission_task, forget_task)
+    assert first_receipt["selected_count"] == 1
+
+    second_source = PayloadSource(
+        "conversation.scheduler", "group.message", "message/second", 1
+    )
+    second_target = SourceTarget(
+        second_source.source_component_id,
+        second_source.source_kind,
+        second_source.source_id,
+        second_source.source_revision,
+    )
+    forget_committed = asyncio.Event()
+    release_forget = asyncio.Event()
+
+    async def forget_second():
+        async with store.pool.connection() as conn, conn.transaction():
+            receipt = await repository.forget_in(
+                conn,
+                operation_id="forget/race-second",
+                source_targets=(second_target,),
+                expected_deletion_epoch=1,
+            )
+            forget_committed.set()
+            await release_forget.wait()
+            return receipt
+
+    async def admit_second():
+        await forget_committed.wait()
+        with pytest.raises(ForestError) as caught:
+            await repository.put_bytes(
+                owner_component_id="conversation.scheduler",
+                owner_kind="context.input",
+                owner_id="race/second",
+                media_type="text/plain",
+                content=b"second",
+                sources=(second_source,),
+                expected_deletion_epoch=2,
+            )
+        return caught.value.code
+
+    second_forget_task = asyncio.create_task(forget_second())
+    second_admission_task = asyncio.create_task(admit_second())
+    await forget_committed.wait()
+    release_forget.set()
+    second_receipt, rejected_code = await asyncio.gather(
+        second_forget_task, second_admission_task
+    )
+    assert second_receipt["selected_count"] == 0
+    assert rejected_code == "SOURCE_SUPPRESSED"
+
+    async with store.pool.connection() as conn:
+        state = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state FROM {}.payload_headers WHERE bot_id=%s AND payload_id=%s"
+                ).format(sql.Identifier(storage.spec.namespace)),
+                (store.bot_id, first_ref.payload_id),
+            )
+        ).fetchone()
+    assert state["state"] == "REVOKED"
+
+
+@pytest.mark.postgres
+async def test_kernel_audit_requires_payload_authority_identity(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    payload_storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    audit_storage = official_storage_bundle(
+        "kernel.audit",
+        "forest.kernel.audit",
+        "forest.kernel-audit.repository/1",
+        "storage/official/kernel_audit.sql",
+    )
+    for storage in (payload_storage, audit_storage):
+        await installer.install(
+            storage.spec,
+            storage.baseline,
+            storage.package_digest,
+            execution_profile=storage.execution_profile,
+        )
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    async with store.pool.connection() as conn, conn.transaction():
+        details = await payloads.put_json_in(
+            conn,
+            owner_component_id="kernel.audit",
+            owner_kind="audit.details",
+            owner_id="audit-joined",
+            value={"safe": True},
+            expected_deletion_epoch=0,
+        )
+    audits = KernelAuditRepository(
+        store,
+        namespace=audit_storage.spec.namespace,
+        payload_verifier=payloads.verify_in,
+    )
+    record = await audits.append(
+        AuditEnvelope(
+            audit_id="audit-joined",
+            action="payload.verified",
+            producer_component_id="kernel.payload",
+            origin_kind="runtime",
+            details_payload_id=details.payload_id,
+            details_payload_digest=details.content_digest,
+        )
+    )
+    assert record["details_payload_id"] == details.payload_id
 
 
 @pytest.mark.postgres
