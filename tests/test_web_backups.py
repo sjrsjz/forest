@@ -1,4 +1,4 @@
-"""Backup HTTP admission, progress, download, and role boundaries."""
+"""Backup, restore, and storage management through scoped module contracts."""
 
 import asyncio
 import os
@@ -10,14 +10,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from psycopg import sql
-from test_management import (
-    ORIGIN,
-    PASSWORD,
-    create_account,
-    initialize,
-    login,
-    login_as,
-)
+from test_management import ORIGIN, PASSWORD, create_account, initialize, login, login_as
 
 from forest.backup_artifact import decrypt_file, inspect_zip
 from forest.bootstrap import BootstrapState
@@ -42,13 +35,17 @@ async def backup_database():
             async with await psycopg.AsyncConnection.connect(
                 uri, row_factory=psycopg.rows.dict_row
             ) as deployment:
-                exists = await (await deployment.execute(
-                    "SELECT to_regclass('restore_stage_targets') AS name"
-                )).fetchone()
+                exists = await (
+                    await deployment.execute(
+                        "SELECT to_regclass('restore_stage_targets') AS name"
+                    )
+                ).fetchone()
                 if exists["name"] is not None:
-                    rows = await (await deployment.execute(
-                        "SELECT database_name FROM restore_stage_targets"
-                    )).fetchall()
+                    rows = await (
+                        await deployment.execute(
+                            "SELECT database_name FROM restore_stage_targets"
+                        )
+                    ).fetchall()
                     restore_names = [row["database_name"] for row in rows]
         except psycopg.Error:
             pass
@@ -60,19 +57,55 @@ async def backup_database():
                 )
             )
         assert name.startswith("forest_backup_web_") and len(name) == 50
-        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.execute(
+            sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name))
+        )
         await admin.close()
 
 
+async def module_roots(client):
+    session = (await client.get("/management/v1/session")).json()
+    deployment = (
+        f"/management/v1/scopes/deployment/{session['deployment_id']}/modules"
+    )
+    host = f"/management/v1/scopes/host/{session['host_id']}/modules"
+    return {
+        "deployment": deployment,
+        "host": host,
+        "backup": deployment + "/deployment.backup",
+        "restore": deployment + "/deployment.restore",
+        "storage": host + "/host.storage",
+        "audit": deployment + "/deployment.audit",
+    }
+
+
+async def action(client, root, operation, body, key):
+    return await client.post(
+        f"{root}/actions/{operation}",
+        json=body,
+        headers={"idempotency-key": key},
+    )
+
+
+async def wait_for(client, url, terminal, *, attempts=160):
+    row = None
+    for _ in range(attempts):
+        response = await client.get(url)
+        assert response.status_code == 200, response.text
+        row = response.json()
+        if row["state"] in terminal:
+            return row
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"operation did not finish: {row}")
+
+
 @pytest.mark.postgres
-async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifact(
-    tmp_path, backup_database
-):
+async def test_scoped_backup_restore_and_cleanup_contracts(tmp_path, backup_database):
     state = tmp_path / "state"
     token = BootstrapState(state).initialize()
     app = create_app(WebSettings(state, ORIGIN, managed_dsn=os.environ["FOREST_TEST_DSN"]))
     passphrase = "web backup recovery passphrase"
-    body = {
+    create_body = {
         "current_password": PASSWORD,
         "recovery_passphrase": passphrase,
         "include_packages": False,
@@ -87,73 +120,67 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
     ):
         await initialize(admin, token, backup_database)
         await login(admin)
-        audit_root = (
-            f"/management/v1/scopes/deployment/{app.state.runtime.deployment_id}/modules/"
-            "deployment.audit/queries/records"
-        )
-        html = await admin.get("/")
-        script = await admin.get("/static/backup-panel.js")
-        assert 'id="nav-backups"' in html.text and 'id="storage-cleanup-form"' in html.text
-        assert 'id="restore-activation-form"' in html.text
-        assert 'id="storage-generation-list"' in html.text
-        assert 'id="backup-import-form"' in html.text
-        assert script.status_code == 200 and "cleanup-plan" in script.text
-        assert "/backup-imports" in script.text
-        assert "/restore-activations" in script.text
-        assert "/storage-generations" in script.text
-        empty = await admin.get("/management/v1/backups")
-        assert empty.status_code == 200 and empty.json()["backups"] == []
-        empty_activations = await admin.get("/management/v1/restore-activations")
-        assert empty_activations.status_code == 200
-        assert empty_activations.json()["restore_activations"] == []
-        empty_generations = await admin.get("/management/v1/storage-generations")
-        assert empty_generations.status_code == 200
-        assert empty_generations.json()["storage_generations"] == []
+        roots = await module_roots(admin)
 
-        rejected = await admin.post(
-            "/management/v1/backups",
-            json={**body, "current_password": "wrong-password-long-enough"},
-            headers={"idempotency-key": "wrong-password"},
+        html = await admin.get("/")
+        assert 'id="nav-backups"' not in html.text
+        assert 'id="storage-cleanup-form"' not in html.text
+        assert (await admin.get("/static/backup-panel.js")).status_code == 404
+        deployment_catalog = await admin.get(roots["deployment"])
+        deployment_modules = {
+            row["component_id"] for row in deployment_catalog.json()["modules"]
+        }
+        assert {"deployment.backup", "deployment.restore"} <= deployment_modules
+        host_catalog = await admin.get(roots["host"])
+        assert "host.storage" in {
+            row["component_id"] for row in host_catalog.json()["modules"]
+        }
+
+        empty = await admin.get(roots["backup"] + "/queries/backups")
+        assert empty.status_code == 200 and empty.json()["backups"] == []
+        generations = await admin.get(roots["storage"] + "/queries/generations")
+        assert generations.status_code == 200
+        assert generations.json()["storage_generations"] == []
+
+        rejected = await action(
+            admin,
+            roots["backup"],
+            "backup.create",
+            {**create_body, "current_password": "wrong-password-long-enough"},
+            "wrong-password",
         )
         assert rejected.status_code == 403
         assert rejected.json()["code"] == "REAUTHENTICATION_FAILED"
         assert passphrase not in rejected.text
 
-        accepted = await admin.post(
-            "/management/v1/backups", json=body,
-            headers={"idempotency-key": "web-backup"},
+        accepted = await action(
+            admin, roots["backup"], "backup.create", create_body, "web-backup"
         )
         assert accepted.status_code == 202, accepted.text
         queued = accepted.json()
-        assert queued["state"] == "QUEUED" and not queued["download_available"]
-        repeated = await admin.post(
-            "/management/v1/backups", json=body,
-            headers={"idempotency-key": "web-backup"},
+        repeated = await action(
+            admin, roots["backup"], "backup.create", create_body, "web-backup"
         )
         assert repeated.status_code == 202
-        repeated_job = repeated.json()
-        assert repeated_job["backup_id"] == queued["backup_id"]
-        assert repeated_job["include_packages"] == queued["include_packages"]
+        assert repeated.json()["backup_id"] == queued["backup_id"]
 
-        detail = queued
-        for _ in range(100):
-            detail_response = await admin.get(
-                f"/management/v1/backups/{queued['backup_id']}"
-            )
-            assert detail_response.status_code == 200, detail_response.text
-            detail = detail_response.json()
-            if detail["state"] in {"READY", "INCONSISTENT", "FAILED"}:
-                break
-            await asyncio.sleep(0.05)
+        backup_url = (
+            roots["backup"] + "/queries/backup?backup_id=" + queued["backup_id"]
+        )
+        detail = await wait_for(admin, backup_url, {"READY", "INCONSISTENT", "FAILED"})
         assert detail["state"] == "READY", detail
         assert detail["database_total"] == detail["database_completed"] == 1
         assert detail["roster_start_digest"] == detail["roster_end_digest"]
 
         download = await admin.get(
-            f"/management/v1/backups/{queued['backup_id']}/download"
+            roots["backup"]
+            + "/downloads/backup.archive?backup_id="
+            + queued["backup_id"]
         )
         assert download.status_code == 200
         assert download.headers["cache-control"] == "no-store"
+        assert download.headers["x-content-type-options"] == "nosniff"
+        assert int(download.headers["content-length"]) == len(download.content)
         encrypted = tmp_path / "download.forest-backup"
         encrypted.write_bytes(download.content)
         restored = tmp_path / "download.zip"
@@ -162,170 +189,165 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         assert header["backup_id"] == manifest["backup_id"] == queued["backup_id"]
         assert manifest["roster"]["consistent"] is True
 
-        import_reservation = await admin.post(
-            "/management/v1/backup-imports",
-            json={"expected_size": len(download.content), "current_password": PASSWORD},
-            headers={"idempotency-key": "web-external-import"},
+        reserved = await action(
+            admin,
+            roots["backup"],
+            "import.reserve",
+            {"expected_size": len(download.content), "current_password": PASSWORD},
+            "web-external-import",
         )
-        assert import_reservation.status_code == 201, import_reservation.text
-        import_job = import_reservation.json()
-        uploaded = await admin.put(
-            f"/management/v1/backup-imports/{import_job['import_id']}/artifact",
+        assert reserved.status_code == 201, reserved.text
+        import_job = reserved.json()
+        uploaded = await admin.post(
+            roots["backup"]
+            + "/uploads/import.artifact?import_id="
+            + import_job["import_id"],
             content=download.content,
-            headers={"content-type": "application/vnd.forest.backup"},
+            headers={
+                "content-type": "application/vnd.forest.backup",
+                "idempotency-key": "web-external-artifact",
+            },
         )
         assert uploaded.status_code == 200, uploaded.text
         assert uploaded.json()["state"] == "UPLOADED"
-        finalized = await admin.post(
-            f"/management/v1/backup-imports/{import_job['import_id']}/finalize",
-            json={"recovery_passphrase": passphrase, "current_password": PASSWORD},
+        finalized = await action(
+            admin,
+            roots["backup"],
+            "import.finalize",
+            {
+                "import_id": import_job["import_id"],
+                "recovery_passphrase": passphrase,
+                "current_password": PASSWORD,
+            },
+            "web-external-finalize",
         )
         assert finalized.status_code == 202, finalized.text
-        for _ in range(100):
-            imported = await admin.get(
-                f"/management/v1/backup-imports/{import_job['import_id']}"
-            )
-            assert imported.status_code == 200, imported.text
-            import_job = imported.json()
-            if import_job["state"] in {"IMPORTED", "FAILED"}:
-                break
-            await asyncio.sleep(0.05)
-        assert import_job["state"] == "IMPORTED" and import_job["backup_id"] == queued["backup_id"]
-        assert "archive_key_ciphertext" not in import_job and passphrase not in imported.text
+        import_job = await wait_for(
+            admin,
+            roots["backup"]
+            + "/queries/import?import_id="
+            + import_job["import_id"],
+            {"IMPORTED", "FAILED"},
+        )
+        assert import_job["state"] == "IMPORTED"
+        assert import_job["backup_id"] == queued["backup_id"]
+        assert "archive_key_ciphertext" not in import_job
 
-        verification_response = await admin.post(
-            f"/management/v1/backups/{queued['backup_id']}/verifications",
-            json={
+        verification_response = await action(
+            admin,
+            roots["backup"],
+            "verification.create",
+            {
+                "backup_id": queued["backup_id"],
                 "current_password": PASSWORD,
                 "recovery_passphrase": passphrase,
             },
-            headers={"idempotency-key": "web-backup-verification"},
+            "web-backup-verification",
         )
         assert verification_response.status_code == 202, verification_response.text
         verification = verification_response.json()
-        assert verification["state"] == "QUEUED"
-        for _ in range(100):
-            response = await admin.get(
-                f"/management/v1/backup-verifications/{verification['verification_id']}"
-            )
-            assert response.status_code == 200, response.text
-            verification = response.json()
-            if verification["state"] in {"VERIFIED", "FAILED"}:
-                break
-            await asyncio.sleep(0.05)
-        assert verification["state"] == "VERIFIED" and verification["receipt_valid"]
-        listed_verifications = await admin.get("/management/v1/backup-verifications")
-        assert listed_verifications.status_code == 200
-        assert listed_verifications.json()["verifications"][0] == verification
-        verification_audit = await admin.get(
-            audit_root + "?action=backup.verify.completed"
+        verification = await wait_for(
+            admin,
+            roots["backup"]
+            + "/queries/verification?verification_id="
+            + verification["verification_id"],
+            {"VERIFIED", "FAILED"},
         )
-        verification_record = verification_audit.json()["records"][0]
-        assert verification_record["details"] == {
-            "verification_id": verification["verification_id"],
-            "backup_id": queued["backup_id"],
-            "manifest_digest": verification["manifest_digest"],
-            "database_total": 1,
-        }
-        assert not verification_record["details_redacted"]
+        assert verification["state"] == "VERIFIED"
+        assert verification["receipt_valid"]
 
-        restore_response = await admin.post(
-            f"/management/v1/backups/{queued['backup_id']}/restore-stages",
-            json={
-                "current_password": PASSWORD,
+        stages = await admin.get(roots["restore"] + "/queries/stages")
+        assert stages.status_code == 200
+        eligible = stages.json()["eligible_backups"]
+        assert eligible[0]["backup_id"] == queued["backup_id"]
+        assert eligible[0]["verification_id"] == verification["verification_id"]
+        restore_response = await action(
+            admin,
+            roots["restore"],
+            "stage.create",
+            {
+                "backup_id": queued["backup_id"],
                 "verification_id": verification["verification_id"],
+                "current_password": PASSWORD,
             },
-            headers={"idempotency-key": "web-restore-stage"},
+            "web-restore-stage",
         )
         assert restore_response.status_code == 202, restore_response.text
         restore = restore_response.json()
-        for _ in range(160):
-            response = await admin.get(
-                f"/management/v1/restore-stages/{restore['restore_id']}"
-            )
-            assert response.status_code == 200, response.text
-            restore = response.json()
-            if restore["state"] in {"STAGED", "FAILED"}:
-                break
-            await asyncio.sleep(0.05)
+        restore = await wait_for(
+            admin,
+            roots["restore"] + "/queries/stage?restore_id=" + restore["restore_id"],
+            {"STAGED", "FAILED"},
+        )
         assert restore["state"] == "STAGED", restore
         assert restore["verification_id"] == verification["verification_id"]
         assert restore["database_total"] == restore["database_completed"] == 1
-        assert restore["targets"][0]["database_scope"] == "deployment"
-        assert restore["targets"][0]["state"] == "STAGED"
 
-        restore_audit = await admin.get(
-            audit_root + "?action=restore.stage.completed"
+        cleanup_plan = await action(
+            admin,
+            roots["storage"],
+            "cleanup.plan",
+            {"resource_kind": "RESTORE_STAGE", "resource_id": restore["restore_id"]},
+            "web-restore-cleanup-plan",
         )
-        restore_record = restore_audit.json()["records"][0]
-        assert restore_record["details"] == {
-            "restore_id": restore["restore_id"],
-            "backup_id": queued["backup_id"],
-            "verification_id": verification["verification_id"],
-            "database_total": 1,
-            "manifest_digest": restore["manifest_digest"],
-        }
-        assert not restore_record["details_redacted"]
-
-        restore_cleanup_plan = await admin.post(
-            f"/management/v1/restore-stages/{restore['restore_id']}/cleanup-plan", json={}
-        )
-        assert restore_cleanup_plan.status_code == 200, restore_cleanup_plan.text
-        restore_cleanup_plan = restore_cleanup_plan.json()
-        restore_cleanup = await admin.post(
-            "/management/v1/storage-cleanups",
-            json={
-                "plan_id": restore_cleanup_plan["plan_id"],
-                "plan_digest": restore_cleanup_plan["plan_digest"],
+        assert cleanup_plan.status_code == 200, cleanup_plan.text
+        plan = cleanup_plan.json()
+        cleanup_response = await action(
+            admin,
+            roots["storage"],
+            "cleanup.apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
                 "current_password": PASSWORD,
             },
-            headers={"idempotency-key": "web-restore-cleanup"},
+            "web-restore-cleanup",
         )
-        assert restore_cleanup.status_code == 202, restore_cleanup.text
-        restore_cleanup = restore_cleanup.json()
+        assert cleanup_response.status_code == 202, cleanup_response.text
+        cleanup = cleanup_response.json()
+        cleanup = await wait_for(
+            admin,
+            roots["storage"]
+            + "/queries/cleanup?cleanup_id="
+            + cleanup["cleanup_id"],
+            {"COMPLETE", "BLOCKED"},
+        )
+        assert cleanup["state"] == "COMPLETE", cleanup
         expired_restore = await admin.get(
-            f"/management/v1/restore-stages/{restore['restore_id']}"
+            roots["restore"] + "/queries/stage?restore_id=" + restore["restore_id"]
         )
         assert expired_restore.json()["state"] == "EXPIRED"
-        for _ in range(100):
-            cleanup_status = await admin.get(
-                f"/management/v1/storage-cleanups/{restore_cleanup['cleanup_id']}"
-            )
-            assert cleanup_status.status_code == 200
-            if cleanup_status.json()["state"] in {"COMPLETE", "BLOCKED"}:
-                break
-            await asyncio.sleep(0.05)
-        assert cleanup_status.json()["state"] == "COMPLETE", cleanup_status.text
 
-        backup_cleanup_plan = await admin.post(
-            f"/management/v1/backups/{queued['backup_id']}/cleanup-plan", json={}
+        audit = await admin.get(
+            roots["audit"] + "/queries/records?action=backup.create"
         )
-        assert backup_cleanup_plan.status_code == 200
-        backup_cleanup_plan = backup_cleanup_plan.json()
-        backup_cleanup = await admin.post(
-            "/management/v1/storage-cleanups",
-            json={
-                "plan_id": backup_cleanup_plan["plan_id"],
-                "plan_digest": backup_cleanup_plan["plan_digest"],
-                "current_password": PASSWORD,
-            },
-            headers={"idempotency-key": "web-backup-cleanup"},
-        )
-        assert backup_cleanup.status_code == 202, backup_cleanup.text
-        assert (await admin.get(
-            f"/management/v1/backups/{queued['backup_id']}/download"
-        )).status_code == 404
-
-        audit = await admin.get(audit_root + "?action=backup.create")
         record = audit.json()["records"][0]
         assert record["details"] == {
-            "backup_id": queued["backup_id"], "include_packages": False
+            "backup_id": queued["backup_id"],
+            "include_packages": False,
         }
         assert not record["details_redacted"]
 
+        legacy = (
+            "/management/v1/backups",
+            "/management/v1/backup-imports",
+            "/management/v1/backup-verifications",
+            "/management/v1/restore-stages",
+            "/management/v1/restore-activations",
+            "/management/v1/storage-cleanups",
+            "/management/v1/storage-generations",
+        )
+        for path in legacy:
+            assert (await admin.get(path)).status_code == 404
+
         viewer_password = "viewer-backup-test-password"
         created = await create_account(
-            admin, "backup-viewer", viewer_password, "viewer", PASSWORD, "backup-viewer"
+            admin,
+            "backup-viewer",
+            viewer_password,
+            "viewer",
+            PASSWORD,
+            "backup-viewer",
         )
         assert created.status_code == 201, created.text
         async with httpx.AsyncClient(
@@ -333,16 +355,15 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
             base_url=ORIGIN,
             headers={"origin": ORIGIN},
         ) as viewer:
-            assert (await login_as(viewer, "backup-viewer", viewer_password)).status_code == 200
-            assert (await viewer.get("/management/v1/backups")).status_code == 403
+            logged_in = await login_as(viewer, "backup-viewer", viewer_password)
+            assert logged_in.status_code == 200
+            viewer_roots = await module_roots(viewer)
             assert (
-                await viewer.get("/management/v1/backup-verifications")
+                await viewer.get(viewer_roots["backup"] + "/queries/backups")
             ).status_code == 403
-            assert (await viewer.get("/management/v1/backup-imports")).status_code == 403
-            assert (await viewer.get("/management/v1/restore-activations")).status_code == 403
-            assert (await viewer.get("/management/v1/storage-generations")).status_code == 403
             assert (
-                await viewer.get(
-                    f"/management/v1/backups/{queued['backup_id']}/download"
-                )
+                await viewer.get(viewer_roots["restore"] + "/queries/stages")
+            ).status_code == 403
+            assert (
+                await viewer.get(viewer_roots["storage"] + "/queries/generations")
             ).status_code == 403

@@ -9,7 +9,7 @@
   <main>
     <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><span id="role" class="role-badge"></span><button id="logout" class="subtle">退出登录</button></div></header>
     <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-    <nav id="main-nav" class="hidden actions" aria-label="管理作用域"><button id="nav-deployment" class="subtle">部署</button><button id="nav-host" class="subtle">当前宿主</button><button id="nav-bots" class="subtle">运行实例与模块</button><button id="nav-backups" class="subtle">存储与备份</button></nav>
+    <nav id="main-nav" class="hidden actions" aria-label="管理作用域"><button id="nav-deployment" class="subtle">部署</button><button id="nav-host" class="subtle">当前宿主</button><button id="nav-bots" class="subtle">运行实例与模块</button></nav>
     <section id="loading"><p>正在连接管理服务…</p></section>
     <section id="setup" class="hidden card narrow">
       <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库，然后创建各自独立的 Bot。</p>
@@ -32,61 +32,6 @@
     </section>
     <section id="host" class="hidden">
       <div class="card"><h2>宿主服务</h2><div id="host-module-registry" class="module-registry-list"></div><nav id="host-module-nav" class="module-surface-nav" aria-label="宿主服务模块"></nav><div id="host-module-views" class="management-contribution-views"></div></div>
-    </section>
-    <section id="backups" class="hidden">
-      <div class="columns"><div class="card"><h2>创建加密备份</h2>
-        <p class="muted">备份部署数据库和当前已就绪的全部 Bot 数据库。各数据库使用独立一致性切片；该工件不是时间点恢复。</p>
-        <form id="backup-create-form">
-          <label>恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
-          <label>再次输入恢复口令<input name="recovery_confirmation" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
-          <label class="check"><input name="include_packages" type="checkbox" checked>包含已注册的插件工件</label>
-          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
-          <button type="submit">创建备份</button>
-        </form>
-        <p class="hint">恢复口令只用于本次请求，不会保存明文。丢失口令后无法解密下载的工件。备份抓取不会启动 Agent，也不会阻塞不同群聊之间的对话。</p>
-      </div><div class="card"><h2>校验与恢复边界</h2>
-        <p class="muted">下载前会重新核对会话与密文摘要。恢复前必须生成一份短期有效的只读校验凭据；校验会完整解密并检查清单，但不会创建或连接恢复数据库。</p>
-        <p class="hint">Bot 目录若在抓取期间变化，工件会标记为不一致并只允许取证下载。删除屏障、外部效果和 UNKNOWN 发送结果仍需在激活前核对。</p>
-        <button id="backup-refresh" class="subtle" type="button">刷新备份状态</button>
-        <form id="backup-restore-form" class="hidden">
-          <h3 id="backup-restore-title">只读校验备份</h3><p id="backup-restore-source" class="hint"></p>
-          <label id="backup-recovery-label">恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
-          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
-          <div class="actions"><button id="backup-restore-submit" type="submit">开始只读校验</button><button id="backup-restore-cancel" class="subtle" type="button">取消</button></div>
-          <p id="backup-restore-hint" class="hint">凭据绑定精确密文与清单摘要，24 小时内可用于建立隔离恢复副本。</p>
-        </form>
-        <form id="storage-cleanup-form" class="hidden">
-          <h3>清理存储资源</h3><p id="storage-cleanup-resource" class="hint"></p>
-          <p id="storage-cleanup-warning" class="notice"></p>
-          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
-          <div class="actions"><button type="submit">撤销并清理</button><button id="storage-cleanup-cancel" class="subtle" type="button">取消</button></div>
-          <p class="hint">提交后会先撤销下载或隔离副本的可见性，再由可续跑后台任务删除 Forest 精确拥有的文件或未采用数据库；已经成为当前 storage head 的 Bot 数据库会保留。普通磁盘不提供不可恢复证明。</p>
-        </form>
-        <form id="restore-activation-form" class="hidden">
-          <h3>激活 Bot 恢复副本</h3><p id="restore-activation-target" class="hint"></p>
-          <p id="restore-activation-warning" class="notice"></p>
-          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
-          <div class="actions"><button type="submit">封存旧库并切换</button><button id="restore-activation-cancel" class="subtle" type="button">取消</button></div>
-          <p class="hint">服务端会再次核对删除代际、Binding 与外部副作用账本。执行顺序固定为封存旧库、切换目录 head、启用恢复库；中断后保持离线并可安全重试。</p>
-        </form>
-      </div></div>
-      <div class="card"><h2>导入外部加密备份</h2>
-        <p class="muted">把从另一套 Forest 部署下载的原始加密工件重新纳入本部署。服务端先按声明大小流式暂存，再完整解密、核对清单和所有成员；校验成功后才发布为标准备份。</p>
-        <form id="backup-import-form">
-          <label>加密备份文件<input name="artifact" type="file" accept=".bin,.forest-backup,application/vnd.forest.backup" required></label>
-          <label>恢复口令<input name="recovery_passphrase" type="password" required minlength="16" maxlength="1024" autocomplete="new-password"></label>
-          <label>你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
-          <button type="submit">上传并校验导入</button>
-        </form>
-        <p class="hint">上传受持久租约和精确大小上限约束，可在进程中断后重新提交。同一备份 ID 只有密文与清单摘要完全一致时才会去重；恢复口令明文不会保存。</p>
-      </div>
-      <h2>外部备份导入任务</h2><p id="backup-import-empty" class="hint hidden">还没有外部备份导入任务。</p><div id="backup-import-list" aria-live="polite"></div>
-      <p id="backup-empty" class="hint hidden">还没有备份任务。</p><div id="backup-list" aria-live="polite"></div>
-      <h2>隔离恢复任务</h2><p id="restore-empty" class="hint hidden">还没有隔离恢复任务。</p><div id="restore-list" aria-live="polite"></div>
-      <h2>Bot 存储代际</h2>
-      <p class="hint">当前代际始终保留。恢复激活替代的旧代默认保留七天，也可先预览并立即回收；后台只删除受管集群中 owner 与 Forest marker 精确匹配的旧数据库，不删除共享角色和不可变目录历史。</p>
-      <p id="storage-generation-empty" class="hint hidden">还没有托管 Bot 存储代际。</p>
-      <div id="storage-generation-list" aria-live="polite"></div>
     </section>
     <section id="bots" class="hidden">
       <p class="muted">这里只承载当前 Bot authority 的运行工作区。Bot 身份、存储供应和创建进度由部署作用域的 Bot 目录模块管理。</p>

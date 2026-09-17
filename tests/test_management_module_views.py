@@ -31,6 +31,9 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="package-import-form"' not in index
     assert 'id="package-list"' not in index
     assert 'id="bot-maintenance-form"' not in index
+    assert 'id="nav-backups"' not in index
+    assert 'id="storage-cleanup-form"' not in index
+    assert 'id="backup-import-form"' not in index
     assert 'id="bot-config-form"' not in index
     assert 'id="bot-package"' not in index
     assert 'id="bot-invoke-form"' not in index
@@ -86,6 +89,13 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     deployment_packages = (
         STATIC / "modules/deployment.package-registry.html"
     ).read_text(encoding="utf-8")
+    deployment_backup = (
+        STATIC / "modules/deployment.backup.html"
+    ).read_text(encoding="utf-8")
+    deployment_restore = (
+        STATIC / "modules/deployment.restore.html"
+    ).read_text(encoding="utf-8")
+    host_storage = (STATIC / "modules/host.storage.html").read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
     memory_style = (STATIC / "modules/memory.graph.css").read_text(encoding="utf-8")
@@ -178,6 +188,21 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert "/modules/deployment.package-registry" in package_controller
     assert "/uploads/package.import" in package_controller
     assert "/downloads/package.archive" in package_controller
+    assert 'id="deployment-backup-create-form"' in deployment_backup
+    backup_controller = (STATIC / "deployment-backup.js").read_text(encoding="utf-8")
+    assert "createModulePanel" in backup_controller
+    assert "/modules/deployment.backup" in backup_controller
+    assert "/uploads/import.artifact" in backup_controller
+    assert "/downloads/backup.archive" in backup_controller
+    assert 'id="deployment-restore-create-form"' in deployment_restore
+    restore_controller = (STATIC / "deployment-restore.js").read_text(encoding="utf-8")
+    assert "createModulePanel" in restore_controller
+    assert "/modules/deployment.restore" in restore_controller
+    assert 'id="host-storage-plan-form"' in host_storage
+    storage_controller = (STATIC / "host-storage.js").read_text(encoding="utf-8")
+    assert "createModulePanel" in storage_controller
+    assert "/modules/host.storage" in storage_controller
+    assert not (STATIC / "backup-panel.js").exists()
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host

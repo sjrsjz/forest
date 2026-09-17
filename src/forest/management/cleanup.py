@@ -439,6 +439,23 @@ class StorageCleanupManager:
             await self._authorize(conn, subject_id, session_token_hash)
             return _public(row)
 
+    async def list(
+        self, *, subject_id: str, session_token_hash: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ForestError("CLEANUP_QUERY_INVALID", "Cleanup limit is invalid", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._authorize(conn, subject_id, session_token_hash)
+            rows = await (
+                await conn.execute(
+                    "SELECT * FROM storage_cleanup_jobs "
+                    "ORDER BY created_at DESC,cleanup_id DESC LIMIT %s",
+                    (limit,),
+                )
+            ).fetchall()
+            await self._authorize(conn, subject_id, session_token_hash)
+            return [_public(row) for row in rows]
+
     async def retry(
         self, *, cleanup_id: str, subject_id: str, session_token_hash: str,
         expected_password_hash: str, idempotency_key: str,

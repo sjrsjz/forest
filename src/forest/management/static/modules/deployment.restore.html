@@ -1,0 +1,20 @@
+<section aria-labelledby="deployment-restore-title">
+  <h2 id="deployment-restore-title">隔离恢复与激活</h2>
+  <p class="hint">恢复模块只消费已经通过验证的不可变备份引用。恢复先建立 SEALED 副本，激活计划再切换 Bot storage head。</p>
+  <div class="card">
+    <h3>建立隔离副本</h3>
+    <form id="deployment-restore-create-form">
+      <label>已验证备份<select name="backup" required></select></label>
+      <label>当前管理员密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
+      <button type="submit">开始恢复</button>
+    </form>
+  </div>
+  <div id="deployment-restore-activation" class="card hidden">
+    <h3>激活恢复副本</h3><p id="deployment-restore-activation-target" class="hint"></p><p id="deployment-restore-activation-warning" class="notice"></p>
+    <form id="deployment-restore-activation-form">
+      <label>当前管理员密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label>
+      <div class="actions"><button type="submit">封存旧库并切换</button><button id="deployment-restore-activation-cancel" type="button" class="subtle">取消</button></div>
+    </form>
+  </div>
+  <div class="card"><div class="actions"><h3>恢复任务</h3><button id="deployment-restore-refresh" type="button" class="subtle">刷新</button></div><p id="deployment-restore-empty" class="hint hidden">还没有恢复任务。</p><div id="deployment-restore-list"></div></div>
+</section>

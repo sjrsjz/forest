@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ from forest.management.deployment_accounts_contract import (
 )
 from forest.management.memory_api import MemoryManagementContract
 from forest.management.module_api import (
+    ArtifactFileResult,
     ArtifactResult,
     EmptyInput,
     ModuleManagementContract,
@@ -58,6 +60,21 @@ def test_artifact_operations_require_bounded_transport_declarations():
             media_type="application/zip", max_bytes=1,
         )
     assert ArtifactResult(b"zip", "package.zip").filename == "package.zip"
+    assert ArtifactFileResult(Path("archive.bin"), 2, "archive.bin").size == 2
+    streamed = ModuleOperation(
+        "backup.import", "upload", "backup.import", EmptyInput, noop,
+        media_type="application/vnd.forest.backup", max_bytes=64 * 1024**3,
+        artifact_mode="stream", artifact_timeout_seconds=3600,
+    )
+    assert ModuleManagementContract((streamed,)).describe()["operations"][0][
+        "artifact"
+    ]["mode"] == "stream"
+    with pytest.raises(ValueError, match="Only upload"):
+        ModuleOperation(
+            "bad", "download", "artifact.read", EmptyInput, noop,
+            media_type="application/zip", max_bytes=1, disposition="attachment",
+            artifact_mode="stream",
+        )
     with pytest.raises(ValueError, match="filename"):
         ArtifactResult(b"zip", "../package.zip")
 

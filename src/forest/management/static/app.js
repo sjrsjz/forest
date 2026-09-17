@@ -1,5 +1,4 @@
 ﻿import { controlReceipts } from './control-receipts.js';
-import { backupPanel as createBackupPanel } from './backup-panel.js';
 import { managementContributions } from './management-contributions.js';
 
 const $ = (id) => document.getElementById(id);
@@ -19,8 +18,8 @@ function setBranding(displayName = 'Forest') {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'host', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'host', 'backups', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'host', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'host', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
@@ -44,33 +43,11 @@ async function fetchApi(path, body, extraHeaders) {
   }
   return data;
 }
-async function uploadBackupArtifact(path, artifact) {
-  if (currentUser?.role === 'viewer') {
-    const error = new Error('当前账号不能导入备份。(PERMISSION_DENIED)');
-    error.code = 'PERMISSION_DENIED'; throw error;
-  }
-  const response = await fetch(`/management/v1${path}`, {
-    method: 'PUT', credentials: 'same-origin', body: artifact,
-    headers: {
-      'Content-Type': 'application/vnd.forest.backup',
-      'X-CSRF-Token': csrf(),
-    },
-  });
-  const data = await response.json().catch(() => ({
-    code: 'INVALID_RESPONSE', message: '服务暂时无法响应，请稍后重试。',
-  }));
-  if (!response.ok || data?.code === 'INVALID_RESPONSE') {
-    const error = new Error(`${data?.message || '上传未完成'} (${data?.code || response.status})`);
-    error.code = data?.code; throw error;
-  }
-  return data;
-}
 function setIdentity(user) {
   currentUser = user;
   document.body.classList.toggle('viewer', user?.role === 'viewer');
   $('username').textContent = user?.username || '';
   $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
-  $('nav-backups').classList.toggle('hidden', user?.role !== 'admin');
   if (user?.display_name) setBranding(user.display_name);
   $('identity').classList.toggle('hidden', !user);
 }
@@ -127,7 +104,6 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   runtimeViews.reset();
   deploymentViews.reset();
   hostViews.reset();
-  backupsPanel.reset();
   selectedBot = null; selectionEpoch++;
   $('bot-detail').classList.add('hidden');
   setIdentity(null); setBranding();
@@ -139,8 +115,6 @@ function sessionEnded(message) {
   hostViews.reset();
   setIdentity(null); show('login'); notice(message, true);
 }
-const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
-
 const deploymentViews = managementContributions({
   api, busy, notice, scopeKind: 'deployment', scopeIdentity: row => row.scope_id,
   nav: $('deployment-module-nav'), registry: $('deployment-module-registry'),
@@ -228,15 +202,4 @@ $('nav-deployment').addEventListener('click', () =>
 $('nav-host').addEventListener('click', () =>
   busy($('nav-host'), readHostWorkspace));
 $('nav-bots').addEventListener('click', () => show('bots'));
-$('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
-  show('backups'); await backupsPanel.load();
-}));
-let backupPolling = false;
-setInterval(async () => {
-  if (activeView !== 'backups' || backupPolling || !backupsPanel.hasRunning()) return;
-  backupPolling = true;
-  try { await backupsPanel.load(); }
-  catch (error) { if (activeView === 'backups') notice(error.message); }
-  finally { backupPolling = false; }
-}, 1000);
 start();

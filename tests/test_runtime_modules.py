@@ -29,13 +29,17 @@ def artifact(marker="0", scope="bot"):
 
 @pytest.mark.asyncio
 async def test_host_runtime_registry_has_its_own_scope_and_contract():
-    host = HostModuleHost("host", "host-id", "incarnation", "deployment-id")
+    host = HostModuleHost(
+        "host", "host-id", "incarnation", "deployment-id",
+        object(), object(), object(),
+    )
     registry = RuntimeModuleRegistry(host, OFFICIAL_HOST_MODULES)
     host.module_registry = registry
     await registry.start()
     try:
         assert registry.scope_kind == "host"
         assert registry.states["host.runtime"] == ModuleLifecycleState.ACTIVE
+        assert registry.states["host.storage"] == ModuleLifecycleState.ACTIVE
         runtime = registry.get("host.runtime")
         assert runtime.management_contract.describe()["operations"] == [
             {

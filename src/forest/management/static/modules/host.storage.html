@@ -1,0 +1,18 @@
+<section aria-labelledby="host-storage-title">
+  <h2 id="host-storage-title">宿主存储资源</h2>
+  <p class="hint">这里只管理当前 host 精确拥有的物理资源。回收不能切换 Bot storage head，也不能决定备份是否可恢复。</p>
+  <div class="card">
+    <h3>预览资源回收</h3>
+    <form id="host-storage-plan-form">
+      <label>资源类型<select name="resource_kind"><option value="BACKUP_ARTIFACT">备份工件</option><option value="RESTORE_STAGE">隔离恢复副本</option><option value="BOT_STORAGE_GENERATION">Bot 历史存储代际</option></select></label>
+      <label>资源 ID<input name="resource_id" required maxlength="256" placeholder="UUID 或 bot_id:generation"></label>
+      <button type="submit">生成回收计划</button>
+    </form>
+  </div>
+  <div id="host-storage-apply" class="card hidden">
+    <h3>确认回收</h3><pre id="host-storage-plan"></pre>
+    <form id="host-storage-apply-form"><label>当前管理员密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label><div class="actions"><button type="submit">撤销可见性并回收</button><button id="host-storage-apply-cancel" type="button" class="subtle">取消</button></div></form>
+  </div>
+  <div class="card"><div class="actions"><h3>Bot 存储代际</h3><button id="host-storage-refresh" type="button" class="subtle">刷新</button></div><p id="host-storage-generation-empty" class="hint hidden">没有托管 Bot 存储代际。</p><div id="host-storage-generations"></div></div>
+  <div class="card"><h3>回收任务</h3><p id="host-storage-cleanup-empty" class="hint hidden">没有回收任务。</p><div id="host-storage-cleanups"></div></div>
+</section>

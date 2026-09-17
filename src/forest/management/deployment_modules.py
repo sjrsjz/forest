@@ -10,6 +10,7 @@ from forest.management.deployment_accounts_contract import (
     DeploymentAccountsManagementContract,
 )
 from forest.management.deployment_audit_contract import DeploymentAuditManagementContract
+from forest.management.deployment_backup_contract import DeploymentBackupManagementContract
 from forest.management.deployment_bot_catalog_contract import (
     DeploymentBotCatalogManagementContract,
 )
@@ -19,6 +20,7 @@ from forest.management.deployment_configuration_contract import (
 from forest.management.deployment_package_registry_contract import (
     DeploymentPackageRegistryManagementContract,
 )
+from forest.management.deployment_restore_contract import DeploymentRestoreManagementContract
 from forest.runtime_modules import (
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
@@ -36,6 +38,11 @@ class DeploymentModuleHost:
     catalog: object
     fleet: object
     managed_available: bool
+    backups: object
+    verifications: object
+    backup_imports: object
+    restores: object
+    activations: object
 
 
 class DeploymentAuditRuntime:
@@ -72,6 +79,28 @@ class DeploymentPackageRegistryRuntime:
         self.management_contract = DeploymentPackageRegistryManagementContract(self)
 
 
+class DeploymentBackupRuntime:
+    def __init__(self, host):
+        self.store = host.store
+        self.authority = host.authority
+        self.password_slots = host.password_slots
+        self.backups = host.backups
+        self.verifications = host.verifications
+        self.backup_imports = host.backup_imports
+        self.management_contract = DeploymentBackupManagementContract(self)
+
+
+class DeploymentRestoreRuntime:
+    def __init__(self, host):
+        self.store = host.store
+        self.password_slots = host.password_slots
+        self.restores = host.restores
+        self.activations = host.activations
+        self.backups = host.backups
+        self.verifications = host.verifications
+        self.management_contract = DeploymentRestoreManagementContract(self)
+
+
 def _audit(host, _modules):
     return DeploymentAuditRuntime(host.store)
 
@@ -90,6 +119,14 @@ def _bot_catalog(host, _modules):
 
 def _package_registry(host, _modules):
     return DeploymentPackageRegistryRuntime(host)
+
+
+def _backup(host, _modules):
+    return DeploymentBackupRuntime(host)
+
+
+def _restore(host, _modules):
+    return DeploymentRestoreRuntime(host)
 
 
 OFFICIAL_DEPLOYMENT_MODULES = (
@@ -124,6 +161,40 @@ OFFICIAL_DEPLOYMENT_MODULES = (
                 "/static/bot-catalog.js",
                 group="runtime",
                 order=10,
+            ),
+        ),
+    ),
+    RuntimeModuleDescriptor(
+        "deployment.backup",
+        ("deployment.package-registry",),
+        _backup,
+        official_artifact("deployment"),
+        management=(
+            RuntimeManagementContribution(
+                "backups",
+                "备份",
+                ("deployment",),
+                "/static/modules/deployment.backup.html",
+                "/static/deployment-backup.js",
+                group="storage",
+                order=10,
+            ),
+        ),
+    ),
+    RuntimeModuleDescriptor(
+        "deployment.restore",
+        ("deployment.backup",),
+        _restore,
+        official_artifact("deployment"),
+        management=(
+            RuntimeManagementContribution(
+                "restore",
+                "恢复",
+                ("deployment",),
+                "/static/modules/deployment.restore.html",
+                "/static/deployment-restore.js",
+                group="storage",
+                order=20,
             ),
         ),
     ),

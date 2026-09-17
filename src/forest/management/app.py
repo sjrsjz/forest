@@ -26,7 +26,6 @@ from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
 from forest.management.activations import RestoreActivationManager
 from forest.management.authority import WebAuthority
-from forest.management.backup_api import install_backup_routes
 from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
 from forest.management.catalog import BotCatalog
@@ -84,7 +83,6 @@ class BodyLimit:
     def __init__(self, app: Any, limit: int = 65536, runtime: Any = None) -> None:
         self.app, self.limit, self.runtime = app, limit, runtime
         self.archive_slots = asyncio.Semaphore(2)
-        self.backup_import_slots = asyncio.Semaphore(2)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -100,25 +98,6 @@ class BodyLimit:
                 )
                 return
             async with self.archive_slots:
-                await self.app(scope, receive, send)
-            return
-        if (
-            scope["method"] == "PUT"
-            and re.fullmatch(r"/management/v1/backup-imports/[^/]+/artifact", scope["path"])
-        ):
-            try:
-                await self.runtime.principal(
-                    Request(scope), write=True, content_type="application/vnd.forest.backup"
-                )
-            except ForestError as error:
-                await JSONResponse(
-                    {"code": error.code, "message": error.message}, error.status
-                )(scope, receive, send)
-                return
-            if self.backup_import_slots.locked():
-                await JSONResponse({"code": "BACKUP_IMPORT_BUSY"}, 429)(scope, receive, send)
-                return
-            async with self.backup_import_slots:
                 await self.app(scope, receive, send)
             return
         await self._bounded(scope, receive, send, self.limit)
@@ -251,7 +230,8 @@ class ManagementRuntime:
                 catalog, backups, restores, self.settings.data_dir
             )
             host = HostModuleHost(
-                "host", self.host_id, str(uuid4()), plan["deployment_id"]
+                "host", self.host_id, str(uuid4()), plan["deployment_id"],
+                candidate, self.password_slots, cleanup,
             )
             host_modules = RuntimeModuleRegistry(host, OFFICIAL_HOST_MODULES)
             host.module_registry = host_modules
@@ -266,6 +246,11 @@ class ManagementRuntime:
                     catalog,
                     fleet,
                     self.settings.managed_dsn is not None,
+                    backups,
+                    verifications,
+                    backup_imports,
+                    restores,
+                    activations,
                 ),
                 OFFICIAL_DEPLOYMENT_MODULES,
             )
@@ -628,7 +613,6 @@ def create_app(settings: WebSettings) -> FastAPI:
         response.delete_cookie("forest_csrf", path="/")
         return response
 
-    install_backup_routes(app, runtime)
     install_onebot_protocol_route(app, runtime)
     install_module_routes(app, runtime)
     static = Path(__file__).with_name("static")
