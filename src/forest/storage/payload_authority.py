@@ -158,6 +158,11 @@ class KernelPayloadRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self._clock_in(conn)
 
+    async def epoch_in(self, conn, *, expected=None, update=False) -> int:
+        """Expose the deletion clock to registered UnitOfWork participants."""
+
+        return await self._clock_in(conn, expected=expected, update=update)
+
     @staticmethod
     def _source_set(sources) -> tuple[PayloadSource, ...]:
         items = tuple(sources)

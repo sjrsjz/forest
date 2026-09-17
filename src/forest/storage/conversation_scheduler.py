@@ -814,6 +814,7 @@ class ConversationSchedulerRepository:
         boundary: str,
         session_ref: str | None = None,
         run_ref: str | None = None,
+        _connection=None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         if boundary not in _BOUNDARIES:
@@ -836,7 +837,7 @@ class ConversationSchedulerRepository:
                 "run_ref": run_ref,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock_operation(conn, operation_id)
             lane = await self._guard_actor(conn, actor)
             replay = await (
@@ -964,6 +965,14 @@ class ConversationSchedulerRepository:
                 actor=actor,
                 selected_input_end_seq=lane["context_applied_seq"],
             )
+
+    async def select_input_in(self, conn, actor: ConversationActor, operation_id: str, **values):
+        return await self.select_input(
+            actor,
+            operation_id,
+            _connection=conn,
+            **values,
+        )
 
     async def _commit_batch(
         self,
@@ -1472,6 +1481,51 @@ class ConversationSchedulerRepository:
                 (self.store.bot_id, actor.conversation_id),
             )
             return tuple(trigger["trigger_id"] for trigger in triggers)
+
+    async def verify_input_batch_occurrence_in(
+        self,
+        conn,
+        *,
+        input_batch_ref: str,
+        conversation_ref: str,
+        event_ref: str,
+        context_revision: int,
+    ) -> dict:
+        """Verify that one committed InputBatch contains the exact occurrence."""
+
+        _bounded(input_batch_ref, "input_batch_ref", 256)
+        _bounded(conversation_ref, "conversation_ref", 256)
+        _bounded(event_ref, "event_ref", 256)
+        if type(context_revision) is not int or context_revision <= 0:
+            raise ForestError("CONVERSATION_INPUT_INVALID", "Invalid Context revision", 422)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT b.input_batch_id,b.conversation_id,b.context_revision,e.event_id,"
+                    "e.ingress_seq FROM {} b JOIN {} e ON e.bot_id=b.bot_id "
+                    "AND e.input_batch_id=b.input_batch_id WHERE b.bot_id=%s "
+                    "AND b.input_batch_id=%s AND b.conversation_id=%s "
+                    "AND b.context_revision=%s AND e.event_id=%s"
+                ).format(
+                    self._table("input_batches"),
+                    self._table("input_batch_events"),
+                ),
+                (
+                    self.store.bot_id,
+                    input_batch_ref,
+                    conversation_ref,
+                    context_revision,
+                    event_ref,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError(
+                "CONVERSATION_INPUT_BATCH_UNAVAILABLE",
+                "InputBatch does not contain this occurrence",
+                409,
+            )
+        return dict(row)
 
     async def context_snapshot(self, actor: ConversationActor) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():

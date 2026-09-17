@@ -209,6 +209,24 @@ async def test_clean_scheduler_cuts_through_last_trigger_and_silently_drains_tai
             "ingress_seq": 5,
         },
     ]
+    async with _store.pool.connection() as conn, conn.transaction():
+        verified = await scheduler.verify_input_batch_occurrence_in(
+            conn,
+            input_batch_ref=first["input_batch_id"],
+            conversation_ref=conversation,
+            event_ref="event/4",
+            context_revision=first["context_revision"],
+        )
+        assert verified["ingress_seq"] == 4
+        with pytest.raises(ForestError) as caught:
+            await scheduler.verify_input_batch_occurrence_in(
+                conn,
+                input_batch_ref=first["input_batch_id"],
+                conversation_ref=conversation,
+                event_ref="event/6",
+                context_revision=first["context_revision"],
+            )
+        assert caught.value.code == "CONVERSATION_INPUT_BATCH_UNAVAILABLE"
 
     safe = await scheduler.select_input(
         actor,
