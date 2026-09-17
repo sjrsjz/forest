@@ -8,7 +8,16 @@ import pytest
 from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
-from forest.agent_model_executor import AgentModelStep, DurableAgentModelExecutor
+from forest.agent_model_executor import (
+    AgentModelStep,
+    AgentToolBinding,
+    DurableAgentModelExecutor,
+)
+from forest.agent_tool_executor import (
+    DurableAgentToolExecutor,
+    ToolAuthorizationResult,
+    ToolDispatchResult,
+)
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
@@ -62,21 +71,95 @@ class FakeModelClient:
     async def dispatch(self, prepared, *, permitcheck):
         await permitcheck(prepared)
         self.permitted = True
+        if "tool" in prepared.request_id:
+            text = (
+                '<valid_agent_protocol_content_block block_type="ModelTurn">'
+                '<payload><blocks><block block_type="FunctionCall">'
+                '<function name="lookup"><arguments encoding="json">'
+                '{"authority_trigger_id":"trigger:tool:1","arguments":{"query":"x"}}'
+                '</arguments></function></block></blocks></payload>'
+                '</valid_agent_protocol_content_block>'
+            )
+        else:
+            text = (
+                '<valid_agent_protocol_content_block block_type="ModelTurn">'
+                '<payload><blocks><block block_type="Assistant"><content>'
+                '<text>ok</text></content></block></blocks></payload>'
+                '</valid_agent_protocol_content_block>'
+            )
         return ModelResult(
             "RESPONDED",
             prepared.request_id,
             prepared.transport_attempt_id,
             prepared.payload_digest,
-            text=(
-                '<valid_agent_protocol_content_block block_type="ModelTurn">'
-                '<payload><blocks><block block_type="Assistant"><content>'
-                '<text>ok</text></content></block></blocks></payload>'
-                '</valid_agent_protocol_content_block>'
-            ),
+            text=text,
         )
 
     async def aclose(self):
         self.closed = True
+
+
+class FakeToolAuthorization:
+    def __init__(self):
+        self.ready = False
+        self.audience_override = None
+        self.requests = []
+
+    async def authorize(self, request, *, approval_required):
+        self.requests.append((request, approval_required))
+        if not self.ready:
+            return ToolAuthorizationResult("WAITING", approval_ref="approval:tool:test")
+        return ToolAuthorizationResult(
+            "AUTHORIZED",
+            authorization_ticket_id="authorization-ticket:tool:test",
+            approval_ref="approval:tool:test",
+            input_digest=request.input_digest,
+            audience_component_id=request.executor_component_id,
+            audience_generation_id=(
+                self.audience_override or request.executor_generation_id
+            ),
+        )
+
+
+class CrashAfterToolHandoff:
+    def __init__(self, store, payloads):
+        self.store = store
+        self.payloads = payloads
+        self.dispatches = []
+        self.queries = []
+
+    async def dispatch(self, request, *, permit_in):
+        self.dispatches.append(request)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await permit_in(conn, effect_observation_ref="effect-attempt:tool:test")
+        raise ConnectionError("tool result was lost after handoff")
+
+    async def query(self, request):
+        self.queries.append(request)
+        epoch = await self.payloads.epoch()
+        saved = await self.payloads.put_bytes(
+            owner_component_id=request.executor_component_id,
+            owner_kind="tool.result",
+            owner_id=request.tool_call_id,
+            media_type="application/json",
+            content=json.dumps(
+                {"value": "reconciled"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            expected_deletion_epoch=epoch,
+        )
+        return ToolDispatchResult(
+            "SUCCEEDED",
+            result=AgentPayloadRef(
+                saved.payload_id,
+                saved.content_digest,
+                request.executor_component_id,
+                "tool.result",
+                request.tool_call_id,
+            ),
+            observation_ref="effect-observation:tool:test",
+        )
 
 
 async def _payload(payloads, *, owner_kind, owner_id, value) -> OneBotPayloadRef:
@@ -431,6 +514,147 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert durable_run["final_candidate_payload_id"] == (
             model_step.final_candidate.payload_id
         )
+
+        await agent_runtime.start_run(
+            operation_id="agent/start/tool",
+            conversation_ref="onebot:group:tool",
+            session_id="agent/session/tool",
+            run_id="agent/run/tool",
+            input_batch=AgentInputBatch(
+                input_batch_ref="batch:tool",
+                input_batch_digest="sha256:" + "3" * 64,
+                selected_input_end_seq=1,
+                context_revision=1,
+                context_view_revision=0,
+                source_manifest_digest="sha256:" + "4" * 64,
+                triggers=(AgentTriggerInput("trigger:tool:1", "qq:43", 1),),
+            ),
+            agent_spec_revision="agent-spec:test/1",
+            config=agent_config,
+            preset_revision="preset:test/1",
+            preset=preset,
+            absolute_deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        tool_owner = await agent_runtime.acquire_run("agent/run/tool", "agent-worker/tool")
+        tool_snapshot = {
+            "bot_id": store.bot_id,
+            "run_id": "agent/run/tool",
+            "logical_step_id": "agent/step/tool",
+            "input_revision": 1,
+            "context_revision": 1,
+            "context_view_revision": 0,
+            "selected_input_end_seq": 1,
+            "trigger_ids": ["trigger:tool:1"],
+            "input_batch_ids": ["batch:tool"],
+            "units": [
+                {
+                    "unit_id": "message:tool:1",
+                    "role": "user",
+                    "source": {
+                        "conversation_id": "onebot:group:tool",
+                        "group_source_id": "qq-group:tool",
+                        "platform": "onebot-v11",
+                        "channel_kind": "group",
+                        "channel_id": "tool",
+                    },
+                    "author": {
+                        "principal_ref": "qq:43",
+                        "external_user_id": "43",
+                        "display_name": "Bob",
+                    },
+                    "parts": [{"type": "text", "text": "lookup x"}],
+                }
+            ],
+        }
+        tool_declaration = {
+            "name": "lookup",
+            "description": "Read a bounded value",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        }
+        tool_binding = AgentToolBinding(
+            "lookup",
+            "adapter.onebot",
+            adapter_runtime.generation_identity.generation_id,
+            "lookup.read",
+            "sha256:" + "5" * 64,
+            supports_query=True,
+        )
+        tool_step = await executor.execute(
+            tool_owner,
+            AgentModelStep(
+                request_id="model-request:tool:test",
+                attempt_id="model-attempt:tool:test",
+                effect_operation_ref="effect:model:tool:test",
+                turn_id="model-turn:tool:test",
+                final_reply_ref="reply:tool:test",
+            ),
+            tool_snapshot,
+            tools=(tool_declaration,),
+            tool_bindings=(tool_binding,),
+            stream=False,
+        )
+        assert tool_step.status == "TOOL_PROPOSED"
+        tool_run = await agent_runtime.load_recovery("agent/run/tool")
+        assert tool_run["state"] == "WAIT_TOOL"
+        assert tool_run["current_tool"]["tool_call_id"] == tool_step.tool_call_id
+        assert tool_run["current_tool"]["authority_principal_ref"] == "qq:43"
+
+        tool_executor = DurableAgentToolExecutor(
+            agent=agent_runtime,
+            payloads=kernel.payload,
+        )
+        tool_authorization = FakeToolAuthorization()
+        tool_port = CrashAfterToolHandoff(store, kernel.payload)
+        waiting = await tool_executor.execute(
+            tool_owner,
+            tool_binding,
+            tool_authorization,
+            tool_port,
+        )
+        assert waiting.status == "WAIT_APPROVAL"
+        assert tool_port.dispatches == []
+        tool_authorization.ready = True
+        tool_authorization.audience_override = "generation:wrong"
+        with pytest.raises(ForestError) as wrong_audience:
+            await tool_executor.execute(
+                tool_owner,
+                tool_binding,
+                tool_authorization,
+                tool_port,
+            )
+        assert wrong_audience.value.code == "AGENT_TOOL_AUTHORIZATION_CONFLICT"
+        assert tool_port.dispatches == []
+        tool_authorization.audience_override = None
+        with pytest.raises(ConnectionError, match="lost after handoff"):
+            await tool_executor.execute(
+                tool_owner,
+                tool_binding,
+                tool_authorization,
+                tool_port,
+            )
+        handed_off = await agent_runtime.load_recovery("agent/run/tool")
+        assert handed_off["state"] == "WAIT_TOOL"
+        assert handed_off["current_tool"]["state"] == "DISPATCHING"
+        await agent_runtime.release_run(tool_owner)
+        recovered_owner = await agent_runtime.acquire_run(
+            "agent/run/tool", "agent-worker/tool-recovery"
+        )
+        reconciled = await tool_executor.reconcile(
+            recovered_owner,
+            tool_binding,
+            tool_port,
+        )
+        assert reconciled.status == "SUCCEEDED"
+        assert len(tool_port.dispatches) == 1
+        assert len(tool_port.queries) == 1
+        recovered = await agent_runtime.load_recovery("agent/run/tool")
+        assert recovered["state"] == "PREPARING_MODEL"
+        assert recovered["current_tool"] is None
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True

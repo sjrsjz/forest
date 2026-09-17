@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
 from forest.agent_protocol import ModelTurn, parse_model_turn
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.storage.agent_runtime_authority import AgentPayloadRef, ModelRequestPlan
+from forest.storage.agent_runtime_authority import (
+    AgentPayloadRef,
+    ModelRequestPlan,
+    ToolProposal,
+)
 
 
 def _canonical(value) -> bytes:
@@ -37,6 +42,46 @@ class AgentModelStepResult:
     final_candidate: AgentPayloadRef | None = None
     text: str | None = None
     error_code: str | None = None
+    tool_call_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentToolBinding:
+    name: str
+    component_id: str
+    generation_id: str
+    service_id: str
+    contract_digest: str
+    approval_required: bool = True
+    supports_query: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not self.name
+            or not self.component_id
+            or not self.generation_id
+            or not self.service_id
+            or not self.contract_digest.startswith("sha256:")
+            or len(self.contract_digest) != 71
+            or any(char not in "0123456789abcdef" for char in self.contract_digest[7:])
+            or type(self.approval_required) is not bool
+            or type(self.supports_query) is not bool
+        ):
+            raise ValueError("Tool binding identity is invalid")
+
+    @property
+    def binding_digest(self) -> str:
+        return digest_json(
+            {
+                "name": self.name,
+                "component_id": self.component_id,
+                "generation_id": self.generation_id,
+                "service_id": self.service_id,
+                "contract_digest": self.contract_digest,
+                "approval_required": self.approval_required,
+                "supports_query": self.supports_query,
+            }
+        )
 
 
 class DurableAgentModelExecutor:
@@ -125,6 +170,7 @@ class DurableAgentModelExecutor:
         tools=(),
         media=None,
         evidence=None,
+        tool_bindings: tuple[AgentToolBinding, ...] = (),
         output_tokens: int = 1024,
         stream: bool = True,
     ) -> AgentModelStepResult:
@@ -251,11 +297,17 @@ class DurableAgentModelExecutor:
             result.text,
             allowed_tools=tuple(item["name"] for item in tools),
         )
-        if turn.function_call is not None:
+        if any(type(item) is not AgentToolBinding for item in tool_bindings):
             raise ForestError(
-                "AGENT_TOOL_PORT_UNAVAILABLE",
-                "Model proposed a tool but no typed Tool executor was supplied",
-                503,
+                "AGENT_TOOL_BINDING_INVALID", "Tool binding set is invalid", 422
+            )
+        bindings = {item.name: item for item in tool_bindings}
+        declared_names = {item.get("name") for item in tools if isinstance(item, dict)}
+        if len(bindings) != len(tool_bindings) or set(bindings) != declared_names:
+            raise ForestError(
+                "AGENT_TOOL_BINDING_INVALID",
+                "Tool declarations and runtime bindings differ",
+                422,
             )
         turn_payload = await self._payload(
             "agent.runtime",
@@ -271,6 +323,57 @@ class DurableAgentModelExecutor:
                 step.turn_id,
                 _canonical({"text": turn.assistant_text}),
             )
+        proposal = None
+        if turn.function_call is not None:
+            binding = bindings.get(turn.function_call.name)
+            if binding is None:
+                raise ForestError(
+                    "AGENT_TOOL_PORT_UNAVAILABLE",
+                    "Model proposed a tool without an exact typed binding",
+                    503,
+                )
+            wrapper = turn.function_call.arguments
+            authority_trigger = wrapper.get("authority_trigger_id")
+            arguments = wrapper.get("arguments")
+            if set(wrapper) != {"authority_trigger_id", "arguments"} or not isinstance(
+                arguments, dict
+            ):
+                raise ForestError(
+                    "AGENT_TOOL_AUTHORITY_INVALID",
+                    "Tool call does not bind arguments to one trigger",
+                    409,
+                )
+            call_digest = hashlib.sha256(
+                _canonical(
+                    {
+                        "turn_id": step.turn_id,
+                        "binding": {
+                            "name": binding.name,
+                            "component_id": binding.component_id,
+                            "generation_id": binding.generation_id,
+                            "service_id": binding.service_id,
+                            "contract_digest": binding.contract_digest,
+                            "approval_required": binding.approval_required,
+                            "supports_query": binding.supports_query,
+                        },
+                        "arguments": wrapper,
+                    }
+                )
+            ).hexdigest()
+            tool_call_id = "tool-call:" + call_digest
+            argument_payload = await self._payload(
+                "agent.runtime",
+                "tool.arguments",
+                tool_call_id,
+                _canonical(wrapper),
+            )
+            proposal = ToolProposal(
+                tool_call_id=tool_call_id,
+                arguments=argument_payload,
+                authority_trigger_ref=authority_trigger,
+                tool_contract_digest=binding.binding_digest,
+                effect_operation_ref="tool-effect:" + call_digest,
+            )
         await self.agent.record_model_turn(
             owner,
             turn_id=step.turn_id,
@@ -278,7 +381,14 @@ class DurableAgentModelExecutor:
             turn=turn,
             turn_payload=turn_payload,
             assistant_payload=assistant_payload,
+            tool=proposal,
         )
+        if proposal is not None:
+            return AgentModelStepResult(
+                "TOOL_PROPOSED",
+                turn=turn,
+                tool_call_id=proposal.tool_call_id,
+            )
         if not turn.terminal:
             return AgentModelStepResult("CONTINUE", turn=turn)
 

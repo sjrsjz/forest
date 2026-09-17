@@ -46,8 +46,6 @@
 `provider.chat-completions`、`agent.runtime`、`conversation.scheduler` 和 `adapter.onebot` 已经作为四个平级业务模块与五个内核模块共同进入一张九成员 RuntimeGraph：
 - `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
 - text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
-`agent.runtime`、`conversation.scheduler` 和 `adapter.onebot` 已经作为三个平级业务模块与五个内核模块共同进入一张八成员 RuntimeGraph：
-
 - `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
 - Agent `COMPLETED` Run 不再擅自关闭 Session；Conversation 排空决定显式关闭，或在同一 Session 下原子推进唯一后继 Run；
 - `conversation.scheduler` 的接纳与分类端口检查自身准确 Generation；
@@ -60,7 +58,7 @@
 - raw event、normalized parts 和 author snapshot 先成为带来源闭包的 payload，再由一个调用方 UoW 原子提交 Adapter platform event 和 Conversation Inbox；
 - Binding head、client 和事件接纳已统一锁序，同一账号不同群可以并行。
 
-Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。领取、续租、选择、Context 追加、失败重排和释放都在调用方事务内复核 Conversation Generation。活跃 Session 本身已作为恢复候选；Worker 重启后读取持久 `session_ref/run_ref` 并恢复原执行链，Agent authority 也能枚举包含已完成但尚未排空 Session 的活动 Run 头。完成端口必须显式返回实际回答的 trigger 集合，不能依赖丢失即不可恢复的进程内累计列表。`FinalReplyUnitOfWork` 已在写入前复核 Agent、Conversation、Delivery 三个精确 Generation，并在一个 Bot PostgreSQL 事务中把 Run 从 `FINAL_READY` 置为 `COMPLETED`、追加正式 `REPLY`/终结明确 trigger、创建 CHAT SendIntent；Delivery participant 失败时三者整体回滚。`SessionHandoffUnitOfWork` 也已把 `SESSION_END` 的输入选择与 Agent Session 的后继 Run 建立/显式关闭放入同一事务；InputBatch 现在冻结 `context_view_revision`，后继 Run 不再从后来状态猜测模型视图。`DurableAgentModelExecutor` 已按持久 Run 输入 fence 构造 Provider 投影，写入 ModelRequest/TransportAttempt，在 Provider 的发送前许可事务中原子标记 Agent handoff，持久化 SUCCEEDED/NOT_APPLIED/UNKNOWN 观察，解析固定 CorePrompt 协议并把终止回答推进到 `FINAL_READY`；输入版本、trigger 和 InputBatch 任一不符都会在调用前拒绝。恢复投影会携带当前 request/attempt/tool/checkpoint；新 owner epoch 遇到无法查询的 `DISPATCHING` Chat Completions attempt 时，幂等落为 `BLOCKED_UNKNOWN`，不会自动重发。当前 Worker 尚未接入这个执行器、工具 Effect/授权参与者以及最终提交协调器，因此生产启动图没有启用 Worker 任务。
+Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。领取、续租、选择、Context 追加、失败重排和释放都在调用方事务内复核 Conversation Generation。活跃 Session 本身已作为恢复候选；Worker 重启后读取持久 `session_ref/run_ref` 并恢复原执行链，Agent authority 也能枚举包含已完成但尚未排空 Session 的活动 Run 头。完成端口必须显式返回实际回答的 trigger 集合，不能依赖丢失即不可恢复的进程内累计列表。`FinalReplyUnitOfWork` 已在写入前复核 Agent、Conversation、Delivery 三个精确 Generation，并在一个 Bot PostgreSQL 事务中把 Run 从 `FINAL_READY` 置为 `COMPLETED`、追加正式 `REPLY`/终结明确 trigger、创建 CHAT SendIntent；Delivery participant 失败时三者整体回滚。`SessionHandoffUnitOfWork` 也已把 `SESSION_END` 的输入选择与 Agent Session 的后继 Run 建立/显式关闭放入同一事务；InputBatch 现在冻结 `context_view_revision`，后继 Run 不再从后来状态猜测模型视图。`DurableAgentModelExecutor` 已按持久 Run 输入 fence 构造 Provider 投影，写入 ModelRequest/TransportAttempt，在 Provider 的发送前许可事务中原子标记 Agent handoff，持久化 SUCCEEDED/NOT_APPLIED/UNKNOWN 观察，解析固定 CorePrompt 协议并把终止回答推进到 `FINAL_READY`；输入版本、trigger 和 InputBatch 任一不符都会在调用前拒绝。FunctionCall 现在冻结准确工具 component/Generation/service/contract 绑定和原触发 principal，并持久化单个 ToolProposal；`DurableAgentToolExecutor` 只接受回显相同输入摘要和 audience Generation 的授权票据收据，通过 Effect 端口的事务回调原子标记 `DISPATCHING`，结果丢失后由新 owner 查询原 effect，不能重新 dispatch；成功载荷必须由工具组件以自身身份发布，协调器不能冒充工具写 payload。恢复投影会携带当前 request/attempt/tool/checkpoint；无法查询的 `DISPATCHING` 模型或工具 attempt 幂等落为 `BLOCKED_UNKNOWN`。当前 Worker 尚未接入这些执行器、真实 `kernel.effect`/批准 authority 适配器以及最终提交协调器，因此生产启动图没有启用 Worker 任务。
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
@@ -91,7 +89,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 ## 当前阻断项
 
 1. 将 `memory.graph`、`delivery`、`shell.command` 和必要的 Provider/Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议。
-2. 将已验证的 `conversation.scheduler` Worker 接到 `DurableAgentModelExecutor`、工具 Effect/授权参与者、Delivery 与最终回复/Session 交接 UnitOfWork；补齐工具执行、授权及 WAIT_TOOL/WAIT_APPROVAL 恢复，不得复用旧组合根。
+2. 将已验证的 `conversation.scheduler` Worker 接到 `DurableAgentModelExecutor`、`DurableAgentToolExecutor`、Delivery 与最终回复/Session 交接 UnitOfWork；为工具端口实现真实 `kernel.effect` 和 approval authority 适配器并验证票据消费/UNKNOWN 对账，不得用测试端口或旧组合根进入生产图。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
 5. 将 provisioning、启动、恢复和 Docker 入口切到最小 bootstrap + 所选模块 bundle + 冻结 RuntimeGraph。
@@ -103,7 +101,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 - 文档权威链与 CorePrompt：`14 passed`。
 - Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：上一基线 `183 passed`。
-- Agent/Conversation Worker、持久调度 Repository、九成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`82 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复和后继 Run，PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
+- Agent/Conversation Worker、持久调度 Repository、九成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`114 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复和后继 Run，PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、工具批准等待、准确 audience Generation、Effect 交接后结果丢失与查询恢复、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
 - 九成员 Kernel + Provider + Agent + Conversation + OneBot RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、发送前许可、延迟开放 WebSocket、作者/群来源和逆序关闭。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
 - 最近一次无 PostgreSQL 全套证据仍为 `747 passed, 36 skipped, 1184 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
