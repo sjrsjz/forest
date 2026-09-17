@@ -3,7 +3,7 @@ import {clearConfiguration, replacementButton} from './configuration-forms.js';
 const $ = (id) => document.getElementById(id);
 const status = (row) => `${({ONLINE:'在线',OFFLINE:'离线',DISABLED:'未启用',DRAINING:'正在切换',RESERVED:'待完成登记'})[row.state || row.stage] || row.state}${row.error_code ? ` · ${row.error_code}` : ''}`;
 
-export function bindingsPanel(api, busy, notice) {
+export function createModulePanel(api, busy, notice) {
   let bot = null, selected = null, epoch = 0, edit = 0;
   let pending = null, planKey = null, applyKey = null, createKey = null;
   let refreshSequence = 0, configSequence = 0;

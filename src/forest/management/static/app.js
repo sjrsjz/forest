@@ -1,4 +1,3 @@
-import { bindingsPanel } from './bindings.js';
 import { eventsPanel } from './events-panel.js';
 import { componentJobsPanel } from './component-jobs-panel.js';
 import { commandPoliciesPanel } from './command-policies.js';
@@ -147,7 +146,6 @@ $('login-form').addEventListener('submit', (event) => {
 });
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
-  bindingPanel.reset();
   runtimeViews.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
@@ -207,7 +205,6 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   componentSourceRevision = null;
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
-const bindingPanel = bindingsPanel(api, busy, notice);
 const componentEventsPanel = eventsPanel(api, busy, notice);
 const durableJobsPanel = componentJobsPanel(api, busy, notice);
 const commandPolicyPanel = commandPoliciesPanel(api, busy, notice);
@@ -240,13 +237,12 @@ botComponentHistory.id = 'bot-component-history';
 const botWorkspacePanes = new Map([
   ['status', [botOverview]],
   ['modules', [$('bot-components'), botComponentHistory]],
-  ['routes', [$('bot-bindings')]],
   ['tasks', [$('bot-component-jobs'), $('bot-events')]],
   ['observability', [$('bot-handler-diagnostics'), $('bot-command-diagnostics'), $('bot-audit')]],
   ['security', [$('bot-command-policies'), $('bot-handler-policies')]],
 ]);
 const botWorkspaceLabels = new Map([
-  ['status', '状态'], ['modules', '模块'], ['routes', 'Adapter 与路由'],
+  ['status', '状态'], ['modules', '模块'],
   ['tasks', '任务'], ['observability', '观测'], ['security', '安全与授权'],
 ]);
 const botWorkspaceContainers = new Map();
@@ -336,7 +332,7 @@ function invalidateControl(scope) {
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
   runtimeViews.invalidateContent(scope);
-  for (const panel of [bindingPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
+  for (const panel of [componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -528,7 +524,6 @@ async function readBotConfig() {
 }
 async function selectBot(id) {
   const epoch = ++selectionEpoch;
-  bindingPanel.reset();
   runtimeViews.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
@@ -563,9 +558,6 @@ async function selectBot(id) {
     await loadPackages(); if (epoch !== selectionEpoch) return;
     await readBotConfig(); if (epoch !== selectionEpoch) return;
     await runtimeViews.select(row); if (epoch !== selectionEpoch) return;
-    await bindingPanel.select(row);
-    if (epoch !== selectionEpoch) return;
-    if (epoch !== selectionEpoch) return;
     await componentEventsPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await durableJobsPanel.select(row);
@@ -830,7 +822,7 @@ setInterval(async () => {
       else if (selectedBot.stage === 'READY' && selectedPackage()) {
         await readBotRuntime();
         const epoch = selectionEpoch, state = await api(`${componentPath()}/configuration`);
-        if (epoch === selectionEpoch) { updateBotState(state); await bindingPanel.refresh(); }
+        if (epoch === selectionEpoch) updateBotState(state);
       }
     }
   } catch (error) { if (activeView === 'bots') notice(error.message); }

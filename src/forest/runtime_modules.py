@@ -380,7 +380,20 @@ _OFFICIAL_ARTIFACT = _official_artifact()
 OFFICIAL_MODULES = (
     RuntimeModuleDescriptor("component.worker-host", (), _component_workers, _OFFICIAL_ARTIFACT),
     RuntimeModuleDescriptor(
-        "adapter.onebot", ("component.worker-host",), _onebot, _OFFICIAL_ARTIFACT
+        "adapter.onebot",
+        ("component.worker-host",),
+        _onebot,
+        _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "connections",
+            "OneBot 连接与投递",
+            ("bot",),
+            "/static/modules/adapter.onebot.html",
+            "/static/onebot-panel.js",
+            style="/static/modules/adapter.onebot.css",
+            group="adapter",
+            order=10,
+        ),),
     ),
     RuntimeModuleDescriptor(
         "routing.graph",

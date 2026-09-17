@@ -246,6 +246,7 @@ def test_registry_rejects_missing_or_cyclic_dependencies():
 
 def test_official_management_contributions_are_declared_by_module_descriptors():
     descriptors = {item.component_id: item for item in OFFICIAL_MODULES}
+    onebot, = descriptors["adapter.onebot"].management
     agent, = descriptors["agent.runtime"].management
     memory, = descriptors["memory.graph"].management
     routing, = descriptors["routing.graph"].management
@@ -266,11 +267,16 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
     assert (schedules.contribution_id, schedules.scope_kinds, schedules.module) == (
         "schedules", ("bot",), "/static/jobs-panel.js"
     )
+    assert (onebot.contribution_id, onebot.scope_kinds, onebot.module) == (
+        "connections", ("bot",), "/static/onebot-panel.js"
+    )
+    assert onebot.template == "/static/modules/adapter.onebot.html"
+    assert onebot.style == "/static/modules/adapter.onebot.css"
     assert all(
         item.management == ()
         for component_id, item in descriptors.items()
         if component_id not in {
-            "agent.runtime", "memory.graph", "routing.graph", "scheduler.jobs"
+            "adapter.onebot", "agent.runtime", "memory.graph", "routing.graph", "scheduler.jobs"
         }
     )
 

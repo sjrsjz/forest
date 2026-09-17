@@ -31,6 +31,10 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         contribution, = modules["agent.runtime"]["management_contributions"]
         assert contribution["protocol"] == "forest.management-contribution/1"
         assert contribution["scope_kinds"] == ["bot"]
+        onebot, = modules["adapter.onebot"]["management_contributions"]
+        assert onebot["contribution_id"] == "connections"
+        assert onebot["surface"]["template"] == "/static/modules/adapter.onebot.html"
+        assert onebot["surface"]["module"] == "/static/onebot-panel.js"
         assert modules["conversation.scheduler"]["management_contributions"] == []
         schedules, = modules["scheduler.jobs"]["management_contributions"]
         assert schedules["contribution_id"] == "schedules"
