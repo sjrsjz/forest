@@ -124,6 +124,17 @@ class EmbeddingPermit:
     deadline_at: datetime
 
 
+@dataclass(frozen=True)
+class EmbeddingClaim:
+    bot_id: str
+    claim_id: str
+    operation_id: str
+    purpose: str
+    accepted_deletion_epoch: int
+    deadline_at: datetime
+    permits: tuple[EmbeddingPermit, ...]
+
+
 class MemoryRetrievalRepository:
     """Own multimodal facets and immutable retrieval decisions."""
 
@@ -793,6 +804,303 @@ class MemoryRetrievalRepository:
                 "deadline_at",
             )
         )
+
+    async def _claim_from_row(self, conn, row) -> EmbeddingClaim:
+        items = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT a.* FROM {} i JOIN {} a ON a.bot_id=i.bot_id "
+                    "AND a.attempt_id=i.attempt_id AND a.facet_id=i.facet_id "
+                    "WHERE i.bot_id=%s AND i.claim_id=%s ORDER BY i.item_index"
+                ).format(
+                    self._table("embedding_claim_items"),
+                    self._table("embedding_attempts"),
+                ),
+                (self.store.bot_id, row["claim_id"]),
+            )
+        ).fetchall()
+        if len(items) != row["item_count"]:
+            raise ForestError(
+                "MEMORY_EMBEDDING_CLAIM_CORRUPT",
+                "Embedding claim items do not match their durable claim",
+                500,
+            )
+        return EmbeddingClaim(
+            self.store.bot_id,
+            row["claim_id"],
+            row["operation_id"],
+            row["purpose"],
+            row["accepted_deletion_epoch"],
+            row["deadline_at"],
+            tuple(self._permit(item) for item in items),
+        )
+
+    async def claim_pending_batch(
+        self,
+        *,
+        operation_id: str,
+        claim_id: str,
+        purpose: str,
+        executor_component_id: str,
+        executor_generation_id: str,
+        route_revision: str,
+        deadline_at: datetime,
+        item_limit: int = 32,
+    ) -> EmbeddingClaim:
+        """Freeze one restart-safe Provider batch from currently pending facets."""
+        for value, field, limit in (
+            (operation_id, "operation_id", 256),
+            (claim_id, "claim_id", 256),
+            (executor_component_id, "executor_component_id", 128),
+            (executor_generation_id, "executor_generation_id", 256),
+            (route_revision, "route_revision", 256),
+        ):
+            _bounded(value, field, limit)
+        if purpose not in {"DOCUMENT", "QUERY"}:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding purpose", 422)
+        if type(item_limit) is not int or not 1 <= item_limit <= 32:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding claim limit", 422)
+        if not isinstance(deadline_at, datetime) or deadline_at.tzinfo is None:
+            raise ForestError("MEMORY_INPUT_INVALID", "Embedding deadline needs a timezone", 422)
+        deadline_at = deadline_at.astimezone(timezone.utc)
+        input_digest = _digest(
+            {
+                "claim_id": claim_id,
+                "purpose": purpose,
+                "executor_component_id": executor_component_id,
+                "executor_generation_id": executor_generation_id,
+                "route_revision": route_revision,
+                "deadline_at": deadline_at.isoformat(),
+                "item_limit": item_limit,
+            }
+        )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._lock_identities(
+                conn,
+                "embedding-claim:" + claim_id,
+                "embedding-claim-operation:" + operation_id,
+            )
+            replay = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND "
+                        "(claim_id=%s OR operation_id=%s)"
+                    ).format(self._table("embedding_claims")),
+                    (self.store.bot_id, claim_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if (
+                    replay["claim_id"] != claim_id
+                    or replay["operation_id"] != operation_id
+                    or replay["input_digest"] != input_digest
+                ):
+                    raise ForestError(
+                        "MEMORY_EMBEDDING_CLAIM_CONFLICT",
+                        "Embedding claim identity differs",
+                        409,
+                    )
+                return await self._claim_from_row(conn, replay)
+            now = datetime.now(timezone.utc)
+            if not now < deadline_at <= now + timedelta(minutes=5):
+                raise ForestError(
+                    "MEMORY_INPUT_INVALID", "Embedding deadline is outside its bound", 422
+                )
+            current_deletion_epoch = await self._epoch(conn)
+            facets = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT f.* FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
+                        "AND u.source_unit_id=f.source_unit_id "
+                        "WHERE f.bot_id=%s AND f.state='PENDING' AND f.purpose=%s "
+                        "AND u.eligibility_state='ELIGIBLE' "
+                        "AND u.source_revision=f.source_revision "
+                        "ORDER BY f.created_at,f.facet_id LIMIT %s "
+                        "FOR UPDATE OF f SKIP LOCKED"
+                    ).format(
+                        self._table("embedding_facets"),
+                        self._table("source_units"),
+                    ),
+                    (self.store.bot_id, purpose, item_limit),
+                )
+            ).fetchall()
+            claim = await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,claim_id,operation_id,input_digest,purpose,"
+                        "executor_component_id,executor_generation_id,route_revision,"
+                        "accepted_deletion_epoch,deadline_at,item_limit,item_count) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+                    ).format(self._table("embedding_claims")),
+                    (
+                        self.store.bot_id,
+                        claim_id,
+                        operation_id,
+                        input_digest,
+                        purpose,
+                        executor_component_id,
+                        executor_generation_id,
+                        route_revision,
+                        current_deletion_epoch,
+                        deadline_at,
+                        item_limit,
+                        len(facets),
+                    ),
+                )
+            ).fetchone()
+            for index, facet in enumerate(facets):
+                unit, _ = await self._source_parts_in(
+                    conn, facet["source_unit_id"], lock=True
+                )
+                if unit["source_revision"] != facet["source_revision"]:
+                    raise ForestError(
+                        "MEMORY_SOURCE_UNAVAILABLE", "Embedding source changed", 409
+                    )
+                attempt_no = facet["attempt_count"] + 1
+                identity = _canonical(
+                    [self.store.bot_id, claim_id, facet["facet_id"], attempt_no]
+                )
+                identity_digest = hashlib.sha256(identity).hexdigest()
+                attempt_id = "embedding-attempt:" + identity_digest
+                prepare_operation_id = "embedding-prepare:" + identity_digest
+                permit = EmbeddingPermit(
+                    self.store.bot_id,
+                    facet["facet_id"],
+                    attempt_id,
+                    attempt_no,
+                    executor_component_id,
+                    executor_generation_id,
+                    route_revision,
+                    current_deletion_epoch,
+                    deadline_at,
+                )
+                await self._verify_fence(conn, permit)
+                attempt_input_digest = _digest(
+                    {
+                        "attempt_id": attempt_id,
+                        "facet_id": facet["facet_id"],
+                        "executor_component_id": executor_component_id,
+                        "executor_generation_id": executor_generation_id,
+                        "route_revision": route_revision,
+                        "deadline_at": deadline_at.isoformat(),
+                    }
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,attempt_id,operation_id,input_digest,facet_id,"
+                        "attempt_no,executor_component_id,executor_generation_id,route_revision,"
+                        "accepted_deletion_epoch,deadline_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                    ).format(self._table("embedding_attempts")),
+                    (
+                        self.store.bot_id,
+                        attempt_id,
+                        prepare_operation_id,
+                        attempt_input_digest,
+                        facet["facet_id"],
+                        attempt_no,
+                        executor_component_id,
+                        executor_generation_id,
+                        route_revision,
+                        current_deletion_epoch,
+                        deadline_at,
+                    ),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,claim_id,item_index,facet_id,attempt_id) "
+                        "VALUES (%s,%s,%s,%s,%s)"
+                    ).format(self._table("embedding_claim_items")),
+                    (
+                        self.store.bot_id,
+                        claim_id,
+                        index,
+                        facet["facet_id"],
+                        attempt_id,
+                    ),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='PREPARED',attempt_count=%s,"
+                        "current_attempt_id=%s,updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND facet_id=%s"
+                    ).format(self._table("embedding_facets")),
+                    (
+                        attempt_no,
+                        attempt_id,
+                        self.store.bot_id,
+                        facet["facet_id"],
+                    ),
+                )
+            return await self._claim_from_row(conn, claim)
+
+    async def recover_expired_attempts(self, *, limit: int = 100) -> dict:
+        """Converge expired attempts without guessing whether a handed-off request ran."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid recovery limit", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            attempts = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s "
+                        "AND state IN ('PREPARED','DISPATCHED') "
+                        "AND deadline_at<=clock_timestamp() "
+                        "ORDER BY deadline_at,attempt_id LIMIT %s FOR UPDATE SKIP LOCKED"
+                    ).format(self._table("embedding_attempts")),
+                    (self.store.bot_id, limit),
+                )
+            ).fetchall()
+            not_sent = unknown = 0
+            for attempt in attempts:
+                if attempt["state"] == "PREPARED":
+                    outcome, facet_state = "NOT_SENT", "PENDING"
+                    error_code = "EMBEDDING_ATTEMPT_EXPIRED_BEFORE_HANDOFF"
+                    not_sent += 1
+                else:
+                    outcome, facet_state = "UNKNOWN", "UNKNOWN"
+                    error_code = "EMBEDDING_ATTEMPT_EXPIRED_AFTER_HANDOFF"
+                    unknown += 1
+                settlement_operation_id = "embedding-recovery:" + hashlib.sha256(
+                    attempt["attempt_id"].encode("utf-8")
+                ).hexdigest()
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state=%s,settlement_operation_id=%s,error_code=%s,"
+                        "settled_at=clock_timestamp() WHERE bot_id=%s AND attempt_id=%s"
+                    ).format(self._table("embedding_attempts")),
+                    (
+                        outcome,
+                        settlement_operation_id,
+                        error_code,
+                        self.store.bot_id,
+                        attempt["attempt_id"],
+                    ),
+                )
+                updated = await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state=%s,current_attempt_id=NULL,"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND facet_id=%s "
+                        "AND state=%s AND current_attempt_id=%s"
+                    ).format(self._table("embedding_facets")),
+                    (
+                        facet_state,
+                        self.store.bot_id,
+                        attempt["facet_id"],
+                        attempt["state"],
+                        attempt["attempt_id"],
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise ForestError(
+                        "MEMORY_EMBEDDING_STATE_CORRUPT",
+                        "Embedding facet and attempt states diverged",
+                        500,
+                    )
+            return {
+                "recovered": len(attempts),
+                "not_sent": not_sent,
+                "unknown": unknown,
+            }
 
     async def prepare_attempt(
         self,

@@ -423,6 +423,7 @@ CREATE TABLE embedding_attempts (
     PRIMARY KEY (bot_id,attempt_id),
     UNIQUE (bot_id,operation_id),
     UNIQUE (bot_id,facet_id,attempt_no),
+    UNIQUE (bot_id,attempt_id,facet_id),
     FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id),
     CHECK (state<>'PREPARED' OR handoff_operation_id IS NULL),
     CHECK (state<>'PREPARED' OR dispatched_at IS NULL),
@@ -439,6 +440,39 @@ CREATE TABLE embedding_attempts (
     CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (vector_digest IS NOT NULL))
+);
+
+CREATE TABLE embedding_claims (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_id text NOT NULL CHECK (octet_length(claim_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    purpose text NOT NULL CHECK (purpose IN ('DOCUMENT','QUERY')),
+    executor_component_id text NOT NULL
+        CHECK (octet_length(executor_component_id) BETWEEN 1 AND 128),
+    executor_generation_id text NOT NULL
+        CHECK (octet_length(executor_generation_id) BETWEEN 1 AND 256),
+    route_revision text NOT NULL CHECK (octet_length(route_revision) BETWEEN 1 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    deadline_at timestamptz NOT NULL,
+    item_limit integer NOT NULL CHECK (item_limit BETWEEN 1 AND 32),
+    item_count integer NOT NULL CHECK (item_count BETWEEN 0 AND item_limit),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_id),
+    UNIQUE (bot_id,operation_id)
+);
+
+CREATE TABLE embedding_claim_items (
+    bot_id text NOT NULL,
+    claim_id text NOT NULL,
+    item_index integer NOT NULL CHECK (item_index BETWEEN 0 AND 31),
+    facet_id text NOT NULL,
+    attempt_id text NOT NULL,
+    PRIMARY KEY (bot_id,claim_id,item_index),
+    UNIQUE (bot_id,attempt_id),
+    FOREIGN KEY (bot_id,claim_id) REFERENCES embedding_claims(bot_id,claim_id),
+    FOREIGN KEY (bot_id,attempt_id,facet_id)
+        REFERENCES embedding_attempts(bot_id,attempt_id,facet_id)
 );
 
 CREATE TABLE embedding_budget_days (
@@ -570,6 +604,12 @@ CREATE INDEX embedding_facets_query_idx ON embedding_facets(
 );
 CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
     bot_id,space_id,purpose,state,published_at,facet_id
+);
+CREATE INDEX embedding_attempts_recovery_idx ON embedding_attempts(
+    bot_id,state,deadline_at,attempt_id
+);
+CREATE INDEX embedding_claims_created_idx ON embedding_claims(
+    bot_id,purpose,created_at,claim_id
 );
 CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reservations(
     bot_id,state,budget_day,reservation_id
@@ -776,6 +816,10 @@ CREATE TRIGGER embedding_facet_guard BEFORE UPDATE OR DELETE ON embedding_facets
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_facet();
 CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_attempts
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
+CREATE TRIGGER embedding_claims_immutable BEFORE UPDATE OR DELETE ON embedding_claims
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER embedding_claim_items_immutable BEFORE UPDATE OR DELETE ON embedding_claim_items
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER embedding_budget_reservation_guard
     BEFORE UPDATE OR DELETE ON embedding_budget_reservations
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_budget_reservation();

@@ -1660,3 +1660,107 @@ async def test_unrelated_forget_does_not_strand_pending_embedding_facet(clean_me
         deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
     )
     assert permit.accepted_deletion_epoch == 1
+
+
+@pytest.mark.postgres
+async def test_embedding_claim_replay_and_expiry_recovery_converge(clean_memory_graph):
+    store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "claim-recovery")
+    source = await _unit_values(
+        payloads,
+        source_suffix="claim-recovery",
+        unit_suffix="claim-recovery",
+        mixed=True,
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, source, suffix="claim-recovery"
+    )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    await retrieval.prepare_source_facets(
+        operation_id="facets/claim-recovery",
+        source_unit_id="unit/claim-recovery",
+        expected_deletion_epoch=0,
+    )
+    first_deadline = datetime.now(timezone.utc) + timedelta(seconds=1)
+
+    async def claim_same():
+        return await retrieval.claim_pending_batch(
+            operation_id="embedding/claim/one",
+            claim_id="embedding/claim/one",
+            purpose="DOCUMENT",
+            executor_component_id="embedding.qiyu-vl",
+            executor_generation_id="generation/qiyu-vl/1",
+            route_revision="route/qiyu-vl/1",
+            deadline_at=first_deadline,
+        )
+
+    first, replay = await asyncio.gather(claim_same(), claim_same())
+    assert first == replay
+    assert len(first.permits) == 2
+    assert {permit.attempt_no for permit in first.permits} == {1}
+    await asyncio.sleep(1.1)
+    recovered = await retrieval.recover_expired_attempts()
+    assert recovered == {"recovered": 2, "not_sent": 2, "unknown": 0}
+
+    second = await retrieval.claim_pending_batch(
+        operation_id="embedding/claim/two",
+        claim_id="embedding/claim/two",
+        purpose="DOCUMENT",
+        executor_component_id="embedding.qiyu-vl",
+        executor_generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+    )
+    assert len(second.permits) == 2
+    assert {permit.attempt_no for permit in second.permits} == {2}
+    await retrieval.mark_batch_handoff(
+        second.permits,
+        batch_operation_id="embedding/claim/two/handoff",
+    )
+    await asyncio.sleep(1.1)
+    recovered = await retrieval.recover_expired_attempts()
+    assert recovered == {"recovered": 2, "not_sent": 0, "unknown": 2}
+    assert await retrieval.recover_expired_attempts() == {
+        "recovered": 0,
+        "not_sent": 0,
+        "unknown": 0,
+    }
+    async with store.pool.connection() as conn:
+        attempts = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT attempt_no,state,error_code FROM {}.embedding_attempts "
+                    "WHERE bot_id=%s ORDER BY attempt_no,state"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id,),
+            )
+        ).fetchall()
+        facets = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,current_attempt_id FROM {}.embedding_facets "
+                    "WHERE bot_id=%s ORDER BY facet_id"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id,),
+            )
+        ).fetchall()
+    assert [(row["attempt_no"], row["state"]) for row in attempts] == [
+        (1, "NOT_SENT"),
+        (1, "NOT_SENT"),
+        (2, "UNKNOWN"),
+        (2, "UNKNOWN"),
+    ]
+    assert all(
+        row["error_code"].startswith("EMBEDDING_ATTEMPT_EXPIRED_") for row in attempts
+    )
+    assert [(row["state"], row["current_attempt_id"]) for row in facets] == [
+        ("UNKNOWN", None),
+        ("UNKNOWN", None),
+    ]
