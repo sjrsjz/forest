@@ -197,6 +197,18 @@ async def test_clean_scheduler_cuts_through_last_trigger_and_silently_drains_tai
     assert (first["start_seq"], first["end_seq"]) == (1, 5)
     assert first["event_ids"] == [f"event/{number}" for number in range(1, 6)]
     assert first["trigger_ids"] == ["trigger/group/main/3", "trigger/group/main/5"]
+    assert first["triggers"] == [
+        {
+            "trigger_id": "trigger/group/main/3",
+            "principal_ref": "user/b",
+            "ingress_seq": 3,
+        },
+        {
+            "trigger_id": "trigger/group/main/5",
+            "principal_ref": "user/c",
+            "ingress_seq": 5,
+        },
+    ]
 
     safe = await scheduler.select_input(
         actor,

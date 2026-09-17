@@ -728,8 +728,12 @@ class ConversationSchedulerRepository:
         ).fetchall()
         triggers = await (
             await conn.execute(
-                sql.SQL("SELECT trigger_id FROM {} WHERE bot_id=%s AND input_batch_id=%s "
-                        "ORDER BY trigger_index").format(self._table("input_batch_triggers")),
+                sql.SQL("SELECT m.trigger_id,t.principal_ref,t.ingress_seq FROM {} m JOIN {} t "
+                        "ON t.bot_id=m.bot_id AND t.trigger_id=m.trigger_id "
+                        "WHERE m.bot_id=%s AND m.input_batch_id=%s ORDER BY m.trigger_index").format(
+                    self._table("input_batch_triggers"),
+                    self._table("conversation_triggers"),
+                ),
                 (self.store.bot_id, receipt["input_batch_id"]),
             )
         ).fetchall()
@@ -739,6 +743,7 @@ class ConversationSchedulerRepository:
             **dict(batch),
             "event_ids": [row["event_id"] for row in events],
             "trigger_ids": [row["trigger_id"] for row in triggers],
+            "triggers": [dict(row) for row in triggers],
         }
 
     async def _record_selection(
