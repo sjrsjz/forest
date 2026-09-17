@@ -13,6 +13,7 @@ import pytest
 from test_web_bots import (
     ORIGIN,
     apply,
+    catalog_query,
     effective,
     invoke,
     login,
@@ -81,7 +82,9 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         base = f"/management/v1/bots/{bot['bot_id']}/components/demo.counter"
         await apply(client, base, await make_plan(client, base, first, "Original", 2, 0, "p1"), "a1")
         await effective(client, base, 1)
-        runtime = (await client.get(f"/management/v1/bots/{bot['bot_id']}")).json()["runtime"]
+        runtime = (
+            await catalog_query(client, "bot", {"bot_id": bot["bot_id"]})
+        )["runtime"]
         modules = {row["component_id"]: row for row in runtime["runtime_modules"]}
         assert set(modules) == {
             "component.worker-host",

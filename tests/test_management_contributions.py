@@ -178,6 +178,30 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         deployment_modules = {
             row["component_id"]: row for row in deployment.json()["modules"]
         }
+        catalog = deployment_modules["deployment.bot-catalog"]
+        assert catalog["artifact"]["scope"] == "deployment"
+        assert catalog["state"] == "ACTIVE"
+        assert catalog["management_contributions"][0]["surface"] == {
+            "kind": "trusted-module",
+            "protocol": "forest.trusted-management-view/1",
+            "template": "/static/modules/deployment.bot-catalog.html",
+            "module": "/static/bot-catalog.js",
+            "style": None,
+        }
+        assert catalog["management_contract"]["operations"] == [
+            {"operation_id": "bots", "kind": "query",
+             "authority": "deployment.bots.read"},
+            {"operation_id": "bot", "kind": "query",
+             "authority": "deployment.bots.read"},
+            {"operation_id": "provision-job", "kind": "query",
+             "authority": "deployment.bots.read"},
+            {"operation_id": "bot.create", "kind": "action",
+             "authority": "deployment.bots.create", "principal": "admin"},
+            {"operation_id": "bot.rename", "kind": "action",
+             "authority": "deployment.bots.rename", "principal": "admin"},
+            {"operation_id": "bot.retry", "kind": "action",
+             "authority": "deployment.bots.retry", "principal": "admin"},
+        ]
         configuration = deployment_modules["deployment.configuration"]
         assert configuration["artifact"]["scope"] == "deployment"
         assert configuration["state"] == "ACTIVE"

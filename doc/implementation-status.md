@@ -90,7 +90,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `ManagementScopeProvider` 注册表已分别实现 Bot 与 deployment 的身份解析、可见性和授权适配；deployment 不复用 `bot.store`、Bot policy revision，也不伪造 Bot ticket。首个 deployment 服务 `deployment.audit` 已进入独立生命周期注册表，旧 `/management/v1/audit`、固定审计 DOM 和专用控制器已删除。
 - `deployment.accounts` 已接管账号目录、创建、变更计划/提交和 UI；旧专用路由、固定页面与壳层控制器 import 已删除。自我降权后以 viewer 会话恢复相同幂等回执的语义仍由 `authenticated` apply action 与存储事务共同保证。
 - `deployment.configuration` 已接管 schema、当前投影、计划/提交契约和 UI；旧 `/configuration`、`/change-plans`、`/management-requests` 与固定表单已删除。登录与 session 端点只读取生效配置以计算会话 TTL 和壳层品牌文字。
-- 下一迁移对象是 `deployment.bot-catalog`。目录模块只拥有列表、创建、重命名、供应重试和供应 Job；选择目录项必须经壳层通用 `openScope(bot,id)` 挂载 Bot 注册表，不能把维护、组件配置或 Agent/Memory 页面移入 deployment authority。
+- `deployment.bot-catalog` 已接管列表、创建、重命名、供应重试和供应 Job；旧 `/management/v1/bots` 目录 CRUD、`/management/v1/provision-jobs/*`、固定目录 DOM 和壳层表单处理已删除。目录选择只调用壳层通用 `openScope({kind:'bot',id,row})`，其中 `row` 只是显示提示；壳层必须再经 `/scopes/{kind}/{id}/modules` 和 Bot provider 解析真实 ACTIVE 注册表。Bot 维护、组件配置和 Agent/Memory 模块仍经目标 Bot authority 处理。
 - 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。
@@ -106,7 +106,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 当前工作区的验证证据：
 
-- 无 PostgreSQL 全套：`740 passed, 36 skipped, 1116 deselected`；
+- 无 PostgreSQL 全套：`833 passed, 1059 skipped`；
 - `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - `command.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；密码重新鉴权、载荷脱敏、热重载失效和并发 CAS 均包含在内。
 - `message.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；Binding 目录、密码脱敏、Handler 恢复幂等和并发 CAS 均包含在内。
@@ -114,6 +114,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - `deployment.audit` 与作用域 provider：Bot/deployment 模块发现、管理员边界、旧端点消失和 PostgreSQL 查询共 `10 passed`；跨作用域工件拒绝、生命周期和 provider 注册表定向单元组共 `31 passed`；备份审计链 `1 passed`，Web 包与持久运行图回归 `9 passed`。
 - `deployment.accounts`：创建幂等、密码投影、变更计划、自我改密、并发降权、viewer 回执恢复、旧端点消失和模块投影的 PostgreSQL/ASGI 回归共 `11 passed`；契约与 UI 所有权定向组共 `32 passed`。
 - `deployment.configuration`：重启恢复、并发 revision、幂等提交、CSRF、viewer 只读、旧端点消失和模块投影的 PostgreSQL/ASGI 回归共 `10 passed`；备份与包管理回归另有 `5 passed`。
+- `deployment.bot-catalog`：隔离 PostgreSQL 17 下目录创建幂等、供应 Job、单项/列表查询、重命名回放、重启恢复、viewer 读取、CSRF、模块发现和旧目录端点消失的首轮为 `16 passed, 1 failed`；失败仅因一个包测试仍读旧 Bot 详情投影，改为读目录模块后定向重跑为 `1 passed`。第二次整组重跑前 15 个通过后在无日志的 Worker 退出阶段停滞，已主动中断，不计作整组通过。
 - PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
 - 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
 - Ruff、Python compileall、四个受影响 ES module 的 `node --check` 和 `git diff --check` 通过；

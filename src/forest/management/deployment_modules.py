@@ -10,6 +10,9 @@ from forest.management.deployment_accounts_contract import (
     DeploymentAccountsManagementContract,
 )
 from forest.management.deployment_audit_contract import DeploymentAuditManagementContract
+from forest.management.deployment_bot_catalog_contract import (
+    DeploymentBotCatalogManagementContract,
+)
 from forest.management.deployment_configuration_contract import (
     DeploymentConfigurationManagementContract,
 )
@@ -27,6 +30,9 @@ class DeploymentModuleHost:
     store: object
     authority: object
     password_slots: object
+    catalog: object
+    fleet: object
+    managed_available: bool
 
 
 class DeploymentAuditRuntime:
@@ -49,6 +55,14 @@ class DeploymentConfigurationRuntime:
         self.management_contract = DeploymentConfigurationManagementContract(store)
 
 
+class DeploymentBotCatalogRuntime:
+    def __init__(self, host):
+        self.catalog = host.catalog
+        self.fleet = host.fleet
+        self.managed_available = host.managed_available
+        self.management_contract = DeploymentBotCatalogManagementContract(self)
+
+
 def _audit(host, _modules):
     return DeploymentAuditRuntime(host.store)
 
@@ -61,7 +75,28 @@ def _configuration(host, _modules):
     return DeploymentConfigurationRuntime(host.store)
 
 
+def _bot_catalog(host, _modules):
+    return DeploymentBotCatalogRuntime(host)
+
+
 OFFICIAL_DEPLOYMENT_MODULES = (
+    RuntimeModuleDescriptor(
+        "deployment.bot-catalog",
+        (),
+        _bot_catalog,
+        official_artifact("deployment"),
+        management=(
+            RuntimeManagementContribution(
+                "bots",
+                "Bot 目录",
+                ("deployment",),
+                "/static/modules/deployment.bot-catalog.html",
+                "/static/bot-catalog.js",
+                group="runtime",
+                order=10,
+            ),
+        ),
+    ),
     RuntimeModuleDescriptor(
         "deployment.configuration",
         (),

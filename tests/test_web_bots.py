@@ -81,7 +81,37 @@ async def setup(client, token):
     await login(client)
 
 
+async def bot_catalog_root(client):
+    session = await client.get("/management/v1/session")
+    assert session.status_code == 200, session.text
+    deployment_id = session.json()["deployment_id"]
+    return (
+        f"/management/v1/scopes/deployment/{deployment_id}/modules/"
+        "deployment.bot-catalog"
+    )
+
+
+async def catalog_query(client, operation, params=None):
+    root = await bot_catalog_root(client)
+    response = await client.get(root + "/queries/" + operation, params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def catalog_action(client, operation, body, key, *, status=200):
+    root = await bot_catalog_root(client)
+    response = await client.post(
+        root + "/actions/" + operation,
+        json=body,
+        headers={"idempotency-key": key},
+    )
+    assert response.status_code == status, response.text
+    return response.json()
+
+
 async def post(client, url, body, key, *, status=200):
+    if url == "/management/v1/bots":
+        url = await bot_catalog_root(client) + "/actions/bot.create"
     response = await client.post(url, json=body, headers={"idempotency-key": key})
     assert response.status_code == status, response.text
     return response.json()
@@ -90,9 +120,9 @@ async def post(client, url, body, key, *, status=200):
 async def ready(client, bot):
     async with asyncio.timeout(35):
         while True:
-            result = await client.get(f"/management/v1/provision-jobs/{bot['job_id']}")
-            assert result.status_code == 200, result.text
-            job = result.json()
+            job = await catalog_query(
+                client, "provision-job", {"job_id": bot["job_id"]}
+            )
             assert job["stage"] != "FAILED", job
             if job["stage"] == "READY":
                 return job
@@ -191,8 +221,34 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
                                      "create-alpha", status=202)
         assert repeated_create == created[0]
         await asyncio.gather(*(ready(client, bot) for bot in created))
-        listing = (await client.get("/management/v1/bots")).json()
+        listing = await catalog_query(client, "bots")
         assert len(listing["bots"]) == 2 and listing["managed_available"]
+        beta = await catalog_query(client, "bot", {"bot_id": created[1]["bot_id"]})
+        renamed = await catalog_action(
+            client,
+            "bot.rename",
+            {
+                "bot_id": beta["bot_id"],
+                "display_name": "Bot Beta renamed",
+                "expected_revision": beta["revision"],
+            },
+            "rename-beta",
+        )
+        assert renamed["display_name"] == "Bot Beta renamed"
+        assert await catalog_action(
+            client,
+            "bot.rename",
+            {
+                "bot_id": beta["bot_id"],
+                "display_name": "Bot Beta renamed",
+                "expected_revision": beta["revision"],
+            },
+            "rename-beta",
+        ) == renamed
+        assert (await client.get("/management/v1/bots")).status_code == 404
+        assert (
+            await client.get(f"/management/v1/provision-jobs/{created[0]['job_id']}")
+        ).status_code == 404
         packages = (await client.get("/management/v1/packages")).json()["packages"]
         package = next(item for item in packages if item["component_id"] == "forest.counter")
         bases = [f"/management/v1/bots/{bot['bot_id']}/components/forest.counter" for bot in created]
@@ -265,7 +321,7 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
     # only the same encrypted deployment state and dedicated databases survive.
     async with running(settings) as (app, client):
         await login(client)
-        listed = (await client.get("/management/v1/bots")).json()["bots"]
+        listed = (await catalog_query(client, "bots"))["bots"]
         assert {row["bot_id"] for row in listed} == {bot["bot_id"] for bot in created}
         await asyncio.gather(*(effective(client, base, revision)
                                for base, revision in zip(bases, (2, 1), strict=True)))
@@ -359,10 +415,13 @@ async def test_bot_endpoints_reject_csrf_cross_target_plan_and_revoked_replay(tm
     settings = WebSettings(data, ORIGIN, managed_dsn=web_bots_database)
     token = BootstrapState(data).initialize()
     async with running(settings) as (_, client):
-        assert (await client.get("/management/v1/bots")).status_code == 401
+        assert (await client.get("/management/v1/bots")).status_code == 404
         await setup(client, token)
-        rejected = await client.post("/management/v1/bots", json={"display_name": "Blocked"},
-                                     headers={"x-csrf-token": "wrong", "idempotency-key": "blocked"})
+        catalog = await bot_catalog_root(client)
+        rejected = await client.post(
+            catalog + "/actions/bot.create", json={"display_name": "Blocked"},
+            headers={"x-csrf-token": "wrong", "idempotency-key": "blocked"},
+        )
         assert rejected.status_code == 403
         bots = [await post(client, "/management/v1/bots", {"display_name": key}, key, status=202)
                 for key in ("first", "second")]

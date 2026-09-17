@@ -25,7 +25,9 @@ policy revision 和可选 plan digest 的 Ed25519 票据。管理权限按旧能
 
 ## 2. 元数据读取
 
-`GET /management/v1/bots/{bot_id}/component-jobs` 支持 `component_id`、`handler_id`、
+`routing.graph` 在 Bot scope 声明 `component-jobs` query，通用管理传输路径为
+`GET /management/v1/scopes/bot/{bot_id}/modules/routing.graph/queries/component-jobs`。
+该查询支持 `component_id`、`handler_id`、
 `status` 和 1–200 的 `limit`。结果包含处理器路由、预算、活动状态和管理修订，以及 Job
 身份、顺序、状态、计数、时间、回放轮次和正文可用性。接口不读取或返回 Job payload、
 结果正文、claim token、宿主 lease 或 Worker 帧。
@@ -36,7 +38,8 @@ policy revision 和可选 plan digest 的 Ed25519 票据。管理权限按旧能
 
 ## 3. 死信回放
 
-`POST .../component-jobs/replays` 接收 `job_id` 和 `expected_revision`。事务依次验证票据、
+`component-job.replay` action 接收 `job_id` 和 `expected_revision`，通过
+`POST .../modules/routing.graph/actions/component-job.replay` 调用。事务依次验证票据、
 原操作回放、正文删除 epoch、处理器 head 和 Job 行锁，并要求：
 
 - Job 当前为 `DEAD`，管理修订与请求一致；
@@ -53,9 +56,9 @@ policy revision 和可选 plan digest 的 Ed25519 票据。管理权限按旧能
 
 退役采用 preview/apply 两步协议：
 
-1. `POST .../component-jobs/retirement-plans` 锁定 head，核对管理修订，统计各状态数量，
+1. `component-job.retirement.plan` action 锁定 head，核对管理修订，统计各状态数量，
    保存 impact digest、操作者、有效期和不可变计划回执；
-2. `POST .../component-jobs/retirement-requests` 必须提交同一计划的 ID、digest 和修订，
+2. `component-job.retirement.apply` action 必须提交同一计划的 ID、digest 和修订，
    再次锁定 head 并重算影响；过期、操作者不同、状态变化或修订变化都拒绝提交。
 
 存在 `INFLIGHT` Job 时 apply 返回 `COMPONENT_JOB_HANDLER_BUSY`，不会抢断 Worker。提交成功

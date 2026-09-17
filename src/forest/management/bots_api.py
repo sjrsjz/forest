@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Query, Request
@@ -19,19 +19,8 @@ class Body(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class CreateBot(Body):
-    display_name: str = Field(min_length=1, max_length=120)
-    mode: Literal["managed", "external"] = "managed"
-    dsn: str | None = Field(default=None, max_length=4096)
-    expected_revision: Literal[0] = 0
-
-
 class Revision(Body):
     expected_revision: int = Field(ge=0, strict=True)
-
-
-class RenameBot(Revision):
-    display_name: str = Field(min_length=1, max_length=120)
 
 
 class ConfigPlan(Revision):
@@ -108,37 +97,6 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
                                        policy_revision=(await bot.store.runtime())["policy_revision"])
         return bot, operation_id, signed
 
-    @app.get("/management/v1/bots")
-    async def list_bots(request: Request):
-        who = await principal(request)
-        catalog, fleet, _ = services()
-        return {"bots": [{**row, "runtime": fleet.status(row["bot_id"])}
-                         for row in await catalog.list(**who)],
-                "managed_available": runtime.settings.managed_dsn is not None}
-
-    @app.post("/management/v1/bots", status_code=202)
-    async def create_bot(body: CreateBot, request: Request):
-        who = await principal(request, True)
-        return await services()[0].create(**body.model_dump(), **who, idempotency_key=key(request))
-
-    @app.get("/management/v1/bots/{bot_id}")
-    async def get_bot(bot_id: str, request: Request):
-        who = await principal(request)
-        catalog, fleet, _ = services()
-        return {**await catalog.get(bot_id=bot_id, **who), "runtime": fleet.status(bot_id)}
-
-    @app.post("/management/v1/bots/{bot_id}/rename")
-    async def rename_bot(bot_id: str, body: RenameBot, request: Request):
-        who = await principal(request, True)
-        return await services()[0].rename(bot_id=bot_id, **body.model_dump(), **who,
-                                          idempotency_key=key(request))
-
-    @app.post("/management/v1/bots/{bot_id}/retry", status_code=202)
-    async def retry_bot(bot_id: str, body: Revision, request: Request):
-        who = await principal(request, True)
-        return await services()[0].retry(bot_id=bot_id, **body.model_dump(), **who,
-                                         idempotency_key=key(request))
-
     @app.get("/management/v1/bots/{bot_id}/runtime")
     async def bot_runtime(bot_id: str, request: Request):
         from forest.storage.bot_runtime import BotRuntimeAdministration
@@ -165,11 +123,6 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
         if bot.runtime is not None and result is not None and not bot.control.is_unavailable(result):
             bot.runtime.notify()
         return result
-
-    @app.get("/management/v1/provision-jobs/{job_id}")
-    async def get_job(job_id: str, request: Request):
-        who = await principal(request)
-        return await services()[0].read_job(job_id=job_id, **who)
 
     @app.get("/management/v1/packages")
     async def packages(request: Request):

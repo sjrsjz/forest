@@ -130,16 +130,16 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   runtimeViews.reset();
   deploymentViews.reset();
   backupsPanel.reset();
-  selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
+  selectedBot = null; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
-  clearBotPlan(); createKey = null; invokeKey = null; $('bot-list').replaceChildren();
-  $('bot-detail').classList.add('hidden'); botCatalog.open = true; $('create-bot-form').reset();
+  clearBotPlan(); invokeKey = null;
+  $('bot-detail').classList.add('hidden');
   setIdentity(null); setBranding();
   $('notice').classList.add('hidden'); show('login');
 }));
-let botRows = [], selectedBot = null, botConfig = null, botRuntime = null, packageRows = [];
+let selectedBot = null, botConfig = null, botRuntime = null, packageRows = [];
 let botPlan = null, botApplyKey = null, componentReload = null, moduleStateRequest = null;
-let createKey = null, invokeKey = null, renameKey = null, retryKey = null;
+let invokeKey = null;
 let maintenanceKey = null;
 const maintenanceWrites = new Map();
 let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0, runtimeReadSeq = 0;
@@ -162,7 +162,7 @@ const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
 const deploymentViews = managementContributions({
   api, busy, notice, scopeKind: 'deployment', scopeIdentity: row => row.scope_id,
   nav: $('deployment-module-nav'), registry: $('deployment-module-registry'),
-  root: $('deployment-module-views'), sessionEnded, setBranding,
+  root: $('deployment-module-views'), sessionEnded, setBranding, openScope,
 });
 async function readDeploymentModules() {
   deploymentViews.reset();
@@ -180,17 +180,8 @@ async function readDeploymentModules() {
   await deploymentViews.select(scope);
 }
 
-// A Bot is a runtime scope. The workspace is organized around kernel concepts;
-// Agent and Memory remain module surfaces inside the module pane.
-const botCatalog = document.createElement('details');
-botCatalog.id = 'bot-catalog'; botCatalog.className = 'card bot-catalog'; botCatalog.open = true;
-const botCatalogSummary = document.createElement('summary');
-botCatalogSummary.textContent = '运行实例列表与创建';
-const botCatalogIntro = document.querySelector('#bots > p.muted');
-const botCatalogColumns = document.querySelector('#bots > .columns');
-botCatalog.append(botCatalogSummary, botCatalogIntro, botCatalogColumns);
-$('bot-detail').before(botCatalog);
-
+// A Bot is a runtime scope. The deployment catalog only supplies its identity;
+// every runtime surface below is mounted from the selected Bot authority.
 const botOverview = $('bot-detail').firstElementChild;
 botOverview.id = 'bot-overview';
 const botComponentHistory = $('bot-components').nextElementSibling;
@@ -324,22 +315,6 @@ async function readBotRuntime() {
   const state = await api(`/bots/${encodeURIComponent(selectedBot.bot_id)}/runtime`);
   if (epoch !== selectionEpoch || seq !== runtimeReadSeq) return;
   renderBotRuntime(state);
-}
-async function readBots() {
-  const data = await api('/bots'); botRows = data.bots;
-  $('bot-list').replaceChildren();
-  if (!botRows.length) $('bot-list').textContent = '还没有 Bot。从右侧创建第一个。';
-  for (const row of botRows) {
-    const button = document.createElement('button'); button.className = 'bot-row subtle';
-    button.textContent = `${row.display_name} · ${botStatus(row.stage)}`;
-    button.dataset.botId = row.bot_id;
-    button.addEventListener('click', () => busy(button, () => selectBot(row.bot_id)));
-    $('bot-list').append(button);
-  }
-  const mode = $('create-bot-form').elements.mode;
-  mode.options[0].disabled = !data.managed_available;
-  if (!data.managed_available) mode.value = 'external';
-  $('bot-dsn-label').classList.toggle('hidden', mode.value !== 'external');
 }
 async function loadPackages(force = false) {
   if (packageRows.length && !force) return;
@@ -479,72 +454,49 @@ async function readBotConfig() {
   $('disable-bot-component').disabled = state.desired_revision < 1 || state.desired_enabled !== true;
   $('bot-history').replaceChildren(); historyBefore = null;
 }
-async function selectBot(id) {
+async function openBotWorkspace(row, modules) {
   const epoch = ++selectionEpoch;
   runtimeViews.reset();
   clearBotPlan(); invokeKey = null; $('bot-invoke-result').textContent = '';
   resetComponent();
-  renameKey = null; retryKey = null; maintenanceKey = null; botRuntime = null;
+  maintenanceKey = null; botRuntime = null;
   $('bot-maintenance-form').classList.add('hidden'); $('bot-maintenance-form').reset();
-  const row = await api(`/bots/${encodeURIComponent(id)}`);
-  if (epoch !== selectionEpoch) return;
   selectedBot = row; $('bot-detail').classList.remove('hidden');
-  botCatalog.open = false;
+  show('bots');
   showBotWorkspacePane('status');
   $('bot-name').textContent = row.display_name;
-  $('rename-bot-form').elements.display_name.value = row.display_name;
   $('bot-status').textContent = `${botStatus(row.stage)}${row.error_code ? ` · ${row.error_code}` : ''}`;
-  $('retry-bot').classList.toggle('hidden', row.stage !== 'FAILED');
   $('bot-components').classList.toggle('hidden', row.stage !== 'READY');
-  const job = await api(`/provision-jobs/${encodeURIComponent(row.job_id)}`);
-  if (epoch !== selectionEpoch) return;
-  $('bot-job-events').replaceChildren();
-  for (const entry of job.events) {
-    const li = document.createElement('li'); li.textContent = `${entry.step} · ${entry.created_at}`;
-    $('bot-job-events').append(li);
-  }
   if (row.stage === 'READY') {
     await readBotRuntime(); if (epoch !== selectionEpoch) return;
     await loadPackages(); if (epoch !== selectionEpoch) return;
+    const pkg = selectedPackage();
+    runtimeViews.update(
+      modules || [], pkg ? {component_id: pkg.component_id, requires: []} : null,
+    );
     await readBotConfig(); if (epoch !== selectionEpoch) return;
     await runtimeViews.select(row);
   }
 }
+async function openScope(target) {
+  if (target?.kind !== 'bot' || !target.id || target.row?.bot_id !== target.id) {
+    throw new Error('当前壳层无法打开该管理作用域。');
+  }
+  const projection = await api(
+    `/scopes/${encodeURIComponent(target.kind)}/${encodeURIComponent(target.id)}/modules`
+  );
+  if (projection.scope?.kind !== target.kind || projection.scope?.id !== target.id) {
+    throw new Error('管理作用域解析结果与请求不一致。');
+  }
+  await openBotWorkspace(target.row, projection.modules);
+}
 $('nav-deployment').addEventListener('click', () =>
   busy($('nav-deployment'), readDeploymentWorkspace));
-$('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
+$('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => {
+  show('bots'); await loadPackages();
+}));
 $('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
   show('backups'); await backupsPanel.load();
-}));
-$('refresh-bots').addEventListener('click', () => busy($('refresh-bots'), readBots));
-$('create-bot-form').addEventListener('input', () => {
-  createKey = null;
-  $('bot-dsn-label').classList.toggle('hidden', $('create-bot-form').elements.mode.value !== 'external');
-});
-$('create-bot-form').addEventListener('submit', (event) => {
-  event.preventDefault(); const form = event.currentTarget;
-  busy(form.querySelector('button'), async () => {
-    createKey ||= crypto.randomUUID(); const values = Object.fromEntries(new FormData(form));
-    if (values.mode === 'managed' || !values.dsn) delete values.dsn;
-    const row = await api('/bots', {...values, expected_revision: 0}, {'Idempotency-Key': createKey});
-    form.reset(); createKey = null; await readBots(); await selectBot(row.bot_id);
-    notice('Bot 创建任务已接纳。存储进度会自动更新。', true);
-  });
-});
-$('rename-bot-form').addEventListener('submit', (event) => {
-  event.preventDefault(); const form = event.currentTarget;
-  busy(form.querySelector('button'), async () => {
-    renameKey ||= crypto.randomUUID();
-    const row = await api(`/bots/${selectedBot.bot_id}/rename`, {display_name: form.elements.display_name.value,
-      expected_revision: selectedBot.revision}, {'Idempotency-Key': renameKey});
-    await readBots(); await selectBot(row.bot_id); notice('Bot 名称已更新。', true);
-  });
-});
-$('rename-bot-form').addEventListener('input', () => { renameKey = null; });
-$('retry-bot').addEventListener('click', () => busy($('retry-bot'), async () => {
-  retryKey ||= crypto.randomUUID();
-  await api(`/bots/${selectedBot.bot_id}/retry`, {expected_revision: selectedBot.revision}, {'Idempotency-Key': retryKey});
-  await readBots(); await selectBot(selectedBot.bot_id);
 }));
 $('bot-maintenance-form').addEventListener('input', () => { maintenanceKey = null; });
 $('bot-maintenance-refresh').addEventListener('click', () => busy($('bot-maintenance-refresh'), readBotRuntime));
@@ -747,15 +699,10 @@ setInterval(async () => {
   if (activeView !== 'bots' || polling) return;
   polling = true;
   try {
-    await readBots();
-    if (selectedBot) {
-      const row = botRows.find((r) => r.bot_id === selectedBot.bot_id);
-      if (row && row.stage !== selectedBot.stage) await selectBot(row.bot_id);
-      else if (selectedBot.stage === 'READY' && selectedPackage()) {
-        await readBotRuntime();
-        const epoch = selectionEpoch, state = await api(`${componentPath()}/configuration`);
-        if (epoch === selectionEpoch) updateBotState(state);
-      }
+    if (selectedBot?.stage === 'READY' && selectedPackage()) {
+      await readBotRuntime();
+      const epoch = selectionEpoch, state = await api(`${componentPath()}/configuration`);
+      if (epoch === selectionEpoch) updateBotState(state);
     }
   } catch (error) { if (activeView === 'bots') notice(error.message); }
   finally { polling = false; }

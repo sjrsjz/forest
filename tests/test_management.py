@@ -382,7 +382,11 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
             session = (await viewer.get("/management/v1/session")).json()
             assert session["role"] == "viewer" and not session["can_write"]
             assert (await read_configuration(viewer)).status_code == 200
-            assert (await viewer.get("/management/v1/bots")).status_code == 200
+            catalog = (
+                f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+                "deployment.bot-catalog/queries/bots"
+            )
+            assert (await viewer.get(catalog)).status_code == 200
             denied = await configuration_action(
                 viewer, "configuration.plan",
                 {"expected_revision": 0, "values": {}}, "viewer-plan",

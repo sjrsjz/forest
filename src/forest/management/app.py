@@ -253,6 +253,9 @@ class ManagementRuntime:
                     candidate,
                     authority,
                     self.password_slots,
+                    catalog,
+                    fleet,
+                    self.settings.managed_dsn is not None,
                 ),
                 OFFICIAL_DEPLOYMENT_MODULES,
             )

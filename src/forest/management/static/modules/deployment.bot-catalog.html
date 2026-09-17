@@ -1,0 +1,7 @@
+<section id="deployment-bot-catalog" aria-labelledby="deployment-bot-catalog-title">
+  <h2 id="deployment-bot-catalog-title">Bot 目录</h2>
+  <p class="muted">目录只管理 Bot 身份和存储供应。选择 Bot 后，运行设置由目标 Bot 的模块工作区提供。</p>
+  <div class="columns"><div class="card"><h3>Bot 实体</h3><div id="bot-list" aria-live="polite"></div><button id="refresh-bots" class="subtle">刷新列表</button></div>
+  <div class="card"><h3>创建 Bot</h3><form id="create-bot-form"><label>显示名称<input name="display_name" required maxlength="120"></label><label>存储方式<select name="mode"><option value="managed">自动创建独立数据库</option><option value="external">连接已有空数据库</option></select></label><label id="bot-dsn-label" class="hidden">数据库连接地址<input name="dsn" type="password" autocomplete="off" maxlength="4096"></label><p class="hint">自动创建可在服务重启后继续。已有数据库应为空，并使用无超级用户权限的专用账号。</p><button type="submit">创建 Bot</button></form></div></div>
+  <div id="catalog-bot-detail" class="card hidden"><h3 id="catalog-bot-name"></h3><p id="catalog-bot-status" class="muted"></p><form id="rename-bot-form" class="actions"><label>修改显示名称<input name="display_name" required maxlength="120"></label><button type="submit">保存名称</button></form><button id="retry-bot" class="subtle hidden">重试存储创建</button><details><summary>创建进度</summary><ol id="bot-job-events"></ol></details></div>
+</section>

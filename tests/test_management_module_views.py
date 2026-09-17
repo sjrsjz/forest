@@ -23,6 +23,11 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="nav-accounts"' not in index
     assert 'id="accounts"' not in index
     assert 'id="config-form"' not in index
+    assert 'id="bot-list"' not in index
+    assert 'id="create-bot-form"' not in index
+    assert 'id="rename-bot-form"' not in index
+    assert 'id="retry-bot"' not in index
+    assert 'id="bot-job-events"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
@@ -47,6 +52,7 @@ def test_control_shell_contains_no_module_owned_product_pages():
 
 
 def test_official_module_templates_and_controllers_own_their_surfaces():
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
     agent = (STATIC / "modules/agent.runtime.html").read_text(encoding="utf-8")
     memory = (STATIC / "modules/memory.graph.html").read_text(encoding="utf-8")
     routing = (STATIC / "modules/routing.graph.html").read_text(encoding="utf-8")
@@ -61,6 +67,9 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     )
     deployment_configuration = (
         STATIC / "modules/deployment.configuration.html"
+    ).read_text(encoding="utf-8")
+    deployment_catalog = (
+        STATIC / "modules/deployment.bot-catalog.html"
     ).read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
@@ -108,6 +117,17 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     ).read_text(encoding="utf-8")
     assert "createModulePanel" in configuration_controller
     assert "/modules/deployment.configuration" in configuration_controller
+    assert 'id="bot-list"' in deployment_catalog
+    assert 'id="create-bot-form"' in deployment_catalog
+    assert 'id="rename-bot-form"' in deployment_catalog
+    assert 'id="retry-bot"' in deployment_catalog
+    assert 'id="bot-job-events"' in deployment_catalog
+    catalog_controller = (STATIC / "bot-catalog.js").read_text(encoding="utf-8")
+    assert "createModulePanel" in catalog_controller
+    assert "/modules/deployment.bot-catalog" in catalog_controller
+    assert "openScope({kind:'bot'" in catalog_controller
+    assert "openScope" in host
+    assert "/scopes/${encodeURIComponent(target.kind)}" in app
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host
