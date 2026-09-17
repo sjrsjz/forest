@@ -14,7 +14,7 @@ WebUI 是 Forest 首版正式管理入口，也是微内核控制台宿主。管
 4. 草稿、期望配置、实际生效配置、运行观测分别展示；保存成功不得伪装为已全部生效。
 5. 每次写入有明确目标、可信主体、规范参数、预期版本与幂等键；多个标签页及 Shell 并发修改不执行最后写入覆盖。
 6. 群消息、记忆、图片或密钥的显示、预览、下载和测试分别授权，控制权限不隐含读取全部内容的权限。
-7. Agent、Memory、Adapter、Scheduler 和 Delivery 均以模块呈现；控制台壳不得为某个官方业务模块建立不可替换的顶层语义。
+7. Agent、Memory、Adapter、Scheduler 和 Delivery 均以模块呈现；控制台壳不得为某个官方业务模块建立不可替换的顶层语义，也不得预先固定一套“Bot 管理平台”栏目。
 8. 模块可携带不可变管理 UI，但它只能在无同源权限的沙箱中通过窄消息协议编辑草稿；不能读取管理员 Cookie、密钥、父页面 DOM 或直接调用管理 API。
 
 ## 2. 运行拓扑与组件生命周期
@@ -70,24 +70,19 @@ flowchart TB
 
 界面主视图使用待应用、应用中、已生效、失败以及短暂离线、需要重启、正在重建索引等具体描述。revision、epoch、摘要和协议水位放入可展开详情，不要求普通管理员理解内部字段才能修改配置。
 
-控制台固定导航只表达微内核概念：“部署、运行实例、模块注册表、操作与追踪、安全、存储”。选择 Bot 只改变运行实例与权限作用域。实例工作区固定提供“状态、模块、路由图、任务、观测”；这些区域读取通用注册、生命周期、RouteGraph、operation 和 trace 契约，不包含任何官方业务模块的字段或专用 API。
+控制台没有固定业务导航。壳层只渲染登录主体、作用域选择器、由内核枚举的模块入口和一个工作区容器。deployment、host、Bot、Binding 与组件实例都是可选择作用域；选择 Bot 只是改变查询与操作的 scope，不会进入一套预制的 Bot CRUD 产品。
 
-| 外壳区域 | 外壳可以理解的数据 | 外壳禁止理解的数据 |
-|---|---|---|
-| 部署 | 内核版本、宿主健康、容量、全局操作和管理服务状态 | Agent prompt、记忆节点、平台协议字段 |
-| 运行实例 | `bot_id`、数据/权限作用域、desired/effective 模块图、预算与健康 | 模块内部会话、模型、索引或连接对象 |
-| 模块注册表 | 包摘要、组件、契约、依赖、能力、配置 schema、管理 UI 工件 | 按 `component_id` 写死的表单、按钮或页面路由 |
-| 路由图 | 节点、代际、契约、依赖边、命令/消息注册和冻结摘要 | 拖拽修改生产路由、用页面状态冒充发布事实 |
-| 操作与追踪 | operation/trace/effect 引用、阶段、结果、因果边与稳定筛选 | 执行业务补写、编辑 Agent 队列或直接修改数据库行 |
-| 安全与存储 | 主体、作用域、能力、审计、事实库/媒体/索引状态、备份任务 | 默认读取所有群正文、图片、密钥或模块私有状态 |
+当前作用域的导航、设置页、诊断页和动作由已发布模块的 `ManagementContribution` 组成。连“安全”“存储”“备份”“追踪”也不是壳层硬编码业务页；它们分别由拥有相应契约的内核模块或业务模块贡献。壳层只理解贡献协议中的标题、排序、schema、query/action、UI 工件和能力要求，不理解 Agent prompt、记忆节点、OneBot 字段、调度策略或模块私有表。
 
-每个实例的“模块”区域完全由当前 RouteGraph/ModuleRegistry 枚举。点击任一模块后，外壳依次提供通用生命周期卡片、schema 表单、模块声明的只读 query、类型化 action，以及可选的沙箱管理 UI。Agent、Memory、OneBot 等官方实现与第三方模块使用同一装载路径；删除、替换或新增模块不修改控制台导航和路由表。
+内核贡献一个不可卸载的最小工作区，用于查看当前作用域的 ModuleRegistry、RuntimeGraph、Generation、契约路由、能力授予、生命周期操作和宿主恢复。它是注册事实的通用投影，不是另一个集中式业务管理器。模块生命周期卡片、通用 schema 表单和失败诊断都由该协议生成；具体业务配置、关系浏览器、连接控制和任务管理由各模块自己的 contribution/UI 提供。
+
+Agent、Memory、OneBot 等官方实现与第三方模块使用同一装载路径。安装、卸载或替换模块可以增加、删除或替换导航入口，无需修改控制台路由源码。任何 `if component_id == ...`、固定 `/agent`/`/memory` 页面、直接读取模块业务表的宿主端点，或以 Bot 为中心拼接全部业务卡片的实现，都属于架构违规，应直接删除。
 
 模块可以通过管理 query 返回大型数据集或关系图，但必须声明筛选 schema、稳定游标、默认/最大页大小、排序键、数据权限和可视化能力。外壳只提供通用筛选容器、分页、表格/图画布和导出门禁，模块 UI 负责解释领域字段。数十万条来源、审计或 trace 不得一次加载，也不得通过 DOM 累积或卡片纵向堆叠撑高整页。
 
 任一时刻只呈现当前工作区，主容器高度受 PC 浏览器视口约束，内部结果区独立滚动；详情、原文和大 JSON 默认折叠。页签切换不卸载运行模块、不清空未提交草稿，也不改变后台契约。窄窗口允许导航横向滚动，表单回落为单列且不得产生页面级横向溢出。
 
-首版闭环是从空部署安装模块组合、创建运行实例、配置模块、绑定外部平台、启动、观察路由与操作、处理失败和备份。图文记忆、LLM、群主干和会话诊断仍是官方模块首版必须提供的管理能力，但它们经模块 query/action/UI 暴露，不成为控制台内建产品栏目。
+首版闭环是从空部署安装模块组合、选择或创建作用域、配置模块、绑定外部平台、启动、观察路由与操作、处理失败和备份。图文记忆、LLM、群主干和会话诊断仍是对应官方模块首版必须提供的管理能力，但它们经模块 query/action/UI 暴露，不成为控制台内建产品栏目。
 
 ## 5. 表单、继承和有效配置
 
@@ -178,7 +173,7 @@ API 使用 `/management/v1` 等显式大版本路径和版本化 DTO；下表是
 | 方法与路径示意 | 输入/返回与语义 |
 |---|---|
 | `GET /capabilities` | API/schema 能力、当前身份可执行动作及前端兼容范围；不代替动作授权 |
-| `GET /bots/{bot_id}/configuration` | 草稿、desired/effective 引用、继承来源、状态与 ETag |
+| `GET /scopes/{scope_kind}/{scope_id}/configuration` | 当前作用域内通用配置头、desired/effective 引用、继承来源、状态与 ETag；模块字段仍按 contribution/schema 分区 |
 | `PUT /drafts/{draft_id}` | 有版本的结构化编辑，不触发运行变更 |
 | `POST /change-plans` | 类型化 action/target/patch/expected_revisions → 固定计划和字段校验 |
 | `POST /management-requests` | plan_ref/digest 与幂等键 → 入口 request_ref、可查询子引用 |
@@ -186,9 +181,9 @@ API 使用 `/management/v1` 等显式大版本路径和版本化 DTO；下表是
 | `GET /operations/{kind}/{id}` | 权威账本的阶段、结果、可取消性和状态版本 |
 | `POST /approvals/{approval_id}/decisions` | 带目标 authority 的固定批准/拒绝，当前主体重新验证 |
 | `POST /secrets` | 专用秘密写入，返回引用与版本；普通 GET 不返回值 |
-| `GET /bots/{bot_id}/runtime-modules` | 当前注册模块、代际、schema、query/action 目录与管理 UI 工件引用 |
-| `GET /bots/{bot_id}/runtime-modules/{component_id}/queries/{operation_id}` | 执行模块预注册的只读查询；输入、分页、权限和返回 DTO 均由固定契约约束 |
-| `POST /bots/{bot_id}/runtime-modules/{component_id}/actions/{operation_id}` | 提交模块预注册的类型化动作；必须进入计划、幂等、授权、审计和权威执行链 |
+| `GET /scopes/{scope_kind}/{scope_id}/modules` | 当前作用域内注册模块、代际、schema、query/action 目录、导航贡献与管理 UI 工件引用 |
+| `GET /scopes/{scope_kind}/{scope_id}/modules/{component_id}/queries/{operation_id}` | 执行模块预注册的只读查询；输入、分页、权限和返回 DTO 均由固定契约约束 |
+| `POST /scopes/{scope_kind}/{scope_id}/modules/{component_id}/actions/{operation_id}` | 提交模块预注册的类型化动作；必须进入计划、幂等、授权、审计和权威执行链 |
 | `GET /media/{media_id}` | 校验 Bot、来源与用途后的受控图像读取，不能凭 digest 公开获取 |
 | `GET /snapshots` 与 `GET /events` | 授权快照与可续传 SSE，事件不是业务提交权威 |
 

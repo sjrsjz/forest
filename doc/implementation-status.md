@@ -11,7 +11,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 微内核只负责模块注册、依赖图、生命周期、契约路由、能力授权、持久任务和效果出口；
 - Agent、Memory、OneBot、Scheduler、Shell、Delivery 都是平级可安装模块；
 - `BotRuntimeSupervisor` 只装配冻结的模块图，不能成为上述业务对象的组合根；
-- WebUI 是控制台宿主，按运行时模块描述符发现配置、诊断和管理视图，不能硬编码 Agent/Memory 产品栏目；
+- WebUI 是作用域感知的控制台宿主，按运行时模块描述符发现导航、配置、诊断和管理视图；连安全、存储和追踪也由所有者模块贡献，不能硬编码 Bot/Agent/Memory 产品栏目；
 - 每个 `(bot_id, conversation_id)` 只有一条持久 Agent 执行链，不存在产品“子 Agent”；
 - 项目未上线，允许删除错误 API、表、页面和测试并重建开发数据库，不为未发布结构增加兼容迁移。
 
@@ -31,16 +31,20 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 这些实现中仍有宿主直接持有业务对象和固定页面入口。它们是必须继续删除或迁移的重构输入，不是兼容资产，也不是最终结构；旧 Child 表、迁移与存储 API 已在本轮从最终基线删除。
 
+## 当前重构执行命令
+
+Forest 尚未上线，本目标明确允许激进破坏性重构：删除错误 API、页面、DTO、表、迁移、测试与数据库，直接从干净基线重建。不得为了让旧开发数据、旧 Web 路由或旧对象图继续工作而增加兼容层。后续代码工作先清除本页列出的架构违规，再增加业务能力；发现文档与纠偏基线冲突时先改文档并停止沿冲突实现扩展。
+
 ## 本轮已经完成的重构切片
 
 - 文档入口已经按“13/14 号纠偏基线 → 通用架构/协议 → 专项设计 → 实现状态”建立明确权威顺序；P0–P5 实现切片不再与目标架构并列，也不能生成兼容任务。
-- WebUI 设计已删除固定 Agent/Memory/LLM 页面和专用 Memory 查询端点，控制台只保留内核导航、RouteGraph 与通用模块工作区；官方模块同样通过描述符、schema、query/action 和沙箱 UI 暴露管理能力。
+- WebUI **目标设计**已取消固定 Agent/Memory/LLM 页面和“部署/运行实例/安全/存储”产品导航；当前代码尚未完成该切换，不能把设计完成写成实现完成。
 - 产品 Child 删除记录、开发期 payload 迁移说明和非空旧库升级文档已经从工作树删除；统一来源闭包与删除规则改由 14 号设计定义。
 - 官方核心模块进入显式注册表，并声明稳定 `component_id`、依赖和能力；
-- 通用管理入口按 `(bot_id, component_id, operation_id)` 解析模块的 query/action contract；
-- Agent 与 Memory 的专用 `/agent/*`、`/memory/*` 管理端点已删除；
+- 通用管理入口已经能按 `(bot_id, component_id, operation_id)` 解析一部分模块 query/action contract，但仍与旧的 Bot 专用路由并存；
+- Agent 与 Memory 已有模块 operation 适配层，但旧的专用管理 API、固定权限名和固定前端 panel 仍在代码中，必须直接删除，不能包装成兼容入口；
 - 模块描述符可投影管理操作目录和 `management_ui` 工件；
-- 控制台使用受限 iframe、摘要校验和有界 `MessageChannel` 装载模块 UI；
+- 控制台已有受限 iframe、摘要校验和有界 `MessageChannel` 的模块 UI 原型；静态 `agent-panel.js`、`memory.js`、`bindings.js`、`jobs-panel.js` 等固定页面仍证明壳层没有完成模块化；
 - `BindingRuntime` 的若干 Agent/Memory/Scheduler/Shell 便利属性已删除，调用方开始按组件 ID 取能力。
 - `BotModuleRegistry` 已拥有严格生命周期状态；失败模块会清理自身，已启动依赖按逆序排空，关闭失败可重试，控制面不再采用模块自报 `state`。
 - `adapter.onebot` 已拥有 Binding/Inbox/Shell ingress/Delivery 端口、连接集合、候选切换、网络接纳、发送 Worker 与连接监督任务；`memory.graph` 已拥有来源回填；`command.router` 与 `message.router` 已拥有各自策略和容量存储。`BindingRuntime` 对应便利属性及 OneBot 私有状态已删除。
@@ -106,9 +110,11 @@ VL 嵌入模型的种类在 Bot 创建时冻结并与 Bot 生命周期绑定；�
 
 ### P5 控制台
 
-- 顶层只展示部署、运行实例、模块注册表、操作追踪、安全和存储；Agent/Memory/Adapter 只能作为模块出现；
-- 模块配置由 schema 或模块携带的受限 UI 呈现，宿主不能按模块 ID 硬编码业务表单；
-- Memory 模块 UI 已有主干、组合筛选、分页和发布图浏览；仍需关系图可视化并用普通 PC 视口完成浏览器验收；
+- 顶层壳只提供管理身份、作用域选择、模块发现与工作区容器；不存在固定的部署/Bot/Agent/Memory/安全/存储产品栏目；
+- 内核与业务模块都通过 `ManagementContribution` 发布导航、配置、query/action 和 UI；宿主不能按模块 ID 硬编码业务表单、端点或页面；
+- 当前 `management.app` 仍安装 Bot/Binding/Agent/Memory/Job 等专用路由，静态资源仍直接导入多个业务 panel；这些都是待删除的架构阻断项，不允许继续美化旧页面；
+- 现有 Memory 页面中的主干、组合筛选、分页和发布图浏览逻辑可迁入 Memory 包的 contribution/UI，但迁移后宿主不能再保留其业务脚本或专用 API；
+- 必须先实现 `ManagementContribution` 注册、作用域枚举、代际绑定的 UI 工件解析和通用 query/action 网关，再重做 PC 布局验收；
 - WebUI、群聊 Shell 和自动化入口必须调用同一类型化控制契约和授权模型。
 
 ## 验收规则

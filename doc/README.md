@@ -10,7 +10,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 | 优先级 | 文档 | 约束范围 |
 |---|---|---|
-| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md) | 当前纠偏基线：微内核、模块注册、持久代际、RouteGraph、模块管理 UI、模块数据所有权与干净 schema bundle；直接否决业务组合根、固定产品后台和巨型全产品内核 SQL |
+| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md) | 当前纠偏基线：微内核、模块注册、持久代际、RouteGraph、作用域感知的模块管理 UI、模块数据所有权与干净 schema bundle；直接否决业务组合根、固定产品后台和巨型全产品内核 SQL |
 | 2 | [01 架构设计](01-architecture.md) | 系统边界、模块职责、部署与总体验收不变量 |
 | 3 | [02 生命周期](02-kernel-lifecycle.md)、[03 通信与调度](03-communication-scheduling.md)、[05 存储与鉴权](05-storage-security-operations.md)、[06 并发合流](06-concurrent-convergence.md) | 通用协议、所有权、事务、授权与收敛规则 |
 | 4 | [08 群聊上下文](08-group-context-interaction.md)、[09 群聊 Shell](09-group-shell-command-system.md)、[10 多主干记忆图](10-multi-trunk-memory-graph.md)、[11 多模态记忆](11-multimodal-memory-and-model-projection.md)、[12 WebUI](12-webui-administration.md) | 交互、管理和数据域专项契约；不得扩大微内核职责 |
@@ -49,7 +49,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 移除裁剪时的记忆摘要以控制成本 | 08 的确定性token预算、可靠归档、原文/来源引用视图；裁剪LLM调用为零，索引独立批量执行 |
 | 记忆与嵌入完整支持文本和图片，并能按图召回 | 11 的有序ContentPart、受管媒体、对齐嵌入空间与text/image/mixed query；04–06、10同步来源与索引协议 |
 | LLM不支持多模态时调用API前去掉图片 | 11 的模型能力快照及逐请求ModelInputProjection；08区分持久裁剪和请求投影，保留原图及图片检索能力 |
-| 通过WebUI后台管理，无需手改日常配置文件 | 12 的首次初始化、schema表单、配置变更与运维闭环；05定义存储权威，WebUI/Shell/CLI共用控制协议 |
+| 通过WebUI后台管理，无需手改日常配置文件 | 12 的首次初始化、作用域选择、模块贡献 UI、schema表单、配置变更与运维闭环；05定义存储权威，WebUI/Shell/CLI共用控制协议 |
 | 激进重构且不保留未发布兼容层 | 13 的重构拒绝清单与 14 的最小 Kernel baseline、模块 schema bundle、统一载荷来源闭包 |
 
 ## 源码调研依据
@@ -110,5 +110,6 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 20. WebUI是首版正式管理入口，日常配置持久化为受版本控制的事实，通过界面完成；页面、群聊Shell和CLI不直接改文件或运行对象，提交均走同一授权、版本冲突和生命周期协议。
 21. 配置期望、生效版本与实际运行状态分别可见；保存成功不冒充已生效，断开浏览器不取消持久操作，冲突不以最后保存覆盖，密钥不通过配置读取接口回显。
 22. Kernel baseline 不包含 Agent、Memory、Adapter、Shell、Job 或 Delivery 业务表；模块数据结构随内容寻址包安装并归模块所有，开发期旧库只重建、不迁移。
+23. WebUI 壳层不固定 Bot/Agent/Memory/安全/存储产品栏目；当前作用域内的导航、配置、查询与动作由准确模块 Generation 的管理贡献生成，内核自身也遵循该协议。
 
 出现跨文档冲突时，先维护这些不变量，再修改具体契约；不得由实现自行弱化并仍宣称满足设计。

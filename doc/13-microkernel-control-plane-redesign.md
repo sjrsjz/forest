@@ -4,7 +4,7 @@
 
 ## 1. 修正的问题
 
-此前实现曾把 `BindingRuntime` 写成 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。本轮重构已经拆出官方运行时模块及其资源所有权；本文继续作为剩余 Contract Router、持久代际和通用监督重构的权威设计，不再把旧组合根描述成当前事实。
+此前实现曾把 `BindingRuntime` 写成 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。本轮重构已经拆出部分官方运行时模块、Contract Router 及其资源所有权；本文继续作为清除旧管理入口、拆分模块存储和收口通用监督器的权威设计，不再把旧组合根描述成当前事实。
 
 本设计立即取代以下语义：
 
@@ -67,18 +67,22 @@ flowchart LR
 
 官方 `adapter.onebot` 模块现拥有 BindingStore、MessageStore、ShellIngressGuard、DeliveryStore、发送 Worker、连接集合、候选发布/恢复、网络接纳和连接监督任务，并向依赖模块提供明确端口；`memory.graph` 同时拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询契约和管理视图；`command.router`、`message.router` 依赖它并分别拥有业务命令和普通消息 Handler 的策略/容量存储。`component.worker-host` 独占可安装包 Worker 的启动锁、错误状态和 Kernel install 调用，OneBot 通过依赖端口请求 codec，不再反向调用宿主私有方法。`contract.router` 独占冻结消息分派、命令/Handler 调用、Agent 选择和模板 responder，Conversation Scheduler 只持有它的 `execute` 端口。`BindingRuntime` 不再暴露这些便利入口；它当前仍持有 Bot 级启动/关闭、Job 授权适配、唤醒汇总和笼统健康循环，后续继续收口到通用 supervisor 和能力端口。
 
-## 4. 控制台信息架构
+## 4. 控制台是模块工作台，不是固定产品后台
 
-顶层导航固定为内核概念：
+控制台壳只保留三个不能由业务模块取代的结构：当前管理主体、当前作用域以及工作区容器。作用域由内核注册表给出，可以是 deployment、host、Bot、Binding 或某个组件实例；Bot 只是其中最常用的一种作用域，不是整个后台的产品首页，也没有固定的“Bot 管理”CRUD 流程。
 
-1. **部署**：内核版本、容量、全局操作、管理账号和备份。
-2. **运行实例**：选择 Bot 作用域，查看状态、模块、RouteGraph、任务和观测。
-3. **模块注册表**：包、摘要、契约、依赖、能力请求、UI 工件和版本。
-4. **操作与追踪**：生命周期操作、dispatch trace、outbox/effect 对账、失败恢复。
-5. **安全**：主体、作用域、能力授予、组件命令授权和审计。
-6. **存储**：部署存储、各实例事实库、媒体、索引、备份与恢复。
+工作区入口来自当前作用域内已发布的 `ManagementContribution`。每个贡献必须绑定准确的 package digest、component generation 和 management protocol，声明：
 
-选中 Bot 后只改变作用域，不改变产品分类。实例页签固定为“状态、模块、RouteGraph、任务、观测”。Agent、Memory、OneBot 在“模块”列表中并列；进入某模块后才显示其配置、业务诊断和自带 UI。记忆浏览器属于 Memory 模块的管理视图，Agent 对话/Run 浏览器属于 Agent 模块的管理视图。控制台不得根据 `component_id` 分支导入业务 JavaScript、拼专用 URL 或生成固定导航；官方模块也必须走描述符、query/action contract 与 UI 工件装载路径。
+- 导航标识、标题、排序组和适用作用域；
+- 配置 schema、desired/effective 状态查询和生效策略；
+- 可分页 query、类型化 action 和所需能力；
+- 可选的 UI 工件入口及其摘要。
+
+内核自身也通过同一贡献协议发布最小工作区，用于模块图、代际、契约路由、能力授予、生命周期操作和宿主恢复。壳层不得另外硬编码“部署、运行实例、Agent、Memory、安全、存储”等固定产品栏目；安装的模块组合不同，实际导航就应不同。通用模块目录和作用域切换器可以始终存在，但它们只枚举注册事实，不能解释模块业务字段。
+
+Agent、Memory、OneBot、Shell、Scheduler、Delivery、备份和账号管理若需要页面，都必须由其所有者模块贡献。进入 Memory 页面时看到的主干、筛选和关系图来自 Memory Generation 的 query/action/UI；卸载该模块后，对应入口自然消失。控制台不得根据 `component_id` 分支导入业务 JavaScript、拼专用 URL、制造固定页签或直接查询模块表。官方模块与第三方模块走相同发现路径，差别只来自包信任等级和获准的 UI 执行模式。
+
+所谓“执行链”只是在通用 trace 工作区中对已提交路由事实的只读投影：消息经过哪个入口、冻结了哪个 RouteGraph、调用了哪个 Generation、产生了哪些 Event/Job/Effect。它不是可编辑的工作流编排器。所谓“业务命令策略”属于发布命令的模块以及授权模块，通过类型化管理贡献配置，不应成为壳层中的独立电商式策略页面。
 
 ## 5. 模块携带管理 UI
 
