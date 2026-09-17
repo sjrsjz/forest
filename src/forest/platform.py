@@ -212,6 +212,8 @@ class BindingRuntime:
             operation_id="response:" + str(uuid4()),
             expected_policy_revision=actor.policy_revision,
             input_parent_ids=(*context["payload_ids"], current["config_payload_id"]),
+            causal_root_kind="CONVERSATION_RUN",
+            causal_root_id=selected["run_id"],
         )
         from forest.group_scheduler import ComponentReply
 

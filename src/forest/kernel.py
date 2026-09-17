@@ -1215,12 +1215,15 @@ class Kernel:
         expected_policy_revision: int | None = None,
         agent_tool_id: str | None = None,
         input_parent_ids: tuple[str, ...] = (),
+        causal_root_kind: str = "KERNEL_OPERATION",
+        causal_root_id: str | None = None,
     ) -> Any:
         receipt = await self.invoke_with_receipt(
             component_id, service, payload, operation_id=operation_id,
             contract_major=contract_major, timeout=timeout,
             expected_policy_revision=expected_policy_revision, agent_tool_id=agent_tool_id,
             input_parent_ids=input_parent_ids,
+            causal_root_kind=causal_root_kind, causal_root_id=causal_root_id,
         )
         return receipt.value
 
@@ -1236,6 +1239,8 @@ class Kernel:
         expected_policy_revision: int | None = None,
         agent_tool_id: str | None = None,
         input_parent_ids: tuple[str, ...] = (),
+        causal_root_kind: str = "KERNEL_OPERATION",
+        causal_root_id: str | None = None,
     ) -> InvocationReceipt:
         self._authority()
         input_parent_ids = self._input_parents(input_parent_ids)
@@ -1272,6 +1277,8 @@ class Kernel:
                     expected_policy_revision=expected_policy_revision,
                     agent_tool_id=agent_tool_id,
                     input_parent_ids=input_parent_ids,
+                    causal_root_kind=causal_root_kind,
+                    causal_root_id=causal_root_id,
                 )
         finally:
             self._call_count -= 1
@@ -1739,6 +1746,8 @@ class Kernel:
         component_job: dict | None = None,
         business_command: dict | None = None,
         message_handler: dict | None = None,
+        causal_root_kind: str = "KERNEL_OPERATION",
+        causal_root_id: str | None = None,
     ) -> InvocationReceipt:
         authority = self._authority(allow_closing=parent_call_id is not None)
         parent = self._calls.get(parent_call_id) if parent_call_id else None
@@ -1757,6 +1766,28 @@ class Kernel:
             parent is not None or admission_lane != "DATA"
         ):
             raise ForestError("INVALID_DELIVERY", "Durable work must be a root data call", 422)
+        if parent is not None:
+            causal_root_kind = parent[1].causal_root_kind
+            causal_root_id = parent[1].causal_root_id
+        elif business_command is not None:
+            causal_root_kind, causal_root_id = (
+                "BUSINESS_COMMAND_REQUEST", business_command["request_id"]
+            )
+        elif message_handler is not None:
+            causal_root_kind, causal_root_id = "MESSAGE_HANDLER_CHAIN", message_handler["chain_id"]
+        elif event_delivery is not None:
+            causal_root_kind = event_delivery["causal_root_kind"]
+            causal_root_id = event_delivery["causal_root_id"]
+        elif component_job is not None:
+            causal_root_kind = component_job["causal_root_kind"]
+            causal_root_id = component_job["causal_root_id"]
+        else:
+            causal_root_id = causal_root_id or operation_id
+        if causal_root_kind not in {
+            "KERNEL_OPERATION", "BUSINESS_COMMAND_REQUEST", "MESSAGE_HANDLER_CHAIN",
+            "CONVERSATION_RUN",
+        } or not isinstance(causal_root_id, str) or not 1 <= len(causal_root_id) <= 256:
+            raise ForestError("INVALID_CALL", "Call causal root is invalid", 422)
         if admission_lane == "CONTROL" and (
             component_id != "adapter.onebot"
             or service not in {"onebot.normalize", "onebot.prepare"}
@@ -1826,7 +1857,17 @@ class Kernel:
 
         previous = await existing_call()
         if previous is not None:
-            if previous["input_digest"] != input_digest or previous["component_id"] != component_id:
+            if (
+                previous["input_digest"] != input_digest
+                or previous["component_id"] != component_id
+                or (
+                    agent_tool_id is None
+                    and (
+                        previous["causal_root_kind"] != causal_root_kind
+                        or previous["causal_root_id"] != causal_root_id
+                    )
+                )
+            ):
                 raise ForestError("IDEMPOTENCY_CONFLICT", "Call operation has different input", 409)
             if previous["status"] == "COMPLETED":
                 return self._invocation_receipt(previous)
@@ -2058,6 +2099,10 @@ class Kernel:
                 dependency_components=dependencies,
                 **({"service_name": service} if admission_lane == "CONTROL" else {}),
                 **({"agent_tool_id": agent_tool_id} if parent is None and admission_lane == "DATA" else {}),
+                **({
+                    "causal_root_kind": causal_root_kind,
+                    "causal_root_id": causal_root_id,
+                } if parent is None and admission_lane == "DATA" else {}),
             )
         except ForestError as exc:
             if exc.code in {"CALL_COMPLETED", "OPERATION_PENDING"}:

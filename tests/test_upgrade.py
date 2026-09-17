@@ -105,9 +105,9 @@ async def test_bot_001_upgrade_preserves_results_state_and_backfills_root_identi
         await conn.execute(
             "INSERT INTO bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
             "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-            "policy_revision,deadline_at,input_digest,status,result) VALUES "
+            "policy_revision,deadline_at,input_digest,causal_root_kind,causal_root_id,status,result) VALUES "
             "('old-bot','old-call','old-op','counter','old-gen',1,'worker','host-id','host',1,1,1,1,"
-            "clock_timestamp(),'input','COMPLETED','{\"value\":7}')"
+            "clock_timestamp(),'input','KERNEL_OPERATION','old-op','COMPLETED','{\"value\":7}')"
         )
         await conn.execute(
             "INSERT INTO bot_component_state(bot_id,component_id,key,revision,value) "

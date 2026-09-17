@@ -208,12 +208,19 @@ async def test_event_publish_fans_out_and_lost_ack_does_not_repeat_handler(
             count = await (await conn.execute(
                 "SELECT count(*) AS n FROM bot_component_events"
             )).fetchone()
+            calls = await (await conn.execute(
+                "SELECT operation_id,causal_root_kind,causal_root_id FROM public.bot_calls "
+                "WHERE causal_root_id='publish-seven' ORDER BY operation_id"
+            )).fetchall()
             entries, truncated = await DispatchTraceStore(event_store)._causal_entries(
                 conn,
                 {"publish-seven": {"kind": "test_operation", "id": "publish-seven"}},
                 [],
             )
         assert count["n"] == 1
+        assert len(calls) == 3
+        assert all(row["causal_root_kind"] == "KERNEL_OPERATION" for row in calls)
+        assert all(row["causal_root_id"] == "publish-seven" for row in calls)
         assert truncated is False
         assert {entry["kind"] for entry in entries} >= {
             "kernel_call", "component_event", "component_event_delivery"

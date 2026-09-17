@@ -48,7 +48,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - 官方运行时模块已拥有持久 RuntimeGraph/Generation、依赖边、追加式生命周期事实和原子 graph head。启动全部成功后才发布整图；失败启动不暴露部分模块；关闭先撤下 head 再逆序排空。RouteGraph 冻结 runtime revision，Adapter/Shell/Agent trace 从消息旧快照解析代际，宿主换代后不会改写历史。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
-这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、旧 `bot_outbox_events` 的来源归一、面向数十万消息的 lineage 游标索引与资源归属尚未全部迁完；当前 trace 对深层筛选采用有界候选扫描并明确报告截断，不能作为全量历史查询的最终实现。
+这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、旧 `bot_outbox_events` 的来源归一、面向数十万消息的稳定分页游标与资源归属尚未全部迁完；trace 的深层筛选已经改用不可变调用因果根和数据库关联键精确选根，不再采用近期消息候选扫描。
 
 本次 Memory 管理切片在 PostgreSQL 17 上完成 109 项组合回归，覆盖来源授权、媒体、图归约/存储、组合筛选、游标绑定、主干统计、关系投影、实际 Web 管理路由和模块描述符；定向 Web 回归为 3 项。真实 Edge 在 1440×1100 PC 视口验证默认只展开“来源、主干与遗忘”，页面高度小于 2500 px，配置、状态、人工关系和发布图按需折叠，同时保留配置草稿、联想变更、延迟响应与 Bot 切换保护。该证据不包含十万至百万来源容量压测、真实图片查询入口或关系图布局。
 
@@ -60,7 +60,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 
 本次官方运行时持久图切片在 PostgreSQL 17 上完成 runtime registry/graph、消息 RouteGraph/trace、平台生命周期和 writer-fence 组合回归 71 项；另有启动失败不发布、关闭失败重试、宿主失租接管以及换代后旧消息仍绑定旧 Adapter Generation 的定向用例。无 PostgreSQL 套件为 711 通过、36 跳过、1113 因 marker 未选择；Ruff 与 Python compileall 通过。该集合尚未覆盖完整 PostgreSQL 全套、长时间反复失租/数据库分区和 effect/outbox trace。
 
-本次执行因果切片把 Kernel call 树、component event/subscriber delivery、component job/worker call 和外部发送 part/attempt/resolution 接入只读 dispatch trace，并把 SendIntent 的类型化原因写入干净数据库基线。PostgreSQL 组合回归为 105 项通过，另有 Web 模块回归 4 项通过；无 PostgreSQL 套件为 712 通过、36 跳过、1114 因 marker 未选择。Ruff、Python compileall、RouteGraph JavaScript 语法和 `git diff --check` 通过。该证据没有完成旧 `bot_outbox_events` 来源归一、lineage 游标索引、十万级容量压测或完整 PostgreSQL 全套。
+本次执行因果切片把 Kernel call 树、component event/subscriber delivery、component job/worker call 和外部发送 part/attempt/resolution 接入只读 dispatch trace，并把 SendIntent 的类型化原因写入干净数据库基线。随后在 `bot_calls` 固化 Kernel operation、业务命令请求、消息 Handler chain 或 Conversation Run 四类不可变因果根；嵌套、Event/Job 后继调用与 Agent 工具调用都受数据库和准入层校验，组件、代际和结果筛选直接通过索引与权威关联表选出精确消息根。PostgreSQL 消息/路由/命令/Event/Job/Agent 组合回归为 98 项通过，干净基线迁移与载荷约束为 9 项通过，最终因果契约烟测为 5 项通过；无 PostgreSQL 套件为 712 项通过、36 项跳过。Ruff、Python compileall、RouteGraph JavaScript 语法和 `git diff --check` 通过。该证据仍未完成旧 `bot_outbox_events` 来源归一、稳定分页游标、十万级容量压测或完整 PostgreSQL 全套。
 
 ## 阻断项
 
@@ -69,7 +69,7 @@ Forest 正在进行激进重构，**不可发布**。已有测试只能证明若
 - `BindingRuntime` 仍负责跨模块会话执行、组件 Worker 确保和总体健康汇总；这些剩余职责需要迁入 Contract Router、组件自己的依赖端口及通用 supervisor；
 - 官方模块已发布独立的持久 RuntimeGraph/Generation 并进入同一 RouteGraph；它和可安装 Worker 仍使用不同运行驱动，需统一健康检查、按依赖边故障隔离、失租恢复和监督器接口；
 - command、message handler、service、event、job 与官方 runtime module 已进入同一可解释 RouteGraph，消息入场冻结精确 `graph_digest`；Kernel call、component event/job 与 Delivery 因果边已进入 trace，仍需归一旧 `bot_outbox_events` 来源；
-- dispatch trace 已能按消息、群、组件、代际、结果和时间查询，且与可编辑业务配置分离；仍需用不可变 lineage 索引和稳定游标替换深层筛选的有界候选扫描，完成十万级容量验证；
+- dispatch trace 已能按消息、群、组件、代际、结果和时间通过不可变调用因果根精确选根，且与可编辑业务配置分离；仍需增加绑定筛选条件的稳定分页游标并完成十万级容量验证；
 - 模块资源所有权仍需继续清理，宿主不得越过契约持有 JobStore、AgentStore 或 Memory 内部对象。
 
 ### P1 群聊调度与 Shell

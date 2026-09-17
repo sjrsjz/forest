@@ -376,10 +376,11 @@ class EventStore:
                 await conn.execute(
                     "SELECT d.*,e.topic,e.contract_minor,e.schema_digest,e.publisher_component_id,"
                     "e.publisher_generation_id,e.payload_id,e.payload_digest,"
-                    "e.created_at AS event_created_at,"
+                    "e.created_at AS event_created_at,pc.causal_root_kind,pc.causal_root_id,"
                     "h.generation_id AS target_generation_id,r.route_epoch "
                     "FROM public.bot_event_deliveries d "
                     "JOIN public.bot_component_events e ON e.bot_id=d.bot_id AND e.event_id=d.event_id "
+                    "JOIN public.bot_calls pc ON pc.bot_id=e.bot_id AND pc.call_id=e.publisher_call_id "
                     "JOIN public.bot_event_subscription_heads h ON h.bot_id=d.bot_id "
                     "AND h.subscriber_id=d.subscriber_id AND h.contract_major=d.contract_major "
                     "JOIN public.bot_component_routes r ON r.bot_id=d.bot_id AND r.component_id=d.component_id "
@@ -455,6 +456,8 @@ class EventStore:
             return {
                 **claimed,
                 "claim_token": token,
+                "causal_root_kind": row["causal_root_kind"],
+                "causal_root_id": row["causal_root_id"],
                 "target_generation_id": row["target_generation_id"],
                 "route_epoch": row["route_epoch"],
                 "event": {

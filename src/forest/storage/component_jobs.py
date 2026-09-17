@@ -305,8 +305,10 @@ class ComponentJobStore:
             row = await (
                 await conn.execute(
                     "SELECT j.*,h.generation_id AS target_generation_id,h.schema_digest,"
+                    "sc.causal_root_kind,sc.causal_root_id,"
                     "h.timeout_seconds,h.max_concurrency,r.route_epoch "
                     "FROM public.bot_component_jobs j "
+                    "JOIN public.bot_calls sc ON sc.bot_id=j.bot_id AND sc.call_id=j.source_call_id "
                     "JOIN public.bot_component_job_heads h ON h.bot_id=j.bot_id "
                     "AND h.component_id=j.component_id AND h.handler_id=j.handler_id "
                     "JOIN public.bot_component_routes r ON r.bot_id=j.bot_id "
@@ -383,6 +385,8 @@ class ComponentJobStore:
             return {
                 **claimed,
                 "claim_token": token,
+                "causal_root_kind": row["causal_root_kind"],
+                "causal_root_id": row["causal_root_id"],
                 "target_generation_id": row["target_generation_id"],
                 "route_epoch": row["route_epoch"],
                 "schema_digest": row["schema_digest"],

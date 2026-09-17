@@ -95,6 +95,10 @@ CREATE TABLE public.bot_calls (
     cancel_epoch bigint NOT NULL DEFAULT 0,
     deadline_at timestamptz NOT NULL,
     input_digest text NOT NULL,
+    causal_root_kind text NOT NULL CHECK (causal_root_kind IN (
+        'KERNEL_OPERATION','BUSINESS_COMMAND_REQUEST','MESSAGE_HANDLER_CHAIN','CONVERSATION_RUN'
+    )),
+    causal_root_id text NOT NULL,
     status text NOT NULL DEFAULT 'ADMITTED' CHECK (status IN ('ADMITTED', 'COMPLETED', 'FAILED', 'CANCELLED')),
     result jsonb,
     error_code text,

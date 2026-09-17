@@ -450,6 +450,8 @@ class AgentRunner:
                     contract_major=definition.get("contract_major", 1),
                     timeout=30,
                     expected_policy_revision=actor.policy_revision,
+                    causal_root_kind="CONVERSATION_RUN",
+                    causal_root_id=run_id,
                 )
             except asyncio.CancelledError:
                 try:

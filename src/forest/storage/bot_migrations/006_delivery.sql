@@ -24,7 +24,7 @@ CREATE TABLE public.bot_send_intents (
     root_operation_id text NOT NULL,
     cause_kind text NOT NULL CHECK (cause_kind IN (
         'SHELL_COMMAND','CONVERSATION_NOTICE','MESSAGE_HANDLER_CHAIN',
-        'BUSINESS_COMMAND_REQUEST','AGENT_RUN','KERNEL_CALL','DELIVERY_OPERATION'
+        'BUSINESS_COMMAND_REQUEST','CONVERSATION_RUN','KERNEL_CALL','DELIVERY_OPERATION'
     )),
     cause_id text NOT NULL,
     binding_id text NOT NULL,

@@ -482,6 +482,8 @@ class CallGrant:
     cancel_epoch: int
     deadline_at: datetime
     input_digest: str
+    causal_root_kind: str
+    causal_root_id: str
     parent_call_id: str | None = None
     root_call_id: str | None = None
     call_depth: int = 0
@@ -2165,6 +2167,8 @@ class BotStore:
         expected_route_epoch: int | None = None,
         dependency_components: tuple[str, ...] = (),
         agent_tool_id: str | None = None,
+        causal_root_kind: str = "KERNEL_OPERATION",
+        causal_root_id: str | None = None,
     ) -> CallGrant:
         return await self._admit(
             lease,
@@ -2181,6 +2185,8 @@ class BotStore:
             expected_route_epoch=expected_route_epoch,
             dependency_components=dependency_components,
             agent_tool_id=agent_tool_id,
+            causal_root_kind=causal_root_kind,
+            causal_root_id=causal_root_id,
         )
 
     @capacity_boundary
@@ -2252,8 +2258,16 @@ class BotStore:
         admission_lane: str = "DATA",
         control_service: str | None = None,
         agent_tool_id: str | None = None,
+        causal_root_kind: str = "KERNEL_OPERATION",
+        causal_root_id: str | None = None,
     ) -> CallGrant:
         self._ttl(timeout_seconds)
+        causal_root_id = causal_root_id or operation_id
+        if causal_root_kind not in {
+            "KERNEL_OPERATION", "BUSINESS_COMMAND_REQUEST", "MESSAGE_HANDLER_CHAIN",
+            "CONVERSATION_RUN",
+        } or not isinstance(causal_root_id, str) or not 1 <= len(causal_root_id) <= 256:
+            raise ForestError("INVALID_CALL", "Call causal root is invalid", 422)
         dependencies = self._dependencies(component_id, dependency_components)
         async with self.pool.connection() as conn, conn.transaction():
             routes = await self._routes(conn, (component_id, *dependencies))
@@ -2272,6 +2286,15 @@ class BotStore:
                 if route["generation_id"] is not None
                 else None
             )
+            agent_authority = None
+            if agent_tool_id is not None:
+                from forest.storage.agent import AgentStore
+
+                agent_authority = await AgentStore.guard_tool_call_in(
+                    conn, self.bot_id, agent_tool_id, input_digest=input_digest
+                )
+                causal_root_kind = "CONVERSATION_RUN"
+                causal_root_id = agent_authority["run_id"]
             if (
                 (
                     expected_generation_id is not None
@@ -2310,6 +2333,8 @@ class BotStore:
                     or old["admission_lane"] != admission_lane
                     or old["control_service"] != control_service
                     or old["agent_tool_id"] != agent_tool_id
+                    or old["causal_root_kind"] != causal_root_kind
+                    or old["causal_root_id"] != causal_root_id
                 ):
                     raise ForestError(
                         "IDEMPOTENCY_CONFLICT", "Call identity already binds different input"
@@ -2365,13 +2390,6 @@ class BotStore:
                         "ADMISSION_CLOSED", "A reserved dependency has no current active Worker"
                     )
             await self.content.lock_in(conn, [generation["generation_id"]], [component_id])
-            agent_authority = None
-            if agent_tool_id is not None:
-                from forest.storage.agent import AgentStore
-
-                agent_authority = await AgentStore.guard_tool_call_in(
-                    conn, self.bot_id, agent_tool_id, input_digest=input_digest
-                )
             if agent_authority is not None and (
                 generation is None or agent_authority["tool_def"].get("package_digest")
                 not in {None, generation["package_digest"]}
@@ -2385,9 +2403,9 @@ class BotStore:
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,root_call_id,dependency_components,admission_lane,control_service,agent_tool_id,input_payload_id) "
+                    "policy_revision,deadline_at,input_digest,causal_root_kind,causal_root_id,root_call_id,dependency_components,admission_lane,control_service,agent_tool_id,input_payload_id) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "clock_timestamp()+%s*interval '1 second',%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -2404,6 +2422,8 @@ class BotStore:
                         runtime["policy_revision"],
                         timeout_seconds,
                         input_digest,
+                        causal_root_kind,
+                        causal_root_id,
                         call_id,
                         list(dependencies),
                         admission_lane,
@@ -2454,7 +2474,9 @@ class BotStore:
         chain.reverse()
         for depth, row in enumerate(chain):
             if (row["root_call_id"] != chain[0]["call_id"] or row["call_depth"] != depth
-                    or row["agent_tool_id"] != chain[0]["agent_tool_id"]):
+                    or row["agent_tool_id"] != chain[0]["agent_tool_id"]
+                    or row["causal_root_kind"] != chain[0]["causal_root_kind"]
+                    or row["causal_root_id"] != chain[0]["causal_root_id"]):
                 raise ForestError(
                     "INVALID_CALL_TREE", "Call ancestry does not match its immutable root"
                 )
@@ -2608,9 +2630,9 @@ class BotStore:
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,"
                     "worker_incarnation,host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,"
-                    "policy_revision,deadline_at,input_digest,parent_call_id,root_call_id,call_depth,dependency_components,agent_tool_id,input_payload_id) "
+                    "policy_revision,deadline_at,input_digest,causal_root_kind,causal_root_id,parent_call_id,root_call_id,call_depth,dependency_components,agent_tool_id,input_payload_id) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "LEAST(%s,clock_timestamp()+%s*interval '1 second'),%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.bot_id,
                         call_id,
@@ -2628,6 +2650,8 @@ class BotStore:
                         parent["deadline_at"],
                         timeout_seconds,
                         input_digest,
+                        parent["causal_root_kind"],
+                        parent["causal_root_id"],
                         parent["call_id"],
                         parent["root_call_id"],
                         parent["call_depth"] + 1,

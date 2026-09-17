@@ -114,7 +114,9 @@ dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph
 
 控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；实际 Kernel call 使用其冻结 Generation；尚未执行的 Event/Job/Delivery 不借用当前 head 伪造代际。外部发送逐 part 显示 `PENDING/CLAIMED/DISPATCHING/SENT/FAILED/UNKNOWN/CANCELLED/SKIPPED`，`UNKNOWN` 只能由显式 resolution 收敛。Trace 只返回身份、状态、摘要、时间和因果引用，不返回消息正文、事件/任务载荷、wire body 或平台 receipt 正文。
 
-单次因果展开必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询的最终实现必须使用以消息根和稳定游标索引的不可变 lineage 事实，不能依赖无界递归或先载入大量消息再在浏览器过滤。当前进程内的有界候选扫描只是重构期投影，命中扫描上限会返回 `candidate_scan_truncated`，不能被文档或 UI 宣称为完整历史结果。控制台始终只读，不能拖拽 trace 改变生产路由。
+每个 Kernel 根调用在准入时固化 `causal_root_kind/causal_root_id`，嵌套调用继承同一根；允许的根是 Kernel operation、业务命令请求、消息 Handler chain 和 Conversation Run。Event 与 Job 的后继调用继承发布/调度调用的根，Agent 工具调用由 Agent 准入证明强制绑定 Conversation Run，调用者不能自行换根。`bot_calls_causal_root_idx` 和各权威事实表上的关联键让组件、代际与结果筛选先在数据库中精确选出消息根，不再扫描最近若干消息后做进程内猜测，也不再返回 `candidate_scan_truncated`。
+
+单次因果展开仍必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询不能依赖无界递归或把大量消息载入浏览器过滤。当前查询会对精确命中的消息根确定排序并限制返回条数，下一步容量工作是为跨页历史浏览增加绑定筛选条件的稳定游标，而不是恢复候选扫描。控制台始终只读，不能拖拽 trace 改变生产路由。
 
 ## 7. 可扩展管理视图
 

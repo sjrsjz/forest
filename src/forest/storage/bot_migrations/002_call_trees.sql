@@ -14,6 +14,8 @@ ALTER TABLE public.bot_calls ADD CONSTRAINT bot_call_root_shape CHECK (
 );
 CREATE INDEX bot_calls_parent_idx ON public.bot_calls(bot_id,parent_call_id);
 CREATE INDEX bot_calls_root_idx ON public.bot_calls(bot_id,root_call_id,call_depth,call_id);
+CREATE INDEX bot_calls_causal_root_idx ON public.bot_calls
+    (bot_id,causal_root_kind,causal_root_id,component_id,generation_id,status);
 
 ALTER TABLE public.bot_generations DROP CONSTRAINT bot_generations_status_check;
 ALTER TABLE public.bot_generations ADD COLUMN capability_grants jsonb NOT NULL DEFAULT '[]'::jsonb;
@@ -31,11 +33,13 @@ BEGIN
     IF ROW(OLD.bot_id, OLD.call_id, OLD.operation_id, OLD.component_id, OLD.generation_id,
         OLD.route_epoch, OLD.worker_incarnation, OLD.host_id, OLD.host_incarnation, OLD.owner_epoch,
         OLD.storage_generation, OLD.maintenance_epoch, OLD.policy_revision, OLD.deadline_at,
-        OLD.input_digest, OLD.parent_call_id, OLD.root_call_id, OLD.call_depth, OLD.dependency_components)
+        OLD.input_digest, OLD.causal_root_kind, OLD.causal_root_id,
+        OLD.parent_call_id, OLD.root_call_id, OLD.call_depth, OLD.dependency_components)
       IS DISTINCT FROM ROW(NEW.bot_id, NEW.call_id, NEW.operation_id, NEW.component_id, NEW.generation_id,
         NEW.route_epoch, NEW.worker_incarnation, NEW.host_id, NEW.host_incarnation, NEW.owner_epoch,
         NEW.storage_generation, NEW.maintenance_epoch, NEW.policy_revision, NEW.deadline_at,
-        NEW.input_digest, NEW.parent_call_id, NEW.root_call_id, NEW.call_depth, NEW.dependency_components) THEN
+        NEW.input_digest, NEW.causal_root_kind, NEW.causal_root_id,
+        NEW.parent_call_id, NEW.root_call_id, NEW.call_depth, NEW.dependency_components) THEN
         RAISE EXCEPTION 'Forest call identity is immutable' USING ERRCODE = '55000';
     END IF;
     RETURN NEW;

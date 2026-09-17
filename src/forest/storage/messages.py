@@ -4751,7 +4751,7 @@ class MessageStore:
             conn, actor.host, operation_id="reply:" + reply_id, route=route, parts=parts,
             conversation_id=actor.conversation_id, lane="CHAT", response_seq=response_seq,
             root_operation_id=run_id, expected_policy_revision=actor.policy_revision,
-            cause_kind="AGENT_RUN", cause_id=run_id,
+            cause_kind="CONVERSATION_RUN", cause_id=run_id,
             parents=(body.payload_id,),
         )
         reply = await (await conn.execute(

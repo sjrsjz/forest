@@ -36,6 +36,35 @@ class DispatchTraceStore:
         cause_by_operation = dict(seed_operations)
         frontier = set(seed_operations)
         truncated = False
+        causal_kinds = {
+            "KERNEL_OPERATION", "BUSINESS_COMMAND_REQUEST", "MESSAGE_HANDLER_CHAIN",
+            "CONVERSATION_RUN",
+        }
+        cause_ids_by_kind = {}
+        for item in causes:
+            if item["kind"] in causal_kinds:
+                cause_ids_by_kind.setdefault(item["kind"], set()).add(item["id"])
+        for cause_kind, cause_ids in sorted(cause_ids_by_kind.items()):
+            rows = await (
+                await conn.execute(
+                    "SELECT operation_id,causal_root_id FROM public.bot_calls WHERE bot_id=%s "
+                    "AND causal_root_kind=%s AND causal_root_id=ANY(%s) "
+                    "ORDER BY created_at,call_id LIMIT %s",
+                    (
+                        self.store.bot_id, cause_kind, sorted(cause_ids),
+                        _MAX_CAUSAL_ENTRIES + 1,
+                    ),
+                )
+            ).fetchall()
+            if len(rows) > _MAX_CAUSAL_ENTRIES:
+                truncated = True
+                rows = rows[:_MAX_CAUSAL_ENTRIES]
+            for row in rows:
+                frontier.add(row["operation_id"])
+                cause_by_operation[row["operation_id"]] = {
+                    "kind": cause_kind.lower(),
+                    "id": row["causal_root_id"],
+                }
         for _ in range(_MAX_CAUSAL_HOPS):
             frontier -= {row["operation_id"] for row in calls.values()}
             if not frontier:
@@ -279,8 +308,105 @@ class DispatchTraceStore:
         status = payload.get("status")
         received_after = payload.get("received_after")
         received_before = payload.get("received_before")
-        deep_filter = component_id is not None or generation_id is not None or status is not None
-        scan_limit = min(max(limit * 5, 100), 500) if deep_filter else limit
+        call_root = lambda alias: (  # noqa: E731
+            f"(({alias}.causal_root_kind='BUSINESS_COMMAND_REQUEST' AND {alias}.causal_root_id=b.request_id) OR "
+            f"({alias}.causal_root_kind='MESSAGE_HANDLER_CHAIN' AND {alias}.causal_root_id=h.chain_id) OR "
+            f"({alias}.causal_root_kind='CONVERSATION_RUN' AND {alias}.causal_root_id=t.claimed_run_id))"
+        )
+        delivery_root = lambda alias: (  # noqa: E731
+            f"(({alias}.cause_kind='SHELL_COMMAND' AND {alias}.cause_id=s.command_id) OR "
+            f"({alias}.cause_kind='BUSINESS_COMMAND_REQUEST' AND {alias}.cause_id=b.request_id) OR "
+            f"({alias}.cause_kind='MESSAGE_HANDLER_CHAIN' AND {alias}.cause_id=h.chain_id) OR "
+            f"({alias}.cause_kind='CONVERSATION_RUN' AND {alias}.cause_id=t.claimed_run_id))"
+        )
+
+        def entry_filter(component_expression, generation_expression):
+            parts, values = [], []
+            if component_id is not None:
+                parts.append(component_expression + "=%s")
+                values.append(component_id)
+            if generation_id is not None:
+                parts.append(generation_expression + "=%s")
+                values.append(generation_id)
+            return "(" + " AND ".join(parts) + ")", values
+
+        root_filters, owner_filters, root_filter_values = [], [], []
+        if component_id is not None or generation_id is not None:
+            direct, values = entry_filter("b.component_id", "b.generation_id")
+            owner_filters.append("(b.request_id IS NOT NULL AND " + direct + ")")
+            root_filter_values.extend(values)
+            handler, values = entry_filter("x.component_id", "x.generation_id")
+            owner_filters.append(
+                "EXISTS(SELECT 1 FROM public.bot_message_handler_chain_items x "
+                "WHERE x.bot_id=i.bot_id AND x.chain_id=h.chain_id AND " + handler + ")"
+            )
+            root_filter_values.extend(values)
+            runtime, values = entry_filter("n->>'component_id'", "n->>'generation_id'")
+            owner_filters.append(
+                "EXISTS(SELECT 1 FROM public.bot_route_graph_snapshots gs CROSS JOIN LATERAL "
+                "jsonb_array_elements(gs.snapshot->'nodes') n WHERE gs.bot_id=i.bot_id "
+                "AND gs.graph_digest=i.graph_digest AND n->>'kind'='runtime_module' AND "
+                + runtime + ")"
+            )
+            root_filter_values.extend(values)
+            call, values = entry_filter("kc.component_id", "kc.generation_id")
+            owner_filters.append(
+                "EXISTS(SELECT 1 FROM public.bot_calls kc WHERE kc.bot_id=i.bot_id AND "
+                + call_root("kc") + " AND " + call + ")"
+            )
+            root_filter_values.extend(values)
+            event, values = entry_filter("ed.component_id", "dc.generation_id")
+            owner_filters.append(
+                "EXISTS(SELECT 1 FROM public.bot_component_events ce "
+                "JOIN public.bot_calls pc ON pc.bot_id=ce.bot_id AND pc.call_id=ce.publisher_call_id "
+                "JOIN public.bot_event_deliveries ed ON ed.bot_id=ce.bot_id AND ed.event_id=ce.event_id "
+                "LEFT JOIN public.bot_calls dc ON dc.bot_id=ed.bot_id "
+                "AND dc.operation_id=ed.call_operation_id WHERE ce.bot_id=i.bot_id AND "
+                + call_root("pc") + " AND " + event + ")"
+            )
+            root_filter_values.extend(values)
+            job, values = entry_filter("j.component_id", "jc.generation_id")
+            owner_filters.append(
+                "EXISTS(SELECT 1 FROM public.bot_component_jobs j "
+                "JOIN public.bot_calls pc ON pc.bot_id=j.bot_id AND pc.call_id=j.source_call_id "
+                "LEFT JOIN public.bot_calls jc ON jc.bot_id=j.bot_id "
+                "AND jc.operation_id=j.call_operation_id WHERE j.bot_id=i.bot_id AND "
+                + call_root("pc") + " AND " + job + ")"
+            )
+            root_filter_values.extend(values)
+            effect, values = entry_filter(
+                "COALESCE(sa.executor_ref->>'component_id','adapter.onebot')",
+                "sa.executor_ref->>'generation_id'",
+            )
+            owner_filters.append(
+                "EXISTS(SELECT 1 FROM public.bot_send_intents si "
+                "JOIN public.bot_send_parts sp USING(bot_id,intent_id) "
+                "LEFT JOIN public.bot_send_attempts sa ON sa.bot_id=sp.bot_id "
+                "AND sa.attempt_id=sp.attempt_id WHERE si.bot_id=i.bot_id AND "
+                + delivery_root("si") + " AND " + effect + ")"
+            )
+            root_filter_values.extend(values)
+            root_filters.append("(" + " OR ".join(owner_filters) + ")")
+        if status is not None:
+            root_filters.append(
+                "(COALESCE(s.status,b.status,h.status,t.status,i.trigger_decision)=%s OR "
+                "EXISTS(SELECT 1 FROM public.bot_calls kc WHERE kc.bot_id=i.bot_id AND "
+                + call_root("kc") + " AND kc.status=%s) OR "
+                "EXISTS(SELECT 1 FROM public.bot_component_events ce "
+                "JOIN public.bot_calls pc ON pc.bot_id=ce.bot_id AND pc.call_id=ce.publisher_call_id "
+                "JOIN public.bot_event_deliveries ed ON ed.bot_id=ce.bot_id AND ed.event_id=ce.event_id "
+                "WHERE ce.bot_id=i.bot_id AND " + call_root("pc") + " AND ed.status=%s) OR "
+                "EXISTS(SELECT 1 FROM public.bot_component_jobs j "
+                "JOIN public.bot_calls pc ON pc.bot_id=j.bot_id AND pc.call_id=j.source_call_id "
+                "WHERE j.bot_id=i.bot_id AND " + call_root("pc") + " AND j.status=%s) OR "
+                "EXISTS(SELECT 1 FROM public.bot_send_intents si "
+                "JOIN public.bot_send_parts sp USING(bot_id,intent_id) WHERE si.bot_id=i.bot_id "
+                "AND " + delivery_root("si") + " AND sp.state=%s))"
+            )
+            root_filter_values.extend([status] * 5)
+        extra_where = ""
+        if root_filters:
+            extra_where = "AND " + " AND ".join(root_filters) + " "
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "module.read", operation_id, payload)
             roots = await (
@@ -300,6 +426,7 @@ class DispatchTraceStore:
                     "AND (%s::text IS NULL OR i.event_id=%s) "
                     "AND (%s::timestamptz IS NULL OR i.received_at>=%s::timestamptz) "
                     "AND (%s::timestamptz IS NULL OR i.received_at<%s::timestamptz) "
+                    + extra_where +
                     "ORDER BY i.received_at DESC,i.event_id DESC LIMIT %s",
                     (
                         self.store.bot_id,
@@ -309,7 +436,8 @@ class DispatchTraceStore:
                         event_id, event_id,
                         received_after, received_after,
                         received_before, received_before,
-                        scan_limit,
+                        *root_filter_values,
+                        limit,
                     ),
                 )
             ).fetchall()
@@ -428,7 +556,7 @@ class DispatchTraceStore:
                 agent = agent_by_event.get(root["event_id"])
                 if agent and agent["claimed_run_id"]:
                     run_id = agent["claimed_run_id"]
-                    cause_roots.append({"kind": "AGENT_RUN", "id": run_id})
+                    cause_roots.append({"kind": "CONVERSATION_RUN", "id": run_id})
                     for tool in tools_by_run.get(run_id, ()):
                         seeds[tool["operation_id"]] = {
                             "kind": "agent_tool", "id": f'{run_id}:{tool["tool_call_id"]}'
@@ -552,7 +680,7 @@ class DispatchTraceStore:
                 "entries": entries,
                 "causal_truncated": causal_truncated,
             })
-        if deep_filter:
+        if component_id is not None or generation_id is not None or status is not None:
             def matches(trace):
                 entries = trace["entries"]
                 if component_id is not None and generation_id is not None:
@@ -574,6 +702,4 @@ class DispatchTraceStore:
                 )
             traces = [trace for trace in traces if matches(trace)][:limit]
         result = {"filter": payload, "traces": traces}
-        if deep_filter and len(roots) == scan_limit:
-            result["candidate_scan_truncated"] = True
         return result

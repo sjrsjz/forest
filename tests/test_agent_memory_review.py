@@ -126,6 +126,15 @@ async def test_real_kernel_state_gateway_rechecks_evidence_after_tool_admission(
         # must remain UNKNOWN; it cannot be replayed or silently discarded.
         assert await rows(media, "SELECT status FROM public.bot_agent_tools WHERE operation_id=%s",
             (permit.operation_id,)) == [{"status": "UNKNOWN"}]
+        assert await rows(
+            media,
+            "SELECT causal_root_kind,causal_root_id FROM public.bot_calls "
+            "WHERE agent_tool_id=%s",
+            (permit.operation_id,),
+        ) == [{
+            "causal_root_kind": "CONVERSATION_RUN",
+            "causal_root_id": snapshot["run_id"],
+        }]
         assert not await rows(media, "SELECT * FROM public.bot_conversation_replies")
     finally:
         await kernel.close()

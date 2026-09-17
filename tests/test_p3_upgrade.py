@@ -133,10 +133,11 @@ async def p2_authority(dsn):
                 await conn.execute(
                     "INSERT INTO public.bot_calls(bot_id,call_id,operation_id,component_id,generation_id,route_epoch,worker_incarnation,"
                     "host_id,host_incarnation,owner_epoch,storage_generation,maintenance_epoch,policy_revision,deadline_at,input_digest,"
-                    "status,result,parent_call_id,root_call_id,call_depth,admission_lane,control_service) "
-                    "VALUES ('bot-a',%s,%s,%s,%s,1,%s,'old-host','old-host',1,1,1,1,clock_timestamp(),'old-input','COMPLETED',%s,%s,%s,%s,%s,%s)",
+                    "causal_root_kind,causal_root_id,status,result,parent_call_id,root_call_id,call_depth,admission_lane,control_service) "
+                    "VALUES ('bot-a',%s,%s,%s,%s,1,%s,'old-host','old-host',1,1,1,1,clock_timestamp(),'old-input',"
+                    "'KERNEL_OPERATION',%s,'COMPLETED',%s,%s,%s,%s,%s,%s)",
                     (call_id, call_id + "-operation", component, component + "-generation", component + "-worker",
-                     Jsonb({"value": call_id}), parent, root, depth, lane, service),
+                     call_id + "-operation", Jsonb({"value": call_id}), parent, root, depth, lane, service),
                 )
     return private, public
 

@@ -1,12 +1,12 @@
 const $ = id => document.getElementById(id);
 
 export function createModulePanel(api, busy, notice) {
-  let bot = null, epoch = 0, snapshot = null, traces = [], traceScanTruncated = false;
+  let bot = null, epoch = 0, snapshot = null, traces = [];
   const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/snapshot`;
   const operationPath = name => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/${name}`;
 
   function reset() {
-    epoch++; bot = null; snapshot = null; traces = []; traceScanTruncated = false;
+    epoch++; bot = null; snapshot = null; traces = [];
     $('bot-route-graph').classList.add('hidden');
     $('route-graph-summary').replaceChildren();
     $('route-graph-nodes').replaceChildren();
@@ -109,9 +109,7 @@ export function createModulePanel(api, busy, notice) {
     const result = await api(`${operationPath('dispatch-traces')}?${query}`);
     if (!bot || own !== epoch) return;
     traces = result.traces || [];
-    traceScanTruncated = Boolean(result.candidate_scan_truncated);
     renderTraces();
-    if (traceScanTruncated) $('dispatch-trace-status').textContent += ' \u5019\u9009\u626b\u63cf\u5df2\u5230\u4e0a\u9650\uff0c\u8bf7\u589e\u52a0\u6d88\u606f\u3001\u7fa4\u6216\u65f6\u95f4\u7b5b\u9009\u3002';
   }
 
   $('route-graph-filter').addEventListener('input', render);

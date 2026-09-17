@@ -194,7 +194,8 @@ async def test_job_schedule_is_convergent_and_lost_ack_does_not_repeat_handler(
         async with component_job_store.pool.connection() as conn:
             source = await (
                 await conn.execute(
-                    "SELECT c.operation_id FROM public.bot_component_jobs j "
+                    "SELECT c.operation_id,c.causal_root_kind,c.causal_root_id "
+                    "FROM public.bot_component_jobs j "
                     "JOIN public.bot_calls c ON (c.bot_id,c.call_id)=(j.bot_id,j.source_call_id)"
                 )
             ).fetchone()
@@ -207,7 +208,15 @@ async def test_job_schedule_is_convergent_and_lost_ack_does_not_repeat_handler(
                 }},
                 [],
             )
+            calls = await (await conn.execute(
+                "SELECT causal_root_kind,causal_root_id FROM public.bot_calls "
+                "WHERE causal_root_kind=%s AND causal_root_id=%s",
+                (source["causal_root_kind"], source["causal_root_id"]),
+            )).fetchall()
         assert truncated is False
+        assert len(calls) == 2
+        assert source["causal_root_kind"] == "KERNEL_OPERATION"
+        assert all(row["causal_root_id"] == source["causal_root_id"] for row in calls)
         job = next(entry for entry in entries if entry["kind"] == "component_job")
         assert job["status"] == "ACKED"
         assert job["references"]["caused_by"]["kind"] == "kernel_call"

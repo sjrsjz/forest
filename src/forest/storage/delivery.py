@@ -198,7 +198,8 @@ class DeliveryStore:
         _text(cause_id, "cause_id")
         if cause_kind not in {
             "SHELL_COMMAND", "CONVERSATION_NOTICE", "MESSAGE_HANDLER_CHAIN",
-            "BUSINESS_COMMAND_REQUEST", "AGENT_RUN", "KERNEL_CALL", "DELIVERY_OPERATION",
+            "BUSINESS_COMMAND_REQUEST", "CONVERSATION_RUN", "KERNEL_CALL",
+            "DELIVERY_OPERATION",
         }:
             raise ForestError("INVALID_DELIVERY", "Delivery cause kind is invalid", 422)
         if lane not in ("CHAT", "CONTROL") or adapter_contract != "onebot-v11:1":

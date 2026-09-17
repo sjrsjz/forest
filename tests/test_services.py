@@ -226,7 +226,17 @@ async def test_topological_install_real_processes_and_persistent_multihop_tree(
     assert rows[1]["parent_call_id"] == rows[0]["call_id"]
     assert rows[2]["parent_call_id"] == rows[1]["call_id"]
     assert all(row["root_call_id"] == rows[0]["call_id"] for row in rows)
+    assert all(row["causal_root_kind"] == "KERNEL_OPERATION" for row in rows)
+    assert all(row["causal_root_id"] == rows[0]["operation_id"] for row in rows)
     assert rows[2]["deadline_at"] <= rows[1]["deadline_at"] <= rows[0]["deadline_at"]
+    async with kernel.store.pool.connection() as conn:
+        with pytest.raises(psycopg.Error):
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE public.bot_calls SET causal_root_id='forged-root' "
+                    "WHERE bot_id=%s AND call_id=%s",
+                    (kernel.store.bot_id, rows[2]["call_id"]),
+                )
     with pytest.raises(ForestError) as denied:
         await kernel.store.authorized_call(kernel.lease, rows[2]["operation_id"], 1)
     assert denied.value.code == "NESTED_AUTHORITY_REQUIRED"
