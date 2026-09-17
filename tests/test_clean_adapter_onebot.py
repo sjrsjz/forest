@@ -71,10 +71,20 @@ async def clean_onebot():
         namespace=scheduler_storage.spec.namespace,
         payload_verifier=payloads.verify_in,
     )
+
+    async def verify_generation(
+        _conn, *, component_id, generation_id, admission_lane
+    ):
+        assert component_id == "adapter.onebot"
+        assert generation_id == "generation/adapter/1"
+        assert admission_lane == "DATA"
+        return {"active": True}
+
     adapter = OneBotAdapterRepository(
         store,
         namespace=onebot_storage.spec.namespace,
         payload_verifier=payloads.verify_in,
+        generation_verifier=verify_generation,
     )
     try:
         yield store, onebot_storage, scheduler_storage, payloads, scheduler, adapter

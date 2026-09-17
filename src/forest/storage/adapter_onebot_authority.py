@@ -181,10 +181,12 @@ class OneBotAdapterRepository:
         *,
         namespace: str | None = None,
         payload_verifier: Callable[..., Awaitable[object]] | None = None,
+        generation_verifier: Callable[..., Awaitable[object]],
     ) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.adapter.onebot")
         self.payload_verifier = payload_verifier
+        self.generation_verifier = generation_verifier
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
@@ -215,6 +217,22 @@ class OneBotAdapterRepository:
             owner_component_id=reference.owner_component_id,
             owner_kind=reference.owner_kind,
             owner_id=reference.owner_id,
+        )
+
+    async def _verify_generation(
+        self, conn, generation_id: str, *, admission_lane: str
+    ) -> object:
+        if not callable(self.generation_verifier):
+            raise ForestError(
+                "RUNTIME_AUTHORITY_MISSING",
+                "OneBot Generation verifier is unavailable",
+                503,
+            )
+        return await self.generation_verifier(
+            conn,
+            component_id="adapter.onebot",
+            generation_id=generation_id,
+            admission_lane=admission_lane,
         )
 
     async def _head(self, conn, binding_id: str, *, lock: str = "") -> dict:
@@ -679,6 +697,9 @@ class OneBotAdapterRepository:
                 raise ForestError("BINDING_CLIENT_CONFLICT", "Client is not buffering", 409)
             if head["current_client_incarnation"] is not None:
                 raise ForestError("BINDING_DRAIN_REQUIRED", "Current client must retire first", 409)
+            await self._verify_generation(
+                conn, client["adapter_generation_id"], admission_lane="DATA"
+            )
             resulting_binding_epoch = expected_binding_epoch + 1
             resulting_connection_epoch = head["connection_epoch"] + 1
             now = head["database_now"]
@@ -860,18 +881,30 @@ class OneBotAdapterRepository:
                         "BINDING_OPERATION_CONFLICT", "Client observation input differs", 409
                     )
                 return dict(replay)
-            client = await (
+            locator = await (
                 await conn.execute(
-                    sql.SQL("SELECT *,clock_timestamp() AS database_now FROM {} WHERE bot_id=%s "
-                            "AND client_incarnation=%s FOR UPDATE").format(
-                        self._table("binding_clients")
-                    ),
+                    sql.SQL(
+                        "SELECT binding_id FROM {} WHERE bot_id=%s AND client_incarnation=%s"
+                    ).format(self._table("binding_clients")),
                     (self.store.bot_id, client_incarnation),
                 )
             ).fetchone()
-            if client is None:
+            if locator is None:
                 raise ForestError("BINDING_CLIENT_NOT_FOUND", "Client does not exist", 404)
-            head = await self._head(conn, client["binding_id"], lock="update")
+            # Every Binding mutation locks the head before its client row. This keeps
+            # event admission, publication and retirement on one deadlock-free order.
+            head = await self._head(conn, locator["binding_id"], lock="update")
+            client = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT *,clock_timestamp() AS database_now FROM {} WHERE bot_id=%s "
+                        "AND client_incarnation=%s FOR UPDATE"
+                    ).format(self._table("binding_clients")),
+                    (self.store.bot_id, client_incarnation),
+                )
+            ).fetchone()
+            if client is None or client["binding_id"] != locator["binding_id"]:
+                raise ForestError("BINDING_CLIENT_NOT_FOUND", "Client does not exist", 404)
             previous = client["state"]
             allowed = {
                 "BUFFERING": {"CLOSED", "FAILED"},
@@ -992,47 +1025,10 @@ class OneBotAdapterRepository:
         )
         async with self._transaction(_connection) as conn:
             await self._lock(conn, "event-operation:" + operation_id)
-            replay = await (
-                await conn.execute(
-                    sql.SQL("SELECT o.* FROM {} o "
-                            "WHERE o.bot_id=%s AND o.operation_id=%s").format(
-                        self._table("event_admission_operations")
-                    ),
-                    (self.store.bot_id, operation_id),
-                )
-            ).fetchone()
-            if replay is not None:
-                if replay["input_digest"] != input_digest:
-                    raise ForestError(
-                        "ONEBOT_EVENT_OPERATION_CONFLICT", "Event admission input differs", 409
-                    )
-                return dict(replay)
             await self._lock(
                 conn,
                 "event-dedupe:" + binding_id + ":" + event.platform_message_ref,
             )
-            existing = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s "
-                            "AND platform_message_ref=%s").format(self._table("platform_events")),
-                    (self.store.bot_id, binding_id, event.platform_message_ref),
-                )
-            ).fetchone()
-            if existing is not None:
-                if existing["semantic_digest"] != semantic_digest:
-                    raise ForestError(
-                        "ONEBOT_EVENT_IDENTITY_CONFLICT", "Platform message identity differs", 409
-                    )
-                row = await (
-                    await conn.execute(
-                        sql.SQL("INSERT INTO {}(bot_id,operation_id,input_digest,event_id,duplicate) "
-                                "VALUES (%s,%s,%s,%s,true) RETURNING *").format(
-                            self._table("event_admission_operations")
-                        ),
-                        (self.store.bot_id, operation_id, input_digest, existing["event_id"]),
-                    )
-                ).fetchone()
-                return dict(row)
             # Shared head lock lets unrelated events run concurrently while fencing retirement.
             head = await self._head(conn, binding_id, lock="share")
             if (
@@ -1044,8 +1040,10 @@ class OneBotAdapterRepository:
                 raise ForestError("STALE_BINDING", "Binding is not accepting this event", 409)
             client = await (
                 await conn.execute(
-                    sql.SQL("SELECT state,published_binding_epoch FROM {} WHERE bot_id=%s "
-                            "AND client_incarnation=%s").format(self._table("binding_clients")),
+                    sql.SQL(
+                        "SELECT state,published_binding_epoch,adapter_generation_id FROM {} "
+                        "WHERE bot_id=%s AND client_incarnation=%s FOR SHARE"
+                    ).format(self._table("binding_clients")),
                     (self.store.bot_id, client_incarnation),
                 )
             ).fetchone()
@@ -1055,6 +1053,47 @@ class OneBotAdapterRepository:
                 or client["published_binding_epoch"] != expected_binding_epoch
             ):
                 raise ForestError("STALE_BINDING", "OneBot client fence changed", 409)
+            await self._verify_generation(
+                conn, client["adapter_generation_id"], admission_lane="DATA"
+            )
+            replay = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT o.* FROM {} o WHERE o.bot_id=%s AND o.operation_id=%s"
+                    ).format(self._table("event_admission_operations")),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "ONEBOT_EVENT_OPERATION_CONFLICT", "Event admission input differs", 409
+                    )
+                return dict(replay)
+            existing = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s "
+                        "AND platform_message_ref=%s"
+                    ).format(self._table("platform_events")),
+                    (self.store.bot_id, binding_id, event.platform_message_ref),
+                )
+            ).fetchone()
+            if existing is not None:
+                if existing["semantic_digest"] != semantic_digest:
+                    raise ForestError(
+                        "ONEBOT_EVENT_IDENTITY_CONFLICT", "Platform message identity differs", 409
+                    )
+                row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,operation_id,input_digest,event_id,duplicate) "
+                            "VALUES (%s,%s,%s,%s,true) RETURNING *"
+                        ).format(self._table("event_admission_operations")),
+                        (self.store.bot_id, operation_id, input_digest, existing["event_id"]),
+                    )
+                ).fetchone()
+                return dict(row)
             for reference in sorted(
                 (event.raw, event.normalized, event.author), key=lambda item: item.payload_id
             ):
@@ -1125,6 +1164,43 @@ class OneBotAdapterRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self._head(conn, binding_id)
 
+    async def list_desired_bindings(self) -> list[dict]:
+        """Return the exact desired Binding revisions for Generation prewarm."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT h.*,r.enabled,r.receive_enabled,r.transport,"
+                        "r.config_payload_id,r.config_payload_digest,"
+                        "r.config_owner_component_id,r.config_owner_kind,r.config_owner_id,"
+                        "r.secret_ref,r.secret_digest FROM {} h "
+                        "LEFT JOIN {} r ON r.bot_id=h.bot_id AND r.binding_id=h.binding_id "
+                        "AND r.revision=h.desired_revision WHERE h.bot_id=%s "
+                        "ORDER BY h.binding_id"
+                    ).format(
+                        self._table("binding_heads"), self._table("binding_revisions")
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchall()
+            result = []
+            for row in rows:
+                if row["desired_revision"] == 0:
+                    continue
+                if row["config_payload_id"] is None:
+                    raise ForestError(
+                        "BINDING_CONFIG_CORRUPT",
+                        "Desired Binding revision is unavailable",
+                        503,
+                    )
+                result.append(dict(row))
+            return result
+
+    async def verify_transport_fence(self, **values) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.verify_transport_fence_in(conn, **values)
+
     async def verify_transport_fence_in(
         self,
         conn,
@@ -1150,9 +1226,9 @@ class OneBotAdapterRepository:
         head = await self._head(conn, binding_ref, lock="share")
         client = await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s").format(
-                    self._table("binding_clients")
-                ),
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s FOR SHARE"
+                ).format(self._table("binding_clients")),
                 (self.store.bot_id, client_incarnation),
             )
         ).fetchone()
@@ -1171,6 +1247,9 @@ class OneBotAdapterRepository:
             or client["executor_fence_digest"] != executor_fence_digest
         ):
             raise ForestError("STALE_BINDING", "OneBot transport fence changed", 409)
+        await self._verify_generation(
+            conn, adapter_generation_id, admission_lane="DATA"
+        )
         return {"binding_id": binding_ref, "client_incarnation": client_incarnation}
 
     async def list_bindings(self) -> list[dict]:

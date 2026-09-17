@@ -26,6 +26,7 @@ from uuid import uuid4
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import (
+    BoundGenerationIdentity,
     PreparedGenerationBinding,
     PreparedGenerationContext,
     RuntimeStorageBinding,
@@ -674,6 +675,7 @@ class RuntimeModuleRegistry:
         }
         self._lifecycle_lock = None
         self._closed = False
+        self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4())
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
@@ -720,6 +722,8 @@ class RuntimeModuleRegistry:
         prepare = getattr(instance, "prepare_generation", None)
         if (
             prepare is None
+            or getattr(instance, "bind_generation", None) is None
+            or getattr(instance, "activate_generation", None) is None
             or not hasattr(instance, "runtime_contract")
             or not hasattr(instance, "state_contract")
             or not hasattr(instance, "state_schema")
@@ -794,6 +798,29 @@ class RuntimeModuleRegistry:
                 409,
             )
         return binding
+
+    async def _bind_generation_identities(self) -> None:
+        if self.generation_authority is None or self._generation_identities_bound:
+            return
+        if self.graph_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_IDENTITY_UNAVAILABLE",
+                "A prepared runtime graph is required before Generation identities can bind",
+                503,
+            )
+        for component_id in self.order:
+            identity = BoundGenerationIdentity(
+                component_id=component_id,
+                generation_id=self.graph_identity.generations[component_id],
+                graph_id=self.graph_identity.graph_id,
+                graph_revision=self.graph_identity.graph_revision,
+                graph_digest=self.graph_identity.graph_digest,
+                activation_id=self.graph_identity.activation_id,
+            )
+            bound = self.instances[component_id].bind_generation(identity)
+            if inspect.isawaitable(bound):
+                await bound
+        self._generation_identities_bound = True
 
     def _lease(self, *, allow_closing=False):
         if allow_closing and hasattr(self.runtime, "_cleanup_lease"):
@@ -977,9 +1004,22 @@ class RuntimeModuleRegistry:
                         self.graph_identity = await self.graph_store.prepare(
                             lease, self._descriptor_facts(), self.activation_id
                         )
+            await self._bind_generation_identities()
             return lease
         except BaseException as exc:
             rollback_errors = await self._rollback_preparation()
+            if lease is not None and self.graph_identity is not None:
+                try:
+                    await self._record_current_states(
+                        lease,
+                        failure_code=(
+                            exc.code
+                            if isinstance(exc, ForestError)
+                            else "RUNTIME_MODULE_PREPARE_FAILED"
+                        ),
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
             if rollback_errors:
                 raise ForestError(
                     "RUNTIME_MODULE_PREPARE_ROLLBACK_FAILED",
@@ -1018,78 +1058,166 @@ class RuntimeModuleRegistry:
             if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
                 return
             lease = await self._prepare_graph()
-            started = []
-            current = None
-            try:
-                for component_id in self.order:
-                    current = component_id
-                    if self.states[component_id] != ModuleLifecycleState.PREPARED:
-                        raise ForestError(
-                            "RUNTIME_MODULE_LIFECYCLE_INVALID",
-                            "Runtime module graph is not prepared for activation",
-                        )
-                    instance = self.instances[component_id]
-                    start = getattr(instance, "start", None)
-                    if start is not None:
-                        await start()
-                    self._transition(component_id, ModuleLifecycleState.ACTIVE)
-                    started.append(component_id)
-                if self.graph_store is not None:
-                    if self.generation_authority is not None:
-                        await self.generation_authority.publish_graph(
-                            lease,
-                            self.graph_identity,
-                            configuration_activators={
-                                component_id: self.instances[component_id].module_configuration
-                                for component_id in self.order
-                            },
-                        )
-                    else:
-                        await self.graph_store.publish(lease, self.graph_identity)
-            except BaseException as exc:
-                failure_code = (
-                    exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
-                )
-                rollback_errors = []
-                if (
-                    self.graph_store is not None
-                    and current is not None
-                    and self.states[current] in {
-                        ModuleLifecycleState.PREPARED,
-                        ModuleLifecycleState.ACTIVE,
-                    }
-                ):
-                    try:
-                        await self.graph_store.record_states(
-                            lease,
-                            self.graph_identity,
-                            {current: ("FAILED", failure_code)},
-                        )
-                    except Exception as rollback_error:
-                        rollback_errors.append(rollback_error)
-                if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
-                    self._transition(current, ModuleLifecycleState.FAILED)
-                    try:
-                        await self._cleanup(current)
-                    except Exception as rollback_error:
-                        rollback_errors.append(rollback_error)
-                for component_id in reversed(started):
-                    try:
-                        await self._quiesce_and_cleanup(component_id)
-                    except Exception as rollback_error:
-                        rollback_errors.append(rollback_error)
+            if self.generation_authority is not None:
+                await self._start_clean(lease)
+                return
+            await self._start_legacy(lease)
+
+    async def _start_legacy(self, lease) -> None:
+        """Temporary lifecycle for modules outside the clean Generation protocol."""
+
+        started = []
+        current = None
+        try:
+            for component_id in self.order:
+                current = component_id
+                if self.states[component_id] != ModuleLifecycleState.PREPARED:
+                    raise ForestError(
+                        "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                        "Runtime module graph is not prepared for activation",
+                    )
+                instance = self.instances[component_id]
+                start = getattr(instance, "start", None)
+                if start is not None:
+                    await start()
+                self._transition(component_id, ModuleLifecycleState.ACTIVE)
+                started.append(component_id)
+            if self.graph_store is not None:
+                await self.graph_store.publish(lease, self.graph_identity)
+        except BaseException as exc:
+            failure_code = (
+                exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
+            )
+            rollback_errors = []
+            if (
+                self.graph_store is not None
+                and current is not None
+                and self.states[current] in {
+                    ModuleLifecycleState.PREPARED,
+                    ModuleLifecycleState.ACTIVE,
+                }
+            ):
                 try:
-                    await self._record_current_states(lease, failure_code=failure_code)
+                    await self.graph_store.record_states(
+                        lease,
+                        self.graph_identity,
+                        {current: ("FAILED", failure_code)},
+                    )
                 except Exception as rollback_error:
                     rollback_errors.append(rollback_error)
-                if rollback_errors:
+            if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
+                self._transition(current, ModuleLifecycleState.FAILED)
+                try:
+                    await self._cleanup(current)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            for component_id in reversed(started):
+                try:
+                    await self._quiesce_and_cleanup(component_id)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            try:
+                await self._record_current_states(lease, failure_code=failure_code)
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise ForestError(
+                    "RUNTIME_MODULE_START_ROLLBACK_FAILED",
+                    "Runtime module startup failed and resources remain owned",
+                    503,
+                    details={"start_error": failure_code, "cleanup_errors": len(rollback_errors)},
+                ) from exc
+            raise
+
+    async def _start_clean(self, lease) -> None:
+        """Prewarm, publish, then admit a clean immutable Generation graph."""
+
+        prewarmed: list[str] = []
+        activated: list[str] = []
+        current = None
+        published = False
+        try:
+            for component_id in self.order:
+                current = component_id
+                if self.states[component_id] != ModuleLifecycleState.PREPARED:
                     raise ForestError(
-                        "RUNTIME_MODULE_START_ROLLBACK_FAILED",
-                        "Runtime module startup failed and resources remain owned",
-                        503,
-                        details={"start_error": failure_code, "cleanup_errors": len(rollback_errors)},
-                    ) from exc
-                raise
+                        "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                        "Runtime module graph is not prepared for prewarming",
+                    )
+                start = getattr(self.instances[component_id], "start", None)
+                if start is not None:
+                    await start()
+                prewarmed.append(component_id)
+
+            current = None
+            await self.generation_authority.publish_graph(
+                lease,
+                self.graph_identity,
+                configuration_activators={
+                    component_id: self.instances[component_id].module_configuration
+                    for component_id in self.order
+                },
+            )
+            published = True
+
+            for component_id in self.order:
+                current = component_id
+                activate = self.instances[component_id].activate_generation
+                result = activate()
+                if inspect.isawaitable(result):
+                    await result
+                self._transition(component_id, ModuleLifecycleState.ACTIVE)
+                activated.append(component_id)
+        except BaseException as exc:
+            failure_code = (
+                exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
+            )
+            rollback_errors: list[Exception] = []
+            if published:
+                try:
+                    await self.generation_authority.retire_graph(lease, self.graph_identity)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
+                self._transition(current, ModuleLifecycleState.FAILED)
+                try:
+                    await self.graph_store.record_states(
+                        lease,
+                        self.graph_identity,
+                        {current: ("FAILED", failure_code)},
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+
+            for component_id in reversed(self.order):
+                if component_id not in self.instances:
+                    continue
+                try:
+                    state = self.states[component_id]
+                    if state == ModuleLifecycleState.ACTIVE:
+                        await self._quiesce_and_cleanup(component_id)
+                    elif state in {
+                        ModuleLifecycleState.PREPARED,
+                        ModuleLifecycleState.FAILED,
+                    }:
+                        await self._cleanup(component_id)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            try:
+                await self._record_current_states(lease, failure_code=failure_code)
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise ForestError(
+                    "RUNTIME_MODULE_START_ROLLBACK_FAILED",
+                    "Runtime module startup failed and resources remain owned",
+                    503,
+                    details={
+                        "start_error": failure_code,
+                        "cleanup_errors": len(rollback_errors),
+                    },
+                ) from exc
+            raise
 
     async def close(self) -> list[Exception]:
         if self._lifecycle_lock is None:

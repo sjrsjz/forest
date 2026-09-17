@@ -112,3 +112,27 @@ class RuntimeGenerationGraph:
     graph_digest: str
     activation_id: str
     generations: dict[str, str]
+
+
+@dataclass(frozen=True)
+class BoundGenerationIdentity:
+    """Exact durable identity assigned to one prepared module generation."""
+
+    component_id: str
+    generation_id: str
+    graph_id: str
+    graph_revision: int
+    graph_digest: str
+    activation_id: str
+
+
+@dataclass(frozen=True)
+class ActiveGenerationRoute:
+    """Route fact returned only while one exact Generation may admit work."""
+
+    component_id: str
+    generation_id: str
+    route_epoch: int
+    admission_lane: str
+    graph_id: str
+    graph_revision: int

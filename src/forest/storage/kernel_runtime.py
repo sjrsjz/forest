@@ -10,7 +10,11 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.runtime_generation import PreparedGenerationBinding, RuntimeGenerationGraph
+from forest.runtime_generation import (
+    ActiveGenerationRoute,
+    PreparedGenerationBinding,
+    RuntimeGenerationGraph,
+)
 from forest.storage.bot import HostLease
 
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
@@ -106,6 +110,108 @@ class KernelRuntimeRepository:
                 )
             ).fetchone()
             return self._lease(saved)
+
+    async def verify_active_generation(
+        self,
+        *,
+        component_id: str,
+        generation_id: str,
+        admission_lane: str = "DATA",
+    ) -> ActiveGenerationRoute:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.verify_active_generation_in(
+                conn,
+                component_id=component_id,
+                generation_id=generation_id,
+                admission_lane=admission_lane,
+            )
+
+    async def verify_active_generation_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+        admission_lane: str = "DATA",
+    ) -> ActiveGenerationRoute:
+        """Fence a business write against the current graph and exact route."""
+
+        if (
+            not isinstance(component_id, str)
+            or _IDENTIFIER.fullmatch(component_id) is None
+            or not isinstance(generation_id, str)
+            or not generation_id
+            or len(generation_id) > 512
+            or admission_lane not in {"DATA", "CONTROL"}
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_FENCE_INVALID",
+                "Generation fence identity or admission lane is invalid",
+                422,
+            )
+        await self._identity_in(conn)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT r.component_id,r.generation_id,r.route_epoch,"
+                    "r.data_admission,r.control_admission,g.status AS generation_status,"
+                    "s.status AS runtime_status,s.data_admission AS runtime_data_admission,"
+                    "s.control_admission AS runtime_control_admission,h.graph_id,"
+                    "h.graph_revision,rg.state AS graph_state "
+                    "FROM {} s JOIN {} r ON r.bot_id=s.bot_id "
+                    "JOIN {} g ON g.bot_id=r.bot_id AND g.generation_id=r.generation_id "
+                    "AND g.component_id=r.component_id "
+                    "JOIN {} h ON h.bot_id=s.bot_id "
+                    "JOIN {} rg ON rg.bot_id=h.bot_id AND rg.graph_id=h.graph_id "
+                    "JOIN {} gm ON gm.bot_id=rg.bot_id AND gm.graph_id=rg.graph_id "
+                    "AND gm.component_id=r.component_id AND gm.generation_id=r.generation_id "
+                    "WHERE s.bot_id=%s AND r.component_id=%s AND r.generation_id=%s "
+                    "FOR SHARE OF s,r,g,h,rg,gm"
+                ).format(
+                    self._table("runtime_state"),
+                    self._table("routes"),
+                    self._table("generations"),
+                    self._table("runtime_graph_head"),
+                    self._table("runtime_graphs"),
+                    self._table("runtime_graph_modules"),
+                ),
+                (self.store.bot_id, component_id, generation_id),
+            )
+        ).fetchone()
+        lane_open = (
+            row is not None
+            and (
+                row["data_admission"]
+                and row["runtime_data_admission"]
+                if admission_lane == "DATA"
+                else row["control_admission"] and row["runtime_control_admission"]
+            )
+        )
+        if (
+            row is None
+            or row["runtime_status"] != "ACTIVE"
+            or row["generation_status"] != "ACTIVE"
+            or row["graph_state"] != "ACTIVE"
+            or not lane_open
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "The exact Generation is not the active admitted route",
+                409,
+                details={
+                    "component_id": component_id,
+                    "generation_id": generation_id,
+                    "admission_lane": admission_lane,
+                },
+            )
+        return ActiveGenerationRoute(
+            component_id=row["component_id"],
+            generation_id=row["generation_id"],
+            route_epoch=row["route_epoch"],
+            admission_lane=admission_lane,
+            graph_id=row["graph_id"],
+            graph_revision=row["graph_revision"],
+        )
 
     async def prepare_graph(
         self,

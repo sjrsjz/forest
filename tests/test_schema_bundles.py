@@ -753,9 +753,12 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         state_schema = 1
         state_contract = {"type": "object", "additionalProperties": False}
 
-        def __init__(self, *, mismatch=False):
+        def __init__(self, *, mismatch=False, fail_bind=False, fail_activate=False):
             self.mismatch = mismatch
+            self.fail_bind = fail_bind
+            self.fail_activate = fail_activate
             self.module_configuration = configuration
+            self.identity = None
 
         async def prepare_generation(self, context):
             events.append(("prepare", context.component_id))
@@ -775,8 +778,8 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
                 config_revision=effective.revision,
                 config_payload_id=effective.payload_id,
                 config_payload_digest=effective.payload_digest,
-                instance_id="instance:kernel.runtime:1",
-                worker_incarnation="worker:kernel.runtime:1",
+                instance_id=f"instance:kernel.runtime:{context.activation_id}",
+                worker_incarnation=f"worker:kernel.runtime:{context.activation_id}",
                 state_schema=context.state_schema,
                 state_contract_digest=context.state_contract_digest,
                 capability_grants_digest=context.package_digest,
@@ -786,7 +789,24 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
             )
 
         async def start(self):
+            assert self.identity is not None
             events.append(("start", "kernel.runtime"))
+
+        async def bind_generation(self, identity):
+            self.identity = identity
+            events.append(("bind", identity.component_id, identity.generation_id))
+            if self.fail_bind:
+                raise RuntimeError("bind failed")
+
+        async def activate_generation(self):
+            route = await repository.verify_active_generation(
+                component_id="kernel.runtime",
+                generation_id=self.identity.generation_id,
+            )
+            assert route.graph_id == self.identity.graph_id
+            events.append(("activate", "kernel.runtime"))
+            if self.fail_activate:
+                raise RuntimeError("activation failed")
 
         async def quiesce(self):
             events.append(("quiesce", "kernel.runtime"))
@@ -816,7 +836,13 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     assert await registry.close() == []
     assert events == [
         ("prepare", "kernel.runtime"),
+        (
+            "bind",
+            "kernel.runtime",
+            registry.graph_identity.generations["kernel.runtime"],
+        ),
         ("start", "kernel.runtime"),
+        ("activate", "kernel.runtime"),
         ("quiesce", "kernel.runtime"),
         ("close", "kernel.runtime"),
     ]
@@ -837,6 +863,58 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         ).fetchone()
     assert generation["config_revision"] == 1 and generation["status"] == "DISPOSED"
     assert graph["state"] == "STOPPED"
+
+    bind_failure_descriptor = replace(
+        descriptor,
+        factory=lambda *_: CleanModule(fail_bind=True),
+    )
+    bind_failure_registry = RuntimeModuleRegistry(runtime, (bind_failure_descriptor,))
+    with pytest.raises(RuntimeError, match="bind failed"):
+        await bind_failure_registry.prepare()
+    assert bind_failure_registry.states["kernel.runtime"] == ModuleLifecycleState.STOPPED
+    async with store.pool.connection() as conn:
+        bind_failure_graph = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state FROM {}.runtime_graphs WHERE graph_id=%s"
+                ).format(sql.Identifier(runtime_storage.spec.namespace)),
+                (bind_failure_registry.graph_identity.graph_id,),
+            )
+        ).fetchone()
+    assert bind_failure_graph["state"] == "STOPPED"
+
+    failed_descriptor = replace(
+        descriptor,
+        factory=lambda *_: CleanModule(fail_activate=True),
+    )
+    failed_registry = RuntimeModuleRegistry(runtime, (failed_descriptor,))
+    with pytest.raises(RuntimeError, match="activation failed"):
+        await failed_registry.start()
+    assert failed_registry.states["kernel.runtime"] == ModuleLifecycleState.STOPPED
+    with pytest.raises(ForestError) as caught:
+        await repository.verify_active_generation(
+            component_id="kernel.runtime",
+            generation_id=failed_registry.graph_identity.generations["kernel.runtime"],
+        )
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    async with store.pool.connection() as conn:
+        failed_graph = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state FROM {}.runtime_graphs WHERE graph_id=%s"
+                ).format(sql.Identifier(runtime_storage.spec.namespace)),
+                (failed_registry.graph_identity.graph_id,),
+            )
+        ).fetchone()
+        head = await (
+            await conn.execute(
+                sql.SQL("SELECT graph_id FROM {}.runtime_graph_head").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+    assert failed_graph["state"] == "STOPPED"
+    assert head["graph_id"] is None
 
     mismatch_descriptor = replace(
         descriptor,

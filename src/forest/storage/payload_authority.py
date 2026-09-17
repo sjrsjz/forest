@@ -500,6 +500,15 @@ class KernelPayloadRepository:
             raise ForestError("PAYLOAD_REVOKED", "Payload body is unavailable", 410)
         return bytes(row["content"])
 
+    async def read_bytes(self, payload_id: str) -> bytes:
+        """Read one active payload under a single deletion-epoch snapshot."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            epoch = await self._clock_in(conn)
+            return await self.read_bytes_in(
+                conn, payload_id, expected_deletion_epoch=epoch
+            )
+
     async def forget_in(
         self,
         conn,

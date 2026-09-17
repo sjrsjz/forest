@@ -296,6 +296,15 @@ class OneBotWebSocketClient:
     def failure_code(self) -> str | None:
         return self._failure_code
 
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        """Expose transport tasks to the owning runtime Generation."""
+
+        return tuple(
+            task
+            for task in (self._reader_task, self._consumer_task, self._close_task)
+            if task is not None
+        )
+
     async def _open(self) -> None:
         try:
             self._socket = await _FixedEndpointConnect(

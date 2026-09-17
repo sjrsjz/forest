@@ -119,10 +119,22 @@ async def clean_delivery():
         namespace=storage["conversation.scheduler"].spec.namespace,
         payload_verifier=payloads.verify_in,
     )
+
+    async def verify_adapter_generation(
+        _conn, *, component_id, generation_id, admission_lane
+    ):
+        assert (component_id, generation_id, admission_lane) == (
+            "adapter.onebot",
+            "generation/adapter/1",
+            "DATA",
+        )
+        return {"active": True}
+
     adapter = OneBotAdapterRepository(
         store,
         namespace=storage["adapter.onebot"].spec.namespace,
         payload_verifier=payloads.verify_in,
+        generation_verifier=verify_adapter_generation,
     )
     delivery = DeliveryRepository(
         store,

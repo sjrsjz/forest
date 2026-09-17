@@ -127,6 +127,8 @@ class PreparedAuthorityModule:
                 {"service_id": service_id, "version": 1} for service_id in services
             ],
         }
+        self.generation_identity = None
+        self.generation_active = False
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired()
@@ -154,6 +156,28 @@ class PreparedAuthorityModule:
             control_admission=True,
             storage=context.storage,
         )
+
+    async def bind_generation(self, identity) -> None:
+        if identity.component_id != self.component_id:
+            raise ValueError("Generation identity belongs to another component")
+        if self.generation_identity is not None and self.generation_identity != identity:
+            raise ValueError("Generation identity is immutable")
+        self.generation_identity = identity
+
+    async def start(self) -> None:
+        if self.generation_identity is None:
+            raise RuntimeError("Generation identity was not bound before prewarm")
+
+    async def activate_generation(self) -> None:
+        if self.generation_identity is None:
+            raise RuntimeError("Generation identity was not bound before activation")
+        self.generation_active = True
+
+    async def quiesce(self) -> None:
+        self.generation_active = False
+
+    async def close(self) -> None:
+        self.generation_active = False
 
 
 @dataclass(frozen=True)

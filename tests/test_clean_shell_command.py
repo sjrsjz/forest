@@ -108,10 +108,22 @@ async def clean_shell():
         )
     storage = {item.spec.component_id: item for item in bundles}
     payloads = KernelPayloadRepository(store, namespace=storage["kernel.payload"].spec.namespace)
+
+    async def verify_adapter_generation(
+        _conn, *, component_id, generation_id, admission_lane
+    ):
+        assert (component_id, generation_id, admission_lane) == (
+            "adapter.onebot",
+            "generation/adapter/1",
+            "DATA",
+        )
+        return {"active": True}
+
     adapter = OneBotAdapterRepository(
         store,
         namespace=storage["adapter.onebot"].spec.namespace,
         payload_verifier=payloads.verify_in,
+        generation_verifier=verify_adapter_generation,
     )
     scheduler = ConversationSchedulerRepository(
         store,
