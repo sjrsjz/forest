@@ -53,7 +53,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 - 旧生产路径曾实现 Bot 全局域、每群主干、图文媒体和嵌入管线；它仍建立在 `public` schema、旧组合根和固定管理实现上，只能作为待删除的行为参考，不能作为干净微内核基线已经完成的证据。
 - 干净 `memory.graph` 候选现在拥有 Bot 级冻结语义空间、每群独立主干、稳定来源单元、一次来源的多次平台观察、图文 payload 引用、来源作者/群标记、跨主干关系贡献与证据、抑制和删除 epoch 防复活。来源资格只能由 `conversation.scheduler` 已提交的精确 `InputBatch` 授予，二者通过同一调用方事务整体提交或回滚。
-- 干净查询端已经提供服务端来源筛选、固定可见性快照、复合键集分页、关系端点/证据查询和管理员抑制视图。新的多模态检索权威还实现了文本确定性分块、原图 facet、QUERY/DOCUMENT 分离、单次外部交接与 `UNKNOWN` 状态、冻结查询切口、text→image/image→text/mixed 精确候选融合、来源明确的 EvidenceBundle、晚到索引隔离和遗忘时派生向量/回执撤销；它没有生成 caption 或裁剪摘要。实际 QiYu VL HTTP Worker、预算/费用接线、ANN 索引、Agent 调用链、模块管理贡献及大规模容量证明仍未完成。
+- 干净查询端已经提供服务端来源筛选、固定可见性快照、复合键集分页、关系端点/证据查询和管理员抑制视图。新的多模态检索权威还实现了文本确定性分块、原图 facet、QUERY/DOCUMENT 分离、单次外部交接与 `UNKNOWN` 状态、冻结查询切口、text→image/image→text/mixed 精确候选融合、来源明确的 EvidenceBundle、晚到索引隔离和遗忘时派生向量/回执撤销；它没有生成 caption 或裁剪摘要。单 facet VL Worker 原语已经能把原图/文本交给现有受限 HTTP transport，在最终网络 fence 处持久 handoff，并把响应作为输入 payload 的派生回执发布；批处理调度、预算/费用、真实 QiYu endpoint 联调、ANN 索引、Agent 调用链、模块管理贡献及大规模容量证明仍未完成。
 
 ### 控制面
 
@@ -87,7 +87,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - 首个 `kernel.runtime` 干净 baseline 已建立并可由官方 bundle 安装器原子安装：只含租约、模块代际、通用调用、状态引用和 RuntimeGraph，不含旧表中的 `agent_tool_id`、OneBot 控制服务特例、业务枚举或跨业务外键。它目前是已验证的 cutover 候选；在其他官方模块 bundle 与 Repository 一起完成前，生产启动路径仍由旧 `BotStore.migrate()` 建库，不能把候选存在误报为切换完成。
 - `kernel.payload` 的干净 baseline 与 Repository 已建立：规范化保存来源 manifest、正文、派生边、删除 epoch、精确遗忘选择和 scrub 状态；载荷接纳与遗忘按同一 clock 行收敛，先接纳会被随后遗忘闭包撤销，先遗忘会拒绝晚到正文。`kernel.audit` 候选只保存可筛选的脱敏 envelope，详情必须经 payload 端口复核，不保存 JSONB 正文或跨模块 join。`kernel.authorization` 候选只保存规范化能力授予集、最长 30 秒的精确票据、一次性消费、撤销事实、单调策略 revision 与通用批准；票据消费和撤销按同一 policy clock 合流，不吞入 Web 会话、OneBot 管理员、Agent 工具或模块策略正文。`kernel.effect` 候选通过 Payload、Authorization 与执行器 fence 端口形成通用 permit/handoff/outcome 状态机：已交接结果丢失保持 `UNKNOWN`，只有显式对账证据可解析，冲突证据留账且不覆盖，未交接 attempt 才能放弃、重试或取消；它不持有 Delivery SendIntent、OneBot action、Agent ToolCall 或 Provider 状态。这四个候选仍未接入生产启动链与旧生产者，下一步是补齐各业务模块 bundle 后执行一次性 provisioning/cutover，不能建立双写兼容桥。
 - `conversation.scheduler` 干净 baseline 与 Repository 已实现连续分类水位、同群 actor lease、三种安全边界、最后 trigger 切口、普通尾部静默排空、原子 reply/trigger 提交和恢复领取；`agent.runtime` 候选已实现单 Agent Session/Run、CorePrompt/Preset 冻结、模型 attempt/UNKNOWN 对账、原子 ModelTurn、工具主体绑定与 checkpoint。两者没有子 Agent 表或互相写表。
-- `memory.graph` 干净 baseline 与 Repository 已实现冻结的 Bot 级语义空间、群主干、稳定来源单元、图文 part、平台观察、来源资格、跨主干关系贡献/证据、抑制、删除 epoch 复核，以及来源和关系的稳定快照键集查询。`ConversationMemoryInputUnitOfWork` 在同一数据库事务内完成 Scheduler 输入切口和 Memory 来源资格提交；任一批次事件缺失对应来源观察时两侧整体回滚。`MemoryRetrievalRepository` 进一步拥有图文 facet、编码 attempt、原始 payload materialization、向量发布、查询切口和 EvidenceBundle；外部 embedding 组件只取得受 fence 的单个 facet 调用许可。该候选尚未接入实际 VL Worker、Agent 或生产组合根，当前精确数组扫描也不是最终大规模 ANN 方案。
+- `memory.graph` 干净 baseline 与 Repository 已实现冻结的 Bot 级语义空间、群主干、稳定来源单元、图文 part、平台观察、来源资格、跨主干关系贡献/证据、抑制、删除 epoch 复核，以及来源和关系的稳定快照键集查询。`ConversationMemoryInputUnitOfWork` 在同一数据库事务内完成 Scheduler 输入切口和 Memory 来源资格提交；任一批次事件缺失对应来源观察时两侧整体回滚。`MemoryRetrievalRepository` 进一步拥有图文 facet、编码 attempt、原始 payload materialization、向量发布、查询切口和 EvidenceBundle；`MemoryEmbeddingWorker` 只取得受 fence 的单个 facet 调用许可并通过受管 transport 执行。该候选尚未接入运行时批处理调度、Agent 或生产组合根，当前精确数组扫描也不是最终大规模 ANN 方案。
 - `adapter.onebot` 干净 baseline 与 Repository 已实现 Binding 配置 plan/apply、连接候选/发布/退役、不可变冲突观察和平台事件接纳；Adapter 只写平台事实，调用方 UnitOfWork 再让 Conversation 与可选 Shell participant 在同一事务接纳，重复平台消息不会再次分配 ingress。Adapter 表不再保存 Conversation ingress 序号。该候选不含 MessageStore、Shell、Delivery、Agent 或凭据正文，尚未替换生产 `OneBotRuntime` 组合根。
 - `delivery` 干净 baseline 与 Repository 已实现 CHAT/CONTROL 独立 lane、CHAT 顺序、短租约 claim、Effect 与 Adapter 双重 fence、prepare/handoff 边界、UNKNOWN 显式对账、取消和晚到冲突证据留账。CHAT 意图只接受 `conversation.scheduler` 已提交的正式回复作为 cause；Agent 只能提供候选回复载荷，不能直接创建发送意图。Conversation 的 REPLY、trigger ANSWERED 与 Delivery SendIntent 已通过同一调用方事务验证整体提交或整体回滚。该候选尚未替换旧发送 Worker。
 - `shell.command` 干净 baseline 与 Repository 已实现按 Binding/群/主体生效的修订化管理员策略、冻结命令 registry、P0/P1 资格、受管参数引用、短租约 claim、当前策略/Binding/Generation 复核和精确授权票据消费端口。Core Gate 只识别有界 `#forest` 前缀并签发短期进程内 proof，不读取管理员名单。Adapter 平台事实、Conversation Inbox、CONTROL_COMMAND 分类与 Shell 请求已通过同一调用方事务验证；Shell 结果与 CONTROL SendIntent 也整体提交或回滚。该候选尚未替换旧 `ShellDispatcher`、版本化 registry 和 `bot_shell_requests` 路径。
@@ -120,8 +120,8 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 当前工作区的验证证据：
 
-- 无 PostgreSQL 全套：`839 passed, 1115 skipped, 1 warning`；
-- 干净 `memory.graph` 与 Conversation-Memory 组合：隔离 PostgreSQL 17 下来源注册/并发收敛、图文 part、资格门禁、稳定快照分页、跨主干关系、复合关系游标、删除防复活、双方事务回滚、text→image、image→text、mixed 查询、完整模态门禁、晚到索引隔离、embedding 重放合流和遗忘撤销共 `19 passed`；同一 embedding prepare/handoff 并发重放另连续 `10 × 1 passed`，上一来源图切片的 Memory 定向组曾连续十轮均为 `8 passed`。
+- 无 PostgreSQL 全套：`839 passed, 1116 skipped, 1 warning`；
+- 干净 `memory.graph` 与 Conversation-Memory 组合：隔离 PostgreSQL 17 下来源注册/并发收敛、图文 part、资格门禁、稳定快照分页、跨主干关系、复合关系游标、删除防复活、双方事务回滚、text→image、image→text、mixed 查询、完整模态门禁、晚到索引隔离、embedding 重放合流、真实 transport handoff 原语、payload lineage 和遗忘撤销共 `20 passed`；同一 embedding prepare/handoff 并发重放另连续 `10 × 1 passed`，上一来源图切片的 Memory 定向组曾连续十轮均为 `8 passed`。
 - `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - `command.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；密码重新鉴权、载荷脱敏、热重载失效和并发 CAS 均包含在内。
 - `message.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；Binding 目录、密码脱敏、Handler 恢复幂等和并发 CAS 均包含在内。

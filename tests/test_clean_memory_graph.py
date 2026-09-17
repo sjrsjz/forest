@@ -11,7 +11,14 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.embeddings import (
+    SILICONFLOW_VL_MODEL,
+    EmbeddingProfile,
+    EmbeddingResult,
+    EmbeddingVector,
+)
 from forest.errors import ForestError
+from forest.memory_embedding_worker import MemoryEmbeddingWorker
 from forest.runtime_modules import official_storage_bundle
 from forest.storage.bot import BotStore
 from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
@@ -1194,3 +1201,109 @@ async def test_embedding_attempt_replays_converge_without_duplicate_dispatch(cle
             deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
         )
     assert caught.value.code == "MEMORY_FACET_NOT_DISPATCHABLE"
+
+
+@pytest.mark.postgres
+async def test_clean_vl_worker_uses_handoff_fence_and_payload_lineage(clean_memory_graph):
+    store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    profile = EmbeddingProfile(
+        deployment_id="qiyu-vl",
+        model_revision="qiyu-docker-v1",
+        model=SILICONFLOW_VL_MODEL,
+        dimensions=1024,
+    )
+    await memory.initialize_domain(
+        operation_id="memory/domain/initialize/worker",
+        space_id=profile.space_id,
+        embedding_model_kind=profile.model,
+        model_revision_digest="sha256:" + "c" * 64,
+        dimensions=profile.dimensions,
+        normalization="L2",
+        fusion_policy_revision="fusion/1",
+    )
+    await _register(memory, "worker")
+    source = await _unit_values(
+        payloads,
+        source_suffix="worker",
+        unit_suffix="worker-image",
+        mixed=True,
+    )
+    await _capture_and_qualify(memory, payloads, batches, source, suffix="worker-image")
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    prepared = await retrieval.prepare_source_facets(
+        operation_id="facets/worker-image",
+        source_unit_id="unit/worker-image",
+        expected_deletion_epoch=0,
+    )
+    image_facet = next(facet for facet in prepared["facets"] if facet["modality"] == "IMAGE")
+
+    class FakeClient:
+        def __init__(self, status):
+            self.status = status
+
+        async def dispatch(self, request, *, permitcheck):
+            await permitcheck(request)
+            if self.status == "NOT_SENT":
+                return EmbeddingResult(
+                    "NOT_SENT",
+                    request.request_id,
+                    request.transport_attempt_id,
+                    request.payload_digest,
+                    request.space_id,
+                    error_code="EMBEDDING_CONNECTION_UNAVAILABLE",
+                )
+            return EmbeddingResult(
+                "RESPONDED",
+                request.request_id,
+                request.transport_attempt_id,
+                request.payload_digest,
+                request.space_id,
+                vectors=(EmbeddingVector(image_facet["facet_id"], 0, tuple(_vector(0))),),
+                usage_json='{"total_tokens":1}',
+                http_status=200,
+            )
+
+    def worker(status):
+        return MemoryEmbeddingWorker(
+            retrieval=retrieval,
+            payloads=payloads,
+            client=FakeClient(status),
+            profile=profile,
+            component_id="embedding.qiyu-vl",
+            generation_id="generation/qiyu-vl/1",
+            route_revision="route/qiyu-vl/1",
+        )
+
+    first = await worker("NOT_SENT").execute(
+        facet_id=image_facet["facet_id"],
+        attempt_id="embedding/worker/not-sent",
+        prepare_operation_id="embedding/worker/prepare/not-sent",
+        expected_deletion_epoch=0,
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert first["state"] == "NOT_SENT"
+    succeeded = await worker("RESPONDED").execute(
+        facet_id=image_facet["facet_id"],
+        attempt_id="embedding/worker/success",
+        prepare_operation_id="embedding/worker/prepare/success",
+        expected_deletion_epoch=0,
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert succeeded["state"] == "SUCCEEDED"
+    async with store.pool.connection() as conn:
+        lineage = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT parent_payload_id FROM {}.payload_derivations "
+                    "WHERE bot_id=%s AND payload_id=%s"
+                ).format(sql.Identifier(payloads.namespace)),
+                (store.bot_id, succeeded["result_payload_id"]),
+            )
+        ).fetchone()
+    assert lineage["parent_payload_id"] == image_facet["input_payload_id"]

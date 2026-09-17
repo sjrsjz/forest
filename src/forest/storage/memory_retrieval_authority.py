@@ -699,13 +699,17 @@ class MemoryRetrievalRepository:
                 await conn.execute(
                     sql.SQL(
                         "SELECT f.*,u.eligibility_state,u.author_subject_ref,u.source_id,u.trunk_id,"
+                        "p.width,p.height,"
                         "s.source_kind,s.platform,s.realm_id,s.external_group_id "
                         "FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
-                        "AND u.source_unit_id=f.source_unit_id JOIN {} s ON s.bot_id=u.bot_id "
+                        "AND u.source_unit_id=f.source_unit_id JOIN {} p ON p.bot_id=f.bot_id "
+                        "AND p.source_unit_id=f.source_unit_id AND p.part_id=f.part_id "
+                        "JOIN {} s ON s.bot_id=u.bot_id "
                         "AND s.source_id=u.source_id WHERE f.bot_id=%s AND f.facet_id=%s"
                     ).format(
                         self._table("embedding_facets"),
                         self._table("source_units"),
+                        self._table("source_parts"),
                         self._table("memory_sources"),
                     ),
                     (self.store.bot_id, facet_id),
@@ -737,6 +741,12 @@ class MemoryRetrievalRepository:
                 "purpose": row["purpose"],
                 "modality": row["modality"],
                 "space_id": row["space_id"],
+                "source_revision": row["source_revision"],
+                "part_id": row["part_id"],
+                "input_payload_id": row["input_payload_id"],
+                "input_payload_digest": row["input_payload_digest"],
+                "width": row["width"],
+                "height": row["height"],
                 "source": {
                     key: row[key]
                     for key in (
@@ -1042,8 +1052,8 @@ class MemoryRetrievalRepository:
                         409,
                     )
                 return dict(attempt)
-            expected_state = "PREPARED" if outcome == "NOT_SENT" else "DISPATCHED"
-            if attempt["state"] != expected_state:
+            expected_states = {"PREPARED", "DISPATCHED"} if outcome == "NOT_SENT" else {"DISPATCHED"}
+            if attempt["state"] not in expected_states:
                 raise ForestError(
                     "MEMORY_EMBEDDING_NOT_SETTLEABLE", "Embedding attempt state differs", 409
                 )

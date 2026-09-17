@@ -421,8 +421,16 @@ CREATE TABLE embedding_attempts (
     UNIQUE (bot_id,operation_id),
     UNIQUE (bot_id,facet_id,attempt_no),
     FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id),
-    CHECK ((state IN ('PREPARED','NOT_SENT')) = (handoff_operation_id IS NULL)),
-    CHECK ((state IN ('PREPARED','NOT_SENT')) = (dispatched_at IS NULL)),
+    CHECK (state<>'PREPARED' OR handoff_operation_id IS NULL),
+    CHECK (state<>'PREPARED' OR dispatched_at IS NULL),
+    CHECK (
+        state NOT IN ('DISPATCHED','SUCCEEDED','UNKNOWN','RETRYABLE_FAILURE','FAILED')
+        OR handoff_operation_id IS NOT NULL
+    ),
+    CHECK (
+        state NOT IN ('DISPATCHED','SUCCEEDED','UNKNOWN','RETRYABLE_FAILURE','FAILED')
+        OR dispatched_at IS NOT NULL
+    ),
     CHECK ((state IN ('PREPARED','DISPATCHED')) = (settlement_operation_id IS NULL)),
     CHECK ((state IN ('PREPARED','DISPATCHED')) = (settled_at IS NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
@@ -677,7 +685,7 @@ BEGIN
     END IF;
     IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','NOT_SENT') THEN RETURN NEW; END IF;
     IF OLD.state='DISPATCHED' AND NEW.state IN (
-        'SUCCEEDED','UNKNOWN','RETRYABLE_FAILURE','FAILED'
+        'SUCCEEDED','NOT_SENT','UNKNOWN','RETRYABLE_FAILURE','FAILED'
     ) THEN RETURN NEW; END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid embedding attempt transition' USING ERRCODE='55000';
