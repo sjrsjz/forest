@@ -18,6 +18,8 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="bot-handler-policies"' not in index
     assert 'id="bot-handler-diagnostics"' not in index
     assert 'id="bot-audit"' not in index
+    assert 'id="audit"' not in index
+    assert 'id="nav-audit"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
@@ -27,6 +29,7 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert "messageHandlerDiagnosticsPanel" not in app
     assert "botAuditPanel" not in app
     assert "bot-audit-panel" not in app
+    assert "auditPanel" not in app
     assert "moduleSurfaces" not in app
     assert "'agent.runtime'" not in app
     assert "'memory.graph'" not in app
@@ -49,6 +52,7 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     command = (STATIC / "modules/command.router.html").read_text(encoding="utf-8")
     message = (STATIC / "modules/message.router.html").read_text(encoding="utf-8")
     audit = (STATIC / "modules/kernel.audit.html").read_text(encoding="utf-8")
+    deployment_audit = (STATIC / "modules/deployment.audit.html").read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
     memory_style = (STATIC / "modules/memory.graph.css").read_text(encoding="utf-8")
@@ -81,6 +85,10 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert "createModulePanel" in audit_controller
     assert "/modules/kernel.audit" in audit_controller
     assert "/queries/records" in audit_controller
+    assert 'id="deployment-audit"' in deployment_audit
+    deployment_audit_controller = (STATIC / "deployment-audit.js").read_text(encoding="utf-8")
+    assert "createModulePanel" in deployment_audit_controller
+    assert "/modules/deployment.audit" in deployment_audit_controller
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host

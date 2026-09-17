@@ -6,7 +6,12 @@ from forest.agent_settings import DEFAULT_AGENT_SETTINGS
 from forest.errors import ForestError
 from forest.management.agent_api import AgentManagementContract
 from forest.management.memory_api import MemoryManagementContract
-from forest.management.module_api import EmptyInput, ModuleManagementContract, ModuleOperation
+from forest.management.module_api import (
+    EmptyInput,
+    ModuleManagementContract,
+    ModuleOperation,
+    management_scope_provider_registry,
+)
 
 
 async def noop(request, body):
@@ -17,6 +22,14 @@ def test_contract_rejects_duplicate_operation_identities():
     operation = ModuleOperation("same", "query", "config.read", EmptyInput, noop)
     with pytest.raises(ValueError, match="unique"):
         ModuleManagementContract((operation, operation))
+
+
+def test_scope_provider_registry_rejects_duplicate_namespaces():
+    class Provider:
+        kind = "duplicate"
+
+    with pytest.raises(ValueError, match="identities must be unique"):
+        management_scope_provider_registry((Provider(), Provider()))
 
 
 def test_agent_secret_is_projected_before_authority_and_never_serialized():

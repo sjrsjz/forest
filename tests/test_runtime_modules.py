@@ -5,22 +5,22 @@ import pytest
 from forest.errors import ForestError
 from forest.runtime_modules import (
     OFFICIAL_MODULES,
-    BotModuleRegistry,
     ModuleLifecycleState,
     RuntimeArtifactIdentity,
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
+    RuntimeModuleRegistry,
     RuntimeStorageBundle,
 )
 from forest.schema_bundles import StorageBundleSpec
 
 
-def artifact(marker="0"):
+def artifact(marker="0", scope="bot"):
     return RuntimeArtifactIdentity(
         "tests.runtime",
         "1.0.0",
         "sha256:" + marker * 64,
-        "bot",
+        scope,
         "tests.in-process/1",
         "installed",
     )
@@ -68,7 +68,7 @@ def descriptor(name, requires, events, *, fail=False, close_failures=0):
 async def test_registry_owns_dependency_order_and_reverse_lifecycle():
     events = []
     platform = SimpleNamespace()
-    registry = BotModuleRegistry(platform, (
+    registry = RuntimeModuleRegistry(platform, (
         descriptor("consumer", ("provider",), events),
         descriptor("independent", (), events),
         descriptor("provider", (), events),
@@ -92,7 +92,7 @@ async def test_registry_owns_dependency_order_and_reverse_lifecycle():
 @pytest.mark.asyncio
 async def test_registry_routes_generic_work_notifications_from_descriptors():
     events = []
-    registry = BotModuleRegistry(
+    registry = RuntimeModuleRegistry(
         SimpleNamespace(),
         (
             RuntimeModuleDescriptor(
@@ -144,7 +144,7 @@ async def test_storage_is_installed_before_factory_and_prepared_state():
         events.append(("factory",))
         return Module("owned", events)
 
-    registry = BotModuleRegistry(
+    registry = RuntimeModuleRegistry(
         platform,
         (
             RuntimeModuleDescriptor(
@@ -178,7 +178,7 @@ async def test_storage_install_failure_never_constructs_module():
         async def install(self, _spec, _baseline, _package_digest):
             raise ForestError("SCHEMA_BUNDLE_MISMATCH", "wrong bundle", 409)
 
-    registry = BotModuleRegistry(
+    registry = RuntimeModuleRegistry(
         SimpleNamespace(schema_bundle_installer=Installer()),
         (
             RuntimeModuleDescriptor(
@@ -213,7 +213,7 @@ def test_storage_bundle_must_be_owned_by_descriptor():
         "sha256:" + "3" * 64,
     )
     with pytest.raises(ForestError) as caught:
-        BotModuleRegistry(
+        RuntimeModuleRegistry(
             SimpleNamespace(),
             (
                 RuntimeModuleDescriptor(
@@ -240,7 +240,7 @@ def test_storage_bundle_must_match_descriptor_package_digest():
         "sha256:" + "4" * 64,
     )
     with pytest.raises(ForestError) as caught:
-        BotModuleRegistry(
+        RuntimeModuleRegistry(
             SimpleNamespace(),
             (
                 RuntimeModuleDescriptor(
@@ -252,7 +252,7 @@ def test_storage_bundle_must_match_descriptor_package_digest():
 
 
 def test_official_modules_bind_distribution_artifact_into_projection():
-    registry = BotModuleRegistry(SimpleNamespace())
+    registry = RuntimeModuleRegistry(SimpleNamespace())
     artifacts = {item.artifact for item in OFFICIAL_MODULES}
     assert len(artifacts) == 1
     official = artifacts.pop()
@@ -271,11 +271,42 @@ def test_official_modules_bind_distribution_artifact_into_projection():
 def test_registry_rejects_missing_or_cyclic_dependencies():
     events = []
     with pytest.raises(ForestError) as caught:
-        BotModuleRegistry(SimpleNamespace(), (
+        RuntimeModuleRegistry(SimpleNamespace(), (
             descriptor("left", ("right",), events),
             descriptor("right", ("left",), events),
         ))
     assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
+
+
+@pytest.mark.asyncio
+async def test_registry_binds_descriptor_scope_to_its_host_lifecycle():
+    events = []
+    descriptor = RuntimeModuleDescriptor(
+        "deployment.test",
+        (),
+        lambda *_: Module("deployment.test", events),
+        artifact("6", "deployment"),
+    )
+    registry = RuntimeModuleRegistry(
+        SimpleNamespace(scope_kind="deployment"), (descriptor,)
+    )
+    await registry.start()
+    assert registry.states == {"deployment.test": ModuleLifecycleState.ACTIVE}
+    assert await registry.close() == []
+    assert events == [
+        ("start", "deployment.test"),
+        ("quiesce", "deployment.test"),
+        ("close", "deployment.test"),
+    ]
+
+
+def test_registry_rejects_artifact_from_another_scope():
+    descriptor = RuntimeModuleDescriptor(
+        "bot.test", (), lambda *_: object(), artifact("7", "bot")
+    )
+    with pytest.raises(ForestError) as caught:
+        RuntimeModuleRegistry(SimpleNamespace(scope_kind="deployment"), (descriptor,))
+    assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"
 
 
 def test_official_management_contributions_are_declared_by_module_descriptors():
@@ -390,7 +421,7 @@ def test_runtime_descriptor_rejects_duplicate_management_contributions():
 @pytest.mark.asyncio
 async def test_registry_rolls_back_started_modules_when_start_fails():
     events = []
-    registry = BotModuleRegistry(SimpleNamespace(), (
+    registry = RuntimeModuleRegistry(SimpleNamespace(), (
         descriptor("first", (), events),
         descriptor("second", ("first",), events, fail=True),
     ))
@@ -409,7 +440,7 @@ async def test_registry_rolls_back_started_modules_when_start_fails():
 @pytest.mark.asyncio
 async def test_registry_continues_start_rollback_after_failed_module_cleanup():
     events = []
-    registry = BotModuleRegistry(SimpleNamespace(), (
+    registry = RuntimeModuleRegistry(SimpleNamespace(), (
         descriptor("first", (), events),
         descriptor("second", ("first",), events, fail=True, close_failures=1),
     ))
@@ -430,7 +461,7 @@ async def test_registry_continues_start_rollback_after_failed_module_cleanup():
 @pytest.mark.asyncio
 async def test_registry_retries_failed_cleanup_without_restarting_modules():
     events = []
-    registry = BotModuleRegistry(SimpleNamespace(), (
+    registry = RuntimeModuleRegistry(SimpleNamespace(), (
         descriptor("owned", (), events, close_failures=1),
     ))
     await registry.start()
@@ -453,5 +484,5 @@ async def test_registry_retries_failed_cleanup_without_restarting_modules():
 ])
 def test_registry_rejects_invalid_descriptor_identity_or_edges(identity, requires):
     with pytest.raises(ForestError) as caught:
-        BotModuleRegistry(SimpleNamespace(), (descriptor(identity, requires, []),))
+        RuntimeModuleRegistry(SimpleNamespace(), (descriptor(identity, requires, []),))
     assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"

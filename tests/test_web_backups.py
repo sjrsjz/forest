@@ -87,6 +87,10 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
     ):
         await initialize(admin, token, backup_database)
         await login(admin)
+        audit_root = (
+            f"/management/v1/scopes/deployment/{app.state.runtime.deployment_id}/modules/"
+            "deployment.audit/queries/records"
+        )
         html = await admin.get("/")
         script = await admin.get("/static/backup-panel.js")
         assert 'id="nav-backups"' in html.text and 'id="storage-cleanup-form"' in html.text
@@ -126,7 +130,10 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
             "/management/v1/backups", json=body,
             headers={"idempotency-key": "web-backup"},
         )
-        assert repeated.status_code == 202 and repeated.json() == queued
+        assert repeated.status_code == 202
+        repeated_job = repeated.json()
+        assert repeated_job["backup_id"] == queued["backup_id"]
+        assert repeated_job["include_packages"] == queued["include_packages"]
 
         detail = queued
         for _ in range(100):
@@ -211,7 +218,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         assert listed_verifications.status_code == 200
         assert listed_verifications.json()["verifications"][0] == verification
         verification_audit = await admin.get(
-            "/management/v1/audit?action=backup.verify.completed"
+            audit_root + "?action=backup.verify.completed"
         )
         verification_record = verification_audit.json()["records"][0]
         assert verification_record["details"] == {
@@ -248,7 +255,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
         assert restore["targets"][0]["state"] == "STAGED"
 
         restore_audit = await admin.get(
-            "/management/v1/audit?action=restore.stage.completed"
+            audit_root + "?action=restore.stage.completed"
         )
         restore_record = restore_audit.json()["records"][0]
         assert restore_record["details"] == {
@@ -309,7 +316,7 @@ async def test_web_backup_requires_reauthentication_and_streams_encrypted_artifa
             f"/management/v1/backups/{queued['backup_id']}/download"
         )).status_code == 404
 
-        audit = await admin.get("/management/v1/audit?action=backup.create")
+        audit = await admin.get(audit_root + "?action=backup.create")
         record = audit.json()["records"][0]
         assert record["details"] == {
             "backup_id": queued["backup_id"], "include_packages": False

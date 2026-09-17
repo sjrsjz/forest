@@ -2,7 +2,6 @@ import { schemaForm } from './schema-form.js';
 import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
 import { accountsPanel } from './accounts-panel.js';
-import { auditPanel } from './audit-panel.js';
 import { backupPanel as createBackupPanel } from './backup-panel.js';
 import { mountModuleUi } from './module-ui-host.js';
 import { managementContributions } from './management-contributions.js';
@@ -23,8 +22,8 @@ function notice(text, success = false) {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'audit', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'audit', 'backups', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'backups', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
@@ -75,7 +74,6 @@ function setIdentity(user) {
   $('username').textContent = user?.username || '';
   $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
   $('nav-accounts').classList.toggle('hidden', user?.role !== 'admin');
-  $('nav-audit').classList.toggle('hidden', user?.role !== 'admin');
   $('nav-backups').classList.toggle('hidden', user?.role !== 'admin');
   $('identity').classList.toggle('hidden', !user);
 }
@@ -98,6 +96,7 @@ async function readConfiguration() {
   $('config-state').textContent = configuration.effective ? '已生效' : '默认配置';
   pendingPlan = null; applyKey = null; $('preview').classList.add('hidden');
   show('configuration');
+  await readDeploymentModules();
 }
 async function start() {
   try {
@@ -140,8 +139,8 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   runtimeViews.reset();
+  deploymentViews.reset();
   accountPanel.reset();
-  deploymentAudit.reset();
   backupsPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
@@ -195,8 +194,23 @@ const accountPanel = accountsPanel(api, busy, notice, (message) => {
   accountPanel.reset(); configuration = null; pendingPlan = null;
   setIdentity(null); show('login'); notice(message, true);
 });
-const deploymentAudit = auditPanel(api, busy);
 const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
+
+const deploymentViews = managementContributions({
+  api, busy, notice, scopeKind: 'deployment', scopeIdentity: row => row.scope_id,
+  nav: $('deployment-module-nav'), registry: $('deployment-module-registry'),
+  root: $('deployment-module-views'),
+});
+async function readDeploymentModules() {
+  deploymentViews.reset();
+  if (!currentUser?.deployment_id || currentUser.role !== 'admin') {
+    deploymentViews.update([]); return;
+  }
+  const scope = {scope_kind:'deployment', scope_id:currentUser.deployment_id};
+  const result = await api(`/scopes/deployment/${encodeURIComponent(scope.scope_id)}/modules`);
+  deploymentViews.update(result.modules || []);
+  await deploymentViews.select(scope);
+}
 
 // A Bot is a runtime scope. The workspace is organized around kernel concepts;
 // Agent and Memory remain module surfaces inside the module pane.
@@ -307,6 +321,7 @@ function invalidateControl(scope) {
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
   runtimeViews.invalidateContent(scope);
+  deploymentViews.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -531,9 +546,6 @@ $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), re
 $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
 $('nav-accounts').addEventListener('click', () => busy($('nav-accounts'), async () => {
   show('accounts'); await accountPanel.load(currentUser.account_id);
-}));
-$('nav-audit').addEventListener('click', () => busy($('nav-audit'), async () => {
-  show('audit'); await deploymentAudit.load();
 }));
 $('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
   show('backups'); await backupsPanel.load();

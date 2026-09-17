@@ -28,7 +28,6 @@ from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
 from forest.management.accounts_api import install_account_routes
 from forest.management.activations import RestoreActivationManager
-from forest.management.audit_api import install_audit_routes
 from forest.management.authority import WebAuthority
 from forest.management.backup_api import install_backup_routes
 from forest.management.backup_imports import BackupImportManager
@@ -36,12 +35,20 @@ from forest.management.backups import BackupManager
 from forest.management.bots_api import install_bot_routes
 from forest.management.catalog import BotCatalog
 from forest.management.cleanup import StorageCleanupManager
+from forest.management.deployment_modules import (
+    OFFICIAL_DEPLOYMENT_MODULES,
+    DeploymentModuleHost,
+)
 from forest.management.fleet import BotFleet
-from forest.management.module_api import install_module_routes
+from forest.management.module_api import (
+    install_module_routes,
+    management_scope_provider_registry,
+)
 from forest.management.onebot_protocol import install_onebot_protocol_route
 from forest.management.provision import BotProvisioner
 from forest.management.restores import RestoreManager
 from forest.management.verifications import BackupVerificationManager
+from forest.runtime_modules import RuntimeModuleRegistry
 from forest.security import SecretVault, digest_token, hash_password, random_token, verify_password
 from forest.storage.postgres import PostgresStore
 
@@ -214,6 +221,9 @@ class ManagementRuntime:
         self.backup_imports: BackupImportManager | None = None
         self.service_tasks: list[asyncio.Task] = []
         self.service_errors: dict[str, str] = {}
+        self.deployment_id: str | None = None
+        self.deployment_modules: RuntimeModuleRegistry | None = None
+        self.management_scope_providers = management_scope_provider_registry()
 
     async def connect(self, dsn: str, *, migrate: bool = True) -> PostgresStore:
         store = PostgresStore(dsn)
@@ -269,7 +279,14 @@ class ManagementRuntime:
             backup_imports = BackupImportManager(
                 catalog, backups, restores, self.settings.data_dir
             )
+            deployment_modules = RuntimeModuleRegistry(
+                DeploymentModuleHost("deployment", plan["deployment_id"], candidate),
+                OFFICIAL_DEPLOYMENT_MODULES,
+            )
+            await deployment_modules.start()
         except BaseException:
+            if "deployment_modules" in locals():
+                await deployment_modules.close()
             await candidate.close()
             raise
         await self.close_services()
@@ -283,6 +300,8 @@ class ManagementRuntime:
         self.cleanup = cleanup
         self.verifications = verifications
         self.backup_imports = backup_imports
+        self.deployment_id = plan["deployment_id"]
+        self.deployment_modules = deployment_modules
         self.provisioner = BotProvisioner(catalog)
         self.service_tasks = [
             asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
@@ -297,6 +316,11 @@ class ManagementRuntime:
         self.recovery_error = None
 
     async def close_services(self) -> None:
+        deployment_modules, self.deployment_modules = self.deployment_modules, None
+        if deployment_modules is not None:
+            errors = await deployment_modules.close()
+            if errors:
+                self.service_errors["deployment-modules"] = "MODULE_CLEANUP_FAILED"
         if self.provisioner is not None:
             await self.provisioner.close()
         if self.backups is not None:
@@ -583,7 +607,8 @@ def create_app(settings: WebSettings) -> FastAPI:
     async def session(request: Request):
         value = await runtime.principal(request)
         return {"account_id": value["account_id"], "username": value["username"],
-                "role": value["role"], "can_write": value["role"] == "admin"}
+                "role": value["role"], "can_write": value["role"] == "admin",
+                "deployment_id": runtime.deployment_id}
 
     @app.post("/management/v1/logout")
     async def logout(request: Request):
@@ -683,7 +708,6 @@ def create_app(settings: WebSettings) -> FastAPI:
         )
 
     install_account_routes(app, runtime)
-    install_audit_routes(app, runtime)
     install_backup_routes(app, runtime)
     install_bot_routes(app, runtime)
     install_onebot_protocol_route(app, runtime)

@@ -170,7 +170,30 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             "routing.graph/queries/snapshot"
         )
         assert legacy.status_code == 404
-        invalid = await client.get(
-            f"/management/v1/scopes/deployment/{bot['bot_id']}/modules"
+        deployment_id = (await client.get("/management/v1/session")).json()["deployment_id"]
+        deployment = await client.get(
+            f"/management/v1/scopes/deployment/{deployment_id}/modules"
         )
-        assert invalid.status_code == 404
+        assert deployment.status_code == 200, deployment.text
+        deployment_modules = {
+            row["component_id"]: row for row in deployment.json()["modules"]
+        }
+        audit = deployment_modules["deployment.audit"]
+        assert audit["artifact"]["scope"] == "deployment"
+        assert audit["state"] == "ACTIVE"
+        assert audit["management_contract"]["operations"] == [{
+            "operation_id": "records",
+            "kind": "query",
+            "authority": "deployment.audit.read",
+            "principal": "admin",
+        }]
+        assert audit["management_contributions"][0]["surface"] == {
+            "kind": "trusted-module",
+            "protocol": "forest.trusted-management-view/1",
+            "template": "/static/modules/deployment.audit.html",
+            "module": "/static/deployment-audit.js",
+            "style": None,
+        }
+        assert (
+            await client.get(f"/management/v1/scopes/host/{deployment_id}/modules")
+        ).status_code == 404

@@ -10,7 +10,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 1. Bot 创建、挂载和恢复仍调用巨型 `BotStore.migrate()`，多数官方模块业务表仍位于历史 `public` schema；
 2. 可安装 Worker 仍由官方 `component.worker-host` 模块内部管理，尚未完成与官方模块一致的代际热替换、失租恢复和按依赖边故障隔离；
-3. Web 壳仍安装 Bot 身份管理、部署审计、备份和账号等专用路由与面板，deployment/host 作用域也尚未由独立注册表和 `ManagementContribution` 驱动。
+3. Web 壳仍安装 Bot 身份管理、备份和账号等专用路由与面板；deployment 注册表目前只有 `deployment.audit`，host 作用域注册表尚未落地。
 
 因此，能在 WebUI 中创建 Bot、配置 Agent、查看 Memory 或运行 OneBot，不能作为微内核完成的证据。
 
@@ -30,7 +30,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 ### 模块运行时与路由
 
-- `BotModuleRegistry` 实现 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`，按依赖顺序启动、反向排空，并记录持久 RuntimeGraph/Generation。
+- `RuntimeModuleRegistry` 实现 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`，按依赖顺序启动、反向排空，并记录持久 RuntimeGraph/Generation。
 - 官方描述符携带 `package_id/version/digest/scope/driver/trust_level`；工件摘要进入 Generation、管理投影和 RouteGraph 历史。
 - command、message handler、service、event、job 和官方 runtime module 已进入同一 RouteGraph；消息入场冻结 `graph_digest`。
 - `component.worker-host` 拥有可安装 Worker 的准备与启动；`contract.router` 拥有冻结后的命令、Handler、Agent 和模板 responder 分派。
@@ -87,6 +87,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 ### P0：完成模块化控制台
 
 - 为 deployment/host 建立独立作用域注册表，将账号、部署审计、备份/恢复、Bot 目录和存储供应迁入准确的控制面服务贡献。它们不是 Bot 模块，也不能继续作为壳层硬编码页面。
+- `ManagementScopeProvider` 注册表已分别实现 Bot 与 deployment 的身份解析、可见性和授权适配；deployment 不复用 `bot.store`、Bot policy revision，也不伪造 Bot ticket。首个 deployment 服务 `deployment.audit` 已进入独立生命周期注册表，旧 `/management/v1/audit`、固定审计 DOM 和专用控制器已删除。
 - 删除壳层业务 DOM、业务 JavaScript import、模块 ID 分支和专用 HTTP API；deployment/host 作用域使用与 Bot 相同的发现协议。
 - Memory 页面现有筛选、分页和图浏览逻辑迁入 Memory 包后，壳层不得保留其脚本或数据端点。
 - 重新完成 PC 视口布局验收；大型结果必须服务端筛选、稳定分页和虚拟/有界渲染，不能靠纵向卡片堆叠。
@@ -102,11 +103,12 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 当前工作区的验证证据：
 
-- 无 PostgreSQL 全套：`736 passed, 36 skipped, 1116 deselected`；
+- 无 PostgreSQL 全套：`739 passed, 36 skipped, 1116 deselected`；
 - `routing.graph` 管理面：隔离 PostgreSQL 17 下模块贡献、包投影、Event 与 ComponentJob 查询/重放/退役共 `9 passed`；模块 UI 所有权与运行时描述符定向组为 `24 passed`。
 - `command.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；密码重新鉴权、载荷脱敏、热重载失效和并发 CAS 均包含在内。
 - `message.router` 管理面：隔离 PostgreSQL 17 下策略、容量、诊断、恢复、模块发现和包投影共 `10 passed`；Binding 目录、密码脱敏、Handler 恢复幂等和并发 CAS 均包含在内。
 - `kernel.audit` 管理面：隔离 PostgreSQL 17 下 Web 脱敏查询、稳定游标、Shell 查询、模块发现和旧端点消失共 `12 passed`；完整插件运行时模块图另有 `4 passed`。
+- `deployment.audit` 与作用域 provider：Bot/deployment 模块发现、管理员边界、旧端点消失和 PostgreSQL 查询共 `10 passed`；跨作用域工件拒绝、生命周期和 provider 注册表定向单元组共 `31 passed`；备份审计链 `1 passed`，Web 包与持久运行图回归 `9 passed`。
 - PostgreSQL 17：RuntimeGraph、Fleet、OneBot 平台与载荷边界的 40 个场景中，长批次前 30 个测试体通过后停止推进；剩余 10 个按两组重跑为 `5 passed` 与 `5 passed`。
 - 多模态记忆运行时的 QiYu VL profile、Agent 禁用、text-only Agent 投影和在途资源关闭四个场景分别通过；runtime descriptor 单元组为 `22 passed`。
 - Ruff、Python compileall、四个受影响 ES module 的 `node --check` 和 `git diff --check` 通过；

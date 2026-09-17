@@ -1,7 +1,8 @@
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 
-export function auditPanel(api, busy) {
-  let records = [], nextBefore = null, readSeq = 0;
+export function createModulePanel(api, busy) {
+  let scope = null, epoch = 0, records = [], nextBefore = null, readSeq = 0;
+  const base = () => `/scopes/deployment/${encodeURIComponent(scope.scope_id)}/modules/deployment.audit`;
 
   function query(before = null) {
     const form = $('audit-filter-form');
@@ -11,7 +12,7 @@ export function auditPanel(api, busy) {
       if (value) params.set(name, value);
     }
     if (before) params.set('before', before);
-    return `/audit?${params}`;
+    return `${base()}/queries/records?${params}`;
   }
 
   function render() {
@@ -39,29 +40,30 @@ export function auditPanel(api, busy) {
   }
 
   async function load({append = false} = {}) {
-    const seq = ++readSeq;
-    const cursor = append ? nextBefore : null;
-    if (append && !cursor) return;
-    const data = await api(query(cursor));
-    if (seq !== readSeq) return data;
+    if (!scope || (append && !nextBefore)) return;
+    const own = epoch, seq = ++readSeq;
+    const data = await api(query(append ? nextBefore : null));
+    if (own !== epoch || seq !== readSeq) return data;
     records = append ? records.concat(data.records) : data.records;
-    nextBefore = data.next_before;
-    render(); return data;
+    nextBefore = data.next_before; render(); return data;
   }
 
-  $('audit-filter-form').addEventListener('submit', (event) => {
-    event.preventDefault();
-    busy(event.currentTarget.querySelector('button'), () => load());
+  $('audit-filter-form').addEventListener('submit', event => {
+    event.preventDefault(); busy(event.currentTarget.querySelector('button'), () => load());
   });
   $('audit-refresh').addEventListener('click', () => busy($('audit-refresh'), () => load()));
-  $('audit-more').addEventListener('click', () => busy($('audit-more'), () => load({append: true})));
+  $('audit-more').addEventListener('click', () =>
+    busy($('audit-more'), () => load({append: true})));
 
-  return {
-    load,
-    reset() {
-      readSeq++; records = []; nextBefore = null;
-      $('audit-filter-form').reset(); $('audit-list').replaceChildren();
-      $('audit-empty').classList.remove('hidden'); $('audit-more').classList.add('hidden');
-    },
-  };
+  function reset() {
+    epoch++; readSeq++; scope = null; records = []; nextBefore = null;
+    $('audit-filter-form').reset(); $('audit-list').replaceChildren();
+    $('audit-empty').classList.remove('hidden'); $('audit-more').classList.add('hidden');
+  }
+  async function select(row) { reset(); scope = row; await load(); }
+  function invalidateContent(target) {
+    if (!scope || target !== base()) return;
+    epoch++; readSeq++; records = []; nextBefore = null; render();
+  }
+  return {select, reset, load, invalidateContent};
 }

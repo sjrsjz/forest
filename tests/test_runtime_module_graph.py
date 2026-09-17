@@ -11,9 +11,9 @@ from psycopg import sql
 from forest.packages import digest_json
 from forest.routing_graph import RouteGraphStore
 from forest.runtime_modules import (
-    BotModuleRegistry,
     RuntimeArtifactIdentity,
     RuntimeModuleDescriptor,
+    RuntimeModuleRegistry,
 )
 from forest.storage.bot import BotStore
 
@@ -98,7 +98,7 @@ async def test_registry_atomically_publishes_native_generations_and_dependency_e
         bot=SimpleNamespace(store=store),
         kernel=KernelAuthority(lease),
     )
-    registry = BotModuleRegistry(
+    registry = RuntimeModuleRegistry(
         platform,
         (
             descriptor("consumer", ("provider",), events),
@@ -181,12 +181,12 @@ async def test_reactivation_under_same_host_allocates_fresh_generations(runtime_
         bot=SimpleNamespace(store=store),
         kernel=KernelAuthority(lease),
     )
-    first = BotModuleRegistry(host, (descriptor("owned", (), []),))
+    first = RuntimeModuleRegistry(host, (descriptor("owned", (), []),))
     await first.start()
     first_generation = first.graph_identity.generations["owned"]
     await first.close()
 
-    second = BotModuleRegistry(host, (descriptor("owned", (), []),))
+    second = RuntimeModuleRegistry(host, (descriptor("owned", (), []),))
     await second.start()
     second_generation = second.graph_identity.generations["owned"]
     assert second.graph_identity.graph_id != first.graph_identity.graph_id
@@ -220,7 +220,7 @@ async def test_failed_start_never_publishes_partial_runtime_graph(runtime_store)
         bot=SimpleNamespace(store=store),
         kernel=KernelAuthority(lease),
     )
-    registry = BotModuleRegistry(
+    registry = RuntimeModuleRegistry(
         platform,
         (
             descriptor("first", (), events),
@@ -272,7 +272,7 @@ async def test_failed_close_is_persisted_and_retry_reaches_stopped(runtime_store
         bot=SimpleNamespace(store=store),
         kernel=KernelAuthority(lease),
     )
-    registry = BotModuleRegistry(
+    registry = RuntimeModuleRegistry(
         platform,
         (descriptor("owned", (), [], close_failures=1),),
     )
@@ -299,8 +299,8 @@ async def test_failed_close_is_persisted_and_retry_reaches_stopped(runtime_store
 
 def test_runtime_descriptor_digest_covers_dependency_and_factory_identity():
     events = []
-    left = BotModuleRegistry(SimpleNamespace(), (descriptor("module", (), events),))
-    right = BotModuleRegistry(
+    left = RuntimeModuleRegistry(SimpleNamespace(), (descriptor("module", (), events),))
+    right = RuntimeModuleRegistry(
         SimpleNamespace(),
         (descriptor("provider", (), events), descriptor("module", ("provider",), events)),
     )

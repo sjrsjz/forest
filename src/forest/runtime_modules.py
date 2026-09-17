@@ -1,9 +1,11 @@
-"""Dependency-ordered official modules for a Bot runtime.
+"""Dependency-ordered runtime modules for Bot, deployment, and host scopes.
 
 The supervisor consumes descriptors and lifecycle operations; concrete module
 construction lives here instead of in the runtime adapter composition root.
-Official and packaged modules can converge on this registry contract without
-making Agent or Memory kernel types.
+Official and packaged modules converge on this registry contract without
+making Agent or Memory kernel types. Bot hosts additionally persist their
+generation graph; other scope hosts use the same lifecycle without pretending
+to own a Bot kernel lease.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ class RuntimeArtifactIdentity:
             not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.package_id)
             or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,127}", self.package_version)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.package_digest)
-            or self.scope != "bot"
+            or self.scope not in {"deployment", "host", "bot"}
             or not re.fullmatch(r"[a-z][a-z0-9._-]*/[1-9][0-9]*", self.driver)
             or self.trust_level not in {"official", "installed"}
         ):
@@ -58,8 +60,8 @@ class RuntimeArtifactIdentity:
         }
 
 
-@lru_cache(maxsize=1)
-def _official_artifact() -> RuntimeArtifactIdentity:
+@lru_cache(maxsize=3)
+def official_artifact(scope: str = "bot") -> RuntimeArtifactIdentity:
     """Hash the complete current Forest distribution, including trusted UI assets."""
 
     root = files("forest")
@@ -93,7 +95,7 @@ def _official_artifact() -> RuntimeArtifactIdentity:
         package_id="forest",
         package_version=package_version,
         package_digest=package_digest,
-        scope="bot",
+        scope=scope,
         driver="forest.in-process-trusted/1",
         trust_level="official",
     )
@@ -412,7 +414,7 @@ def _jobs(runtime, modules: dict[str, Any]):
     return module
 
 
-_OFFICIAL_ARTIFACT = _official_artifact()
+_OFFICIAL_ARTIFACT = official_artifact("bot")
 
 
 OFFICIAL_MODULES = (
@@ -566,7 +568,7 @@ OFFICIAL_MODULES = (
 )
 
 
-class BotModuleRegistry:
+class RuntimeModuleRegistry:
     """Build and supervise modules from an acyclic descriptor graph."""
 
     def __init__(self, runtime, descriptors=OFFICIAL_MODULES):
@@ -582,6 +584,7 @@ class BotModuleRegistry:
         self._closed = False
         self.graph_identity = None
         self.activation_id = str(uuid4())
+        self.scope_kind = getattr(runtime, "scope_kind", "bot")
         store = getattr(getattr(runtime, "bot", None), "store", None)
         if store is None:
             self.graph_store = None
@@ -672,6 +675,7 @@ class BotModuleRegistry:
                 or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for char in identity)
                 or len(set(descriptor.requires)) != len(descriptor.requires)
                 or identity in descriptor.requires
+                or descriptor.artifact.scope != self.scope_kind
                 or (
                     descriptor.storage is not None
                     and (

@@ -9,7 +9,7 @@
   <main>
     <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><span id="role" class="role-badge"></span><button id="logout" class="subtle">退出登录</button></div></header>
     <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署</button><button id="nav-bots" class="subtle">运行实例与模块</button><button id="nav-backups" class="subtle">存储与备份</button><button id="nav-accounts" class="subtle">安全与账号</button><button id="nav-audit" class="subtle">操作与审计</button></nav>
+    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署</button><button id="nav-bots" class="subtle">运行实例与模块</button><button id="nav-backups" class="subtle">存储与备份</button><button id="nav-accounts" class="subtle">安全与账号</button></nav>
     <section id="loading"><p>正在连接管理服务…</p></section>
     <section id="setup" class="hidden card narrow">
       <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库，然后创建各自独立的 Bot。</p>
@@ -34,6 +34,7 @@
         <form id="config-form"><label>后台显示名称<input name="display_name" required maxlength="80"></label><label>新登录会话有效时长（分钟）<input name="session_ttl_minutes" type="number" required min="5" max="1440"></label><p class="hint">时长修改用于后续登录，不改变已经建立的会话。</p><div class="actions"><button type="submit">预览变更</button><button id="reload" type="button" class="subtle">读取最新配置</button></div></form>
       </div><div class="card"><h2>生效状态</h2><p class="muted">保存与生效由服务端事务确认。其他窗口同时修改时，当前提交会提示冲突。</p><dl><dt>期望修订</dt><dd id="desired">—</dd><dt>生效修订</dt><dd id="effective">—</dd></dl><p class="hint">在「运行实例与模块」中创建 Bot 并配置组件。</p></div></div>
       <div id="preview" class="card hidden"><h2>确认变更</h2><ul id="diff"></ul><p id="effect" class="muted"></p><button id="apply">应用变更</button></div>
+      <div class="card"><h2>部署服务</h2><div id="deployment-module-registry" class="module-registry-list"></div><nav id="deployment-module-nav" class="module-surface-nav" aria-label="部署服务模块"></nav><div id="deployment-module-views" class="management-contribution-views"></div></div>
     </section>
     <section id="accounts" class="hidden">
       <p class="muted">固定角色模板由服务端强制执行。管理员可以读写；查看者只能查询部署与 Bot 状态。平台群管理员不会自动成为后台账号。</p>
@@ -57,13 +58,6 @@
           <form id="account-apply-form"><label>再次输入你的当前密码<input name="current_password" type="password" required minlength="12" maxlength="1024" autocomplete="current-password"></label><button type="submit">应用账号变更</button></form>
         </div>
       </div>
-    </section>
-    <section id="audit" class="hidden">
-      <div class="card"><h2>部署审计</h2><p class="muted">按不可变部署事实核对账号、配置、Bot 目录、Binding 预留和插件导入。页面只显示服务端白名单内的脱敏元数据。</p>
-        <form id="audit-filter-form" class="audit-filters"><label>动作<input name="action" maxlength="256" placeholder="例如 account.apply"></label><label>资源前缀<input name="resource_prefix" maxlength="256" placeholder="例如 bot:"></label><label>操作者 ID<input name="actor_id" maxlength="256"></label><button type="submit">查询</button></form>
-        <div class="actions"><button id="audit-refresh" class="subtle" type="button">刷新最新记录</button><button id="audit-more" class="subtle hidden" type="button">更早记录</button></div>
-      </div>
-      <p id="audit-empty" class="hint hidden">当前筛选条件下没有审计记录。</p><div id="audit-list" aria-live="polite"></div>
     </section>
     <section id="backups" class="hidden">
       <div class="columns"><div class="card"><h2>创建加密备份</h2>

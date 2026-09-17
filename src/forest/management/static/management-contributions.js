@@ -28,7 +28,10 @@ function availableContributions(descriptors, scopeKind) {
       || left.key.localeCompare(right.key));
 }
 
-export function managementContributions({api, busy, notice, nav, registry, root, packageElements}) {
+export function managementContributions({
+  api, busy, notice, nav, registry, root, packageElements = [], scopeKind = 'bot',
+  scopeIdentity = row => row.bot_id,
+}) {
   const views = new Map();
   let descriptors = [];
   let scope = null;
@@ -98,8 +101,9 @@ export function managementContributions({api, busy, notice, nav, registry, root,
       if (entry) {
         const controller = await load(entry);
         const view = views.get(key);
-        if (scope && view.selectedScopeId !== scope.bot_id) {
-          await controller.select(scope); view.selectedScopeId = scope.bot_id;
+        const selectedId = scope ? scopeIdentity(scope) : null;
+        if (scope && view.selectedScopeId !== selectedId) {
+          await controller.select(scope); view.selectedScopeId = selectedId;
         }
       }
       show(key);
@@ -109,7 +113,7 @@ export function managementContributions({api, busy, notice, nav, registry, root,
 
   function update(runtimeModules, packageRow = null) {
     descriptors = runtimeModules || [];
-    const entries = availableContributions(descriptors, 'bot');
+    const entries = availableContributions(descriptors, scopeKind);
     const wanted = new Set(entries.map(entry => entry.key));
     for (const [key, view] of views) {
       if (wanted.has(key)) continue;
@@ -144,10 +148,11 @@ export function managementContributions({api, busy, notice, nav, registry, root,
 
   async function select(row) {
     scope = row;
+    const selectedId = scopeIdentity(row);
     for (const view of views.values()) {
       const controller = await load(view.entry);
-      if (!scope || scope.bot_id !== row.bot_id) return;
-      await controller.select(row); view.selectedScopeId = row.bot_id;
+      if (!scope || scopeIdentity(scope) !== selectedId) return;
+      await controller.select(row); view.selectedScopeId = selectedId;
     }
   }
 

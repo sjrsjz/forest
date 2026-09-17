@@ -346,7 +346,11 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
             )
             assert denied.status_code == 403 and denied.json()["code"] == "PERMISSION_DENIED"
             assert (await viewer.get("/management/v1/accounts")).status_code == 403
-            assert (await viewer.get("/management/v1/audit")).status_code == 403
+            audit = (
+                f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+                "deployment.audit/queries/records"
+            )
+            assert (await viewer.get(audit)).status_code == 403
             assert (await viewer.post("/management/v1/logout", json={})).status_code == 200
 
 
@@ -364,7 +368,12 @@ async def test_deployment_audit_is_redacted_and_keyset_paginated(tmp_path, web_d
     ):
         await initialize(client, token, web_database)
         await login(client)
-        account_id = (await client.get("/management/v1/session")).json()["account_id"]
+        session = (await client.get("/management/v1/session")).json()
+        account_id = session["account_id"]
+        root = (
+            f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+            "deployment.audit/queries/records"
+        )
         async with app.state.runtime.store.pool.connection() as conn, conn.transaction():
             for audit_id in ("audit-a", "audit-b", "audit-c"):
                 await conn.execute(
@@ -385,7 +394,7 @@ async def test_deployment_audit_is_redacted_and_keyset_paginated(tmp_path, web_d
                     ),
                 )
         first = await client.get(
-            "/management/v1/audit",
+            root,
             params={"action": "account.apply", "resource_prefix": "audit:test:", "limit": 2},
         )
         assert first.status_code == 200, first.text
@@ -396,7 +405,7 @@ async def test_deployment_audit_is_redacted_and_keyset_paginated(tmp_path, web_d
         assert all(row["details_redacted"] for row in body["records"])
         assert "must-never-leave-storage" not in first.text and "also-private" not in first.text
         second = await client.get(
-            "/management/v1/audit",
+            root,
             params={
                 "action": "account.apply",
                 "resource_prefix": "audit:test:",
@@ -408,10 +417,12 @@ async def test_deployment_audit_is_redacted_and_keyset_paginated(tmp_path, web_d
         assert second.status_code == 200, second.text
         assert [row["audit_id"] for row in second.json()["records"]] == ["audit-a"]
         assert second.json()["next_before"] is None
-        invalid = await client.get("/management/v1/audit", params={"before": "not-a-cursor"})
+        invalid = await client.get(root, params={"before": "not-a-cursor"})
         assert invalid.status_code == 422 and invalid.json()["code"] == "AUDIT_CURSOR_INVALID"
-        unknown = await client.get("/management/v1/audit", params={"surprise": "value"})
-        assert unknown.status_code == 422 and unknown.json()["code"] == "AUDIT_QUERY_INVALID"
+        unknown = await client.get(root, params={"surprise": "value"})
+        assert unknown.status_code == 422
+        assert unknown.json()["code"] == "MODULE_MANAGEMENT_INPUT_INVALID"
+        assert (await client.get("/management/v1/audit")).status_code == 404
 
 
 @pytest.mark.postgres

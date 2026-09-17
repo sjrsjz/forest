@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from forest.errors import ForestError
-from forest.runtime_modules import BotModuleRegistry
+from forest.runtime_modules import RuntimeModuleRegistry
 
 
 def _observe(task):
@@ -31,7 +31,7 @@ class BotRuntimeSupervisor:
         from forest.storage.schema_bundles import SchemaBundleInstaller
 
         self.schema_bundle_installer = SchemaBundleInstaller(bot.store)
-        self.module_registry = BotModuleRegistry(self)
+        self.module_registry = RuntimeModuleRegistry(self)
 
     def module(self, component_id: str):
         """Resolve a runtime capability owner by its stable component identity."""

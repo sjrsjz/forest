@@ -4,8 +4,7 @@
 
 Forest 不把多库日志拼成虚假的全局时间线。部署数据库的 `audit_records` 记录账号、目录、
 部署配置和包管理；每个 Bot 数据库的 `bot_audit_records` 记录该 Bot 的控制与运行事实。
-部署审计当前仍由旧的 `GET /management/v1/audit` 读取，待迁入 deployment 作用域贡献；Bot
-审计由 `kernel.audit` 的通用管理查询
+部署审计由 `deployment.audit` 的 deployment 作用域贡献读取；Bot 审计由 `kernel.audit` 的通用管理查询
 `GET /management/v1/scopes/bot/{bot_id}/modules/kernel.audit/queries/records` 和
 `#forest audit list` 读取。旧 `/management/v1/bots/{bot_id}/audit` 已删除，不保留兼容入口。
 两层结果只能分别分页和核对。

@@ -8,7 +8,13 @@
 
 ## 2. 查询与分页
 
-`GET /management/v1/audit` 支持 `action` 精确筛选、`resource_prefix` 前缀筛选、`actor_id` 精确筛选和 `limit`。结果按 `(created_at, audit_id)` 逆序排列；`next_before` 是服务端编码的稳定键集游标。后一页严格读取小于该二元组的事实，因此同一时间写入多条记录时不会因只按时间分页而漏项或重复。
+当前接口是 `deployment.audit` 在 deployment scope 发布的通用 query：
+`GET /management/v1/scopes/deployment/{deployment_id}/modules/deployment.audit/queries/records`。
+它支持 `action` 精确筛选、`resource_prefix` 前缀筛选、`actor_id` 精确筛选和 `limit`。结果按
+`(created_at, audit_id)` 逆序排列；`next_before` 是服务端编码的稳定键集游标。后一页严格读取小于
+该二元组的事实，因此同一时间写入多条记录时不会因只按时间分页而漏项或重复。旧
+`GET /management/v1/audit` 已删除，不保留兼容别名。页面由 deployment 模块描述符声明模板和
+ES module 控制器，通用壳层只发现和挂载贡献。
 
 读取在事务开始和结果取得后两次复核当前管理员账号与会话。页面的晚到请求由单调读取序号丢弃，刷新筛选不会被旧分页结果覆盖。查询有 200 条硬上限，不提供无界导出。
 
@@ -20,7 +26,10 @@
 
 ## 4. 容量边界
 
-部署 Audit 模块的干净 schema bundle 从首次创建即包含时间、动作、操作者和资源前缀索引。当前审计事实仍按部署生命周期永久保留；首版备份/WAL 与保留期管理尚未落地，所以本页面只解决有界读取，不宣称解决长期物理容量。后续归档必须保留事实摘要、主体和请求关联，并通过独立备份/保留协议处理，不能由浏览器删除不可变记录。
+当前部署表和索引仍由巨型部署迁移创建，尚未拆为 `deployment.audit` 的 schema bundle；不能把
+Web 贡献迁移写成存储所有权已经完成。审计事实仍按部署生命周期永久保留；首版备份/WAL 与
+保留期管理尚未落地，所以本页面只解决有界读取，不宣称解决长期物理容量。后续归档必须保留
+事实摘要、主体和请求关联，并通过独立备份/保留协议处理，不能由浏览器删除不可变记录。
 
 ## 5. 验证
 
