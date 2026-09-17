@@ -283,6 +283,204 @@ CREATE TABLE relation_retractions (
         REFERENCES relation_contributions(bot_id,contribution_id)
 );
 
+CREATE TABLE memory_queries (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    query_id text NOT NULL CHECK (octet_length(query_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    current_source_id text NOT NULL,
+    input_batch_ref text NOT NULL CHECK (octet_length(input_batch_ref) BETWEEN 1 AND 256),
+    context_revision bigint NOT NULL CHECK (context_revision > 0),
+    query_mode text NOT NULL CHECK (query_mode IN ('TEXT','IMAGE','MIXED')),
+    fusion_policy_revision text NOT NULL
+        CHECK (octet_length(fusion_policy_revision) BETWEEN 1 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    state text NOT NULL DEFAULT 'OPEN' CHECK (state IN ('OPEN','FROZEN')),
+    bundle_id text CHECK (bundle_id IS NULL OR octet_length(bundle_id) BETWEEN 1 AND 256),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    frozen_at timestamptz,
+    PRIMARY KEY (bot_id,query_id),
+    UNIQUE (bot_id,operation_id),
+    UNIQUE (bot_id,bundle_id),
+    FOREIGN KEY (bot_id,current_source_id) REFERENCES memory_sources(bot_id,source_id),
+    CHECK ((state='FROZEN') = (bundle_id IS NOT NULL)),
+    CHECK ((state='FROZEN') = (frozen_at IS NOT NULL))
+);
+
+CREATE TABLE memory_query_parts (
+    bot_id text NOT NULL,
+    query_id text NOT NULL,
+    query_part_index integer NOT NULL CHECK (query_part_index BETWEEN 0 AND 255),
+    source_unit_id text NOT NULL,
+    source_revision bigint NOT NULL CHECK (source_revision > 0),
+    occurrence_id text NOT NULL,
+    part_id text NOT NULL CHECK (octet_length(part_id) BETWEEN 1 AND 256),
+    modality text NOT NULL CHECK (modality IN ('TEXT','IMAGE')),
+    PRIMARY KEY (bot_id,query_id,query_part_index),
+    UNIQUE (bot_id,query_id,source_unit_id,part_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id),
+    FOREIGN KEY (bot_id,source_unit_id,part_id)
+        REFERENCES source_parts(bot_id,source_unit_id,part_id),
+    FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)
+);
+
+CREATE TABLE facet_preparation_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    target_kind text NOT NULL CHECK (target_kind IN ('SOURCE_UNIT','QUERY')),
+    target_id text NOT NULL CHECK (octet_length(target_id) BETWEEN 1 AND 256),
+    facet_count integer NOT NULL CHECK (facet_count BETWEEN 1 AND 4096),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id)
+);
+
+CREATE TABLE embedding_facets (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    facet_id text NOT NULL CHECK (octet_length(facet_id) BETWEEN 1 AND 256),
+    purpose text NOT NULL CHECK (purpose IN ('DOCUMENT','QUERY')),
+    query_id text,
+    source_unit_id text NOT NULL,
+    source_revision bigint NOT NULL CHECK (source_revision > 0),
+    part_id text NOT NULL CHECK (octet_length(part_id) BETWEEN 1 AND 256),
+    modality text NOT NULL CHECK (modality IN ('TEXT','IMAGE')),
+    selector_start_char integer,
+    selector_end_char integer,
+    input_payload_id text NOT NULL CHECK (octet_length(input_payload_id) BETWEEN 1 AND 256),
+    input_payload_digest text NOT NULL CHECK (
+        input_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    facet_content_digest text NOT NULL CHECK (
+        facet_content_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    input_media_type text NOT NULL CHECK (octet_length(input_media_type) BETWEEN 1 AND 128),
+    input_byte_length bigint NOT NULL CHECK (input_byte_length BETWEEN 1 AND 33554432),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    state text NOT NULL DEFAULT 'PENDING' CHECK (
+        state IN ('PENDING','PREPARED','DISPATCHED','READY','UNKNOWN','FAILED','SUPPRESSED')
+    ),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    current_attempt_id text,
+    vector real[],
+    vector_digest text CHECK (vector_digest IS NULL OR vector_digest ~ '^sha256:[a-f0-9]{64}$'),
+    result_payload_id text,
+    result_payload_digest text CHECK (
+        result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    published_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,facet_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id),
+    FOREIGN KEY (bot_id,source_unit_id,part_id)
+        REFERENCES source_parts(bot_id,source_unit_id,part_id),
+    CHECK ((purpose='QUERY') = (query_id IS NOT NULL)),
+    CHECK (
+        (modality='TEXT' AND selector_start_char IS NOT NULL
+            AND selector_end_char IS NOT NULL AND selector_start_char < selector_end_char)
+        OR (modality='IMAGE' AND selector_start_char IS NULL AND selector_end_char IS NULL)
+    ),
+    CHECK ((state='READY') = (vector IS NOT NULL)),
+    CHECK ((state='READY') = (vector_digest IS NOT NULL)),
+    CHECK ((state='READY') = (result_payload_id IS NOT NULL)),
+    CHECK ((state='READY') = (result_payload_digest IS NOT NULL)),
+    CHECK ((state='READY') = (published_at IS NOT NULL)),
+    CHECK (vector IS NULL OR cardinality(vector) BETWEEN 1 AND 4096)
+);
+
+CREATE TABLE embedding_attempts (
+    bot_id text NOT NULL,
+    attempt_id text NOT NULL CHECK (octet_length(attempt_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    facet_id text NOT NULL,
+    attempt_no integer NOT NULL CHECK (attempt_no > 0),
+    executor_component_id text NOT NULL
+        CHECK (octet_length(executor_component_id) BETWEEN 1 AND 128),
+    executor_generation_id text NOT NULL
+        CHECK (octet_length(executor_generation_id) BETWEEN 1 AND 256),
+    route_revision text NOT NULL CHECK (octet_length(route_revision) BETWEEN 1 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    deadline_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'PREPARED' CHECK (
+        state IN ('PREPARED','DISPATCHED','SUCCEEDED','NOT_SENT','UNKNOWN','RETRYABLE_FAILURE','FAILED')
+    ),
+    handoff_operation_id text,
+    settlement_operation_id text,
+    result_payload_id text,
+    result_payload_digest text CHECK (
+        result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    vector_digest text CHECK (vector_digest IS NULL OR vector_digest ~ '^sha256:[a-f0-9]{64}$'),
+    error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
+    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    dispatched_at timestamptz,
+    settled_at timestamptz,
+    PRIMARY KEY (bot_id,attempt_id),
+    UNIQUE (bot_id,operation_id),
+    UNIQUE (bot_id,facet_id,attempt_no),
+    FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id),
+    CHECK ((state IN ('PREPARED','NOT_SENT')) = (handoff_operation_id IS NULL)),
+    CHECK ((state IN ('PREPARED','NOT_SENT')) = (dispatched_at IS NULL)),
+    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settlement_operation_id IS NULL)),
+    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settled_at IS NULL)),
+    CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
+    CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL)),
+    CHECK ((state='SUCCEEDED') = (vector_digest IS NOT NULL))
+);
+
+CREATE TABLE retrieval_bundles (
+    bot_id text NOT NULL,
+    bundle_id text NOT NULL CHECK (octet_length(bundle_id) BETWEEN 1 AND 256),
+    query_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    index_snapshot_at timestamptz NOT NULL,
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    result_limit integer NOT NULL CHECK (result_limit BETWEEN 1 AND 256),
+    candidate_limit_per_facet integer NOT NULL CHECK (
+        candidate_limit_per_facet BETWEEN 1 AND 256
+    ),
+    result_count integer NOT NULL CHECK (result_count BETWEEN 0 AND 256),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,bundle_id),
+    UNIQUE (bot_id,query_id),
+    UNIQUE (bot_id,operation_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id)
+);
+
+CREATE TABLE retrieval_items (
+    bot_id text NOT NULL,
+    bundle_id text NOT NULL,
+    item_index integer NOT NULL CHECK (item_index BETWEEN 0 AND 255),
+    source_unit_id text NOT NULL,
+    source_revision bigint NOT NULL CHECK (source_revision > 0),
+    rank_micros bigint NOT NULL CHECK (rank_micros >= 0),
+    PRIMARY KEY (bot_id,bundle_id,item_index),
+    UNIQUE (bot_id,bundle_id,source_unit_id),
+    FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
+);
+
+CREATE TABLE retrieval_matches (
+    bot_id text NOT NULL,
+    bundle_id text NOT NULL,
+    item_index integer NOT NULL,
+    match_index integer NOT NULL CHECK (match_index BETWEEN 0 AND 4095),
+    query_facet_id text NOT NULL,
+    document_facet_id text NOT NULL,
+    query_modality text NOT NULL CHECK (query_modality IN ('TEXT','IMAGE')),
+    document_modality text NOT NULL CHECK (document_modality IN ('TEXT','IMAGE')),
+    candidate_rank integer NOT NULL CHECK (candidate_rank BETWEEN 1 AND 256),
+    score real NOT NULL CHECK (score = score),
+    PRIMARY KEY (bot_id,bundle_id,item_index,match_index),
+    FOREIGN KEY (bot_id,bundle_id,item_index)
+        REFERENCES retrieval_items(bot_id,bundle_id,item_index),
+    FOREIGN KEY (bot_id,query_facet_id) REFERENCES embedding_facets(bot_id,facet_id),
+    FOREIGN KEY (bot_id,document_facet_id) REFERENCES embedding_facets(bot_id,facet_id)
+);
+
 CREATE INDEX sources_external_group_idx ON memory_sources(
     bot_id,platform,realm_id,external_group_id,identity_incarnation
 );
@@ -306,6 +504,18 @@ CREATE INDEX relation_left_idx ON relation_contributions(
 );
 CREATE INDEX relation_right_idx ON relation_contributions(
     bot_id,right_kind,right_id,active,relation_id
+);
+CREATE INDEX embedding_facets_work_idx ON embedding_facets(
+    bot_id,state,purpose,created_at,facet_id
+);
+CREATE INDEX embedding_facets_source_idx ON embedding_facets(
+    bot_id,source_unit_id,source_revision,part_id,purpose,state
+);
+CREATE INDEX embedding_facets_query_idx ON embedding_facets(
+    bot_id,query_id,purpose,state,facet_id
+);
+CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
+    bot_id,space_id,purpose,state,published_at,facet_id
 );
 
 CREATE FUNCTION reject_immutable_row() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -400,6 +610,80 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_vector_dot(left_vector real[], right_vector real[])
+RETURNS double precision LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT CASE
+        WHEN cardinality(left_vector) <> cardinality(right_vector) THEN NULL
+        ELSE sum(left_vector[index]::double precision * right_vector[index]::double precision)
+    END
+    FROM generate_subscripts(left_vector, 1) AS value(index)
+$$;
+
+CREATE FUNCTION guard_memory_query() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.query_id,NEW.operation_id,NEW.input_digest,
+           NEW.current_source_id,NEW.input_batch_ref,NEW.context_revision,
+           NEW.query_mode,NEW.fusion_policy_revision,NEW.accepted_deletion_epoch,
+           NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.query_id,OLD.operation_id,OLD.input_digest,
+           OLD.current_source_id,OLD.input_batch_ref,OLD.context_revision,
+           OLD.query_mode,OLD.fusion_policy_revision,OLD.accepted_deletion_epoch,
+           OLD.created_at) THEN
+        RAISE EXCEPTION 'Memory query identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='OPEN' AND NEW.state='FROZEN' THEN RETURN NEW; END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid Memory query transition' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_embedding_facet() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.facet_id,NEW.purpose,NEW.query_id,NEW.source_unit_id,
+           NEW.source_revision,NEW.part_id,NEW.modality,NEW.selector_start_char,
+           NEW.selector_end_char,NEW.input_payload_id,NEW.input_payload_digest,
+           NEW.facet_content_digest,NEW.input_media_type,NEW.input_byte_length,
+           NEW.space_id,NEW.accepted_deletion_epoch,NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.facet_id,OLD.purpose,OLD.query_id,OLD.source_unit_id,
+           OLD.source_revision,OLD.part_id,OLD.modality,OLD.selector_start_char,
+           OLD.selector_end_char,OLD.input_payload_id,OLD.input_payload_digest,
+           OLD.facet_content_digest,OLD.input_media_type,OLD.input_byte_length,
+           OLD.space_id,OLD.accepted_deletion_epoch,OLD.created_at) THEN
+        RAISE EXCEPTION 'Embedding facet identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='PENDING' AND NEW.state IN ('PREPARED','SUPPRESSED') THEN RETURN NEW; END IF;
+    IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','PENDING','SUPPRESSED') THEN RETURN NEW; END IF;
+    IF OLD.state='DISPATCHED' AND NEW.state IN (
+        'READY','UNKNOWN','FAILED','PENDING','SUPPRESSED'
+    ) THEN RETURN NEW; END IF;
+    IF OLD.state IN ('READY','UNKNOWN','FAILED') AND NEW.state='SUPPRESSED' THEN RETURN NEW; END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid embedding facet transition' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_embedding_attempt() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.attempt_id,NEW.operation_id,NEW.input_digest,NEW.facet_id,
+           NEW.attempt_no,NEW.executor_component_id,NEW.executor_generation_id,
+           NEW.route_revision,NEW.accepted_deletion_epoch,NEW.deadline_at,NEW.prepared_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.attempt_id,OLD.operation_id,OLD.input_digest,OLD.facet_id,
+           OLD.attempt_no,OLD.executor_component_id,OLD.executor_generation_id,
+           OLD.route_revision,OLD.accepted_deletion_epoch,OLD.deadline_at,OLD.prepared_at) THEN
+        RAISE EXCEPTION 'Embedding attempt identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','NOT_SENT') THEN RETURN NEW; END IF;
+    IF OLD.state='DISPATCHED' AND NEW.state IN (
+        'SUCCEEDED','UNKNOWN','RETRYABLE_FAILURE','FAILED'
+    ) THEN RETURN NEW; END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid embedding attempt transition' USING ERRCODE='55000';
+END;
+$$;
+
 CREATE TRIGGER memory_domain_immutable BEFORE UPDATE OR DELETE ON memory_domains
     FOR EACH ROW EXECUTE FUNCTION guard_memory_domain();
 CREATE TRIGGER memory_source_guard BEFORE UPDATE OR DELETE ON memory_sources
@@ -410,6 +694,12 @@ CREATE TRIGGER source_occurrence_guard BEFORE UPDATE OR DELETE ON source_occurre
     FOR EACH ROW EXECUTE FUNCTION guard_occurrence();
 CREATE TRIGGER relation_contribution_guard BEFORE UPDATE OR DELETE ON relation_contributions
     FOR EACH ROW EXECUTE FUNCTION guard_relation_contribution();
+CREATE TRIGGER memory_query_guard BEFORE UPDATE OR DELETE ON memory_queries
+    FOR EACH ROW EXECUTE FUNCTION guard_memory_query();
+CREATE TRIGGER embedding_facet_guard BEFORE UPDATE OR DELETE ON embedding_facets
+    FOR EACH ROW EXECUTE FUNCTION guard_embedding_facet();
+CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_attempts
+    FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
 CREATE TRIGGER memory_trunks_immutable BEFORE UPDATE OR DELETE ON memory_trunks
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER source_registration_operations_immutable
@@ -426,4 +716,15 @@ CREATE TRIGGER source_suppressions_immutable BEFORE UPDATE OR DELETE ON source_s
 CREATE TRIGGER relation_evidence_immutable BEFORE UPDATE OR DELETE ON relation_evidence
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER relation_retractions_immutable BEFORE UPDATE OR DELETE ON relation_retractions
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER memory_query_parts_immutable BEFORE UPDATE OR DELETE ON memory_query_parts
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER facet_preparation_operations_immutable
+    BEFORE UPDATE OR DELETE ON facet_preparation_operations
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER retrieval_bundles_immutable BEFORE UPDATE OR DELETE ON retrieval_bundles
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER retrieval_items_immutable BEFORE UPDATE OR DELETE ON retrieval_items
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER retrieval_matches_immutable BEFORE UPDATE OR DELETE ON retrieval_matches
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();

@@ -1077,6 +1077,29 @@ class MemoryGraphRepository:
                 ),
                 (self.store.bot_id, row["source_unit_id"]),
             )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} a SET state=CASE WHEN a.state='PREPARED' THEN 'NOT_SENT' "
+                    "ELSE 'UNKNOWN' END,settlement_operation_id='suppression:' || "
+                    "md5(%s || ':' || a.attempt_id),error_code='SOURCE_SUPPRESSED',"
+                    "settled_at=clock_timestamp() FROM {} f WHERE a.bot_id=f.bot_id "
+                    "AND a.facet_id=f.facet_id AND f.bot_id=%s AND f.source_unit_id=%s "
+                    "AND a.state IN ('PREPARED','DISPATCHED')"
+                ).format(
+                    self._table("embedding_attempts"),
+                    self._table("embedding_facets"),
+                ),
+                (operation_id, self.store.bot_id, row["source_unit_id"]),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='SUPPRESSED',current_attempt_id=NULL,vector=NULL,"
+                    "vector_digest=NULL,result_payload_id=NULL,result_payload_digest=NULL,"
+                    "published_at=NULL,updated_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND source_unit_id=%s AND state<>'SUPPRESSED'"
+                ).format(self._table("embedding_facets")),
+                (self.store.bot_id, row["source_unit_id"]),
+            )
         return {"source_unit_ids": list(ids), "deletion_epoch": deletion_epoch, "duplicate": False}
 
     async def payload_ids_for_sources_in(self, conn, source_unit_ids) -> tuple[str, ...]:
@@ -1104,10 +1127,20 @@ class MemoryGraphRepository:
                 (self.store.bot_id, list(ids)),
             )
         ).fetchall()
+        embedding_results = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT result_payload_id FROM {} WHERE bot_id=%s "
+                    "AND source_unit_id=ANY(%s) AND result_payload_id IS NOT NULL"
+                ).format(self._table("embedding_facets")),
+                (self.store.bot_id, list(ids)),
+            )
+        ).fetchall()
         return tuple(
             sorted(
                 {row["author_payload_id"] for row in units}
                 | {row["payload_id"] for row in parts}
+                | {row["result_payload_id"] for row in embedding_results}
             )
         )
 

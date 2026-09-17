@@ -28,6 +28,10 @@ from forest.storage.memory_graph_authority import (
     MemoryPayloadRef,
     MemorySourceIdentity,
 )
+from forest.storage.memory_retrieval_authority import (
+    MemoryRetrievalRepository,
+    RetrievalQueryPart,
+)
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
@@ -786,3 +790,407 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
         "unit/uow-1",
         "unit/uow-2",
     }
+
+
+async def _capture_and_qualify(
+    memory,
+    payloads,
+    batches,
+    values,
+    *,
+    suffix: str,
+    context_revision: int = 1,
+):
+    await memory.capture_source_unit(operation_id=f"capture/retrieval/{suffix}", **values)
+    occurrence = values["occurrence"]
+    batch = f"batch/retrieval/{suffix}"
+    batches.add((batch, occurrence.conversation_ref, occurrence.event_ref, context_revision))
+    await memory.qualify_occurrence(
+        operation_id=f"eligibility/retrieval/{suffix}",
+        source_unit_id=values["source_unit_id"],
+        occurrence_id=occurrence.occurrence_id,
+        input_batch_ref=batch,
+        context_revision=context_revision,
+        expected_deletion_epoch=await payloads.epoch(),
+    )
+    return batch
+
+
+def _vector(axis: int):
+    value = [0.0] * 1024
+    value[axis] = 1.0
+    return value
+
+
+async def _embed(payloads, retrieval, facet, vector, *, suffix: str):
+    attempt_id = f"embedding/attempt/{suffix}"
+    permit = await retrieval.prepare_attempt(
+        operation_id=f"embedding/prepare/{suffix}",
+        attempt_id=attempt_id,
+        facet_id=facet["facet_id"],
+        executor_component_id="embedding.qiyu-vl",
+        executor_generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    await retrieval.mark_handoff(permit, handoff_operation_id=f"embedding/handoff/{suffix}")
+    body = (f'{{"attempt_id":"{attempt_id}","dimensions":1024}}').encode()
+    saved = await payloads.put_bytes(
+        owner_component_id="embedding.qiyu-vl",
+        owner_kind="embedding.result",
+        owner_id=attempt_id,
+        media_type="application/json",
+        content=body,
+        sources=(
+            PayloadSource(
+                source_component_id="memory.graph",
+                source_kind="embedding.facet",
+                source_id=facet["facet_id"],
+                source_revision=1,
+            ),
+        ),
+        expected_deletion_epoch=permit.accepted_deletion_epoch,
+    )
+    return await retrieval.settle_attempt(
+        permit,
+        settlement_operation_id=f"embedding/settle/{suffix}",
+        outcome="SUCCEEDED",
+        expected_deletion_epoch=permit.accepted_deletion_epoch,
+        result=MemoryPayloadRef(
+            saved.payload_id,
+            saved.content_digest,
+            "embedding.qiyu-vl",
+            "embedding.result",
+            attempt_id,
+        ),
+        vector=vector,
+    )
+
+
+@pytest.mark.postgres
+async def test_text_query_retrieves_image_with_explicit_cross_trunk_source(clean_memory_graph):
+    _store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "query-a")
+    await _register(memory, "evidence-b")
+    query_source = await _unit_values(
+        payloads,
+        source_suffix="query-a",
+        unit_suffix="query-text",
+    )
+    evidence_source = await _unit_values(
+        payloads,
+        source_suffix="evidence-b",
+        unit_suffix="evidence-image",
+        mixed=True,
+    )
+    query_batch = await _capture_and_qualify(
+        memory, payloads, batches, query_source, suffix="query-text"
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, evidence_source, suffix="evidence-image"
+    )
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    documents = await retrieval.prepare_source_facets(
+        operation_id="facets/evidence-image",
+        source_unit_id="unit/evidence-image",
+        expected_deletion_epoch=0,
+    )
+    query = await retrieval.register_query(
+        operation_id="query/register/text-image",
+        query_id="query/text-image",
+        current_source_id="source/group/query-a",
+        input_batch_ref=query_batch,
+        context_revision=1,
+        parts=(
+            RetrievalQueryPart(
+                "unit/query-text",
+                1,
+                query_source["occurrence"].occurrence_id,
+                "part/text",
+            ),
+        ),
+        expected_deletion_epoch=0,
+    )
+    for facet in documents["facets"]:
+        await _embed(
+            payloads,
+            retrieval,
+            facet,
+            _vector(0 if facet["modality"] == "IMAGE" else 1),
+            suffix="document-" + facet["modality"].lower(),
+        )
+    await _embed(payloads, retrieval, query["facets"][0], _vector(0), suffix="query-text")
+
+    bundle = await retrieval.freeze_bundle(
+        operation_id="bundle/freeze/text-image",
+        bundle_id="bundle/text-image",
+        query_id="query/text-image",
+        expected_deletion_epoch=0,
+    )
+    assert bundle["query_mode"] == "TEXT"
+    assert len(bundle["evidence"]) == 1
+    evidence = bundle["evidence"][0]
+    assert evidence["external_group_id"] == "group-evidence-b"
+    assert evidence["trunk_id"] == "trunk/evidence-b"
+    assert evidence["author_subject_ref"] == "principal/evidence-image"
+    assert evidence["is_current_group"] is False
+    assert [part["part_kind"] for part in evidence["parts"]] == ["TEXT", "IMAGE"]
+    assert evidence["matches"][0]["query_modality"] == "TEXT"
+    assert evidence["matches"][0]["document_modality"] == "IMAGE"
+
+
+@pytest.mark.postgres
+async def test_mixed_query_waits_for_image_and_freezes_late_index_results(clean_memory_graph):
+    _store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    for suffix in ("query", "first", "late"):
+        await _register(memory, suffix)
+    query_source = await _unit_values(
+        payloads,
+        source_suffix="query",
+        unit_suffix="mixed-query",
+        mixed=True,
+    )
+    first_source = await _unit_values(
+        payloads,
+        source_suffix="first",
+        unit_suffix="first-text",
+    )
+    late_source = await _unit_values(
+        payloads,
+        source_suffix="late",
+        unit_suffix="late-text",
+    )
+    query_batch = await _capture_and_qualify(
+        memory, payloads, batches, query_source, suffix="mixed-query"
+    )
+    await _capture_and_qualify(memory, payloads, batches, first_source, suffix="first-text")
+    await _capture_and_qualify(memory, payloads, batches, late_source, suffix="late-text")
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    first = await retrieval.prepare_source_facets(
+        operation_id="facets/first", source_unit_id="unit/first-text", expected_deletion_epoch=0
+    )
+    late = await retrieval.prepare_source_facets(
+        operation_id="facets/late", source_unit_id="unit/late-text", expected_deletion_epoch=0
+    )
+    query = await retrieval.register_query(
+        operation_id="query/register/mixed",
+        query_id="query/mixed",
+        current_source_id="source/group/query",
+        input_batch_ref=query_batch,
+        context_revision=1,
+        parts=(
+            RetrievalQueryPart(
+                "unit/mixed-query", 1, query_source["occurrence"].occurrence_id, "part/text"
+            ),
+            RetrievalQueryPart(
+                "unit/mixed-query", 1, query_source["occurrence"].occurrence_id, "part/image"
+            ),
+        ),
+        expected_deletion_epoch=0,
+    )
+    await _embed(payloads, retrieval, first["facets"][0], _vector(0), suffix="first")
+    query_by_modality = {facet["modality"]: facet for facet in query["facets"]}
+    await _embed(
+        payloads, retrieval, query_by_modality["TEXT"], _vector(1), suffix="mixed-query-text"
+    )
+    with pytest.raises(ForestError) as caught:
+        await retrieval.freeze_bundle(
+            operation_id="bundle/freeze/mixed",
+            bundle_id="bundle/mixed",
+            query_id="query/mixed",
+            expected_deletion_epoch=0,
+        )
+    assert caught.value.code == "MEMORY_QUERY_NOT_READY"
+    await _embed(
+        payloads, retrieval, query_by_modality["IMAGE"], _vector(0), suffix="mixed-query-image"
+    )
+    bundle = await retrieval.freeze_bundle(
+        operation_id="bundle/freeze/mixed",
+        bundle_id="bundle/mixed",
+        query_id="query/mixed",
+        expected_deletion_epoch=0,
+    )
+    assert bundle["query_mode"] == "MIXED"
+    assert bundle["evidence"][0]["source_unit_id"] == "unit/first-text"
+    assert any(
+        match["query_modality"] == "IMAGE" and match["document_modality"] == "TEXT"
+        for match in bundle["evidence"][0]["matches"]
+    )
+
+    await _embed(payloads, retrieval, late["facets"][0], _vector(0), suffix="late")
+    replay = await retrieval.freeze_bundle(
+        operation_id="bundle/freeze/mixed",
+        bundle_id="bundle/mixed",
+        query_id="query/mixed",
+        expected_deletion_epoch=0,
+    )
+    assert [item["source_unit_id"] for item in replay["evidence"]] == ["unit/first-text"]
+
+
+@pytest.mark.postgres
+async def test_forget_revokes_bundle_and_scrubs_derived_vectors(clean_memory_graph):
+    store, _storage, payloads, memory, forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "query")
+    await _register(memory, "evidence")
+    query_source = await _unit_values(
+        payloads, source_suffix="query", unit_suffix="forget-query"
+    )
+    evidence_source = await _unit_values(
+        payloads, source_suffix="evidence", unit_suffix="forget-evidence"
+    )
+    query_batch = await _capture_and_qualify(
+        memory, payloads, batches, query_source, suffix="forget-query"
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, evidence_source, suffix="forget-evidence"
+    )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    document = await retrieval.prepare_source_facets(
+        operation_id="facets/forget-evidence",
+        source_unit_id="unit/forget-evidence",
+        expected_deletion_epoch=0,
+    )
+    query = await retrieval.register_query(
+        operation_id="query/register/forget",
+        query_id="query/forget",
+        current_source_id="source/group/query",
+        input_batch_ref=query_batch,
+        context_revision=1,
+        parts=(
+            RetrievalQueryPart(
+                "unit/forget-query",
+                1,
+                query_source["occurrence"].occurrence_id,
+                "part/text",
+            ),
+        ),
+        expected_deletion_epoch=0,
+    )
+    document_attempt = await _embed(
+        payloads, retrieval, document["facets"][0], _vector(0), suffix="forget-doc"
+    )
+    await _embed(payloads, retrieval, query["facets"][0], _vector(0), suffix="forget-query")
+    await retrieval.freeze_bundle(
+        operation_id="bundle/freeze/forget",
+        bundle_id="bundle/forget",
+        query_id="query/forget",
+        expected_deletion_epoch=0,
+    )
+    await forget.apply(
+        operation_id="forget/retrieval/evidence",
+        source_unit_ids=("unit/forget-evidence",),
+        expected_deletion_epoch=0,
+        reason_code="ADMIN_REQUEST",
+    )
+    with pytest.raises(ForestError) as caught:
+        await retrieval.read_bundle("bundle/forget", expected_deletion_epoch=1)
+    assert caught.value.code == "MEMORY_EVIDENCE_REVOKED"
+    async with store.pool.connection() as conn:
+        facet = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,vector,result_payload_id FROM {}.embedding_facets "
+                    "WHERE bot_id=%s AND source_unit_id=%s"
+                ).format(sql.Identifier(memory.namespace)),
+                (store.bot_id, "unit/forget-evidence"),
+            )
+        ).fetchone()
+    assert facet["state"] == "SUPPRESSED"
+    assert facet["vector"] is None
+    assert facet["result_payload_id"] is None
+    async with store.pool.connection() as conn, conn.transaction():
+        with pytest.raises(ForestError) as caught:
+            await payloads.read_bytes_in(
+                conn,
+                document_attempt["result_payload_id"],
+                expected_deletion_epoch=1,
+            )
+    assert caught.value.code == "PAYLOAD_REVOKED"
+
+
+@pytest.mark.postgres
+async def test_embedding_attempt_replays_converge_without_duplicate_dispatch(clean_memory_graph):
+    _store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "converge")
+    source = await _unit_values(
+        payloads, source_suffix="converge", unit_suffix="converge"
+    )
+    await _capture_and_qualify(memory, payloads, batches, source, suffix="converge")
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    first, replay = await asyncio.gather(
+        retrieval.prepare_source_facets(
+            operation_id="facets/converge",
+            source_unit_id="unit/converge",
+            expected_deletion_epoch=0,
+        ),
+        retrieval.prepare_source_facets(
+            operation_id="facets/converge",
+            source_unit_id="unit/converge",
+            expected_deletion_epoch=0,
+        ),
+    )
+    assert {first["duplicate"], replay["duplicate"]} == {False, True}
+    facet = first["facets"][0]
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=2)
+
+    async def prepare_same():
+        return await retrieval.prepare_attempt(
+            operation_id="embedding/prepare/converge",
+            attempt_id="embedding/attempt/converge",
+            facet_id=facet["facet_id"],
+            executor_component_id="embedding.qiyu-vl",
+            executor_generation_id="generation/qiyu-vl/1",
+            route_revision="route/qiyu-vl/1",
+            deadline_at=deadline,
+        )
+
+    permits = await asyncio.gather(prepare_same(), prepare_same())
+    assert permits[0] == permits[1]
+    handoffs = await asyncio.gather(
+        retrieval.mark_handoff(
+            permits[0], handoff_operation_id="embedding/handoff/converge"
+        ),
+        retrieval.mark_handoff(
+            permits[1], handoff_operation_id="embedding/handoff/converge"
+        ),
+    )
+    assert {row["state"] for row in handoffs} == {"DISPATCHED"}
+    with pytest.raises(ForestError) as caught:
+        await retrieval.prepare_attempt(
+            operation_id="embedding/prepare/converge/second",
+            attempt_id="embedding/attempt/converge/second",
+            facet_id=facet["facet_id"],
+            executor_component_id="embedding.qiyu-vl",
+            executor_generation_id="generation/qiyu-vl/1",
+            route_revision="route/qiyu-vl/1",
+            deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+        )
+    assert caught.value.code == "MEMORY_FACET_NOT_DISPATCHABLE"
