@@ -73,6 +73,7 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 | `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
 | `conversation.scheduler` | `trigger_requeues / trigger_requeue_items` | Worker/Run 明确失效后的幂等重排事实及逐 trigger 成员；不能靠 `context_applied_seq` 猜测触发已经完成 |
 | `conversation.scheduler` | `context_units` | 输入及其他模块已提交事实的有序 PayloadRef；保存来源、作者、所属批次和 `commit_seq/unit_index`，不复制正文 |
+| `conversation.scheduler` | `context_append_operations` | Agent/控制模块追加闭合步骤或最终回复的幂等回执；固定 Context revision、unit 集及可选回复引用 |
 | `conversation.scheduler` | `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
 | `agent.runtime` | `conversation_sessions` | `session_id, conversation_id, status, active_run_id, session_epoch`；承载同群持续工作期间的 Agent 逻辑独占 |
 | `agent.runtime` | `runs / run_inputs` | Run 生命周期及追加的 InputBatch 引用；新增批次不覆盖早期输入 |
@@ -108,6 +109,8 @@ PENDING ------------> FAILED / CANCELLED
 ```
 
 `CLAIMED` 只说明某个会话执行承诺处理该触发；模型启动、一次工具调用结束、输入被裁剪或 Agent 已阅读，都不等于 `ANSWERED`。最终回复事务把实际纳入该回答输入、归属于该 Run 的触发关联到回复意图并标记 `ANSWERED`。该状态表示回复事实已提交，平台是否送达另查 Delivery；它不声称模型回答的内容质量已经得到证明。
+
+最终回复必须经调度器的 Context 追加端口提交：同一事务写 `context_append_operations`、不可变 `REPLY` Context unit，并把明确列出的、仍由该 Session/Run 领取的 trigger 转为 `ANSWERED`。禁止提供一个能绕过回复 Context 单独“批量回答 trigger”的公开端口。闭合的非最终 Agent 步骤也通过同一追加端口写 `AGENT_STEP`，但不终结 trigger。
 
 同一批次可以领取多个触发并产生一次连贯回复，不要求每条触发独立启动 Run 或独立发一条消息。每条触发仍保留自己的用户、来源、取消/失败结果及回复关联。新近入队、尚未出现在该模型输入中的触发不能被顺手标为已回答。
 

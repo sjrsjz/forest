@@ -40,7 +40,9 @@ Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot �
 
 `kernel.effect` 只负责不可撤回外部副作用的通用派发边界。Delivery 仍拥有 SendIntent、群聊顺序、Binding 和平台回执语义；Agent 仍拥有 ToolCall、工具 schema 与 Run 续调；模型 Provider 仍拥有请求投影、用量和 fallback。它们以稳定 `effect_operation_id`、精确目标、语义输入摘要和受管 payload 引用请求 Effect Gateway，不得把自己的业务状态机搬入内核效果表。效果记录不得出现 `tool_id`、`intent_id`、`binding_id`、群号、Provider 名称或 OneBot action 等业务字段。
 
-`conversation.scheduler` 的干净 bundle 物理拥有 `conversation_lanes`、`inbox_messages`、`conversation_triggers`、`selection_operations`、`input_batches`、`input_batch_events`、`input_batch_triggers`、`trigger_requeues`、`trigger_requeue_items`、`context_units` 与 `context_compactions`。它只对 `forest_kernel.bot_identity` 建立 bootstrap 外键；对 Adapter event、Payload、Agent Session/Run、Delivery reply 和业务路由结果一律保存稳定引用及必要摘要，并通过对应端口复核。正文、作者快照和结构化分类依据只存在于 `kernel.payload`，调度器表不得出现任意 JSONB 正文列。
+`conversation.scheduler` 的干净 bundle 物理拥有 `conversation_lanes`、`inbox_messages`、`conversation_triggers`、`selection_operations`、`input_batches`、`input_batch_events`、`input_batch_triggers`、`trigger_requeues`、`trigger_requeue_items`、`context_units`、`context_append_operations` 与 `context_compactions`。它只对 `forest_kernel.bot_identity` 建立 bootstrap 外键；对 Adapter event、Payload、Agent Session/Run、Delivery reply 和业务路由结果一律保存稳定引用及必要摘要，并通过对应端口复核。正文、作者快照和结构化分类依据只存在于 `kernel.payload`，调度器表不得出现任意 JSONB 正文列。
+
+非输入 Context 单元只能通过幂等追加 operation 写入。最终 `REPLY` 单元与其回答的 trigger 状态必须在同一调度器事务提交；不存在绕过 Context 单独把 trigger 标为 `ANSWERED` 的 Repository 方法。Delivery 仍只接收 reply/send-intent 引用并独立记录外部送达，不能反向改写 Context 或 trigger。
 
 该 bundle 不拥有 `conversation_sessions`、`runs`、`model_turns`、`tool_calls`、`business_command_requests`、`message_handler_chains` 或平台 Binding。一个 Conversation 的 `active_session_ref/active_run_ref` 只是串行调度 fence 的外部身份，不是对 Agent schema 的 SQL 外键。输入批次成员必须使用规范化关系表，不能把 event/trigger ID 数组藏进 JSON。所有已接纳且允许读取的消息都先占用不可变 `ingress_seq`；分类可以乱序完成，但 `classified_through_seq` 只跨越连续终态前缀。
 
