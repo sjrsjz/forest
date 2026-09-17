@@ -57,6 +57,8 @@ CREATE TABLE tickets (
     action text NOT NULL CHECK (octet_length(action) BETWEEN 1 AND 200),
     resource_kind text NOT NULL CHECK (octet_length(resource_kind) BETWEEN 1 AND 64),
     resource_id text NOT NULL CHECK (octet_length(resource_id) BETWEEN 1 AND 512),
+    issuance_operation_id text NOT NULL
+        CHECK (octet_length(issuance_operation_id) BETWEEN 1 AND 256),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     plan_digest text,
@@ -66,7 +68,7 @@ CREATE TABLE tickets (
     issued_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     expires_at timestamptz NOT NULL,
     PRIMARY KEY (bot_id, ticket_id),
-    UNIQUE (bot_id, operation_id),
+    UNIQUE (bot_id, issuance_operation_id),
     FOREIGN KEY (bot_id, grant_set_id)
         REFERENCES grant_sets(bot_id, grant_set_id),
     CHECK ((audience_component_id IS NULL) = (audience_generation_id IS NULL)),

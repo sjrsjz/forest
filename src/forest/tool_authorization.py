@@ -50,6 +50,7 @@ class KernelToolAuthorizationPort:
         request: ToolAuthorizationRequest,
         *,
         ticket_id: str,
+        issuance_operation_id: str,
         approval_id: str | None,
     ) -> dict:
         existing = await self._existing(ticket_id)
@@ -84,6 +85,7 @@ class KernelToolAuthorizationPort:
             resource_kind="bot",
             resource_id=self.authority.store.bot_id,
             operation_id=request.effect_operation_ref,
+            issuance_operation_id=issuance_operation_id,
             input_digest=request.input_digest,
             plan_digest=request.binding_digest,
             grant_set=self.agent_grants,
@@ -120,7 +122,6 @@ class KernelToolAuthorizationPort:
             )
         if request.producer_component_id != "agent.runtime":
             return ToolAuthorizationResult("DENIED", error_code="TOOL_PRODUCER_DENIED")
-        ticket_id = _stable_id("ticket:agent-tool", request.tool_call_id)
         approval_id = None
         if approval_required:
             approval_id = _stable_id("approval:agent-tool", request.tool_call_id)
@@ -152,10 +153,25 @@ class KernelToolAuthorizationPort:
                     error_code="TOOL_APPROVAL_REJECTED",
                 )
 
+        tickets = await self.authority.tickets_for_operation(request.effect_operation_ref)
+        now = datetime.now(timezone.utc)
+        reusable = [ticket for ticket in tickets if ticket["expires_at"] > now]
+        if reusable:
+            ticket_id = reusable[-1]["ticket_id"]
+            issuance_operation_id = reusable[-1]["issuance_operation_id"]
+        else:
+            attempt_no = len(tickets) + 1
+            ticket_id = _stable_id(
+                "ticket:agent-tool", f"{request.tool_call_id}:{attempt_no}"
+            )
+            issuance_operation_id = _stable_id(
+                "ticket-issue:agent-tool", f"{request.tool_call_id}:{attempt_no}"
+            )
         try:
             ticket = await self._issue(
                 request,
                 ticket_id=ticket_id,
+                issuance_operation_id=issuance_operation_id,
                 approval_id=approval_id,
             )
         except ForestError as exc:

@@ -85,6 +85,16 @@ class KernelAuthorizationRepository:
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
 
+    async def _operation_lock_in(self, conn, operation_id: str) -> None:
+        digest = hashlib.sha256(
+            b"forest.authorization.operation/1\0"
+            + self.store.bot_id.encode("utf-8")
+            + b"\0"
+            + operation_id.encode("utf-8")
+        ).digest()
+        key = int.from_bytes(digest[:8], "big", signed=True)
+        await conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+
     async def _clock_in(self, conn, *, expected=None, update=False) -> int:
         row = await (
             await conn.execute(
@@ -261,6 +271,7 @@ class KernelAuthorizationRepository:
         resource_kind: str,
         resource_id: str,
         operation_id: str,
+        issuance_operation_id: str | None = None,
         input_digest: str,
         plan_digest: str | None,
         grant_set: GrantSetRef,
@@ -280,6 +291,8 @@ class KernelAuthorizationRepository:
             ("operation_id", operation_id, 256),
         ):
             _bounded(value, field, limit)
+        issuance_operation_id = issuance_operation_id or operation_id
+        _bounded(issuance_operation_id, "issuance_operation_id", 256)
         _validated_digest(input_digest, "input_digest")
         _validated_digest(plan_digest, "plan_digest", optional=True)
         if (audience_component_id is None) != (audience_generation_id is None):
@@ -292,13 +305,14 @@ class KernelAuthorizationRepository:
             await conn.execute(
                 sql.SQL(
                     "SELECT * FROM {} WHERE bot_id=%s AND "
-                    "(ticket_id=%s OR operation_id=%s)"
+                    "(ticket_id=%s OR issuance_operation_id=%s)"
                 ).format(self._table("tickets")),
-                (self.store.bot_id, ticket_id, operation_id),
+                (self.store.bot_id, ticket_id, issuance_operation_id),
             )
         ).fetchone()
         replay_expected = {
             "ticket_id": ticket_id,
+            "issuance_operation_id": issuance_operation_id,
             "operation_id": operation_id,
             "issuer_kind": issuer_kind,
             "issuer_id": issuer_id,
@@ -377,8 +391,8 @@ class KernelAuthorizationRepository:
             sql.SQL(
                 "INSERT INTO {}(bot_id,ticket_id,issuer_kind,issuer_id,subject_kind,subject_id,"
                 "audience_component_id,audience_generation_id,action,resource_kind,resource_id,operation_id,input_digest,plan_digest,"
-                "grant_set_id,grant_set_digest,policy_revision,expires_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "issuance_operation_id,grant_set_id,grant_set_digest,policy_revision,expires_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT DO NOTHING"
             ).format(self._table("tickets")),
             (
@@ -396,6 +410,7 @@ class KernelAuthorizationRepository:
                 operation_id,
                 input_digest,
                 plan_digest,
+                issuance_operation_id,
                 grant_set.grant_set_id,
                 grant_set.grant_set_digest,
                 revision,
@@ -412,6 +427,7 @@ class KernelAuthorizationRepository:
         ).fetchone()
         expected = {
             "operation_id": operation_id,
+            "issuance_operation_id": issuance_operation_id,
             "issuer_kind": issuer_kind,
             "issuer_id": issuer_id,
             "subject_kind": subject_kind,
@@ -451,6 +467,20 @@ class KernelAuthorizationRepository:
             raise ForestError("TICKET_NOT_FOUND", "Authorization ticket is unavailable", 404)
         return dict(row)
 
+    async def tickets_for_operation(self, operation_id: str) -> list[dict]:
+        _bounded(operation_id, "operation_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s "
+                        "ORDER BY issued_at,ticket_id"
+                    ).format(self._table("tickets")),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     async def consume_ticket_in(
         self,
         conn,
@@ -479,12 +509,14 @@ class KernelAuthorizationRepository:
         _bounded(audience_generation_id, "audience_generation_id", 256, optional=True)
         _validated_digest(input_digest, "input_digest")
         _validated_digest(plan_digest, "plan_digest", optional=True)
+        await self._operation_lock_in(conn, operation_id)
         existing = await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND ticket_id=%s").format(
-                    self._table("ticket_consumptions")
-                ),
-                (self.store.bot_id, ticket_id),
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND "
+                    "(ticket_id=%s OR operation_id=%s)"
+                ).format(self._table("ticket_consumptions")),
+                (self.store.bot_id, ticket_id, operation_id),
             )
         ).fetchone()
         expected = {
@@ -498,7 +530,9 @@ class KernelAuthorizationRepository:
             "plan_digest": plan_digest,
         }
         if existing is not None:
-            if any(existing[key] != value for key, value in expected.items()):
+            if existing["ticket_id"] != ticket_id or any(
+                existing[key] != value for key, value in expected.items()
+            ):
                 raise ForestError("TICKET_CONSUMPTION_CONFLICT", "Ticket replay differs", 409)
             return dict(existing)
         ticket = await (
@@ -513,14 +547,17 @@ class KernelAuthorizationRepository:
             raise ForestError("TICKET_NOT_FOUND", "Authorization ticket is unavailable", 404)
         existing = await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND ticket_id=%s").format(
-                    self._table("ticket_consumptions")
-                ),
-                (self.store.bot_id, ticket_id),
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND "
+                    "(ticket_id=%s OR operation_id=%s)"
+                ).format(self._table("ticket_consumptions")),
+                (self.store.bot_id, ticket_id, operation_id),
             )
         ).fetchone()
         if existing is not None:
-            if any(existing[key] != value for key, value in expected.items()):
+            if existing["ticket_id"] != ticket_id or any(
+                existing[key] != value for key, value in expected.items()
+            ):
                 raise ForestError("TICKET_CONSUMPTION_CONFLICT", "Ticket replay differs", 409)
             return dict(existing)
         revision = await self._clock_in(conn, expected=ticket["policy_revision"])

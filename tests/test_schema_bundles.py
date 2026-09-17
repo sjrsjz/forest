@@ -1412,6 +1412,98 @@ async def test_kernel_authorization_delegates_only_explicit_capabilities_to_exac
         )
     assert caught.value.code == "CAPABILITY_DENIED"
 
+    port = KernelToolAuthorizationPort(
+        authority=authority,
+        agent_grants=delegated,
+        ticket_lifetime=timedelta(seconds=1),
+    )
+    request = ToolAuthorizationRequest(
+        tool_call_id="tool-call/renewable",
+        effect_operation_ref="effect/tool/renewable",
+        producer_component_id="agent.runtime",
+        producer_generation_id="generation/agent-one",
+        executor_component_id="tool.weather",
+        executor_generation_id="generation/weather-one",
+        service_id="weather.lookup",
+        binding_digest="sha256:" + "8" * 64,
+        authority_trigger_ref="trigger/renewable",
+        authority_principal_ref="qq/42",
+        arguments={"city": "Shijiazhuang"},
+        input_digest="sha256:" + "9" * 64,
+    )
+    first = await port.authorize(request, approval_required=False)
+    await asyncio.sleep(1.05)
+    renewed = await port.authorize(request, approval_required=False)
+    assert renewed.authorization_ticket_id != first.authorization_ticket_id
+    attempts = await authority.tickets_for_operation(request.effect_operation_ref)
+    assert len(attempts) == 2
+    assert len({row["issuance_operation_id"] for row in attempts}) == 2
+    await authority.consume_ticket(
+        ticket_id=renewed.authorization_ticket_id,
+        operation_id=request.effect_operation_ref,
+        action="tool.invoke",
+        resource_kind="bot",
+        resource_id=store.bot_id,
+        input_digest=request.input_digest,
+        plan_digest=request.binding_digest,
+        audience_component_id=request.executor_component_id,
+        audience_generation_id=request.executor_generation_id,
+    )
+
+    concurrent_expiry = datetime.now(timezone.utc) + timedelta(seconds=20)
+    concurrent_values = dict(
+        issuer_kind="agent.policy",
+        issuer_id="agent.runtime/tool-authorization",
+        subject_kind="component",
+        subject_id="agent.runtime",
+        action="tool.invoke",
+        resource_kind="bot",
+        resource_id=store.bot_id,
+        operation_id="effect/tool/concurrent-tickets",
+        input_digest=request.input_digest,
+        plan_digest=request.binding_digest,
+        grant_set=delegated,
+        expires_at=concurrent_expiry,
+        audience_component_id=request.executor_component_id,
+        audience_generation_id=request.executor_generation_id,
+    )
+    await asyncio.gather(
+        authority.issue_ticket(
+            ticket_id="ticket/tool/concurrent/one",
+            issuance_operation_id="ticket-issue/tool/concurrent/one",
+            **concurrent_values,
+        ),
+        authority.issue_ticket(
+            ticket_id="ticket/tool/concurrent/two",
+            issuance_operation_id="ticket-issue/tool/concurrent/two",
+            **concurrent_values,
+        ),
+    )
+
+    async def consume_concurrent(ticket_id):
+        try:
+            await authority.consume_ticket(
+                ticket_id=ticket_id,
+                operation_id=concurrent_values["operation_id"],
+                action="tool.invoke",
+                resource_kind="bot",
+                resource_id=store.bot_id,
+                input_digest=request.input_digest,
+                plan_digest=request.binding_digest,
+                audience_component_id=request.executor_component_id,
+                audience_generation_id=request.executor_generation_id,
+            )
+        except ForestError as exc:
+            return exc.code
+        return "accepted"
+
+    assert sorted(
+        await asyncio.gather(
+            consume_concurrent("ticket/tool/concurrent/one"),
+            consume_concurrent("ticket/tool/concurrent/two"),
+        )
+    ) == ["TICKET_CONSUMPTION_CONFLICT", "accepted"]
+
 
 @pytest.mark.postgres
 async def test_kernel_authorization_approval_requires_ticketed_decision_and_single_consumption(
