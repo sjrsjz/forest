@@ -19,8 +19,8 @@ function setBranding(displayName = 'Forest') {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'backups', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'host', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'host', 'backups', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
@@ -126,6 +126,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {});
   runtimeViews.reset();
   deploymentViews.reset();
+  hostViews.reset();
   backupsPanel.reset();
   selectedBot = null; selectionEpoch++;
   $('bot-detail').classList.add('hidden');
@@ -135,6 +136,7 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
 let selectedBot = null, selectionEpoch = 0;
 function sessionEnded(message) {
   deploymentViews.reset();
+  hostViews.reset();
   setIdentity(null); show('login'); notice(message, true);
 }
 const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
@@ -143,6 +145,11 @@ const deploymentViews = managementContributions({
   api, busy, notice, scopeKind: 'deployment', scopeIdentity: row => row.scope_id,
   nav: $('deployment-module-nav'), registry: $('deployment-module-registry'),
   root: $('deployment-module-views'), sessionEnded, setBranding, openScope,
+});
+const hostViews = managementContributions({
+  api, busy, notice, scopeKind: 'host', scopeIdentity: row => row.scope_id,
+  nav: $('host-module-nav'), registry: $('host-module-registry'),
+  root: $('host-module-views'), sessionEnded,
 });
 async function readDeploymentModules() {
   deploymentViews.reset();
@@ -159,6 +166,19 @@ async function readDeploymentModules() {
   deploymentViews.update(modules);
   await deploymentViews.select(scope);
 }
+async function readHostWorkspace() {
+  show('host'); hostViews.reset();
+  if (!currentUser?.host_id) { hostViews.update([]); return; }
+  const scope = {scope_kind:'host', scope_id:currentUser.host_id,
+    account_id:currentUser.account_id};
+  const result = await api(`/scopes/host/${encodeURIComponent(scope.scope_id)}/modules`);
+  const modules = currentUser.role === 'admin' ? (result.modules || [])
+    : (result.modules || []).filter(row =>
+      row.management_contract?.operations?.some(operation =>
+        operation.kind === 'query' && operation.principal !== 'admin'));
+  hostViews.update(modules);
+  await hostViews.select(scope);
+}
 
 // A Bot is a runtime scope. The deployment catalog only supplies its identity;
 // every runtime surface below is mounted from the selected Bot authority.
@@ -171,6 +191,7 @@ const runtimeViews = managementContributions({
 function invalidateControl(scope) {
   runtimeViews.invalidateContent(scope);
   deploymentViews.invalidateContent(scope);
+  hostViews.invalidateContent(scope);
 }
 function botStatus(state) {
   return ({ PENDING: '等待创建存储', PROVISIONING: '正在创建存储', READY: '存储就绪', FAILED: '创建未完成' })[state] || state;
@@ -204,6 +225,8 @@ async function openScope(target) {
 }
 $('nav-deployment').addEventListener('click', () =>
   busy($('nav-deployment'), readDeploymentWorkspace));
+$('nav-host').addEventListener('click', () =>
+  busy($('nav-host'), readHostWorkspace));
 $('nav-bots').addEventListener('click', () => show('bots'));
 $('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
   show('backups'); await backupsPanel.load();

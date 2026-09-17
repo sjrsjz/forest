@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
+from forest.management.host_modules import OFFICIAL_HOST_MODULES, HostModuleHost
 from forest.runtime_modules import (
     OFFICIAL_MODULES,
     ModuleLifecycleState,
@@ -24,6 +25,30 @@ def artifact(marker="0", scope="bot"):
         "tests.in-process/1",
         "installed",
     )
+
+
+@pytest.mark.asyncio
+async def test_host_runtime_registry_has_its_own_scope_and_contract():
+    host = HostModuleHost("host", "host-id", "incarnation", "deployment-id")
+    registry = RuntimeModuleRegistry(host, OFFICIAL_HOST_MODULES)
+    host.module_registry = registry
+    await registry.start()
+    try:
+        assert registry.scope_kind == "host"
+        assert registry.states["host.runtime"] == ModuleLifecycleState.ACTIVE
+        runtime = registry.get("host.runtime")
+        assert runtime.management_contract.describe()["operations"] == [
+            {
+                "operation_id": "runtime",
+                "kind": "query",
+                "authority": "host.runtime.read",
+            }
+        ]
+        contribution, = OFFICIAL_HOST_MODULES[0].management
+        assert contribution.scope_kinds == ("host",)
+        assert contribution.template == "/static/modules/host.runtime.html"
+    finally:
+        assert await registry.close() == []
 
 
 class Module:

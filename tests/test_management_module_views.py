@@ -72,6 +72,7 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     component_worker = (
         STATIC / "modules/component.worker-host.html"
     ).read_text(encoding="utf-8")
+    host_runtime = (STATIC / "modules/host.runtime.html").read_text(encoding="utf-8")
     deployment_audit = (STATIC / "modules/deployment.audit.html").read_text(encoding="utf-8")
     deployment_accounts = (STATIC / "modules/deployment.accounts.html").read_text(
         encoding="utf-8"
@@ -127,6 +128,11 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert "/bots/" not in kernel_runtime_controller
     assert 'id="component-worker-management"' in component_worker
     assert 'id="bot-config-form"' in component_worker
+    assert 'id="host-runtime-id"' in host_runtime
+    assert 'id="host-module-registry"' in (STATIC / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "host-runtime-id" in (STATIC / "host-runtime.js").read_text(encoding="utf-8")
     assert 'id="bot-package"' in component_worker
     assert 'id="bot-invoke-form"' in component_worker
     assert 'id="bot-history"' in component_worker

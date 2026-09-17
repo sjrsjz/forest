@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -36,6 +37,7 @@ from forest.management.deployment_modules import (
     DeploymentModuleHost,
 )
 from forest.management.fleet import BotFleet
+from forest.management.host_modules import OFFICIAL_HOST_MODULES, HostModuleHost
 from forest.management.module_api import (
     install_module_routes,
     management_scope_provider_registry,
@@ -189,6 +191,9 @@ class ManagementRuntime:
         self.service_errors: dict[str, str] = {}
         self.deployment_id: str | None = None
         self.deployment_modules: RuntimeModuleRegistry | None = None
+        self.host_id = self.bootstrap.host_identity()
+        self.host: HostModuleHost | None = None
+        self.host_modules: RuntimeModuleRegistry | None = None
         self.management_scope_providers = management_scope_provider_registry()
 
     async def connect(self, dsn: str, *, migrate: bool = True) -> PostgresStore:
@@ -245,6 +250,12 @@ class ManagementRuntime:
             backup_imports = BackupImportManager(
                 catalog, backups, restores, self.settings.data_dir
             )
+            host = HostModuleHost(
+                "host", self.host_id, str(uuid4()), plan["deployment_id"]
+            )
+            host_modules = RuntimeModuleRegistry(host, OFFICIAL_HOST_MODULES)
+            host.module_registry = host_modules
+            await host_modules.start()
             deployment_modules = RuntimeModuleRegistry(
                 DeploymentModuleHost(
                     "deployment",
@@ -262,6 +273,8 @@ class ManagementRuntime:
         except BaseException:
             if "deployment_modules" in locals():
                 await deployment_modules.close()
+            if "host_modules" in locals():
+                await host_modules.close()
             await candidate.close()
             raise
         await self.close_services()
@@ -277,6 +290,8 @@ class ManagementRuntime:
         self.backup_imports = backup_imports
         self.deployment_id = plan["deployment_id"]
         self.deployment_modules = deployment_modules
+        self.host = host
+        self.host_modules = host_modules
         self.provisioner = BotProvisioner(catalog)
         self.service_tasks = [
             asyncio.create_task(self.provisioner.run_forever(), name="bot-provisioning"),
@@ -296,6 +311,12 @@ class ManagementRuntime:
             errors = await deployment_modules.close()
             if errors:
                 self.service_errors["deployment-modules"] = "MODULE_CLEANUP_FAILED"
+        host_modules, self.host_modules = self.host_modules, None
+        self.host = None
+        if host_modules is not None:
+            errors = await host_modules.close()
+            if errors:
+                self.service_errors["host-modules"] = "MODULE_CLEANUP_FAILED"
         if self.provisioner is not None:
             await self.provisioner.close()
         if self.backups is not None:
@@ -591,9 +612,10 @@ def create_app(settings: WebSettings) -> FastAPI:
         config = await runtime.require_store().read_config("deployment")
         values = config["effective"]["values"] if config["effective"] else DEFAULT_VALUES
         return {"account_id": value["account_id"], "username": value["username"],
-                "role": value["role"], "can_write": value["role"] == "admin",
-                "deployment_id": runtime.deployment_id,
-                "display_name": values["display_name"]}
+                 "role": value["role"], "can_write": value["role"] == "admin",
+                 "deployment_id": runtime.deployment_id,
+                 "host_id": runtime.host_id,
+                 "display_name": values["display_name"]}
 
     @app.post("/management/v1/logout")
     async def logout(request: Request):

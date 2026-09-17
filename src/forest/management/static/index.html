@@ -9,7 +9,7 @@
   <main>
     <header><div><p class="eyebrow">FOREST / ADMINISTRATION</p><h1 id="page-title">管理后台</h1></div><div id="identity" class="hidden"><span id="username"></span><span id="role" class="role-badge"></span><button id="logout" class="subtle">退出登录</button></div></header>
     <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-    <nav id="main-nav" class="hidden actions" aria-label="管理页面"><button id="nav-deployment" class="subtle">部署</button><button id="nav-bots" class="subtle">运行实例与模块</button><button id="nav-backups" class="subtle">存储与备份</button></nav>
+    <nav id="main-nav" class="hidden actions" aria-label="管理作用域"><button id="nav-deployment" class="subtle">部署</button><button id="nav-host" class="subtle">当前宿主</button><button id="nav-bots" class="subtle">运行实例与模块</button><button id="nav-backups" class="subtle">存储与备份</button></nav>
     <section id="loading"><p>正在连接管理服务…</p></section>
     <section id="setup" class="hidden card narrow">
       <p class="eyebrow">WELCOME</p><h2>建立你的 Forest</h2><p class="muted">设置管理账号与部署数据库，然后创建各自独立的 Bot。</p>
@@ -29,6 +29,9 @@
     </section>
     <section id="configuration" class="hidden">
       <div class="card"><h2>部署服务</h2><div id="deployment-module-registry" class="module-registry-list"></div><nav id="deployment-module-nav" class="module-surface-nav" aria-label="部署服务模块"></nav><div id="deployment-module-views" class="management-contribution-views"></div></div>
+    </section>
+    <section id="host" class="hidden">
+      <div class="card"><h2>宿主服务</h2><div id="host-module-registry" class="module-registry-list"></div><nav id="host-module-nav" class="module-surface-nav" aria-label="宿主服务模块"></nav><div id="host-module-views" class="management-contribution-views"></div></div>
     </section>
     <section id="backups" class="hidden">
       <div class="columns"><div class="card"><h2>创建加密备份</h2>

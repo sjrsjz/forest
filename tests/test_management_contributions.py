@@ -18,6 +18,33 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
     settings = WebSettings(state, ORIGIN, managed_dsn=web_bots_database)
     async with running(settings) as (_, client):
         await setup(client, token)
+        session = (await client.get("/management/v1/session")).json()
+        host_id = session["host_id"]
+        host_response = await client.get(
+            f"/management/v1/scopes/host/{host_id}/modules"
+        )
+        assert host_response.status_code == 200, host_response.text
+        host_projection = host_response.json()
+        assert host_projection["scope"] == {"kind": "host", "id": host_id}
+        host_modules = {
+            row["component_id"]: row for row in host_projection["modules"]
+        }
+        host_runtime = host_modules["host.runtime"]
+        assert host_runtime["artifact"]["scope"] == "host"
+        contribution, = host_runtime["management_contributions"]
+        assert contribution["surface"]["template"] == "/static/modules/host.runtime.html"
+        assert contribution["surface"]["module"] == "/static/host-runtime.js"
+        runtime_response = await client.get(
+            f"/management/v1/scopes/host/{host_id}/modules/host.runtime/queries/runtime"
+        )
+        assert runtime_response.status_code == 200, runtime_response.text
+        runtime_state = runtime_response.json()
+        assert runtime_state["host_id"] == host_id
+        assert runtime_state["deployment_id"] == session["deployment_id"]
+        assert runtime_state["incarnation"] != host_id
+        assert (
+            await client.get("/management/v1/scopes/host/not-this-host/modules")
+        ).status_code == 404
         bot = await post(client, "/management/v1/bots", {"display_name": "Scope"}, "bot", status=202)
         await ready(client, bot)
 

@@ -17,7 +17,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
@@ -144,6 +144,16 @@ class BootstrapState:
                 "VALUES (1,0,NULL)"
             )
             connection.execute("""
+                CREATE TABLE IF NOT EXISTS host_identity (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    host_id TEXT NOT NULL UNIQUE
+                )
+            """)
+            connection.execute(
+                "INSERT OR IGNORE INTO host_identity(singleton,host_id) VALUES (1,?)",
+                (str(uuid4()),),
+            )
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS deployment_recovery_plans (
                     recovery_id TEXT PRIMARY KEY,
                     expected_head_revision INTEGER NOT NULL CHECK (expected_head_revision >= 0),
@@ -194,6 +204,21 @@ class BootstrapState:
                 ),
             )
         return token
+
+    def host_identity(self) -> str:
+        """Return the stable identity of this local Forest host."""
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT host_id FROM host_identity WHERE singleton=1"
+            ).fetchone()
+            if row is None:
+                raise ForestError("HOST_IDENTITY_UNAVAILABLE", "Host identity is unavailable", 503)
+            try:
+                return str(UUID(row["host_id"]))
+            except (TypeError, ValueError, AttributeError):
+                raise ForestError(
+                    "HOST_IDENTITY_INVALID", "Host identity failed integrity checks", 503
+                ) from None
 
     def rotate_setup_token(self) -> str:
         """Local operator recovery only; never expose as an unauthenticated API."""

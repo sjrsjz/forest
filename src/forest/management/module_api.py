@@ -238,9 +238,41 @@ class DeploymentManagementScopeProvider:
         return {}
 
 
+class HostManagementScopeProvider:
+    kind = "host"
+
+    async def resolve(self, runtime, who, scope_id):
+        host = runtime.host
+        if (
+            host is None
+            or runtime.host_modules is None
+            or runtime.host_id is None
+            or scope_id != runtime.host_id
+        ):
+            raise ForestError(
+                "MANAGEMENT_SCOPE_NOT_FOUND",
+                "The requested management scope is unavailable",
+                404,
+            )
+        return ScopeTarget(self.kind, host.scope_id, host, runtime.host_modules, self)
+
+    async def issue(self, runtime, target, who, authority, operation_id, payload):
+        # Host operations bind to the stable host scope and the current process
+        # incarnation. Repositories that mutate physical resources must recheck
+        # both values before committing an effect.
+        return {
+            "claims": {
+                "host_id": target.identity,
+                "host_incarnation": target.resource.incarnation,
+                "subject_id": who["subject_id"],
+            }
+        }
+
+
 OFFICIAL_MANAGEMENT_SCOPE_PROVIDERS: tuple[ManagementScopeProvider, ...] = (
     BotManagementScopeProvider(),
     DeploymentManagementScopeProvider(),
+    HostManagementScopeProvider(),
 )
 
 

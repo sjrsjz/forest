@@ -4,6 +4,7 @@ import json
 import multiprocessing
 import sqlite3
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -12,6 +13,13 @@ from forest.errors import ForestError
 from forest.security import hash_password
 
 DSN = "postgresql://forest:synthetic-db-password@localhost/forest"
+
+
+def test_host_identity_is_stable_across_bootstrap_reopen(tmp_path):
+    state = BootstrapState(tmp_path / "state")
+    host_id = state.host_identity()
+    assert str(UUID(host_id)) == host_id
+    assert BootstrapState(tmp_path / "state").host_identity() == host_id
 
 
 @pytest.fixture(scope="module")
