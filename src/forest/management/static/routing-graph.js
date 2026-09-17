@@ -1,12 +1,12 @@
 const $ = id => document.getElementById(id);
 
 export function createModulePanel(api, busy, notice) {
-  let bot = null, epoch = 0, snapshot = null, traces = [];
+  let bot = null, epoch = 0, snapshot = null, traces = [], traceQuery = null, nextBefore = null;
   const path = () => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/snapshot`;
   const operationPath = name => `/bots/${encodeURIComponent(bot.bot_id)}/runtime-modules/routing.graph/queries/${name}`;
 
   function reset() {
-    epoch++; bot = null; snapshot = null; traces = [];
+    epoch++; bot = null; snapshot = null; traces = []; traceQuery = null; nextBefore = null;
     $('bot-route-graph').classList.add('hidden');
     $('route-graph-summary').replaceChildren();
     $('route-graph-nodes').replaceChildren();
@@ -17,6 +17,7 @@ export function createModulePanel(api, busy, notice) {
     $('dispatch-trace-filter').elements.limit.value = '30';
     $('dispatch-trace-status').textContent = '';
     $('dispatch-traces').replaceChildren();
+    $('dispatch-trace-more').classList.add('hidden');
   }
 
   const text = value => value == null ? '—' : String(value);
@@ -100,22 +101,37 @@ export function createModulePanel(api, busy, notice) {
       return article;
     }));
     $('dispatch-trace-status').textContent = traces.length ? `显示 ${traces.length} 条消息执行记录。` : '没有符合条件的执行记录。';
+    $('dispatch-trace-more').classList.toggle('hidden', !nextBefore);
   }
 
-  async function queryTraces() {
+  async function queryTraces(append = false) {
     if (!bot) return;
-    const own = epoch, data = new FormData($('dispatch-trace-filter')), query = new URLSearchParams();
-    for (const [key, value] of data) if (String(value).trim()) query.set(key, String(value).trim());
+    const own = epoch;
+    let query;
+    if (append) {
+      if (!nextBefore || traceQuery == null) return;
+      query = new URLSearchParams(traceQuery);
+      query.set('before', nextBefore);
+    } else {
+      const data = new FormData($('dispatch-trace-filter'));
+      query = new URLSearchParams();
+      for (const [key, value] of data) if (String(value).trim()) query.set(key, String(value).trim());
+      traceQuery = query.toString();
+    }
     const result = await api(`${operationPath('dispatch-traces')}?${query}`);
     if (!bot || own !== epoch) return;
-    traces = result.traces || [];
+    traces = append ? traces.concat(result.traces || []) : (result.traces || []);
+    nextBefore = result.next_before || null;
     renderTraces();
   }
 
   $('route-graph-filter').addEventListener('input', render);
   $('route-graph-refresh').addEventListener('click', event => busy(event.currentTarget, refresh));
   $('dispatch-trace-filter').addEventListener('submit', event => {
-    event.preventDefault(); busy(event.submitter, queryTraces);
+    event.preventDefault(); busy(event.submitter, () => queryTraces(false));
+  });
+  $('dispatch-trace-more').addEventListener('click', event => {
+    busy(event.currentTarget, () => queryTraces(true));
   });
 
   async function select(row) {

@@ -1,13 +1,71 @@
 """Read-only dispatch traces projected from durable execution authorities."""
 
+import base64
+import binascii
+import json
+from datetime import datetime
+
+from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.storage.control import BotControl
 
 _MAX_CAUSAL_ENTRIES = 256
 _MAX_CAUSAL_HOPS = 8
+_TRACE_FILTER_FIELDS = (
+    "conversation_id", "binding_id", "channel_id", "event_id", "component_id",
+    "generation_id", "status", "received_after", "received_before",
+)
 
 
 def _iso(value):
     return value.isoformat() if value is not None else None
+
+
+def _trace_filters(payload):
+    return {key: payload[key] for key in _TRACE_FILTER_FIELDS if payload.get(key) is not None}
+
+
+def _trace_cursor(filters, row):
+    value = {
+        "v": 1,
+        "filters": digest_json(filters),
+        "received_at": row["received_at"].isoformat(),
+        "event_id": row["event_id"],
+    }
+    raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _read_trace_cursor(value, filters):
+    if value is None:
+        return None, None
+    try:
+        if (
+            not isinstance(value, str)
+            or not 1 <= len(value) <= 512
+            or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for char in value)
+        ):
+            raise ValueError
+        padded = value + "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode())
+        if (
+            set(decoded) != {"v", "filters", "received_at", "event_id"}
+            or decoded["v"] != 1
+            or decoded["filters"] != digest_json(filters)
+            or not isinstance(decoded["event_id"], str)
+            or not 1 <= len(decoded["event_id"]) <= 256
+        ):
+            raise ValueError
+        received_at = datetime.fromisoformat(decoded["received_at"])
+        if received_at.tzinfo is None:
+            raise ValueError
+    except (ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError, binascii.Error):
+        raise ForestError(
+            "DISPATCH_TRACE_CURSOR_INVALID",
+            "Dispatch trace cursor is invalid or belongs to different filters",
+            422,
+        ) from None
+    return received_at, decoded["event_id"]
 
 
 class DispatchTraceStore:
@@ -308,6 +366,8 @@ class DispatchTraceStore:
         status = payload.get("status")
         received_after = payload.get("received_after")
         received_before = payload.get("received_before")
+        before = payload.get("before")
+        filters = _trace_filters(payload)
         call_root = lambda alias: (  # noqa: E731
             f"(({alias}.causal_root_kind='BUSINESS_COMMAND_REQUEST' AND {alias}.causal_root_id=b.request_id) OR "
             f"({alias}.causal_root_kind='MESSAGE_HANDLER_CHAIN' AND {alias}.causal_root_id=h.chain_id) OR "
@@ -409,6 +469,7 @@ class DispatchTraceStore:
             extra_where = "AND " + " AND ".join(root_filters) + " "
         async with self.store.pool.connection() as conn, conn.transaction():
             claims = await self.control._guard(conn, ticket, "module.read", operation_id, payload)
+            before_at, before_event_id = _read_trace_cursor(before, filters)
             roots = await (
                 await conn.execute(
                     "SELECT i.event_id,i.conversation_id,c.binding_id,c.channel_id,i.ingress_seq,"
@@ -426,6 +487,8 @@ class DispatchTraceStore:
                     "AND (%s::text IS NULL OR i.event_id=%s) "
                     "AND (%s::timestamptz IS NULL OR i.received_at>=%s::timestamptz) "
                     "AND (%s::timestamptz IS NULL OR i.received_at<%s::timestamptz) "
+                    "AND (%s::timestamptz IS NULL OR "
+                    "(i.received_at,i.event_id)<(%s::timestamptz,%s)) "
                     + extra_where +
                     "ORDER BY i.received_at DESC,i.event_id DESC LIMIT %s",
                     (
@@ -436,11 +499,14 @@ class DispatchTraceStore:
                         event_id, event_id,
                         received_after, received_after,
                         received_before, received_before,
+                        before_at, before_at, before_event_id,
                         *root_filter_values,
-                        limit,
+                        limit + 1,
                     ),
                 )
             ).fetchall()
+            has_more = len(roots) > limit
+            roots = roots[:limit]
             event_ids = [row["event_id"] for row in roots]
             if not event_ids:
                 await self.control._time(conn, claims)
@@ -702,4 +768,6 @@ class DispatchTraceStore:
                 )
             traces = [trace for trace in traces if matches(trace)][:limit]
         result = {"filter": payload, "traces": traces}
+        if has_more and roots:
+            result["next_before"] = _trace_cursor(filters, roots[-1])
         return result

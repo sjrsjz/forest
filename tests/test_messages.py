@@ -167,6 +167,42 @@ async def test_ingress_freezes_content_addressed_route_graph_and_projects_dispat
     assert count["n"] == 1
 
 
+async def test_dispatch_trace_cursor_pages_exact_roots_and_is_bound_to_filters(messages):
+    repository, lease, _ = messages
+    accepted = [await receive(repository, lease, f"trace-page-{index}") for index in range(5)]
+    ticket = await signed_ticket_factory(repository.store)
+    traces = DispatchTraceStore(repository.store)
+
+    async def page(operation_id, payload):
+        return await traces.read(
+            await ticket("module.read", operation_id, payload), operation_id, payload
+        )
+
+    first_payload = {"channel_id": "group-1", "limit": 2}
+    first = await page("trace-page-first", first_payload)
+    assert [row["event_id"] for row in first["traces"]] == [
+        accepted[4]["event_id"], accepted[3]["event_id"]
+    ]
+    assert first["next_before"]
+
+    second_payload = {**first_payload, "before": first["next_before"]}
+    second = await page("trace-page-second", second_payload)
+    assert [row["event_id"] for row in second["traces"]] == [
+        accepted[2]["event_id"], accepted[1]["event_id"]
+    ]
+    assert second["next_before"]
+
+    third_payload = {**first_payload, "before": second["next_before"]}
+    third = await page("trace-page-third", third_payload)
+    assert [row["event_id"] for row in third["traces"]] == [accepted[0]["event_id"]]
+    assert "next_before" not in third
+
+    mismatched = {"channel_id": "group-2", "limit": 2, "before": first["next_before"]}
+    with pytest.raises(ForestError) as rejected:
+        await page("trace-page-filter-mismatch", mismatched)
+    assert rejected.value.code == "DISPATCH_TRACE_CURSOR_INVALID"
+
+
 async def test_dispatch_trace_keeps_frozen_native_generation_after_host_restart(messages):
     repository, first_lease, _ = messages
     store = repository.store

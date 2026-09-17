@@ -34,3 +34,4 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert ".memory-association" in memory_style
     assert ".route-graph-nodes" in routing_style
     assert ".dispatch-traces" in routing_style
+    assert 'id="dispatch-trace-more"' in routing

@@ -23,6 +23,7 @@ class DispatchTraceInput(BaseModel):
     status: str | None = Field(default=None, min_length=1, max_length=64)
     received_after: str | None = Field(default=None, min_length=1, max_length=64)
     received_before: str | None = Field(default=None, min_length=1, max_length=64)
+    before: str | None = Field(default=None, min_length=1, max_length=512, pattern=r"^[A-Za-z0-9_-]+$")
     limit: int = Field(default=50, ge=1, le=100)
 
     @field_validator(
