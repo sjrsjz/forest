@@ -1,40 +1,55 @@
-# 多 Bot、Agent 与记忆详细设计
+# Bot 作用域、Agent 模块与记忆契约
 
-## 1. Bot 实体与身份边界
+> 本文只定义 Bot 作用域事实以及 `agent.runtime`、`memory.graph` 等模块之间的公开契约。Bot 不是组合根，Agent 也不是框架主循环。实现状态仅见 [implementation-status.md](implementation-status.md)。
 
-Bot 是长期存在的逻辑主体，Agent 是为 Bot 工作的一次执行器。Bot 不等于 Python 实例、平台连接、群聊或单个 LLM 会话。
+## 1. Bot 作用域与身份边界
 
-```text
-BotEntity
-  bot_id                  稳定不可复用身份
-  display_name            可修改展示名
-  persona_profile_ref     人格/系统指令版本
-  model_profile_ref       模型、备用模型与预算策略
-  memory_store_profile_id 独立长期记忆存储配置
-  module_set_revision     安装/启用组件集合
-  policy_revision         当前权限和行为策略
-  config_revision         运行配置快照修订
-  status                  生命周期状态
-```
+Bot 是长期存在的身份、资源、授权、预算和数据作用域记录，不是 Python 对象聚合、平台连接、群聊或单个 LLM 会话。它不能拥有或构造 Agent、Memory、Adapter、Shell、Scheduler、Delivery 等具体运行对象；这些能力来自当前 RuntimeGraph 中可独立替换的模块 Generation。
+
+`agent.runtime` 是一种可安装、可卸载、可替换的业务模块。一次 Agent Run 在 Bot 作用域内执行，但 Agent 不代表 Bot 本身；没有 Agent 模块时，命令型或规则型 Bot 仍然成立。Conversation Scheduler 只通过版本化契约提交冻结的 Run 输入，Agent 不能扫描 Inbox、直接发消息或把下一次模型调用拆成另一个 Agent。
+
+同一个 `bot_id` 下的事实由准确 authority 分别拥有，不能重新压成 `BotEntity` 行或巨型配置文档：
+
+| Authority / 模块 | 独占事实 |
+|---|---|
+| `deployment.bot-catalog` | 稳定且不可复用的 `bot_id`、显示名、供应状态与目标存储引用 |
+| `kernel.runtime` | RuntimeGraph head、DATA/CONTROL admission、maintenance epoch 与运行状态 |
+| `kernel.authorization` | policy revision、主体、grant、撤权与准确 audience Generation |
+| 配额/预算模块 | 资源限额、消费账本与预算策略；若首版由 kernel 模块提供也保持独立契约 |
+| `agent.runtime` | PresetContext/persona revision、Session、Run、ModelTurn、ToolStep 与 checkpoint |
+| `provider.*` | 模型 endpoint、凭据引用、能力快照、请求与 attempt |
+| `memory.graph` / `embedding.*` | Bot 全局记忆域、群主干、MemoryStoreProfile 与冻结的嵌入空间身份 |
+| `adapter.*` | Binding、平台账号、连接代际与平台事件观察 |
+
+任一管理查询若需要“Bot 概览”，只能按已注册 query 合并这些带 owner/revision 的投影；该概览不是写入模型，也不能产生跨模块 `bot.save()`。
 
 `BotBinding` 包括平台、外部账号、adapter、凭据引用与启用状态。一个 Bot 可有多个账号/平台绑定；同一个 Bot 的各绑定读写同一个全局记忆域。默认一个外部账号只归一个 Bot，binding_id 固定归属原 Bot/账号。账号重新分配先撤销旧绑定、处理旧发送和关闭连接，再创建新的 binding_id，见[迁移与账号转移](05-storage-security-operations.md#25-存储迁移与账号转移)。
 
 用户身份使用 `(platform, external_user_id)`，需要跨平台关联时由身份模块保存可审计映射；不能按昵称自动合并，也不能让模型生成的“这就是某用户”成为可信身份关系。
 
-### 1.1 Bot 生命周期
+### 1.1 目录供应与运行准入
+
+`deployment.bot-catalog` 只描述作用域供应：
 
 ```text
-CREATED → PROVISIONING → READY → ONLINE
-                            ↗       ↓
-                         PAUSED ← PAUSING
-ONLINE / PAUSED → STOPPING → STOPPED
-STOPPED → PROVISIONING（重新启动）
-STOPPED → DELETING → DELETED
+RESERVED → PROVISIONING → READY
+    └──────── failure/retry ────────┘
+READY → DELETING → DELETED
 ```
 
-创建 Bot 必须先验证独立 MemoryStoreProfile 和必需模块，存储未就绪不能上线。普通暂停关闭 `data_admission`，停止创建新 Run 与业务任务，保留绑定接收、Inbox、持久 Job 记录以及 `control_admission`，因此管理员仍可在群里查询、取消或恢复。已运行工作按 pause 的类型化参数选择排空或取消，不能含糊地假定已停止。恢复按明确积压/过期策略消费，并使用最新 `maintenance_epoch`；旧重载不能覆盖新暂停。真正停止会排空组件并关闭连接，不删除记忆，也不保证该绑定仍能接收群管理命令。
+`kernel.runtime` 在 READY 作用域内独立描述运行图与准入：
 
-删除是独立管理工作流：先冻结接入、取消/对账执行、撤权、清理索引及媒体、执行存储保留政策，再标记 DELETED。bot_id 不再复用；备份恢复使用同一身份并通过 epoch 提升重新建立执行权。
+```text
+OFFLINE → STARTING → ONLINE → PAUSING → PAUSED
+   ↑                    └──── STOPPING ────┘
+   └───────────────────────────────┘
+```
+
+目录状态不能冒充 RuntimeGraph 已 ACTIVE，运行状态也不能重命名或删除目录身份。两条状态机通过稳定引用和类型化供应/启动操作协调，不共享一行 status，也不允许 WebUI 用一个“保存 Bot”事务同时覆盖所有模块。
+
+供应计划通过模块描述符验证所选模块、独立存储和必需依赖；Memory 不是内核强制模块，只有所选 RuntimeGraph 声明它为必需依赖时才阻止该图启动。普通暂停由 `kernel.runtime` 关闭 `data_admission`，停止创建新 Run 与业务任务，保留绑定接收、Inbox、持久 Job 记录以及 `control_admission`，因此管理员仍可在群里查询、取消或恢复。已运行工作按 pause 的类型化参数选择排空或取消，不能含糊地假定已停止。恢复按明确积压/过期策略消费，并使用最新 `maintenance_epoch`；旧重载不能覆盖新暂停。真正停止会反向排空 RuntimeGraph 并关闭其连接，不删除记忆，也不保证该 Binding 仍能接收群管理命令。
+
+删除是由 `deployment.bot-catalog` 发起的持久协调操作：依次请求 `kernel.runtime` 冻结接入，各 owner 取消或对账执行、撤权、清理索引及媒体并执行存储保留政策，最后由目录 authority 标记 DELETED。每个 participant 只改自己的 namespace；任一步失败都保留可恢复状态。`bot_id` 不再复用，备份恢复也不能复制出同时有效的相同身份。
 
 ## 2. 会话与工作上下文
 
@@ -60,7 +75,7 @@ flowchart LR
 
 ## 3. Agent 运行模型
 
-Agent 使用不可混合的三层输入：宿主内置且不可覆盖的 `ForestCorePrompt`、Bot 配置产生的不可裁剪 `PresetContext`、群会话的可裁剪 `ContextView`。CorePrompt 定义原子 ModelTurn、工具状态机、来源边界和多模态诚实性；人格、语气与 Bot 行为约束只进入 PresetContext。两者都不进入聊天历史或记忆。
+Agent 使用不可混合的三层输入：宿主内置且不可覆盖的 `ForestCorePrompt`、`agent.runtime` 配置产生的不可裁剪 `PresetContext`、群会话的可裁剪 `ContextView`。CorePrompt 定义原子 ModelTurn、工具状态机、来源边界和多模态诚实性；人格、语气与行为约束只进入 Agent 模块拥有的 PresetContext。两者都不进入聊天历史或记忆。
 
 模型每次只能返回一个完整 ModelTurn，内部按序包含 Thinking、Assistant 和至多一个最终 FunctionCall。Thinking 不直接发送到群；FunctionCall 后的模型文本不可信并被丢弃；真实 FunctionResponse 持久化后才允许下一次模型调用。终止 Assistant 出现前的 ModelTurn 保持在本 Run 的持久私有分支，不能启动第二个 Agent 解释它。
 
@@ -121,7 +136,7 @@ Provider 输出先按字节、事件数和 UTF-8 限制收敛，再由禁用 DTD
 
 ### 3.2 Run 输入与资源
 
-一次 Run 固定 `bot_id, conversation_id?, session_id?, ReplyRoute 的会话目标, config_revision, persona_revision, agent_contract, module_generation, budgets, service_principal_ref`。它的输入使用追加式 InputBatch，不再假定整个 Run 的 input_event_ids 从启动到结束永远不变；每批冻结来源前缀、trigger_ids、逐触发 principal_ref 与 input_revision，每次模型调用固定其所见输入版本。
+一次 Run 固定 `bot_id, conversation_id?, session_id?, ReplyRoute 的会话目标, agent_config_revision, preset_context_revision, agent_contract, module_generation, budget_snapshot_ref, service_principal_ref`。这些引用分别指向其 owner 的不可变事实，不是一份跨模块 Bot 配置。Run 输入使用追加式 InputBatch，不再假定整个 Run 的 input_event_ids 从启动到结束永远不变；每批冻结来源前缀、trigger_ids、逐触发 principal_ref 与 input_revision，每次模型调用固定其所见输入版本。
 
 Agent 的 Prompt 使用冻结的配置版本；安全权限与删除状态始终重验，不能冻结一份权限后无限有效。Run 读取的长期记忆附 `source_revision, projection_revision, evidence_ids, deletion_epoch`，其结果可能在执行期间失效。
 
@@ -302,7 +317,7 @@ CanonicalContext、Archive、稳定源单元和Evidence均保留有序`ContentPa
 
 `EmbeddingProfile`与LLM模型配置分别选择。合格记忆嵌入配置必须原生接收文本和图片、支持这两类查询，并明确对齐的space_id及模型/预处理版本；可以是已对齐的双编码器，不能把同维度但不相关的文本/图像向量混算。OCR、caption只是显式授权且有预算的可选派生文本，不代替图片资产/原生图像向量，也不因裁剪或文本LLM降级自动生成。
 
-首次记忆配置把 deployment、模型、模型/预处理修订和维度写成 Bot 生命周期不变量；之后只允许轮换 endpoint、凭据、预算与运行开关。endpoint 轮换不等于空间迁移，运营方必须保证它仍提供同一空间。更换模型种类或维度需要新建 Bot 并显式迁移，不能让一个 Bot 的旧向量和新向量共享同一身份。
+`memory.graph`/`embedding.*` 在 Bot 作用域首次供应时把 deployment、模型、模型/预处理修订、维度、归一化与融合语义写成绑定 `bot_id` 的不可变 EmbeddingSpaceIdentity；该记录随 Bot 生命周期存在，但仍由记忆/嵌入模块拥有。之后只允许轮换兼容 endpoint、凭据、预算与运行开关。endpoint 轮换不等于空间迁移，运营方必须保证它仍提供同一空间。更换模型种类或维度需要新建 Bot 并显式搬运获准来源，不能让一个 Bot 的旧向量和新向量共享同一身份。
 
 图片和文本按有界批量、稳定工件键异步建立索引，分别报告完成水位与失败状态。相同图片在两个群出现时，可以在授权域内复用字节或嵌入计算，但每次source_unit/ContentPart/作者/主干来源都保留；向量命中回到当前可见的来源关联，不能按图片hash把两个群的证据合并成一次发言。删除和撤权同时覆盖媒体来源、派生图像、可选描述、向量及缓存，详情见[11 多模态设计](11-multimodal-memory-and-model-projection.md)。
 

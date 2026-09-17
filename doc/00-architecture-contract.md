@@ -2,9 +2,11 @@
 
 > **权威性：最高。** 本文是当前重构和后续实现的入口规范。其他设计、历史 Git 记录、现有代码和测试若与本文冲突，必须删除或重写冲突部分。旧 P0–P5 纵向切片已经从工作树删除，不能作为实现输入。Forest 尚未发布，开发数据库直接重建，不为错误对象模型、旧表、旧 API、旧页面或旧 DTO 编写迁移、兼容读取、双写和转发层。
 
+本文及 01–14 只描述**目标契约**，不证明任何能力已经实现。完成度、测试证据和暂时缺口只允许写入 [implementation-status.md](implementation-status.md)；目标文档不得使用“已落地”“当前实现已经”“已接管”等措辞把工作树偶然形态升级为架构。代码与状态页也不能反向削弱本文契约。
+
 ## 1. 产品语义
 
-Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品能力来自可安装、可替换、可观察的模块组合；Agent 只是其中一个业务模块，Bot 只是身份、资源、授权和数据作用域。控制台不能把两者重新塑造成整个系统的中心。
+Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品能力来自可安装、可替换、可观察的模块组合；Agent 只是其中一个可选业务模块，Bot 只是身份、资源、授权和数据作用域事实。Bot 不是持有 Agent、Memory、Adapter 或 Scheduler 的运行时聚合对象；控制台也不能把 Bot 或 Agent 重新塑造成整个系统的中心。
 
 以下语义不可更改：
 
@@ -139,6 +141,8 @@ Memory 模块的管理贡献必须面向数十万至数百万来源：服务端�
 4. 实现运行契约和模块自带管理贡献；
 5. 先做隔离模块测试，再做跨模块 UnitOfWork、并发乱序、崩溃恢复和真实外部边界验证；
 6. 在 `implementation-status.md` 只记录已运行的证据，不能把候选文件或设计条款写成已完成。
+
+每个实现切片在步骤 3 之前必须填写并评审以下设计门：`owner`、`namespace`、`provides`、`requires`、`Repository contract`、`UnitOfWork participants`、`Generation fence`、`authority/effect`、`management contribution`、`concurrency arbitration`、`deletion/recovery behavior`。任何一项只能通过读取其他模块内部表、持有其他模块对象或在 Web 壳中按组件 ID 分支才能实现时，说明边界尚未闭合，必须先改设计。
 
 出现以下任一情况应立即停止编码并先修正文档/方案：
 

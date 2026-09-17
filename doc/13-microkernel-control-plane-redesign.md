@@ -4,11 +4,11 @@
 
 ## 1. 修正的问题
 
-此前实现曾把 `BindingRuntime` 写成 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。本轮重构已经拆出部分官方运行时模块、Contract Router 及其资源所有权；本文继续作为清除旧管理入口、拆分模块存储和收口通用监督器的权威设计，不再把旧组合根描述成当前事实。
+错误设计曾把 `BindingRuntime` 写成 OneBot、消息存储、Agent、Memory、Shell、Job、Delivery 和策略存储的组合根，WebUI 又为 Agent、Memory、定时任务和 Bot 管理分别硬编码大块页面。本文彻底废弃该语义，规定最终模块边界、控制协议和删除门槛；任何尚存代码都只是待删除对象，不能据此修改目标设计。
 
 本设计立即取代以下语义：
 
-- Bot 不是产品导航中心，而是运行实例和数据/权限作用域。
+- Bot 不是产品导航中心或运行时对象聚合，而是身份、资源、授权、预算和数据作用域事实。
 - Agent 不是框架主循环，也不创建“子 Agent”；它是一个可安装组件，消费调度器交付的 `ConversationRun`，按 QiYu Agentlib 的模型循环推进下一次模型调用、工具闭合和 checkpoint。
 - Memory 不是 Agent 的内部辅助类；它是独立模块，向消息归档、Agent、管理查询提供版本化服务。
 - “业务命令策略”是路由入口的组件命令授权，“执行链”是一次消息在注册路由中的 dispatch trace。两者分别属于安全/路由和可观测性，不是两套独立业务后台。
@@ -68,9 +68,9 @@ flowchart LR
 
 依赖图必须无环。生命周期协调器拓扑准备和启动，反向排空和停止。Contract Router 只向 ACTIVE 代际发布路由；候选代际完成 schema、依赖、能力、状态迁移和健康检查后一次切换。任何组件失败都按依赖边影响实例，不以“平台子任务失败”笼统拖停无关模块。
 
-当前 `RuntimeModuleRegistry` 已由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次 Registry 激活分配独立 activation UUID，为完整官方描述符集建立一个不可变 RuntimeGraph，并为每个官方模块建立 Generation；即使宿主 lease incarnation 未变化，关闭后再次启动也必须创建新图和新代际，绝不重新激活已经 `STOPPED` 的记录。描述符摘要覆盖依赖、factory 身份、管理契约、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`。当前官方模块仍同属一个 Forest Python distribution，所以共享由该 distribution 全部 Python、SQL、HTML、CSS、JavaScript、JSON 和 TOML 资源派生的内容摘要；这比伪造独立包身份更准确，待物理拆包后再自然变为各包摘要。存储 bundle 的 `package_digest` 必须等于描述符工件摘要。
+`RuntimeModuleRegistry` 必须由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次 Registry 激活分配独立 activation UUID，为完整描述符集建立一个不可变 RuntimeGraph，并为每个模块建立 Generation；即使宿主 lease incarnation 未变化，关闭后再次启动也必须创建新图和新代际，绝不重新激活已经 `STOPPED` 的记录。描述符摘要覆盖依赖、factory 身份、管理契约、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`。物理上同属一个 Forest Python distribution 的模块使用覆盖该 distribution 全部 Python、SQL、HTML、CSS、JavaScript、JSON 和 TOML 资源的真实摘要；物理拆包后才使用各自包摘要。存储 bundle 的 `package_digest` 必须等于描述符工件摘要。
 
-干净代际的顺序固定为 `prepare_generation → 持久化候选图并分配 generation_id → bind_generation → start/prewarm → publish participants + RuntimeGraph commit → activate_generation`。`start` 只能建立待命资源，不能领取生产工作；需要随路由一起生效的模块事实必须实现事务型 publication participant，在同一个 Bot 数据库事务中与配置 effective、Generation ACTIVE、Route epoch 和 graph head 一起提交。提交后的 `activate_generation` 只能打开已经预热完成的本地 admission gate，不得访问网络、数据库或执行可能失败的业务发布。若本地不变量仍意外抛错，Registry 立即撤下刚发布的路由并把图记为失败，不能把该动作包装成跨事务“补发布”。关闭先在持久路由上原子关闭 DATA/CONTROL admission 并递增 route epoch，RuntimeGraph head 暂时保持当前，使已经持有 actor/run/call lease 的工作可用精确 member fence 完成或 checkpoint；随后按逆依赖序排空。达到 QUIESCENT 后才撤下 head、退休图并追加终态。member fence 不能领取新顶层工作，最终事务还必须校验对应业务 lease/epoch。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 仍使用不同的运行驱动和代际事实表，后续需统一健康检查、恢复和按依赖边隔离的故障策略，不能把二者误称为已经共用同一 Worker 生命周期实现。
+干净代际的顺序固定为 `prepare_generation → 持久化候选图并分配 generation_id → bind_generation → start/prewarm → publish participants + RuntimeGraph commit → activate_generation`。`start` 只能建立待命资源，不能领取生产工作；需要随路由一起生效的模块事实必须实现事务型 publication participant，在同一个 Bot 数据库事务中与配置 effective、Generation ACTIVE、Route epoch 和 graph head 一起提交。提交后的 `activate_generation` 只能打开已经预热完成的本地 admission gate，不得访问网络、数据库或执行可能失败的业务发布。若本地不变量仍意外抛错，Registry 立即撤下刚发布的路由并把图记为失败，不能把该动作包装成跨事务“补发布”。关闭先在持久路由上原子关闭 DATA/CONTROL admission 并递增 route epoch，RuntimeGraph head 暂时保持当前，使已经持有 actor/run/call lease 的工作可用精确 member fence 完成或 checkpoint；随后按逆依赖序排空。达到 QUIESCENT 后才撤下 head、退休图并追加终态。member fence 不能领取新顶层工作，最终事务还必须校验对应业务 lease/epoch。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 可以使用不同运行驱动，但必须遵守同一 Generation、健康、恢复、依赖隔离和终止契约；运行驱动差异不能产生第二套生命周期事实。
 
 这里的“建立 Generation”必须经过显式的 `PreparedGenerationBinding`，不能由 Registry 根据模块描述符补空值或猜测配置。模块的 PREPARE 端口在外部资源尚不可路由时返回不可变候选，至少包含 `component_id`、package digest、全部 storage bundle identity、实际采用的 `config_revision + config_payload_id + config_payload_digest`、`state_schema + state_contract_digest`、`capability_grants_digest`、`instance_id + worker_incarnation`、管理契约摘要和 UI 工件摘要。配置身份由拥有配置的模块 Repository 产生，授权摘要由 `kernel.authorization` 产生，状态契约和实例身份由候选运行驱动产生；Registry 只核验这些事实与描述符、已安装 bundle、Host lease 和准备操作一致，禁止生成哨兵摘要、复用当前 head 的配置身份或把 desired revision 当成 effective revision。
 
@@ -130,9 +130,9 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 注册表把命令、消息处理器、服务、事件和任务统一编译为 RouteGraph。路由节点包含契约、提供组件、代际、优先级、并发预算和所需能力；边表示所有权、同步依赖解析和事件投递。
 
-当前实现不再从 Worker 内存拼 service 图。每个 Generation 在注册时固化 `provides` 的精确契约与输入/输出 schema 摘要，以及 `requires` 的版本范围、必需性和启动依赖标记；发布事务同时切换组件 route、service head、command head、message-handler head、event subscription head 和 job head。普通 service 调用在交给 Worker 前核对持久 service head、目标 Generation 和 `route_epoch`，随后由既有调用准入事务决定新根调用或已保留父调用是否可继续。冻结阶段不会因为只读解析提前拒绝已经入场的调用树。
+系统不得从 Worker 内存临时拼 service 图。每个 Generation 在注册时固化 `provides` 的精确契约与输入/输出 schema 摘要，以及 `requires` 的版本范围、必需性和启动依赖标记；发布事务同时切换组件 route、service head、command head、message-handler head、event subscription head 和 job head。普通 service 调用在交给 Worker 前核对持久 service head、目标 Generation 和 `route_epoch`，随后由调用准入事务决定新根调用或已保留父调用是否可继续。冻结阶段不会因为只读解析提前拒绝已经入场的调用树。
 
-`routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径已经持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service、runtime graph clock；它用四类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，官方 runtime module 及其依赖边也从持久 head 投影；WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。
+`routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径必须持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service、runtime graph clock；它用四类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，runtime module 及其依赖边也从持久 head 投影；WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。ShellGate 的保留管理命令先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 
@@ -142,7 +142,7 @@ dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph
 
 每个 Kernel 根调用在准入时固化 `causal_root_kind/causal_root_id`，嵌套调用继承同一根；允许的根是 Kernel operation、业务命令请求、消息 Handler chain 和 Conversation Run。Event 与 Job 的后继调用继承发布/调度调用的根，Agent 工具调用由 Agent 准入证明强制绑定 Conversation Run，调用者不能自行换根。`bot_calls_causal_root_idx` 和各权威事实表上的关联键让组件、代际与结果筛选先在数据库中精确选出消息根，不再扫描最近若干消息后做进程内猜测，也不再返回 `candidate_scan_truncated`。
 
-单次因果展开仍必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询不能依赖无界递归或把大量消息载入浏览器过滤。当前查询按 `(received_at,event_id)` 倒序读取精确命中的消息根，并返回绑定其余筛选条件的 `next_before` 游标；游标不能换筛选条件后复用，WebUI 逐页追加而不要求浏览器先取得全部历史。剩余容量工作是验证十万级数据上的索引计划、延迟和单页因果展开上限。控制台始终只读，不能拖拽 trace 改变生产路由。
+单次因果展开必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询不能依赖无界递归或把大量消息载入浏览器过滤。查询按 `(received_at,event_id)` 倒序读取精确命中的消息根，并返回绑定其余筛选条件的 `next_before` 游标；游标不能换筛选条件后复用，WebUI 逐页追加而不要求浏览器先取得全部历史。验收必须覆盖十万级数据上的索引计划、延迟和单页因果展开上限。控制台始终只读，不能拖拽 trace 改变生产路由。
 
 ## 7. 可扩展管理视图
 
@@ -172,9 +172,7 @@ revision 或 `WebAuthority.issue(bot_id=...)`。
 deployment/host 管理服务也有描述符、工件身份和
 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`
 生命周期；注册表必须整体准备成功后再发布给 scope provider，恢复数据库、替换部署 authority 或
-关闭宿主时先撤下目录再反向排空。首个 deployment 切片 `deployment.audit` 已落地：它只拥有部署审计
-脱敏查询与 UI，继续由部署数据库事务在查询前后复核管理员会话。`deployment.accounts` 也已接管账号目录、创建、变更计划/提交和 UI，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 必须由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应
-随后各自成为 deployment/host 服务；不能把已有 `ManagementRuntime` 字段列表当作最终注册表，
+关闭宿主时先撤下目录再反向排空。`deployment.audit` 只拥有部署审计脱敏查询与 UI，由部署数据库事务在查询前后复核管理员会话。`deployment.accounts` 拥有账号目录、创建、变更计划/提交和 UI，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应分别属于 deployment/host 服务；不能把某个临时 `ManagementRuntime` 字段列表当作最终注册表，
 也不能为了共用 transport 给 deployment 操作伪造 Bot ID 或 Bot ticket。
 
 密钥输入在权限签名前投影为“是否变化 + 不可逆摘要”，原始密钥只交给经过校验的模块 handler，并立即进入凭据库加密路径；权限载荷、operation digest、审计参数和错误详情都不能携带密钥正文。输入错误返回稳定 `MODULE_MANAGEMENT_INPUT_INVALID`，未知或 query/action 类型不符返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`，校验详情必须可安全 JSON 序列化。
@@ -183,21 +181,21 @@ deployment/host 管理服务也有描述符、工件身份和
 
 管理调用必须按 scope provider 收口所有权和传输。Bot 与 deployment provider 由注册表选择，Bot provider 签发真实 Bot ticket，deployment provider 保持部署会话事务边界；deployment 模块与 Bot 模块使用同一发现、生命周期、契约和 UI 挂载协议。Memory 模块必须声明群主干目录、来源组合筛选、绑定筛选条件的稳定键集分页、人工关系筛选、实际发布图的 scope/节点/边遍历，以及 text/image/mixed 真实召回试验；每条返回关系必须说明方向、审核来源、贡献、证据、投影版本和跨主干状态。相关索引直接进入最终数据库基线，控制台只通过模块 operation 使用这些能力。简单列表、浏览器内筛选或 JSON 图遍历不能冒充大规模记忆管理完成。
 
-Bot 目录迁移必须保持两层 authority，不能把整个“Bot 页面”包装成 deployment 模块。`deployment.bot-catalog` 只拥有目录列表、创建、重命名、供应重试和供应 Job 投影；点击目录项只把规范 `bot_id` 交给壳层的通用 scope opener。壳层随后通过 Bot provider 挂载目标 Bot 的模块注册表。维护开关、组件配置/启停/调用、OneBot、Agent、Memory、Routing 和 Scheduler 始终由目标 Bot authority 与对应模块契约处理，不能经过目录模块代签。包工件目录也不能顺便塞入 Bot 目录：全部署包仓库归 deployment/host 服务，某个 Bot 对包代际的选择才归 Bot scope。目录贡献卸载后，已有 Bot runtime 不被伪装成删除；只是控制面不再提供目录发现入口。
+Bot 目录拆分必须保持两层 authority，不能把整个“Bot 页面”包装成 deployment 模块。`deployment.bot-catalog` 只拥有目录列表、创建、重命名、供应重试和供应 Job 投影；点击目录项只把规范 `bot_id` 交给壳层的通用 scope opener。壳层随后通过 Bot provider 挂载目标 Bot 的模块注册表。维护开关、组件配置/启停/调用、OneBot、Agent、Memory、Routing 和 Scheduler 始终由目标 Bot authority 与对应模块契约处理，不能经过目录模块代签。包工件目录也不能顺便塞入 Bot 目录：全部署包仓库归 deployment/host 服务，某个 Bot 对包代际的选择才归 Bot scope。目录贡献卸载后，已有 Bot runtime 不被伪装成删除；只是控制面不再提供目录发现入口。
 
 UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `openScope({kind,id})` 能力，但不能取得 `app.js` 内部函数、直接操作 Bot 工作区 DOM 或拼接 Bot 专用管理 URL。目录可附带名称等显示提示，但它们不是作用域权威。Scope opener 必须通过通用 `/scopes/{kind}/{id}/modules` 和对应 provider 重新解析目标、读取该 scope 的 ACTIVE 模块描述符并建立工作区；目录模块自行处理列表分页、供应进度、创建/重命名/重试表单和晚到响应。未 READY 的 Bot 仅在目录内展示供应状态，不伪装成已可挂载的运行作用域。这样 Bot 数量增长后可以给目录增加服务端筛选与键集分页，而不会让每个 Bot 的业务面板重新成为 deployment 页面的一部分。
 
 包工件和备份还暴露了通用传输的一个缺口：它们需要有界的二进制上传与下载，不能被塞进 JSON action，也不能因此回到壳层专用路由。`ModuleOperation` 需要增加受限的 artifact 操作种类：描述符声明方向、媒体类型、最大字节数、所需主体和是否要求幂等 key；通用网关在读取正文前先解析 scope/module/operation 并做会话、CSRF、角色和 `Content-Length` 门禁，再把有界流交给同一 ACTIVE Generation。模块负责内容校验、不可变工件发布、存储预留和审计；下载 handler 只能返回受控的工件句柄、长度、媒体类型与建议文件名，由网关流式输出并固定 `nosniff`/`Content-Disposition`/缓存策略。不允许模块返回任意 ASGI `Response`、自定义响应头或无上限缓冲。
 
-`deployment.package-registry` 已拥有全部署的包列表、ZIP 导入、原工件导出、校验结果和导入错误投影，并通过上述 artifact 操作传输 ZIP 与包内管理 UI。它不决定某个 Bot 的组件代际；该选择与配置属于 Bot scope 的 `component.worker-host`。类似地，备份容器的导入/下载应迁入 artifact 传输，但备份 Job、恢复、激活和存储回收必须由各自 deployment/host 模块声明独立操作与生命周期，不得建成一个再次集中所有资源的“存储后台”。
+`deployment.package-registry` 拥有全部署的包列表、ZIP 导入、原工件导出、校验结果和导入错误投影，并通过上述 artifact 操作传输 ZIP 与包内管理 UI。它不决定某个 Bot 的组件代际；该选择与配置属于 Bot scope 的 `component.worker-host`。类似地，备份容器的导入/下载使用 artifact 传输，但备份 Job、恢复、激活和存储回收必须由各自 deployment/host 模块声明独立操作与生命周期，不得建成一个再次集中所有资源的“存储后台”。
 
 备份与恢复的目标模块边界固定如下。`deployment.backup` 拥有跨 deployment 与多个 Bot cut 的备份集合、创建 Job、列表/详情、只读验证、外部容器导入及备份容器下载；它通过受限端口调用各 Bot 的一致性切口和宿主 artifact store，不取得 Bot 业务写权限。`deployment.restore` 拥有从已验证备份创建 SEALED 候选、候选校验、激活计划、storage head 切换与激活 Job；它只能消费 `deployment.backup` 发布的不可变备份引用，不能自行读取任意文件路径。二者是独立模块、独立 Generation 和独立操作命名空间，恢复失败不能阻断新备份，备份模块也不能绕过恢复计划直接替换活动 Bot。
 
-`host.storage` 拥有本宿主持有的 artifact、隔离数据库和历史 storage generation 的物理清单、容量、回收计划、回收 Job 与重试；它不拥有备份的逻辑可恢复性或 Bot storage head。deployment 模块只向它提交内容寻址资源引用和预期 owner marker，host 模块在删除前复核稳定 `host_id`、当前 incarnation、资源 fence、名称/所有者标记和“未被 storage head/活动 Job 引用”。必须先建立持久 host identity、host provider 和 host module registry，才能迁移这些操作；不得为了尽快删除页面而临时创建语义错误的 `deployment.storage`，也不得把进程重启产生的 incarnation 当成稳定 scope ID。
+`host.storage` 拥有本宿主持有的 artifact、隔离数据库和历史 storage generation 的物理清单、容量、回收计划、回收 Job 与重试；它不拥有备份的逻辑可恢复性或 Bot storage head。deployment 模块只向它提交内容寻址资源引用和预期 owner marker，host 模块在删除前复核稳定 `host_id`、当前 incarnation、资源 fence、名称/所有者标记和“未被 storage head/活动 Job 引用”。这些操作只有在持久 host identity、host provider 和 host module registry 都成立后才能启用；不得为了尽快删除页面而临时创建语义错误的 `deployment.storage`，也不得把进程重启产生的 incarnation 当成稳定 scope ID。
 
 稳定操作名也在此固定。`deployment.backup` 使用 `backups`、`backup`、`backup.create`、`backup.archive`、`imports`、`import`、`import.reserve`、`import.artifact`、`import.finalize`、`verifications`、`verification`、`verification.create`；`deployment.restore` 使用 `stages`、`stage`、`stage.create`、`activation.plan`、`activations`、`activation`、`activation.apply`、`activation.retry`；`host.storage` 使用 `generations`、`cleanup.plan`、`cleanups`、`cleanup`、`cleanup.apply`、`cleanup.retry`。大文件只经 upload/download artifact 传输。计划、应用、重试分别保留独立 action，不能由一个带 `mode` 的总 action 动态选择 authority。
 
-Bot 运行工作区的剩余固定页面必须拆成两个 authority，不能整体改名为一个“Bot 模块”。不可卸载的 `kernel.runtime` 只拥有 Bot runtime/admission 投影、维护修订和暂停/恢复业务接纳；它不读取包配置，不启停可安装组件，也不代理 Agent/Memory/Adapter 动作。`component.worker-host` 拥有可选包投影、某个 component 的 desired/effective 配置、历史、验证、显式启用/停用、Generation 重建请求和服务调用。它从 BotRuntimeSupervisor 获得受限包目录端口和当前 Bot control/store 端口，不能持有 deployment Web 会话或跨过模块直接查 `web_packages`。
+Bot 运行工作区的剩余固定页面必须拆成两个 authority，不能整体改名为一个“Bot 模块”。不可卸载的 `kernel.runtime` 只拥有 Bot runtime/admission 投影、维护修订和暂停/恢复业务接纳；它不读取包配置，不启停可安装组件，也不代理 Agent/Memory/Adapter 动作。`component.worker-host` 拥有可选包投影、某个 component 的 desired/effective 配置、历史、验证、显式启用/停用、Generation 重建请求和服务调用。它只能经 Contract Router 解析受限的包目录、Bot control 和存储契约，不能持有 `BotRuntimeSupervisor`、deployment Web 会话或跨模块读取 `web_packages`。
 
 `component.worker-host` 的管理契约使用稳定操作名：`packages`、`configuration`、`configuration-history`、`module`、`module.validate`、`configuration.plan`、`configuration.apply`、`module.enable`、`module.disable` 和 `service.invoke`，并用只读 download artifact `package.management-ui` 传输选中包的自带配置界面。启用与停用必须是两个声明不同 authority 的 action，不能由 handler 根据布尔字段在签票后动态换权限。配置预览先根据当前包工件快照校验 schema/能力/接管声明，apply 仍由 Bot 库的 revision、plan digest 和内容来源围栏裁决。`module.validate` 是无持久效果的类型化 query；`service.invoke` 是可能产生组件效果的幂等 action。页面、schema 表单、包内 UI iframe 和历史列表全部随 `component.worker-host` Generation 发布；卸载贡献时壳层不得留下一套可绕过的旧表单。
 

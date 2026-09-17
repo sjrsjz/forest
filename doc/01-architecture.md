@@ -150,13 +150,17 @@ Python 模块以新 Worker 加载新版本，不依赖 `importlib.reload()` 清�
 Deployment
   ├─ Kernel：稳定信任根
   ├─ Host components：限定为无 Bot 私有可变状态的共享服务
-  ├─ Bot A：配置快照、能力、MemoryStoreProfile、预算
-  │    ├─ Binding QQ-1
-  │    ├─ Conversation 群甲 → Actor → Run
-  │    └─ Conversation 群乙 → Actor → Run
-  └─ Bot B：另一份配置、能力、MemoryStoreProfile、预算
-       └─ Conversation 群甲 → 不同 Actor 与 Run
+  ├─ Bot A 作用域：bot_id、RuntimeGraph head、各模块独立事实
+  │    ├─ adapter.* → Binding QQ-1
+  │    ├─ conversation.scheduler → 群甲 Actor / Context
+  │    ├─ agent.runtime → 群甲 Session / Run（若安装）
+  │    ├─ conversation.scheduler → 群乙 Actor / Context
+  │    └─ memory.graph → Bot A 全局图与群甲/群乙主干（若安装）
+  └─ Bot B 作用域：另一组 RuntimeGraph 与模块事实
+       └─ 各模块在相同外部群身份下仍使用 Bot B 的独立作用域
 ```
+
+该图按作用域分组观察事实，不表示存在持有这些子对象的 `Bot` 实例。配置、能力、预算、Binding、Conversation、Agent 与 Memory 分别由准确模块拥有，只以 `bot_id` 作为强制作用域键并经契约组合。
 
 包可全局安装，组件实例默认 `scope=bot`。`scope=host` 需要声明多租户输入、无私有全局状态及按请求配额；不得缓存未带 `bot_id` 的聊天/记忆数据。Conversation 与 Run 是组件管理的资源作用域，不为每个群复制整个插件进程。
 
