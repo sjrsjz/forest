@@ -261,8 +261,10 @@ async def login_as(client, username, password):
 
 
 async def create_account(client, username, password, role, current_password, key):
+    session = (await client.get("/management/v1/session")).json()
     return await client.post(
-        "/management/v1/accounts",
+        f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+        "deployment.accounts/actions/account.create",
         json={
             "username": username,
             "password": password,
@@ -270,6 +272,25 @@ async def create_account(client, username, password, role, current_password, key
             "current_password": current_password,
         },
         headers={"idempotency-key": key},
+    )
+
+
+async def account_action(client, operation, body, *, key=None):
+    session = (await client.get("/management/v1/session")).json()
+    headers = {"idempotency-key": key or operation + "-" + uuid4().hex}
+    return await client.post(
+        f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+        f"deployment.accounts/actions/{operation}",
+        json=body,
+        headers=headers,
+    )
+
+
+async def list_accounts(client):
+    session = (await client.get("/management/v1/session")).json()
+    return await client.get(
+        f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
+        "deployment.accounts/queries/accounts"
     )
 
 
@@ -289,6 +310,7 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
     ):
         await initialize(admin, token, web_database)
         await login(admin)
+        assert (await admin.get("/management/v1/accounts")).status_code == 404
         body = ("observer", viewer_password, "viewer", PASSWORD, "create-observer")
         created = await create_account(admin, *body)
         assert created.status_code == 201, created.text
@@ -305,26 +327,29 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
         assert duplicate.status_code == 409
         assert duplicate.json()["code"] == "ACCOUNT_NAME_CONFLICT"
         current_id = (await admin.get("/management/v1/session")).json()["account_id"]
-        self_disable = await admin.post(
-            f"/management/v1/accounts/{current_id}/change-plans",
-            json={"expected_revision": 1, "role": "admin", "disabled": True},
+        self_disable = await account_action(
+            admin, "account.change.plan",
+            {"account_id": current_id, "expected_revision": 1,
+             "role": "admin", "disabled": True},
         )
         assert self_disable.status_code == 409
         assert self_disable.json()["code"] == "SELF_DISABLE_REQUIRES_ANOTHER_ADMIN"
-        demotion = await admin.post(
-            f"/management/v1/accounts/{current_id}/change-plans",
-            json={"expected_revision": 1, "role": "viewer", "disabled": False},
+        demotion = await account_action(
+            admin, "account.change.plan",
+            {"account_id": current_id, "expected_revision": 1,
+             "role": "viewer", "disabled": False},
         )
         frozen = demotion.json()
-        last_admin = await admin.post(
-            f"/management/v1/accounts/{current_id}/management-requests",
-            json={
+        last_admin = await account_action(
+            admin, "account.change.apply",
+            {
+                "account_id": current_id,
                 "expected_revision": 1,
                 "plan_id": frozen["plan_id"],
                 "plan_digest": frozen["plan_digest"],
                 "current_password": PASSWORD,
             },
-            headers={"idempotency-key": "demote-only-admin"},
+            key="demote-only-admin",
         )
         assert last_admin.status_code == 409
         assert last_admin.json()["code"] == "LAST_ADMIN_REQUIRED"
@@ -345,7 +370,7 @@ async def test_account_creation_is_idempotent_and_viewer_is_read_only(tmp_path, 
                 json={"expected_revision": 0, "values": {}},
             )
             assert denied.status_code == 403 and denied.json()["code"] == "PERMISSION_DENIED"
-            assert (await viewer.get("/management/v1/accounts")).status_code == 403
+            assert (await list_accounts(viewer)).status_code == 403
             audit = (
                 f"/management/v1/scopes/deployment/{session['deployment_id']}/modules/"
                 "deployment.audit/queries/records"
@@ -452,21 +477,23 @@ async def test_account_apply_revokes_sessions_and_records_no_passwords(tmp_path,
             headers={"origin": ORIGIN},
         ) as viewer:
             assert (await login_as(viewer, "session-viewer", viewer_password)).status_code == 200
-            plan = await admin.post(
-                f"/management/v1/accounts/{account['id']}/change-plans",
-                json={"expected_revision": 1, "role": "viewer", "disabled": True},
+            plan = await account_action(
+                admin, "account.change.plan",
+                {"account_id": account["id"], "expected_revision": 1,
+                 "role": "viewer", "disabled": True},
             )
             assert plan.status_code == 200, plan.text
             frozen = plan.json()
-            applied = await admin.post(
-                f"/management/v1/accounts/{account['id']}/management-requests",
-                json={
+            applied = await account_action(
+                admin, "account.change.apply",
+                {
+                    "account_id": account["id"],
                     "expected_revision": frozen["expected_revision"],
                     "plan_id": frozen["plan_id"],
                     "plan_digest": frozen["plan_digest"],
                     "current_password": PASSWORD,
                 },
-                headers={"idempotency-key": "disable-session-viewer"},
+                key="disable-session-viewer",
             )
             assert applied.status_code == 200, applied.text
             assert applied.json()["disabled"] and applied.json()["revoked_sessions"] == 1
@@ -500,9 +527,10 @@ async def test_self_password_change_revokes_cookie_and_requires_new_password(tmp
         await initialize(client, token, web_database)
         await login(client)
         account_id = (await client.get("/management/v1/session")).json()["account_id"]
-        preview = await client.post(
-            f"/management/v1/accounts/{account_id}/change-plans",
-            json={
+        preview = await account_action(
+            client, "account.change.plan",
+            {
+                "account_id": account_id,
                 "expected_revision": 1,
                 "role": "admin",
                 "disabled": False,
@@ -520,15 +548,16 @@ async def test_self_password_change_revokes_cookie_and_requires_new_password(tmp
             )).fetchone()
         assert not secret["password_hash_ciphertext"].startswith("$scrypt$")
         assert secret["password_secret_digest"].startswith("hmac-sha256:")
-        applied = await client.post(
-            f"/management/v1/accounts/{account_id}/management-requests",
-            json={
+        applied = await account_action(
+            client, "account.change.apply",
+            {
+                "account_id": account_id,
                 "expected_revision": 1,
                 "plan_id": frozen["plan_id"],
                 "plan_digest": frozen["plan_digest"],
                 "current_password": PASSWORD,
             },
-            headers={"idempotency-key": "change-own-password"},
+            key="change-own-password",
         )
         assert applied.status_code == 200, applied.text
         assert applied.json()["reauthentication_required"]
@@ -559,31 +588,34 @@ async def test_concurrent_admin_demotions_keep_one_enabled_admin(tmp_path, web_d
         )
         assert created.status_code == 201, created.text
         assert (await login_as(second, "second-admin", second_password)).status_code == 200
-        accounts = (await first.get("/management/v1/accounts")).json()["accounts"]
+        accounts = (await list_accounts(first)).json()["accounts"]
         first_id = next(row["id"] for row in accounts if row["username"] == "admin")
         second_id = created.json()["id"]
 
-        first_plan = await first.post(
-            f"/management/v1/accounts/{first_id}/change-plans",
-            json={"expected_revision": 1, "role": "viewer", "disabled": False},
+        first_plan = await account_action(
+            first, "account.change.plan",
+            {"account_id": first_id, "expected_revision": 1,
+             "role": "viewer", "disabled": False},
         )
-        second_plan = await second.post(
-            f"/management/v1/accounts/{second_id}/change-plans",
-            json={"expected_revision": 1, "role": "viewer", "disabled": False},
+        second_plan = await account_action(
+            second, "account.change.plan",
+            {"account_id": second_id, "expected_revision": 1,
+             "role": "viewer", "disabled": False},
         )
         assert first_plan.status_code == second_plan.status_code == 200
 
         async def apply(client, account_id, plan, password, key):
             frozen = plan.json()
-            return await client.post(
-                f"/management/v1/accounts/{account_id}/management-requests",
-                json={
+            return await account_action(
+                client, "account.change.apply",
+                {
+                    "account_id": account_id,
                     "expected_revision": frozen["expected_revision"],
                     "plan_id": frozen["plan_id"],
                     "plan_digest": frozen["plan_digest"],
                     "current_password": password,
                 },
-                headers={"idempotency-key": key},
+                key=key,
             )
 
         results = await asyncio.gather(

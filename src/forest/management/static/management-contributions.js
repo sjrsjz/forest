@@ -30,7 +30,7 @@ function availableContributions(descriptors, scopeKind) {
 
 export function managementContributions({
   api, busy, notice, nav, registry, root, packageElements = [], scopeKind = 'bot',
-  scopeIdentity = row => row.bot_id,
+  scopeIdentity = row => row.bot_id, sessionEnded = () => {},
 }) {
   const views = new Map();
   let descriptors = [];
@@ -76,7 +76,7 @@ export function managementContributions({
       if (typeof implementation.createModulePanel !== 'function') {
         throw new Error(`模块 ${entry.descriptor.component_id} 未导出 createModulePanel。`);
       }
-      view.controller = implementation.createModulePanel(api, busy, notice);
+      view.controller = implementation.createModulePanel(api, busy, notice, {sessionEnded});
       if (!view.controller || ['select', 'reset', 'invalidateContent'].some(
         name => typeof view.controller[name] !== 'function'
       )) {

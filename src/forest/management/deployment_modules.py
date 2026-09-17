@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.management.accounts import AccountManager
 from forest.management.audit import DeploymentAudit
+from forest.management.deployment_accounts_contract import (
+    DeploymentAccountsManagementContract,
+)
 from forest.management.deployment_audit_contract import DeploymentAuditManagementContract
 from forest.runtime_modules import (
     RuntimeManagementContribution,
@@ -18,6 +22,8 @@ class DeploymentModuleHost:
     scope_kind: str
     scope_id: str
     store: object
+    authority: object
+    password_slots: object
 
 
 class DeploymentAuditRuntime:
@@ -26,11 +32,41 @@ class DeploymentAuditRuntime:
         self.management_contract = DeploymentAuditManagementContract()
 
 
+class DeploymentAccountsRuntime:
+    def __init__(self, host):
+        self.store = host.store
+        self.authority = host.authority
+        self.password_slots = host.password_slots
+        self.manager = AccountManager(host.store, host.authority.vault)
+        self.management_contract = DeploymentAccountsManagementContract(self)
+
+
 def _audit(host, _modules):
     return DeploymentAuditRuntime(host.store)
 
 
+def _accounts(host, _modules):
+    return DeploymentAccountsRuntime(host)
+
+
 OFFICIAL_DEPLOYMENT_MODULES = (
+    RuntimeModuleDescriptor(
+        "deployment.accounts",
+        (),
+        _accounts,
+        official_artifact("deployment"),
+        management=(
+            RuntimeManagementContribution(
+                "accounts",
+                "安全与账号",
+                ("deployment",),
+                "/static/modules/deployment.accounts.html",
+                "/static/accounts-panel.js",
+                group="security",
+                order=10,
+            ),
+        ),
+    ),
     RuntimeModuleDescriptor(
         "deployment.audit",
         (),

@@ -26,7 +26,6 @@ from starlette.staticfiles import StaticFiles
 
 from forest.bootstrap import BootstrapState, normalize_dsn
 from forest.errors import ForestError
-from forest.management.accounts_api import install_account_routes
 from forest.management.activations import RestoreActivationManager
 from forest.management.authority import WebAuthority
 from forest.management.backup_api import install_backup_routes
@@ -280,7 +279,13 @@ class ManagementRuntime:
                 catalog, backups, restores, self.settings.data_dir
             )
             deployment_modules = RuntimeModuleRegistry(
-                DeploymentModuleHost("deployment", plan["deployment_id"], candidate),
+                DeploymentModuleHost(
+                    "deployment",
+                    plan["deployment_id"],
+                    candidate,
+                    authority,
+                    self.password_slots,
+                ),
                 OFFICIAL_DEPLOYMENT_MODULES,
             )
             await deployment_modules.start()
@@ -707,7 +712,6 @@ def create_app(settings: WebSettings) -> FastAPI:
             session_token_hash=digest_token(request.cookies["forest_session"]),
         )
 
-    install_account_routes(app, runtime)
     install_backup_routes(app, runtime)
     install_bot_routes(app, runtime)
     install_onebot_protocol_route(app, runtime)

@@ -1,7 +1,6 @@
 import { schemaForm } from './schema-form.js';
 import { controlReceipts } from './control-receipts.js';
 import { replacementButton } from './configuration-forms.js';
-import { accountsPanel } from './accounts-panel.js';
 import { backupPanel as createBackupPanel } from './backup-panel.js';
 import { mountModuleUi } from './module-ui-host.js';
 import { managementContributions } from './management-contributions.js';
@@ -22,8 +21,8 @@ function notice(text, success = false) {
 function show(id) {
   if (activeView === 'bots' && id !== 'bots') selectionEpoch++;
   activeView = id;
-  for (const name of ['loading', 'setup', 'login', 'configuration', 'accounts', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
-  $('main-nav').classList.toggle('hidden', !['configuration', 'accounts', 'backups', 'bots'].includes(id));
+  for (const name of ['loading', 'setup', 'login', 'configuration', 'backups', 'bots']) $(name).classList.toggle('hidden', name !== id);
+  $('main-nav').classList.toggle('hidden', !['configuration', 'backups', 'bots'].includes(id));
 }
 async function api(path, body, extraHeaders = {}) {
   return readReceipt(path, () => fetchApi(path, body, extraHeaders));
@@ -73,7 +72,6 @@ function setIdentity(user) {
   document.body.classList.toggle('viewer', user?.role === 'viewer');
   $('username').textContent = user?.username || '';
   $('role').textContent = user?.role === 'admin' ? '管理员' : '查看者';
-  $('nav-accounts').classList.toggle('hidden', user?.role !== 'admin');
   $('nav-backups').classList.toggle('hidden', user?.role !== 'admin');
   $('identity').classList.toggle('hidden', !user);
 }
@@ -140,7 +138,6 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   runtimeViews.reset();
   deploymentViews.reset();
-  accountPanel.reset();
   backupsPanel.reset();
   selectedBot = null; botRows = []; botConfig = null; botRuntime = null; packageRows = [];
   selectionEpoch++; packageReadSeq++; runtimeReadSeq++;
@@ -190,23 +187,24 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   componentSourceRevision = null;
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
-const accountPanel = accountsPanel(api, busy, notice, (message) => {
-  accountPanel.reset(); configuration = null; pendingPlan = null;
+function sessionEnded(message) {
+  deploymentViews.reset(); configuration = null; pendingPlan = null;
   setIdentity(null); show('login'); notice(message, true);
-});
+}
 const backupsPanel = createBackupPanel(api, busy, notice, uploadBackupArtifact);
 
 const deploymentViews = managementContributions({
   api, busy, notice, scopeKind: 'deployment', scopeIdentity: row => row.scope_id,
   nav: $('deployment-module-nav'), registry: $('deployment-module-registry'),
-  root: $('deployment-module-views'),
+  root: $('deployment-module-views'), sessionEnded,
 });
 async function readDeploymentModules() {
   deploymentViews.reset();
   if (!currentUser?.deployment_id || currentUser.role !== 'admin') {
     deploymentViews.update([]); return;
   }
-  const scope = {scope_kind:'deployment', scope_id:currentUser.deployment_id};
+  const scope = {scope_kind:'deployment', scope_id:currentUser.deployment_id,
+    account_id:currentUser.account_id};
   const result = await api(`/scopes/deployment/${encodeURIComponent(scope.scope_id)}/modules`);
   deploymentViews.update(result.modules || []);
   await deploymentViews.select(scope);
@@ -544,9 +542,6 @@ async function selectBot(id) {
 }
 $('nav-deployment').addEventListener('click', () => busy($('nav-deployment'), readConfiguration));
 $('nav-bots').addEventListener('click', () => busy($('nav-bots'), async () => { show('bots'); await readBots(); await loadPackages(); }));
-$('nav-accounts').addEventListener('click', () => busy($('nav-accounts'), async () => {
-  show('accounts'); await accountPanel.load(currentUser.account_id);
-}));
 $('nav-backups').addEventListener('click', () => busy($('nav-backups'), async () => {
   show('backups'); await backupsPanel.load();
 }));

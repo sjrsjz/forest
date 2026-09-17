@@ -1,6 +1,6 @@
 # P5 Web 账号与固定角色管理
 
-## 1. 当前实现范围
+## 1. 目标模块边界
 
 本切片把首次初始化后只有一个管理员的临时状态扩展为可日常使用的 Web 账号生命周期。部署账号仍只存在于部署数据库，不会成为 Bot、群聊用户或产品 Agent。当前提供两个固定角色模板：
 
@@ -23,7 +23,9 @@
 
 ## 3. 创建账号
 
-`POST /management/v1/accounts` 接收目标用户名、初始密码、角色、操作者当前密码和稳定 `Idempotency-Key`。入口在有限并发的工作线程中验证操作者密码并生成随机盐 scrypt verifier，数据库事务随后再次检查：
+`deployment.accounts` 在 deployment scope 声明 `accounts` query 与 `account.create`、`account.change.plan`、`account.change.apply` actions。通用管理传输只负责会话、CSRF、规范输入和幂等 operation ID；账号字段、密码投影、重新鉴权、事务和 UI 都归该模块。旧 `/management/v1/accounts*` 专用端点、壳层固定页面和控制器 import 已删除，不保留兼容别名。
+
+`account.create` 接收目标用户名、初始密码、角色、操作者当前密码和稳定 `Idempotency-Key`。入口在有限并发的工作线程中验证操作者密码并生成随机盐 scrypt verifier，数据库事务随后再次检查：
 
 1. 取得部署级账号 advisory transaction lock；
 2. 锁定当前操作者账号并验证它仍启用、仍是管理员且密码 verifier 未变化；
@@ -38,8 +40,8 @@
 
 已有账号通过两个阶段修改：
 
-- `POST /accounts/{account_id}/change-plans` 冻结目标角色、停用状态、加密的新密码 verifier、操作者/目标 revision、计划摘要和十分钟期限；响应只含差异、`password_change` 布尔值与计划引用。
-- `POST /accounts/{account_id}/management-requests` 携带计划 ID/digest、目标 expected revision、操作者当前密码与稳定幂等键，执行最终提交。
+- `account.change.plan` 在类型化 payload 中接收 `account_id`，冻结目标角色、停用状态、加密的新密码 verifier、操作者/目标 revision、计划摘要和十分钟期限；响应只含差异、`password_change` 布尔值与计划引用。
+- `account.change.apply` 携带 `account_id`、计划 ID/digest、目标 expected revision、操作者当前密码与稳定幂等键，执行最终提交。
 
 提交事务的锁序为：部署账号 advisory lock → 操作者账号 → 操作者会话 → 不可变请求 → 计划 → 目标账号 → 计划时钟复核 → 目标会话。全局账号锁同时串行化管理员集合变化和用户名创建，避免两个并发降级都根据过期计数移除最后管理员。
 
@@ -55,7 +57,7 @@
 
 ## 5. 响应丢失与权限收紧
 
-同一已提交请求在计划过期后仍可按原幂等键恢复。自我降级会撤销旧会话；操作者可用原凭据以查看者重新登录，再提交同一计划引用和幂等键。入口允许已认证查看者到达账号提交恢复端点，存储层只在找到属于该主体且语义摘要一致的既有请求时返回原结果；任何新操作仍要求事务当前看到管理员角色。因此恢复通道不能让查看者应用新计划。
+同一已提交请求在计划过期后仍可按原幂等键恢复。自我降级会撤销旧会话；操作者可用原凭据以查看者重新登录，再提交同一计划引用和幂等键。`account.change.apply` 明确声明 `authenticated` principal；通用传输仍执行 Origin/CSRF，但不能在模块事务前硬编码 admin 拒绝。存储层只在找到属于该主体且语义摘要一致的既有请求时返回原结果；任何新操作仍要求事务当前看到管理员角色。因此恢复通道不能让查看者应用新计划。
 
 自我改密后使用新密码重新登录可采用同一路径。账号被另一管理员停用后不能自行恢复响应，但其他管理员仍可从审计及账号状态核对；完整操作日志查询页将在后续切片提供。
 

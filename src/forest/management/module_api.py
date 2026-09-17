@@ -192,7 +192,9 @@ def management_scope_provider_registry(
 
 
 async def _target(runtime, request, scope_kind, scope_id, *, write=False):
-    session = await runtime.principal(request, write=write)
+    session = await runtime.principal(
+        request, write=write, require_admin=False if write else None
+    )
     who = {
         "subject_id": session["account_id"],
         "session_token_hash": digest_token(request.cookies["forest_session"]),

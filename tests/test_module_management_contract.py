@@ -5,6 +5,9 @@ import pytest
 from forest.agent_settings import DEFAULT_AGENT_SETTINGS
 from forest.errors import ForestError
 from forest.management.agent_api import AgentManagementContract
+from forest.management.deployment_accounts_contract import (
+    DeploymentAccountsManagementContract,
+)
 from forest.management.memory_api import MemoryManagementContract
 from forest.management.module_api import (
     EmptyInput,
@@ -49,6 +52,28 @@ def test_agent_secret_is_projected_before_authority_and_never_serialized():
     assert "private-contract-key" not in encoded
     assert payload["credentials_changed"] is True
     assert payload["secret_digest"].startswith("sha256:")
+
+
+def test_account_contract_projects_passwords_out_of_management_payload():
+    contract = DeploymentAccountsManagementContract(object())
+    operation, _, payload = contract.prepare(
+        "account.create", "action",
+        {"username": "viewer", "password": "new-password-value",
+         "role": "viewer", "current_password": "admin-password-value"},
+    )
+    assert operation.principal == "admin"
+    assert payload == {
+        "username": "viewer", "role": "viewer", "credentials_changed": True
+    }
+    assert "password" not in json.dumps(payload)
+
+    operation, _, payload = contract.prepare(
+        "account.change.apply", "action",
+        {"account_id": "account-1", "expected_revision": 1, "plan_id": "plan-1",
+         "plan_digest": "digest-1", "current_password": "admin-password-value"},
+    )
+    assert operation.principal == "authenticated"
+    assert "current_password" not in payload
 
 
 def test_query_contract_normalizes_transport_strings_before_signing():

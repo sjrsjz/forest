@@ -1,8 +1,9 @@
 const $ = (id) => document.getElementById(id);
 
-export function accountsPanel(api, busy, notice, sessionEnded) {
+export function createModulePanel(api, busy, notice, {sessionEnded}) {
   let rows = [], selected = null, plan = null, createKey = null, applyKey = null;
-  let readSeq = 0, currentAccountId = null;
+  let readSeq = 0, currentAccountId = null, scope = null;
+  const base = () => `/scopes/deployment/${encodeURIComponent(scope.scope_id)}/modules/deployment.accounts`;
 
   function resetPlan() {
     plan = null; applyKey = null;
@@ -41,7 +42,7 @@ export function accountsPanel(api, busy, notice, sessionEnded) {
   async function load(currentId) {
     if (currentId) currentAccountId = currentId;
     const seq = ++readSeq;
-    const data = await api('/accounts');
+    const data = await api(`${base()}/queries/accounts`);
     if (seq !== readSeq) return data;
     rows = data.accounts;
     renderList(currentAccountId);
@@ -57,7 +58,7 @@ export function accountsPanel(api, busy, notice, sessionEnded) {
     busy(form.querySelector('button'), async () => {
       createKey ||= crypto.randomUUID();
       const body = Object.fromEntries(new FormData(form));
-      await api('/accounts', body, {'Idempotency-Key': createKey});
+      await api(`${base()}/actions/account.create`, body, {'Idempotency-Key': createKey});
       form.reset(); createKey = null; await load();
       notice('管理账号已创建；对方可使用新密码登录。', true);
     });
@@ -73,7 +74,9 @@ export function accountsPanel(api, busy, notice, sessionEnded) {
         disabled: form.elements.disabled.checked,
       };
       if (form.elements.new_password.value) body.new_password = form.elements.new_password.value;
-      plan = await api(`/accounts/${encodeURIComponent(selected.id)}/change-plans`, body);
+      body.account_id = selected.id;
+      plan = await api(`${base()}/actions/account.change.plan`, body,
+        {'Idempotency-Key': crypto.randomUUID()});
       form.elements.new_password.value = '';
       applyKey = crypto.randomUUID();
       $('account-preview-diff').textContent = JSON.stringify({
@@ -89,7 +92,8 @@ export function accountsPanel(api, busy, notice, sessionEnded) {
     event.preventDefault(); const form = event.currentTarget;
     if (!selected || !plan || !form.reportValidity()) return;
     busy(form.querySelector('button'), async () => {
-      const result = await api(`/accounts/${encodeURIComponent(selected.id)}/management-requests`, {
+      const result = await api(`${base()}/actions/account.change.apply`, {
+        account_id: selected.id,
         expected_revision: plan.expected_revision,
         plan_id: plan.plan_id,
         plan_digest: plan.plan_digest,
@@ -106,9 +110,10 @@ export function accountsPanel(api, busy, notice, sessionEnded) {
   });
 
   return {
-    load,
+    async select(row) { scope = row; await load(row.account_id); },
+    invalidateContent() { readSeq++; },
     reset() {
-      rows = []; selected = null; createKey = null;
+      rows = []; selected = null; createKey = null; scope = null;
       readSeq++; currentAccountId = null;
       resetPlan(); $('account-list').replaceChildren();
       $('account-detail').classList.add('hidden'); $('account-create-form').reset();
