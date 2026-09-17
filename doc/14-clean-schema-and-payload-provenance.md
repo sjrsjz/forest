@@ -34,6 +34,8 @@
 
 `kernel.authorization` 只回答“某个稳定主体凭哪一组当前能力，能否对精确资源执行精确动作”。授予集按主体、可选目标组件代际、能力键、资源种类和资源 ID 规范化并以摘要寻址；模块自身仍解释管理员名单、群 Shell 规则、工具策略、可见性和业务审批含义。模块先通过自己的策略端口形成能力请求，授权模块再签发最长 30 秒且绑定 `ticket_id + operation_id + subject + audience + action + resource + input_digest + plan_digest + grant_set_digest + policy_revision` 的票据。消费记录是不可变的一次性事实；相同 operation 的精确重放返回原回执，不同输入或目标复用身份必须拒绝。
 
+没有 audience 的 bootstrap grant 不能默认扩张到任意运行代际。只有具体能力项显式声明 `delegable` 时，签发端才能把这一项委托给一个准确的 `component_id + generation_id`；已有 audience 的 grant 只能沿用原 audience。通用批准只冻结请求对象、动作、输入/计划摘要、请求主体、批准范围、policy revision 与期限。批准决定本身必须消费绑定 `approval.decide + scope + approval_id/decision digest + plan digest + decision principal + kernel.authorization audience Generation` 的短票；获批对象在签发业务票据的同一事务中单次消费，拒绝、过期、撤权或异摘要重放都不能产生效果许可。
+
 授权撤销与票据消费在同一 Bot 的 `policy_clock` 上线性化。普通授予、签发与首次消费取得共享事务锁，撤销取得排他事务锁并把 revision 只推进一次。若消费先提交，随后撤销不能抹掉已经发生的效果，但精确重放仍返回原消费事实；若撤销先提交，旧票据在最终消费边界观察到新 revision 并拒绝。撤销事实、旧/新 revision、选择器和幂等 operation 必须同事务提交，不能只在缓存中递增数字。授予集、票据和消费事实不可更新或删除，批准只允许 `PENDING -> APPROVED|REJECTED` 以及 `APPROVED -> CONSUMED` 的单向转换。
 
 Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot 群管理员和平台身份解析属于 Adapter/Shell；Agent 工具定义、参数验证和工具审批的业务上下文属于 Agent。它们可把稳定主体引用、策略结果或批准依据交给授权端口，但不能把这些业务表搬进 `kernel.authorization`，也不能让通用票据携带密码、平台令牌或任意策略正文。授权模块不跨 schema 建外键或 join，涉及正文的限制条件必须使用经 `kernel.payload` 端口复核的载荷引用。

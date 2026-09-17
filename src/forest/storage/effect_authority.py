@@ -246,6 +246,44 @@ class KernelEffectRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.admit_in(conn, **values)
 
+    async def load(self, effect_operation_id: str) -> dict:
+        _bounded(effect_operation_id, "effect_operation_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            effect = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND effect_operation_id=%s"
+                    ).format(self._table("effect_operations")),
+                    (self.store.bot_id, effect_operation_id),
+                )
+            ).fetchone()
+            if effect is None:
+                raise ForestError("EFFECT_NOT_FOUND", "Effect operation is unavailable", 404)
+            attempt = None
+            if effect["current_attempt_id"] is not None:
+                attempt = await (
+                    await conn.execute(
+                        sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s").format(
+                            self._table("effect_attempts")
+                        ),
+                        (self.store.bot_id, effect["current_attempt_id"]),
+                    )
+                ).fetchone()
+            observations = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s "
+                        "ORDER BY observed_at,observation_operation_id"
+                    ).format(self._table("effect_observations")),
+                    (self.store.bot_id, effect["current_attempt_id"]),
+                )
+            ).fetchall() if effect["current_attempt_id"] is not None else []
+        return {
+            "effect": dict(effect),
+            "attempt": dict(attempt) if attempt is not None else None,
+            "observations": [dict(row) for row in observations],
+        }
+
     async def permit_in(
         self,
         conn,

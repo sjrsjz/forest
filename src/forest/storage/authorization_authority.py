@@ -265,6 +265,8 @@ class KernelAuthorizationRepository:
         plan_digest: str | None,
         grant_set: GrantSetRef,
         expires_at: datetime,
+        audience_component_id: str | None = None,
+        audience_generation_id: str | None = None,
     ) -> dict:
         for field, value, limit in (
             ("ticket_id", ticket_id, 256),
@@ -280,6 +282,10 @@ class KernelAuthorizationRepository:
             _bounded(value, field, limit)
         _validated_digest(input_digest, "input_digest")
         _validated_digest(plan_digest, "plan_digest", optional=True)
+        if (audience_component_id is None) != (audience_generation_id is None):
+            raise ForestError("AUTHORIZATION_INPUT_INVALID", "Ticket audience is incomplete", 422)
+        _bounded(audience_component_id, "audience_component_id", 128, optional=True)
+        _bounded(audience_generation_id, "audience_generation_id", 256, optional=True)
         if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
             raise ForestError("AUTHORIZATION_INPUT_INVALID", "Ticket expiry needs a timezone", 422)
         replay = await (
@@ -309,7 +315,13 @@ class KernelAuthorizationRepository:
             "expires_at": expires_at,
         }
         if replay is not None:
-            if any(replay[key] != value for key, value in replay_expected.items()):
+            if any(replay[key] != value for key, value in replay_expected.items()) or (
+                audience_component_id is not None
+                and (
+                    replay["audience_component_id"] != audience_component_id
+                    or replay["audience_generation_id"] != audience_generation_id
+                )
+            ):
                 raise ForestError("TICKET_ID_CONFLICT", "Ticket identity is already used", 409)
             return dict(replay)
         now = datetime.now(timezone.utc)
@@ -319,7 +331,7 @@ class KernelAuthorizationRepository:
         entry = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT g.* FROM {} g JOIN {} e USING (bot_id,grant_set_id) "
+                    "SELECT g.*,e.delegable FROM {} g JOIN {} e USING (bot_id,grant_set_id) "
                     "WHERE g.bot_id=%s AND g.grant_set_id=%s AND e.capability=%s "
                     "AND e.resource_kind=%s AND e.resource_id=%s"
                 ).format(self._table("grant_sets"), self._table("grant_entries")),
@@ -342,6 +354,25 @@ class KernelAuthorizationRepository:
             or (entry["expires_at"] is not None and expires_at > entry["expires_at"])
         ):
             raise ForestError("CAPABILITY_DENIED", "Grant set does not permit this target", 403)
+        grant_audience = (
+            entry["audience_component_id"],
+            entry["audience_generation_id"],
+        )
+        requested_audience = (audience_component_id, audience_generation_id)
+        if grant_audience[0] is not None:
+            if audience_component_id is not None and requested_audience != grant_audience:
+                raise ForestError(
+                    "CAPABILITY_DENIED", "Grant set is bound to another audience", 403
+                )
+            ticket_audience = grant_audience
+        elif audience_component_id is not None:
+            if not entry["delegable"]:
+                raise ForestError(
+                    "CAPABILITY_DENIED", "Capability cannot be delegated to an audience", 403
+                )
+            ticket_audience = requested_audience
+        else:
+            ticket_audience = (None, None)
         await conn.execute(
             sql.SQL(
                 "INSERT INTO {}(bot_id,ticket_id,issuer_kind,issuer_id,subject_kind,subject_id,"
@@ -357,8 +388,8 @@ class KernelAuthorizationRepository:
                 issuer_id,
                 subject_kind,
                 subject_id,
-                entry["audience_component_id"],
-                entry["audience_generation_id"],
+                ticket_audience[0],
+                ticket_audience[1],
                 action,
                 resource_kind,
                 resource_id,
@@ -385,8 +416,8 @@ class KernelAuthorizationRepository:
             "issuer_id": issuer_id,
             "subject_kind": subject_kind,
             "subject_id": subject_id,
-            "audience_component_id": entry["audience_component_id"],
-            "audience_generation_id": entry["audience_generation_id"],
+            "audience_component_id": ticket_audience[0],
+            "audience_generation_id": ticket_audience[1],
             "action": action,
             "resource_kind": resource_kind,
             "resource_id": resource_id,
@@ -404,6 +435,21 @@ class KernelAuthorizationRepository:
     async def issue_ticket(self, **values) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.issue_ticket_in(conn, **values)
+
+    async def ticket(self, ticket_id: str) -> dict:
+        _bounded(ticket_id, "ticket_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND ticket_id=%s").format(
+                        self._table("tickets")
+                    ),
+                    (self.store.bot_id, ticket_id),
+                )
+            ).fetchone()
+        if row is None:
+            raise ForestError("TICKET_NOT_FOUND", "Authorization ticket is unavailable", 404)
+        return dict(row)
 
     async def consume_ticket_in(
         self,
@@ -517,6 +563,323 @@ class KernelAuthorizationRepository:
     async def consume_ticket(self, **values) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.consume_ticket_in(conn, **values)
+
+    @staticmethod
+    def approval_decision_digest(*, approval_id: str, decision: str) -> str:
+        _bounded(approval_id, "approval_id", 256)
+        if decision not in {"APPROVED", "REJECTED"}:
+            raise ForestError("AUTHORIZATION_INPUT_INVALID", "Invalid approval decision", 422)
+        return _digest({"approval_id": approval_id, "decision": decision})
+
+    async def request_approval_in(
+        self,
+        conn,
+        *,
+        approval_id: str,
+        request_kind: str,
+        request_id: str,
+        action: str,
+        input_digest: str,
+        plan_digest: str | None,
+        requester_kind: str,
+        requester_id: str,
+        approver_scope_kind: str,
+        approver_scope_id: str,
+        expected_policy_revision: int,
+        expires_at: datetime,
+    ) -> dict:
+        for field, value, limit in (
+            ("approval_id", approval_id, 256),
+            ("request_kind", request_kind, 64),
+            ("request_id", request_id, 256),
+            ("action", action, 200),
+            ("requester_kind", requester_kind, 64),
+            ("requester_id", requester_id, 256),
+            ("approver_scope_kind", approver_scope_kind, 64),
+            ("approver_scope_id", approver_scope_id, 512),
+        ):
+            _bounded(value, field, limit)
+        _validated_digest(input_digest, "input_digest")
+        _validated_digest(plan_digest, "plan_digest", optional=True)
+        if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+            raise ForestError("AUTHORIZATION_INPUT_INVALID", "Approval expiry needs a timezone", 422)
+        now = datetime.now(timezone.utc)
+        if not now < expires_at <= now + timedelta(hours=24):
+            raise ForestError("AUTHORIZATION_INPUT_INVALID", "Approval lifetime is invalid", 422)
+        expected = {
+            "approval_id": approval_id,
+            "request_kind": request_kind,
+            "request_id": request_id,
+            "action": action,
+            "input_digest": input_digest,
+            "plan_digest": plan_digest,
+            "requester_kind": requester_kind,
+            "requester_id": requester_id,
+            "approver_scope_kind": approver_scope_kind,
+            "approver_scope_id": approver_scope_id,
+            "policy_revision": expected_policy_revision,
+            "expires_at": expires_at,
+        }
+        replay = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND "
+                    "(approval_id=%s OR (request_kind=%s AND request_id=%s))"
+                ).format(self._table("approvals")),
+                (self.store.bot_id, approval_id, request_kind, request_id),
+            )
+        ).fetchone()
+        if replay is not None:
+            if any(replay[key] != value for key, value in expected.items()):
+                raise ForestError("APPROVAL_ID_CONFLICT", "Approval identity differs", 409)
+            return dict(replay)
+        revision = await self._clock_in(conn, expected=expected_policy_revision)
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}(bot_id,approval_id,request_kind,request_id,action,"
+                "input_digest,plan_digest,requester_kind,requester_id,approver_scope_kind,"
+                "approver_scope_id,policy_revision,expires_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT DO NOTHING"
+            ).format(self._table("approvals")),
+            (
+                self.store.bot_id,
+                approval_id,
+                request_kind,
+                request_id,
+                action,
+                input_digest,
+                plan_digest,
+                requester_kind,
+                requester_id,
+                approver_scope_kind,
+                approver_scope_id,
+                revision,
+                expires_at,
+            ),
+        )
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND "
+                    "(approval_id=%s OR (request_kind=%s AND request_id=%s))"
+                ).format(self._table("approvals")),
+                (self.store.bot_id, approval_id, request_kind, request_id),
+            )
+        ).fetchone()
+        expected["policy_revision"] = revision
+        if row is None or any(row[key] != value for key, value in expected.items()):
+            raise ForestError("APPROVAL_ID_CONFLICT", "Approval identity differs", 409)
+        return dict(row)
+
+    async def request_approval(self, **values) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.request_approval_in(conn, **values)
+
+    async def approval(self, approval_id: str) -> dict:
+        _bounded(approval_id, "approval_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND approval_id=%s").format(
+                        self._table("approvals")
+                    ),
+                    (self.store.bot_id, approval_id),
+                )
+            ).fetchone()
+        if row is None:
+            raise ForestError("APPROVAL_NOT_FOUND", "Approval is unavailable", 404)
+        return dict(row)
+
+    async def decide_approval_in(
+        self,
+        conn,
+        *,
+        approval_id: str,
+        decision: str,
+        decided_by_kind: str,
+        decided_by_id: str,
+        decision_operation_id: str,
+        authorization_ticket_id: str,
+        audience_component_id: str | None = None,
+        audience_generation_id: str | None = None,
+    ) -> dict:
+        for field, value, limit in (
+            ("approval_id", approval_id, 256),
+            ("decided_by_kind", decided_by_kind, 64),
+            ("decided_by_id", decided_by_id, 256),
+            ("decision_operation_id", decision_operation_id, 256),
+            ("authorization_ticket_id", authorization_ticket_id, 256),
+        ):
+            _bounded(value, field, limit)
+        decision_digest = self.approval_decision_digest(
+            approval_id=approval_id, decision=decision
+        )
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND approval_id=%s FOR UPDATE").format(
+                    self._table("approvals")
+                ),
+                (self.store.bot_id, approval_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError("APPROVAL_NOT_FOUND", "Approval is unavailable", 404)
+        if row["state"] != "PENDING":
+            if (
+                (
+                    row["state"] == decision
+                    or (row["state"] == "CONSUMED" and decision == "APPROVED")
+                )
+                and row["decided_by_kind"] == decided_by_kind
+                and row["decided_by_id"] == decided_by_id
+                and row["decision_operation_id"] == decision_operation_id
+            ):
+                receipt = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT t.subject_kind,t.subject_id FROM {} c JOIN {} t "
+                            "USING (bot_id,ticket_id) WHERE c.bot_id=%s AND c.ticket_id=%s "
+                            "AND c.operation_id=%s"
+                        ).format(
+                            self._table("ticket_consumptions"), self._table("tickets")
+                        ),
+                        (self.store.bot_id, authorization_ticket_id, decision_operation_id),
+                    )
+                ).fetchone()
+                if (
+                    receipt is None
+                    or receipt["subject_kind"] != decided_by_kind
+                    or receipt["subject_id"] != decided_by_id
+                ):
+                    raise ForestError(
+                        "APPROVAL_DECISION_CONFLICT", "Decision authorization differs", 409
+                    )
+                return dict(row)
+            raise ForestError("APPROVAL_DECISION_CONFLICT", "Approval was already decided", 409)
+        now = datetime.now(timezone.utc)
+        if row["expires_at"] <= now:
+            raise ForestError("APPROVAL_EXPIRED", "Approval has expired", 409)
+        await self._clock_in(conn, expected=row["policy_revision"])
+        await self.consume_ticket_in(
+            conn,
+            ticket_id=authorization_ticket_id,
+            operation_id=decision_operation_id,
+            action="approval.decide",
+            resource_kind=row["approver_scope_kind"],
+            resource_id=row["approver_scope_id"],
+            input_digest=decision_digest,
+            plan_digest=row["plan_digest"],
+            audience_component_id=audience_component_id,
+            audience_generation_id=audience_generation_id,
+        )
+        ticket = await (
+            await conn.execute(
+                sql.SQL("SELECT subject_kind,subject_id FROM {} WHERE bot_id=%s AND ticket_id=%s").format(
+                    self._table("tickets")
+                ),
+                (self.store.bot_id, authorization_ticket_id),
+            )
+        ).fetchone()
+        if (
+            ticket is None
+            or ticket["subject_kind"] != decided_by_kind
+            or ticket["subject_id"] != decided_by_id
+        ):
+            raise ForestError("APPROVAL_PRINCIPAL_CONFLICT", "Decision principal differs", 403)
+        decided = await (
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state=%s,decided_by_kind=%s,decided_by_id=%s,"
+                    "decision_operation_id=%s,decided_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND approval_id=%s RETURNING *"
+                ).format(self._table("approvals")),
+                (
+                    decision,
+                    decided_by_kind,
+                    decided_by_id,
+                    decision_operation_id,
+                    self.store.bot_id,
+                    approval_id,
+                ),
+            )
+        ).fetchone()
+        return dict(decided)
+
+    async def decide_approval(self, **values) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.decide_approval_in(conn, **values)
+
+    async def consume_approval_in(
+        self,
+        conn,
+        *,
+        approval_id: str,
+        request_kind: str,
+        request_id: str,
+        action: str,
+        input_digest: str,
+        plan_digest: str | None,
+        requester_kind: str,
+        requester_id: str,
+        consume_operation_id: str,
+    ) -> dict:
+        for field, value, limit in (
+            ("approval_id", approval_id, 256),
+            ("request_kind", request_kind, 64),
+            ("request_id", request_id, 256),
+            ("action", action, 200),
+            ("requester_kind", requester_kind, 64),
+            ("requester_id", requester_id, 256),
+            ("consume_operation_id", consume_operation_id, 256),
+        ):
+            _bounded(value, field, limit)
+        _validated_digest(input_digest, "input_digest")
+        _validated_digest(plan_digest, "plan_digest", optional=True)
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND approval_id=%s FOR UPDATE").format(
+                    self._table("approvals")
+                ),
+                (self.store.bot_id, approval_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError("APPROVAL_NOT_FOUND", "Approval is unavailable", 404)
+        expected = {
+            "request_kind": request_kind,
+            "request_id": request_id,
+            "action": action,
+            "input_digest": input_digest,
+            "plan_digest": plan_digest,
+            "requester_kind": requester_kind,
+            "requester_id": requester_id,
+        }
+        if any(row[key] != value for key, value in expected.items()):
+            raise ForestError("APPROVAL_CONSUMPTION_CONFLICT", "Approval identity differs", 409)
+        if row["state"] == "CONSUMED":
+            if row["consume_operation_id"] == consume_operation_id:
+                return dict(row)
+            raise ForestError("APPROVAL_CONSUMPTION_CONFLICT", "Approval was already consumed", 409)
+        if row["state"] != "APPROVED":
+            raise ForestError("APPROVAL_NOT_APPROVED", "Approval is not approved", 409)
+        if row["expires_at"] <= datetime.now(timezone.utc):
+            raise ForestError("APPROVAL_EXPIRED", "Approval has expired", 409)
+        await self._clock_in(conn, expected=row["policy_revision"])
+        consumed = await (
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='CONSUMED',consume_operation_id=%s,"
+                    "consumed_at=clock_timestamp() WHERE bot_id=%s AND approval_id=%s RETURNING *"
+                ).format(self._table("approvals")),
+                (consume_operation_id, self.store.bot_id, approval_id),
+            )
+        ).fetchone()
+        return dict(consumed)
+
+    async def consume_approval(self, **values) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.consume_approval_in(conn, **values)
 
     async def revoke_in(
         self,

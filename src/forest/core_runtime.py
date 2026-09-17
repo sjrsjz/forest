@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import PreparedGenerationBinding
 from forest.runtime_modules import (
@@ -219,11 +220,36 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         store, namespace=bundles["kernel.authorization"].spec.namespace
     )
     runtime = KernelRuntimeRepository(store, bundles["kernel.runtime"].spec.namespace)
+
+    async def verify_effect_fence(
+        conn,
+        *,
+        executor_component_id,
+        executor_generation_id,
+        fence_kind,
+        fence_id,
+        fence_epoch,
+    ):
+        graph = await runtime.verify_generation_member_in(
+            conn,
+            component_id=executor_component_id,
+            generation_id=executor_generation_id,
+        )
+        if (
+            fence_kind != "runtime.graph"
+            or fence_id != graph.graph_id
+            or fence_epoch != graph.graph_revision
+        ):
+            raise ForestError(
+                "EFFECT_STALE_FENCE", "Executor RuntimeGraph fence is no longer current", 409
+            )
+
     effect = KernelEffectRepository(
         store,
         namespace=bundles["kernel.effect"].spec.namespace,
         payload_verifier=payload.verify_in,
         authorization_consumer=authorization.consume_ticket_in,
+        fence_verifier=verify_effect_fence,
     )
     audit = KernelAuditRepository(
         store,

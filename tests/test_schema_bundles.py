@@ -14,6 +14,11 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.agent_tool_executor import (
+    ToolAuthorizationRequest,
+    ToolDispatchRequest,
+    ToolDispatchResult,
+)
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.runtime_generation import (
@@ -32,6 +37,7 @@ from forest.schema_bundles import (
     validate_official_storage_baseline,
     validate_storage_baseline,
 )
+from forest.storage.agent_runtime_authority import AgentPayloadRef
 from forest.storage.authorization_authority import (
     CapabilityGrant,
     KernelAuthorizationRepository,
@@ -47,6 +53,8 @@ from forest.storage.payload_authority import (
     SourceTarget,
 )
 from forest.storage.schema_bundles import SchemaBundleInstaller
+from forest.tool_authorization import KernelToolAuthorizationPort
+from forest.tool_effect_execution import KernelToolExecutionPort
 
 
 def bundle(
@@ -1317,6 +1325,460 @@ async def test_clean_kernel_authorization_fences_exact_tickets_and_revocation(
                 ),
                 (store.bot_id,),
             )
+
+
+@pytest.mark.postgres
+async def test_kernel_authorization_delegates_only_explicit_capabilities_to_exact_generation(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    authority = KernelAuthorizationRepository(store, namespace=storage.spec.namespace)
+    delegated = await authority.create_grant_set(
+        grantee_kind="component",
+        grantee_id="agent.runtime",
+        entries=(CapabilityGrant("tool.invoke", "bot", store.bot_id, delegable=True),),
+        expected_policy_revision=1,
+    )
+    digest = "sha256:" + "a" * 64
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=20)
+    ticket = await authority.issue_ticket(
+        ticket_id="ticket/tool/one",
+        issuer_kind="kernel",
+        issuer_id="kernel.authorization",
+        subject_kind="component",
+        subject_id="agent.runtime",
+        action="tool.invoke",
+        resource_kind="bot",
+        resource_id=store.bot_id,
+        operation_id="effect/tool/one",
+        input_digest=digest,
+        plan_digest=None,
+        grant_set=delegated,
+        expires_at=expiry,
+        audience_component_id="tool.weather",
+        audience_generation_id="generation/weather-one",
+    )
+    assert ticket["audience_component_id"] == "tool.weather"
+    assert ticket["audience_generation_id"] == "generation/weather-one"
+    receipt = await authority.consume_ticket(
+        ticket_id=ticket["ticket_id"],
+        operation_id="effect/tool/one",
+        action="tool.invoke",
+        resource_kind="bot",
+        resource_id=store.bot_id,
+        input_digest=digest,
+        plan_digest=None,
+        audience_component_id="tool.weather",
+        audience_generation_id="generation/weather-one",
+    )
+    assert receipt["policy_revision"] == 1
+
+    fixed = await authority.create_grant_set(
+        grantee_kind="component",
+        grantee_id="agent.runtime",
+        entries=(CapabilityGrant("provider.invoke", "bot", store.bot_id),),
+        expected_policy_revision=1,
+    )
+    with pytest.raises(ForestError) as caught:
+        await authority.issue_ticket(
+            ticket_id="ticket/provider/wrong-delegation",
+            issuer_kind="kernel",
+            issuer_id="kernel.authorization",
+            subject_kind="component",
+            subject_id="agent.runtime",
+            action="provider.invoke",
+            resource_kind="bot",
+            resource_id=store.bot_id,
+            operation_id="provider/wrong-delegation",
+            input_digest=digest,
+            plan_digest=None,
+            grant_set=fixed,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+            audience_component_id="provider.chat-completions",
+            audience_generation_id="generation/provider-one",
+        )
+    assert caught.value.code == "CAPABILITY_DENIED"
+
+
+@pytest.mark.postgres
+async def test_kernel_authorization_approval_requires_ticketed_decision_and_single_consumption(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    authority = KernelAuthorizationRepository(store, namespace=storage.spec.namespace)
+    input_digest = "sha256:" + "b" * 64
+    plan_digest = "sha256:" + "c" * 64
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
+    approval_args = dict(
+        approval_id="approval/tool/one",
+        request_kind="agent.tool",
+        request_id="tool-call/one",
+        action="tool.invoke",
+        input_digest=input_digest,
+        plan_digest=plan_digest,
+        requester_kind="component",
+        requester_id="agent.runtime",
+        approver_scope_kind="group",
+        approver_scope_id="933179609",
+        expected_policy_revision=1,
+        expires_at=expiry,
+    )
+    pending, pending_replay = await asyncio.gather(
+        authority.request_approval(**approval_args),
+        authority.request_approval(**approval_args),
+    )
+    assert pending["state"] == "PENDING"
+    assert pending_replay == pending
+    assert await authority.request_approval(**approval_args) == pending
+
+    approver = await authority.create_grant_set(
+        grantee_kind="platform.user",
+        grantee_id="qq/1234",
+        entries=(CapabilityGrant("approval.decide", "group", "933179609"),),
+        expected_policy_revision=1,
+        audience_component_id="kernel.authorization",
+        audience_generation_id="generation/authorization-one",
+    )
+    decision_digest = authority.approval_decision_digest(
+        approval_id="approval/tool/one", decision="APPROVED"
+    )
+    decision_expiry = datetime.now(timezone.utc) + timedelta(seconds=20)
+    await authority.issue_ticket(
+        ticket_id="ticket/approval/tool-one",
+        issuer_kind="group.shell",
+        issuer_id="shell/main",
+        subject_kind="platform.user",
+        subject_id="qq/1234",
+        action="approval.decide",
+        resource_kind="group",
+        resource_id="933179609",
+        operation_id="approval-decision/tool-one",
+        input_digest=decision_digest,
+        plan_digest=plan_digest,
+        grant_set=approver,
+        expires_at=decision_expiry,
+    )
+    decision_args = dict(
+        approval_id="approval/tool/one",
+        decision="APPROVED",
+        decided_by_kind="platform.user",
+        decided_by_id="qq/1234",
+        decision_operation_id="approval-decision/tool-one",
+        authorization_ticket_id="ticket/approval/tool-one",
+        audience_component_id="kernel.authorization",
+        audience_generation_id="generation/authorization-one",
+    )
+    approved = await authority.decide_approval(**decision_args)
+    assert approved["state"] == "APPROVED"
+    assert await authority.decide_approval(**decision_args) == approved
+
+    consume_args = dict(
+        approval_id="approval/tool/one",
+        request_kind="agent.tool",
+        request_id="tool-call/one",
+        action="tool.invoke",
+        input_digest=input_digest,
+        plan_digest=plan_digest,
+        requester_kind="component",
+        requester_id="agent.runtime",
+        consume_operation_id="effect/tool/one",
+    )
+    consumed = await authority.consume_approval(**consume_args)
+    assert consumed["state"] == "CONSUMED"
+    assert await authority.consume_approval(**consume_args) == consumed
+    assert (await authority.decide_approval(**decision_args))["state"] == "CONSUMED"
+    with pytest.raises(ForestError) as caught:
+        await authority.consume_approval(
+            **{**consume_args, "consume_operation_id": "effect/tool/two"}
+        )
+    assert caught.value.code == "APPROVAL_CONSUMPTION_CONFLICT"
+
+
+@pytest.mark.postgres
+async def test_tool_authorization_port_waits_for_approval_then_issues_exact_ticket(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    authority = KernelAuthorizationRepository(store, namespace=storage.spec.namespace)
+    agent_grants = await authority.create_grant_set(
+        grantee_kind="component",
+        grantee_id="agent.runtime",
+        entries=(CapabilityGrant("tool.invoke", "bot", store.bot_id, delegable=True),),
+        expected_policy_revision=1,
+    )
+    port = KernelToolAuthorizationPort(authority=authority, agent_grants=agent_grants)
+    request = ToolAuthorizationRequest(
+        tool_call_id="tool-call/weather/one",
+        effect_operation_ref="effect/tool/weather/one",
+        producer_component_id="agent.runtime",
+        producer_generation_id="generation/agent-one",
+        executor_component_id="tool.weather",
+        executor_generation_id="generation/weather-one",
+        service_id="weather.lookup",
+        binding_digest="sha256:" + "d" * 64,
+        authority_trigger_ref="trigger/one",
+        authority_principal_ref="qq/42",
+        arguments={"city": "Shijiazhuang"},
+        input_digest="sha256:" + "e" * 64,
+    )
+    waiting = await port.authorize(request, approval_required=True)
+    assert waiting.status == "WAITING"
+    approval = await authority.approval(waiting.approval_ref)
+    assert approval["request_id"] == request.tool_call_id
+    assert approval["input_digest"] == request.input_digest
+
+    approver = await authority.create_grant_set(
+        grantee_kind="platform.user",
+        grantee_id="qq/42",
+        entries=(CapabilityGrant("approval.decide", "bot", store.bot_id),),
+        expected_policy_revision=1,
+        audience_component_id="kernel.authorization",
+        audience_generation_id="generation/authorization-one",
+    )
+    decision_operation_id = "decision/tool/weather/one"
+    decision_digest = authority.approval_decision_digest(
+        approval_id=approval["approval_id"], decision="APPROVED"
+    )
+    await authority.issue_ticket(
+        ticket_id="ticket/decision/tool/weather/one",
+        issuer_kind="group.shell",
+        issuer_id="shell/main",
+        subject_kind="platform.user",
+        subject_id="qq/42",
+        action="approval.decide",
+        resource_kind="bot",
+        resource_id=store.bot_id,
+        operation_id=decision_operation_id,
+        input_digest=decision_digest,
+        plan_digest=request.binding_digest,
+        grant_set=approver,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+    )
+    await authority.decide_approval(
+        approval_id=approval["approval_id"],
+        decision="APPROVED",
+        decided_by_kind="platform.user",
+        decided_by_id="qq/42",
+        decision_operation_id=decision_operation_id,
+        authorization_ticket_id="ticket/decision/tool/weather/one",
+        audience_component_id="kernel.authorization",
+        audience_generation_id="generation/authorization-one",
+    )
+
+    authorized = await port.authorize(request, approval_required=True)
+    assert authorized.status == "AUTHORIZED"
+    assert authorized.approval_ref == approval["approval_id"]
+    assert authorized.audience_component_id == "tool.weather"
+    assert authorized.audience_generation_id == "generation/weather-one"
+    assert (await authority.approval(approval["approval_id"]))["state"] == "CONSUMED"
+    receipt = await authority.consume_ticket(
+        ticket_id=authorized.authorization_ticket_id,
+        operation_id=request.effect_operation_ref,
+        action="tool.invoke",
+        resource_kind="bot",
+        resource_id=store.bot_id,
+        input_digest=request.input_digest,
+        plan_digest=request.binding_digest,
+        audience_component_id=request.executor_component_id,
+        audience_generation_id=request.executor_generation_id,
+    )
+    assert receipt["policy_revision"] == 1
+
+
+@pytest.mark.postgres
+async def test_tool_effect_port_commits_handoff_and_reconciles_unknown_without_redispatch(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = {
+        component: official_storage_bundle(component, schema, contract, resource)
+        for component, schema, contract, resource in (
+            (
+                "kernel.payload",
+                "forest.kernel.payload",
+                "forest.kernel-payload.repository/1",
+                "storage/official/kernel_payload.sql",
+            ),
+            (
+                "kernel.authorization",
+                "forest.kernel.authorization",
+                "forest.kernel-authorization.repository/1",
+                "storage/official/kernel_authorization.sql",
+            ),
+            (
+                "kernel.effect",
+                "forest.kernel.effect",
+                "forest.kernel-effect.repository/1",
+                "storage/official/kernel_effect.sql",
+            ),
+        )
+    }
+    for bundle_item in storage.values():
+        await installer.install(
+            bundle_item.spec,
+            bundle_item.baseline,
+            bundle_item.package_digest,
+            execution_profile=bundle_item.execution_profile,
+        )
+    payloads = KernelPayloadRepository(store, namespace=storage["kernel.payload"].spec.namespace)
+    authorization = KernelAuthorizationRepository(
+        store, namespace=storage["kernel.authorization"].spec.namespace
+    )
+
+    async def verify_fence(_conn, **identity):
+        assert identity == {
+            "executor_component_id": "tool.weather",
+            "executor_generation_id": "generation/weather-one",
+            "fence_kind": "runtime.graph",
+            "fence_id": "graph/one",
+            "fence_epoch": 7,
+        }
+
+    effects = KernelEffectRepository(
+        store,
+        namespace=storage["kernel.effect"].spec.namespace,
+        payload_verifier=payloads.verify_in,
+        authorization_consumer=authorization.consume_ticket_in,
+        fence_verifier=verify_fence,
+    )
+    agent_grants = await authorization.create_grant_set(
+        grantee_kind="component",
+        grantee_id="agent.runtime",
+        entries=(CapabilityGrant("tool.invoke", "bot", store.bot_id, delegable=True),),
+        expected_policy_revision=1,
+    )
+    auth_port = KernelToolAuthorizationPort(
+        authority=authorization, agent_grants=agent_grants
+    )
+    request = ToolAuthorizationRequest(
+        tool_call_id="tool-call/weather/reconcile",
+        effect_operation_ref="effect/tool/weather/reconcile",
+        producer_component_id="agent.runtime",
+        producer_generation_id="generation/agent-one",
+        executor_component_id="tool.weather",
+        executor_generation_id="generation/weather-one",
+        service_id="weather.lookup",
+        binding_digest="sha256:" + "6" * 64,
+        authority_trigger_ref="trigger/reconcile",
+        authority_principal_ref="qq/42",
+        arguments={"city": "Shijiazhuang"},
+        input_digest="sha256:" + "7" * 64,
+    )
+    authorized = await auth_port.authorize(request, approval_required=False)
+
+    class RuntimeFence:
+        async def verify_generation_member(self, **identity):
+            assert identity == {
+                "component_id": request.executor_component_id,
+                "generation_id": request.executor_generation_id,
+            }
+            return SimpleNamespace(graph_id="graph/one", graph_revision=7)
+
+    class RecoverableTool:
+        def __init__(self):
+            self.dispatches = 0
+            self.queries = 0
+
+        async def dispatch(self, _request):
+            self.dispatches += 1
+            raise ConnectionError("response lost after tool handoff")
+
+        async def query(self, query_request):
+            self.queries += 1
+            epoch = await payloads.epoch()
+            saved = await payloads.put_bytes(
+                owner_component_id=query_request.executor_component_id,
+                owner_kind="tool.result",
+                owner_id=query_request.tool_call_id,
+                media_type="application/json",
+                content=b'{"temperature":23}',
+                expected_deletion_epoch=epoch,
+            )
+            return ToolDispatchResult(
+                "SUCCEEDED",
+                result=AgentPayloadRef(
+                    saved.payload_id,
+                    saved.content_digest,
+                    query_request.executor_component_id,
+                    "tool.result",
+                    query_request.tool_call_id,
+                ),
+                observation_ref="weather/query/one",
+            )
+
+    service = RecoverableTool()
+    port = KernelToolExecutionPort(
+        effects=effects,
+        payloads=payloads,
+        runtime=RuntimeFence(),
+        authorization=authorization,
+        service=service,
+    )
+    handed_off = False
+
+    async def permit_in(_conn, *, effect_observation_ref):
+        nonlocal handed_off
+        assert effect_observation_ref.startswith("effect-attempt:agent-tool:")
+        handed_off = True
+
+    unknown = await port.dispatch(
+        ToolDispatchRequest(request, authorized.authorization_ticket_id, None),
+        permit_in=permit_in,
+    )
+    assert unknown.status == "UNKNOWN"
+    assert handed_off is True
+    assert service.dispatches == 1
+    assert (await effects.load(request.effect_operation_ref))["effect"]["state"] == "UNKNOWN"
+
+    recovered = await port.query(request)
+    assert recovered.status == "SUCCEEDED"
+    assert recovered.result.owner_component_id == "tool.weather"
+    assert service.dispatches == 1
+    assert service.queries == 1
+    persisted = await port.query(request)
+    assert persisted == recovered
+    assert service.queries == 1
+    assert (await effects.load(request.effect_operation_ref))["effect"]["state"] == "SUCCEEDED"
 
 
 @pytest.mark.postgres

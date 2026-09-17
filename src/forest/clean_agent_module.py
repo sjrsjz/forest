@@ -62,7 +62,7 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
         entries=(
             CapabilityGrant("agent.run", "bot", store.bot_id),
             CapabilityGrant("provider.invoke", "bot", store.bot_id),
-            CapabilityGrant("tool.invoke", "bot", store.bot_id),
+            CapabilityGrant("tool.invoke", "bot", store.bot_id, delegable=True),
         ),
         expected_policy_revision=policy_revision,
     )

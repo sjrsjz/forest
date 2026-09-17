@@ -165,6 +165,10 @@ CREATE INDEX approvals_pending_idx ON approvals(bot_id, expires_at, approval_id)
 CREATE INDEX approvals_requester_idx ON approvals(
     bot_id, requester_kind, requester_id, created_at DESC, approval_id
 );
+CREATE UNIQUE INDEX approvals_decision_operation_idx ON approvals(bot_id, decision_operation_id)
+    WHERE decision_operation_id IS NOT NULL;
+CREATE UNIQUE INDEX approvals_consume_operation_idx ON approvals(bot_id, consume_operation_id)
+    WHERE consume_operation_id IS NOT NULL;
 
 CREATE FUNCTION reject_immutable_authorization_fact() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
