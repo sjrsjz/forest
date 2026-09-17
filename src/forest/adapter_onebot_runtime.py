@@ -131,6 +131,7 @@ class CleanOneBotRuntime:
         self.generation_identity: BoundGenerationIdentity | None = None
         self._prepared: dict[str, _PreparedBinding] = {}
         self._active: dict[str, _ActiveBinding] = {}
+        self._publications: dict[str, dict] = {}
         self._accepting = False
         self._closed = False
         self._failure: str | None = None
@@ -332,20 +333,25 @@ class CleanOneBotRuntime:
             webhook_secret,
         )
 
-    async def activate_generation(self) -> None:
-        """Publish Binding clients, then open buffered event streams."""
+    async def publish_generation_in(self, conn, *, generation_id: str, graph_id: str) -> None:
+        """Join Binding publication to the RuntimeGraph commit transaction."""
 
         generation = self.generation_identity
-        if generation is None:
+        if (
+            generation is None
+            or generation.generation_id != generation_id
+            or generation.graph_id != graph_id
+        ):
             raise ForestError(
-                "RUNTIME_GENERATION_IDENTITY_UNAVAILABLE",
-                "OneBot Generation identity was not bound",
-                503,
+                "RUNTIME_GENERATION_BINDING_MISMATCH",
+                "OneBot publication belongs to another RuntimeGraph",
+                409,
             )
         for binding_id, prepared in sorted(self._prepared.items()):
             row = prepared.binding
             if prepared.client is None:
-                await self.repository.publish_disabled(
+                publication = await self.repository.publish_disabled_for_generation_in(
+                    conn,
                     operation_id=_operation_id(
                         "publish-disabled", generation.activation_id + "\0" + binding_id
                     ),
@@ -353,16 +359,34 @@ class CleanOneBotRuntime:
                     revision=row["desired_revision"],
                     expected_binding_epoch=row["binding_epoch"],
                 )
-                continue
-            publication = await self.repository.publish_client(
-                operation_id=_operation_id(
-                    "publish-client", generation.activation_id + "\0" + binding_id
-                ),
-                binding_id=binding_id,
-                client_incarnation=prepared.client_incarnation,
-                revision=row["desired_revision"],
-                expected_binding_epoch=row["binding_epoch"],
+            else:
+                publication = await self.repository.publish_client_for_generation_in(
+                    conn,
+                    candidate_generation_id=generation.generation_id,
+                    operation_id=_operation_id(
+                        "publish-client", generation.activation_id + "\0" + binding_id
+                    ),
+                    binding_id=binding_id,
+                    client_incarnation=prepared.client_incarnation,
+                    revision=row["desired_revision"],
+                    expected_binding_epoch=row["binding_epoch"],
+                )
+            self._publications[binding_id] = publication
+
+    def activate_generation(self) -> None:
+        """Open only local admission gates after the graph transaction commits."""
+
+        if set(self._publications) != set(self._prepared):
+            raise ForestError(
+                "RUNTIME_PUBLICATION_INCOMPLETE",
+                "OneBot Binding publication did not cover the prepared Generation",
+                503,
             )
+        for binding_id, prepared in sorted(self._prepared.items()):
+            if prepared.client is None:
+                continue
+            row = prepared.binding
+            publication = self._publications[binding_id]
             self._active[binding_id] = _ActiveBinding(
                 binding_id=binding_id,
                 self_id=row["self_id"],
@@ -575,6 +599,7 @@ class CleanOneBotRuntime:
                 errors.append(exc)
         self._active.clear()
         self._prepared.clear()
+        self._publications.clear()
         self._closed = not errors
         if errors:
             raise ForestError(

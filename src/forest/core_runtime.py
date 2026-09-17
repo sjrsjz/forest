@@ -168,7 +168,7 @@ class PreparedAuthorityModule:
         if self.generation_identity is None:
             raise RuntimeError("Generation identity was not bound before prewarm")
 
-    async def activate_generation(self) -> None:
+    def activate_generation(self) -> None:
         if self.generation_identity is None:
             raise RuntimeError("Generation identity was not bound before activation")
         self.generation_active = True

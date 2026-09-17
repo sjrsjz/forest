@@ -798,12 +798,7 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
             if self.fail_bind:
                 raise RuntimeError("bind failed")
 
-        async def activate_generation(self):
-            route = await repository.verify_active_generation(
-                component_id="kernel.runtime",
-                generation_id=self.identity.generation_id,
-            )
-            assert route.graph_id == self.identity.graph_id
+        def activate_generation(self):
             events.append(("activate", "kernel.runtime"))
             if self.fail_activate:
                 raise RuntimeError("activation failed")
@@ -831,6 +826,11 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     )
     registry = RuntimeModuleRegistry(runtime, (descriptor,))
     await registry.start()
+    route = await repository.verify_active_generation(
+        component_id="kernel.runtime",
+        generation_id=registry.graph_identity.generations["kernel.runtime"],
+    )
+    assert route.graph_id == registry.graph_identity.graph_id
     assert registry.graph_identity is not None
     assert registry.generation_bindings["kernel.runtime"].config_revision == 1
     assert await registry.close() == []

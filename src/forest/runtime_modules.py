@@ -1157,6 +1157,14 @@ class RuntimeModuleRegistry:
                     component_id: self.instances[component_id].module_configuration
                     for component_id in self.order
                 },
+                publication_participants={
+                    component_id: self.instances[component_id]
+                    for component_id in self.order
+                    if getattr(
+                        self.instances[component_id], "publish_generation_in", None
+                    )
+                    is not None
+                },
             )
             published = True
 
@@ -1165,7 +1173,14 @@ class RuntimeModuleRegistry:
                 activate = self.instances[component_id].activate_generation
                 result = activate()
                 if inspect.isawaitable(result):
-                    await result
+                    close = getattr(result, "close", None)
+                    if close is not None:
+                        close()
+                    raise ForestError(
+                        "RUNTIME_GENERATION_ACTIVATION_INVALID",
+                        "Post-publication activation must be local and synchronous",
+                        503,
+                    )
                 self._transition(component_id, ModuleLifecycleState.ACTIVE)
                 activated.append(component_id)
         except BaseException as exc:

@@ -105,7 +105,13 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
     head = await adapter.load_binding("binding/main")
     assert head["state"] == "DISABLED" and head["binding_epoch"] == 0
 
-    await runtime.activate_generation()
+    async with store.pool.connection() as conn, conn.transaction():
+        await runtime.publish_generation_in(
+            conn,
+            generation_id=identity.generation_id,
+            graph_id=identity.graph_id,
+        )
+    runtime.activate_generation()
     head = await adapter.load_binding("binding/main")
     assert head["state"] == "ONLINE" and head["binding_epoch"] == 1
     assert clients[0].handler is not None

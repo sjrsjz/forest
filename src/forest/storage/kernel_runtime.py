@@ -370,6 +370,7 @@ class KernelRuntimeRepository:
         graph: RuntimeGenerationGraph,
         *,
         configuration_activators: dict[str, object] | None = None,
+        publication_participants: dict[str, object] | None = None,
     ) -> int:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
@@ -433,6 +434,32 @@ class KernelRuntimeRepository:
                         generation_id=item["generation_id"],
                         expected_payload_id=item["config_payload_id"],
                         expected_payload_digest=item["config_payload_digest"],
+                    )
+            if publication_participants is not None:
+                components = {item["component_id"] for item in members}
+                if set(publication_participants) - components:
+                    raise ForestError(
+                        "RUNTIME_PUBLICATION_PARTICIPANTS_INVALID",
+                        "Runtime publication participant is not a graph member",
+                        503,
+                    )
+                members_by_component = {
+                    item["component_id"]: item for item in members
+                }
+                for component_id in sorted(publication_participants):
+                    participant = publication_participants[component_id]
+                    publish = getattr(participant, "publish_generation_in", None)
+                    if publish is None:
+                        raise ForestError(
+                            "RUNTIME_PUBLICATION_PARTICIPANTS_INVALID",
+                            "Runtime publication participant has no transaction port",
+                            503,
+                        )
+                    item = members_by_component[component_id]
+                    await publish(
+                        conn,
+                        generation_id=item["generation_id"],
+                        graph_id=graph.graph_id,
                     )
             old_components: set[str] = set()
             if head is not None and head["graph_id"] is not None:

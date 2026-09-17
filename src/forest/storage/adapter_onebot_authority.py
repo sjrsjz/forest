@@ -632,6 +632,8 @@ class OneBotAdapterRepository:
         client_incarnation: str,
         revision: int,
         expected_binding_epoch: int,
+        _connection=None,
+        _candidate_generation_id: str | None = None,
     ) -> dict:
         for value, field in (
             (operation_id, "operation_id"),
@@ -651,7 +653,7 @@ class OneBotAdapterRepository:
                 "expected_binding_epoch": expected_binding_epoch,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "publication:" + operation_id)
             replay = await (
                 await conn.execute(
@@ -697,9 +699,16 @@ class OneBotAdapterRepository:
                 raise ForestError("BINDING_CLIENT_CONFLICT", "Client is not buffering", 409)
             if head["current_client_incarnation"] is not None:
                 raise ForestError("BINDING_DRAIN_REQUIRED", "Current client must retire first", 409)
-            await self._verify_generation(
-                conn, client["adapter_generation_id"], admission_lane="DATA"
-            )
+            if _candidate_generation_id is None:
+                await self._verify_generation(
+                    conn, client["adapter_generation_id"], admission_lane="DATA"
+                )
+            elif client["adapter_generation_id"] != _candidate_generation_id:
+                raise ForestError(
+                    "RUNTIME_GENERATION_BINDING_MISMATCH",
+                    "Binding client belongs to another Adapter Generation",
+                    409,
+                )
             resulting_binding_epoch = expected_binding_epoch + 1
             resulting_connection_epoch = head["connection_epoch"] + 1
             now = head["database_now"]
@@ -756,6 +765,18 @@ class OneBotAdapterRepository:
             ).fetchone()
             return dict(row)
 
+    async def publish_client_for_generation_in(
+        self, conn, *, candidate_generation_id: str, **values
+    ) -> dict:
+        """Publish inside the owning RuntimeGraph transaction before its route opens."""
+
+        _bounded(candidate_generation_id, "candidate_generation_id", 256)
+        return await self.publish_client(
+            _connection=conn,
+            _candidate_generation_id=candidate_generation_id,
+            **values,
+        )
+
     async def publish_disabled(
         self,
         *,
@@ -763,6 +784,7 @@ class OneBotAdapterRepository:
         binding_id: str,
         revision: int,
         expected_binding_epoch: int,
+        _connection=None,
     ) -> dict:
         for value, field in ((operation_id, "operation_id"), (binding_id, "binding_id")):
             _bounded(value, field, 256)
@@ -777,7 +799,7 @@ class OneBotAdapterRepository:
                 "expected_binding_epoch": expected_binding_epoch,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "publication:" + operation_id)
             replay = await (
                 await conn.execute(
@@ -840,6 +862,11 @@ class OneBotAdapterRepository:
                 )
             ).fetchone()
             return dict(row)
+
+    async def publish_disabled_for_generation_in(self, conn, **values) -> dict:
+        """Publish a disabled Binding inside the owning RuntimeGraph transaction."""
+
+        return await self.publish_disabled(_connection=conn, **values)
 
     async def observe_client(
         self,

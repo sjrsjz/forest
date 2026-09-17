@@ -126,7 +126,7 @@ class ResourceSupervisor:
 
 `prepare` 可以分配受监督资源、读取允许的数据；`start` 启动待命循环并报告 ready。候选尚未获得业务执行权，无法发送消息、执行真实工具、提交正式记忆或消费生产队列。预热写入只能落隔离临时空间。排空后取得的最终快照通过 READY 状态下的 `restore` 应用于候选，再验证健康；Worker 退出后的 `dispose` 由宿主执行，不要求已退出的 Python 对象继续调用方法。
 
-内核提交路由后才开放 admission token，待命循环才能领取工作；发布正确性不依赖另一个可能失败的业务 `on_activate` 回调。候选准备成功但切换失败时，回收整个候选进程。
+内核提交路由后才开放 admission token，待命循环才能领取工作；发布正确性不依赖另一个可能失败的业务 `on_activate` 回调。需要推进 Binding、订阅头或其他模块私有生效事实时，模块提供事务型 publication participant，由内核在同一目标 Bot 数据库事务中与配置 effective、Generation、Route 和 RuntimeGraph head 一起调用；participant 失败则整个提交回滚。提交后的本地 activation 只允许打开已预热的内存 gate，不做 I/O。候选准备成功但切换失败时，回收整个候选进程。
 
 ## 4. 组件状态机
 
