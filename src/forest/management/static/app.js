@@ -1,5 +1,4 @@
 import { bindingsPanel } from './bindings.js';
-import { jobsPanel } from './jobs-panel.js';
 import { eventsPanel } from './events-panel.js';
 import { componentJobsPanel } from './component-jobs-panel.js';
 import { commandPoliciesPanel } from './command-policies.js';
@@ -150,7 +149,6 @@ $('logout').addEventListener('click', () => busy($('logout'), async () => {
   await api('/logout', {}); configuration = null; pendingPlan = null; applyKey = null;
   bindingPanel.reset();
   runtimeViews.reset();
-  scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
   commandPolicyPanel.reset();
@@ -210,7 +208,6 @@ const replaceComponent = replacementButton($('bot-runtime-status'), 'component-r
   replaceComponent.classList.add('hidden'); renderComponent(undefined, [], false); updateBotState(botConfig);
 });
 const bindingPanel = bindingsPanel(api, busy, notice);
-const scheduledPanel = jobsPanel(api, busy, notice);
 const componentEventsPanel = eventsPanel(api, busy, notice);
 const durableJobsPanel = componentJobsPanel(api, busy, notice);
 const commandPolicyPanel = commandPoliciesPanel(api, busy, notice);
@@ -244,7 +241,7 @@ const botWorkspacePanes = new Map([
   ['status', [botOverview]],
   ['modules', [$('bot-components'), botComponentHistory]],
   ['routes', [$('bot-bindings')]],
-  ['tasks', [$('bot-jobs'), $('bot-component-jobs'), $('bot-events')]],
+  ['tasks', [$('bot-component-jobs'), $('bot-events')]],
   ['observability', [$('bot-handler-diagnostics'), $('bot-command-diagnostics'), $('bot-audit')]],
   ['security', [$('bot-command-policies'), $('bot-handler-policies')]],
 ]);
@@ -339,7 +336,7 @@ function invalidateControl(scope) {
     $('bot-runtime-status').textContent = '相关内容已不可用，请重新加载当前配置。';
   }
   runtimeViews.invalidateContent(scope);
-  for (const panel of [bindingPanel, scheduledPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
+  for (const panel of [bindingPanel, componentEventsPanel, durableJobsPanel, commandPolicyPanel, handlerPolicyPanel, handlerDiagnosticsPanel, commandDiagnosticsPanel, botAudit]) panel.invalidateContent(scope);
 }
 function resetComponent() {
   mountedModuleUi?.destroy(); mountedModuleUi = null;
@@ -533,7 +530,6 @@ async function selectBot(id) {
   const epoch = ++selectionEpoch;
   bindingPanel.reset();
   runtimeViews.reset();
-  scheduledPanel.reset();
   componentEventsPanel.reset();
   durableJobsPanel.reset();
   commandPolicyPanel.reset();
@@ -569,7 +565,6 @@ async function selectBot(id) {
     await runtimeViews.select(row); if (epoch !== selectionEpoch) return;
     await bindingPanel.select(row);
     if (epoch !== selectionEpoch) return;
-    await scheduledPanel.select(row);
     if (epoch !== selectionEpoch) return;
     await componentEventsPanel.select(row);
     if (epoch !== selectionEpoch) return;

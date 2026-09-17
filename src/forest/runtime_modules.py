@@ -304,9 +304,12 @@ def _message_routing(platform, _: dict[str, Any]):
 
 
 def _onebot(platform, modules: dict[str, Any]):
+    from forest.management.onebot_contract import OneBotManagementContract
     from forest.onebot_runtime import OneBotRuntime
 
-    return OneBotRuntime(platform, component_host=modules["component.worker-host"])
+    runtime = OneBotRuntime(platform, component_host=modules["component.worker-host"])
+    runtime.management_contract = OneBotManagementContract()
+    return runtime
 
 
 def _component_workers(platform, _: dict[str, Any]):
@@ -351,6 +354,7 @@ def _shell(platform, modules: dict[str, Any]):
 
 def _jobs(platform, modules: dict[str, Any]):
     from forest.job_scheduler import JobAuthorizationPort, JobDispatcher
+    from forest.management.job_contract import JobManagementContract
     from forest.storage.jobs import JobStore
 
     store = JobStore(modules["adapter.onebot"].messages)
@@ -360,12 +364,14 @@ def _jobs(platform, modules: dict[str, Any]):
         if platform.job_authority is not None
         else None
     )
-    return JobDispatcher(
+    runtime = JobDispatcher(
         store,
         platform.kernel._authority,
         authorize=authorization.authorize if authorization is not None else None,
         on_change=scheduler.notify,
     )
+    runtime.management_contract = JobManagementContract()
+    return runtime
 
 
 _OFFICIAL_ARTIFACT = _official_artifact()
@@ -448,6 +454,16 @@ OFFICIAL_MODULES = (
         ("adapter.onebot", "conversation.scheduler"),
         _jobs,
         _OFFICIAL_ARTIFACT,
+        management=(RuntimeManagementContribution(
+            "schedules",
+            "定时任务",
+            ("bot",),
+            "/static/modules/scheduler.jobs.html",
+            "/static/jobs-panel.js",
+            style="/static/modules/scheduler.jobs.css",
+            group="automation",
+            order=20,
+        ),),
     ),
 )
 

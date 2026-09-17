@@ -21,6 +21,10 @@ def module_scope(root):
     return root.replace("/management/v1/bots/", "/management/v1/scopes/bot/", 1) + "/modules"
 
 
+def job_scope(root):
+    return module_scope(root) + "/scheduler.jobs"
+
+
 def definition(conversation_id, **changes):
     start = datetime.now(UTC) + timedelta(days=1)
     return {
@@ -68,13 +72,13 @@ async def configured(tmp_path, dsn):
 
 
 async def planned(client, root, values, *, revision=0, key="plan", job_id="daily"):
-    return await post(client, root + "/jobs/change-plans", {
+    return await post(client, job_scope(root) + "/actions/definition.plan", {
         "job_id": job_id, "expected_revision": revision, "values": values,
     }, key)
 
 
 async def applied(client, root, plan, *, key="apply", status=200):
-    return await post(client, root + "/jobs/management-requests", {
+    return await post(client, job_scope(root) + "/actions/definition.apply", {
         field: plan[field] for field in ("job_id", "expected_revision", "plan_id", "plan_digest")
     }, key, status=status)
 
@@ -88,22 +92,22 @@ async def test_web_job_plan_manual_run_is_durable_and_delivered_once(tmp_path, w
         result = await applied(client, root, plan)
         assert result["revision"] == 1
         assert await applied(client, root, plan) == result
-        listing = await get(client, root + "/jobs")
+        listing = await get(client, job_scope(root) + "/queries/definitions")
         job = listing["jobs"][0]
         assert job["conversation"]["channel_id"] == "30001"
         assert job["values"]["prompt"] == values["prompt"]
         assert job["delegation"]["subject_id"]
         assert not model["requests"] and not onebot["sends"]
         body = {"job_id": "daily", "expected_revision": 1}
-        queued = await post(client, root + "/jobs/run-requests", body, "manual-one")
-        assert await post(client, root + "/jobs/run-requests", body, "manual-one") == queued
-        committed = await wait_for(lambda: get(client, root + "/jobs"),
+        queued = await post(client, job_scope(root) + "/actions/occurrence.run", body, "manual-one")
+        assert await post(client, job_scope(root) + "/actions/occurrence.run", body, "manual-one") == queued
+        committed = await wait_for(lambda: get(client, job_scope(root) + "/queries/definitions"),
                                   lambda row: any(item["reply_id"] for item in row["occurrences"]))
         occurrence = committed["occurrences"][0]
         assert occurrence["run_id"] and occurrence["event_id"] and occurrence["trigger_id"]
-        await wait_for(lambda: get(client, root + "/jobs"),
+        await wait_for(lambda: get(client, job_scope(root) + "/queries/definitions"),
                        lambda row: row["occurrences"][0]["delivery_state"] == "SENT")
-        no_repeat = await post(client, root + "/jobs/replays", {
+        no_repeat = await post(client, job_scope(root) + "/actions/occurrence.replay", {
             "occurrence_id": occurrence["occurrence_id"], "expected_revision": occurrence["revision"],
         }, "no-replay-after-ingress", status=409)
         assert no_repeat["code"] == "JOB_REPLAY_CONFLICT"
@@ -111,11 +115,11 @@ async def test_web_job_plan_manual_run_is_durable_and_delivered_once(tmp_path, w
         assert values["prompt"] in json.dumps(model["requests"][0])
         assert "30001" in json.dumps(model["requests"][0])
         assert not model["errors"]
-        cancelled = await post(client, root + "/jobs/cancellations", {
+        cancelled = await post(client, job_scope(root) + "/actions/definition.cancel", {
             **body, "scope": "future", "reason": "Stop future report generation",
         }, "stop")
         assert cancelled["revision"] == 2
-        final = await get(client, root + "/jobs")
+        final = await get(client, job_scope(root) + "/queries/definitions")
         assert not final["jobs"][0]["enabled"]
         assert final["occurrences"][0]["occurrence_id"] == occurrence["occurrence_id"]
 
@@ -130,27 +134,28 @@ async def test_web_jobs_cas_authority_and_bot_source_isolation(tmp_path, web_bot
         assert (await applied(client, root, second, key="apply-b", status=409))["code"] == "REVISION_CONFLICT"
         other = await post(client, "/management/v1/bots", {"display_name": "Other"}, "other", status=202)
         await ready(client, other)
-        foreign = await post(client, "/management/v1/bots/" + other["bot_id"] + "/jobs/change-plans", {
+        foreign_root = "/management/v1/bots/" + other["bot_id"]
+        foreign = await post(client, job_scope(foreign_root) + "/actions/definition.plan", {
             "job_id": "foreign", "expected_revision": 0, "values": values,
         }, "foreign", status=404)
         assert foreign["code"] == "CONVERSATION_NOT_FOUND"
-        forged = await post(client, root + "/jobs/change-plans", {
+        forged = await post(client, job_scope(root) + "/actions/definition.plan", {
             "job_id": "forged", "expected_revision": 0,
             "values": {**values, "delegation": {"subject_id": "some-other-admin"}},
         }, "forged", status=422)
         assert "some-other-admin" not in json.dumps(forged)
         body = {"job_id": "daily", "expected_revision": 2}
-        missing = await client.post(root + "/jobs/run-requests", json=body)
+        missing = await client.post(job_scope(root) + "/actions/occurrence.run", json=body)
         assert missing.status_code == 422 and missing.json()["code"] == "IDEMPOTENCY_KEY_REQUIRED"
-        csrf = await client.post(root + "/jobs/run-requests", json=body,
+        csrf = await client.post(job_scope(root) + "/actions/occurrence.run", json=body,
                                  headers={"idempotency-key": "bad-csrf", "x-csrf-token": ""})
         assert csrf.status_code == 403
-        origin = await client.post(root + "/jobs/run-requests", json=body,
+        origin = await client.post(job_scope(root) + "/actions/occurrence.run", json=body,
                                    headers={"idempotency-key": "bad-origin", "origin": "https://elsewhere.invalid"})
         assert origin.status_code == 403
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as anonymous:
-            assert (await anonymous.get(root + "/jobs")).status_code == 401
-        absent = await post(client, root + "/jobs/replays", {
+            assert (await anonymous.get(job_scope(root) + "/queries/definitions")).status_code == 401
+        absent = await post(client, job_scope(root) + "/actions/occurrence.replay", {
             "occurrence_id": "missing", "expected_revision": 1,
         }, "missing-occurrence", status=404)
         assert absent["code"] == "JOB_NOT_FOUND"
@@ -165,13 +170,13 @@ async def test_web_cron_preview_and_cancellation_receipt_replay(tmp_path, web_bo
         await applied(client, root, plan)
         body = {"job_id": "daily", "expected_revision": 1,
                 "scope": "pending", "reason": "Cancel unstarted occurrences"}
-        first = await post(client, root + "/jobs/cancellations", body, "cancel")
-        assert await post(client, root + "/jobs/cancellations", body, "cancel") == first
-        stale = await post(client, root + "/jobs/run-requests", {
+        first = await post(client, job_scope(root) + "/actions/definition.cancel", body, "cancel")
+        assert await post(client, job_scope(root) + "/actions/definition.cancel", body, "cancel") == first
+        stale = await post(client, job_scope(root) + "/actions/occurrence.run", {
             "job_id": "daily", "expected_revision": 1,
         }, "stale", status=409)
         assert stale["code"] == "REVISION_CONFLICT"
-        assert (await get(client, root + "/jobs"))["jobs"][0]["values"]["enabled"]
+        assert (await get(client, job_scope(root) + "/queries/definitions"))["jobs"][0]["values"]["enabled"]
 
 
 async def test_web_retry_never_enqueued_failure_keeps_occurrence_identity(tmp_path, web_bots_database):
@@ -184,7 +189,7 @@ async def test_web_retry_never_enqueued_failure_keeps_occurrence_identity(tmp_pa
         jobs.authorize = None
         values = definition(group["conversation_id"])
         await applied(client, root, await planned(client, root, values))
-        queued = await post(client, root + "/jobs/run-requests", {
+        queued = await post(client, job_scope(root) + "/actions/occurrence.run", {
             "job_id": "daily", "expected_revision": 1,
         }, "manual-fails-before-ingress")
         store = jobs.store
@@ -192,13 +197,13 @@ async def test_web_retry_never_enqueued_failure_keeps_occurrence_identity(tmp_pa
         claim = await store.claim_pending(lease, "web-retry-fixture", ttl_seconds=30)
         assert claim is not None
         await store.fail(lease, claim, "DEFINITELY_NOT_ENQUEUED")
-        failed = (await get(client, root + "/jobs"))["occurrences"][0]
+        failed = (await get(client, job_scope(root) + "/queries/definitions"))["occurrences"][0]
         assert failed["replay_allowed"] and not failed["event_id"]
         payload = {"occurrence_id": failed["occurrence_id"], "expected_revision": failed["revision"]}
-        replayed = await post(client, root + "/jobs/replays", payload, "retry-one")
-        assert await post(client, root + "/jobs/replays", payload, "retry-one") == replayed
+        replayed = await post(client, job_scope(root) + "/actions/occurrence.replay", payload, "retry-one")
+        assert await post(client, job_scope(root) + "/actions/occurrence.replay", payload, "retry-one") == replayed
         assert replayed["occurrence_id"] == queued["occurrence_id"]
         assert replayed["revision"] == failed["revision"] + 1
-        remaining = (await get(client, root + "/jobs"))["occurrences"]
+        remaining = (await get(client, job_scope(root) + "/queries/definitions"))["occurrences"]
         assert len(remaining) == 1 and remaining[0]["status"] == "QUEUED"
         assert not model["requests"] and not onebot["sends"]

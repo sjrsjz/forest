@@ -32,6 +32,30 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         assert contribution["protocol"] == "forest.management-contribution/1"
         assert contribution["scope_kinds"] == ["bot"]
         assert modules["conversation.scheduler"]["management_contributions"] == []
+        schedules, = modules["scheduler.jobs"]["management_contributions"]
+        assert schedules["contribution_id"] == "schedules"
+        assert {
+            item["operation_id"]
+            for item in modules["scheduler.jobs"]["management_contract"]["operations"]
+        } == {
+            "definitions",
+            "definition.plan",
+            "definition.apply",
+            "occurrence.run",
+            "definition.cancel",
+            "occurrence.replay",
+        }
+
+        adapter = (
+            f"/management/v1/scopes/bot/{bot['bot_id']}/modules/adapter.onebot/queries"
+        )
+        assert (await client.get(adapter + "/bindings")).json() == {"bindings": []}
+        assert (await client.get(adapter + "/conversations")).json() == {
+            "conversations": []
+        }
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/jobs")
+        ).status_code == 404
 
         graph = await client.get(
             f"/management/v1/scopes/bot/{bot['bot_id']}/modules/"

@@ -58,6 +58,7 @@ Forest 尚未上线，本目标明确允许激进破坏性重构：删除错误 
 - 跨模块执行已从 `BindingRuntime` 移出。新增 `component.worker-host` 官方模块，拥有可安装包 Worker 的去重启动、Kernel install 和局部错误；OneBot 的 codec 恢复只调用该依赖端口。新增 `contract.router` 官方模块，拥有消息 Handler、业务命令、Agent 和模板 responder 的冻结执行分派；Conversation Scheduler 只调用其 `execute` 端口。注册表新增独立 `prepare()` 安全边界，测试或恢复流程可以在不启动后台接纳的情况下完成 schema 安装和实例构造。PostgreSQL 定向回归 5 项覆盖模块所有权、Worker 故障隔离、群回复/Shell 并行、配置正文撤销及模板结果因果，另有 3 项无数据库端口测试。`BindingRuntime` 仍持有唤醒汇总和总体健康循环。
 - Job 委派授权适配已移入 `scheduler.jobs`，由模块内 `JobAuthorizationPort` 绑定自己的 JobStore、Bot scope 与部署 authority；`BindingRuntime` 不再读取 Job claim 或转换授权请求。无数据库定向测试覆盖完整字段翻译及 issuer 换代先于存储访问的拒绝路径。
 - 运行时描述符已用可多项的 `management_contributions` 取代单个 `management_view`。每项贡献固定 contribution ID、适用 scope、排序组和代际绑定的 UI 工件；Bot scope 通过 `/management/v1/scopes/bot/{bot_id}/modules` 枚举，并从统一 scope query/action 网关调用模块契约。旧 `/bots/{bot_id}/runtime-modules/*` 路径已删除，没有兼容分支；Agent、Memory 和 Routing 控制器已经切换到新路径。无 PostgreSQL 全套为 734 通过、36 跳过；PostgreSQL 17 上独立 scope 发现/旧路径拒绝 1 项，以及 Package、Memory、Agent 既有端到端 3 项通过。
+- `scheduler.jobs` 已成为首个从旧壳层完整迁出的控制页面：模块贡献自己的 HTML、CSS、控制器和六项类型化管理操作，旧 `/bots/{bot_id}/jobs*` 路由、`install_job_routes` 和壳层 `scheduledPanel` 已删除。Job 页面通过 `adapter.onebot` 的 `bindings`/`conversations` 管理 query 取得来源，不直接读取 Adapter 表或 Agent DOM。无 PostgreSQL 全套为 735 通过、36 跳过；PostgreSQL 17 上计划/手动触发、CAS 与 Bot 来源隔离、cron/取消回执、失败重试身份四项 Web 回归及一项贡献目录回归通过。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
 这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、旧 `bot_outbox_events` 的来源归一与资源归属尚未全部迁完；trace 的深层筛选已经改用不可变调用因果根和数据库关联键精确选根，并通过绑定筛选条件的稳定游标跨页读取，不再采用近期消息候选扫描。
@@ -114,7 +115,7 @@ VL 嵌入模型的种类在 Bot 创建时冻结并与 Bot 生命周期绑定；�
 
 - 顶层壳只提供管理身份、作用域选择、模块发现与工作区容器；不存在固定的部署/Bot/Agent/Memory/安全/存储产品栏目；
 - 内核与业务模块都通过 `ManagementContribution` 发布导航、配置、query/action 和 UI；宿主不能按模块 ID 硬编码业务表单、端点或页面；
-- 当前 `management.app` 仍安装 Bot/Binding/Agent/Memory/Job 等专用路由，静态资源仍直接导入多个业务 panel；这些都是待删除的架构阻断项，不允许继续美化旧页面；
+- 当前 `management.app` 仍安装 Bot/Binding、Event/ComponentJob、命令与消息策略、审计和备份等专用路由，静态资源仍直接导入多个业务 panel；这些都是待删除的架构阻断项，不允许继续美化旧页面；
 - 现有 Memory 页面中的主干、组合筛选、分页和发布图浏览逻辑可迁入 Memory 包的 contribution/UI，但迁移后宿主不能再保留其业务脚本或专用 API；
 - Bot runtime 的 `ManagementContribution` 注册、Bot 作用域枚举、代际绑定 UI 工件解析和通用 query/action 网关已经接通；仍需为 deployment/host/Binding 建立同一注册机制，并迁走壳层里的固定页面和专用路由，再重做 PC 布局验收；
 - WebUI、群聊 Shell 和自动化入口必须调用同一类型化控制契约和授权模型。

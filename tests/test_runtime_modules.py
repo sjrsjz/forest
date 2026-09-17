@@ -249,6 +249,7 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
     agent, = descriptors["agent.runtime"].management
     memory, = descriptors["memory.graph"].management
     routing, = descriptors["routing.graph"].management
+    schedules, = descriptors["scheduler.jobs"].management
     assert (agent.label, agent.template, agent.module) == (
         "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js"
     )
@@ -262,10 +263,15 @@ def test_official_management_contributions_are_declared_by_module_descriptors():
         "路由与执行图", "/static/modules/routing.graph.html", "/static/routing-graph.js"
     )
     assert routing.style == "/static/modules/routing.graph.css"
+    assert (schedules.contribution_id, schedules.scope_kinds, schedules.module) == (
+        "schedules", ("bot",), "/static/jobs-panel.js"
+    )
     assert all(
         item.management == ()
         for component_id, item in descriptors.items()
-        if component_id not in {"agent.runtime", "memory.graph", "routing.graph"}
+        if component_id not in {
+            "agent.runtime", "memory.graph", "routing.graph", "scheduler.jobs"
+        }
     )
 
 

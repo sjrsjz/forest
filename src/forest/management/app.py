@@ -44,7 +44,6 @@ from forest.management.command_policies_api import install_command_policy_routes
 from forest.management.component_jobs_api import install_component_job_routes
 from forest.management.events_api import install_event_routes
 from forest.management.fleet import BotFleet
-from forest.management.jobs_api import install_job_routes
 from forest.management.message_handler_diagnostics_api import (
     install_message_handler_diagnostic_routes,
 )
@@ -682,7 +681,6 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_bot_routes(app, runtime)
     install_binding_routes(app, runtime)
     install_module_routes(app, runtime)
-    install_job_routes(app, runtime)
     install_event_routes(app, runtime)
     install_component_job_routes(app, runtime)
     install_command_policy_routes(app, runtime)

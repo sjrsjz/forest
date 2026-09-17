@@ -5,11 +5,14 @@ const states = {PENDING:'排队中', QUEUED:'排队中', CLAIMED:'已被调度�
   SKIPPED:'已跳过', UNKNOWN:'结果待核实', REPLY_COMMITTED:'回复已提交', SENT:'平台已确认送达'};
 const misfires = {skip:'跳过漏执行', coalesce:'合并为一次', catch_up:'限量补执行'};
 
-export function jobsPanel(api, busy, notice) {
+export function createModulePanel(api, busy, notice) {
   let bot = null, epoch = 0, edit = 0, readSeq = 0, detailSeq = 0;
   let rows = [], conversations = [], bindings = [], selected = null, draftId = null, plan = null, dirty = false;
   let planKey = null, applyKey = null, runKey = null, cancelKey = null;
-  const form = $('job-config'), base = () => `/bots/${encodeURIComponent(bot.bot_id)}/jobs`;
+  const form = $('job-config');
+  const scope = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules`;
+  const base = () => `${scope()}/scheduler.jobs`;
+  const adapter = () => `${scope()}/adapter.onebot`;
   const post = (path, body, key) => api(path, body, {'Idempotency-Key':key});
   const valid = own => bot !== null && own === epoch;
   const option = (value, label) => { const node = document.createElement('option'); node.value = value; node.textContent = label; return node; };
@@ -160,7 +163,7 @@ export function jobsPanel(api, busy, notice) {
       if (row.replay_allowed === true) {
         const button = document.createElement('button'); button.textContent = '按当前授权重新执行'; const key = crypto.randomUUID();
         button.addEventListener('click', () => busy(button, async () => {
-          await post(prefix + '/replays', {occurrence_id:row.occurrence_id, expected_revision:row.revision}, key);
+          await post(prefix + '/actions/occurrence.replay', {occurrence_id:row.occurrence_id, expected_revision:row.revision}, key);
           if (valid(own)) { notice('重放请求已提交，执行结果与送达仍以记录为准。', true); await detail(); }
         })); item.append(button);
       }
@@ -171,7 +174,11 @@ export function jobsPanel(api, busy, notice) {
   async function refresh() {
     if (!bot || draftId === null) return;
     const own = epoch, sequence = ++readSeq, prefix = base();
-    const [data, sources, accounts] = await Promise.all([api(prefix), api(`/bots/${encodeURIComponent(bot.bot_id)}/conversations`), api(`/bots/${encodeURIComponent(bot.bot_id)}/bindings`)]);
+    const [data, sources, accounts] = await Promise.all([
+      api(prefix + '/queries/definitions'),
+      api(adapter() + '/queries/conversations'),
+      api(adapter() + '/queries/bindings'),
+    ]);
     if (!valid(own) || sequence !== readSeq) return;
     const sourceId = form.elements.conversation_id.value;
     conversations = sources.conversations || []; bindings = accounts.bindings || []; listing(data);
@@ -187,20 +194,20 @@ export function jobsPanel(api, busy, notice) {
     note.textContent = rejected ? '取消请求未应用：任务已进入活跃 Agent 运行，可能与其他触发共用同一次运行。请先在运行管理中核对并显式取消，再重试计划取消。' : '已领取的 Agent 运行仍在继续；如需停止，请先核对其中包含的其他触发，再显式取消。';
     root.append(note);
     for (const row of runs) facts(root, [['活跃运行',row.run_id], ['核对时检查点',row.expected_checkpoint_seq]]);
-    const button = document.createElement('button'); button.type = 'button'; button.textContent = '查看 Agent 运行并核对取消';
-    button.addEventListener('click', () => { $('agent-refresh').click(); $('agent-runs').scrollIntoView({behavior:'smooth', block:'start'}); }); root.append(button);
+    const hint = document.createElement('p'); hint.className = 'hint';
+    hint.textContent = '请从当前作用域的 Agent 管理贡献打开运行记录并核对取消。'; root.append(hint);
   }
   async function detail() {
     if (!bot || !selected) return;
     const own = epoch, sequence = ++detailSeq, id = selected.job_id, prefix = base();
-    const data = await api(prefix + '?job_id=' + encodeURIComponent(id));
+    const data = await api(prefix + '/queries/definitions?job_id=' + encodeURIComponent(id));
     if (!valid(own) || sequence !== detailSeq || selected?.job_id !== id) return;
     occurrences(data);
   }
   async function reload() {
     if (!bot || !selected) return;
     const own = epoch, edited = edit, id = selected.job_id, sequence = ++detailSeq;
-    const data = await api(base() + '?job_id=' + encodeURIComponent(id));
+    const data = await api(base() + '/queries/definitions?job_id=' + encodeURIComponent(id));
     if (!valid(own) || sequence !== detailSeq || selected?.job_id !== id) return;
     if (edited !== edit) { notice('读取期间计划已编辑，已保留草稿。'); return; }
     const row = (data.jobs || []).find(item => item.job_id === id);
@@ -215,7 +222,11 @@ export function jobsPanel(api, busy, notice) {
   async function select(row) {
     reset(); bot = row; const own = epoch;
     $('bot-jobs').classList.remove('hidden');
-    const [data, sources, accounts] = await Promise.all([api(base()), api(`/bots/${encodeURIComponent(bot.bot_id)}/conversations`), api(`/bots/${encodeURIComponent(bot.bot_id)}/bindings`)]);
+    const [data, sources, accounts] = await Promise.all([
+      api(base() + '/queries/definitions'),
+      api(adapter() + '/queries/conversations'),
+      api(adapter() + '/queries/bindings'),
+    ]);
     if (!valid(own)) return;
     conversations = sources.conversations || []; bindings = accounts.bindings || []; listing(data); fill();
     $('job-source-empty').classList.toggle('hidden', conversations.length !== 0);
@@ -228,7 +239,7 @@ export function jobsPanel(api, busy, notice) {
     const own = epoch, edited = edit, id = draftId, revision = selected?.revision || 0, prefix = base();
     planKey ||= crypto.randomUUID(); const key = planKey;
     busy(event.submitter || form.querySelector('button[type="submit"]'), async () => {
-      const result = await post(prefix + '/change-plans', {job_id:id, expected_revision:revision, values}, key);
+      const result = await post(prefix + '/actions/definition.plan', {job_id:id, expected_revision:revision, values}, key);
       if (!valid(own) || edited !== edit || id !== draftId || key !== planKey) return;
       plan = result; applyKey = crypto.randomUUID(); preview(result);
     });
@@ -237,7 +248,7 @@ export function jobsPanel(api, busy, notice) {
     if (!plan || !bot) return;
     const own = epoch, edited = edit, proposed = plan, id = draftId, key = applyKey, prefix = base();
     busy(event.currentTarget, async () => {
-      const result = await post(prefix + '/management-requests', {job_id:id, expected_revision:proposed.expected_revision,
+      const result = await post(prefix + '/actions/definition.apply', {job_id:id, expected_revision:proposed.expected_revision,
         plan_id:proposed.plan_id, plan_digest:proposed.plan_digest}, key);
       if (!valid(own)) return;
       if (edited === edit && plan === proposed && draftId === id) fill({job_id:id, revision:result.revision, values:proposed.values});
@@ -254,7 +265,7 @@ export function jobsPanel(api, busy, notice) {
     if (!selected || !bot) return;
     const own = epoch, prefix = base(), row = selected; runKey ||= crypto.randomUUID(); const key = runKey;
     busy(event.currentTarget, async () => {
-      await post(prefix + '/run-requests', {job_id:row.job_id, expected_revision:row.revision}, key);
+      await post(prefix + '/actions/occurrence.run', {job_id:row.job_id, expected_revision:row.revision}, key);
       if (!valid(own)) return;
       notice('手动执行请求已接纳；重试同一次请求不会重复触发。', true);
       if (selected?.job_id === row.job_id) await detail();
@@ -270,7 +281,7 @@ export function jobsPanel(api, busy, notice) {
     cancelKey ||= crypto.randomUUID(); const key = cancelKey;
     busy(event.currentTarget, async () => {
       let result;
-      try { result = await post(prefix + '/cancellations', {job_id:row.job_id, expected_revision:row.revision, scope, reason}, key); }
+      try { result = await post(prefix + '/actions/definition.cancel', {job_id:row.job_id, expected_revision:row.revision, scope, reason}, key); }
       catch (error) {
         // Invalidation has already advanced this panel's epoch and cleared its
         // selection. Surface the receipt for this Bot, but never on another Bot.

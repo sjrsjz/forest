@@ -104,6 +104,34 @@ class MessageStore:
         self.handler_chains = MessageHandlerChainStore(store, bindings)
         self.context_token_budget = context_token_budget
 
+    async def list_conversations(
+        self, ticket: dict, operation_id: str, *, limit: int = 100
+    ) -> dict:
+        """Return the bounded adapter-owned conversation directory."""
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ForestError("MESSAGE_QUERY_INVALID", "Conversation limit is invalid", 422)
+        from forest.storage.control import BotControl
+
+        control = BotControl(self.store)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            claims = await control._guard(conn, ticket, "message.read", operation_id, {})
+            rows = await (
+                await conn.execute(
+                    "SELECT conversation_id,binding_id,group_source_id,platform,channel_kind,"
+                    "channel_id,thread_id,next_ingress_seq,classified_through_seq,"
+                    "context_applied_seq,context_revision,next_response_seq,"
+                    "(SELECT count(*) FROM public.bot_conversation_triggers t "
+                    "WHERE t.bot_id=c.bot_id AND t.conversation_id=c.conversation_id "
+                    "AND t.status IN ('PENDING','CLAIMED')) AS pending_triggers "
+                    "FROM public.bot_conversations c WHERE bot_id=%s "
+                    "ORDER BY updated_at DESC LIMIT %s",
+                    (self.store.bot_id, limit),
+                )
+            ).fetchall()
+            await control._time(conn, claims)
+            return {"conversations": rows}
+
     @staticmethod
     def _business_token(value: dict) -> tuple[str, str] | None:
         """Read one token from one real text segment; other parts never join it."""

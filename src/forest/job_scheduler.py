@@ -68,6 +68,13 @@ class JobDispatcher:
     def notify(self):
         self._wake.set()
 
+    def notify_change(self):
+        """Wake both the Job scanner and its downstream conversation scheduler."""
+
+        self.notify()
+        if self.on_change is not None:
+            self.on_change()
+
     async def start(self):
         if self._closed:
             raise ForestError("JOB_DISPATCHER_CLOSED", "Job dispatcher is closed", 503)
