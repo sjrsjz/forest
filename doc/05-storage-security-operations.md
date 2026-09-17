@@ -489,16 +489,16 @@ tests/
 
 ## 11. 开发阶段与出口
 
-本节 P0–P5 是实施阶段编号，与群聊 Shell 的 P0–P4 服务优先级没有映射关系；引用时应明确“实施阶段”或“服务等级”。
+本节使用 M0–M5 表示里程碑，避免与群聊 Shell 的 P0–P4 服务优先级或已经删除的旧 P0–P5 切片混淆。
 
 | 阶段 | 交付范围 | 出口 |
 |---|---|---|
-| P0 契约与可靠内核 | Python SDK/Worker、消息 schema、Scoped Store、CommitGuard、生命周期骨架、日志；独立 Web bootstrap/登录、配置修订与类型化管理纵向切片 | 普通 Python 插件可加载/失败清理，伪造身份和旧 epoch 写入被拒绝；浏览器首次初始化不依赖 Bot/LLM |
-| P1 多 Bot 消息闭环 | OneBot Adapter、全量Inbox/作者信息、分类水位、会话Session/Actor、公平调度、命令插件、Delivery顺序；Web Bot/绑定/基础配置、操作查询 | 两Bot多群并行，同群有序且全部正常消息可追溯，断线与UNKNOWN可查询；创建/设置无需手改文件 |
-| P2 原生插件热重载 | watcher、不可变包候选、依赖计划、排空、路由提交、状态迁移、操作恢复；Web schema 表单、diff、desired/effective 与回滚 | 文件保存触发受控替换，语法/钩子失败保留旧代，100 次替换无资源增长；Web/Shell 并发配置无丢失更新 |
-| P3 Agent 与工具 | CorePrompt/PresetContext、原子ModelTurn、Provider、InputBatch/触发切口、Run/checkpoint、静默裁剪、单工具账本、修复、确认/取消与定时触发 | 08交互用例通过；等待不阻塞接收和其他群、不另开同群Agent，恢复不重做已知效果 |
-| P4 全局记忆与合流 | 原生图文来源/受管媒体、多主干图、跨主干证据、图文查询与出处召回、操作集/冲突投影、scope 水位、显式可选语义派生、遗忘/索引修复；LLM 能力投影与 canonical 记忆分离 | A-02/A-05/A-06/A-07/A-14/A-32–A-45、11 多模态验收及 06 全部性质场景通过；默认裁剪模型调用为零 |
-| P5 运维与容量 | 完整 Web 管理页、权限/密钥/成本、实时操作/日志视图、迁移/备份恢复、压力与故障测试 | A-46–A-51 及 12 WebUI 场景通过；首版 WebUI 可完成日常后台管理，单节点运行基线和已知限制可复现 |
+| M0 契约与可靠内核 | Python SDK/Worker、消息 schema、Scoped Store、CommitGuard、生命周期骨架、日志；独立 Web bootstrap/登录、配置修订与类型化管理纵向切片 | 普通 Python 插件可加载/失败清理，伪造身份和旧 epoch 写入被拒绝；浏览器首次初始化不依赖 Bot/LLM |
+| M1 多 Bot 消息闭环 | OneBot Adapter、全量Inbox/作者信息、分类水位、会话Session/Actor、公平调度、命令插件、Delivery顺序；模块贡献式 Binding/基础配置与操作查询 | 两Bot多群并行，同群有序且全部正常消息可追溯，断线与UNKNOWN可查询；创建/设置无需手改文件 |
+| M2 原生插件热重载 | watcher、不可变包候选、依赖计划、排空、路由提交、状态 handoff、操作恢复；模块 schema 表单、diff、desired/effective 与回滚 | 文件保存触发受控替换，语法/钩子失败保留旧代，100 次替换无资源增长；Web/Shell 并发配置无丢失更新 |
+| M3 Agent 与工具 | CorePrompt/PresetContext、原子ModelTurn、Provider、InputBatch/触发切口、Run/checkpoint、静默裁剪、单工具账本、修复、确认/取消与定时触发 | 08交互用例通过；等待不阻塞接收和其他群、不另开同群Agent，恢复不重做已知效果 |
+| M4 全局记忆与合流 | 原生图文来源/受管媒体、多主干图、跨主干证据、图文查询与出处召回、操作集/冲突投影、scope 水位、显式可选语义派生、遗忘/索引修复；LLM 能力投影与 canonical 记忆分离 | A-02/A-05/A-06/A-07/A-14/A-32–A-45、11 多模态验收及 06 全部性质场景通过；默认裁剪模型调用为零 |
+| M5 运维与容量 | 模块贡献式 Web 管理、权限/密钥/成本、实时操作/日志视图、备份恢复、压力与故障测试 | A-46–A-51 及 12 WebUI 场景通过；首版 WebUI 可完成日常后台管理，单节点运行基线和已知限制可复现 |
 | 可选扩展 | 远程/集群 Worker、额外平台、不可信插件隔离、Wasm Driver | 不弱化已建立协议，单独验收 |
 
 各阶段累积实现同一套契约，不在早期采用未来无法兼容的无界队列、按群长期库或原地共享内存热替换。实现开始时优先交付可运行纵向切片，避免只搭建大量空抽象。
