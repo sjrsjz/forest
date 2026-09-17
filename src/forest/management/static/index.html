@@ -86,7 +86,6 @@
       <div id="storage-generation-list" aria-live="polite"></div>
     </section>
     <section id="bots" class="hidden">
-      <details class="card"><summary>模块注册表</summary><p class="hint">导入可信来源的 Python 插件 ZIP 包。导入后为 Bot 选择版本并预览配置；启用时才启动插件。</p><form id="package-import-form"><label>插件包<input name="archive" type="file" accept=".zip,application/zip" required></label><button type="submit">导入插件包</button></form><div id="package-list"></div></details>
       <p class="muted">这里只承载当前 Bot authority 的运行工作区。Bot 身份、存储供应和创建进度由部署作用域的 Bot 目录模块管理。</p>
       <div id="bot-detail" class="hidden">
         <div class="card"><h2 id="bot-name"></h2><p id="bot-status" class="muted"></p><form id="bot-maintenance-form" class="hidden"><h3>业务接纳</h3><p id="bot-maintenance-status" class="muted" role="status"></p><label>操作原因<input name="reason" required maxlength="256" placeholder="例如：上游接口维护"></label><div class="actions"><button id="bot-maintenance-toggle" type="submit">暂停业务处理</button><button id="bot-maintenance-refresh" type="button" class="subtle">刷新维护状态</button></div><p class="hint">暂停后仍可靠接收群消息和管理命令；Agent、任务和记忆工作等恢复后继续。提交使用维护版本裁决并发操作。</p></form></div>

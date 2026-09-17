@@ -18,6 +18,7 @@ from test_web_bots import (
     invoke,
     login,
     make_plan,
+    package_query,
     post,
     ready,
     running,
@@ -52,8 +53,33 @@ def archive(tmp_path, version, *, broken=False, large=False, reserved=False):
 
 
 async def upload(client, data, key, *, status=201, headers=None):
-    response = await client.post("/management/v1/packages", content=data,
+    response = await client.post(
+        await package_module_root(client) + "/uploads/package.import", content=data,
         headers={"content-type": "application/zip", "idempotency-key": key, **(headers or {})})
+    assert response.status_code == status, response.text
+    return response.json()
+
+
+async def package_module_root(client):
+    session = await client.get("/management/v1/session")
+    assert session.status_code == 200, session.text
+    return (
+        f"/management/v1/scopes/deployment/{session.json()['deployment_id']}/modules/"
+        "deployment.package-registry"
+    )
+
+
+async def module_upload(client, data, key, *, status=201, headers=None):
+    root = await package_module_root(client)
+    response = await client.post(
+        root + "/uploads/package.import",
+        content=data,
+        headers={
+            "content-type": "application/zip",
+            "idempotency-key": key,
+            **(headers or {}),
+        },
+    )
     assert response.status_code == status, response.text
     return response.json()
 
@@ -73,7 +99,11 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
         broken = await upload(client, bad, "import-bad")
         third = await upload(client, new, "import-new")
         assert not app.state.runtime.fleet.bots
-        exported = await client.get(f"/management/v1/packages/{first['package_digest']}/archive")
+        package_root = await package_module_root(client)
+        exported = await client.get(
+            package_root + "/downloads/package.archive",
+            params={"package_digest": first["package_digest"]},
+        )
         assert exported.status_code == 200
         imported = PackageCatalog(tmp_path / "roundtrip").import_archive(exported.content)
         assert imported.digest == first["package_digest"]
@@ -338,7 +368,7 @@ async def test_web_package_upgrade_failure_history_restore_and_restart(tmp_path,
     async with running(settings) as (app, client):
         assert app.state.runtime.store is not None, app.state.runtime.recovery_error
         await login(client)
-        packages = (await client.get("/management/v1/packages")).json()["packages"]
+        packages = (await package_query(client))["packages"]
         assert {p["version"] for p in packages if p["package_id"] == "demo.counter"} == {"1.0.0", "2.0.0", "3.0.0"}
         await effective(client, base, 4)
         assert (await invoke(client, base, 1, "after-restart"))["result"]["value"] == 15
@@ -350,20 +380,50 @@ async def test_package_endpoint_auth_and_static_admission(tmp_path, web_bots_dat
     settings = WebSettings(data_dir, ORIGIN, managed_dsn=web_bots_database)
     good = archive(tmp_path, "1.0.0")
     async with running(settings) as (_, client):
-        await upload(client, good, "no-session", status=401)
+        anonymous = await client.post(
+            "/management/v1/scopes/deployment/missing/modules/"
+            "deployment.package-registry/uploads/package.import",
+            content=good,
+            headers={"content-type": "application/zip", "idempotency-key": "anonymous"},
+        )
+        assert anonymous.status_code == 401
+        assert (await client.post("/management/v1/packages", content=good)).status_code == 404
         await setup(client, token)
+        package_root = await package_module_root(client)
+        projection = await client.get(package_root + "/queries/packages")
+        assert projection.status_code == 200, projection.text
+        imported = await module_upload(client, good, "module-import")
+        assert imported["package_id"] == "demo.counter"
+        assert await module_upload(client, good, "module-import") == imported
+        exported = await client.get(
+            package_root + "/downloads/package.archive",
+            params={"package_digest": imported["package_digest"]},
+        )
+        assert exported.status_code == 200
+        assert exported.headers["content-disposition"] == (
+            'attachment; filename="forest-plugin.zip"'
+        )
+        assert PackageCatalog(tmp_path / "module-roundtrip").import_archive(
+            exported.content
+        ).digest == imported["package_digest"]
         builtin = next(
-            package for package in (await client.get("/management/v1/packages")).json()["packages"]
+            package for package in (await package_query(client))["packages"]
             if package["package_id"] == "forest.counter"
         )
         assert builtin["management_ui"]["protocol"] == "forest.management-ui/1"
-        ui = await client.get(
-            f"/management/v1/packages/{builtin['package_digest']}/management-ui"
+        assert (
+            await client.get(
+                f"/management/v1/packages/{builtin['package_digest']}/management-ui"
+            )
+        ).status_code == 404
+        module_ui = await client.get(
+            package_root + "/downloads/package.management-ui",
+            params={"package_digest": builtin["package_digest"]},
         )
-        assert ui.status_code == 200
-        assert ui.headers["x-forest-management-ui-digest"] == builtin["management_ui"]["sha256"]
-        assert "connect-src 'none'" in ui.headers["content-security-policy"]
-        assert "forest.management-ui/1" in ui.text
+        assert module_ui.status_code == 200
+        assert module_ui.headers["content-type"].startswith("text/html")
+        assert "connect-src 'none'" in module_ui.headers["content-security-policy"]
+        assert "forest.management-ui/1" in module_ui.text
         await upload(client, good, "wrong-origin", status=403, headers={"origin": "https://untrusted.invalid"})
         await upload(client, good, "wrong-csrf", status=403, headers={"x-csrf-token": "wrong"})
         await upload(client, good, "wrong-type", status=415, headers={"content-type": "application/json"})
@@ -376,7 +436,7 @@ async def test_package_endpoint_auth_and_static_admission(tmp_path, web_bots_dat
         await upload(client, good, "one-key")
         result = await upload(client, archive(tmp_path, "2.0.0"), "one-key", status=409)
         assert result["code"] == "IDEMPOTENCY_CONFLICT"
-        listing = (await client.get("/management/v1/packages")).json()["packages"]
+        listing = (await package_query(client))["packages"]
         assert [p["version"] for p in listing if p["package_id"] == "demo.counter"] == ["1.0.0"]
         await upload(client, b"x" * (32 * 1024 * 1024 + 1), "too-large", status=413)
 

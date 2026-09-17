@@ -176,7 +176,7 @@ UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `ope
 
 包工件和备份还暴露了通用传输的一个缺口：它们需要有界的二进制上传与下载，不能被塞进 JSON action，也不能因此回到壳层专用路由。`ModuleOperation` 需要增加受限的 artifact 操作种类：描述符声明方向、媒体类型、最大字节数、所需主体和是否要求幂等 key；通用网关在读取正文前先解析 scope/module/operation 并做会话、CSRF、角色和 `Content-Length` 门禁，再把有界流交给同一 ACTIVE Generation。模块负责内容校验、不可变工件发布、存储预留和审计；下载 handler 只能返回受控的工件句柄、长度、媒体类型与建议文件名，由网关流式输出并固定 `nosniff`/`Content-Disposition`/缓存策略。不允许模块返回任意 ASGI `Response`、自定义响应头或无上限缓冲。
 
-`deployment.package-registry` 将拥有全部署的包列表、ZIP 导入、原工件导出、验签/校验结果和导入错误投影。它不决定某个 Bot 的组件代际；该选择与配置属于 Bot scope 的 `component.worker-host`。类似地，备份容器的导入/下载走 artifact 传输，但备份 Job、恢复、激活和存储回收必须由各自 deployment/host 模块声明独立操作与生命周期，不得建成一个再次集中所有资源的“存储后台”。
+`deployment.package-registry` 已拥有全部署的包列表、ZIP 导入、原工件导出、校验结果和导入错误投影，并通过上述 artifact 操作传输 ZIP 与包内管理 UI。它不决定某个 Bot 的组件代际；该选择与配置属于 Bot scope 的 `component.worker-host`。类似地，备份容器的导入/下载应迁入 artifact 传输，但备份 Job、恢复、激活和存储回收必须由各自 deployment/host 模块声明独立操作与生命周期，不得建成一个再次集中所有资源的“存储后台”。
 
 ## 8. 完成判据
 

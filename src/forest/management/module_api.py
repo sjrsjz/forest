@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol
 from uuid import uuid4
 
 from fastapi import Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from forest.errors import ForestError
@@ -21,7 +25,7 @@ class EmptyInput(BaseModel):
 @dataclass(frozen=True)
 class ModuleOperation:
     operation_id: str
-    kind: Literal["query", "action"]
+    kind: Literal["query", "action", "upload", "download"]
     authority: str
     input_model: type[BaseModel]
     handler: Callable[["ModuleRequest", BaseModel], Awaitable[Any]]
@@ -30,6 +34,48 @@ class ModuleOperation:
         Callable[["ModuleRequest", BaseModel], Awaitable[tuple[dict, Any]]] | None
     ) = None
     principal: Literal["authenticated", "admin"] = "authenticated"
+    media_type: str | None = None
+    max_bytes: int | None = None
+    disposition: Literal["attachment", "inline"] | None = None
+    success_status: int = 200
+
+    def __post_init__(self) -> None:
+        artifact = self.kind in {"upload", "download"}
+        if (
+            artifact and (self.media_type is None or self.max_bytes is None)
+        ) or (
+            not artifact and (self.media_type is not None or self.max_bytes is not None)
+        ):
+            raise ValueError("Artifact operations require media type and byte limit")
+        if artifact and (
+            type(self.max_bytes) is not int
+            or not 1 <= self.max_bytes <= 64 * 1024 * 1024
+            or re.fullmatch(
+                r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*(?:; charset=utf-8)?",
+                self.media_type,
+            ) is None
+        ):
+            raise ValueError("Artifact operation byte limit is invalid")
+        if self.kind == "download" and self.disposition not in {"attachment", "inline"}:
+            raise ValueError("Download operations require a disposition")
+        if self.kind != "download" and self.disposition is not None:
+            raise ValueError("Only download operations declare a disposition")
+        if type(self.success_status) is not int or self.success_status not in {200, 201, 202}:
+            raise ValueError("Module operation success status is invalid")
+
+
+@dataclass(frozen=True)
+class ArtifactResult:
+    content: bytes
+    filename: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, bytes):
+            raise TypeError("Artifact content must be bytes")
+        if self.filename is not None and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.filename
+        ) is None:
+            raise ValueError("Artifact filename is invalid")
 
 
 @dataclass(frozen=True)
@@ -44,6 +90,7 @@ class ModuleRequest:
     prepared: Any = None
     scope_kind: str = "bot"
     scope_id: str = ""
+    artifact: bytes | None = None
 
 
 class ModuleManagementContract:
@@ -65,6 +112,21 @@ class ModuleManagementContract:
                     **(
                         {"principal": operation.principal}
                         if operation.principal != "authenticated"
+                        else {}
+                    ),
+                    **(
+                        {
+                            "artifact": {
+                                "media_type": operation.media_type,
+                                "max_bytes": operation.max_bytes,
+                                **(
+                                    {"disposition": operation.disposition}
+                                    if operation.disposition is not None
+                                    else {}
+                                ),
+                            }
+                        }
+                        if operation.kind in {"upload", "download"}
                         else {}
                     ),
                 }
@@ -274,6 +336,50 @@ def install_module_routes(app, runtime):
         )
         return await contract.invoke(context, declared, body)
 
+    async def artifact_target(
+        scope_kind, scope_id, component_id, operation_id, request, kind
+    ):
+        if any(len(request.query_params.getlist(key)) != 1 for key in request.query_params):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Duplicate query fields are not allowed", 422
+            )
+        session, who, target = await _target(
+            runtime, request, scope_kind, scope_id, write=False
+        )
+        module, contract = _contract(target, component_id)
+        declared, body, authorized = contract.prepare(
+            operation_id, kind, dict(request.query_params)
+        )
+        if declared.principal == "admin" and session["role"] != "admin":
+            raise ForestError("PERMISSION_DENIED", "Current account cannot use this operation", 403)
+        return session, who, target, module, contract, declared, body, authorized
+
+    async def bounded_artifact(request: Request, limit: int) -> bytes:
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                raise ForestError("CONTENT_LENGTH_INVALID", "Content-Length is invalid", 400) from None
+            if length < 0 or length > limit:
+                raise ForestError("REQUEST_TOO_LARGE", "Artifact exceeds its byte limit", 413)
+        body = bytearray()
+        try:
+            async with asyncio.timeout(30):
+                async for chunk in request.stream():
+                    body.extend(chunk)
+                    if len(body) > limit:
+                        raise ForestError(
+                            "REQUEST_TOO_LARGE", "Artifact exceeds its byte limit", 413
+                        )
+        except TimeoutError:
+            raise ForestError("REQUEST_TIMEOUT", "Artifact upload timed out", 408) from None
+        return bytes(body)
+
+    async def chunks(content: bytes) -> AsyncIterator[bytes]:
+        for offset in range(0, len(content), 64 * 1024):
+            yield content[offset : offset + 64 * 1024]
+
     @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/modules")
     async def modules(scope_kind: str, scope_id: str, request: Request):
         _, _, target = await _target(runtime, request, scope_kind, scope_id)
@@ -321,4 +427,95 @@ def install_module_routes(app, runtime):
     ):
         return await dispatch(
             scope_kind, scope_id, component_id, operation_id, request, body, "action"
+        )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/uploads/{operation_id}"
+    )
+    async def upload(
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        operation_id: str,
+        request: Request,
+    ):
+        session, who, target, module, contract, declared, body, authorized = (
+            await artifact_target(
+                scope_kind, scope_id, component_id, operation_id, request, "upload"
+            )
+        )
+        session = await runtime.principal(
+            request, write=True, content_type=declared.media_type
+        )
+        if declared.principal == "admin" and session["role"] != "admin":
+            raise ForestError("PERMISSION_DENIED", "Current account cannot use this operation", 403)
+        operation = _operation_id(
+            request, target, who, declared.authority, write=True
+        )
+        artifact = await bounded_artifact(request, declared.max_bytes)
+        authorized = {
+            **authorized,
+            "artifact": {
+                "media_type": declared.media_type,
+                "bytes": len(artifact),
+                "sha256": hashlib.sha256(artifact).hexdigest(),
+            },
+        }
+        ticket = await _signed(
+            runtime, target, who, declared.authority, operation, authorized
+        )
+        context = ModuleRequest(
+            runtime, target.resource, module, who, operation, ticket, authorized,
+            scope_kind=target.kind, scope_id=target.identity, artifact=artifact,
+        )
+        result = await contract.invoke(context, declared, body)
+        return JSONResponse(result, status_code=declared.success_status)
+
+    @app.get(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/downloads/{operation_id}"
+    )
+    async def download(
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        operation_id: str,
+        request: Request,
+    ):
+        _, who, target, module, contract, declared, body, authorized = (
+            await artifact_target(
+                scope_kind, scope_id, component_id, operation_id, request, "download"
+            )
+        )
+        operation = _operation_id(
+            request, target, who, declared.authority, write=False
+        )
+        ticket = await _signed(
+            runtime, target, who, declared.authority, operation, authorized
+        )
+        context = ModuleRequest(
+            runtime, target.resource, module, who, operation, ticket, authorized,
+            scope_kind=target.kind, scope_id=target.identity,
+        )
+        result = await contract.invoke(context, declared, body)
+        if not isinstance(result, ArtifactResult) or len(result.content) > declared.max_bytes:
+            raise ForestError("MODULE_ARTIFACT_INVALID", "Module returned an invalid artifact", 500)
+        headers = {
+            "Cache-Control": "private, no-store",
+            "Content-Length": str(len(result.content)),
+            "X-Content-Type-Options": "nosniff",
+        }
+        if result.filename is not None:
+            headers["Content-Disposition"] = (
+                f'{declared.disposition}; filename="{result.filename}"'
+            )
+        if declared.media_type.startswith("text/html"):
+            headers["Content-Security-Policy"] = (
+                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                "img-src data: blob:; font-src data:; connect-src 'none'; "
+                "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+            )
+        return StreamingResponse(
+            chunks(result.content), media_type=declared.media_type, headers=headers
         )

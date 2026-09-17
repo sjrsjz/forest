@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from forest.errors import ForestError
@@ -123,62 +121,6 @@ def install_bot_routes(app: FastAPI, runtime: Any) -> None:
         if bot.runtime is not None and result is not None and not bot.control.is_unavailable(result):
             bot.runtime.notify()
         return result
-
-    @app.get("/management/v1/packages")
-    async def packages(request: Request):
-        await principal(request)
-        fleet = services()[1]
-        return {"packages": fleet.available_packages(), "errors": fleet.package_errors}
-
-    @app.post("/management/v1/packages", status_code=201)
-    async def import_package(request: Request):
-        session = await runtime.principal(request, write=True, content_type="application/zip")
-        fleet = services()[1]
-        snapshot = await fleet.registry.import_archive(
-            await request.body(), subject_id=session["account_id"],
-            session_token_hash=digest_token(request.cookies["forest_session"]),
-            idempotency_key=key(request),
-        )
-        metadata = await asyncio.to_thread(fleet.describe_package, snapshot)
-        fleet.package_metadata[snapshot.digest] = metadata
-        fleet.packages[snapshot.digest] = snapshot
-        fleet.package_errors.pop(snapshot.digest, None)
-        return metadata
-
-    @app.get("/management/v1/packages/{package_digest}/archive")
-    async def export_package(package_digest: str, request: Request):
-        await principal(request)
-        fleet = services()[1]
-        if package_digest not in fleet.packages:
-            raise ForestError("PACKAGE_UNAVAILABLE", "Package is not registered", 404)
-        data = await asyncio.to_thread(fleet.artifacts.export_archive, package_digest)
-        return Response(data, media_type="application/zip", headers={
-            "Content-Disposition": 'attachment; filename="forest-plugin.zip"',
-            "Cache-Control": "no-store",
-        })
-
-    @app.get("/management/v1/packages/{package_digest}/management-ui")
-    async def package_management_ui(package_digest: str, request: Request):
-        await principal(request)
-        fleet = services()[1]
-        package = fleet.packages.get(package_digest)
-        if package is None:
-            raise ForestError("PACKAGE_UNAVAILABLE", "Package is not registered", 404)
-        asset = await asyncio.to_thread(package.management_ui)
-        if asset is None:
-            raise ForestError("MANAGEMENT_UI_UNAVAILABLE", "Package has no management UI", 404)
-        metadata, content = asset
-        return Response(content, media_type="text/html; charset=utf-8", headers={
-            "Cache-Control": "private, no-store",
-            "Content-Security-Policy": (
-                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-                "img-src data: blob:; font-src data:; connect-src 'none'; "
-                "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
-            ),
-            "X-Content-Type-Options": "nosniff",
-            "X-Forest-Package-Digest": package_digest,
-            "X-Forest-Management-UI-Digest": metadata["sha256"],
-        })
 
     @app.get("/management/v1/bots/{bot_id}/components/{component_id}/configuration")
     async def configuration(bot_id: str, component_id: str, request: Request):

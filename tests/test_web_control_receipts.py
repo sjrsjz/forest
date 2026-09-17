@@ -10,6 +10,7 @@ from test_web_bots import (
     effective,
     invoke,
     make_plan,
+    package_query,
     post,
     ready,
     running,
@@ -65,7 +66,7 @@ async def test_erased_web_service_admission_and_binding_reservation_do_not_finis
         base = root + "/components/forest.counter"
         package = next(
             item
-            for item in (await client.get("/management/v1/packages")).json()["packages"]
+            for item in (await package_query(client))["packages"]
             if item["component_id"] == "forest.counter"
         )
         plan = await make_plan(client, base, package, "Counter", 1, 0, "plan")

@@ -109,6 +109,23 @@ async def catalog_action(client, operation, body, key, *, status=200):
     return response.json()
 
 
+async def package_registry_root(client):
+    session = await client.get("/management/v1/session")
+    assert session.status_code == 200, session.text
+    return (
+        f"/management/v1/scopes/deployment/{session.json()['deployment_id']}/modules/"
+        "deployment.package-registry"
+    )
+
+
+async def package_query(client):
+    response = await client.get(
+        await package_registry_root(client) + "/queries/packages"
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 async def post(client, url, body, key, *, status=200):
     if url == "/management/v1/bots":
         url = await bot_catalog_root(client) + "/actions/bot.create"
@@ -249,7 +266,7 @@ async def test_two_bots_configure_run_reload_and_restart_over_http(tmp_path, web
         assert (
             await client.get(f"/management/v1/provision-jobs/{created[0]['job_id']}")
         ).status_code == 404
-        packages = (await client.get("/management/v1/packages")).json()["packages"]
+        packages = (await package_query(client))["packages"]
         package = next(item for item in packages if item["component_id"] == "forest.counter")
         bases = [f"/management/v1/bots/{bot['bot_id']}/components/forest.counter" for bot in created]
         plans = [await make_plan(client, base, package, label, multiplier, 0, "initial-plan")
@@ -348,7 +365,7 @@ async def test_web_module_validate_disable_edit_and_enable_is_atomic(
         )
         await ready(client, bot)
         package = next(
-            row for row in (await client.get("/management/v1/packages")).json()["packages"]
+            row for row in (await package_query(client))["packages"]
             if row["component_id"] == "forest.counter"
         )
         base = f"/management/v1/bots/{bot['bot_id']}/components/forest.counter"
@@ -426,7 +443,7 @@ async def test_bot_endpoints_reject_csrf_cross_target_plan_and_revoked_replay(tm
         bots = [await post(client, "/management/v1/bots", {"display_name": key}, key, status=202)
                 for key in ("first", "second")]
         await asyncio.gather(*(ready(client, bot) for bot in bots))
-        package = (await client.get("/management/v1/packages")).json()["packages"][0]
+        package = (await package_query(client))["packages"][0]
         bases = [f"/management/v1/bots/{bot['bot_id']}/components/{package['component_id']}" for bot in bots]
         plan = await make_plan(client, bases[0], package, "First", 1, 0, "plan")
         moved = await apply(client, bases[1], plan, "cross-target", status=404)

@@ -10,6 +10,7 @@ from forest.management.deployment_accounts_contract import (
 )
 from forest.management.memory_api import MemoryManagementContract
 from forest.management.module_api import (
+    ArtifactResult,
     EmptyInput,
     ModuleManagementContract,
     ModuleOperation,
@@ -25,6 +26,40 @@ def test_contract_rejects_duplicate_operation_identities():
     operation = ModuleOperation("same", "query", "config.read", EmptyInput, noop)
     with pytest.raises(ValueError, match="unique"):
         ModuleManagementContract((operation, operation))
+
+
+def test_artifact_operations_require_bounded_transport_declarations():
+    upload = ModuleOperation(
+        "archive.import", "upload", "artifact.write", EmptyInput, noop,
+        media_type="application/zip", max_bytes=1024, success_status=201,
+    )
+    download = ModuleOperation(
+        "archive", "download", "artifact.read", EmptyInput, noop,
+        media_type="application/zip", max_bytes=2048, disposition="attachment",
+    )
+    described = ModuleManagementContract((upload, download)).describe()["operations"]
+    assert described[0]["artifact"] == {
+        "media_type": "application/zip", "max_bytes": 1024,
+    }
+    assert described[1]["artifact"] == {
+        "media_type": "application/zip", "max_bytes": 2048,
+        "disposition": "attachment",
+    }
+    with pytest.raises(ValueError, match="require media type"):
+        ModuleOperation("bad", "upload", "artifact.write", EmptyInput, noop)
+    with pytest.raises(ValueError, match="require media type"):
+        ModuleOperation(
+            "bad", "query", "artifact.read", EmptyInput, noop,
+            media_type="application/zip",
+        )
+    with pytest.raises(ValueError, match="disposition"):
+        ModuleOperation(
+            "bad", "download", "artifact.read", EmptyInput, noop,
+            media_type="application/zip", max_bytes=1,
+        )
+    assert ArtifactResult(b"zip", "package.zip").filename == "package.zip"
+    with pytest.raises(ValueError, match="filename"):
+        ArtifactResult(b"zip", "../package.zip")
 
 
 def test_scope_provider_registry_rejects_duplicate_namespaces():

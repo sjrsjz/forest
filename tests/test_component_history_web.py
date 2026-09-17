@@ -10,6 +10,7 @@ from test_web_bots import (
     apply,
     effective,
     make_plan,
+    package_query,
     post,
     ready,
     running,
@@ -32,7 +33,7 @@ async def test_http_history_copy_tracks_real_revision_and_erasure(tmp_path, web_
             client, "/management/v1/bots", {"display_name": "History"}, "create", status=202
         )
         await ready(client, created)
-        packages = (await client.get("/management/v1/packages")).json()["packages"]
+        packages = (await package_query(client))["packages"]
         package = next(row for row in packages if row["component_id"] == "forest.counter")
         base = f"/management/v1/bots/{created['bot_id']}/components/forest.counter"
         first = await make_plan(client, base, package, "original", 2, 0, "initial-plan")

@@ -89,17 +89,17 @@ class BodyLimit:
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
             await self.app(scope, receive, send)
             return
-        if scope["path"] == "/management/v1/packages" and scope["method"] == "POST":
-            try:
-                await self.runtime.principal(Request(scope), write=True, content_type="application/zip")
-            except ForestError as error:
-                await JSONResponse({"code": error.code, "message": error.message}, error.status)(scope, receive, send)
-                return
+        if re.fullmatch(
+            r"/management/v1/scopes/[^/]+/[^/]+/modules/[^/]+/uploads/[^/]+",
+            scope["path"],
+        ):
             if self.archive_slots.locked():
-                await JSONResponse({"code": "PACKAGE_IMPORT_BUSY"}, 429)(scope, receive, send)
+                await JSONResponse({"code": "ARTIFACT_UPLOAD_BUSY"}, 429)(
+                    scope, receive, send
+                )
                 return
             async with self.archive_slots:
-                await self._bounded(scope, receive, send, 32 * 1024 * 1024)
+                await self.app(scope, receive, send)
             return
         if (
             scope["method"] == "PUT"

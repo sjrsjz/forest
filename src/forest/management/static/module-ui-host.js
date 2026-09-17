@@ -13,8 +13,12 @@ function plainObject(value) {
 
 export async function mountModuleUi(container, pkg, values, onDraft) {
   if (pkg.management_ui?.protocol !== PROTOCOL) throw new Error('模块管理界面协议不兼容。');
+  if (typeof pkg.management_ui_url !== 'string' ||
+      !pkg.management_ui_url.startsWith('/management/v1/scopes/')) {
+    throw new Error('模块管理界面工件地址无效。');
+  }
   const response = await fetch(
-    `/management/v1/packages/${encodeURIComponent(pkg.package_digest)}/management-ui`,
+    pkg.management_ui_url,
     {credentials: 'same-origin'},
   );
   if (!response.ok) throw new Error(`模块管理界面读取失败 (${response.status})`);

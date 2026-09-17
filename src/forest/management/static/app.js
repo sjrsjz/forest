@@ -143,7 +143,7 @@ let invokeKey = null;
 let maintenanceKey = null;
 const maintenanceWrites = new Map();
 let selectionEpoch = 0, formEpoch = 0, configReadSeq = 0, packageReadSeq = 0, runtimeReadSeq = 0;
-let readConfigFields, readInvokeFields, historyBefore = null, importKey = null;
+let readConfigFields, readInvokeFields, historyBefore = null;
 let mountedModuleUi = null;
 let componentReplacementRequired = false, componentReplacementDraft = false;
 let componentSourceRevision = null;
@@ -319,10 +319,14 @@ async function readBotRuntime() {
 async function loadPackages(force = false) {
   if (packageRows.length && !force) return;
   const seq = ++packageReadSeq;
-  const response = await api('/packages');
+  if (!currentUser?.deployment_id) return;
+  const root = `/scopes/deployment/${encodeURIComponent(currentUser.deployment_id)}/modules/deployment.package-registry`;
+  const response = await api(`${root}/queries/packages`);
   if (seq !== packageReadSeq) return;
   const previous = $('bot-package').value;
-  packageRows = response.packages;
+  packageRows = response.packages.map(pkg => ({...pkg,
+    management_ui_url: `/management/v1${root}/downloads/package.management-ui?${
+      new URLSearchParams({package_digest:pkg.package_digest})}`}));
   $('bot-package').replaceChildren();
   for (const item of packageRows) {
     const option = document.createElement('option'); option.value = item.package_digest;
@@ -330,13 +334,6 @@ async function loadPackages(force = false) {
     $('bot-package').append(option);
   }
   if (packageRows.some((p) => p.package_digest === previous)) $('bot-package').value = previous;
-  $('package-list').replaceChildren();
-  for (const pkg of packageRows) {
-    const row = document.createElement('p'); row.textContent = `${pkg.package_id} · ${pkg.version} `;
-    const link = document.createElement('a'); link.textContent = '下载插件包';
-    link.href = `/management/v1/packages/${encodeURIComponent(pkg.package_digest)}/archive`;
-    row.append(link); $('package-list').append(row);
-  }
 }
 function updateBotState(state) {
   if (botConfig && (state.desired_revision < botConfig.desired_revision ||
@@ -647,19 +644,6 @@ $('bot-invoke-form').addEventListener('submit', (event) => {
     invokeKey = null;
     $('bot-invoke-result').textContent = data.result?.label !== undefined && data.result?.revision !== undefined ?
       `${data.result.label}：${data.result.value}（状态修订 ${data.result.revision}）` : JSON.stringify(data.result, null, 2);
-  });
-});
-$('package-import-form').addEventListener('input', () => { importKey = null; });
-$('package-import-form').addEventListener('submit', (event) => {
-  event.preventDefault(); const form = event.currentTarget;
-  busy(form.querySelector('button'), async () => {
-    const file = form.elements.archive.files[0];
-    if (!file || file.size > 32 * 1024 * 1024) throw new Error('请选择不超过 32 MiB 的插件 ZIP 包。');
-    importKey ||= crypto.randomUUID(); const sentKey = importKey;
-    const pkg = await api('/packages', file, {'Content-Type': 'application/zip', 'Idempotency-Key': sentKey});
-    if (importKey === sentKey) { importKey = null; form.reset(); }
-    await loadPackages(true);
-    notice(`已导入 ${pkg.package_id} ${pkg.version}。选择 Bot 和插件版本，预览配置后即可启用。`, true);
   });
 });
 async function readHistory(append = false) {

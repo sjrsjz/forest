@@ -28,6 +28,8 @@ def test_control_shell_contains_no_module_owned_product_pages():
     assert 'id="rename-bot-form"' not in index
     assert 'id="retry-bot"' not in index
     assert 'id="bot-job-events"' not in index
+    assert 'id="package-import-form"' not in index
+    assert 'id="package-list"' not in index
     assert "jobsPanel" not in app
     assert "eventsPanel" not in app
     assert "componentJobsPanel" not in app
@@ -70,6 +72,9 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     ).read_text(encoding="utf-8")
     deployment_catalog = (
         STATIC / "modules/deployment.bot-catalog.html"
+    ).read_text(encoding="utf-8")
+    deployment_packages = (
+        STATIC / "modules/deployment.package-registry.html"
     ).read_text(encoding="utf-8")
     host = (STATIC / "management-contributions.js").read_text(encoding="utf-8")
     agent_style = (STATIC / "modules/agent.runtime.css").read_text(encoding="utf-8")
@@ -128,6 +133,13 @@ def test_official_module_templates_and_controllers_own_their_surfaces():
     assert "openScope({kind:'bot'" in catalog_controller
     assert "openScope" in host
     assert "/scopes/${encodeURIComponent(target.kind)}" in app
+    assert 'id="deployment-package-import-form"' in deployment_packages
+    assert 'id="deployment-package-list"' in deployment_packages
+    package_controller = (STATIC / "package-registry.js").read_text(encoding="utf-8")
+    assert "createModulePanel" in package_controller
+    assert "/modules/deployment.package-registry" in package_controller
+    assert "/uploads/package.import" in package_controller
+    assert "/downloads/package.archive" in package_controller
     assert "createModulePanel" in host
     assert "descriptor.management_contributions" in host
     assert "forest.management-contribution/1" in host

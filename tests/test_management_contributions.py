@@ -202,6 +202,31 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
             {"operation_id": "bot.retry", "kind": "action",
              "authority": "deployment.bots.retry", "principal": "admin"},
         ]
+        packages = deployment_modules["deployment.package-registry"]
+        assert packages["artifact"]["scope"] == "deployment"
+        assert packages["state"] == "ACTIVE"
+        assert packages["management_contributions"][0]["surface"] == {
+            "kind": "trusted-module",
+            "protocol": "forest.trusted-management-view/1",
+            "template": "/static/modules/deployment.package-registry.html",
+            "module": "/static/package-registry.js",
+            "style": None,
+        }
+        assert packages["management_contract"]["operations"] == [
+            {"operation_id": "packages", "kind": "query",
+             "authority": "deployment.packages.read"},
+            {"operation_id": "package.import", "kind": "upload",
+             "authority": "deployment.packages.import", "principal": "admin",
+             "artifact": {"media_type": "application/zip", "max_bytes": 33554432}},
+            {"operation_id": "package.archive", "kind": "download",
+             "authority": "deployment.packages.read",
+             "artifact": {"media_type": "application/zip", "max_bytes": 33554432,
+                          "disposition": "attachment"}},
+            {"operation_id": "package.management-ui", "kind": "download",
+             "authority": "deployment.packages.read",
+             "artifact": {"media_type": "text/html; charset=utf-8", "max_bytes": 262144,
+                          "disposition": "inline"}},
+        ]
         configuration = deployment_modules["deployment.configuration"]
         assert configuration["artifact"]["scope"] == "deployment"
         assert configuration["state"] == "ACTIVE"

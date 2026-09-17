@@ -16,6 +16,9 @@ from forest.management.deployment_bot_catalog_contract import (
 from forest.management.deployment_configuration_contract import (
     DeploymentConfigurationManagementContract,
 )
+from forest.management.deployment_package_registry_contract import (
+    DeploymentPackageRegistryManagementContract,
+)
 from forest.runtime_modules import (
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
@@ -63,6 +66,12 @@ class DeploymentBotCatalogRuntime:
         self.management_contract = DeploymentBotCatalogManagementContract(self)
 
 
+class DeploymentPackageRegistryRuntime:
+    def __init__(self, host):
+        self.fleet = host.fleet
+        self.management_contract = DeploymentPackageRegistryManagementContract(self)
+
+
 def _audit(host, _modules):
     return DeploymentAuditRuntime(host.store)
 
@@ -79,7 +88,28 @@ def _bot_catalog(host, _modules):
     return DeploymentBotCatalogRuntime(host)
 
 
+def _package_registry(host, _modules):
+    return DeploymentPackageRegistryRuntime(host)
+
+
 OFFICIAL_DEPLOYMENT_MODULES = (
+    RuntimeModuleDescriptor(
+        "deployment.package-registry",
+        (),
+        _package_registry,
+        official_artifact("deployment"),
+        management=(
+            RuntimeManagementContribution(
+                "packages",
+                "包工件",
+                ("deployment",),
+                "/static/modules/deployment.package-registry.html",
+                "/static/package-registry.js",
+                group="runtime",
+                order=20,
+            ),
+        ),
+    ),
     RuntimeModuleDescriptor(
         "deployment.bot-catalog",
         (),
