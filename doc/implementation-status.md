@@ -56,6 +56,8 @@
 - raw event、normalized parts 和 author snapshot 先成为带来源闭包的 payload，再由一个调用方 UoW 原子提交 Adapter platform event 和 Conversation Inbox；
 - Binding head、client 和事件接纳已统一锁序，同一账号不同群可以并行。
 
+Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。领取、续租、选择、Context 追加、失败重排和释放都在调用方事务内复核 Conversation Generation。当前该 Worker 只用确定性假 Agent 端口验证了调度协议，尚未接入 `agent.runtime`、Delivery 和最终回复的跨模块 participant UnitOfWork，因此未进入生产启动图。
+
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
 ### 已有干净业务 Authority 候选
@@ -86,7 +88,7 @@
 ## 当前阻断项
 
 1. 将 `agent.runtime`、`memory.graph`、`delivery`、`shell.command` 和必要的 Provider/Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议。
-2. 用干净 `conversation.scheduler` Worker 实现实际 claim、同群串行 Agent 链、安全边界接入和终止静默排空，不复用旧组合根。
+2. 将已验证的 `conversation.scheduler` Worker 接到真实 `agent.runtime`、Provider、Delivery 与最终回复 participant UnitOfWork，并补齐崩溃后持久 Session/Run 恢复；不得复用旧组合根。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
 5. 将 provisioning、启动、恢复和 Docker 入口切到最小 bootstrap + 所选模块 bundle + 冻结 RuntimeGraph。
@@ -97,7 +99,8 @@
 ## 最近可复现证据
 
 - 文档权威链与 CorePrompt：`14 passed`。
-- Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：`183 passed`。
+- Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：上一基线 `183 passed`。
+- Conversation Worker、持久调度 Repository、七成员 Messaging RuntimeGraph 与生命周期相关定向组合：`39 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入和后继 Run，PostgreSQL 用例验证 Generation fence、来源作者与 trigger 所有权。
 - 七成员 Kernel + Conversation + OneBot RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、延迟开放 WebSocket、作者/群来源和逆序关闭。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
 - 最近一次无 PostgreSQL 全套证据仍为 `747 passed, 36 skipped, 1184 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。

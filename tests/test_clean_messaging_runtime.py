@@ -10,6 +10,7 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.errors import ForestError
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.payload_authority import PayloadSource
@@ -178,18 +179,41 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         async with store.pool.connection() as conn:
             inbox = await (
                 await conn.execute(
-                    sql.SQL("SELECT conversation_id,author_subject_ref FROM {}.inbox_messages").format(
+                    sql.SQL(
+                        "SELECT event_id,conversation_id,author_subject_ref FROM {}.inbox_messages"
+                    ).format(
                         sql.Identifier(
                             messaging.conversation.namespace
                         )
                     )
                 )
             ).fetchone()
-        assert inbox == {
-            "conversation_id": "onebot:group:933179609",
-            "author_subject_ref": "qq:42",
-        }
+        assert inbox["event_id"].startswith("onebot:onebot-event:")
+        assert inbox["conversation_id"] == "onebot:group:933179609"
+        assert inbox["author_subject_ref"] == "qq:42"
+        async with store.pool.connection() as conn, conn.transaction():
+            classified = await conversation_runtime.complete_classification_in(
+                conn,
+                operation_id="classify:onebot:88",
+                conversation_id="onebot:group:933179609",
+                event_id=inbox["event_id"],
+                decision="TRIGGER",
+                classifier_component_id="conversation.classifier",
+                classifier_generation_id="generation:classifier:test",
+                rule_revision="rules:test/1",
+                reason_code="test_trigger",
+                route_ref=None,
+                trigger_id="trigger:onebot:88",
+                principal_ref="qq:42",
+            )
+        assert classified["classified_through_seq"] == 1
+        assert await conversation_runtime.claimable_conversations() == (
+            "onebot:group:933179609",
+        )
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True
     assert set(registry.states.values()) == {ModuleLifecycleState.STOPPED}
+    with pytest.raises(ForestError) as caught:
+        await conversation_runtime.claimable_conversations()
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"

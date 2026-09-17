@@ -592,7 +592,21 @@ async def test_final_reply_context_and_answered_triggers_commit_atomically(clean
                 (store.bot_id, selected["trigger_ids"][0]),
             )
         ).fetchone()
-        assert trigger == {"status": "ANSWERED", "answered_reply_ref": "reply/reply/1"}
+    assert trigger == {"status": "ANSWERED", "answered_reply_ref": "reply/reply/1"}
+
+    await _admit(scheduler, payloads, conversation, 2, "user/c")
+    await _classify(scheduler, conversation, 2, "TRIGGER", "user/c")
+    successor = await scheduler.select_input(
+        actor,
+        "select/reply/successor",
+        boundary="SESSION_END",
+        session_ref="session/reply",
+        run_ref="run/reply",
+        next_run_ref="run/reply/successor",
+    )
+    assert successor["kind"] == "TRIGGER_INPUT"
+    assert successor["run_ref"] == "run/reply/successor"
+    assert successor["trigger_ids"] == ["trigger/group/reply/2"]
 
     other = "group/no-reply-bypass"
     await _admit(scheduler, payloads, other, 1, "user/b")

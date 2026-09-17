@@ -653,13 +653,18 @@ class ConversationSchedulerRepository:
         return expired
 
     async def acquire_actor(
-        self, conversation_id: str, owner_id: str, *, lease_seconds: int = 30
+        self,
+        conversation_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 30,
+        _connection=None,
     ) -> ConversationActor:
         _bounded(conversation_id, "conversation_id", 256)
         _bounded(owner_id, "owner_id", 256)
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
             raise ForestError("CONVERSATION_INPUT_INVALID", "Invalid actor lease", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             lane = await self._lane(conn, conversation_id, update=True)
             alive = (
                 lane["actor_owner_id"] is not None
@@ -678,6 +683,14 @@ class ConversationSchedulerRepository:
             )
             return ConversationActor(conversation_id, owner_id, epoch, expires)
 
+    async def acquire_actor_in(self, conn, conversation_id: str, owner_id: str, **values):
+        return await self.acquire_actor(
+            conversation_id,
+            owner_id,
+            _connection=conn,
+            **values,
+        )
+
     async def _guard_actor(self, conn, actor: ConversationActor):
         if type(actor) is not ConversationActor:
             raise ForestError("STALE_CONVERSATION_ACTOR", "Invalid conversation actor", 409)
@@ -692,11 +705,11 @@ class ConversationSchedulerRepository:
         return lane
 
     async def renew_actor(
-        self, actor: ConversationActor, *, lease_seconds: int = 30
+        self, actor: ConversationActor, *, lease_seconds: int = 30, _connection=None
     ) -> ConversationActor:
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
             raise ForestError("CONVERSATION_INPUT_INVALID", "Invalid actor lease", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             lane = await self._guard_actor(conn, actor)
             expires = lane["database_now"] + timedelta(seconds=lease_seconds)
             await conn.execute(
@@ -708,8 +721,11 @@ class ConversationSchedulerRepository:
             )
             return ConversationActor(actor.conversation_id, actor.owner_id, actor.epoch, expires)
 
-    async def release_actor(self, actor: ConversationActor) -> None:
-        async with self.store.pool.connection() as conn, conn.transaction():
+    async def renew_actor_in(self, conn, actor: ConversationActor, **values):
+        return await self.renew_actor(actor, _connection=conn, **values)
+
+    async def release_actor(self, actor: ConversationActor, *, _connection=None) -> None:
+        async with self._transaction(_connection) as conn:
             await self._guard_actor(conn, actor)
             await conn.execute(
                 sql.SQL("UPDATE {} SET actor_owner_id=NULL,actor_expires_at=NULL,"
@@ -718,6 +734,36 @@ class ConversationSchedulerRepository:
                 ),
                 (self.store.bot_id, actor.conversation_id),
             )
+
+    async def release_actor_in(self, conn, actor: ConversationActor) -> None:
+        await self.release_actor(actor, _connection=conn)
+
+    async def claimable_conversations(self, *, limit: int = 64, _connection=None) -> tuple[str, ...]:
+        """Return bounded wake candidates; actor acquisition remains the ownership point."""
+
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ForestError("CONVERSATION_INPUT_INVALID", "Invalid claim candidate limit", 422)
+        async with self._transaction(_connection) as conn:
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT l.conversation_id FROM {} l WHERE l.bot_id=%s AND ("
+                        "l.context_applied_seq < l.classified_through_seq OR EXISTS ("
+                        "SELECT 1 FROM {} t WHERE t.bot_id=l.bot_id "
+                        "AND t.conversation_id=l.conversation_id AND t.status='PENDING' "
+                        "AND t.ingress_seq<=l.classified_through_seq)) "
+                        "ORDER BY l.updated_at,l.conversation_id LIMIT %s"
+                    ).format(
+                        self._table("conversation_lanes"),
+                        self._table("conversation_triggers"),
+                    ),
+                    (self.store.bot_id, limit),
+                )
+            ).fetchall()
+            return tuple(row["conversation_id"] for row in rows)
+
+    async def claimable_conversations_in(self, conn, *, limit: int = 64):
+        return await self.claimable_conversations(limit=limit, _connection=conn)
 
     async def _selection_result(self, conn, receipt) -> dict:
         result = {
@@ -814,6 +860,7 @@ class ConversationSchedulerRepository:
         boundary: str,
         session_ref: str | None = None,
         run_ref: str | None = None,
+        next_run_ref: str | None = None,
         _connection=None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
@@ -825,6 +872,13 @@ class ConversationSchedulerRepository:
             )
         _bounded(session_ref, "session_ref", 256, optional=True)
         _bounded(run_ref, "run_ref", 256, optional=True)
+        _bounded(next_run_ref, "next_run_ref", 256, optional=True)
+        if next_run_ref is not None and boundary != "SESSION_END":
+            raise ForestError(
+                "CONVERSATION_INPUT_INVALID",
+                "A successor Run is only valid at Session end",
+                422,
+            )
         if type(actor) is not ConversationActor:
             raise ForestError("STALE_CONVERSATION_ACTOR", "Invalid conversation actor", 409)
         input_digest = _digest(
@@ -835,6 +889,7 @@ class ConversationSchedulerRepository:
                 "boundary": boundary,
                 "session_ref": session_ref,
                 "run_ref": run_ref,
+                "next_run_ref": next_run_ref,
             }
         )
         async with self._transaction(_connection) as conn:
@@ -888,6 +943,15 @@ class ConversationSchedulerRepository:
                         "A trigger cut requires caller-owned Session and Run references",
                         409,
                     )
+                selected_run_ref = run_ref
+                if boundary == "SESSION_END":
+                    if next_run_ref is None:
+                        raise ForestError(
+                            "CONVERSATION_SUCCESSOR_RUN_REQUIRED",
+                            "A pending trigger after a final reply needs a successor Run",
+                            409,
+                        )
+                    selected_run_ref = next_run_ref
                 trigger_cut = max(row["ingress_seq"] for row in pending)
                 if trigger_cut > lane["context_applied_seq"]:
                     kind = "TRIGGER_INPUT"
@@ -908,7 +972,7 @@ class ConversationSchedulerRepository:
                     end_seq=end_seq,
                     trigger_cut_seq=trigger_cut,
                     session_ref=session_ref,
-                    run_ref=run_ref,
+                    run_ref=selected_run_ref,
                     triggers=pending,
                 )
             has_gap = lane["classified_through_seq"] < lane["next_ingress_seq"] - 1
@@ -1373,6 +1437,7 @@ class ConversationSchedulerRepository:
         session_ref: str,
         run_ref: str,
         reason_code: str,
+        _connection=None,
     ) -> tuple[str, ...]:
         _bounded(operation_id, "operation_id", 256)
         _bounded(session_ref, "session_ref", 256)
@@ -1390,7 +1455,7 @@ class ConversationSchedulerRepository:
                 "reason_code": reason_code,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock_operation(conn, operation_id)
             lane = await self._guard_actor(conn, actor)
             replay = await (
@@ -1482,6 +1547,9 @@ class ConversationSchedulerRepository:
             )
             return tuple(trigger["trigger_id"] for trigger in triggers)
 
+    async def requeue_run_in(self, conn, actor: ConversationActor, **values):
+        return await self.requeue_run(actor, _connection=conn, **values)
+
     async def verify_input_batch_occurrence_in(
         self,
         conn,
@@ -1527,8 +1595,8 @@ class ConversationSchedulerRepository:
             )
         return dict(row)
 
-    async def context_snapshot(self, actor: ConversationActor) -> dict:
-        async with self.store.pool.connection() as conn, conn.transaction():
+    async def context_snapshot(self, actor: ConversationActor, *, _connection=None) -> dict:
+        async with self._transaction(_connection) as conn:
             lane = await self._guard_actor(conn, actor)
             units = await (
                 await conn.execute(
@@ -1547,3 +1615,6 @@ class ConversationSchedulerRepository:
                 "context_view_revision": lane["context_view_revision"],
                 "units": [dict(row) for row in units],
             }
+
+    async def context_snapshot_in(self, conn, actor: ConversationActor) -> dict:
+        return await self.context_snapshot(actor, _connection=conn)
