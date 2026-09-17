@@ -4,7 +4,7 @@ import pytest
 from test_management import create_account, login_as
 from test_message_handler_execution import handler_source
 from test_messages import event
-from test_web_bindings import configure, onebot_server
+from test_web_bindings import configure, create_binding, onebot_server
 from test_web_bots import ORIGIN, PASSWORD, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -42,13 +42,7 @@ async def test_web_handler_diagnostics_are_redacted_and_recovery_replays(
             await managed.kernel.install(
                 PackageCatalog(tmp_path / "packages").build(handler_source(tmp_path))
             )
-            binding = await post(
-                client,
-                root + "/bindings",
-                {"self_id": "1000", "display_name": "Diagnostic QQ"},
-                "create-handler-diagnostic-binding",
-                status=201,
-            )
+            binding = await create_binding(client, root, {"self_id": "1000", "display_name": "Diagnostic QQ"}, "create-handler-diagnostic-binding")
             binding_id = binding["binding_id"]
             await configure(client, root + "/bindings/" + binding_id, server["origin"])
             for handler_id in ("first", "second"):

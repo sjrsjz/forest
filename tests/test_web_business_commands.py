@@ -4,7 +4,7 @@ import pytest
 from test_business_command_actor import actor, command_source
 from test_management import create_account, login_as
 from test_messages import event
-from test_web_bindings import configure, onebot_server
+from test_web_bindings import configure, create_binding, onebot_server
 from test_web_bots import ORIGIN, PASSWORD, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -42,13 +42,7 @@ async def test_web_command_diagnostics_are_redacted_and_recovery_replays(
             await managed.kernel.install(
                 PackageCatalog(tmp_path / "packages").build(command_source(tmp_path))
             )
-            binding = await post(
-                client,
-                root + "/bindings",
-                {"self_id": "1000", "display_name": "Diagnostic QQ"},
-                "create-command-diagnostic-binding",
-                status=201,
-            )
+            binding = await create_binding(client, root, {"self_id": "1000", "display_name": "Diagnostic QQ"}, "create-command-diagnostic-binding")
             binding_id = binding["binding_id"]
             binding_root = root + "/bindings/" + binding_id
             await configure(client, binding_root, server["origin"])

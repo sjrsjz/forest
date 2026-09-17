@@ -14,8 +14,9 @@ export function createModulePanel(api, busy, notice) {
     replace.classList.add('hidden'); state(selected);
   });
   const deliveryNodes = new Map(), resolutionRequests = new Map();
-  const base = () => `/bots/${encodeURIComponent(bot.bot_id)}`;
-  const path = () => `${base()}/bindings/${encodeURIComponent(selected.binding_id)}`;
+  const base = () => `/scopes/bot/${encodeURIComponent(bot.bot_id)}/modules/adapter.onebot`;
+  const query = (operation, values = {}) => `${base()}/queries/${operation}?${new URLSearchParams(values)}`;
+  const action = operation => `${base()}/actions/${operation}`;
   const valid = (value) => value === epoch && bot !== null;
   function clearPlan() { edit++; pending = null; planKey = null; applyKey = null; $('binding-preview').classList.add('hidden'); }
   function state(row) {
@@ -43,7 +44,7 @@ export function createModulePanel(api, busy, notice) {
   async function readSelected() {
     if (!selected) return;
     const own = epoch, current = selected.binding_id, requested = ++configSequence, edited = edit;
-    const row = await api(`${path()}/configuration`);
+    const row = await api(query('binding.configuration', {binding_id:current}));
     if (!valid(own) || selected?.binding_id !== current || requested !== configSequence) return;
     if (edited !== edit) {
       state(row); notice('读取期间有新的配置输入，已保留。需要丢弃草稿时可再次重新加载。'); return;
@@ -69,7 +70,9 @@ export function createModulePanel(api, busy, notice) {
   async function refresh() {
     if (!bot) return;
     const own = epoch, prefix = base(), requested = ++refreshSequence;
-    const [data, queues, sends] = await Promise.all([api(`${prefix}/bindings`), api(`${prefix}/conversations`), api(`${prefix}/delivery`)]);
+    const [data, queues, sends] = await Promise.all([
+      api(`${prefix}/queries/bindings`), api(`${prefix}/queries/conversations`), api(`${prefix}/queries/delivery`),
+    ]);
     if (!valid(own) || requested !== refreshSequence) return;
     $('binding-list').replaceChildren();
     if (!data.bindings.length) $('binding-list').textContent = '尚未登记账号。';
@@ -79,7 +82,7 @@ export function createModulePanel(api, busy, notice) {
       button.addEventListener('click', () => busy(button, async () => {
         const own = epoch;
         if (row.registration_stage === 'RESERVED') {
-          await api(`${prefix}/bindings/${row.binding_id}/registration`, {});
+          await api(`${prefix}/actions/binding.registration.resume`, {binding_id:row.binding_id});
           if (!valid(own)) return; await refresh();
         }
         if (valid(own)) await choose(row);
@@ -156,7 +159,9 @@ export function createModulePanel(api, busy, notice) {
       resolutionRequests.set(key, request); request.inflight = true; locked();
       busy(button, async () => {
         try {
-          await api(`${prefix}/delivery/${row.intent_id}/${row.part_index}/resolution`, request.body, {'Idempotency-Key':request.key});
+          await api(`${prefix}/actions/delivery.reconcile`, {
+            intent_id:row.intent_id, part_index:row.part_index, ...request.body,
+          }, {'Idempotency-Key':request.key});
           if (valid(own)) { await refresh(); notice('核对结果已保存。', true); }
         } finally {
           request.inflight = false;
@@ -174,7 +179,7 @@ export function createModulePanel(api, busy, notice) {
     event.preventDefault(); const form = event.currentTarget;
     busy(form.querySelector('button'), async () => {
       const own = epoch; createKey ||= crypto.randomUUID();
-      const row = await api(`${base()}/bindings`, Object.fromEntries(new FormData(form)), {'Idempotency-Key':createKey});
+      const row = await api(action('binding.create'), Object.fromEntries(new FormData(form)), {'Idempotency-Key':createKey});
       if (!valid(own)) return;
       createKey = null; form.reset(); await refresh(); if (valid(own)) await choose(row);
     });
@@ -188,9 +193,9 @@ export function createModulePanel(api, busy, notice) {
       for (const name of ['enabled','trigger_mentions','private_trigger']) values[name] = form.elements[name].checked;
       for (const name of ['transport','api_base_url','websocket_url','response_mode','response_template','trigger_prefix']) values[name] = form.elements[name].value;
       values.admin_user_ids = form.elements.admin_user_ids.value.split(/[,，\s]+/).filter(Boolean);
-      const body = {expected_revision:selected.revision, values};
+      const body = {binding_id:selected.binding_id, expected_revision:selected.revision, values};
       for (const name of ['access_token','webhook_secret']) if (form.elements[name].value) body[name] = form.elements[name].value;
-      planKey ||= crypto.randomUUID(); const plan = await api(`${path()}/change-plans`, body, {'Idempotency-Key':planKey});
+      planKey ||= crypto.randomUUID(); const plan = await api(action('binding.plan'), body, {'Idempotency-Key':planKey});
       if (!valid(own) || edited !== edit) return;
       pending = plan; applyKey = crypto.randomUUID();
       const endpoint = values.transport === 'forward-websocket' ? values.websocket_url : values.api_base_url;
@@ -200,7 +205,7 @@ export function createModulePanel(api, busy, notice) {
   });
   $('apply-binding').addEventListener('click', () => busy($('apply-binding'), async () => {
     if (!pending) return; const own = epoch, edited = edit;
-    const result = await api(`${path()}/management-requests`, {expected_revision:pending.expected_revision, plan_id:pending.plan_id, plan_digest:pending.plan_digest}, {'Idempotency-Key':applyKey});
+    const result = await api(action('binding.apply'), {binding_id:selected.binding_id, expected_revision:pending.expected_revision, plan_id:pending.plan_id, plan_digest:pending.plan_digest}, {'Idempotency-Key':applyKey});
     if (!valid(own)) return;
     const preserved = edited !== edit;
     if (preserved) { selected = {...selected, revision:result.revision}; clearPlan(); }
@@ -211,9 +216,11 @@ export function createModulePanel(api, busy, notice) {
   $('reload-binding').addEventListener('click', () => busy($('reload-binding'), readSelected));
   $('refresh-bindings').addEventListener('click', () => busy($('refresh-bindings'), refresh));
   function invalidateContent(scope) {
-    if (!bot || ![`${base()}/bindings`, `${base()}/delivery`].includes(scope)) return;
+    if (!bot) return;
+    const contentBase = `/bots/${encodeURIComponent(bot.bot_id)}`;
+    if (![`${contentBase}/bindings`, `${contentBase}/delivery`].includes(scope)) return;
     refreshSequence++;
-    if (scope === `${base()}/bindings`) {
+    if (scope === `${contentBase}/bindings`) {
       epoch++; configSequence++; clearPlan(); selected = null;
       $('binding-config').reset(); $('binding-diff').replaceChildren();
       $('binding-detail').classList.add('hidden'); $('binding-list').replaceChildren();

@@ -5,7 +5,15 @@ import json
 
 import httpx
 import pytest
-from test_web_bindings import configure, get, onebot_server, receive, wait_for
+from test_web_bindings import (
+    adapter_query,
+    configure,
+    create_binding,
+    get,
+    onebot_server,
+    receive,
+    wait_for,
+)
 from test_web_bots import ORIGIN, login, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -168,11 +176,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
             )
             await ready(client, bot)
             root = "/management/v1/bots/" + bot["bot_id"]
-            binding = await post(
-                client, root + "/bindings",
-                {"self_id": "10001", "display_name": "Memory QQ"},
-                "forget-binding", status=201,
-            )
+            binding = await create_binding(client, root, {"self_id": "10001", "display_name": "Memory QQ"}, "forget-binding")
             await configure(
                 client, root + "/bindings/" + binding["binding_id"], server["origin"],
                 response_mode="disabled",
@@ -184,7 +188,7 @@ async def test_web_lists_and_forgets_a_reviewed_multigroup_memory_source(
                 client, binding["binding_id"], 42, "other group stays", group_id=31002
             )).status_code == 200
             await wait_for(
-                lambda: get(client, root + "/conversations"),
+                    lambda: adapter_query(client, root, "conversations"),
                 lambda value: value["conversations"]
                 and len(value["conversations"]) == 2
                 and all(row["context_applied_seq"] == 1 for row in value["conversations"]),

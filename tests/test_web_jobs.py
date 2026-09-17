@@ -7,7 +7,15 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from test_web_agent import MODEL_KEY, model_server
-from test_web_bindings import configure, get, onebot_server, receive, wait_for
+from test_web_bindings import (
+    adapter_query,
+    configure,
+    create_binding,
+    get,
+    onebot_server,
+    receive,
+    wait_for,
+)
 from test_web_bots import ORIGIN, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -60,13 +68,13 @@ async def configured(tmp_path, dsn):
         await post(client, module_scope(root) + "/agent.runtime/actions/configuration.apply", {
             key: plan[key] for key in ("expected_revision", "plan_id", "plan_digest")
         }, "agent-apply")
-        binding = await post(client, root + "/bindings", {
+        binding = await create_binding(client, root, {
             "self_id": "10001", "display_name": "QQ",
-        }, "binding", status=201)
-        await configure(client, root + "/bindings/" + binding["binding_id"],
+        }, "binding")
+        await configure(client, root, binding["binding_id"],
                         onebot["origin"], response_mode="agent")
         assert (await receive(client, binding["binding_id"], 1, "ordinary group context")).status_code == 200
-        groups = await wait_for(lambda: get(client, root + "/conversations"),
+        groups = await wait_for(lambda: adapter_query(client, root, "conversations"),
                                lambda row: bool(row["conversations"]))
         yield app, client, bot, root, groups["conversations"][0], model, onebot
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from uuid import uuid4
 
@@ -231,22 +232,28 @@ class CommandPolicyStore:
             # transaction is resolving its immutable plan payload. Re-read the
             # head after rollback so the public conflict is determined by the
             # authoritative revision rather than payload cleanup timing.
-            async with self.store.pool.connection() as conn:
-                row = await (
-                    await conn.execute(
-                        "SELECT revision FROM public.bot_command_policy_heads "
-                        "WHERE bot_id=%s AND binding_id=%s AND command_id=%s FOR SHARE",
-                        (
-                            self.store.bot_id,
-                            payload.get("binding_id"),
-                            payload.get("command_id"),
-                        ),
-                    )
-                ).fetchone()
-            if row is not None and row["revision"] != payload.get("expected_revision"):
-                raise ForestError(
-                    "REVISION_CONFLICT", "Command policy changed after preview", 409
-                ) from exc
+            # The revocation can be observed before the concurrent publisher
+            # reaches the policy-head lock. Wait for that bounded publication
+            # boundary instead of exposing a cleanup race as the public result.
+            for delay in (0, 0.005, 0.01, 0.02, 0.04, 0.08, 0.16):
+                if delay:
+                    await asyncio.sleep(delay)
+                async with self.store.pool.connection() as conn:
+                    row = await (
+                        await conn.execute(
+                            "SELECT revision FROM public.bot_command_policy_heads "
+                            "WHERE bot_id=%s AND binding_id=%s AND command_id=%s FOR SHARE",
+                            (
+                                self.store.bot_id,
+                                payload.get("binding_id"),
+                                payload.get("command_id"),
+                            ),
+                        )
+                    ).fetchone()
+                if row is not None and row["revision"] != payload.get("expected_revision"):
+                    raise ForestError(
+                        "REVISION_CONFLICT", "Command policy changed after preview", 409
+                    ) from exc
             raise
 
     async def _apply(self, ticket, operation_id: str, payload: dict) -> dict:

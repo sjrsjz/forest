@@ -7,7 +7,7 @@ from websockets.asyncio.server import serve
 
 from forest.adapters.onebot import OneBotWebSocketClient, prepare_send
 from forest.errors import ForestError
-from forest.management.bindings_api import BindingValues
+from forest.management.onebot_contract import BindingValues
 
 
 def event(message_id: int, text: str = "hello") -> dict:

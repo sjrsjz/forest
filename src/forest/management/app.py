@@ -33,7 +33,6 @@ from forest.management.authority import WebAuthority
 from forest.management.backup_api import install_backup_routes
 from forest.management.backup_imports import BackupImportManager
 from forest.management.backups import BackupManager
-from forest.management.bindings_api import install_binding_routes
 from forest.management.bot_audit_api import install_bot_audit_routes
 from forest.management.bots_api import install_bot_routes
 from forest.management.business_commands_api import install_business_command_routes
@@ -50,6 +49,7 @@ from forest.management.message_handler_diagnostics_api import (
 from forest.management.message_handler_limits_api import install_message_handler_limit_routes
 from forest.management.message_handler_policies_api import install_message_handler_policy_routes
 from forest.management.module_api import install_module_routes
+from forest.management.onebot_protocol import install_onebot_protocol_route
 from forest.management.provision import BotProvisioner
 from forest.management.restores import RestoreManager
 from forest.management.verifications import BackupVerificationManager
@@ -679,7 +679,7 @@ def create_app(settings: WebSettings) -> FastAPI:
     install_audit_routes(app, runtime)
     install_backup_routes(app, runtime)
     install_bot_routes(app, runtime)
-    install_binding_routes(app, runtime)
+    install_onebot_protocol_route(app, runtime)
     install_module_routes(app, runtime)
     install_event_routes(app, runtime)
     install_component_job_routes(app, runtime)

@@ -35,6 +35,20 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         assert onebot["contribution_id"] == "connections"
         assert onebot["surface"]["template"] == "/static/modules/adapter.onebot.html"
         assert onebot["surface"]["module"] == "/static/onebot-panel.js"
+        assert {
+            item["operation_id"]
+            for item in modules["adapter.onebot"]["management_contract"]["operations"]
+        } == {
+            "binding.create",
+            "binding.registration.resume",
+            "bindings",
+            "binding.configuration",
+            "binding.plan",
+            "binding.apply",
+            "conversations",
+            "delivery",
+            "delivery.reconcile",
+        }
         assert modules["conversation.scheduler"]["management_contributions"] == []
         schedules, = modules["scheduler.jobs"]["management_contributions"]
         assert schedules["contribution_id"] == "schedules"
@@ -53,12 +67,18 @@ async def test_bot_scope_discovers_generation_bound_management_contributions(
         adapter = (
             f"/management/v1/scopes/bot/{bot['bot_id']}/modules/adapter.onebot/queries"
         )
-        assert (await client.get(adapter + "/bindings")).json() == {"bindings": []}
+        assert (await client.get(adapter + "/bindings")).json() == {
+            "bindings": [],
+            "errors": {},
+        }
         assert (await client.get(adapter + "/conversations")).json() == {
             "conversations": []
         }
         assert (
             await client.get(f"/management/v1/bots/{bot['bot_id']}/jobs")
+        ).status_code == 404
+        assert (
+            await client.get(f"/management/v1/bots/{bot['bot_id']}/bindings")
         ).status_code == 404
 
         graph = await client.get(

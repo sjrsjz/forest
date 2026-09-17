@@ -59,7 +59,7 @@ Forest 尚未上线，本目标明确允许激进破坏性重构：删除错误 
 - Job 委派授权适配已移入 `scheduler.jobs`，由模块内 `JobAuthorizationPort` 绑定自己的 JobStore、Bot scope 与部署 authority；`BindingRuntime` 不再读取 Job claim 或转换授权请求。无数据库定向测试覆盖完整字段翻译及 issuer 换代先于存储访问的拒绝路径。
 - 运行时描述符已用可多项的 `management_contributions` 取代单个 `management_view`。每项贡献固定 contribution ID、适用 scope、排序组和代际绑定的 UI 工件；Bot scope 通过 `/management/v1/scopes/bot/{bot_id}/modules` 枚举，并从统一 scope query/action 网关调用模块契约。旧 `/bots/{bot_id}/runtime-modules/*` 路径已删除，没有兼容分支；Agent、Memory 和 Routing 控制器已经切换到新路径。无 PostgreSQL 全套为 734 通过、36 跳过；PostgreSQL 17 上独立 scope 发现/旧路径拒绝 1 项，以及 Package、Memory、Agent 既有端到端 3 项通过。
 - `scheduler.jobs` 已成为首个从旧壳层完整迁出的控制页面：模块贡献自己的 HTML、CSS、控制器和六项类型化管理操作，旧 `/bots/{bot_id}/jobs*` 路由、`install_job_routes` 和壳层 `scheduledPanel` 已删除。Job 页面通过 `adapter.onebot` 的 `bindings`/`conversations` 管理 query 取得来源，不直接读取 Adapter 表或 Agent DOM。无 PostgreSQL 全套为 735 通过、36 跳过；PostgreSQL 17 上计划/手动触发、CAS 与 Bot 来源隔离、cron/取消回执、失败重试身份四项 Web 回归及一项贡献目录回归通过。
-- `adapter.onebot` 已贡献完整的连接、对话队列和投递管理界面；原 `bot-bindings` HTML、样式和 `bindingPanel` 生命周期已从控制台壳删除。当前 UI 仍调用 `management.app` 安装的 Binding/Delivery 专用管理路由，只有 bindings/conversations 读查询已进入通用模块契约，因此 API 所有权迁移尚未完成；OneBot 协议入站路由继续属于适配器宿主边界。
+- `adapter.onebot` 已贡献完整的连接、对话队列和投递管理界面；原 `bot-bindings` HTML、样式和 `bindingPanel` 生命周期已从控制台壳删除。Binding 登记/恢复、配置读取/计划/应用、对话查询、投递查询和 UNKNOWN 核对共九项操作已经进入通用模块契约，旧 `bindings_api.py` 与 `/management/v1/bots/{bot_id}/bindings|conversations|delivery` 管理路由已直接删除。凭据由模块在稳定操作 ID 下先加密暂存，通用授权票据只接收密文摘要；OneBot 协议入站路由继续属于适配器宿主边界。无 PostgreSQL 全套为 735 通过、36 跳过；PostgreSQL 17 上受影响的贡献、Binding、Delivery、Job、Agent、Memory、策略、诊断和控制回执 29 项均已有通过结果。
 - 产品 Child Agent 已从最终基线删除：019/032/050 Child 迁移、两张 Child 表、数据搬运器、旧配置投影和冻结升级夹具均不存在；Kernel 内部组件调用统一使用 nested call 命名，Run token 账户改为 `bot_agent_run_budgets`。
 
 这只是控制面所有权、传输和模块路由的收口。运行时组合根、官方/可安装驱动的统一健康与恢复策略、旧 `bot_outbox_events` 的来源归一与资源归属尚未全部迁完；trace 的深层筛选已经改用不可变调用因果根和数据库关联键精确选根，并通过绑定筛选条件的稳定游标跨页读取，不再采用近期消息候选扫描。
@@ -116,9 +116,9 @@ VL 嵌入模型的种类在 Bot 创建时冻结并与 Bot 生命周期绑定；�
 
 - 顶层壳只提供管理身份、作用域选择、模块发现与工作区容器；不存在固定的部署/Bot/Agent/Memory/安全/存储产品栏目；
 - 内核与业务模块都通过 `ManagementContribution` 发布导航、配置、query/action 和 UI；宿主不能按模块 ID 硬编码业务表单、端点或页面；
-- 当前 `management.app` 仍安装 Bot/Binding、Event/ComponentJob、命令与消息策略、审计和备份等专用路由，静态资源仍直接导入多个业务 panel；这些都是待删除的架构阻断项，不允许继续美化旧页面；
+- 当前 `management.app` 仍安装 Bot、Event/ComponentJob、命令与消息策略、审计和备份等专用路由，静态资源仍直接导入多个业务 panel；这些都是待删除的架构阻断项，不允许继续美化旧页面；
 - 现有 Memory 页面中的主干、组合筛选、分页和发布图浏览逻辑可迁入 Memory 包的 contribution/UI，但迁移后宿主不能再保留其业务脚本或专用 API；
-- Bot runtime 的 `ManagementContribution` 注册、Bot 作用域枚举、代际绑定 UI 工件解析和通用 query/action 网关已经接通；OneBot 页面已经从壳迁入 `adapter.onebot`，但其写操作与投递诊断仍需迁入模块契约；还需为 deployment/host 建立同一注册机制，并迁走余下固定页面和专用路由，再重做 PC 布局验收；
+- Bot runtime 的 `ManagementContribution` 注册、Bot 作用域枚举、代际绑定 UI 工件解析和通用 query/action 网关已经接通；OneBot 页面、写操作和投递诊断已经迁入 `adapter.onebot`。还需为 deployment/host 建立同一注册机制，并迁走余下固定页面和专用路由，再重做 PC 布局验收；
 - WebUI、群聊 Shell 和自动化入口必须调用同一类型化控制契约和授权模型。
 
 ## 验收规则

@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from test_web_bindings import create_binding
 from test_web_bots import ORIGIN, PASSWORD, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -62,10 +63,7 @@ async def test_web_message_handler_policy_requires_reauth_and_persists_source_bo
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         package = PackageCatalog(tmp_path / "packages").build(handler_source(tmp_path))
         await managed.kernel.install(package)
-        binding = await post(
-            client, root + "/bindings", {"self_id": "10001", "display_name": "QQ"},
-            "create-handler-policy-binding", status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10001", "display_name": "QQ"}, "create-handler-policy-binding")
         path = root + "/bindings/" + binding["binding_id"]
         response = await client.get(path + "/message-handler-policies")
         assert response.status_code == 200, response.text
@@ -150,10 +148,7 @@ async def test_policy_preview_is_rejected_after_handler_spec_hot_reload(
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         catalog = PackageCatalog(tmp_path / "packages")
         await managed.kernel.install(catalog.build(handler_source(tmp_path, version="0.1.0")))
-        binding = await post(
-            client, root + "/bindings", {"self_id": "10002", "display_name": "QQ"},
-            "create-stale-policy-binding", status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10002", "display_name": "QQ"}, "create-stale-policy-binding")
         path = (root + "/bindings/" + binding["binding_id"]
                 + "/components/policy.handler/message-handlers/ordinary")
         plan = await post(
@@ -192,10 +187,7 @@ async def test_message_handler_policy_expected_revision_has_single_winner(tmp_pa
         root = "/management/v1/bots/" + bot["bot_id"]
         managed = await app.state.runtime.fleet.attach(bot["bot_id"])
         await managed.kernel.install(PackageCatalog(tmp_path / "packages").build(handler_source(tmp_path)))
-        binding = await post(
-            client, root + "/bindings", {"self_id": "10003", "display_name": "QQ"},
-            "create-policy-race-binding", status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10003", "display_name": "QQ"}, "create-policy-race-binding")
         path = (root + "/bindings/" + binding["binding_id"]
                 + "/components/policy.handler/message-handlers/ordinary")
         plans = []

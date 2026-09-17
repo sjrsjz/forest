@@ -1,7 +1,15 @@
 """Real OneBot UNKNOWN receipt and Web reconciliation retain only permitted content."""
 
 import pytest
-from test_web_bindings import configure, get, onebot_server, receive, wait_for
+from test_web_bindings import (
+    adapter_action,
+    adapter_query,
+    configure,
+    create_binding,
+    onebot_server,
+    receive,
+    wait_for,
+)
 from test_web_bots import ORIGIN, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 from test_web_control_receipts import erase
@@ -32,20 +40,18 @@ async def test_web_unknown_resolution_inherits_administrative_source_and_replays
         )
         await ready(client, created)
         root = "/management/v1/bots/" + created["bot_id"]
-        binding = await post(
-            client,
-            root + "/bindings",
+        binding = await create_binding(
+            client, root,
             {"self_id": "10001", "display_name": "Account"},
             "binding",
-            status=201,
         )
-        await configure(client, root + "/bindings/" + binding["binding_id"], server["origin"])
+        await configure(client, root, binding["binding_id"], server["origin"])
         server["unknown_next"] = True
         assert (
             await receive(client, binding["binding_id"], 2, "/chat one uncertain message")
         ).status_code == 200
         pending = await wait_for(
-            lambda: get(client, root + "/delivery"),
+            lambda: adapter_query(client, root, "delivery"),
             lambda value: any(p["state"] == "UNKNOWN" for p in value["parts"]),
         )
         part = next(p for p in pending["parts"] if p["state"] == "UNKNOWN")
@@ -76,10 +82,14 @@ async def test_web_unknown_resolution_inherits_administrative_source_and_replays
             "decision": decision,
             "reason": "ADMIN-REASON-CANARY",
         }
-        endpoint = root + "/delivery/" + part["intent_id"] + "/0/resolution"
-        resolved = await post(client, endpoint, payload, "resolve")
+        payload = {"intent_id": part["intent_id"], "part_index": 0, **payload}
+        resolved = await adapter_action(
+            client, root, "delivery.reconcile", payload, "resolve"
+        )
         assert resolved["state"] == ("SKIPPED" if decision == "SKIP" else "SENT")
-        assert await post(client, endpoint, payload, "resolve") == resolved
+        assert await adapter_action(
+            client, root, "delivery.reconcile", payload, "resolve"
+        ) == resolved
         async with bot.store.pool.connection() as conn:
             receipt = await (
                 await conn.execute(
@@ -118,7 +128,9 @@ async def test_web_unknown_resolution_inherits_administrative_source_and_replays
                 original_part["payload_id"],
             }
         await erase(bot, receipt["operation_id"])
-        replay = await post(client, endpoint, payload, "resolve")
+        replay = await adapter_action(
+            client, root, "delivery.reconcile", payload, "resolve"
+        )
         assert replay == {
             "operation_id": receipt["operation_id"],
             "action": "delivery.reconcile",

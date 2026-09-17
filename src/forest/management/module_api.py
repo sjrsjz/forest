@@ -26,6 +26,9 @@ class ModuleOperation:
     input_model: type[BaseModel]
     handler: Callable[["ModuleRequest", BaseModel], Awaitable[Any]]
     authorization_payload: Callable[[BaseModel], dict] | None = None
+    authorization_preparer: (
+        Callable[["ModuleRequest", BaseModel], Awaitable[tuple[dict, Any]]] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -33,9 +36,11 @@ class ModuleRequest:
     web: Any
     bot: Any
     module: Any
-    ticket: dict
+    principal: dict
     operation_id: str
+    ticket: dict
     payload: dict
+    prepared: Any = None
 
 
 class ModuleManagementContract:
@@ -112,13 +117,13 @@ async def _target(runtime, request, scope_kind, scope_id, *, write=False):
     return who, await runtime.fleet.attach(bot_id)
 
 
-async def _signed(runtime, request, bot, who, authority, payload, *, write):
+def _operation_id(request, bot, who, authority, *, write):
     key = request.headers.get("idempotency-key", "") if write else str(uuid4())
     if not 1 <= len(key) <= 128:
         raise ForestError(
             "IDEMPOTENCY_KEY_REQUIRED", "A stable idempotency key is required", 422
         )
-    operation = "web:" + digest_json(
+    return "web:" + digest_json(
         {
             "subject_id": who["subject_id"],
             "bot_id": bot.store.bot_id,
@@ -126,6 +131,9 @@ async def _signed(runtime, request, bot, who, authority, payload, *, write):
             "key": key,
         }
     )
+
+
+async def _signed(runtime, bot, who, authority, operation, payload):
     ticket = await runtime.authority.issue(
         **who,
         bot_id=bot.store.bot_id,
@@ -135,7 +143,7 @@ async def _signed(runtime, request, bot, who, authority, payload, *, write):
         plan_digest=payload.get("plan_digest", ""),
         policy_revision=(await bot.store.runtime())["policy_revision"],
     )
-    return ticket, operation
+    return ticket
 
 
 def _contract(bot, component_id: str) -> tuple[Any, ModuleManagementContract]:
@@ -161,16 +169,19 @@ def install_module_routes(app, runtime):
         )
         module, contract = _contract(bot, component_id)
         declared, body, authorized_payload = contract.prepare(operation_id, kind, payload)
-        ticket, operation = await _signed(
-            runtime,
-            request,
-            bot,
-            who,
-            declared.authority,
-            authorized_payload,
-            write=module_write,
+        operation = _operation_id(
+            request, bot, who, declared.authority, write=module_write
         )
-        context = ModuleRequest(runtime, bot, module, ticket, operation, authorized_payload)
+        context = ModuleRequest(runtime, bot, module, who, operation, {}, authorized_payload)
+        prepared = None
+        if declared.authorization_preparer is not None:
+            authorized_payload, prepared = await declared.authorization_preparer(context, body)
+        ticket = await _signed(
+            runtime, bot, who, declared.authority, operation, authorized_payload
+        )
+        context = ModuleRequest(
+            runtime, bot, module, who, operation, ticket, authorized_payload, prepared
+        )
         return await contract.invoke(context, declared, body)
 
     @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/modules")

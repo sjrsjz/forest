@@ -1,6 +1,7 @@
 """Real HTTP and PG: erased admissions cannot restart cross-boundary effects."""
 
 import pytest
+from test_web_bindings import adapter_action
 from test_web_bots import (
     ORIGIN,
     BootstrapState,
@@ -130,7 +131,9 @@ async def test_erased_web_service_admission_and_binding_reservation_do_not_finis
 
         monkeypatch.setattr(BindingCatalog, "registered", registration_gap)
         body = {"self_id": "991100", "display_name": "Account"}
-        await post(client, root + "/bindings", body, "binding", status=503)
+        await adapter_action(
+            client, root, "binding.create", body, "binding", status=503
+        )
         async with bot.store.pool.connection() as conn:
             creation = await (
                 await conn.execute(
@@ -146,7 +149,7 @@ async def test_erased_web_service_admission_and_binding_reservation_do_not_finis
             ).fetchone()
         assert before["stage"] == "RESERVED" and registered_calls == 1
         await erase(bot, creation["operation_id"])
-        replay = await post(client, root + "/bindings", body, "binding", status=201)
+        replay = await adapter_action(client, root, "binding.create", body, "binding")
         assert (
             replay["result_payload_state"] == "UNAVAILABLE"
             and replay["operation_status"] == "RECORDED"

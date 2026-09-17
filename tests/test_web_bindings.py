@@ -122,15 +122,45 @@ async def wait_for(read, condition, timeout=30):
         pytest.fail(f"Expected state did not arrive: {value}")
 
 
-async def get(client, path):
-    response = await client.get(path)
+async def get(client, path, **kwargs):
+    response = await client.get(path, **kwargs)
     assert response.status_code == 200, response.text
     return response.json()
 
 
-async def online(client, path, revision=1):
-    return await wait_for(lambda: get(client, path + "/configuration"),
-                          lambda row: row["state"] == "ONLINE" and row["effective_revision"] == revision)
+def adapter_scope(root):
+    return (
+        root.replace("/management/v1/bots/", "/management/v1/scopes/bot/", 1)
+        + "/modules/adapter.onebot"
+    )
+
+
+async def adapter_query(client, root, operation, **parameters):
+    return await get(client, adapter_scope(root) + "/queries/" + operation, params=parameters)
+
+
+async def adapter_action(client, root, operation, body, key, *, status=200):
+    return await post(
+        client,
+        adapter_scope(root) + "/actions/" + operation,
+        body,
+        key,
+        status=status,
+    )
+
+
+async def create_binding(client, root, body, key, *, status=201):
+    # Generic module actions use one response status for all operations.
+    return await adapter_action(client, root, "binding.create", body, key, status=200)
+
+
+async def online(client, root, binding_id, revision=1):
+    return await wait_for(
+        lambda: adapter_query(
+            client, root, "binding.configuration", binding_id=binding_id
+        ),
+        lambda row: row["state"] == "ONLINE" and row["effective_revision"] == revision,
+    )
 
 
 async def receive(client, binding_id, message_id, text, *, user_id=20001, group_id=30001,
@@ -147,17 +177,30 @@ async def receive(client, binding_id, message_id, text, *, user_id=20001, group_
         headers={"content-type": "application/json", "x-signature": "sha1=" + hmac.new(secret.encode(), raw, hashlib.sha1).hexdigest()})
 
 
-async def configure(client, base, origin, *, revision=0, key="initial", **changes):
+async def configure(
+    client, root, binding_id, origin=None, *, revision=0, key="initial", **changes
+):
+    if origin is None:
+        endpoint = binding_id
+        root, separator, binding_id = root.rpartition("/bindings/")
+        if not root or not separator or not binding_id:
+            raise ValueError("Expected a Bot root plus binding identity")
+        origin = endpoint
     values = {"enabled": True, "api_base_url": origin, "response_mode": "component",
               "response_template": "{sender}@{group}:{text}", "admin_user_ids": ["20001"], **changes}
-    body = {"expected_revision": revision, "values": values, "access_token": TOKEN, "webhook_secret": SECRET}
-    plan = await post(client, base + "/change-plans", body, key + "-plan")
+    body = {"binding_id": binding_id, "expected_revision": revision, "values": values,
+            "access_token": TOKEN, "webhook_secret": SECRET}
+    plan = await adapter_action(client, root, "binding.plan", body, key + "-plan")
     assert TOKEN not in json.dumps(plan) and SECRET not in json.dumps(plan)
-    assert await post(client, base + "/change-plans", body, key + "-plan") == plan
-    accepted = await post(client, base + "/management-requests",
-                          {k: plan[k] for k in ("plan_id", "plan_digest", "expected_revision")}, key + "-apply", status=202)
+    assert await adapter_action(client, root, "binding.plan", body, key + "-plan") == plan
+    accepted = await adapter_action(
+        client, root, "binding.apply",
+        {"binding_id": binding_id,
+         **{k: plan[k] for k in ("plan_id", "plan_digest", "expected_revision")}},
+        key + "-apply",
+    )
     assert accepted["revision"] == revision + 1
-    return await online(client, base, revision + 1)
+    return await online(client, root, binding_id, revision + 1)
 
 
 async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path, web_bots_database):  # noqa: F811
@@ -171,23 +214,22 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             await ready(client, bot)
             root = "/management/v1/bots/" + bot["bot_id"]
             payload = {"self_id": "10001", "display_name": "测试QQ"}
-            binding = await post(client, root + "/bindings", payload, "binding", status=201)
-            assert await post(client, root + "/bindings", payload, "binding", status=201) == binding
+            binding = await create_binding(client, root, payload, "binding")
+            assert await create_binding(client, root, payload, "binding") == binding
             binding_id = binding["binding_id"]
-            base = root + "/bindings/" + binding_id
-            row = await configure(client, base, server["origin"])
+            row = await configure(client, root, binding_id, server["origin"])
             assert row["webhook_url"].endswith(binding_id)
             assert TOKEN not in json.dumps(row) and SECRET not in json.dumps(row)
             wrong = await receive(client, binding_id, 1, "do not store", secret="wrong")
             assert wrong.status_code in {400, 401, 403}
-            assert (await get(client, root + "/conversations"))["conversations"] == []
+            assert (await adapter_query(client, root, "conversations"))["conversations"] == []
             assert (await receive(client, binding_id, 2, "ordinary message")).status_code == 200
-            queues = await wait_for(lambda: get(client, root + "/conversations"),
+            queues = await wait_for(lambda: adapter_query(client, root, "conversations"),
                 lambda value: value["conversations"] and value["conversations"][0]["context_applied_seq"] == 1)
             assert queues["conversations"][0]["pending_triggers"] == 0
             assert server["sends"] == []
             assert (await receive(client, binding_id, 3, "answer this", mention=True)).status_code == 200
-            first = await wait_for(lambda: get(client, root + "/delivery"),
+            first = await wait_for(lambda: adapter_query(client, root, "delivery"),
                                   lambda value: value["parts"] and value["parts"][0]["state"] == "SENT")
             assert first["parts"][0]["reply_route"]["channel_id"] == "30001"
             assert first["parts"][0]["payload_state"] == "ACTIVE"
@@ -199,21 +241,23 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             assert len(server["sends"]) == 1
             # Exact platform receipt makes a self echo an alias of the canonical reply.
             assert (await receive(client, binding_id, 8001, "self reply", user_id=10001)).status_code == 200
-            assert (await get(client, root + "/conversations"))["conversations"][0]["next_ingress_seq"] == 3
+            assert (await adapter_query(client, root, "conversations"))["conversations"][0]["next_ingress_seq"] == 3
             server["unknown_next"] = True
             assert (await receive(client, binding_id, 4, "/chat uncertain")).status_code == 200
-            uncertain = await wait_for(lambda: get(client, root + "/delivery"),
+            uncertain = await wait_for(lambda: adapter_query(client, root, "delivery"),
                                       lambda value: any(p["state"] == "UNKNOWN" for p in value["parts"]))
             unknown = next(p for p in uncertain["parts"] if p["state"] == "UNKNOWN")
             assert len(server["sends"]) == 2
             assert (await receive(client, binding_id, 5, "/chat later")).status_code == 200
-            await wait_for(lambda: get(client, root + "/delivery"), lambda value: len(value["parts"]) == 3)
+            await wait_for(lambda: adapter_query(client, root, "delivery"), lambda value: len(value["parts"]) == 3)
             await asyncio.sleep(0.3)
             assert len(server["sends"]) == 2
-            resolved = await post(client, root + f"/delivery/{unknown['intent_id']}/0/resolution",
-                {"expected_revision": unknown["revision"], "decision": "SKIP", "reason": "Verified original target; skip uncertain part"}, "resolve")
+            resolved = await adapter_action(client, root, "delivery.reconcile",
+                {"intent_id": unknown["intent_id"], "part_index": 0,
+                 "expected_revision": unknown["revision"], "decision": "SKIP",
+                 "reason": "Verified original target; skip uncertain part"}, "resolve")
             assert resolved["state"] == "SKIPPED"
-            await wait_for(lambda: get(client, root + "/delivery"),
+            await wait_for(lambda: adapter_query(client, root, "delivery"),
                            lambda value: sum(p["state"] == "SENT" for p in value["parts"]) == 2)
             assert len(server["sends"]) == 3
             # Pause keeps durable intake alive and ordinary Context waits for resume.
@@ -221,18 +265,18 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             state = await managed.store.runtime()
             await managed.store.set_maintenance(managed.kernel._authority(), state["maintenance_epoch"], False)
             assert (await receive(client, binding_id, 6, "while paused", group_id=30002)).status_code == 200
-            paused = await get(client, root + "/conversations")
+            paused = await adapter_query(client, root, "conversations")
             assert any(c["channel_id"] == "30002" for c in paused["conversations"])
             state = await managed.store.runtime()
             await managed.store.set_maintenance(managed.kernel._authority(), state["maintenance_epoch"], True)
-            await wait_for(lambda: get(client, root + "/conversations"),
+            await wait_for(lambda: adapter_query(client, root, "conversations"),
                            lambda value: all(c["context_applied_seq"] == c["next_ingress_seq"] - 1 for c in value["conversations"]))
         async with running(settings) as (app, client):
             await login(client)
-            await online(client, base)
-            assert len((await get(client, root + "/bindings"))["bindings"]) == 1
+            await online(client, root, binding_id)
+            assert len((await adapter_query(client, root, "bindings"))["bindings"]) == 1
             assert (await receive(client, binding_id, 7, "/chat after restart", group_id=30002)).status_code == 200
-            await wait_for(lambda: get(client, root + "/delivery"),
+            await wait_for(lambda: adapter_query(client, root, "delivery"),
                            lambda value: sum(p["state"] == "SENT" for p in value["parts"]) == 3)
             assert len(server["sends"]) == 4
             managed = await app.state.runtime.fleet.attach(bot["bot_id"])
@@ -248,7 +292,7 @@ async def test_web_binding_ingress_context_delivery_unknown_and_restart(tmp_path
             await payloads.forget_sources(lease, "remove-first-web-message", (SourceRef(source["source_unit_id"]),),
                 expected_deletion_epoch=await payloads.epoch(lease))
             for _ in range(2):
-                status = await get(client, root + "/delivery")
+                status = await adapter_query(client, root, "delivery")
                 original = next(part for part in status["parts"] if part["intent_id"] == first["parts"][0]["intent_id"])
                 assert original["state"] == "SENT" and original["receipt"]["message_id"] == "8001"
                 assert original["payload"] is None and original["payload_state"] == "UNAVAILABLE"
@@ -274,15 +318,12 @@ async def test_websocket_binding_ingress_and_delivery_share_one_owned_connection
         )
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
-        binding = await post(
-            client,
-            root + "/bindings",
+        binding = await create_binding(
+            client, root,
             {"self_id": "10001", "display_name": "WS QQ"},
             "ws-binding",
-            status=201,
         )
         binding_id = binding["binding_id"]
-        base = root + "/bindings/" + binding_id
         values = {
             "enabled": True,
             "transport": "forward-websocket",
@@ -295,20 +336,18 @@ async def test_websocket_binding_ingress_and_delivery_share_one_owned_connection
             "private_trigger": True,
             "admin_user_ids": ["20001"],
         }
-        plan = await post(
-            client,
-            base + "/change-plans",
-            {"expected_revision": 0, "values": values, "access_token": TOKEN},
-            "ws-plan",
+        plan = await adapter_action(
+            client, root, "binding.plan",
+            {"binding_id": binding_id, "expected_revision": 0,
+             "values": values, "access_token": TOKEN}, "ws-plan",
         )
-        await post(
-            client,
-            base + "/management-requests",
-            {key: plan[key] for key in ("plan_id", "plan_digest", "expected_revision")},
+        await adapter_action(
+            client, root, "binding.apply",
+            {"binding_id": binding_id,
+             **{key: plan[key] for key in ("plan_id", "plan_digest", "expected_revision")}},
             "ws-apply",
-            status=202,
         )
-        row = await online(client, base)
+        row = await online(client, root, binding_id)
         assert row["config"]["transport"] == "forward-websocket"
         assert len(server["connections"]) == 1
 
@@ -337,7 +376,7 @@ async def test_websocket_binding_ingress_and_delivery_share_one_owned_connection
         )
         await server["connections"][0].send(body)
         sent = await wait_for(
-            lambda: get(client, root + "/delivery"),
+            lambda: adapter_query(client, root, "delivery"),
             lambda result: result["parts"] and result["parts"][0]["state"] == "SENT",
         )
         assert sent["parts"][0]["reply_route"]["channel_id"] == "933179609"
@@ -385,24 +424,36 @@ async def test_binding_registration_recovers_cross_database_ack_and_account_isol
 
         monkeypatch.setattr(BindingCatalog, "registered", lost_ack)
         body = {"self_id": "10001", "display_name": "不可重复归属"}
-        result = await client.post(roots[0] + "/bindings", json=body, headers={"idempotency-key": "stable-create"})
+        result = await client.post(
+            adapter_scope(roots[0]) + "/actions/binding.create", json=body,
+            headers={"idempotency-key": "stable-create"},
+        )
         assert result.status_code == 503
-        rows = (await get(client, roots[0] + "/bindings"))["bindings"]
+        rows = (await adapter_query(client, roots[0], "bindings"))["bindings"]
         assert len(rows) == 1 and rows[0]["registration_stage"] == "RESERVED"
         assert rows[0]["state"] == "DISABLED"  # Target committed, directory has not acknowledged it.
-        restored = await post(client, roots[0] + "/bindings", body, "stable-create", status=201)
+        restored = await create_binding(client, roots[0], body, "stable-create")
         assert restored["binding_id"] == rows[0]["binding_id"]
-        assert (await get(client, roots[0] + "/bindings"))["bindings"][0]["registration_stage"] == "REGISTERED"
-        assert (await get(client, roots[1] + "/bindings"))["bindings"] == []
-        duplicate = await post(client, roots[1] + "/bindings", body, "other-owner", status=409)
+        assert (await adapter_query(client, roots[0], "bindings"))["bindings"][0]["registration_stage"] == "REGISTERED"
+        assert (await adapter_query(client, roots[1], "bindings"))["bindings"] == []
+        duplicate = await adapter_action(client, roots[1], "binding.create", body,
+                                         "other-owner", status=409)
         assert duplicate["code"] == "ACCOUNT_ALREADY_BOUND"
-        changed = await post(client, roots[0] + "/bindings", {**body, "self_id": "10002"}, "stable-create", status=409)
+        changed = await adapter_action(client, roots[0], "binding.create",
+                                       {**body, "self_id": "10002"},
+                                       "stable-create", status=409)
         assert changed["code"] == "IDEMPOTENCY_CONFLICT"
-        cross = await client.get(roots[1] + "/bindings/" + rows[0]["binding_id"] + "/configuration")
+        cross = await client.get(
+            adapter_scope(roots[1]) + "/queries/binding.configuration",
+            params={"binding_id": rows[0]["binding_id"]},
+        )
         assert cross.status_code == 404
         await post(client, "/management/v1/logout", {}, "logout")
-        denied = await client.post(roots[0] + "/bindings", json={**body, "self_id": "10003"},
-                                   headers={"idempotency-key": "after-logout"})
+        denied = await client.post(
+            adapter_scope(roots[0]) + "/actions/binding.create",
+            json={**body, "self_id": "10003"},
+            headers={"idempotency-key": "after-logout"},
+        )
         assert denied.status_code == 401
 
 
@@ -415,26 +466,46 @@ async def test_binding_web_plan_cas_secret_replay_and_identity_probe(tmp_path, w
         bot = await post(client, "/management/v1/bots", {"display_name": "配置竞争"}, "create", status=202)
         await ready(client, bot)
         root = "/management/v1/bots/" + bot["bot_id"]
-        binding = await post(client, root + "/bindings", {"self_id": "10001", "display_name": "账号"}, "create-binding", status=201)
-        base = root + "/bindings/" + binding["binding_id"]
-        await configure(client, base, server["origin"])
-        body = {"expected_revision": 1, "values": {"enabled": True, "api_base_url": server["origin"],
-            "response_mode": "component", "response_template": "changed"}}
-        a, b = await asyncio.gather(post(client, base + "/change-plans", body, "a"),
-                                    post(client, base + "/change-plans", body, "b"))
-        apply_body = {k: a[k] for k in ("expected_revision", "plan_id", "plan_digest")}
-        result = await post(client, base + "/management-requests", apply_body, "apply-a", status=202)
-        assert await post(client, base + "/management-requests", apply_body, "apply-a", status=202) == result
-        conflict = await post(client, base + "/management-requests",
-            {k: b[k] for k in apply_body}, "apply-b", status=409)
+        binding = await create_binding(client, root, {"self_id": "10001", "display_name": "账号"}, "create-binding")
+        binding_id = binding["binding_id"]
+        await configure(client, root, binding_id, server["origin"])
+        body = {"binding_id": binding_id, "expected_revision": 1,
+                "values": {"enabled": True, "api_base_url": server["origin"],
+                           "response_mode": "component", "response_template": "changed"}}
+        a, b = await asyncio.gather(
+            adapter_action(client, root, "binding.plan", body, "a"),
+            adapter_action(client, root, "binding.plan", body, "b"),
+        )
+        apply_body = {"binding_id": binding_id,
+                      **{key: a[key] for key in ("expected_revision", "plan_id", "plan_digest")}}
+        result = await adapter_action(client, root, "binding.apply", apply_body, "apply-a")
+        assert await adapter_action(client, root, "binding.apply", apply_body, "apply-a") == result
+        conflicting = {"binding_id": binding_id,
+                       **{key: b[key] for key in ("expected_revision", "plan_id", "plan_digest")}}
+        conflict = await adapter_action(
+            client, root, "binding.apply", conflicting, "apply-b", status=409
+        )
         assert conflict["code"] == "REVISION_CONFLICT"
-        await online(client, base, 2)
-        assert await post(client, base + "/change-plans", body, "a") == a
+        await online(client, root, binding_id, 2)
+        assert await adapter_action(client, root, "binding.plan", body, "a") == a
         server["self_id"] = "10002"
-        await post(client, base + "/change-plans", {"expected_revision": 2, "values": body["values"]}, "wrong-identity-plan")
-        wrong = await post(client, base + "/change-plans", {"expected_revision": 2, "values": body["values"]}, "wrong-identity-plan")
-        await post(client, base + "/management-requests", {k: wrong[k] for k in apply_body}, "wrong-identity-apply", status=202)
-        row = await wait_for(lambda: get(client, base + "/configuration"),
-                             lambda value: value["error_code"] == "ONEBOT_IDENTITY_MISMATCH")
+        wrong_body = {"binding_id": binding_id, "expected_revision": 2,
+                      "values": body["values"]}
+        await adapter_action(client, root, "binding.plan", wrong_body, "wrong-identity-plan")
+        wrong = await adapter_action(
+            client, root, "binding.plan", wrong_body, "wrong-identity-plan"
+        )
+        await adapter_action(
+            client, root, "binding.apply",
+            {"binding_id": binding_id,
+             **{key: wrong[key] for key in ("expected_revision", "plan_id", "plan_digest")}},
+            "wrong-identity-apply",
+        )
+        row = await wait_for(
+            lambda: adapter_query(
+                client, root, "binding.configuration", binding_id=binding_id
+            ),
+            lambda value: value["error_code"] == "ONEBOT_IDENTITY_MISMATCH",
+        )
         assert row["revision"] == 3 and row["effective_revision"] == 2
         assert row["self_id"] == "10001"

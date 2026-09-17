@@ -8,7 +8,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
-from test_web_bindings import configure, get, onebot_server, receive, wait_for
+from test_web_bindings import (
+    adapter_query,
+    configure,
+    create_binding,
+    get,
+    onebot_server,
+    receive,
+    wait_for,
+)
 from test_web_bots import ORIGIN, post, ready, running, setup
 from test_web_bots import web_bots_database as web_bots_database
 
@@ -183,13 +191,7 @@ async def test_web_approval_resumes_exact_tool_before_next_model_call(tmp_path, 
         )
         await managed.kernel.install(snapshot, grants=frozenset({"state.read", "state.write"}))
         await configure_agent(client, root, model["endpoint"], approval="always")
-        binding = await post(
-            client,
-            root + "/bindings",
-            {"self_id": "10001", "display_name": "QQ"},
-            "binding",
-            status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10001", "display_name": "QQ"}, "binding")
         await configure(
             client,
             root + "/bindings/" + binding["binding_id"],
@@ -224,7 +226,7 @@ async def test_web_approval_resumes_exact_tool_before_next_model_call(tmp_path, 
         accepted = await post(client, module_scope(root) + "/agent.runtime/actions/approval.decide", decision, "approve")
         assert accepted["run_id"] == original["run_id"]
         await wait_for(
-            lambda: get(client, root + "/delivery"),
+            lambda: adapter_query(client, root, "delivery"),
             lambda value: any(part["state"] == "SENT" for part in value["parts"]),
         )
         assert len(model["requests"]) == 2 and not model["errors"]
@@ -284,13 +286,7 @@ async def test_web_agent_multigroup_and_next_model_trigger_cut(tmp_path, web_bot
         )
         await managed.kernel.install(snapshot, grants=frozenset({"state.read", "state.write"}))
         await configure_agent(client, root, model["endpoint"])
-        binding = await post(
-            client,
-            root + "/bindings",
-            {"self_id": "10001", "display_name": "Agent QQ"},
-            "binding",
-            status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10001", "display_name": "Agent QQ"}, "binding")
         binding_id = binding["binding_id"]
         await configure(
             client, root + "/bindings/" + binding_id, onebot["origin"], response_mode="agent"
@@ -313,13 +309,13 @@ async def test_web_agent_multigroup_and_next_model_trigger_cut(tmp_path, web_bot
                 await receive(client, binding_id, 1, "other request", group_id=30002, mention=True)
             ).status_code == 200
             await wait_for(
-                lambda: get(client, root + "/delivery"),
+                    lambda: adapter_query(client, root, "delivery"),
                 lambda value: any(part["state"] == "SENT" for part in value["parts"]),
             )
             assert len(onebot["sends"]) == 1 and onebot["sends"][0]["group_id"] == 30002
             model["release_first"].set()
             await wait_for(
-                lambda: get(client, root + "/delivery"),
+                    lambda: adapter_query(client, root, "delivery"),
                 lambda value: sum(part["state"] == "SENT" for part in value["parts"]) == 2,
             )
             assert not model["errors"] and len(model["requests"]) == 3
@@ -358,7 +354,7 @@ async def test_web_agent_multigroup_and_next_model_trigger_cut(tmp_path, web_bot
             )
             assert state["counter"]["value"] == 3
             await wait_for(
-                lambda: get(client, root + "/conversations"),
+                    lambda: adapter_query(client, root, "conversations"),
                 lambda value: all(
                     item["context_applied_seq"] == item["next_ingress_seq"] - 1
                     for item in value["conversations"]
@@ -392,13 +388,7 @@ async def test_web_tool_revocation_blocks_already_running_native_worker_write(
         )
         await managed.kernel.install(snapshot, grants=frozenset({"state.read", "state.write"}))
         await configure_agent(client, root, model["endpoint"])
-        binding = await post(
-            client,
-            root + "/bindings",
-            {"self_id": "10001", "display_name": "QQ"},
-            "binding",
-            status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10001", "display_name": "QQ"}, "binding")
         await configure(
             client,
             root + "/bindings/" + binding["binding_id"],
@@ -486,13 +476,7 @@ async def test_web_revokes_unsent_final_without_retrying_model_or_dropping_saved
         )
         await managed.kernel.install(snapshot, grants=frozenset({"state.read", "state.write"}))
         await configure_agent(client, root, model["endpoint"])
-        binding = await post(
-            client,
-            root + "/bindings",
-            {"self_id": "10001", "display_name": "QQ"},
-            "binding",
-            status=201,
-        )
+        binding = await create_binding(client, root, {"self_id": "10001", "display_name": "QQ"}, "binding")
         await configure(
             client,
             root + "/bindings/" + binding["binding_id"],
