@@ -18,6 +18,7 @@ from forest.final_reply_uow import (
     RuntimeParticipant,
 )
 from forest.runtime_modules import official_storage_bundle
+from forest.session_handoff_uow import SessionHandoffPlan, SessionHandoffUnitOfWork
 from forest.storage.adapter_onebot_authority import OneBotAdapterRepository, OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
     AgentInputBatch,
@@ -777,6 +778,88 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
     ]
     assert (await agent.load("run/1"))["state"] == "COMPLETED"
     assert (await delivery.load_intent("intent/atomic"))["state"] == "QUEUED"
+
+    message_two = await _put(
+        payloads,
+        component="adapter.test",
+        kind="normalized.message",
+        owner_id="message/2",
+        body=b'{"parts":[{"type":"text","text":"again"}]}',
+        source_id="message/2",
+    )
+    author_two = await _put(
+        payloads,
+        component="adapter.test",
+        kind="author.snapshot",
+        owner_id="author/2",
+        body=b'{"subject":"user/2"}',
+        source_id="author/2",
+    )
+    await scheduler.admit_message(
+        operation_id="message/admit/2",
+        conversation_id="conversation/main",
+        source_component_id="adapter.test",
+        binding_ref="binding/main",
+        platform="test",
+        channel_ref="933179609",
+        thread_ref=None,
+        event_id="message/2",
+        source_event_ref="source/message/2",
+        event_kind="group.message",
+        platform_message_ref="2",
+        author_subject_ref="user/2",
+        content=SchedulerPayloadRef(
+            message_two.payload_id,
+            message_two.content_digest,
+            "adapter.test",
+            "normalized.message",
+            "message/2",
+        ),
+        author=SchedulerPayloadRef(
+            author_two.payload_id,
+            author_two.content_digest,
+            "adapter.test",
+            "author.snapshot",
+            "author/2",
+        ),
+        received_at=now + timedelta(seconds=1),
+        classification_deadline=now + timedelta(minutes=2),
+    )
+    await scheduler.complete_classification(
+        operation_id="message/classify/2",
+        conversation_id="conversation/main",
+        event_id="message/2",
+        decision="TRIGGER",
+        classifier_component_id="router.test",
+        classifier_generation_id="generation/router/1",
+        trigger_id="trigger/2",
+        principal_ref="user/2",
+    )
+    handoff = SessionHandoffUnitOfWork(
+        store=store,
+        agent_repository=agent,
+        conversation_repository=scheduler,
+        generation_member_verifier=verify_member,
+        agent_generation_id="generation/agent/1",
+        conversation_generation_id="generation/conversation/1",
+    )
+    next_run = await handoff.decide(
+        actor=actor,
+        plan=SessionHandoffPlan(
+            selection_operation_id="session/end/1",
+            session_id="session/1",
+            completed_run_id="run/1",
+            successor_run_id="run/2",
+            successor_start_operation_id="agent/successor/2",
+            session_close_operation_id="agent/close/1",
+            successor_deadline=now + timedelta(minutes=20),
+        ),
+    )
+    assert next_run["action"] == "SUCCESSOR"
+    assert next_run["selection"]["trigger_ids"] == ["trigger/2"]
+    assert next_run["run"]["session_id"] == "session/1"
+    assert next_run["run"]["run_id"] == "run/2"
+    assert next_run["run"]["context_view_revision"] == 0
 
 
 @pytest.mark.postgres

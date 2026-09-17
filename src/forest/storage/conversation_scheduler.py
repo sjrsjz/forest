@@ -1135,8 +1135,9 @@ class ConversationSchedulerRepository:
             sql.SQL(
                 "INSERT INTO {}(bot_id,conversation_id,input_batch_id,operation_id,input_digest,"
                 "boundary,kind,start_seq,end_seq,trigger_cut_seq,selected_input_end_seq,"
-                "session_ref,run_ref,actor_owner_id,actor_epoch,context_revision) VALUES "
-                "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                "session_ref,run_ref,actor_owner_id,actor_epoch,context_revision,"
+                "context_view_revision) VALUES "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             ).format(self._table("input_batches")),
             (
                 self.store.bot_id,
@@ -1155,6 +1156,7 @@ class ConversationSchedulerRepository:
                 actor.owner_id,
                 actor.epoch,
                 context_revision,
+                lane["context_view_revision"],
             ),
         )
         for index, event in enumerate(events):

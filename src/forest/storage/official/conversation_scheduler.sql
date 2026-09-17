@@ -181,6 +181,7 @@ CREATE TABLE input_batches (
     actor_owner_id text NOT NULL CHECK (octet_length(actor_owner_id) BETWEEN 1 AND 256),
     actor_epoch bigint NOT NULL CHECK (actor_epoch > 0),
     context_revision bigint NOT NULL CHECK (context_revision > 0),
+    context_view_revision bigint NOT NULL CHECK (context_view_revision >= 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, input_batch_id),
     UNIQUE (bot_id, operation_id),
