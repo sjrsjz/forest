@@ -7,11 +7,23 @@ from forest.runtime_modules import (
     OFFICIAL_MODULES,
     BotModuleRegistry,
     ModuleLifecycleState,
+    RuntimeArtifactIdentity,
     RuntimeManagementView,
     RuntimeModuleDescriptor,
     RuntimeStorageBundle,
 )
 from forest.schema_bundles import StorageBundleSpec
+
+
+def artifact(marker="0"):
+    return RuntimeArtifactIdentity(
+        "tests.runtime",
+        "1.0.0",
+        "sha256:" + marker * 64,
+        "bot",
+        "tests.in-process/1",
+        "installed",
+    )
 
 
 class Module:
@@ -43,6 +55,7 @@ def descriptor(name, requires, events, *, fail=False, close_failures=0):
         lambda _platform, _modules: Module(
             name, events, fail=fail, close_failures=close_failures
         ),
+        artifact(),
     )
 
 
@@ -98,7 +111,7 @@ async def test_storage_is_installed_before_factory_and_prepared_state():
         platform,
         (
             RuntimeModuleDescriptor(
-                "owned", (), factory,
+                "owned", (), factory, artifact("1"),
                 storage=RuntimeStorageBundle(spec, baseline, package_digest),
             ),
         ),
@@ -132,9 +145,9 @@ async def test_storage_install_failure_never_constructs_module():
         SimpleNamespace(schema_bundle_installer=Installer()),
         (
             RuntimeModuleDescriptor(
-                "owned",
-                (),
+                "owned", (),
                 lambda _platform, _modules: constructed.append(True),
+                artifact("2"),
                 storage=RuntimeStorageBundle(spec, baseline, "sha256:" + "2" * 64),
             ),
         ),
@@ -165,9 +178,57 @@ def test_storage_bundle_must_be_owned_by_descriptor():
     with pytest.raises(ForestError) as caught:
         BotModuleRegistry(
             SimpleNamespace(),
-            (RuntimeModuleDescriptor("owned", (), lambda *_: object(), storage=storage),),
+            (
+                RuntimeModuleDescriptor(
+                    "owned", (), lambda *_: object(), artifact("3"), storage=storage
+                ),
+            ),
         )
     assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"
+
+
+def test_storage_bundle_must_match_descriptor_package_digest():
+    import hashlib
+
+    baseline = b"CREATE TABLE records (record_id text PRIMARY KEY);"
+    storage = RuntimeStorageBundle(
+        StorageBundleSpec(
+            component_id="owned",
+            schema_id="owned.records",
+            schema_version="1.0.0",
+            baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract="owned.records/1",
+        ),
+        baseline,
+        "sha256:" + "4" * 64,
+    )
+    with pytest.raises(ForestError) as caught:
+        BotModuleRegistry(
+            SimpleNamespace(),
+            (
+                RuntimeModuleDescriptor(
+                    "owned", (), lambda *_: object(), artifact("5"), storage=storage
+                ),
+            ),
+        )
+    assert caught.value.code == "RUNTIME_MODULE_DESCRIPTOR_INVALID"
+
+
+def test_official_modules_bind_distribution_artifact_into_projection():
+    registry = BotModuleRegistry(SimpleNamespace())
+    artifacts = {item.artifact for item in OFFICIAL_MODULES}
+    assert len(artifacts) == 1
+    official = artifacts.pop()
+    assert official.package_id == "forest"
+    assert official.scope == "bot"
+    assert official.driver == "forest.in-process-trusted/1"
+    assert official.trust_level == "official"
+    assert all(
+        item["artifact"] == official.as_fact() for item in registry.describe()
+    )
+    assert all(
+        item["artifact"] == official.as_fact() for item in registry._descriptor_facts()
+    )
 
 
 def test_registry_rejects_missing_or_cyclic_dependencies():

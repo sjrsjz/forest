@@ -10,7 +10,11 @@ from psycopg import sql
 
 from forest.packages import digest_json
 from forest.routing_graph import RouteGraphStore
-from forest.runtime_modules import BotModuleRegistry, RuntimeModuleDescriptor
+from forest.runtime_modules import (
+    BotModuleRegistry,
+    RuntimeArtifactIdentity,
+    RuntimeModuleDescriptor,
+)
 from forest.storage.bot import BotStore
 
 pytestmark = pytest.mark.postgres
@@ -44,6 +48,14 @@ def descriptor(name, requires, events, *, fail=False, close_failures=0):
         tuple(requires),
         lambda _platform, _modules: Module(
             name, events, fail=fail, close_failures=close_failures
+        ),
+        RuntimeArtifactIdentity(
+            "tests.runtime",
+            "1.0.0",
+            "sha256:" + "0" * 64,
+            "bot",
+            "tests.in-process/1",
+            "installed",
         ),
     )
 

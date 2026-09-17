@@ -9,15 +9,93 @@ making Agent or Memory kernel types.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
+from importlib.resources import files
 from typing import Any
 
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.schema_bundles import StorageBundleSpec, validate_storage_baseline
+
+
+@dataclass(frozen=True)
+class RuntimeArtifactIdentity:
+    """Immutable code/resource envelope that produced a runtime Generation."""
+
+    package_id: str
+    package_version: str
+    package_digest: str
+    scope: str
+    driver: str
+    trust_level: str
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.package_id)
+            or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,127}", self.package_version)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.package_digest)
+            or self.scope != "bot"
+            or not re.fullmatch(r"[a-z][a-z0-9._-]*/[1-9][0-9]*", self.driver)
+            or self.trust_level not in {"official", "installed"}
+        ):
+            raise ValueError("Runtime artifact identity is invalid")
+
+    def as_fact(self) -> dict:
+        return {
+            "package_id": self.package_id,
+            "package_version": self.package_version,
+            "package_digest": self.package_digest,
+            "scope": self.scope,
+            "driver": self.driver,
+            "trust_level": self.trust_level,
+        }
+
+
+@lru_cache(maxsize=1)
+def _official_artifact() -> RuntimeArtifactIdentity:
+    """Hash the complete current Forest distribution, including trusted UI assets."""
+
+    root = files("forest")
+    captured: dict[str, str] = {}
+
+    def walk(node, prefix: str = "") -> None:
+        for child in sorted(node.iterdir(), key=lambda item: item.name):
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            if child.is_dir():
+                if child.name != "__pycache__":
+                    walk(child, relative)
+            elif child.name != "RECORD" and child.suffix.lower() in {
+                ".py", ".sql", ".html", ".css", ".js", ".json", ".toml"
+            }:
+                captured[relative] = hashlib.sha256(child.read_bytes()).hexdigest()
+
+    walk(root)
+    try:
+        package_version = version("forest")
+    except PackageNotFoundError:  # pragma: no cover - source tree without installation
+        package_version = "0.1.0"
+    package_digest = digest_json(
+        {
+            "protocol": "forest.official-distribution/1",
+            "package_id": "forest",
+            "package_version": package_version,
+            "files": captured,
+        }
+    )
+    return RuntimeArtifactIdentity(
+        package_id="forest",
+        package_version=package_version,
+        package_digest=package_digest,
+        scope="bot",
+        driver="forest.in-process-trusted/1",
+        trust_level="official",
+    )
 
 
 @dataclass(frozen=True)
@@ -78,6 +156,7 @@ class RuntimeModuleDescriptor:
     component_id: str
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
+    artifact: RuntimeArtifactIdentity
     management_view: RuntimeManagementView | None = None
     storage: RuntimeStorageBundle | None = None
 
@@ -226,12 +305,16 @@ def _jobs(platform, modules: dict[str, Any]):
     )
 
 
+_OFFICIAL_ARTIFACT = _official_artifact()
+
+
 OFFICIAL_MODULES = (
-    RuntimeModuleDescriptor("adapter.onebot", (), _onebot),
+    RuntimeModuleDescriptor("adapter.onebot", (), _onebot, _OFFICIAL_ARTIFACT),
     RuntimeModuleDescriptor(
         "routing.graph",
         (),
         _routing_graph,
+        _OFFICIAL_ARTIFACT,
         RuntimeManagementView(
             "路由与执行图",
             "/static/modules/routing.graph.html",
@@ -243,6 +326,7 @@ OFFICIAL_MODULES = (
         "memory.graph",
         ("adapter.onebot",),
         _memory,
+        _OFFICIAL_ARTIFACT,
         RuntimeManagementView(
             "图文记忆", "/static/modules/memory.graph.html", "/static/memory.js",
             style="/static/modules/memory.graph.css",
@@ -252,21 +336,30 @@ OFFICIAL_MODULES = (
         "agent.runtime",
         ("adapter.onebot", "memory.graph"),
         _agent,
+        _OFFICIAL_ARTIFACT,
         RuntimeManagementView(
             "Agent 与模型", "/static/modules/agent.runtime.html", "/static/agent-panel.js",
             style="/static/modules/agent.runtime.css",
         ),
     ),
-    RuntimeModuleDescriptor("command.router", ("routing.graph",), _command_routing),
-    RuntimeModuleDescriptor("message.router", ("routing.graph",), _message_routing),
+    RuntimeModuleDescriptor(
+        "command.router", ("routing.graph",), _command_routing, _OFFICIAL_ARTIFACT
+    ),
+    RuntimeModuleDescriptor(
+        "message.router", ("routing.graph",), _message_routing, _OFFICIAL_ARTIFACT
+    ),
     RuntimeModuleDescriptor(
         "conversation.scheduler",
         ("adapter.onebot", "agent.runtime", "command.router", "message.router"),
         _conversation,
+        _OFFICIAL_ARTIFACT,
     ),
-    RuntimeModuleDescriptor("shell.command", ("adapter.onebot",), _shell),
+    RuntimeModuleDescriptor("shell.command", ("adapter.onebot",), _shell, _OFFICIAL_ARTIFACT),
     RuntimeModuleDescriptor(
-        "scheduler.jobs", ("adapter.onebot", "conversation.scheduler"), _jobs
+        "scheduler.jobs",
+        ("adapter.onebot", "conversation.scheduler"),
+        _jobs,
+        _OFFICIAL_ARTIFACT,
     ),
 )
 
@@ -309,6 +402,7 @@ class BotModuleRegistry:
                 "factory_ref": (
                     descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__
                 ),
+                "artifact": descriptor.artifact.as_fact(),
                 "management_view": (
                     {
                         "label": view.label,
@@ -384,7 +478,11 @@ class BotModuleRegistry:
                 or identity in descriptor.requires
                 or (
                     descriptor.storage is not None
-                    and descriptor.storage.spec.component_id != identity
+                    and (
+                        descriptor.storage.spec.component_id != identity
+                        or descriptor.storage.package_digest
+                        != descriptor.artifact.package_digest
+                    )
                 )
             ):
                 raise ForestError(
@@ -666,6 +764,7 @@ class BotModuleRegistry:
                 "component_id": descriptor.component_id,
                 "requires": list(descriptor.requires),
                 "state": self.states[descriptor.component_id],
+                "artifact": descriptor.artifact.as_fact(),
                 "graph_id": self.graph_identity.graph_id if self.graph_identity is not None else None,
                 "generation_id": (
                     self.graph_identity.generations[descriptor.component_id]
