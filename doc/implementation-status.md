@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-18。本页覆盖干净 Conversation、Agent、OneBot、Delivery 与 Shell authority 候选的实现事实。
+更新日期：2026-09-18。本页覆盖干净 Conversation、Agent、OneBot、Delivery 与 Shell authority 候选的实现事实。目标设计先以[00 架构总契约](00-architecture-contract.md)裁决，再由 01–14 展开；未通过相应设计门禁与运行验证的工作树文件不计为已实现。
 
 ## 结论
 
@@ -25,6 +25,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 - VL 嵌入模型种类和语义空间与 Bot 生命周期绑定；创建后只允许更换兼容 endpoint 或凭据。
 - WebUI 壳只管理身份、作用域、模块发现和工作区；业务配置、查询、动作与 UI 由准确模块 Generation 贡献。
 - 未发布结构不保留兼容层。错误 API、表、迁移、页面、DTO、测试和开发数据库可直接删除或重建。
+- 每个模块必须先明确 owner、namespace、Repository contract、跨模块 participant、管理贡献和并发 fence，再开始编码；发现设计偏移时先改文档和删除错误实现。
 
 ## 已完成且可继续复用
 

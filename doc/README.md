@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：目标设计与激进重构进行中。更新日期：2026-09-18。01–14 描述目标契约，不代表相应能力已经实现；[13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)与[14 干净数据库基线](14-clean-schema-and-payload-provenance.md)是架构纠偏后的最高优先级设计，[实现状态与验证记录](implementation-status.md)是代码完成度的唯一权威。P0–P5 是历史纵向切片和局部协议证据，**不是新的实现输入**；只有经 01–14 明确确认且不依赖旧对象模型的部分可以复用。它们不能要求为未发布结构保留表、DTO、API、页面或兼容迁移。实际启动方式见[项目 README](../README.md)。
+状态：目标设计与激进重构进行中。更新日期：2026-09-18。[00 架构总契约](00-architecture-contract.md)是当前实现的唯一入口和最高权威；01–14 展开各领域契约，不代表相应能力已经实现。[实现状态与验证记录](implementation-status.md)是代码完成度的唯一权威。P0–P5 是历史纵向切片和局部协议证据，**不是新的实现输入**；只有经 00–14 明确确认且不依赖旧对象模型的部分可以复用。它们不能要求为未发布结构保留表、DTO、API、页面或兼容迁移。实际启动方式见[项目 README](../README.md)。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -10,7 +10,8 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 | 优先级 | 文档 | 约束范围 |
 |---|---|---|
-| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md) | 当前纠偏基线：微内核、模块注册、持久代际、RouteGraph、作用域感知的模块管理 UI、模块数据所有权与干净 schema bundle；直接否决业务组合根、固定产品后台和巨型全产品内核 SQL |
+| 0 | [00 架构总契约](00-architecture-contract.md) | 当前对象模型、微内核边界、权威执行链、模块控制台、激进重构规则和实现门禁；直接否决冲突设计 |
+| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md) | 00 的运行时、控制面、模块数据所有权和 schema bundle 详细化 |
 | 2 | [01 架构设计](01-architecture.md) | 系统边界、模块职责、部署与总体验收不变量 |
 | 3 | [02 生命周期](02-kernel-lifecycle.md)、[03 通信与调度](03-communication-scheduling.md)、[05 存储与鉴权](05-storage-security-operations.md)、[06 并发合流](06-concurrent-convergence.md) | 通用协议、所有权、事务、授权与收敛规则 |
 | 4 | [08 群聊上下文](08-group-context-interaction.md)、[09 群聊 Shell](09-group-shell-command-system.md)、[10 多主干记忆图](10-multi-trunk-memory-graph.md)、[11 多模态记忆](11-multimodal-memory-and-model-projection.md)、[12 WebUI](12-webui-administration.md) | 交互、管理和数据域专项契约；不得扩大微内核职责 |
@@ -23,7 +24,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 `p0-*` 至 `p5-*` 记录纵向实现、测试和局部协议。它们用于追查某项机制或复用不变量，必须服从上面的权威设计；标题中的“已实现”只说明该切片曾通过其测试，不说明目标微内核已经完成。开始编写任何模块前，必须先从 13/14 的所有权矩阵确定 owner、schema、Repository、contract 与 UI contribution，再把 P 文档中的算法逐条映射；若出现 `BotStore`/`MessageStore` 巨型仓库、Adapter 持有 Shell/Delivery、Agent 直写 Delivery、壳层固定业务页、旧库迁移或兼容 fallback，直接删除或重写相应 P 文档与代码，不能用“实现记录”覆盖目标语义。
 
-- 内核模块机制：[资源监督](p0-resource-sdk.md)、[组件事件](p0-component-events.md)、[组件任务](p0-component-jobs.md)、[插件包](p2-plugin-packages.md)、[状态迁移](p2-state-migration.md)、[业务命令](p2-business-commands.md)、[消息处理器](p2-message-handlers.md)。
+- 内核模块机制：[资源监督](p0-resource-sdk.md)、[组件事件](p0-component-events.md)、[组件任务](p0-component-jobs.md)、[插件包](p2-plugin-packages.md)、[业务命令](p2-business-commands.md)、[消息处理器](p2-message-handlers.md)。[旧状态迁移切片](p2-state-migration.md)只保留为历史证据，当前阶段不得据此实现数据库迁移或兼容层；必要的运行状态 handoff 必须重新映射到 00/02 的 Generation 生命周期。
 - 单 Agent 与群聊控制：[单 Agent 协议](p3-agent.md)、[定时任务](p3-jobs.md)、[群聊监督](p3-control.md)、[组件生命周期 Shell](p5-module-lifecycle-shell.md)、[Core 救援入口](p5-core-shell.md)、[Shell 接入容量](p5-shell-ingress-admission.md)。旧 `p3-agent-state` 把 Conversation 输入选择、Agent 状态和 Delivery 提交塞进同一 Store，已删除；不得从 Git 历史恢复。
 - 多模态记忆与来源：[统一载荷与来源闭包](14-clean-schema-and-payload-provenance.md#4-统一载荷与来源闭包)、[图归约器](p4-graph-reducer.md)、[人工联想召回](p4-association-retrieval.md)、[自动语义联想](p4-semantic-associations.md)、[图文嵌入](p4-embedding-driver.md)、[图存储](p4-graph-store.md)、[记忆运行链路](p4-memory-runtime.md)、[来源管理](p4-memory-administration.md)。
 - 控制面与恢复：[Web 插件管理](p2-web-plugin-management.md)、[账号管理](p5-account-management.md)、[部署审计](p5-deployment-audit.md)、[Bot 审计](p5-bot-audit.md)、[备份恢复](p5-backup-restore.md)、[部署恢复](p5-deployment-recovery.md)、[OneBot WebSocket](p5-onebot-forward-websocket.md)。

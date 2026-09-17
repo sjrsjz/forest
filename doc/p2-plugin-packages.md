@@ -106,6 +106,6 @@ Worker 使用已验证的 base CPython，以 `-I -S -B` 启动；搜索路径只
 
 ## 可执行验证
 
-`tests/test_packages.py` 覆盖两个真实进程竞争同一正式版本、开发版本稳定性、catalog 重启、完整导入导出、被拒登记不占版本、路径/链接/重复/展开上限和 state migration manifest 校验。`tests/test_environments.py` 覆盖闭包、marker/extras、hash/目标不匹配、只读环境篡改、构建取消/停止收尾，并同时启动两个真实 Worker，验证不同依赖版本共存、旧进程不受影响、宿主已安装的 httpx 不会进入插件搜索路径。内建 OneBot 也在实际隔离进程内执行规范化与发送字节准备。
+`tests/test_packages.py` 覆盖两个真实进程竞争同一正式版本、开发版本稳定性、catalog 重启、完整导入导出、被拒登记不占版本、路径/链接/重复/展开上限和历史 state-handoff manifest 校验。该历史校验不是数据库迁移要求，后续只能按 00/02 的 Generation handoff 契约保留或直接删除。`tests/test_environments.py` 覆盖闭包、marker/extras、hash/目标不匹配、只读环境篡改、构建取消/停止收尾，并同时启动两个真实 Worker，验证不同依赖版本共存、旧进程不受影响、宿主已安装的 httpx 不会进入插件搜索路径。内建 OneBot 也在实际隔离进程内执行规范化与发送字节准备。
 
-这些测试使用本地构造的标准 wheel 和真实 Python 进程，不需要外部 API 凭据。插件自身逻辑正确性、第三方库在实际目标系统上的运行行为，以及真实 QQ/模型服务联调仍需对应插件和部署验收；静态 wheel 检查不能替代候选启动、健康检查与状态迁移门禁。
+这些测试使用本地构造的标准 wheel 和真实 Python 进程，不需要外部 API 凭据。插件自身逻辑正确性、第三方库在实际目标系统上的运行行为，以及真实 QQ/模型服务联调仍需对应插件和部署验收；静态 wheel 检查不能替代候选启动、健康检查与状态 handoff 门禁。

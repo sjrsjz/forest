@@ -177,7 +177,7 @@ stateDiagram-v2
 
 正常 Bot 暂停与真正停机分别处理。`data_admission` 控制新 Agent/业务作业，`control_admission` 控制受权运维入口；普通 `pause` 关闭前者并提升 `maintenance_epoch`，保留接收绑定、核心 ShellGate、状态/恢复命令及必要回执。停止宿主、关闭绑定或封闭整个 Bot 事实库时，原群控制链也可能中断，操作应提前返回持久 operation_id 并明确恢复入口。稳定核心命令不能作为普通插件被卸载，完整 Shell 模块的替换不应冻结核心救援路由，详见[09](09-group-shell-command-system.md)。
 
-升级前构造影响集合：目标组件、同一 Worker 中的其他组件、必须共迁移的状态组件、仅兼容旧契约的调用方及其必要依赖。首版一个包/Bot 的组件默认共用 Worker，因此整体属于进程替换集合。依赖兼容且进程独立时无需重载调用方，因为其持有稳定服务句柄。破坏性契约升级先并行提供新 major，再迁移消费者，最后移除旧 major。
+替换前构造影响集合：目标组件、同一 Worker 中的其他组件、必须共同交接的状态组件、仅兼容旧契约的调用方及其必要依赖。首版一个包/Bot 的组件默认共用 Worker，因此整体属于进程替换集合。依赖兼容且进程独立时无需重载调用方，因为其持有稳定服务句柄。破坏性契约替换先并行提供新 major，再切换消费者，最后移除旧 major。
 
 ## 6. 热重载协议
 
@@ -186,11 +186,11 @@ stateDiagram-v2
 ### 6.1 单 Bot 的 drain 替换
 
 1. **PLAN**：写 `lifecycle_operations`，锁定目标包摘要、旧 Generation、候选 Generation、受影响路由、状态版本、预计资源和回滚条件。对相交的 route/state/binding 资源集合按规范顺序取得持久 operation lease 与 `op_epoch`；相交操作必须排队。FREEZE、RESUME、COMMIT 都校验操作所有权，过期协调器不能解冻另一操作的队列。
-2. **PREPARE**：建立候选 Worker，加载完整代码和 schema，解析依赖、恢复可用的只读快照、执行无副作用健康检查。旧代继续服务。
+2. **PREPARE**：建立候选 Worker，加载完整代码和当前 baseline contract，解析依赖、恢复可用的只读快照、执行无副作用健康检查。旧代继续服务。首发前若模块数据库 schema 已变化，本次热重载不负责升级旧库，开发环境必须先重建。
 3. **FREEZE**：在该 Bot 的协调账本冻结受影响路由的顶层 admission。相关业务命令保留在有界持久队列，查询按策略返回 `SERVICE_RELOADING` 或等待至 deadline。独立核心控制入口继续接收取消、状态与维护意图；若其具体目标正被升级占有，目标操作等待资源协调，不能直接调用已冻结 Worker。
 4. **DRAIN**：旧代停止计时器和新消息领取，完成已入场调用树；长 Agent 在模型/工具步骤之间写 checkpoint，进入绑定本次 operation_id 的 `RELOAD_WAIT` 后释放执行租约。内核在准入锁下确认在途计数归零，再签发排空证据并关闭全部旧调用入口；QUIESCENT 后不能新增子调用。仍可能调用目标的外部调用方必须完成原调用树或暂停于可重试边界。外部结果未知的调用转交账本，不能谎报已取消。
-5. **SNAPSHOT**：确认旧代没有可提交的用户任务，导出带 state schema、revision、checksum 的有界组件状态；候选执行纯确定性状态转换并验证不变量，输出只写候选 shadow 状态。这一步不执行 SQL、不安装或修改业务 schema。持久 schema bundle 的安装/升级是独立生命周期资源；首次发布前只允许在空 namespace 安装完整 baseline，发布后才允许经明确升级边准备前后兼容的 expand 版本。
-6. **COMMIT**：一个 Bot 数据库事务锁定相关 `component_routes`，确认操作所有权、旧 epoch/代际、源 revision 及排空证据，递增 epoch，替换候选路由和可迁移状态指针，写 `route_committed` 日志。任何旧写事务也必须锁定/验证这些 fence 行，二者形成确定先后顺序。
+5. **SNAPSHOT**：确认旧代没有可提交的用户任务，按模块明确声明的 handoff contract 导出带 state schema、revision、checksum 的有界组件状态；候选执行纯确定性状态转换并验证不变量，输出只写候选 shadow 状态。没有明确需求的模块跳过此步并从权威事实恢复。这一步不执行 SQL、不安装或修改业务 schema；首发前只允许在空 namespace 安装完整 baseline。
+6. **COMMIT**：一个 Bot 数据库事务锁定相关 `component_routes`，确认操作所有权、旧 epoch/代际、源 revision 及排空证据，递增 epoch，替换候选路由和已验证的 handoff 状态指针，写 `route_committed` 日志。任何旧写事务也必须锁定/验证这些 fence 行，二者形成确定先后顺序。
 7. **PUBLISH**：宿主从已提交账本更新不可变路由快照，按当前 Bot 维护策略发放新 admission token，解冻允许执行的队列。COMMIT、PUBLISH 和失败后的 RESUME 均复核最新 `maintenance_epoch/data_admission`，不凭 PLAN 时的旧快照重新开放已被管理员暂停的业务。即使内存缓存仍暂存旧路由，Worker/写网关也会因旧 epoch 拒绝请求并触发重解析。
 8. **RETIRE**：停止并回收旧代；记录健康观察和资源差额。旧包在回滚保留期内可缓存，旧实例不保留写权。
 
@@ -213,7 +213,7 @@ sequenceDiagram
     LC->>OLD: quiesce(deadline)
     OLD->>DB: 提交已完成步骤/checkpoint
     OLD-->>LC: QUIESCENT + snapshot
-    LC->>NEW: restore/migrate/validate
+    LC->>NEW: restore/handoff/validate
     NEW-->>LC: ready_to_publish
     LC->>DB: CAS route epoch + 切换日志
     DB-->>LC: committed
@@ -235,14 +235,14 @@ Router 校验不是最终保护。持久提交事务必须同时验证组件 `ro
 
 | 失败点 | 恢复动作 |
 |---|---|
-| 新包校验、预热或迁移失败 | 回收候选，旧代按最新维护策略继续/恢复 admission，记录失败 |
+| 新包校验、预热或状态 handoff 失败 | 回收候选，旧代按最新维护策略继续/恢复 admission，记录失败 |
 | freeze 后协调器崩溃，尚无 route commit | 恢复器读旧路由，校验旧代健康；恢复旧代或以旧包创建新代并提升 epoch |
 | route commit 成功，内存发布前崩溃 | 以 Bot 数据库已提交路由为准；可重新握手接管仍存活的候选。若需重建 Worker，则创建新 Instance/Generation 并再次递增 epoch，不能按控制库缓存回旧代 |
 | 新代已接单后健康失败 | 执行一次新的替换操作；回旧包也必须创建新 Generation、递增 epoch |
 | 旧实例 stop 失败 | 撤销句柄、终止 Worker、检查资源账本；残余资源使操作标记 `CLEANUP_FAILED` |
 | 外部副作用结果不明 | 意图保持 UNKNOWN，由专用对账路径处理；不能恢复 Run 后重新生成同一效果 |
 
-切换后的回滚不等于恢复旧快照。新代已经提交的数据必须保留；仅在旧代码能读取当前 schema、checkpoint 与事件版本时才允许部署旧包。不可逆 schema 迁移必须采用 expand/contract 分阶段发布，收缩阶段需要受控维护窗口；禁止伪装为普通热重载。
+切换后的回滚不等于恢复旧快照。新代已经提交的数据必须保留；仅在旧代码能读取当前 baseline contract、checkpoint 与事件版本时才允许部署旧包。当前未发布阶段的 schema 不兼容变化不走热重载或回滚，直接重建开发数据库；不得预埋 expand/contract、旧列 fallback 或双写。
 
 ### 6.4 多 Bot 与共享组件
 
@@ -260,17 +260,17 @@ dynamic字段以新的不可变请求配置覆盖层发布，Generation的构造
 
 管理API/UI自身也属于受监督组件，其替换不迁移HTTP连接或浏览器执行栈；未完成操作依靠权威账本恢复。管理服务故障不停止Bot业务，QQAdapter故障不停止Web管理；整个宿主重启仍有管理连接中断，页面重连后核验同一操作和实际运行状态，不能因请求超时重新发起重启。
 
-## 7. 状态分类与迁移
+## 7. 状态分类与代际交接
 
 | 状态 | 示例 | 替换策略 |
 |---|---|---|
 | 无状态/可重建缓存 | schema 缓存、只读索引句柄 | 丢弃并预热，不要求 snapshot |
-| 会话临时状态 | Prompt 视图、stream 缓冲 | 在安全边界结束/取消后重建；不迁移活跃流 |
+| 会话临时状态 | Prompt 视图、stream 缓冲 | 在安全边界结束/取消后重建；不交接活跃流 |
 | 小型组件状态 | 有界游标、计数快照 | 序列化 snapshot，检查基准 revision 与 checksum |
 | 持久业务状态 | Context、记忆、Job、工具结果 | 保留模块 Repository 中的事实；随准确 schema bundle 身份重新挂载，不混入 Generation snapshot |
 | 外部资源 | WebSocket、浏览器、模型流 | 原实例关闭，新实例重建；必要时交接持久游标 |
 
-snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source_revision, captured_at, checksum, payload_ref`。禁止序列化凭据、Python 对象引用、锁、执行栈或模块数据库。状态转换函数输入旧值对象、输出新值对象，不访问数据库、模型、网络或真实平台；重复转换应得到相同结果。持久事实的 schema 兼容性由 bundle ledger、Repository contract 和独立升级计划证明，不能借 snapshot 回调绕过。
+snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source_revision, captured_at, checksum, payload_ref`。禁止序列化凭据、Python 对象引用、锁、执行栈或模块数据库。handoff 转换函数输入旧值对象、输出新值对象，不访问数据库、模型、网络或真实平台；重复转换应得到相同结果。持久事实不进入 snapshot；首发前 schema 变化直接重建数据库，不能借 handoff 回调绕过。
 
 ## 8. 资源所有权与监督
 

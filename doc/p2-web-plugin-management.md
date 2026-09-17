@@ -2,15 +2,15 @@
 
 > **文档级别：实现切片。** 本页只描述包工件与可安装组件的管理协议。控制台结构、作用域和 UI 所有权以 [12](12-webui-administration.md) 与 [13](13-microkernel-control-plane-redesign.md) 为准。不存在一个拥有包仓库、Bot 目录、运行维护和全部组件配置的“模块管理后台”。旧专用包 API 和固定壳层页面已经删除，后续实现不得恢复。
 
-插件包与依赖格式见 [插件包说明](p2-plugin-packages.md)，持久状态迁移见 [状态迁移说明](p2-state-migration.md)。
+插件包与依赖格式见[插件包说明](p2-plugin-packages.md)。旧“状态迁移”切片已撤销；当前 Generation 切换与可选 state handoff 只按[生命周期设计](02-kernel-lifecycle.md)执行，开发数据库 schema 直接重建。
 
 ## 操作流程
 
 1. 管理员先进入 deployment scope 的 `deployment.package-registry` 贡献，通过它的 `package.import` artifact operation 上传完整 ZIP。导入只把内容寻址工件登记到部署包仓库，不选择任何 Bot 的运行版本。
 2. 管理员再通过通用 scope opener 进入目标 Bot。该 Bot 的 `component.worker-host` 贡献从受限包目录端口读取可选工件，用 `packages`、`configuration` 和 `configuration-history` query 展示候选与当前状态。
-3. `configuration.plan` 固定包摘要、配置、能力、接管声明和预期修订；`configuration.apply` 只提交这一不可变计划。候选准备、在途调用排空、迁移与健康检查成功后，目标 Bot 数据库在受围栏事务中发布路由与 effective。
+3. `configuration.plan` 固定包摘要、配置、能力、handoff 声明和预期修订；`configuration.apply` 只提交这一不可变计划。候选准备、在途调用排空、必要状态交接与健康检查成功后，目标 Bot 数据库在受围栏事务中发布路由与 effective。
 4. `module.validate` 只做无持久副作用的验证；`module.enable` 与 `module.disable` 是两个权限固定的 action，不能用一个布尔字段在 handler 内动态选择 authority。`service.invoke` 依据已发布服务 schema 调用实际 Worker。
-5. 配置历史按稳定游标分页。载入历史只生成新草稿，重新 plan/apply 后创建新修订；不会倒退 revision。历史包必须仍可按摘要取得，状态格式不同则由目标包声明迁移。
+5. 配置历史按稳定游标分页。载入历史只生成新草稿，重新 plan/apply 后创建新修订；不会倒退 revision。历史包必须仍可按摘要取得；运行状态格式不同时只允许 02 定义的显式 handoff，持久 schema 不兼容时首发前直接拒绝并重建开发数据库。
 
 常见的闭合对象 schema 可以由宿主兜底表单编辑。包也可以携带与摘要、Generation 和 schema revision 绑定的管理 UI；该 UI 在受限 iframe 中只交换草稿补丁、校验和计划请求，不能持有管理 Cookie、拼接 API URL 或直接调用任意管理动作。最终始终由服务端 schema 和模块契约校验。日常配置保存在权威存储中，管理员无需编辑服务器配置文件。
 

@@ -229,7 +229,7 @@ Shell 控制执行使用当前命令主体、目标授权、资源 revision、�
 | 发布多模态索引 | 已冻结 EmbeddingProfile/space 与 ordered_parts_digest、当前源/part/materialization 修订和删除/权限验证、index document/coverage 记录及 head CAS；不等待外部编码调用 |
 | 模型请求许可 | Gateway先在事务外合法prepare精确body；短事务校验Session/Run/input、来源切口、能力/投影版本、实际included/omitted语义manifest、预算与当前授权/删除，冻结transport attempt的wire hash/permit并关联RunStep；提交后发送同一body |
 | 配置接纳 | 资源权威库内重验 Web/Shell 主体、当前 policy/fences、schema/plan 摘要、expected_revisions 和源请求幂等；创建不可变 ConfigRevision、CAS desired head、需要时创建既有 lifecycle/job 关联、审计与 outbox；不等待浏览器或外部验证 |
-| 配置生效 | 资源权威库内校验原计划和当前 desired/maintenance/storage 版本；dynamic 发布可供后续消费者获取的完整快照，generation 将 effective head 与 route/state 一起 CAS，restart/migration 在对应流程的已验证切换点发布；失败不改旧 effective |
+| 配置生效 | 资源权威库内校验原计划和当前 desired/maintenance/storage 版本；dynamic 发布可供后续消费者获取的完整快照，generation 将 effective head 与 route/state 一起 CAS，restart 在受控重启的已验证切换点发布；失败不改旧 effective。首发前 schema 变化直接重建开发库，不存在 migration 生效策略 |
 
 最终轮次默认仅入列确定性归档/图投影工作，不自动创建 LLM 抽取、摘要或记忆整合调用。业务显式请求的语义任务才独立入列并预留预算；若要求同时接纳确定性记忆事实，可由同 Bot 的事务协调入口在本地 repository 内完成，不能跨 RPC 开启所谓联合数据库事务。
 
@@ -317,12 +317,13 @@ Web 管理主体来自服务端验证的本地账户或显式接入的身份提�
 
 **WebUI 是首版必需的后台管理入口。**日常创建和编辑 Bot、绑定账号、配置模型/原生图文嵌入、记忆存储、模块、触发与调度策略、权限、成本额度，以及观察/取消操作，均通过表单和管理 API 完成，不要求管理员手改配置文件。CLI 与群聊 Shell 提供同一控制能力的其他入口；部署启动所必需的数据库定位由独立初始化页面收集，主密钥来源由安装/启动引导管理，不依赖尚未启动的 Bot、插件或 Agent。初始化页面、配置流程和操作中心详见[12 WebUI](12-webui-administration.md)。
 
-配置按 deployment → Bot → component → Run 的明示覆盖顺序合成不可变快照。Bot 物化快照固定所有父配置修订引用，读取时不能把部署新默认值静默合入旧快照。更新部署默认/共享模板时，选择目标并以各 Bot 受权、幂等的子计划推进其 desired/effective，展示覆盖字段、待同步、冲突与部分成功；部署库提交不原子修改所有 Bot。安全 scope 只能收窄，不允许普通配置覆盖扩大能力。字段声明 `reload_policy = dynamic / generation / restart / migration`：
+配置按 deployment → Bot → component → Run 的明示覆盖顺序合成不可变快照。Bot 物化快照固定所有父配置修订引用，读取时不能把部署新默认值静默合入旧快照。更新部署默认/共享模板时，选择目标并以各 Bot 受权、幂等的子计划推进其 desired/effective，展示覆盖字段、待同步、冲突与部分成功；部署库提交不原子修改所有 Bot。安全 scope 只能收窄，不允许普通配置覆盖扩大能力。当前阶段字段只声明 `reload_policy = dynamic / generation / restart`：
 
 - dynamic：经校验后生成新快照，后续 Run 使用；在途安全策略仍实时重验。
 - generation：新建候选并走模块替换，例如 Provider 客户端设置或插件代码。
 - restart：内核/Driver 基础参数，执行受控宿主重启。
-- migration：存储归属、持久 schema 收缩，走独立迁移工作流。
+
+首发前不提供 `migration` 策略。存储归属或 schema 变化直接修改内容寻址 baseline、删除旧实现并重建开发数据库；不得从配置保存路径生成数据搬运、双写或兼容读取。
 
 ### 6.1 配置权威、接纳与生效
 
@@ -330,7 +331,7 @@ Web 管理主体来自服务端验证的本地账户或显式接入的身份提�
 
 WebUI 编辑器展示配置 schema、默认值/继承来源、当前 desired/effective、字段生效方式和校验错误。preview 在事务外完成类型校验、依赖检查、影响/成本预估并生成固定 `plan_digest`，不改变运行态；实际 apply 必须携带 `expected_revisions`、原计划摘要、同一次请求的幂等键。远端连通性探测单独作为可取消的现有 Job，返回观测时间，不能把一次探测成功永久等同生效保证；涉及付费 API 的探测先明示模型、预计调用和预算。
 
-配置接纳在短事务中记录不可变修订和 desired head；结果同时显示“已保存、等待生效/生效失败/已生效”，不能只返回绿色成功。`dynamic` 发布完整快照后供新 Run 使用，现有 Run 保持其固定快照；明确支持按模型安全点更新的字段也必须在合法边界形成新版本记录。授权撤销、预算/资源限制和维护暂停依其最终 guard 即时校验，不等待现有 Run 自然结束。`generation` 只有在同目标库的路由/状态 CAS 与候选健康检查通过时才同时发布 effective；`restart/migration` 分别在受控重启/迁移协议的验证切换点发布。失败保留旧 effective 和可诊断 operation，不能把保存 desired 冒充真实生效。
+配置接纳在短事务中记录不可变修订和 desired head；结果同时显示“已保存、等待生效/生效失败/已生效”，不能只返回绿色成功。`dynamic` 发布完整快照后供新 Run 使用，现有 Run 保持其固定快照；明确支持按模型安全点更新的字段也必须在合法边界形成新版本记录。授权撤销、预算/资源限制和维护暂停依其最终 guard 即时校验，不等待现有 Run 自然结束。`generation` 只有在同目标库的路由/状态 CAS 与候选健康检查通过时才同时发布 effective；`restart` 在受控重启的验证切换点发布。失败保留旧 effective 和可诊断 operation，不能把保存 desired 冒充真实生效。
 
 同组件一次修订含不同生效方式时，按足够严格且可执行的整体计划发布完整快照，例如同时改 dynamic 与 generation 字段时都随新代切换，避免拼接半新半旧客户端。不同资源无法联合切换时，计划显式分步并展示每项 effective；跨 Bot 不承诺 all-or-nothing。新 desired 取代未生效候选时必须使旧候选提交 CAS 失效，不能在晚到完成时覆盖新选择。回滚是以当前 head 为 expected revision、引用旧值创建**新修订**并走相同生效流程；迁移等不可直接逆转状态须展示其恢复计划，不倒退 revision 或伪造已撤回外部效果。
 

@@ -1,6 +1,6 @@
 # 干净数据库基线、模块数据所有权与载荷来源详细设计
 
-> **权威性：目标设计。** 本文取代所有按开发期 SQL 编号组织的 payload/migration 文档。Forest 尚未发布，不升级开发期旧库，不保留旧列 fallback、双写、数据搬运器或 legacy marker。旧实现只能从 Git 历史追查，不能成为新代码的兼容要求。
+> **权威性：存储详细设计。** 本文展开[00 架构总契约](00-architecture-contract.md)，并取代所有按开发期 SQL 编号组织的 payload/migration 文档。Forest 尚未发布，不升级开发期旧库，不保留旧列 fallback、双写、数据搬运器或 legacy marker。旧实现只能从 Git 历史追查，不能成为新代码的兼容要求。
 
 ## 1. 目标
 

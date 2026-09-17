@@ -58,14 +58,14 @@ Compose 部署可以用 `--target-database forest_restore_...` 代替 `--target-
 1. 认证解开数据密钥并流式 AES-GCM 解密到数据目录中的私有临时文件；
 2. 校验 ZIP 条目数量、路径、压缩方式、大小和每个成员 SHA-256；
 3. 要求顶层精确格式、`ISOLATED_RESTORE_REQUIRED` 激活标志、一致的 roster 和唯一部署数据库切片；
-4. 复算 manifest SHA-256、部署切片 `content_digest`、migration digest 和 identity digest；
+4. 复算 manifest SHA-256、部署切片 `content_digest`、schema-bundle roster digest 和 identity digest；
 5. 核对已验证归档中的 `recovery/master.key` 摘要与当前宿主主密钥一致；
 6. 冻结密文 SHA-256、备份 ID、manifest digest、部署内容摘要与预期 restore marker。
 
 目标 PostgreSQL 在 `REPEATABLE READ` 事务中校验：
 
 - 实际连接的 host/dbname/user 与冻结 locator 一致，数据库注释精确为 `forest:restore-stage:<restore_id>:<content_digest>`；
-- server version、encoding、collation、ctype、迁移版本和 checksum 与 manifest 精确相同；
+- server version、encoding、collation、ctype、内容寻址 schema-bundle roster 和 checksum 与 manifest 精确相同；
 - 公共表、列顺序、类型、not-null、identity/generated 属性、约束和序列定义精确相同；
 - 每张业务表重新执行 binary `COPY TO STDOUT`，字节摘要与备份成员相同，行数相同；序列当前值与 manifest 相同；
 - `web_setup_state` 的 `setup_id + plan_digest` 与原本地初始化计划及备份 identity 三方相同。

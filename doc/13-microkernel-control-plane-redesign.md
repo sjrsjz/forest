@@ -1,6 +1,6 @@
 # 微内核运行时与控制面重构详细设计
 
-> **权威性：当前最高。** 后续代码、测试和 P0–P5 实现记录若与本文冲突，应删除或重写冲突实现；不得为 Forest 未发布期间的错误对象模型增加兼容层。本文所称 Agent 始终是可替换的单执行链模块，不是内核调度主体，也不存在产品子 Agent。
+> **权威性：运行时与控制面详细设计。** 本文展开[00 架构总契约](00-architecture-contract.md)。后续代码、测试和 P0–P5 实现记录若与本文冲突，应删除或重写冲突实现；不得为 Forest 未发布期间的错误对象模型增加兼容层。本文所称 Agent 始终是可替换的单执行链模块，不是内核调度主体，也不存在产品子 Agent。
 
 ## 1. 修正的问题
 
@@ -217,3 +217,5 @@ Bot 运行工作区的剩余固定页面必须拆成两个 authority，不能整
 - 仅记录进程内 ACTIVE 状态，却把模块展示为已经发布到持久 Generation/RouteGraph；
 - 用当前模块 head 解释历史消息，而不使用该消息接纳时冻结的 `graph_digest`；
 - 为降低实现成本而弱化同群唯一 Agent、消息切口、作者来源、多主干/多模态记忆或异步写合流不变量。
+
+每个新模块开始编码前还必须先在设计中填全 `owner / namespace / repository contract / provides / requires / UnitOfWork participants / management contribution / concurrency fence / deletion behavior`。其中任何一项只能通过读取其他模块内部表或调用具体 Python 对象才能表达时，说明模块边界仍然错误，应先重画依赖和提交协议。
