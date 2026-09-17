@@ -38,6 +38,19 @@
 
 Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot 群管理员和平台身份解析属于 Adapter/Shell；Agent 工具定义、参数验证和工具审批的业务上下文属于 Agent。它们可把稳定主体引用、策略结果或批准依据交给授权端口，但不能把这些业务表搬进 `kernel.authorization`，也不能让通用票据携带密码、平台令牌或任意策略正文。授权模块不跨 schema 建外键或 join，涉及正文的限制条件必须使用经 `kernel.payload` 端口复核的载荷引用。
 
+`kernel.effect` 只负责不可撤回外部副作用的通用派发边界。Delivery 仍拥有 SendIntent、群聊顺序、Binding 和平台回执语义；Agent 仍拥有 ToolCall、工具 schema 与 Run 续调；模型 Provider 仍拥有请求投影、用量和 fallback。它们以稳定 `effect_operation_id`、精确目标、语义输入摘要和受管 payload 引用请求 Effect Gateway，不得把自己的业务状态机搬入内核效果表。效果记录不得出现 `tool_id`、`intent_id`、`binding_id`、群号、Provider 名称或 OneBot action 等业务字段。
+
+外部派发严格分为四个边界：
+
+1. 业务模块在事务外准备实际 wire 内容，并把正文交给 `kernel.payload`；此时没有外部效果许可；
+2. 短事务锁定 effect operation，经端口消费精确授权票据、复核 wire payload 和执行器 fence，创建最长 30 秒的 `PREPARED` attempt；
+3. 实际 I/O 前的最后一个短事务再次复核 attempt、payload、执行器 fence 与期限，把 attempt 持久变为 `DISPATCHING` 并写入 `started_at`；事务提交后才把 bytes 交给网络、进程或设备；
+4. 执行器只追加 `SUCCEEDED`、`NOT_APPLIED` 或 `UNKNOWN` 观察。结果正文和供应商回执仍是 payload 引用，通用表只保留摘要、状态和因果身份。
+
+`PREPARED` 尚未交接，可在过期或明确取消后变为 `ABANDONED`；`DISPATCHING` 丢失执行结果必须收敛为 `UNKNOWN`，不能回退 `PENDING`。`UNKNOWN` 不得自动重发，只能由显式对账 operation 和不可变 evidence 将同一 attempt 解析为 `SUCCEEDED` 或 `NOT_APPLIED`；只有确定 `NOT_APPLIED` 后，业务模块才能以同一 effect operation 创建下一 attempt。`SUCCEEDED` 为终态。取消只阻止尚未交接的 attempt，不能把已进入 `DISPATCHING` 的事实改写成未执行。
+
+所有路径按 effect operation 后 attempt 的固定顺序取锁。相同许可、交接、观察或对账 operation 的精确重放返回原回执；同一 ID 改输入必须冲突。并发观察与对账无论谁先提交都只能形成一个当前结算结果；冲突证据必须保留为可审计冲突，不能以后到写覆盖。热重载、Host 失租、Bot 停止、授权撤销和遗忘可以阻止新的 `PREPARED`/交接，但已交接效果仍按原 attempt 留账并对账，不能因正文被 scrub 就抹成 `NOT_APPLIED`。
+
 ## 3. Schema bundle 生命周期
 
 模块 manifest 声明：

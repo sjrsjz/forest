@@ -24,6 +24,7 @@ from forest.storage.authorization_authority import (
     KernelAuthorizationRepository,
 )
 from forest.storage.bot import BotStore
+from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
 from forest.storage.payload_authority import (
     KernelPayloadRepository,
@@ -500,6 +501,434 @@ async def test_kernel_authorization_consumption_and_revocation_converge_in_both_
     revocation, result = await asyncio.gather(revocation_task, consumption_task)
     assert revocation["policy_revision"] == 3
     assert result == "POLICY_CONFLICT"
+
+
+@pytest.mark.postgres
+async def test_clean_kernel_effect_preserves_unknown_and_reconciles_explicitly(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    payload_storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    authorization_storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    effect_storage = official_storage_bundle(
+        "kernel.effect",
+        "forest.kernel.effect",
+        "forest.kernel-effect.repository/1",
+        "storage/official/kernel_effect.sql",
+    )
+    for storage in (payload_storage, authorization_storage, effect_storage):
+        await installer.install(
+            storage.spec,
+            storage.baseline,
+            storage.package_digest,
+            execution_profile=storage.execution_profile,
+        )
+    lowered = effect_storage.baseline.lower()
+    for forbidden in (
+        b"agent",
+        b"onebot",
+        b"memory",
+        b"binding",
+        b"job",
+        b"tool_id",
+        b"intent_id",
+        b"provider",
+    ):
+        assert forbidden not in lowered
+
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    authorization = KernelAuthorizationRepository(
+        store, namespace=authorization_storage.spec.namespace
+    )
+    checked_fences = []
+    synchronize_first_permits = True
+    first_permit_arrivals = 0
+    both_first_permits_ready = asyncio.Event()
+
+    async def verify_fence(_conn, **identity):
+        nonlocal first_permit_arrivals
+        checked_fences.append(identity)
+        if synchronize_first_permits:
+            first_permit_arrivals += 1
+            if first_permit_arrivals == 2:
+                both_first_permits_ready.set()
+            await both_first_permits_ready.wait()
+
+    effects = KernelEffectRepository(
+        store,
+        namespace=effect_storage.spec.namespace,
+        payload_verifier=payloads.verify_in,
+        authorization_consumer=authorization.consume_ticket_in,
+        fence_verifier=verify_fence,
+    )
+    effect_operation_id = "effect/send-one"
+    attempt_id = "attempt/send-one/1"
+    semantic_digest = "sha256:" + "3" * 64
+    input_payload = await payloads.put_bytes(
+        owner_component_id="kernel.effect",
+        owner_kind="effect.input",
+        owner_id=effect_operation_id,
+        media_type="application/json",
+        content=b'{"semantic":"send"}',
+        expected_deletion_epoch=0,
+    )
+    wire_payload = await payloads.put_bytes(
+        owner_component_id="kernel.effect",
+        owner_kind="effect.wire",
+        owner_id=attempt_id,
+        media_type="application/octet-stream",
+        content=b"exact wire bytes",
+        expected_deletion_epoch=0,
+    )
+    effect = await effects.admit(
+        effect_operation_id=effect_operation_id,
+        input_digest=semantic_digest,
+        effect_kind="external.dispatch",
+        target_kind="channel",
+        target_id="group/933179609",
+        producer_component_id="delivery",
+        producer_generation_id="generation/delivery-one",
+        root_operation_kind="conversation.reply",
+        root_operation_id="reply/one",
+        input_payload_id=input_payload.payload_id,
+        input_payload_digest=input_payload.content_digest,
+    )
+    assert await effects.admit(
+        effect_operation_id=effect_operation_id,
+        input_digest=semantic_digest,
+        effect_kind="external.dispatch",
+        target_kind="channel",
+        target_id="group/933179609",
+        producer_component_id="delivery",
+        producer_generation_id="generation/delivery-one",
+        root_operation_kind="conversation.reply",
+        root_operation_id="reply/one",
+        input_payload_id=input_payload.payload_id,
+        input_payload_digest=input_payload.content_digest,
+    ) == effect
+
+    grant = await authorization.create_grant_set(
+        grantee_kind="component",
+        grantee_id="delivery",
+        entries=(CapabilityGrant("message.send", "channel", "group/933179609"),),
+        expected_policy_revision=1,
+        audience_component_id="adapter.onebot",
+        audience_generation_id="generation/adapter-one",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    permit_operation_id = "permit/send-one/1"
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=20)
+    await authorization.issue_ticket(
+        ticket_id="ticket/send-one/1",
+        issuer_kind="kernel",
+        issuer_id="kernel.authorization",
+        subject_kind="component",
+        subject_id="delivery",
+        action="message.send",
+        resource_kind="channel",
+        resource_id="group/933179609",
+        operation_id=permit_operation_id,
+        input_digest=semantic_digest,
+        plan_digest=None,
+        grant_set=grant,
+        expires_at=deadline,
+    )
+    permit_values = dict(
+        effect_operation_id=effect_operation_id,
+        attempt_id=attempt_id,
+        permit_operation_id=permit_operation_id,
+        wire_payload_id=wire_payload.payload_id,
+        wire_payload_digest=wire_payload.content_digest,
+        authorization_ticket_id="ticket/send-one/1",
+        authorization_action="message.send",
+        authorization_resource_kind="channel",
+        authorization_resource_id="group/933179609",
+        authorization_plan_digest=None,
+        executor_component_id="adapter.onebot",
+        executor_generation_id="generation/adapter-one",
+        fence_kind="connection",
+        fence_id="connection/main",
+        fence_epoch=7,
+        deadline_at=deadline,
+    )
+    permit, permit_replay = await asyncio.gather(
+        effects.permit(**permit_values), effects.permit(**permit_values)
+    )
+    synchronize_first_permits = False
+    assert permit_replay == permit
+    assert permit.attempt_no == 1
+    handoff = await effects.mark_handoff(
+        permit=permit, handoff_operation_id="handoff/send-one/1"
+    )
+    assert handoff["state"] == "DISPATCHING"
+    assert await effects.mark_handoff(
+        permit=permit, handoff_operation_id="handoff/send-one/1"
+    ) == handoff
+
+    unknown = await effects.observe(
+        effect_operation_id=effect_operation_id,
+        attempt_id=attempt_id,
+        observation_operation_id="observe/send-one/unknown",
+        status="UNKNOWN",
+        evidence_kind="executor",
+    )
+    assert unknown["accepted"] is True
+    premature = await effects.observe(
+        effect_operation_id=effect_operation_id,
+        attempt_id=attempt_id,
+        observation_operation_id="observe/send-one/premature-success",
+        status="SUCCEEDED",
+        evidence_kind="executor",
+    )
+    assert premature["accepted"] is False
+    evidence_payload = await payloads.put_bytes(
+        owner_component_id="kernel.effect",
+        owner_kind="effect.evidence",
+        owner_id="reconcile/send-one/success",
+        media_type="application/json",
+        content=b'{"platform_receipt":"confirmed"}',
+        expected_deletion_epoch=0,
+    )
+    reconciled = await effects.observe(
+        effect_operation_id=effect_operation_id,
+        attempt_id=attempt_id,
+        observation_operation_id="reconcile/send-one/success",
+        status="SUCCEEDED",
+        evidence_kind="reconciliation",
+        evidence_payload_id=evidence_payload.payload_id,
+        evidence_payload_digest=evidence_payload.content_digest,
+    )
+    assert reconciled["accepted"] is True
+    conflict = await effects.observe(
+        effect_operation_id=effect_operation_id,
+        attempt_id=attempt_id,
+        observation_operation_id="reconcile/send-one/not-applied",
+        status="NOT_APPLIED",
+        evidence_kind="reconciliation",
+    )
+    assert conflict["accepted"] is False
+    async with store.pool.connection() as conn:
+        state = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state FROM {}.effect_operations "
+                    "WHERE bot_id=%s AND effect_operation_id=%s"
+                ).format(sql.Identifier(effect_storage.spec.namespace)),
+                (store.bot_id, effect_operation_id),
+            )
+        ).fetchone()
+        assert state["state"] == "SUCCEEDED"
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("DELETE FROM {}.effect_observations").format(
+                    sql.Identifier(effect_storage.spec.namespace)
+                )
+            )
+    assert len(checked_fences) >= 2
+
+    concurrent_effect_id = "effect/concurrent-reconciliation"
+    concurrent_attempt_id = "attempt/concurrent-reconciliation/1"
+    concurrent_digest = "sha256:" + "4" * 64
+    await effects.admit(
+        effect_operation_id=concurrent_effect_id,
+        input_digest=concurrent_digest,
+        effect_kind="external.dispatch",
+        target_kind="channel",
+        target_id="group/933179609",
+        producer_component_id="delivery",
+        producer_generation_id="generation/delivery-one",
+        root_operation_kind="conversation.reply",
+        root_operation_id="reply/concurrent",
+    )
+    concurrent_wire = await payloads.put_bytes(
+        owner_component_id="kernel.effect",
+        owner_kind="effect.wire",
+        owner_id=concurrent_attempt_id,
+        media_type="application/octet-stream",
+        content=b"concurrent wire bytes",
+        expected_deletion_epoch=0,
+    )
+    concurrent_permit_operation = "permit/concurrent-reconciliation/1"
+    concurrent_deadline = datetime.now(timezone.utc) + timedelta(seconds=20)
+    await authorization.issue_ticket(
+        ticket_id="ticket/concurrent-reconciliation/1",
+        issuer_kind="kernel",
+        issuer_id="kernel.authorization",
+        subject_kind="component",
+        subject_id="delivery",
+        action="message.send",
+        resource_kind="channel",
+        resource_id="group/933179609",
+        operation_id=concurrent_permit_operation,
+        input_digest=concurrent_digest,
+        plan_digest=None,
+        grant_set=grant,
+        expires_at=concurrent_deadline,
+    )
+    concurrent_permit = await effects.permit(
+        effect_operation_id=concurrent_effect_id,
+        attempt_id=concurrent_attempt_id,
+        permit_operation_id=concurrent_permit_operation,
+        wire_payload_id=concurrent_wire.payload_id,
+        wire_payload_digest=concurrent_wire.content_digest,
+        authorization_ticket_id="ticket/concurrent-reconciliation/1",
+        authorization_action="message.send",
+        authorization_resource_kind="channel",
+        authorization_resource_id="group/933179609",
+        authorization_plan_digest=None,
+        executor_component_id="adapter.onebot",
+        executor_generation_id="generation/adapter-one",
+        fence_kind="connection",
+        fence_id="connection/main",
+        fence_epoch=7,
+        deadline_at=concurrent_deadline,
+    )
+    await effects.mark_handoff(
+        permit=concurrent_permit,
+        handoff_operation_id="handoff/concurrent-reconciliation/1",
+    )
+    await effects.observe(
+        effect_operation_id=concurrent_effect_id,
+        attempt_id=concurrent_attempt_id,
+        observation_operation_id="observe/concurrent-reconciliation/unknown",
+        status="UNKNOWN",
+        evidence_kind="executor",
+    )
+
+    async def reconcile(operation_id: str, status: str):
+        return await effects.observe(
+            effect_operation_id=concurrent_effect_id,
+            attempt_id=concurrent_attempt_id,
+            observation_operation_id=operation_id,
+            status=status,
+            evidence_kind="reconciliation",
+        )
+
+    competing = await asyncio.gather(
+        reconcile("reconcile/concurrent/succeeded", "SUCCEEDED"),
+        reconcile("reconcile/concurrent/not-applied", "NOT_APPLIED"),
+    )
+    assert sorted(item["accepted"] for item in competing) == [False, True]
+    accepted = next(item for item in competing if item["accepted"])
+    async with store.pool.connection() as conn:
+        current = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state FROM {}.effect_operations "
+                    "WHERE bot_id=%s AND effect_operation_id=%s"
+                ).format(sql.Identifier(effect_storage.spec.namespace)),
+                (store.bot_id, concurrent_effect_id),
+            )
+        ).fetchone()
+    assert current["state"] == accepted["observed_status"]
+    assert len(checked_fences) >= 4
+
+    abandoned_effect_id = "effect/abandoned-retry"
+    abandoned_digest = "sha256:" + "5" * 64
+    await effects.admit(
+        effect_operation_id=abandoned_effect_id,
+        input_digest=abandoned_digest,
+        effect_kind="external.dispatch",
+        target_kind="channel",
+        target_id="group/933179609",
+        producer_component_id="delivery",
+        producer_generation_id="generation/delivery-one",
+        root_operation_kind="conversation.reply",
+        root_operation_id="reply/abandoned",
+    )
+
+    async def prepare_abandon_attempt(number: int):
+        attempt = f"attempt/abandoned-retry/{number}"
+        operation = f"permit/abandoned-retry/{number}"
+        ticket = f"ticket/abandoned-retry/{number}"
+        wire = await payloads.put_bytes(
+            owner_component_id="kernel.effect",
+            owner_kind="effect.wire",
+            owner_id=attempt,
+            media_type="application/octet-stream",
+            content=f"abandon wire {number}".encode(),
+            expected_deletion_epoch=0,
+        )
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=20)
+        await authorization.issue_ticket(
+            ticket_id=ticket,
+            issuer_kind="kernel",
+            issuer_id="kernel.authorization",
+            subject_kind="component",
+            subject_id="delivery",
+            action="message.send",
+            resource_kind="channel",
+            resource_id="group/933179609",
+            operation_id=operation,
+            input_digest=abandoned_digest,
+            plan_digest=None,
+            grant_set=grant,
+            expires_at=expires_at,
+        )
+        return await effects.permit(
+            effect_operation_id=abandoned_effect_id,
+            attempt_id=attempt,
+            permit_operation_id=operation,
+            wire_payload_id=wire.payload_id,
+            wire_payload_digest=wire.content_digest,
+            authorization_ticket_id=ticket,
+            authorization_action="message.send",
+            authorization_resource_kind="channel",
+            authorization_resource_id="group/933179609",
+            authorization_plan_digest=None,
+            executor_component_id="adapter.onebot",
+            executor_generation_id="generation/adapter-one",
+            fence_kind="connection",
+            fence_id="connection/main",
+            fence_epoch=7,
+            deadline_at=expires_at,
+        )
+
+    first_abandoned = await prepare_abandon_attempt(1)
+    abandonment = await effects.abandon_prepared(
+        effect_operation_id=abandoned_effect_id,
+        attempt_id=first_abandoned.attempt_id,
+        abandonment_operation_id="abandon/abandoned-retry/1",
+        reason_code="PREPARE_EXPIRED",
+    )
+    assert await effects.abandon_prepared(
+        effect_operation_id=abandoned_effect_id,
+        attempt_id=first_abandoned.attempt_id,
+        abandonment_operation_id="abandon/abandoned-retry/1",
+        reason_code="PREPARE_EXPIRED",
+    ) == abandonment
+    second_abandoned = await prepare_abandon_attempt(2)
+    assert second_abandoned.attempt_no == 2
+    await effects.abandon_prepared(
+        effect_operation_id=abandoned_effect_id,
+        attempt_id=second_abandoned.attempt_id,
+        abandonment_operation_id="abandon/abandoned-retry/2",
+        reason_code="EXPLICIT_CANCEL",
+        cancel_effect=True,
+    )
+    async with store.pool.connection() as conn:
+        abandoned_state = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,attempt_count FROM {}.effect_operations "
+                    "WHERE bot_id=%s AND effect_operation_id=%s"
+                ).format(sql.Identifier(effect_storage.spec.namespace)),
+                (store.bot_id, abandoned_effect_id),
+            )
+        ).fetchone()
+    assert abandoned_state == {"state": "CANCELLED", "attempt_count": 2}
+    assert len(checked_fences) >= 6
 
 
 @pytest.mark.postgres
