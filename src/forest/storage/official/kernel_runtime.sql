@@ -23,7 +23,8 @@ CREATE TABLE host_incarnations (
     host_id text NOT NULL,
     owner_epoch bigint NOT NULL CHECK (owner_epoch > 0),
     PRIMARY KEY (bot_id, incarnation),
-    UNIQUE (bot_id, owner_epoch)
+    UNIQUE (bot_id, owner_epoch),
+    UNIQUE (bot_id, incarnation, owner_epoch)
 );
 
 CREATE TABLE module_resources (
@@ -56,8 +57,11 @@ CREATE TABLE generations (
     )),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, generation_id),
+    UNIQUE (bot_id, generation_id, component_id),
     UNIQUE (bot_id, generation_id, component_id, package_digest),
-    UNIQUE (bot_id, worker_incarnation)
+    UNIQUE (bot_id, worker_incarnation),
+    FOREIGN KEY (bot_id, host_incarnation, host_owner_epoch)
+        REFERENCES host_incarnations(bot_id, incarnation, owner_epoch)
 );
 
 CREATE TABLE routes (
@@ -68,7 +72,8 @@ CREATE TABLE routes (
     data_admission boolean NOT NULL DEFAULT false,
     control_admission boolean NOT NULL DEFAULT false,
     PRIMARY KEY (bot_id, component_id),
-    FOREIGN KEY (bot_id, generation_id) REFERENCES generations(bot_id, generation_id)
+    FOREIGN KEY (bot_id, generation_id, component_id)
+        REFERENCES generations(bot_id, generation_id, component_id)
 );
 
 CREATE TABLE lifecycle_operations (
@@ -90,7 +95,10 @@ CREATE TABLE lifecycle_operations (
     error_code text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, operation_id),
-    FOREIGN KEY (bot_id, candidate_generation_id) REFERENCES generations(bot_id, generation_id),
+    FOREIGN KEY (bot_id, candidate_generation_id, component_id)
+        REFERENCES generations(bot_id, generation_id, component_id),
+    FOREIGN KEY (bot_id, old_generation_id, component_id)
+        REFERENCES generations(bot_id, generation_id, component_id),
     CHECK (
         (operation_kind = 'DISABLE' AND candidate_generation_id IS NULL)
         OR (operation_kind IN ('INSTALL', 'RELOAD') AND candidate_generation_id IS NOT NULL)
@@ -132,7 +140,8 @@ CREATE TABLE calls (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, call_id),
     UNIQUE (bot_id, operation_id),
-    FOREIGN KEY (bot_id, generation_id) REFERENCES generations(bot_id, generation_id),
+    FOREIGN KEY (bot_id, generation_id, component_id)
+        REFERENCES generations(bot_id, generation_id, component_id),
     FOREIGN KEY (bot_id, parent_call_id) REFERENCES calls(bot_id, call_id),
     FOREIGN KEY (bot_id, root_call_id) REFERENCES calls(bot_id, call_id),
     CHECK (
@@ -225,6 +234,14 @@ CREATE TABLE runtime_graph_modules (
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[a-f0-9]{64}$'),
     driver text NOT NULL,
     trust_level text NOT NULL CHECK (trust_level IN ('official', 'installed')),
+    descriptor_digest text NOT NULL CHECK (descriptor_digest ~ '^sha256:[a-f0-9]{64}$'),
+    route_contract_digest text NOT NULL CHECK (route_contract_digest ~ '^sha256:[a-f0-9]{64}$'),
+    management_contract_digest text NOT NULL CHECK (
+        management_contract_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    management_ui_digest text NOT NULL CHECK (management_ui_digest ~ '^sha256:[a-f0-9]{64}$'),
+    data_admission boolean NOT NULL,
+    control_admission boolean NOT NULL,
     storage_schema_id text,
     storage_schema_version text,
     storage_namespace text,
@@ -280,7 +297,7 @@ CREATE TABLE runtime_graph_lifecycle_facts (
 
 CREATE TABLE runtime_graph_head (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
-    graph_id text NOT NULL,
+    graph_id text,
     graph_revision bigint NOT NULL CHECK (graph_revision > 0),
     published_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY (bot_id, graph_id) REFERENCES runtime_graphs(bot_id, graph_id),
@@ -342,12 +359,30 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION runtime_graph_identity_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+BEGIN
+    IF ROW(
+        OLD.bot_id, OLD.graph_id, OLD.graph_revision, OLD.graph_digest,
+        OLD.activation_id, OLD.created_at
+    ) IS DISTINCT FROM ROW(
+        NEW.bot_id, NEW.graph_id, NEW.graph_revision, NEW.graph_digest,
+        NEW.activation_id, NEW.created_at
+    ) THEN
+        RAISE EXCEPTION 'Forest runtime graph identity is immutable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TRIGGER host_incarnations_immutable BEFORE UPDATE OR DELETE ON host_incarnations
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER generation_identity BEFORE UPDATE ON generations
     FOR EACH ROW EXECUTE FUNCTION generation_identity_guard();
 CREATE TRIGGER call_identity BEFORE UPDATE ON calls
     FOR EACH ROW EXECUTE FUNCTION call_identity_guard();
+CREATE TRIGGER runtime_graph_identity BEFORE UPDATE ON runtime_graphs
+    FOR EACH ROW EXECUTE FUNCTION runtime_graph_identity_guard();
 CREATE TRIGGER state_steps_immutable BEFORE UPDATE OR DELETE ON state_steps
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER state_revisions_immutable BEFORE UPDATE OR DELETE ON state_revisions

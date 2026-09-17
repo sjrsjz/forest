@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -13,6 +14,10 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.runtime_generation import (
+    PreparedGenerationBinding,
+    RuntimeStorageBinding,
+)
 from forest.runtime_modules import official_storage_bundle
 from forest.schema_bundles import (
     StorageBundleSpec,
@@ -26,6 +31,7 @@ from forest.storage.authorization_authority import (
 from forest.storage.bot import BotStore
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
+from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.payload_authority import (
     KernelPayloadRepository,
     PayloadSource,
@@ -309,35 +315,316 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
             ).format(sql.Identifier(namespace)),
             (store.bot_id, digest),
         )
+        member_sql = sql.SQL(
+            "INSERT INTO {}.runtime_graph_modules"
+            "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
+            "package_digest,driver,trust_level,descriptor_digest,route_contract_digest,"
+            "management_contract_digest,management_ui_digest,data_admission,control_admission) "
+            "VALUES (%s,'graph-1',%s,'gen-1','pkg','1.0.0',%s,'native','official',"
+            "%s,%s,%s,%s,true,true)"
+        ).format(sql.Identifier(namespace))
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.runtime_graph_modules"
-                    "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
-                    "package_digest,driver,trust_level) VALUES "
-                    "(%s,'graph-1','component.wrong','gen-1','pkg','1.0.0',%s,'native','official')"
-                ).format(sql.Identifier(namespace)),
-                (store.bot_id, digest),
+                member_sql,
+                (
+                    store.bot_id,
+                    "component.wrong",
+                    digest,
+                    digest,
+                    digest,
+                    digest,
+                    digest,
+                ),
             )
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.runtime_graph_modules"
-                    "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
-                    "package_digest,driver,trust_level) VALUES "
-                    "(%s,'graph-1','component.correct','gen-1','pkg','1.0.0',%s,'native','official')"
-                ).format(sql.Identifier(namespace)),
-                (store.bot_id, "sha256:" + "2" * 64),
+                member_sql,
+                (
+                    store.bot_id,
+                    "component.correct",
+                    "sha256:" + "2" * 64,
+                    digest,
+                    digest,
+                    digest,
+                    digest,
+                ),
             )
         await conn.execute(
-            sql.SQL(
-                "INSERT INTO {}.runtime_graph_modules"
-                "(bot_id,graph_id,component_id,generation_id,package_id,package_version,"
-                "package_digest,driver,trust_level) VALUES "
-                "(%s,'graph-1','component.correct','gen-1','pkg','1.0.0',%s,'native','official')"
-            ).format(sql.Identifier(namespace)),
-            (store.bot_id, digest),
+            member_sql,
+            (
+                store.bot_id,
+                "component.correct",
+                digest,
+                digest,
+                digest,
+                digest,
+                digest,
+            ),
         )
+
+
+def runtime_binding(
+    component_id: str,
+    *,
+    marker: str,
+    requires: tuple[str, ...] = (),
+    storage: RuntimeStorageBinding | None = None,
+) -> PreparedGenerationBinding:
+    digest = "sha256:" + marker * 64
+    return PreparedGenerationBinding(
+        component_id=component_id,
+        requires=requires,
+        package_id="forest.tests",
+        package_version="1.0.0",
+        package_digest=digest,
+        driver="forest.tests/1",
+        trust_level="official",
+        descriptor_digest=digest,
+        route_contract_digest=digest,
+        management_contract_digest=digest,
+        management_ui_digest=digest,
+        config_revision=1,
+        config_payload_id=f"config:{component_id}:1",
+        config_payload_digest=digest,
+        instance_id=f"instance:{component_id}:{marker}",
+        worker_incarnation=f"worker:{component_id}:{marker}",
+        state_schema=1,
+        state_contract_digest=digest,
+        capability_grants_digest=digest,
+        data_admission=True,
+        control_admission=True,
+        storage=storage,
+    )
+
+
+@pytest.mark.postgres
+async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    runtime_storage = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    await installer.install(
+        runtime_storage.spec,
+        runtime_storage.baseline,
+        runtime_storage.package_digest,
+        execution_profile=runtime_storage.execution_profile,
+    )
+    repository = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
+    lease, renewed = await asyncio.gather(
+        repository.claim_host("host-a", "inc-a"),
+        repository.claim_host("host-a", "inc-a"),
+    )
+    assert renewed.owner_epoch == lease.owner_epoch == 1
+    with pytest.raises(ForestError) as caught:
+        await repository.claim_host("host-b", "inc-b")
+    assert caught.value.code == "HOST_LEASE_HELD"
+
+    storage = RuntimeStorageBinding(
+        runtime_storage.spec.schema_id,
+        runtime_storage.spec.schema_version,
+        runtime_storage.spec.namespace,
+        runtime_storage.spec.baseline_sha256,
+        runtime_storage.spec.repository_contract,
+        runtime_storage.execution_profile,
+    )
+    kernel = runtime_binding("kernel.runtime", marker="1", storage=storage)
+    kernel = replace(kernel, package_digest=runtime_storage.package_digest)
+    consumer = runtime_binding(
+        "example.consumer", marker="2", requires=("kernel.runtime",)
+    )
+    activation_id = str(uuid4())
+    graph = await repository.prepare_graph(renewed, [consumer, kernel], activation_id)
+    assert await repository.prepare_graph(renewed, [kernel, consumer], activation_id) == graph
+    assert await repository.publish_graph(renewed, graph) == graph.graph_revision
+    assert await repository.publish_graph(renewed, graph) == graph.graph_revision
+
+    namespace = runtime_storage.spec.namespace
+    async with store.pool.connection() as conn:
+        head = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchone()
+        routes = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT component_id,generation_id,route_epoch,data_admission,"
+                    "control_admission FROM {}.routes ORDER BY component_id"
+                ).format(sql.Identifier(namespace))
+            )
+        ).fetchall()
+        generations = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT component_id,config_revision,status FROM {}.generations "
+                    "ORDER BY component_id"
+                ).format(sql.Identifier(namespace))
+            )
+        ).fetchall()
+    assert head["graph_id"] == graph.graph_id
+    assert {item["component_id"] for item in routes} == {
+        "example.consumer",
+        "kernel.runtime",
+    }
+    assert all(item["generation_id"] and item["route_epoch"] == 1 for item in routes)
+    assert all(item["data_admission"] and item["control_admission"] for item in routes)
+    assert [(item["config_revision"], item["status"]) for item in generations] == [
+        (1, "ACTIVE"),
+        (1, "ACTIVE"),
+    ]
+
+    with pytest.raises(ForestError) as caught:
+        await repository.prepare_graph(
+            renewed,
+            [kernel, replace(consumer, config_revision=2)],
+            activation_id,
+        )
+    assert caught.value.code == "RUNTIME_ACTIVATION_CONFLICT"
+
+    kernel_v2 = replace(
+        runtime_binding("kernel.runtime", marker="5", storage=storage),
+        package_digest=runtime_storage.package_digest,
+    )
+    consumer_v2 = runtime_binding(
+        "example.consumer", marker="6", requires=("kernel.runtime",)
+    )
+    graph_v2 = await repository.prepare_graph(
+        renewed, [kernel_v2, consumer_v2], str(uuid4())
+    )
+    assert graph_v2.graph_revision > graph.graph_revision
+    assert await repository.publish_graph(renewed, graph_v2) == graph_v2.graph_revision
+    with pytest.raises(ForestError) as caught:
+        await repository.publish_graph(renewed, graph)
+    assert caught.value.code == "RUNTIME_GRAPH_STALE"
+    assert await repository.retire_graph(renewed, graph) == graph_v2.graph_revision
+
+    async with store.pool.connection() as conn:
+        routes = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.routes ORDER BY component_id").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchall()
+        statuses = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT generation_id,status FROM {}.generations ORDER BY generation_id"
+                ).format(sql.Identifier(namespace))
+            )
+        ).fetchall()
+    assert all(item["route_epoch"] == 2 for item in routes)
+    assert {item["status"] for item in statuses if item["generation_id"] in graph.generations.values()} == {
+        "QUIESCING"
+    }
+    assert {
+        item["status"]
+        for item in statuses
+        if item["generation_id"] in graph_v2.generations.values()
+    } == {"ACTIVE"}
+
+    retired_revision = await repository.retire_graph(renewed, graph_v2)
+    assert retired_revision > graph_v2.graph_revision
+    async with store.pool.connection() as conn:
+        head = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchone()
+        routes = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.routes ORDER BY component_id").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchall()
+    assert head["graph_id"] is None and head["graph_revision"] == retired_revision
+    assert all(
+        item["generation_id"] is None
+        and not item["data_admission"]
+        and not item["control_admission"]
+        for item in routes
+    )
+
+
+@pytest.mark.postgres
+async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    runtime_storage = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    await installer.install(
+        runtime_storage.spec,
+        runtime_storage.baseline,
+        runtime_storage.package_digest,
+        execution_profile=runtime_storage.execution_profile,
+    )
+    repository = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
+    old_lease = await repository.claim_host("host-a", "inc-a")
+    missing = RuntimeStorageBinding(
+        "missing.schema",
+        "1.0.0",
+        "forest_m_missing",
+        "a" * 64,
+        "missing/1",
+        "official",
+    )
+    with pytest.raises(ForestError) as caught:
+        await repository.prepare_graph(
+            old_lease,
+            [runtime_binding("example.missing", marker="3", storage=missing)],
+            str(uuid4()),
+        )
+    assert caught.value.code == "RUNTIME_STORAGE_BINDING_INVALID"
+
+    async with store.pool.connection() as conn:
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {}.host_lease SET expires_at='1970-01-01 UTC' WHERE bot_id=%s"
+            ).format(sql.Identifier(runtime_storage.spec.namespace)),
+            (store.bot_id,),
+        )
+    claims = await asyncio.gather(
+        repository.claim_host("host-b", "inc-b"),
+        repository.claim_host("host-c", "inc-c"),
+        return_exceptions=True,
+    )
+    leases = [item for item in claims if not isinstance(item, BaseException)]
+    failures = [item for item in claims if isinstance(item, BaseException)]
+    assert len(leases) == len(failures) == 1
+    new_lease = leases[0]
+    assert isinstance(failures[0], ForestError)
+    assert failures[0].code == "HOST_LEASE_HELD"
+    assert new_lease.owner_epoch == old_lease.owner_epoch + 1
+    with pytest.raises(ForestError) as caught:
+        await repository.prepare_graph(
+            old_lease,
+            [runtime_binding("example.module", marker="4")],
+            str(uuid4()),
+        )
+    assert caught.value.code == "STALE_HOST"
+    async with store.pool.connection() as conn:
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {}.host_lease SET expires_at='1970-01-01 UTC' WHERE bot_id=%s"
+            ).format(sql.Identifier(runtime_storage.spec.namespace)),
+            (store.bot_id,),
+        )
+    with pytest.raises(ForestError) as caught:
+        await repository.claim_host("host-a", "inc-a")
+    assert caught.value.code == "STALE_HOST"
 
 
 @pytest.mark.postgres

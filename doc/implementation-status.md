@@ -31,7 +31,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 ### 模块运行时与路由
 
-- `RuntimeModuleRegistry` 实现 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`，按依赖顺序启动、反向排空，并记录持久 RuntimeGraph/Generation。
+- `RuntimeModuleRegistry` 已有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 的进程内顺序与反向排空，但当前生产 Registry 仍把 factory 构造当作 PREPARED，并写旧 `public.bot_runtime_*`；它尚未接入 `PreparedGenerationBinding`，因此其持久 RuntimeGraph/Generation 不能作为新架构完成证据。
 - 官方描述符携带 `package_id/version/digest/scope/driver/trust_level`；工件摘要进入 Generation、管理投影和 RouteGraph 历史。
 - command、message handler、service、event、job 和官方 runtime module 已进入同一 RouteGraph；消息入场冻结 `graph_digest`。
 - `component.worker-host` 拥有可安装 Worker 的准备与启动；`contract.router` 拥有冻结后的命令、Handler、Agent 和模板 responder 分派。
@@ -72,7 +72,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 - `BindingRuntime` 类型、兼容别名和 `forest.platform` 组合根已删除；`BotRuntimeSupervisor` 只监督模块图、宿主 lease、内核任务、通用工作通知和归约健康状态。
 - 唤醒由描述符声明 `wakes_on_work/work_notify_order`，Supervisor 不再按 Agent、Memory、Job 或 OneBot 分支；Fleet 只读取公开 `healthy` 状态。
-- 每次 Registry 激活分配独立 UUID；同一宿主关闭后重启会创建新的 RuntimeGraph 和 Generation，不能把已 `STOPPED` 的代际重新激活。
+- 旧 Registry 每次激活会分配独立 UUID，干净 `kernel.runtime` Repository 也会为精确 binding 创建新 RuntimeGraph/Generation；生产切换前，前者生成的旧 `public.bot_runtime_*` 事实不等价于后者，不能把 UUID 不复用误报成完整代际绑定已经落地。
 
 ## 当前阻断项
 
@@ -84,7 +84,7 @@ Forest 正在进行激进重构，**不可发布**。本页只记录代码事实
 
 - `BotProvisioner._initialize`、`BotFleet.attach`、CLI 和 Restore 仍调用 `BotStore.migrate()`；必须改为最小 Kernel bootstrap 加所选模块的准确 schema bundle。
 - 当前 `forest_kernel.bot_identity` 和 `forest_kernel.schema_bundles` installer 已能校验摘要、namespace、Repository contract、执行档位、并发安装和事务回滚。第三方 `declarative` SQL 与 distribution 绑定的 `official` 完整不变量 SQL 已严格分流，但官方模块尚未提供完整业务 bundle。
-- 首个 `kernel.runtime` 干净 baseline 已建立并可由官方 bundle 安装器原子安装：只含租约、模块代际、通用调用、状态引用和 RuntimeGraph，不含旧表中的 `agent_tool_id`、OneBot 控制服务特例、业务枚举或跨业务外键。它目前是已验证的 cutover 候选；在其他官方模块 bundle 与 Repository 一起完成前，生产启动路径仍由旧 `BotStore.migrate()` 建库，不能把候选存在误报为切换完成。
+- `kernel.runtime` 干净 baseline 与 Repository 已建立：Host lease 支持同 incarnation 并发续租、竞争换代与旧代 fencing；模块通过显式 `PreparedGenerationBinding` 冻结配置修订/载荷、包、存储、状态契约、授权集、实例、路由与管理摘要；相同 activation 精确重放，不同事实冲突；完整 READY 图原子发布并推进 Route epoch，替换图使旧代进入 QUIESCING，退役时原子撤下 head。图成员、Generation、组件和包摘要由复合外键约束，未安装 storage bundle 不能进入图。完整干净 schema authority 文件现为 `24 passed`。生产 Registry 尚未接入该 Repository，其他官方模块也尚未提供完整业务 bundle，启动路径仍由旧 `BotStore.migrate()` 建库，不能把候选存在误报为切换完成。
 - `kernel.payload` 的干净 baseline 与 Repository 已建立：规范化保存来源 manifest、正文、派生边、删除 epoch、精确遗忘选择和 scrub 状态；载荷接纳与遗忘按同一 clock 行收敛，先接纳会被随后遗忘闭包撤销，先遗忘会拒绝晚到正文。`kernel.audit` 候选只保存可筛选的脱敏 envelope，详情必须经 payload 端口复核，不保存 JSONB 正文或跨模块 join。`kernel.authorization` 候选只保存规范化能力授予集、最长 30 秒的精确票据、一次性消费、撤销事实、单调策略 revision 与通用批准；票据消费和撤销按同一 policy clock 合流，不吞入 Web 会话、OneBot 管理员、Agent 工具或模块策略正文。`kernel.effect` 候选通过 Payload、Authorization 与执行器 fence 端口形成通用 permit/handoff/outcome 状态机：已交接结果丢失保持 `UNKNOWN`，只有显式对账证据可解析，冲突证据留账且不覆盖，未交接 attempt 才能放弃、重试或取消；它不持有 Delivery SendIntent、OneBot action、Agent ToolCall 或 Provider 状态。这四个候选仍未接入生产启动链与旧生产者，下一步是补齐各业务模块 bundle 后执行一次性 provisioning/cutover，不能建立双写兼容桥。
 - `conversation.scheduler` 干净 baseline 与 Repository 已实现连续分类水位、同群 actor lease、三种安全边界、最后 trigger 切口、普通尾部静默排空、原子 reply/trigger 提交和恢复领取；`agent.runtime` 候选已实现单 Agent Session/Run、CorePrompt/Preset 冻结、模型 attempt/UNKNOWN 对账、原子 ModelTurn、工具主体绑定与 checkpoint。两者没有子 Agent 表或互相写表。
 - `memory.graph` 干净 baseline 与 Repository 已实现冻结的 Bot 级语义空间、群主干、稳定来源单元、图文 part、平台观察、来源资格、跨主干关系贡献/证据、抑制、删除 epoch 复核，以及来源和关系的稳定快照键集查询。`ConversationMemoryInputUnitOfWork` 在同一数据库事务内完成 Scheduler 输入切口和 Memory 来源资格提交；任一批次事件缺失对应来源观察时两侧整体回滚。`MemoryRetrievalRepository` 进一步拥有图文 facet、编码 attempt、原始 payload materialization、向量发布、查询切口和 EvidenceBundle；`MemoryEmbeddingWorker` 只取得受 fence 的单个 facet 调用许可并通过受管 transport 执行。该候选尚未接入运行时批处理调度、Agent 或生产组合根，当前精确数组扫描也不是最终大规模 ANN 方案。
