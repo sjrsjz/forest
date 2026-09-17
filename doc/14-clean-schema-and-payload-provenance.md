@@ -4,7 +4,7 @@
 
 ## 1. 目标
 
-持久化必须服务微内核边界，而不是把当前官方模块固化成一个产品数据库。不可绕过的 bootstrap 只拥有 Bot 身份与 schema bundle 账本；运行、授权、外部效果和审计分别由不可卸载但仍遵守模块描述符、bundle、Repository 与管理贡献协议的 kernel 模块持有。Agent、Memory、Adapter、Conversation Scheduler、Shell、Job 与 Delivery 分别拥有自己的状态和载荷。模块卸载、替换或热重载时，bootstrap 和其他模块都不需要理解其业务表。
+持久化必须服务微内核边界，而不是把当前官方模块固化成一个产品数据库。不可绕过的 bootstrap 只拥有 Bot 身份与 schema bundle 账本；运行、统一载荷、授权、外部效果和审计分别由不可卸载但仍遵守模块描述符、bundle、Repository 与管理贡献协议的 kernel 模块持有。Agent、Memory、Adapter、Conversation Scheduler、Shell、Job 与 Delivery 分别拥有自己的业务事实和载荷引用。模块卸载、替换或热重载时，bootstrap 和其他模块都不需要理解其业务表。
 
 正文和二进制内容必须从首次写入起携带完整来源闭包。删除、授权收缩、热重载、异步索引完成和外部结果晚到时，任何路径都不能通过缓存、派生正文或重放回执复活已撤销来源。
 
@@ -16,6 +16,7 @@
 |---|---|---|
 | Kernel bootstrap (`forest_kernel`) | Bot 身份、schema bundle 账本 | RuntimeGraph、业务配置、调用、授权、效果、审计正文 |
 | `kernel.runtime` | Bot 运行封印、host/module lease、Generation、Route、Lifecycle、通用 Call、状态引用、RuntimeGraph | Agent/Adapter/Memory/Shell/Job 业务字段、业务 payload 正文 |
+| `kernel.payload` | Payload header/body、SourceManifest、派生父边、payload capability、删除 epoch 与 revoke/scrub 状态 | Memory 图、Context 顺序、业务可检索索引、模块私有配置 head |
 | `kernel.authorization` | 能力授予、撤销、主体映射引用、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台凭据 |
 | `kernel.effect` | 通用 Effect identity、dispatch fence、attempt/outcome 与 UNKNOWN 对账 | Delivery SendIntent、OneBot wire body、Agent 工具上下文副本 |
 | `kernel.audit` | 通用审计 envelope、来源 operation/call 引用、脱敏查询索引 | 模块业务正文、密钥、跨模块复制的完整 payload |
@@ -29,7 +30,7 @@
 
 模块表放入由 bundle 分配的独占 PostgreSQL schema。模块运行角色只拥有该 schema 的 DML 权限和明确批准的内核函数；第三方 Worker 不获得数据库连接。官方受信模块也必须经自己的 Repository 访问，不能借同进程身份跨模块 join。跨模块原子流程使用内核主持的类型化 transaction participant 或 outbox/effect 协议；不能靠某模块直接更新另一模块的表来“方便地”完成事务。
 
-`kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用 Call、组件状态 payload 引用和 RuntimeGraph。Call 的来源种类、服务名和 payload 身份是有界通用字段；该 bundle 不因“都是内核功能”而吞并 authorization、effect 或 audit 的表。任何 kernel 模块表都不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让对应 kernel 模块提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
+`kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用 Call、组件状态 payload 引用和 RuntimeGraph。Call 的来源种类、服务名和 payload 身份是有界通用字段；该 bundle 不因“都是内核功能”而吞并 payload、authorization、effect 或 audit 的表。任何 kernel 模块表都不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让对应 kernel 模块提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
 
 ## 3. Schema bundle 生命周期
 
@@ -78,6 +79,8 @@ PayloadRef {
 
 `SourceManifest` 是有序且内容寻址的来源集合。每项至少包含 Bot、稳定 source unit/revision/part、原始群主干、具体 Conversation/Binding 观察、作者主体、发生时间和传播限制。派生载荷必须联合所有实际输入的来源；不能只记录最后调用者、当前群或模型自报的引用。跨模块传递正文时，发送方同时传递由宿主签发的 payload capability；接收方创建派生载荷时由宿主追加父引用和来源闭包，Worker 不能自行缩小闭包。
 
+`kernel.payload` 是这套协议的唯一写入权威。它只理解稳定来源引用、内容摘要、派生边、授权/删除 fence 和正文生命周期，不理解某个 payload 是 Prompt、记忆节点、OneBot 消息还是配置字段。业务模块在自己的 schema 保存 `payload_id + digest + owner_kind/owner_id`，并通过 payload participant 在同一 UnitOfWork 中创建或复核正文；模块间不得对 `kernel.payload` 表建立 SQL 外键或直接 join。Memory 仍拥有 source/trunk/graph 与检索资格，Conversation 仍拥有 Context 顺序，Payload 模块不会因集中保存正文而取得这些业务语义。
+
 正文状态只有 `ACTIVE -> REVOKED -> SCRUBBED`。永久事实保留稳定 ID、状态、摘要、因果和外部效果结算信息；正文不可用时返回类型化 `PAYLOAD_REVOKED/PAYLOAD_SCRUBBED`，不得返回空字符串、空 JSON 或从审计/outbox/checkpoint 复制一份旧内容。
 
 下列内容从第一次写入就必须使用该协议：群入站、Context 单元、Agent snapshot/request/result/tool/final、Memory source/media/evidence、Kernel call 参数与结果、模块状态、配置修订、Job 定义、Shell 参数和结果、Delivery wire body/receipt、管理操作结果和审计详情。不存在“以后再迁”的裸 JSONB 正文列。
@@ -113,7 +116,7 @@ participant 集合、顺序、输入摘要和结果摘要写入 operation；重�
 
 ## 8. 干净基线验收
 
-- 新 Bot 数据库先只安装 `forest_kernel` bootstrap，再按冻结的首发 RuntimeGraph 安装所需 kernel 模块与所选业务模块 bundle；bootstrap 中不存在 RuntimeGraph、授权、效果、审计或任何业务表，任何 kernel 模块 bundle 中也不得混入 Agent、Memory、OneBot、Shell、Job 或 Delivery 业务表。
+- 新 Bot 数据库先只安装 `forest_kernel` bootstrap，再按冻结的首发 RuntimeGraph 安装所需 kernel 模块与所选业务模块 bundle；bootstrap 中不存在 RuntimeGraph、Payload、授权、效果、审计或任何业务表，任何 kernel 模块 bundle 中也不得混入 Agent、Memory、OneBot、Shell、Job 或 Delivery 业务表。
 - 启用模块才安装其准确 bundle；删除任一官方模块包后，内核仍能启动并明确报告缺失契约。
 - 目标命名空间非空、摘要不符、未知对象、越权 DDL 和跨 owner 引用均拒绝。
 - 源码、SQL 和测试中不存在开发期 `migration_v*`、001…087 回放、legacy marker、旧列 fallback、双写或非空旧库升级夹具。

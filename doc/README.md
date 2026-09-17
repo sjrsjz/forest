@@ -109,7 +109,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 19. 每次LLM请求按实际模型能力生成独立投影视图；文本模型请求移除所有图片载荷并标记未见图片，不删除持久媒体、不改变输入切口，也不隐式调用OCR/描述模型。
 20. WebUI是首版正式管理入口，日常配置持久化为受版本控制的事实，通过界面完成；页面、群聊Shell和CLI不直接改文件或运行对象，提交均走同一授权、版本冲突和生命周期协议。
 21. 配置期望、生效版本与实际运行状态分别可见；保存成功不冒充已生效，断开浏览器不取消持久操作，冲突不以最后保存覆盖，密钥不通过配置读取接口回显。
-22. 不可绕过的 `forest_kernel` bootstrap 只包含 Bot 身份与 schema bundle 账本；Runtime、Authorization、Effect、Audit 也是拥有独立 bundle/Repository/UI 贡献的 kernel 模块，不能把它们和 Agent、Memory、Adapter、Shell、Job、Delivery 压成巨型内核表。开发期旧库只重建、不迁移。
+22. 不可绕过的 `forest_kernel` bootstrap 只包含 Bot 身份与 schema bundle 账本；Runtime、Payload、Authorization、Effect、Audit 是拥有独立 bundle/Repository/管理贡献的 kernel 模块，不能把它们和 Agent、Memory、Adapter、Shell、Job、Delivery 压成巨型内核表。开发期旧库只重建、不迁移。
 23. WebUI 壳层不固定 Bot/Agent/Memory/安全/存储产品栏目；当前作用域内的导航、配置、查询与动作由准确模块 Generation 的管理贡献生成，内核自身也遵循该协议。
 
 出现跨文档冲突时，先维护这些不变量，再修改具体契约；不得由实现自行弱化并仍宣称满足设计。

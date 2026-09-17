@@ -19,6 +19,7 @@ from forest.schema_bundles import (
     validate_storage_baseline,
 )
 from forest.storage.bot import BotStore
+from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
 
@@ -248,6 +249,106 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
                 sql.SQL("DELETE FROM {}.host_incarnations").format(
                     sql.Identifier(namespace)
                 )
+            )
+
+
+@pytest.mark.postgres
+async def test_clean_kernel_audit_bundle_is_filterable_immutable_and_payload_only(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.audit",
+        "forest.kernel.audit",
+        "forest.kernel-audit.repository/1",
+        "storage/official/kernel_audit.sql",
+    )
+    row = await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    assert row["component_id"] == "kernel.audit"
+    lowered = storage.baseline.lower()
+    assert b" jsonb" not in lowered
+    for forbidden in (b"agent", b"onebot", b"memory", b"binding", b"job"):
+        assert forbidden not in lowered
+
+    verified_payloads = []
+
+    async def verify_payload(_conn, **identity):
+        verified_payloads.append(identity)
+
+    repository = KernelAuditRepository(
+        store,
+        namespace=storage.spec.namespace,
+        payload_verifier=verify_payload,
+    )
+    envelope = AuditEnvelope(
+        audit_id="audit-1",
+        action="component.reload",
+        severity="SECURITY",
+        producer_component_id="component.worker-host",
+        producer_generation_id="generation/one",
+        origin_kind="shell",
+        actor_kind="platform.user",
+        actor_id="qq/1234",
+        resource_kind="component",
+        resource_id="example.worker",
+        operation_kind="lifecycle",
+        operation_id="operation/1",
+        call_id="call/1",
+        details_payload_id="payload/1",
+        details_payload_digest="sha256:" + "1" * 64,
+    )
+    with pytest.raises(ForestError) as caught:
+        await KernelAuditRepository(
+            store, namespace=storage.spec.namespace
+        ).append(envelope)
+    assert caught.value.code == "AUDIT_PAYLOAD_PORT_REQUIRED"
+    first = await repository.append(envelope)
+    assert await repository.append(envelope) == first
+    assert verified_payloads[-1] == {
+        "payload_id": "payload/1",
+        "digest": "sha256:" + "1" * 64,
+        "owner_component_id": "kernel.audit",
+        "owner_kind": "audit.details",
+        "owner_id": "audit-1",
+    }
+    with pytest.raises(ForestError) as caught:
+        await repository.append(
+            AuditEnvelope(
+                **{**envelope.__dict__, "action": "component.disable"}
+            )
+        )
+    assert caught.value.code == "AUDIT_ID_CONFLICT"
+    await repository.append(
+        AuditEnvelope(
+            audit_id="audit-2",
+            action="component.reload",
+            producer_component_id="component.worker-host",
+            origin_kind="web",
+            resource_kind="component",
+            resource_id="other.worker",
+        )
+    )
+    page = await repository.scan(
+        producer_component_id="component.worker-host",
+        resource_kind="component",
+        resource_id="example.worker",
+    )
+    assert [item["audit_id"] for item in page["records"]] == ["audit-1"]
+    assert page["records"][0]["details_payload_id"] == "payload/1"
+
+    async with store.pool.connection() as conn:
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("DELETE FROM {}.records WHERE bot_id=%s").format(
+                    sql.Identifier(storage.spec.namespace)
+                ),
+                (store.bot_id,),
             )
 
 

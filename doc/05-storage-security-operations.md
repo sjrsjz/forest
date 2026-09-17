@@ -20,7 +20,7 @@ PostgreSQL 作为首版持久事实与协调账本。每个 Bot 的共享图包�
 
 下表是跨模块协议需要保存的**逻辑事实词汇**，不是一份共享 SQL schema，也不是 `BotStore.migrate()` 的建表清单。实际表由拥有该事实的模块以内容寻址 schema bundle 在独占 namespace 中创建，并只能经该模块 Repository 访问；模块之间保存带摘要的类型化引用，禁止跨 namespace 外键、宿主直查和跨模块 join。首次发布前每个模块只有从空 namespace 安装的 baseline，不生成或保留开发期编号 SQL migration。所有 `*_at` 使用 UTC，外部 ID 用字符串；独立 Bot 数据库仍保留 `bot_id` 和检查约束。下述主键均为逻辑简写，共享物理部署时必须将 `bot_id` 纳入本模块的主键、唯一键与外键。
 
-事实所有权按职责拆分：deployment 目录、包仓库、账号和管理入口分别由对应 deployment 模块持有；`kernel.runtime` 只持有 lease、Generation、Route、Lifecycle、通用 Call、状态引用和 RuntimeGraph；Authorization、Effect 与 Audit 分别属于自己的 kernel 模块；Shell、配置、Adapter、Conversation、Agent、Routing、Delivery、Scheduler 与 Memory 各自由准确模块持有自己的表。后续各节把相关事实放在一起是为了描述跨模块因果关系，不授予任何组件把它们建进同一个 `public` schema 的权力。准确模块表、namespace、bundle 身份和 Repository contract 以[干净数据库基线](14-clean-schema-and-payload-provenance.md)为准。
+事实所有权按职责拆分：deployment 目录、包仓库、账号和管理入口分别由对应 deployment 模块持有；`kernel.runtime` 只持有 lease、Generation、Route、Lifecycle、通用 Call、状态引用和 RuntimeGraph；Payload、Authorization、Effect 与 Audit 分别属于自己的 kernel 模块；Shell、配置、Adapter、Conversation、Agent、Routing、Delivery、Scheduler 与 Memory 各自由准确模块持有自己的表。后续各节把相关事实放在一起是为了描述跨模块因果关系，不授予任何组件把它们建进同一个 `public` schema 的权力。准确模块表、namespace、bundle 身份和 Repository contract 以[干净数据库基线](14-clean-schema-and-payload-provenance.md)为准。
 
 ### 2.1 控制与所有权
 
