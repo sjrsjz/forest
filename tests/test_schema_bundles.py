@@ -14,12 +14,14 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.runtime_generation import (
     PreparedGenerationBinding,
     RuntimeStorageBinding,
 )
 from forest.runtime_modules import (
+    ModuleLifecycleState,
     RuntimeModuleDescriptor,
     RuntimeModuleRegistry,
     official_artifact,
@@ -1010,6 +1012,85 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
         ).fetchone()
     assert head["graph_id"] == graph.graph_id
     assert failed_candidate["state"] == "PREPARED"
+
+
+@pytest.mark.postgres
+async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_authority):
+    store, installer = clean_authority
+    core = await bootstrap_clean_kernel(store, installer)
+    replay = await bootstrap_clean_kernel(store, installer)
+    assert {
+        component_id: grant.grant_set_digest
+        for component_id, grant in core.grants.items()
+    } == {
+        component_id: grant.grant_set_digest
+        for component_id, grant in replay.grants.items()
+    }
+    assert {item.component_id for item in core.descriptors} == {
+        "kernel.runtime",
+        "kernel.payload",
+        "kernel.authorization",
+        "kernel.effect",
+        "kernel.audit",
+    }
+    lease = await core.runtime.claim_host("host-a", "inc-a")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    registry = RuntimeModuleRegistry(host, core.descriptors)
+    await registry.start()
+    assert set(registry.states.values()) == {ModuleLifecycleState.ACTIVE}
+    graph = registry.graph_identity
+    assert graph is not None and set(graph.generations) == {
+        "kernel.runtime",
+        "kernel.payload",
+        "kernel.authorization",
+        "kernel.effect",
+        "kernel.audit",
+    }
+    namespace = next(
+        descriptor.storage.spec.namespace
+        for descriptor in core.descriptors
+        if descriptor.component_id == "kernel.runtime"
+    )
+    async with store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT component_id,capability_grants_digest,status "
+                    "FROM {}.generations ORDER BY component_id"
+                ).format(sql.Identifier(namespace))
+            )
+        ).fetchall()
+        head = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchone()
+    assert head["graph_id"] == graph.graph_id
+    assert {
+        row["component_id"]: row["capability_grants_digest"] for row in rows
+    } == {
+        component_id: grant.grant_set_digest
+        for component_id, grant in core.grants.items()
+    }
+    assert all(row["status"] == "ACTIVE" for row in rows)
+    assert await registry.close() == []
+    async with store.pool.connection() as conn:
+        statuses = await (
+            await conn.execute(
+                sql.SQL("SELECT status FROM {}.generations").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        ).fetchall()
+    assert {row["status"] for row in statuses} == {"DISPOSED"}
 
 
 @pytest.mark.postgres
