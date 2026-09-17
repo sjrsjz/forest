@@ -183,6 +183,7 @@ def test_storage_bundle_is_content_addressed_package_content(tmp_path):
             'schema_version = "1.0.0"\n'
             'baseline = "schema/baseline.sql"\n'
             f'baseline_sha256 = "{digest}"\n'
+            'scope = "bot"\n'
             'repository_contract = "counter.repository/1"\n'
         )
     snapshot = PackageCatalog(tmp_path / "catalog").build(root)
@@ -194,8 +195,10 @@ def test_storage_bundle_is_content_addressed_package_content(tmp_path):
         "namespace": module_schema_namespace("counter.state"),
         "baseline": "schema/baseline.sql",
         "baseline_sha256": digest,
+        "scope": "bot",
         "repository_contract": "counter.repository/1",
         "bytes": len(sql),
+        "package_digest": snapshot.digest,
     }
     copied = snapshot.root / "schema" / "baseline.sql"
     copied.chmod(0o600)
@@ -230,6 +233,7 @@ def test_invalid_storage_bundle_declarations_are_rejected(
             'schema_version = "1.0.0"\n'
             f'baseline = "{baseline}"\n'
             f'baseline_sha256 = "{digest or actual}"\n'
+            'scope = "bot"\n'
             f'repository_contract = "{contract}"\n'
         )
     with pytest.raises(ForestError) as caught:

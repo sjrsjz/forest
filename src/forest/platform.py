@@ -31,6 +31,9 @@ class BindingRuntime:
         self._started = False
         self._failure: ForestError | None = None
         self.job_authority = job_authority
+        from forest.storage.schema_bundles import SchemaBundleInstaller
+
+        self.schema_bundle_installer = SchemaBundleInstaller(bot.store)
         self.module_registry = BotModuleRegistry(self)
 
     def module(self, component_id: str):

@@ -82,9 +82,11 @@ async def test_storage_is_installed_before_factory_and_prepared_state():
         repository_contract="owned.records/1",
     )
 
+    package_digest = "sha256:" + "1" * 64
+
     class Installer:
-        async def install(self, installed_spec, installed_baseline):
-            events.append(("install", installed_spec, installed_baseline))
+        async def install(self, installed_spec, installed_baseline, installed_package):
+            events.append(("install", installed_spec, installed_baseline, installed_package))
 
     platform = SimpleNamespace(schema_bundle_installer=Installer())
 
@@ -94,7 +96,12 @@ async def test_storage_is_installed_before_factory_and_prepared_state():
 
     registry = BotModuleRegistry(
         platform,
-        (RuntimeModuleDescriptor("owned", (), factory, storage=RuntimeStorageBundle(spec, baseline)),),
+        (
+            RuntimeModuleDescriptor(
+                "owned", (), factory,
+                storage=RuntimeStorageBundle(spec, baseline, package_digest),
+            ),
+        ),
     )
     assert registry.states["owned"] == ModuleLifecycleState.VALIDATED
     await registry.start()
@@ -118,7 +125,7 @@ async def test_storage_install_failure_never_constructs_module():
     constructed = []
 
     class Installer:
-        async def install(self, _spec, _baseline):
+        async def install(self, _spec, _baseline, _package_digest):
             raise ForestError("SCHEMA_BUNDLE_MISMATCH", "wrong bundle", 409)
 
     registry = BotModuleRegistry(
@@ -128,7 +135,7 @@ async def test_storage_install_failure_never_constructs_module():
                 "owned",
                 (),
                 lambda _platform, _modules: constructed.append(True),
-                storage=RuntimeStorageBundle(spec, baseline),
+                storage=RuntimeStorageBundle(spec, baseline, "sha256:" + "2" * 64),
             ),
         ),
     )
@@ -153,6 +160,7 @@ def test_storage_bundle_must_be_owned_by_descriptor():
             repository_contract="other.records/1",
         ),
         baseline,
+        "sha256:" + "3" * 64,
     )
     with pytest.raises(ForestError) as caught:
         BotModuleRegistry(

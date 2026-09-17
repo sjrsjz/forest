@@ -198,6 +198,7 @@ MANIFEST_SCHEMA = {
                             "schema_version",
                             "baseline",
                             "baseline_sha256",
+                            "scope",
                             "repository_contract",
                         ],
                         "properties": {
@@ -205,6 +206,7 @@ MANIFEST_SCHEMA = {
                             "schema_version": {"type": "string"},
                             "baseline": {"type": "string"},
                             "baseline_sha256": {"type": "string"},
+                            "scope": {"const": "bot"},
                             "repository_contract": {"type": "string"},
                         },
                     },
@@ -607,6 +609,7 @@ def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
         "namespace": spec.namespace,
         "baseline": reference,
         "baseline_sha256": spec.baseline_sha256,
+        "scope": declaration["scope"],
         "repository_contract": spec.repository_contract,
         "bytes": len(content),
     }
@@ -849,7 +852,7 @@ class PackageSnapshot:
         metadata = _storage_bundle(files, self.component)
         if metadata is None:
             return None
-        return metadata, files[metadata["baseline"]]
+        return {**metadata, "package_digest": self.digest}, files[metadata["baseline"]]
 
     def _verified_files(self) -> dict[str, bytes]:
         files = _capture(self.root)

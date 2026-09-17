@@ -18,10 +18,20 @@ _FORBIDDEN_SQL = re.compile(
     r"CREATE\s+(?:DATABASE|ROLE|USER|EXTENSION|SCHEMA|EVENT\s+TRIGGER)|"
     r"ALTER\s+(?:SYSTEM|DATABASE|ROLE|USER)|"
     r"DROP\s+(?:DATABASE|ROLE|USER|SCHEMA)|"
-    r"GRANT|REVOKE|SET\s+ROLE|COPY\b[\s\S]*?\bPROGRAM|SECURITY\s+DEFINER"
+    r"GRANT|REVOKE|SET\b|RESET\b|COPY\b|SECURITY\s+DEFINER|"
+    r"INSERT\b|UPDATE\b|DELETE\b|MERGE\b|TRUNCATE\b|SELECT\b|"
+    r"DO\b|CALL\b|BEGIN\b|COMMIT\b|ROLLBACK\b|SAVEPOINT\b|"
+    r"CREATE\s+(?:FUNCTION|PROCEDURE|TRIGGER|VIEW|MATERIALIZED\s+VIEW|RULE|POLICY|"
+    r"FOREIGN\s+TABLE|SERVER|USER\s+MAPPING|PUBLICATION|SUBSCRIPTION)|"
+    r"DROP\b|ALTER\b|IF\s+NOT\s+EXISTS|TABLESPACE\b|INHERITS\b|PARTITION\b"
     r")\b",
     re.IGNORECASE,
 )
+_ALLOWED_STATEMENT = re.compile(
+    r"CREATE\s+(?:(?:UNIQUE\s+)?INDEX|TABLE|TYPE|DOMAIN|SEQUENCE)\b|COMMENT\s+ON\b",
+    re.IGNORECASE,
+)
+_QUALIFIED_IDENTIFIER = re.compile(r"[a-zA-Z_][a-zA-Z0-9_$]*\s*\.")
 
 
 def _invalid(message: str) -> None:
@@ -75,6 +85,7 @@ class StorageBundleSpec:
             "schema_version": self.schema_version,
             "namespace": self.namespace,
             "baseline_sha256": self.baseline_sha256,
+            "scope": "bot",
             "repository_contract": self.repository_contract,
         }
 
@@ -93,6 +104,81 @@ def validate_storage_baseline(source: bytes, expected_sha256: str) -> str:
         raise ForestError(
             "INVALID_STORAGE_BUNDLE", "Storage baseline must be UTF-8 SQL", 422
         ) from exc
-    if "\x00" in sql or re.search(r"(?m)^\s*\\", sql) or _FORBIDDEN_SQL.search(sql):
+    code = _lexical_sql(sql)
+    statements = [statement.strip() for statement in code.split(";") if statement.strip()]
+    if (
+        "\x00" in sql
+        or re.search(r"(?m)^\s*\\", sql)
+        or not statements
+        or any(not _ALLOWED_STATEMENT.match(statement) for statement in statements)
+        or _FORBIDDEN_SQL.search(code)
+        or _QUALIFIED_IDENTIFIER.search(code)
+    ):
         _invalid("Storage baseline contains forbidden SQL")
     return sql
+
+
+def _lexical_sql(sql: str) -> str:
+    """Remove comments and string bodies before structural admission checks."""
+
+    output = []
+    index = 0
+    block_depth = 0
+    state = "code"
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ""
+        if state == "line-comment":
+            if char in "\r\n":
+                state = "code"
+                output.append(char)
+            else:
+                output.append(" ")
+            index += 1
+            continue
+        if state == "block-comment":
+            if char == "/" and following == "*":
+                block_depth += 1
+                output.extend((" ", " "))
+                index += 2
+            elif char == "*" and following == "/":
+                block_depth -= 1
+                output.extend((" ", " "))
+                index += 2
+                if block_depth == 0:
+                    state = "code"
+            else:
+                output.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        if state == "string":
+            output.append(" ")
+            if char == "'":
+                if following == "'":
+                    output.append(" ")
+                    index += 2
+                    continue
+                state = "code"
+            index += 1
+            continue
+        if char == "-" and following == "-":
+            state = "line-comment"
+            output.extend((" ", " "))
+            index += 2
+        elif char == "/" and following == "*":
+            state = "block-comment"
+            block_depth = 1
+            output.extend((" ", " "))
+            index += 2
+        elif char == "'":
+            state = "string"
+            output.append(" ")
+            index += 1
+        elif char in {'"', '$'}:
+            _invalid("Storage baseline uses unsupported SQL quoting")
+        else:
+            output.append(char)
+            index += 1
+    if state in {"block-comment", "string"}:
+        _invalid("Storage baseline contains unterminated SQL input")
+    return "".join(output)

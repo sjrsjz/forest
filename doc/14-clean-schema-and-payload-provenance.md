@@ -39,6 +39,8 @@ scope = "bot"
 repository_contract = "forest.memory.repository/1"
 ```
 
+`package_digest` 不写入 manifest，因为包不能稳定地自引用自己的摘要；宿主在完整包快照通过校验后派生该值，并把它与上述字段、Runtime Generation、Repository contract 和管理 UI 摘要一起写入描述符事实及安装账本。缺少包摘要或任一字段不一致都不能按幂等安装处理。
+
 首发前只允许以下安装状态：
 
 ```text
@@ -47,6 +49,8 @@ ABSENT -> VERIFYING -> INSTALLING -> READY
 ```
 
 安装事务先锁定 `(bot_id, schema_id)`，要求目标命名空间为空且没有未知对象；随后验证包摘要、SQL 静态限制和数据库能力，在受限 owner 下执行 baseline，写入精确 bundle 摘要，再把状态置为 READY。候选 Generation 只有引用 READY 的准确 bundle 才能 PREPARE/ACTIVE。安装失败回滚整个命名空间，不发布半成品路由。
+
+`VERIFYING/INSTALLING/FAILED` 是 Lifecycle Coordinator 的操作状态；bundle 账本只保存事务提交后的 `READY`（以及卸载后的 `DETACHED`）。安装事务失败时 namespace 和账本行共同回滚，失败详情写控制操作审计，不能为了记录 `FAILED` 而留下一个可被误认作已安装的半成品 schema。
 
 重复安装相同摘要为幂等；相同 `schema_id + version` 对应不同摘要是供应链冲突。开发期 schema 变化直接修改 baseline 并重建测试库，不增加 `ALTER old_table`、兼容 view 或数据 handler。首次正式发布后才设计 `from_version -> to_version` 的模块升级边，升级也属于模块生命周期操作，不成为内核硬编码的 001、002、003 全产品链。
 

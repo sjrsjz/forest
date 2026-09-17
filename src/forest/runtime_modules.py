@@ -9,6 +9,7 @@ making Agent or Memory kernel types.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -57,9 +58,19 @@ class RuntimeStorageBundle:
 
     spec: StorageBundleSpec
     baseline: bytes
+    package_digest: str
 
     def __post_init__(self) -> None:
         validate_storage_baseline(self.baseline, self.spec.baseline_sha256)
+        if not isinstance(self.package_digest, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", self.package_digest
+        ):
+            raise ForestError(
+                "INVALID_STORAGE_BUNDLE", "Storage package digest is invalid", 422
+            )
+
+    def as_fact(self) -> dict:
+        return {**self.spec.as_fact(), "package_digest": self.package_digest}
 
 
 @dataclass(frozen=True)
@@ -311,7 +322,7 @@ class BotModuleRegistry:
                 ),
                 "management_contract": contract.describe() if contract is not None else None,
                 "storage": (
-                    descriptor.storage.spec.as_fact()
+                    descriptor.storage.as_fact()
                     if descriptor.storage is not None
                     else None
                 ),
@@ -408,7 +419,11 @@ class BotModuleRegistry:
                 "A storage-owning runtime module requires the host schema installer",
                 503,
             )
-        await install(descriptor.storage.spec, descriptor.storage.baseline)
+        await install(
+            descriptor.storage.spec,
+            descriptor.storage.baseline,
+            descriptor.storage.package_digest,
+        )
 
     async def _prepare_modules(self) -> None:
         for component_id in self.order:
@@ -677,7 +692,7 @@ class BotModuleRegistry:
                     else None
                 ),
                 "storage": (
-                    descriptor.storage.spec.as_fact()
+                    descriptor.storage.as_fact()
                     if descriptor.storage is not None
                     else None
                 ),
