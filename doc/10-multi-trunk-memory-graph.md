@@ -98,6 +98,8 @@ GROUP_MESSAGE 的 source_unit_id 根据 Bot 和平台去重身份稳定派生；
 
 源单元注册与语义可检索性是两个状态。Inbox 中仍排队的消息可以已有来源身份和持久载荷，但没有因此获得进入当前 Run 的资格。普通群消息的主干节点和长期索引发布至少等待来源已获已提交 InputBatch 归属、可靠 Archive/来源映射及当前可见性检查；早期注册表不是可检索原文入口。后台抽取也不能先读排队正文再把它包装成全局事实。即使来源已在后来的 InputBatch 中提交，早先模型调用仍按自己冻结的切口过滤。
 
+InputBatch 提交不能同步等待远端图片下载。若选择事务尚未找到完整 source occurrence，Memory 在同一事务写入由 `(conversation_ref,event_ref)` 唯一标识的 `PENDING_CAPTURE` 资格事实，并先用 Conversation authority 证明该事件确属该 InputBatch。媒体物化事务与选择事务对同一事件使用相同锁：来源先到时直接资格化，InputBatch 先到时来源提交后自动解析原待定事实。待定记录本身不可检索，也不能创建文本占位冒充图片；它只保存未来来源可继承的准确 InputBatch、Context revision 和删除 epoch。重放输入不同必须冲突，不能最后写入者覆盖。
+
 ```text
 MemorySourceUnit
   bot_id, source_unit_id, source_id, source_kind

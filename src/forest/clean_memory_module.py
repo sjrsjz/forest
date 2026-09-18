@@ -110,6 +110,8 @@ async def bootstrap_clean_memory(
             module_configuration=configuration,
             grants=grants,
             generation_verifier=kernel.runtime.verify_active_generation,
+            generation_admission_verifier=kernel.runtime.verify_active_generation_in,
+            generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
 
     descriptor = RuntimeModuleDescriptor(

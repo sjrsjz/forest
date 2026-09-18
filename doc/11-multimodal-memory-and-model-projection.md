@@ -162,6 +162,8 @@ cache_key = H(bot_id, storage_generation, profile_revision, space_id,
 
 来源注册和媒体获取不等于可检索发布。普通群消息必须满足 10 的 InputBatch/静默输入归属、可靠归档与权限条件后才进入长期检索候选；提前下载图片仅保存字节，不允许 observer 或向量查询绕过同群输入切口。
 
+图片下载慢于 Conversation 输入选择时，InputBatch 正常提交并留下不可检索的 `PENDING_CAPTURE` 资格事实，不能让整个群的串行 Agent 等待网络。图片完成校验和受管载荷发布后，在同一事件锁下继承该批次资格；若图片先完成，后续选择直接资格化。两条路径必须得到相同 occurrence/InputBatch 归属，失败或永久缺图只形成可观测覆盖缺口，不把 URI、占位文本或空向量发布为图片记忆。
+
 Worker 使用有界批次、积压阈值、每 Bot 预算和重试退避。媒体未就绪时图像部分状态为 `WAIT_MEDIA`；文本部分可独立完成，但同一条图文消息的索引完整性仍是 `PARTIAL`。向量发布明确包含成功的段与失败段，不能以一段文字成功就标记整条多模态消息已完成。
 
 `QUEUED / WAIT_MEDIA / ENCODING / READY / RETRYABLE_FAILURE / UNSUPPORTED / SUPPRESSED` 是索引工件状态，独立于媒体状态和来源是否可见。积压、预算耗尽和模型暂不可用进入可恢复状态；源删除后进入 SUPPRESSED，不继续向旧索引写入。

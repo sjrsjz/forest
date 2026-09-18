@@ -68,17 +68,24 @@ class SessionHandoffUnitOfWork:
         generation_member_verifier,
         agent_generation_id: str,
         conversation_generation_id: str,
+        memory_participant=None,
+        memory_generation_id: str | None = None,
     ) -> None:
         if not agent_generation_id or not conversation_generation_id:
             raise ValueError("Session handoff needs exact participant Generations")
         self.store = store
         self.agent_participant = agent_participant
         self.conversation_participant = conversation_participant
+        self.memory_participant = memory_participant
         self.generation_member_verifier = generation_member_verifier
         self.participants = (
             ("agent.runtime", agent_generation_id),
             ("conversation.scheduler", conversation_generation_id),
         )
+        if memory_participant is not None:
+            if not memory_generation_id:
+                raise ValueError("Session handoff Memory needs an exact Generation")
+            self.participants += (("memory.graph", memory_generation_id),)
 
     async def decide(self, *, actor, plan: SessionHandoffPlan) -> dict:
         if type(plan) is not SessionHandoffPlan:
@@ -102,6 +109,39 @@ class SessionHandoffUnitOfWork:
                 run_ref=plan.completed_run_id,
                 next_run_ref=plan.successor_run_id,
             )
+            event_refs = tuple(selection.get("event_ids", ()))
+            if (
+                self.memory_participant is not None
+                and selection.get("input_batch_id") is not None
+                and event_refs
+            ):
+                deletion_epoch = await self.memory_participant.deletion_epoch_in(conn)
+                qualifications = await self.memory_participant.qualify_input_batch_in(
+                    conn,
+                    operation_id=plan.selection_operation_id,
+                    input_batch_ref=selection["input_batch_id"],
+                    conversation_ref=actor.conversation_id,
+                    event_refs=event_refs,
+                    context_revision=selection["context_revision"],
+                    expected_deletion_epoch=deletion_epoch,
+                    input_batch_verifier=(
+                        self.conversation_participant.verify_input_batch_occurrence_in
+                    ),
+                )
+                pending = sum(
+                    item.get("state") == "PENDING_CAPTURE" for item in qualifications
+                )
+                selection = {
+                    **selection,
+                    "memory_qualified_count": len(qualifications) - pending,
+                    "memory_pending_count": pending,
+                }
+            else:
+                selection = {
+                    **selection,
+                    "memory_qualified_count": 0,
+                    "memory_pending_count": 0,
+                }
             if selection.get("kind") == "TRIGGER_INPUT":
                 successor = await self.agent_participant.start_successor_run_in(
                     conn,

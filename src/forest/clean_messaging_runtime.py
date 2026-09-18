@@ -22,6 +22,7 @@ from forest.runtime_modules import (
 from forest.session_handoff_uow import SessionHandoffUnitOfWork
 from forest.storage.adapter_onebot_authority import OneBotAdapterRepository
 from forest.storage.authorization_authority import CapabilityGrant, GrantSetRef
+from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
 from forest.storage.ingress_unit_of_work import OneBotIngressUnitOfWork
 from forest.storage.module_configuration import ModuleConfigurationRepository
@@ -36,6 +37,7 @@ _DEFINITIONS = {
             "kernel.payload",
             "kernel.authorization",
             "agent.runtime",
+            "memory.graph",
         ),
         "capabilities": ("conversation.admit", "conversation.classify"),
     },
@@ -48,6 +50,7 @@ _DEFINITIONS = {
             "kernel.payload",
             "kernel.authorization",
             "conversation.scheduler",
+            "memory.graph",
         ),
         "capabilities": ("adapter.onebot.ingress", "adapter.onebot.send"),
     },
@@ -77,6 +80,14 @@ class _RoutedCompletion:
 
     async def commit(self, **values):
         return await self._commit(**values)
+
+
+class _RoutedInputSelection:
+    def __init__(self, select_input) -> None:
+        self._select_input = select_input
+
+    async def select_input(self, actor, operation_id: str, **values):
+        return await self._select_input(actor, operation_id, **values)
 
 
 class _RoutedSessionDecision:
@@ -127,18 +138,33 @@ def _build_final_reply_commit(context):
 def _build_session_handoff(context):
     agent = context.participant("agent.runtime")
     conversation = context.participant("conversation.scheduler")
+    memory = context.participant("memory.graph")
     port = TransactionalSessionDecisionPort(
         unit_of_work=SessionHandoffUnitOfWork(
             store=context.store,
             agent_participant=agent,
             conversation_participant=conversation,
+            memory_participant=memory,
             generation_member_verifier=context.generation_member_verifier,
             agent_generation_id=agent.generation_identity.generation_id,
             conversation_generation_id=conversation.generation_identity.generation_id,
+            memory_generation_id=memory.generation_identity.generation_id,
         ),
         agent=agent,
     )
     return port.decide
+
+
+def _build_input_selection(context):
+    conversation = context.participant("conversation.scheduler")
+    memory = context.participant("memory.graph")
+    port = ConversationMemoryInputUnitOfWork(
+        context.store,
+        scheduler=conversation,
+        memory=memory,
+        deletion_epoch_guard=memory.deletion_epoch_in,
+    )
+    return port.select_input
 
 
 def _build_onebot_ingress(context):
@@ -146,6 +172,7 @@ def _build_onebot_ingress(context):
         context.store,
         adapter=context.participant("adapter.onebot"),
         conversation=context.participant("conversation.scheduler"),
+        memory=context.participant("memory.graph"),
     )
     return port.admit
 
@@ -240,6 +267,11 @@ async def bootstrap_clean_messaging(
             agent_execution=_RoutedAgentExecution(
                 contracts.service("agent.execute", 1, owned_work=True)
             ),
+            input_selection_port=_RoutedInputSelection(
+                contracts.service(
+                    "kernel.uow.conversation.select-input", 1, owned_work=True
+                )
+            ),
             completion_port=_RoutedCompletion(
                 contracts.service(
                     "kernel.uow.conversation.final-reply", 1, owned_work=True
@@ -292,6 +324,12 @@ async def bootstrap_clean_messaging(
             kernel_services=(
                 (
                     RuntimeKernelServiceSpec(
+                        "kernel.uow.conversation.select-input",
+                        1,
+                        ("conversation.scheduler", "memory.graph"),
+                        _build_input_selection,
+                    ),
+                    RuntimeKernelServiceSpec(
                         "kernel.uow.conversation.final-reply",
                         1,
                         ("agent.runtime", "conversation.scheduler", "delivery"),
@@ -300,7 +338,7 @@ async def bootstrap_clean_messaging(
                     RuntimeKernelServiceSpec(
                         "kernel.uow.conversation.session-handoff",
                         1,
-                        ("agent.runtime", "conversation.scheduler"),
+                        ("agent.runtime", "conversation.scheduler", "memory.graph"),
                         _build_session_handoff,
                     ),
                 )
@@ -309,7 +347,7 @@ async def bootstrap_clean_messaging(
                     RuntimeKernelServiceSpec(
                         "kernel.uow.onebot.ingress",
                         1,
-                        ("adapter.onebot", "conversation.scheduler"),
+                        ("adapter.onebot", "conversation.scheduler", "memory.graph"),
                         _build_onebot_ingress,
                     ),
                 )

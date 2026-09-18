@@ -26,6 +26,12 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPayloadRef,
     OneBotPlatformEvent,
 )
+from forest.storage.ingress_unit_of_work import IngressMemoryCapture
+from forest.storage.memory_graph_authority import (
+    MemoryPart,
+    MemoryPayloadRef,
+    MemorySourceIdentity,
+)
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 
 _STATE_CONTRACT = {
@@ -508,6 +514,74 @@ class CleanOneBotRuntime:
             body=_canonical(author),
             source=source,
         )
+        memory_capture = None
+        segments = normalized["segments"]
+        if not any(part["type"] == "image" for part in segments):
+            rendered = []
+            for part in segments:
+                kind = part["type"]
+                if kind == "text":
+                    rendered.append(part["text"])
+                elif kind == "mention":
+                    rendered.append("[mention:" + part["external_user_id"] + "]")
+                elif kind == "reply":
+                    rendered.append("[reply:" + part["platform_message_id"] + "]")
+                else:
+                    rendered.append("[unsupported:" + part.get("platform_type", kind) + "]")
+            memory_text = "".join(rendered) or "[empty message]"
+            memory_owner_id = event_id + ":memory-text"
+            epoch = await self.payloads.epoch()
+            saved_memory_text = await self.payloads.put_bytes(
+                owner_component_id="adapter.onebot",
+                owner_kind="onebot.memory-text",
+                owner_id=memory_owner_id,
+                media_type="text/plain; charset=utf-8",
+                content=memory_text.encode("utf-8"),
+                sources=(source,),
+                parents=(normalized_ref.payload_id,),
+                expected_deletion_epoch=epoch,
+            )
+            source_hash = hashlib.sha256(
+                (normalized["platform"] + "\0" + connection.self_id + "\0" + channel_kind + "\0" + channel_ref).encode()
+            ).hexdigest()
+            is_group = channel_kind == "group"
+            memory_capture = IngressMemoryCapture(
+                identity=MemorySourceIdentity(
+                    source_id="onebot-source:" + source_hash,
+                    source_kind="GROUP" if is_group else "DIRECT",
+                    platform=normalized["platform"],
+                    realm_id="qq:" + connection.self_id,
+                    external_group_id=channel_ref if is_group else None,
+                    trunk_id="onebot-trunk:" + source_hash if is_group else None,
+                ),
+                source_unit_id="onebot-unit:" + event_hash,
+                source_revision=1,
+                unit_kind="GROUP_MESSAGE" if is_group else "DIRECT_MESSAGE",
+                author=MemoryPayloadRef(
+                    author_ref.payload_id,
+                    author_ref.digest,
+                    author_ref.owner_component_id,
+                    author_ref.owner_kind,
+                    author_ref.owner_id,
+                ),
+                parts=(
+                    MemoryPart(
+                        "part:text",
+                        0,
+                        "TEXT",
+                        "text/plain; charset=utf-8",
+                        MemoryPayloadRef(
+                            saved_memory_text.payload_id,
+                            saved_memory_text.content_digest,
+                            "adapter.onebot",
+                            "onebot.memory-text",
+                            memory_owner_id,
+                        ),
+                        byte_length=len(memory_text.encode("utf-8")),
+                    ),
+                ),
+                occurred_at=sent_at,
+            )
         event = OneBotPlatformEvent(
             event_id=event_id,
             platform_message_ref=message_ref,
@@ -529,6 +603,7 @@ class CleanOneBotRuntime:
             expected_binding_epoch=connection.binding_epoch,
             client_incarnation=connection.client_incarnation,
             event=event,
+            memory_capture=memory_capture,
         )
 
     async def admit_http_event(

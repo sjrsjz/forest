@@ -94,6 +94,7 @@ _MODULES = {
             "runtime.call.admit",
             "runtime.state.publish",
             "kernel.uow.conversation.final-reply",
+            "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
             "kernel.uow.onebot.ingress",
         ),

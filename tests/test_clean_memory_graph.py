@@ -790,19 +790,41 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
     ]
 
     missing = await admit(2, capture=False)
-    with pytest.raises(ForestError) as caught:
-        await unit_of_work.select_input(actor, "selection/uow/2", boundary="IDLE")
-    assert caught.value.code == "MEMORY_OCCURRENCE_MISSING"
-    snapshot = await scheduler.context_snapshot(actor)
-    assert snapshot["context_applied_seq"] == 1
-
-    await memory.capture_source_unit(operation_id="capture/uow-2", **missing)
     second = await unit_of_work.select_input(actor, "selection/uow/2", boundary="IDLE")
-    assert second["memory_qualified_count"] == 1
+    assert second["kind"] == "SILENT_DRAIN"
+    assert second["memory_qualified_count"] == 0
+    assert second["memory_pending_count"] == 1
+    snapshot = await scheduler.context_snapshot(actor)
+    assert snapshot["context_applied_seq"] == 2
+
+    late = await actual_memory.capture_source_unit(operation_id="capture/uow-2", **missing)
+    assert late["eligibility_state"] == "ELIGIBLE"
     assert {item["source_unit_id"] for item in (await memory.query_sources())["items"]} == {
         "unit/uow-1",
         "unit/uow-2",
     }
+
+    racing = await admit(3, capture=False)
+    selection, _capture = await asyncio.gather(
+        unit_of_work.select_input(actor, "selection/uow/3", boundary="IDLE"),
+        actual_memory.capture_source_unit(operation_id="capture/uow-3", **racing),
+    )
+    assert selection["memory_qualified_count"] + selection["memory_pending_count"] == 1
+    assert {item["source_unit_id"] for item in (await memory.query_sources())["items"]} == {
+        "unit/uow-1",
+        "unit/uow-2",
+        "unit/uow-3",
+    }
+    async with store.pool.connection() as conn:
+        unresolved = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT count(*) AS n FROM {}.pending_input_events "
+                    "WHERE state='PENDING_CAPTURE'"
+                ).format(sql.Identifier(memory.namespace))
+            )
+        ).fetchone()
+    assert unresolved["n"] == 0
 
 
 async def _capture_and_qualify(

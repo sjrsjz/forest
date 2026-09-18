@@ -403,13 +403,14 @@ class MemoryGraphRepository:
         *,
         operation_id: str,
         identity: MemorySourceIdentity,
+        _connection=None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         if type(identity) is not MemorySourceIdentity:
             raise ForestError("MEMORY_INPUT_INVALID", "Invalid Memory source identity", 422)
         identity.validate()
         input_digest = _digest(identity.canonical())
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             domain = await (
                 await conn.execute(
                     sql.SQL("SELECT 1 FROM {} WHERE bot_id=%s").format(
@@ -531,6 +532,9 @@ class MemoryGraphRepository:
             )
             return {**dict(row), "duplicate_source": duplicate_source}
 
+    async def register_source_in(self, conn, **values) -> dict:
+        return await self.register_source(_connection=conn, **values)
+
     @staticmethod
     def _modality(parts: tuple[MemoryPart, ...], unit_kind: str) -> str:
         kinds = {part.part_kind for part in parts}
@@ -607,6 +611,11 @@ class MemoryGraphRepository:
         )
         async with self._transaction(_connection) as conn:
             await self._lock(conn, "capture-operation:" + operation_id)
+            await self._lock(
+                conn,
+                "event-eligibility:"
+                + _digest([occurrence.conversation_ref, occurrence.event_ref]),
+            )
             replay = await (
                 await conn.execute(
                     sql.SQL("SELECT c.*,u.source_order_seq,u.trunk_id,u.modality,u.eligibility_state "
@@ -621,7 +630,23 @@ class MemoryGraphRepository:
             if replay is not None:
                 if replay["input_digest"] != input_digest:
                     raise ForestError("MEMORY_CAPTURE_CONFLICT", "Capture operation differs", 409)
-                return dict(replay)
+                await self._resolve_pending_input_in(
+                    conn,
+                    source_unit_id=source_unit_id,
+                    occurrence_id=occurrence.occurrence_id,
+                    conversation_ref=occurrence.conversation_ref,
+                    event_ref=occurrence.event_ref,
+                )
+                refreshed = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT source_order_seq,trunk_id,modality,eligibility_state "
+                            "FROM {} WHERE bot_id=%s AND source_unit_id=%s"
+                        ).format(self._table("source_units")),
+                        (self.store.bot_id, source_unit_id),
+                    )
+                ).fetchone()
+                return {**dict(replay), **dict(refreshed)}
             await self._epoch(conn, expected=expected_deletion_epoch)
             admission_locks = {
                 "source-unit:" + source_unit_id,
@@ -798,6 +823,13 @@ class MemoryGraphRepository:
                     ),
                 )
             ).fetchone()
+            await self._resolve_pending_input_in(
+                conn,
+                source_unit_id=source_unit_id,
+                occurrence_id=occurrence.occurrence_id,
+                conversation_ref=occurrence.conversation_ref,
+                event_ref=occurrence.event_ref,
+            )
             unit = await (
                 await conn.execute(
                     sql.SQL("SELECT source_order_seq,trunk_id,modality,eligibility_state "
@@ -822,6 +854,8 @@ class MemoryGraphRepository:
         context_revision: int,
         expected_deletion_epoch: int,
         _connection=None,
+        _input_batch_verifier=None,
+        _skip_input_batch_verification: bool = False,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -872,20 +906,22 @@ class MemoryGraphRepository:
                 raise ForestError("MEMORY_SOURCE_NOT_FOUND", "Memory occurrence is unavailable", 404)
             if unit["eligibility_state"] == "SUPPRESSED" or occurrence["eligibility_state"] == "SUPPRESSED":
                 raise ForestError("MEMORY_SOURCE_SUPPRESSED", "Memory source unit was removed", 409)
-            if self.input_batch_verifier is None:
+            verifier = _input_batch_verifier or self.input_batch_verifier
+            if verifier is None and not _skip_input_batch_verification:
                 raise ForestError(
                     "MEMORY_INPUT_AUTHORITY_MISSING",
                     "Conversation InputBatch verification is unavailable",
                     503,
                 )
-            await _call(
-                self.input_batch_verifier,
-                conn,
-                input_batch_ref=input_batch_ref,
-                conversation_ref=occurrence["conversation_ref"],
-                event_ref=occurrence["event_ref"],
-                context_revision=context_revision,
-            )
+            if not _skip_input_batch_verification:
+                await _call(
+                    verifier,
+                    conn,
+                    input_batch_ref=input_batch_ref,
+                    conversation_ref=occurrence["conversation_ref"],
+                    event_ref=occurrence["event_ref"],
+                    context_revision=context_revision,
+                )
             if occurrence["eligibility_state"] == "ELIGIBLE":
                 if (
                     occurrence["input_batch_ref"] != input_batch_ref
@@ -946,6 +982,7 @@ class MemoryGraphRepository:
         event_refs,
         context_revision: int,
         expected_deletion_epoch: int,
+        input_batch_verifier=None,
     ) -> tuple[dict, ...]:
         """Qualify the exact committed Conversation batch as one UoW participant."""
 
@@ -959,6 +996,12 @@ class MemoryGraphRepository:
             _bounded(event_ref, "event_ref", 256)
         if not events:
             return ()
+        verifier = input_batch_verifier or self.input_batch_verifier
+        for event_ref in sorted(events):
+            await self._lock(
+                conn,
+                "event-eligibility:" + _digest([conversation_ref, event_ref]),
+            )
         rows = await (
             await conn.execute(
                 sql.SQL(
@@ -969,15 +1012,72 @@ class MemoryGraphRepository:
             )
         ).fetchall()
         by_event = {row["event_ref"]: row for row in rows}
-        if set(by_event) != set(events):
-            raise ForestError(
-                "MEMORY_OCCURRENCE_MISSING",
-                "A committed InputBatch event has no Memory occurrence",
-                409,
-            )
         results = []
         for event_ref in events:
-            row = by_event[event_ref]
+            row = by_event.get(event_ref)
+            if row is None:
+                if verifier is None:
+                    raise ForestError(
+                        "MEMORY_INPUT_AUTHORITY_MISSING",
+                        "Conversation InputBatch verification is unavailable",
+                        503,
+                    )
+                await _call(
+                    verifier,
+                    conn,
+                    input_batch_ref=input_batch_ref,
+                    conversation_ref=conversation_ref,
+                    event_ref=event_ref,
+                    context_revision=context_revision,
+                )
+                pending_digest = _digest(
+                    [
+                        operation_id,
+                        input_batch_ref,
+                        conversation_ref,
+                        event_ref,
+                        context_revision,
+                        expected_deletion_epoch,
+                    ]
+                )
+                pending = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,conversation_ref,event_ref,operation_id,"
+                            "input_digest,input_batch_ref,context_revision,accepted_deletion_epoch) "
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT "
+                            "(bot_id,conversation_ref,event_ref) DO NOTHING RETURNING *"
+                        ).format(self._table("pending_input_events")),
+                        (
+                            self.store.bot_id,
+                            conversation_ref,
+                            event_ref,
+                            operation_id,
+                            pending_digest,
+                            input_batch_ref,
+                            context_revision,
+                            expected_deletion_epoch,
+                        ),
+                    )
+                ).fetchone()
+                if pending is None:
+                    pending = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s "
+                                "AND event_ref=%s"
+                            ).format(self._table("pending_input_events")),
+                            (self.store.bot_id, conversation_ref, event_ref),
+                        )
+                    ).fetchone()
+                if pending["input_digest"] != pending_digest:
+                    raise ForestError(
+                        "MEMORY_ELIGIBILITY_CONFLICT",
+                        "Pending Memory eligibility differs",
+                        409,
+                    )
+                results.append(dict(pending))
+                continue
             item_operation_id = "eligibility:" + hashlib.sha256(
                 _canonical([self.store.bot_id, operation_id, row["occurrence_id"]])
             ).hexdigest()
@@ -990,9 +1090,62 @@ class MemoryGraphRepository:
                     input_batch_ref=input_batch_ref,
                     context_revision=context_revision,
                     expected_deletion_epoch=expected_deletion_epoch,
+                    _input_batch_verifier=verifier,
                 )
             )
         return tuple(results)
+
+    async def _resolve_pending_input_in(
+        self,
+        conn,
+        *,
+        source_unit_id: str,
+        occurrence_id: str,
+        conversation_ref: str,
+        event_ref: str,
+    ) -> dict | None:
+        pending = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s "
+                    "AND event_ref=%s FOR UPDATE"
+                ).format(self._table("pending_input_events")),
+                (self.store.bot_id, conversation_ref, event_ref),
+            )
+        ).fetchone()
+        if pending is None or pending["state"] == "RESOLVED":
+            return None if pending is None else dict(pending)
+        item_operation_id = "eligibility:" + hashlib.sha256(
+            _canonical([self.store.bot_id, pending["operation_id"], occurrence_id])
+        ).hexdigest()
+        await self.qualify_occurrence_in(
+            conn,
+            operation_id=item_operation_id,
+            source_unit_id=source_unit_id,
+            occurrence_id=occurrence_id,
+            input_batch_ref=pending["input_batch_ref"],
+            context_revision=pending["context_revision"],
+            expected_deletion_epoch=pending["accepted_deletion_epoch"],
+            _skip_input_batch_verification=True,
+        )
+        return dict(
+            await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='RESOLVED',source_unit_id=%s,occurrence_id=%s,"
+                        "resolved_at=clock_timestamp() WHERE bot_id=%s AND conversation_ref=%s "
+                        "AND event_ref=%s RETURNING *"
+                    ).format(self._table("pending_input_events")),
+                    (
+                        source_unit_id,
+                        occurrence_id,
+                        self.store.bot_id,
+                        conversation_ref,
+                        event_ref,
+                    ),
+                )
+            ).fetchone()
+        )
 
     async def suppress_sources_in(
         self,

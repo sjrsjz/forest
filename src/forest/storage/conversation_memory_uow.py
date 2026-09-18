@@ -54,8 +54,20 @@ class ConversationMemoryInputUnitOfWork:
                     event_refs=event_refs,
                     context_revision=result["context_revision"],
                     expected_deletion_epoch=deletion_epoch,
+                    input_batch_verifier=self.scheduler.verify_input_batch_occurrence_in,
                 )
-                result = {**result, "memory_qualified_count": len(qualifications)}
+                pending = sum(
+                    item.get("state") == "PENDING_CAPTURE" for item in qualifications
+                )
+                result = {
+                    **result,
+                    "memory_qualified_count": len(qualifications) - pending,
+                    "memory_pending_count": pending,
+                }
             else:
-                result = {**result, "memory_qualified_count": 0}
+                result = {
+                    **result,
+                    "memory_qualified_count": 0,
+                    "memory_pending_count": 0,
+                }
             return result

@@ -208,6 +208,34 @@ CREATE TABLE eligibility_operations (
     FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)
 );
 
+CREATE TABLE pending_input_events (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    conversation_ref text NOT NULL
+        CHECK (octet_length(conversation_ref) BETWEEN 1 AND 256),
+    event_ref text NOT NULL CHECK (octet_length(event_ref) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    input_batch_ref text NOT NULL CHECK (octet_length(input_batch_ref) BETWEEN 1 AND 256),
+    context_revision bigint NOT NULL CHECK (context_revision > 0),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    state text NOT NULL DEFAULT 'PENDING_CAPTURE'
+        CHECK (state IN ('PENDING_CAPTURE','RESOLVED')),
+    source_unit_id text,
+    occurrence_id text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    resolved_at timestamptz,
+    PRIMARY KEY (bot_id,conversation_ref,event_ref),
+    UNIQUE (bot_id,operation_id,event_ref),
+    CHECK (
+        (state='PENDING_CAPTURE' AND source_unit_id IS NULL AND occurrence_id IS NULL
+            AND resolved_at IS NULL)
+        OR (state='RESOLVED' AND source_unit_id IS NOT NULL AND occurrence_id IS NOT NULL
+            AND resolved_at IS NOT NULL)
+    ),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)
+);
+
 CREATE TABLE source_suppressions (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),

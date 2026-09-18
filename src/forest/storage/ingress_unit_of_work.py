@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from forest.errors import ForestError
 from forest.storage.adapter_onebot_authority import OneBotPlatformEvent
 from forest.storage.conversation_scheduler import SchedulerPayloadRef
+from forest.storage.memory_graph_authority import (
+    MemoryOccurrence,
+    MemoryPart,
+    MemoryPayloadRef,
+    MemorySourceIdentity,
+)
 from forest.storage.shell_command_authority import (
     ShellAdmissionProof,
     ShellPayloadRef,
@@ -23,13 +30,25 @@ class ShellIngressCommand:
     idempotency_key: str
 
 
+@dataclass(frozen=True)
+class IngressMemoryCapture:
+    identity: MemorySourceIdentity
+    source_unit_id: str
+    source_revision: int
+    unit_kind: str
+    author: MemoryPayloadRef
+    parts: tuple[MemoryPart, ...]
+    occurred_at: datetime
+
+
 class OneBotIngressUnitOfWork:
     """Coordinate participant ports without taking ownership of their facts."""
 
-    def __init__(self, store, *, adapter, conversation, shell=None) -> None:
+    def __init__(self, store, *, adapter, conversation, memory=None, shell=None) -> None:
         self.store = store
         self.adapter = adapter
         self.conversation = conversation
+        self.memory = memory
         self.shell = shell
 
     @staticmethod
@@ -75,6 +94,7 @@ class OneBotIngressUnitOfWork:
         expected_binding_epoch: int,
         client_incarnation: str,
         event: OneBotPlatformEvent,
+        memory_capture: IngressMemoryCapture | None = None,
         shell_command: ShellIngressCommand | None = None,
     ) -> dict:
         if shell_command is not None:
@@ -119,6 +139,40 @@ class OneBotIngressUnitOfWork:
                 received_at=event.received_at,
                 classification_deadline=event.classification_deadline,
             )
+            memory_result = None
+            if memory_capture is not None and self.memory is not None:
+                if type(memory_capture) is not IngressMemoryCapture:
+                    raise ForestError(
+                        "MEMORY_INPUT_INVALID", "Invalid ingress Memory capture", 422
+                    )
+                source = await self.memory.register_source_in(
+                    conn,
+                    operation_id="onebot-memory-source:" + memory_capture.identity.source_id,
+                    identity=memory_capture.identity,
+                )
+                deletion_epoch = await self.memory.deletion_epoch_in(conn)
+                captured = await self.memory.capture_source_unit_in(
+                    conn,
+                    operation_id="onebot-memory-capture:" + event.event_id,
+                    source_unit_id=memory_capture.source_unit_id,
+                    source_id=memory_capture.identity.source_id,
+                    source_revision=memory_capture.source_revision,
+                    unit_kind=memory_capture.unit_kind,
+                    author_subject_ref=event.author_subject_ref,
+                    author=memory_capture.author,
+                    parts=memory_capture.parts,
+                    occurrence=MemoryOccurrence(
+                        occurrence_id="onebot-memory-occurrence:" + event.event_id,
+                        binding_ref=binding_id,
+                        conversation_ref=event.conversation_ref,
+                        event_ref=scheduler_event_id,
+                        ingress_seq=conversation_result["ingress_seq"],
+                        observed_at=event.received_at,
+                    ),
+                    occurred_at=memory_capture.occurred_at,
+                    expected_deletion_epoch=deletion_epoch,
+                )
+                memory_result = {"source": source, "capture": captured}
             shell_result = None
             classification = None
             if shell_command is not None:
@@ -151,6 +205,7 @@ class OneBotIngressUnitOfWork:
             return {
                 "adapter": adapter_result,
                 "conversation": conversation_result,
+                "memory": memory_result,
                 "shell": shell_result,
                 "classification": classification,
             }

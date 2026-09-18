@@ -41,12 +41,21 @@ class CleanMemoryRuntime:
     state_contract = _STATE_CONTRACT
 
     def __init__(
-        self, *, repository, module_configuration, grants, generation_verifier
+        self,
+        *,
+        repository,
+        module_configuration,
+        grants,
+        generation_verifier,
+        generation_admission_verifier,
+        generation_member_verifier,
     ) -> None:
         self.repository = repository
         self.module_configuration = module_configuration
         self.grants = grants
         self.generation_verifier = generation_verifier
+        self.generation_admission_verifier = generation_admission_verifier
+        self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
         self.profile: FrozenMemoryProfile | None = None
         self.active = False
@@ -181,3 +190,46 @@ class CleanMemoryRuntime:
     async def query_relations(self, **filters):
         await self._admit()
         return await self.repository.query_relations(**filters)
+
+    async def _admit_in(self, conn, *, owned_work: bool) -> None:
+        if not self.active or self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Memory Generation is not accepting transaction work",
+                409,
+            )
+        if owned_work:
+            await self.generation_member_verifier(
+                conn,
+                component_id="memory.graph",
+                generation_id=self.generation_identity.generation_id,
+            )
+        else:
+            await self.generation_admission_verifier(
+                conn,
+                component_id="memory.graph",
+                generation_id=self.generation_identity.generation_id,
+                admission_lane="DATA",
+            )
+
+    async def qualify_input_batch_in(self, conn, **values):
+        await self._admit_in(conn, owned_work=True)
+        return await self.repository.qualify_input_batch_in(conn, **values)
+
+    async def register_source_in(self, conn, **values):
+        await self._admit_in(conn, owned_work=False)
+        return await self.repository.register_source_in(conn, **values)
+
+    async def capture_source_unit_in(self, conn, **values):
+        await self._admit_in(conn, owned_work=False)
+        return await self.repository.capture_source_unit_in(conn, **values)
+
+    async def deletion_epoch_in(self, conn) -> int:
+        await self._admit_in(conn, owned_work=True)
+        if self.repository.deletion_epoch_guard is None:
+            raise ForestError(
+                "PAYLOAD_AUTHORITY_MISSING",
+                "Memory deletion epoch authority is unavailable",
+                503,
+            )
+        return await self.repository.deletion_epoch_guard(conn)

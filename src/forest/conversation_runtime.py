@@ -25,6 +25,7 @@ class CleanConversationSchedulerRuntime:
         ],
         "requires": [
             {"service_id": "agent.execute", "version": 1},
+            {"service_id": "kernel.uow.conversation.select-input", "version": 1},
             {"service_id": "kernel.uow.conversation.final-reply", "version": 1},
             {"service_id": "kernel.uow.conversation.session-handoff", "version": 1},
         ],
@@ -41,6 +42,7 @@ class CleanConversationSchedulerRuntime:
         generation_verifier,
         generation_member_verifier=None,
         agent_execution=None,
+        input_selection_port=None,
         completion_port=None,
         session_decision_port=None,
         graph_admission=None,
@@ -51,6 +53,7 @@ class CleanConversationSchedulerRuntime:
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
         self.agent_execution = agent_execution
+        self.input_selection_port = input_selection_port
         self.completion_port = completion_port
         self.session_decision_port = session_decision_port
         self.graph_admission = graph_admission
@@ -111,6 +114,7 @@ class CleanConversationSchedulerRuntime:
             item is None
             for item in (
                 self.agent_execution,
+                self.input_selection_port,
                 self.completion_port,
                 self.session_decision_port,
                 self.graph_admission,
@@ -233,11 +237,15 @@ class CleanConversationSchedulerRuntime:
         )
 
     async def select_input(self, actor, operation_id: str, **values):
-        return await self._repository_call(
-            "select_input_in",
-            actor=actor,
-            operation_id=operation_id,
-            owned_work=True,
+        if self.input_selection_port is None:
+            raise ForestError(
+                "CONVERSATION_INPUT_PORT_MISSING",
+                "Conversation input selection coordinator is unavailable",
+                503,
+            )
+        return await self.input_selection_port.select_input(
+            actor,
+            operation_id,
             **values,
         )
 
@@ -268,6 +276,10 @@ class CleanConversationSchedulerRuntime:
             operation_id,
             **values,
         )
+
+    async def verify_input_batch_occurrence_in(self, conn, **values):
+        await self._verify_member(conn)
+        return await self.repository.verify_input_batch_occurrence_in(conn, **values)
 
     async def requeue_run(self, actor, **values):
         return await self._repository_call(

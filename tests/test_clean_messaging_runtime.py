@@ -370,6 +370,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         reply_uow_route = conversation_runtime.completion_port._commit.route
         assert reply_uow_route.provider_component_id == "kernel.runtime"
         assert reply_uow_route.owned_work is True
+        input_uow_route = conversation_runtime.input_selection_port._select_input.route
+        assert input_uow_route.provider_component_id == "kernel.runtime"
+        assert input_uow_route.owned_work is True
         assert adapter_runtime.ingress_port is not messaging.conversation
         ingress_route = adapter_runtime.ingress_port._admit.route
         assert ingress_route.provider_component_id == "kernel.runtime"
@@ -465,6 +468,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert inbox["event_id"].startswith("onebot:onebot-event:")
         assert inbox["conversation_id"] == "onebot:group:933179609"
         assert inbox["author_subject_ref"] == "qq:42"
+        trunks = await memory_runtime.list_trunks()
+        assert len(trunks) == 1
+        assert trunks[0]["external_group_id"] == "933179609"
+        assert trunks[0]["registered_sources"] == 1
+        assert trunks[0]["eligible_sources"] == 0
         async with store.pool.connection() as conn, conn.transaction():
             classified = await conversation_runtime.complete_classification_in(
                 conn,
@@ -481,6 +489,15 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                 principal_ref="qq:42",
             )
         assert classified["classified_through_seq"] == 1
+        for _ in range(500):
+            remembered = await memory_runtime.query_sources()
+            if remembered["items"]:
+                break
+            await asyncio.sleep(0.01)
+        assert len(remembered["items"]) == 1
+        assert remembered["items"][0]["external_group_id"] == "933179609"
+        assert remembered["items"][0]["author_subject_ref"] == "qq:42"
+        assert remembered["items"][0]["parts"][0]["part_kind"] == "TEXT"
         assert await conversation_runtime.claimable_conversations() == (
             "onebot:group:933179609",
         )
