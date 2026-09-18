@@ -57,6 +57,7 @@ from forest.storage.migration_v24 import install_writer_gate_in as install_write
 from forest.storage.migration_v25 import install_writer_gate_in as install_writer_gate_v25_in
 from forest.storage.migration_v26 import WRITER_GENERATION
 from forest.storage.migration_v26 import install_writer_gate_in as install_writer_gate_v26_in
+from forest.storage.runtime_identity import HostLease
 
 MIGRATION_HANDLERS = {
     "029_input_payloads.sql": "input_payloads_v1",
@@ -453,15 +454,6 @@ def _migration_checksum(version: str, source: str) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(envelope).hexdigest()
-
-
-@dataclass(frozen=True)
-class HostLease:
-    bot_id: str
-    host_id: str
-    incarnation: str
-    owner_epoch: int
-    expires_at: datetime
 
 
 @dataclass(frozen=True)

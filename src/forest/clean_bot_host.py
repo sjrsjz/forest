@@ -27,7 +27,7 @@ from forest.errors import ForestError
 from forest.models import ModelCapabilities
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.payload_authority import PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
@@ -242,7 +242,7 @@ class CleanBotHost:
         websocket_client_factory=None,
     ) -> None:
         self.settings = settings
-        self.store = BotStore(settings.dsn, settings.bot_id)
+        self.store = CleanBotStore(settings.dsn, settings.bot_id)
         self.schema_bundle_installer = SchemaBundleInstaller(self.store)
         self.generation_authority = None
         self.registry: RuntimeModuleRegistry | None = None

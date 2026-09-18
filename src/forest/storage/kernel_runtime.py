@@ -15,7 +15,7 @@ from forest.runtime_generation import (
     PreparedGenerationBinding,
     RuntimeGenerationGraph,
 )
-from forest.storage.bot import HostLease
+from forest.storage.runtime_identity import HostLease
 
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")

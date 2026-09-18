@@ -101,6 +101,8 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 
 切换时直接删除这些路径并重建开发数据库，不建立桥接层。
 
+生产 `CleanBotHost` 已不再导入或实例化旧 `BotStore`。它使用仅含固定 Bot 身份与受限 PostgreSQL 连接池的 `CleanBotStore`；HostLease 类型也已移入无迁移依赖的 runtime identity 模块。导入 `forest.clean_bot_host` 不会再加载 `forest.storage.bot` 或任何 `migration_v1`—`migration_v26` helper。旧对象暂时只为尚未删除的旧入口和旧测试保留。
+
 ## 当前阻断项
 
 1. 扩展 `shell.command` 的模块贡献式命令目录：当前生产路径已完成 `core.status`、`core.pause/resume`、群管理员策略、P0/P1 优先级、DATA 关闭时的 CONTROL 准入、双阶段授权和安全失败回执；仍需接入取消、重载、任务处理及模块查询命令，补齐审计查询投影，并验证 Shell Generation 热替换排空。
@@ -124,6 +126,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - 干净管理面首个垂直切片：真实 PostgreSQL 宿主集成通过，验证管理 token、模块 Generation 贡献发现、Memory 主干/来源筛选、结构错误 422、VL profile 不可变约束、Embedding endpoint plan/apply、RuntimeGraph 原子热替换、固定 `100dvh` PC 工作台及 CSP；Docker Compose 使用完整占位环境变量可通过配置解析。
 - `agent.runtime` 管理贡献：真实 PostgreSQL 宿主集成通过，完整 CorePrompt 正文、协议版本、parser revision 与固定摘要可见且不可编辑；PresetContext 经 Agent 自有 Payload authority 生成带来源的新 PayloadRef，再通过配置 CAS 和完整 RuntimeGraph 替换生效。不存在子 Agent、Agent 目录或第二套聊天执行链。
 - `adapter.onebot` 管理贡献：Binding 的账号、连接状态、desired/effective revision、binding/connection epoch、当前 client fence 与端点配置由 Adapter authority 投影；修改先生成有期限的原生 Binding plan，再由 Adapter apply，候选连接在 BUFFERING 中验证账号后随 RuntimeGraph 原子换代。应用回执丢失后用同一幂等键重放不会再替换图。访问令牌不回显；在 Secret authority UI 落地前仅允许沿用现有 secret 引用与 transport。
+- 干净生产存储入口：真实 PostgreSQL 下 `CleanBotStore` 从空库完成 kernel baseline、15 个模块 bundle、运行图多次热替换和重启；定向导入探针确认生产宿主不加载旧 `BotStore` 或 26 代迁移 helper。干净运行图组合仍为 `236 passed`。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

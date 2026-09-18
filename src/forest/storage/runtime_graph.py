@@ -9,7 +9,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.storage.bot import HostLease
+from forest.storage.runtime_identity import HostLease
 
 
 @dataclass(frozen=True)
