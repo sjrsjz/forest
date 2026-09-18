@@ -557,7 +557,9 @@ class CleanMemoryRuntime:
             error_code=error_code,
         )
 
-    async def _admit_in(self, conn, *, owned_work: bool) -> None:
+    async def _admit_in(
+        self, conn, *, owned_work: bool, admission_lane: str = "DATA"
+    ) -> None:
         if not self.active or self.generation_identity is None:
             raise ForestError(
                 "RUNTIME_GENERATION_NOT_ACTIVE",
@@ -575,7 +577,7 @@ class CleanMemoryRuntime:
                 conn,
                 component_id="memory.graph",
                 generation_id=self.generation_identity.generation_id,
-                admission_lane="DATA",
+                admission_lane=admission_lane,
             )
 
     async def qualify_input_batch_in(self, conn, **values):
@@ -594,11 +596,13 @@ class CleanMemoryRuntime:
         return qualifications
 
     async def register_source_in(self, conn, **values):
-        await self._admit_in(conn, owned_work=False)
+        admission_lane = values.pop("admission_lane", "DATA")
+        await self._admit_in(conn, owned_work=False, admission_lane=admission_lane)
         return await self.repository.register_source_in(conn, **values)
 
     async def capture_source_unit_in(self, conn, **values):
-        await self._admit_in(conn, owned_work=False)
+        admission_lane = values.pop("admission_lane", "DATA")
+        await self._admit_in(conn, owned_work=False, admission_lane=admission_lane)
         captured = await self.repository.capture_source_unit_in(conn, **values)
         if captured["eligibility_state"] == "ELIGIBLE":
             await self._prepare_source_facets_in(

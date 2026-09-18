@@ -8,6 +8,7 @@ from datetime import datetime
 from forest.errors import ForestError
 from forest.storage.adapter_onebot_authority import OneBotPlatformEvent
 from forest.storage.conversation_scheduler import SchedulerPayloadRef
+from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
 from forest.storage.media_capture_authority import IngressMediaCapture
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
@@ -29,6 +30,7 @@ class ShellIngressCommand:
     command_version: int
     arguments: ShellPayloadRef
     idempotency_key: str
+    rejection: ShellPayloadRef | None = None
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,7 @@ class OneBotIngressUnitOfWork:
     """Coordinate participant ports without taking ownership of their facts."""
 
     def __init__(
-        self, store, *, adapter, conversation, memory=None, media=None, shell=None
+        self, store, *, adapter, conversation, memory=None, media=None, shell=None, delivery=None
     ) -> None:
         self.store = store
         self.adapter = adapter
@@ -63,6 +65,7 @@ class OneBotIngressUnitOfWork:
         self.memory = memory
         self.media = media
         self.shell = shell
+        self.delivery = delivery
 
     @staticmethod
     def _scheduler_ref(reference) -> SchedulerPayloadRef:
@@ -124,9 +127,11 @@ class OneBotIngressUnitOfWork:
             )
         scheduler_operation_id = "onebot-event:" + event.event_id
         scheduler_event_id = "onebot:" + event.event_id
+        admission_lane = "CONTROL" if shell_command is not None else "DATA"
         async with self.store.pool.connection() as conn, conn.transaction():
             adapter_result = await self.adapter.record_platform_event_in(
                 conn,
+                admission_lane=admission_lane,
                 operation_id=operation_id,
                 binding_id=binding_id,
                 expected_binding_epoch=expected_binding_epoch,
@@ -135,6 +140,7 @@ class OneBotIngressUnitOfWork:
             )
             conversation_result = await self.conversation.admit_message_in(
                 conn,
+                admission_lane=admission_lane,
                 operation_id=scheduler_operation_id,
                 conversation_id=event.conversation_ref,
                 source_component_id="adapter.onebot",
@@ -162,12 +168,14 @@ class OneBotIngressUnitOfWork:
                     )
                 source = await self.memory.register_source_in(
                     conn,
+                    admission_lane=admission_lane,
                     operation_id="onebot-memory-source:" + memory_capture.identity.source_id,
                     identity=memory_capture.identity,
                 )
                 deletion_epoch = await self.memory.deletion_epoch_in(conn)
                 captured = await self.memory.capture_source_unit_in(
                     conn,
+                    admission_lane=admission_lane,
                     operation_id="onebot-memory-capture:" + event.event_id,
                     source_unit_id=memory_capture.source_unit_id,
                     source_id=memory_capture.identity.source_id,
@@ -202,6 +210,7 @@ class OneBotIngressUnitOfWork:
                     )
                 media_result = await self.media.register_capture_in(
                     conn,
+                    admission_lane=admission_lane,
                     operation_id="onebot-media-capture:" + event.event_id,
                     capture=media_capture,
                     author_subject_ref=event.author_subject_ref,
@@ -221,6 +230,7 @@ class OneBotIngressUnitOfWork:
                 is_trigger = classification.decision == "TRIGGER"
                 classification_result = await self.conversation.complete_classification_in(
                     conn,
+                    admission_lane=admission_lane,
                     operation_id="onebot-classification:" + event.event_id,
                     conversation_id=event.conversation_ref,
                     event_id=scheduler_event_id,
@@ -248,6 +258,7 @@ class OneBotIngressUnitOfWork:
                 )
                 classification_result = await self.conversation.complete_classification_in(
                     conn,
+                    admission_lane=admission_lane,
                     operation_id="onebot-shell-classification:" + event.event_id,
                     conversation_id=event.conversation_ref,
                     event_id=scheduler_event_id,
@@ -260,6 +271,51 @@ class OneBotIngressUnitOfWork:
                     reason_code=shell_result["rejection_code"],
                     route_ref=shell_result["request_id"],
                 )
+                if shell_result["state"] == "REJECTED":
+                    if self.delivery is None or shell_command.rejection is None:
+                        raise ForestError(
+                            "SHELL_CONTROL_DELIVERY_MISSING",
+                            "Rejected Shell command has no CONTROL delivery participant",
+                            503,
+                        )
+                    delivery_generation = self.delivery.generation_identity
+                    if delivery_generation is None:
+                        raise ForestError(
+                            "SHELL_CONTROL_DELIVERY_MISSING",
+                            "Delivery Generation is unavailable",
+                            503,
+                        )
+                    identity = shell_result["request_id"]
+                    part_id = "shell-rejection-part:" + identity[-64:]
+                    await self.delivery.create_intent_in(
+                        conn,
+                        operation_id="shell-rejection-delivery:" + identity[-64:],
+                        intent_id="shell-rejection-intent:" + identity[-64:],
+                        binding_ref=binding_id,
+                        lane_kind="CONTROL",
+                        ordering_key=event.conversation_ref,
+                        conversation_ref=None,
+                        channel_kind=event.channel_kind,
+                        channel_ref=event.channel_ref,
+                        cause_component_id="shell.command",
+                        cause_kind="shell.request",
+                        cause_id=identity,
+                        delivery_generation_id=delivery_generation.generation_id,
+                        reply_ref=None,
+                        parts=(
+                            DeliveryPart(
+                                part_id,
+                                "shell-rejection-effect:" + identity[-64:],
+                                DeliveryPayloadRef(
+                                    shell_command.rejection.payload_id,
+                                    shell_command.rejection.digest,
+                                    shell_command.rejection.owner_component_id,
+                                    shell_command.rejection.owner_kind,
+                                    shell_command.rejection.owner_id,
+                                ),
+                            ),
+                        ),
+                    )
             return {
                 "adapter": adapter_result,
                 "conversation": conversation_result,

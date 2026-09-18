@@ -182,11 +182,13 @@ class OneBotAdapterRepository:
         namespace: str | None = None,
         payload_verifier: Callable[..., Awaitable[object]] | None = None,
         generation_verifier: Callable[..., Awaitable[object]],
+        generation_member_verifier: Callable[..., Awaitable[object]] | None = None,
     ) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.adapter.onebot")
         self.payload_verifier = payload_verifier
         self.generation_verifier = generation_verifier
+        self.generation_member_verifier = generation_member_verifier
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
@@ -233,6 +235,17 @@ class OneBotAdapterRepository:
             component_id="adapter.onebot",
             generation_id=generation_id,
             admission_lane=admission_lane,
+        )
+
+    async def _verify_generation_member(self, conn, generation_id: str) -> object:
+        if self.generation_member_verifier is None:
+            return await self._verify_generation(
+                conn, generation_id, admission_lane="DATA"
+            )
+        return await self.generation_member_verifier(
+            conn,
+            component_id="adapter.onebot",
+            generation_id=generation_id,
         )
 
     async def _head(self, conn, binding_id: str, *, lock: str = "") -> dict:
@@ -1023,6 +1036,7 @@ class OneBotAdapterRepository:
         expected_binding_epoch: int,
         client_incarnation: str,
         event: OneBotPlatformEvent,
+        admission_lane: str = "DATA",
         _connection=None,
     ) -> dict:
         for value, field in (
@@ -1078,7 +1092,9 @@ class OneBotAdapterRepository:
             ):
                 raise ForestError("STALE_BINDING", "OneBot client fence changed", 409)
             await self._verify_generation(
-                conn, client["adapter_generation_id"], admission_lane="DATA"
+                conn,
+                client["adapter_generation_id"],
+                admission_lane=admission_lane,
             )
             replay = await (
                 await conn.execute(
@@ -1315,9 +1331,7 @@ class OneBotAdapterRepository:
             or client["executor_fence_digest"] != executor_fence_digest
         ):
             raise ForestError("STALE_BINDING", "OneBot transport fence changed", 409)
-        await self._verify_generation(
-            conn, adapter_generation_id, admission_lane="DATA"
-        )
+        await self._verify_generation_member(conn, adapter_generation_id)
         return {"binding_id": binding_ref, "client_incarnation": client_incarnation}
 
     async def list_bindings(self) -> list[dict]:

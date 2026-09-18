@@ -20,6 +20,7 @@ from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
+from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
@@ -140,6 +141,7 @@ class CleanBotSettings:
     allowed_group_ids: tuple[str, ...]
     group_trigger_mode: str
     private_enabled: bool
+    shell_administrator_ids: tuple[str, ...]
     agent_system_prompt: str
 
     @classmethod
@@ -152,6 +154,17 @@ class CleanBotSettings:
         if any(not item.isdecimal() for item in groups) or len(groups) != len(set(groups)):
             raise ForestError(
                 "BOT_CONFIGURATION_INVALID", "FOREST_ALLOWED_GROUP_IDS is invalid", 422
+            )
+        shell_administrators = tuple(
+            part.strip()
+            for part in os.environ.get("FOREST_SHELL_ADMIN_IDS", "").split(",")
+            if part.strip()
+        )
+        if any(not item.isdecimal() for item in shell_administrators) or len(
+            shell_administrators
+        ) != len(set(shell_administrators)):
+            raise ForestError(
+                "BOT_CONFIGURATION_INVALID", "FOREST_SHELL_ADMIN_IDS is invalid", 422
             )
         modalities = tuple(
             part.strip()
@@ -225,6 +238,7 @@ class CleanBotSettings:
             allowed_group_ids=groups,
             group_trigger_mode=mode,
             private_enabled=private == "true",
+            shell_administrator_ids=shell_administrators,
             agent_system_prompt=os.environ.get("FOREST_AGENT_SYSTEM_PROMPT", ""),
         )
 
@@ -510,6 +524,18 @@ class CleanBotHost:
                 kernel=self._kernel,
                 adapter=messaging.adapter,
             )
+            shell = await bootstrap_clean_shell(
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                initial_configuration={
+                    "protocol": "forest.shell.command/1",
+                    "binding_ref": "binding/main",
+                    "administrator_principals": [
+                        "qq:" + value for value in self.settings.shell_administrator_ids
+                    ],
+                },
+            )
             await self._configure_binding(messaging.adapter)
             self._lease = await self._kernel.runtime.claim_host(
                 self._host_id, self._incarnation
@@ -524,6 +550,7 @@ class CleanBotHost:
                     media.descriptor,
                     agent.descriptor,
                     trigger.descriptor,
+                    shell.descriptor,
                 )
                 + messaging.descriptors
                 + (delivery.descriptor,)

@@ -125,6 +125,7 @@ class CleanOneBotRuntime:
         "requires": [
             {"service_id": "kernel.uow.onebot.ingress", "version": 1},
             {"service_id": "conversation.trigger.classify", "version": 1},
+            {"service_id": "shell.ingress.inspect", "version": 1},
         ],
     }
     state_schema = 1
@@ -140,6 +141,9 @@ class CleanOneBotRuntime:
     async def record_platform_event_in(self, conn, **values):
         return await self.repository.record_platform_event_in(conn, **values)
 
+    async def verify_transport_fence_in(self, conn, **values):
+        return await self.repository.verify_transport_fence_in(conn, **values)
+
     def __init__(
         self,
         *,
@@ -150,6 +154,7 @@ class CleanOneBotRuntime:
         secret_resolver: Callable[..., Awaitable[Mapping[str, str]] | Mapping[str, str]],
         ingress_port,
         trigger_policy,
+        shell_inspector,
         http_client_factory=OneBotHTTPClient,
         websocket_client_factory=OneBotWebSocketClient.create,
     ) -> None:
@@ -160,6 +165,7 @@ class CleanOneBotRuntime:
         self.secret_resolver = secret_resolver
         self.ingress_port = ingress_port
         self.trigger_policy = trigger_policy
+        self.shell_inspector = shell_inspector
         self.http_client_factory = http_client_factory
         self.websocket_client_factory = websocket_client_factory
         self.generation_identity: BoundGenerationIdentity | None = None
@@ -668,14 +674,29 @@ class CleanOneBotRuntime:
             classification_deadline=received_at + timedelta(minutes=2),
             sent_at=sent_at,
         )
-        classified = await self.trigger_policy(normalized={**normalized, "segments": context_parts})
-        classification = IngressClassification(
-            decision=classified["decision"],
-            classifier_component_id=classified["classifier_component_id"],
-            classifier_generation_id=classified["classifier_generation_id"],
-            rule_revision=classified["rule_revision"],
-            reason_code=classified["reason_code"],
+        projected = {**normalized, "segments": context_parts}
+        shell_command = await self.shell_inspector(
+            normalized=projected,
+            binding_ref=connection.binding_id,
+            binding_epoch=connection.binding_epoch,
+            connection_epoch=connection.connection_epoch,
+            client_incarnation=connection.client_incarnation,
+            adapter_generation_id=self.generation_identity.generation_id,
+            executor_fence_digest=connection.executor_fence_digest,
+            conversation_ref=conversation_ref,
+            event_ref=event_id,
+            principal_ref=author_subject_ref,
         )
+        classification = None
+        if shell_command is None:
+            classified = await self.trigger_policy(normalized=projected)
+            classification = IngressClassification(
+                decision=classified["decision"],
+                classifier_component_id=classified["classifier_component_id"],
+                classifier_generation_id=classified["classifier_generation_id"],
+                rule_revision=classified["rule_revision"],
+                reason_code=classified["reason_code"],
+            )
         await self.ingress_port.admit(
             operation_id="onebot-admit:" + event_hash,
             binding_id=connection.binding_id,
@@ -685,6 +706,7 @@ class CleanOneBotRuntime:
             memory_capture=memory_capture,
             media_capture=media_capture,
             classification=classification,
+            shell_command=shell_command,
         )
 
     async def admit_http_event(

@@ -186,11 +186,13 @@ class CleanConversationSchedulerRuntime:
         )
 
     async def admit_message_in(self, conn, **values):
-        await self._verify(conn, admission_lane="DATA")
+        admission_lane = values.pop("admission_lane", "DATA")
+        await self._verify(conn, admission_lane=admission_lane)
         return await self.repository.admit_message_in(conn, **values)
 
     async def complete_classification_in(self, conn, **values):
-        await self._verify(conn, admission_lane="DATA")
+        admission_lane = values.pop("admission_lane", "DATA")
+        await self._verify(conn, admission_lane=admission_lane)
         return await self.repository.complete_classification_in(conn, **values)
 
     async def _repository_call(

@@ -112,11 +112,11 @@ async def clean_shell():
     async def verify_adapter_generation(
         _conn, *, component_id, generation_id, admission_lane
     ):
-        assert (component_id, generation_id, admission_lane) == (
+        assert (component_id, generation_id) == (
             "adapter.onebot",
             "generation/adapter/1",
-            "DATA",
         )
+        assert admission_lane in {"DATA", "CONTROL"}
         return {"active": True}
 
     adapter = OneBotAdapterRepository(
@@ -140,7 +140,8 @@ async def clean_shell():
 
     async def consume_authorization(_conn, **values):
         assert values["action"] == "management.invoke"
-        assert values["resource_kind"] == "shell-request"
+        assert values["resource_kind"] == "bot"
+        assert values["resource_id"] == "bot-shell"
         assert values["plan_digest"] == CAPABILITIES
         return {"ticket_id": values["ticket_id"], "accepted": True}
 
@@ -842,7 +843,7 @@ async def test_policy_revocation_blocks_claim_before_effect(clean_shell):
         clean_shell,
         (ShellPolicyGrant("BINDING", "admin/revoked", True),),
     )
-    _store, _storage, _payloads, _adapter, _gate, shell, _scheduler = clean_shell
+    _store, _storage, payloads, _adapter, _gate, shell, _scheduler = clean_shell
     await _admit(
         clean_shell,
         publication,
@@ -867,6 +868,27 @@ async def test_policy_revocation_blocks_claim_before_effect(clean_shell):
             authorization_operation_id="invoke/revoked",
         )
     assert caught.value.code == "SHELL_FORBIDDEN"
+    saved = await _put(
+        payloads,
+        owner_id="request/revoked",
+        kind="shell.result",
+        body=b'{"status":"failed"}',
+    )
+    failed = await shell.fail_claim(
+        claim,
+        operation_id="result/revoked",
+        resulting_state="FAILED",
+        result=ShellPayloadRef(
+            saved.payload_id,
+            saved.content_digest,
+            "shell.command",
+            "shell.result",
+            "request/revoked",
+        ),
+        error_code="SHELL_FORBIDDEN",
+    )
+    assert failed["resulting_state"] == "FAILED"
+    assert (await shell.load_request("request/revoked"))["state"] == "FAILED"
 
 
 @pytest.mark.postgres

@@ -34,6 +34,111 @@ class KernelRuntimeRepository:
     def _table(self, name: str):
         return sql.Identifier(self.namespace, name)
 
+    async def status(self) -> dict:
+        """Return a bounded view of the current Bot runtime graph for control planes."""
+
+        async with self.store.pool.connection() as conn:
+            runtime = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT s.status,s.maintenance_epoch,s.policy_revision,"
+                        "s.data_admission,s.control_admission,h.graph_id,h.graph_revision,"
+                        "g.graph_digest,g.state AS graph_state,h.published_at FROM {} s "
+                        "JOIN {} h ON h.bot_id=s.bot_id LEFT JOIN {} g ON g.bot_id=h.bot_id "
+                        "AND g.graph_id=h.graph_id WHERE s.bot_id=%s"
+                    ).format(
+                        self._table("runtime_state"),
+                        self._table("runtime_graph_head"),
+                        self._table("runtime_graphs"),
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            if runtime is None:
+                raise ForestError(
+                    "KERNEL_RUNTIME_NOT_INITIALIZED", "Runtime state is unavailable", 503
+                )
+            members = ()
+            if runtime["graph_id"] is not None:
+                rows = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT m.component_id,m.generation_id,g.status,g.config_revision "
+                            "FROM {} m JOIN {} g ON g.bot_id=m.bot_id "
+                            "AND g.generation_id=m.generation_id WHERE m.bot_id=%s "
+                            "AND m.graph_id=%s ORDER BY m.component_id"
+                        ).format(
+                            self._table("runtime_graph_modules"),
+                            self._table("generations"),
+                        ),
+                        (self.store.bot_id, runtime["graph_id"]),
+                    )
+                ).fetchall()
+                members = tuple(dict(row) for row in rows)
+        return {
+            "protocol": "forest.runtime-status/1",
+            "bot_id": self.store.bot_id,
+            **dict(runtime),
+            "members": members,
+        }
+
+    async def set_data_admission(
+        self,
+        lease: HostLease,
+        *,
+        expected_maintenance_epoch: int,
+        data_admission: bool,
+    ) -> dict:
+        """Atomically pause or resume DATA while leaving CONTROL available."""
+
+        if (
+            type(expected_maintenance_epoch) is not int
+            or expected_maintenance_epoch <= 0
+            or type(data_admission) is not bool
+        ):
+            raise ForestError(
+                "RUNTIME_MAINTENANCE_INPUT_INVALID",
+                "Maintenance epoch or DATA admission is invalid",
+                422,
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            current = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
+                        self._table("runtime_state")
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            if current is None:
+                raise ForestError(
+                    "KERNEL_RUNTIME_NOT_INITIALIZED", "Runtime state is unavailable", 503
+                )
+            if current["maintenance_epoch"] != expected_maintenance_epoch:
+                raise ForestError(
+                    "RUNTIME_MAINTENANCE_CONFLICT",
+                    "Maintenance intent changed",
+                    409,
+                )
+            if current["status"] != "ACTIVE" or not current["control_admission"]:
+                raise ForestError(
+                    "RUNTIME_CONTROL_ADMISSION_CLOSED",
+                    "Runtime control admission is unavailable",
+                    409,
+                )
+            saved = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET maintenance_epoch=maintenance_epoch+1,"
+                        "data_admission=%s WHERE bot_id=%s RETURNING *"
+                    ).format(self._table("runtime_state")),
+                    (data_admission, self.store.bot_id),
+                )
+            ).fetchone()
+            return dict(saved)
+
     async def claim_host(
         self,
         host_id: str,

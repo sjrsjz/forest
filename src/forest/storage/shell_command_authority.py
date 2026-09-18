@@ -315,6 +315,29 @@ class ShellCommandRepository:
             owner_id=reference.owner_id,
         )
 
+    async def policy_revision_in(self, conn, binding_ref: str) -> int:
+        _bounded(binding_ref, "binding_ref", 256)
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT revision FROM {} WHERE bot_id=%s AND binding_ref=%s").format(
+                    self._table("policy_heads")
+                ),
+                (self.store.bot_id, binding_ref),
+            )
+        ).fetchone()
+        return 0 if row is None else row["revision"]
+
+    async def registry_revision_in(self, conn) -> int:
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT revision FROM {} WHERE bot_id=%s").format(
+                    self._table("registry_heads")
+                ),
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+        return 0 if row is None else row["revision"]
+
     async def publish_policy(
         self,
         *,
@@ -323,6 +346,7 @@ class ShellCommandRepository:
         expected_revision: int,
         actor_principal_ref: str,
         grants,
+        _connection=None,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -358,7 +382,7 @@ class ShellCommandRepository:
                 "grants": canonical,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "policy-operation:" + operation_id)
             replay = await (
                 await conn.execute(
@@ -440,6 +464,7 @@ class ShellCommandRepository:
         expected_revision: int,
         graph_digest: str,
         routes,
+        _connection=None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         if type(expected_revision) is not int or expected_revision < 0:
@@ -462,7 +487,7 @@ class ShellCommandRepository:
                 "routes": [item.canonical() for item in ordered],
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             await self._lock(conn, "registry-operation:" + operation_id)
             replay = await (
                 await conn.execute(
@@ -612,8 +637,6 @@ class ShellCommandRepository:
                 "command_version": command_version,
                 "arguments": arguments.canonical(),
                 "idempotency_key": idempotency_key,
-                "received_at": received_at.isoformat(),
-                "admission_deadline": admission_deadline.isoformat(),
             }
         )
         async with self._transaction(_connection) as conn:
@@ -1059,8 +1082,8 @@ class ShellCommandRepository:
                 ticket_id=ticket_id,
                 operation_id=authorization_operation_id,
                 action="management.invoke",
-                resource_kind="shell-request",
-                resource_id=claim.request_id,
+                resource_kind="bot",
+                resource_id=self.store.bot_id,
                 input_digest=self.invocation_input_digest(claim),
                 plan_digest=claim.required_capabilities_digest,
                 audience_component_id=claim.owner_component_id,
@@ -1199,6 +1222,96 @@ class ShellCommandRepository:
 
     async def complete_in(self, conn, claim: ShellClaim, **values) -> dict:
         return await self.complete(claim, _connection=conn, **values)
+
+    async def fail_claim(
+        self,
+        claim: ShellClaim,
+        *,
+        operation_id: str,
+        resulting_state: str,
+        result: ShellPayloadRef,
+        error_code: str,
+        _connection=None,
+    ) -> dict:
+        """Record a safe terminal failure without granting a management effect."""
+
+        _bounded(operation_id, "operation_id", 256)
+        if resulting_state not in {"FAILED", "UNKNOWN"}:
+            raise ForestError("SHELL_INPUT_INVALID", "Invalid Shell failure state", 422)
+        _bounded(error_code, "error_code", 128)
+        result.validate("result")
+        input_digest = _digest(
+            {
+                "request_id": claim.request_id,
+                "owner_id": claim.worker_id,
+                "owner_epoch": claim.owner_epoch,
+                "resulting_state": resulting_state,
+                "result": result.canonical(),
+                "error_code": error_code,
+                "terminal_without_authorization": True,
+            }
+        )
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "result-operation:" + operation_id)
+            replay = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s").format(
+                        self._table("request_results")
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError("SHELL_RESULT_CONFLICT", "Shell result input differs", 409)
+                return dict(replay)
+            request = await self._guard_claim(conn, claim)
+            if request["state"] not in {"CLAIMED", "EXECUTING", "WAITING_APPROVAL"}:
+                raise ForestError("SHELL_STATE_CONFLICT", "Shell request cannot fail", 409)
+            await self._verify_payload(conn, result)
+            now = await (await conn.execute("SELECT clock_timestamp() AS now")).fetchone()
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,operation_id,input_digest,request_id,resulting_state,"
+                        "result_payload_id,result_payload_digest,result_owner_component_id,"
+                        "result_owner_kind,result_owner_id,error_code,owner_id,owner_epoch) VALUES "
+                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+                    ).format(self._table("request_results")),
+                    (
+                        self.store.bot_id,
+                        operation_id,
+                        input_digest,
+                        claim.request_id,
+                        resulting_state,
+                        result.payload_id,
+                        result.digest,
+                        result.owner_component_id,
+                        result.owner_kind,
+                        result.owner_id,
+                        error_code,
+                        claim.worker_id,
+                        claim.owner_epoch,
+                    ),
+                )
+            ).fetchone()
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state=%s,owner_id=NULL,owner_expires_at=NULL,"
+                    "completed_at=%s,updated_at=%s WHERE bot_id=%s AND request_id=%s"
+                ).format(self._table("shell_requests")),
+                (
+                    resulting_state,
+                    now["now"],
+                    now["now"],
+                    self.store.bot_id,
+                    claim.request_id,
+                ),
+            )
+            return dict(row)
+
+    async def fail_claim_in(self, conn, claim: ShellClaim, **values) -> dict:
+        return await self.fail_claim(claim, _connection=conn, **values)
 
     async def load_request(self, request_id: str) -> dict:
         _bounded(request_id, "request_id", 256)

@@ -132,6 +132,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         allowed_group_ids=("933179609",),
         group_trigger_mode="MENTION",
         private_enabled=True,
+        shell_administrator_ids=("42",),
         agent_system_prompt="You are the production-host integration test Bot.",
     )
     clients = []
@@ -168,6 +169,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "media.capture",
                     "agent.runtime",
                     "conversation.trigger-policy",
+                    "shell.command",
                     "conversation.scheduler",
                     "adapter.onebot",
                     "delivery",

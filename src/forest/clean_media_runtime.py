@@ -183,7 +183,9 @@ class CleanMediaCaptureRuntime:
     def owned_tasks(self):
         return (self._task,) if self._task is not None else ()
 
-    async def _admit_in(self, conn, *, owned_work: bool) -> None:
+    async def _admit_in(
+        self, conn, *, owned_work: bool, admission_lane: str = "DATA"
+    ) -> None:
         if not self.active or self.generation_identity is None:
             raise ForestError("RUNTIME_GENERATION_NOT_ACTIVE", "Media is not active", 409)
         verifier = (
@@ -196,11 +198,12 @@ class CleanMediaCaptureRuntime:
             "generation_id": self.generation_identity.generation_id,
         }
         if not owned_work:
-            values["admission_lane"] = "DATA"
+            values["admission_lane"] = admission_lane
         await verifier(conn, **values)
 
     async def register_capture_in(self, conn, **values):
-        await self._admit_in(conn, owned_work=False)
+        admission_lane = values.pop("admission_lane", "DATA")
+        await self._admit_in(conn, owned_work=False, admission_lane=admission_lane)
         return await self.repository.register_in(conn, **values)
 
     async def _wait(self, timeout: float = 1) -> None:

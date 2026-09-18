@@ -97,6 +97,11 @@ _MODULES = {
             "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
             "kernel.uow.onebot.ingress",
+            "kernel.uow.shell.result",
+            "kernel.uow.shell.binding-fence",
+            "kernel.uow.shell.route-fence",
+            "kernel.uow.shell.authorization.consume",
+            "kernel.runtime.status",
         ),
         "capabilities": (
             "runtime.graph.publish",

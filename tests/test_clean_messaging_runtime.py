@@ -28,6 +28,7 @@ from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
+from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embeddings import EmbeddingResult, EmbeddingVector
@@ -324,6 +325,16 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         kernel=kernel,
         adapter=messaging.adapter,
     )
+    shell = await bootstrap_clean_shell(
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={
+            "protocol": "forest.shell.command/1",
+            "binding_ref": "binding/main",
+            "administrator_principals": ["qq:42"],
+        },
+    )
     display = await _payload(
         kernel.payload,
         owner_kind="binding.display",
@@ -380,6 +391,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             media.descriptor,
             agent.descriptor,
             trigger_policy.descriptor,
+            shell.descriptor,
         )
         + messaging.descriptors
         + (delivery.descriptor,),
@@ -402,6 +414,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "conversation.trigger-policy",
             "adapter.onebot",
             "delivery",
+            "shell.command",
         }
         adapter_runtime = registry.get("adapter.onebot")
         conversation_runtime = registry.get("conversation.scheduler")
@@ -409,6 +422,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         provider_runtime = registry.get("provider.chat-completions")
         memory_runtime = registry.get("memory.graph")
         delivery_runtime = registry.get("delivery")
+        shell_runtime = registry.get("shell.command")
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
         )
@@ -439,7 +453,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert input_uow_route.provider_component_id == "kernel.runtime"
         assert input_uow_route.owned_work is True
         assert adapter_runtime.ingress_port is not messaging.conversation
-        ingress_route = adapter_runtime.ingress_port._admit.route
+        ingress_route = adapter_runtime.ingress_port._data_admit.route
         assert ingress_route.provider_component_id == "kernel.runtime"
         assert ingress_route.owned_work is False
         assert delivery_runtime.adapter is not adapter_runtime
@@ -888,6 +902,159 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert lane["active_session_ref"] is None
         assert lane["active_run_ref"] is None
         assert lane["context_revision"] >= 2
+
+        paused = await kernel.runtime.set_data_admission(
+            lease, expected_maintenance_epoch=1, data_admission=False
+        )
+        assert paused["maintenance_epoch"] == 2
+        assert paused["data_admission"] is False
+        model_request_count = len(model_clients[0].requests)
+        shell_body = json.dumps(
+            {
+                "time": 1700000001,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 89,
+                "group_id": 933179609,
+                "user_id": 42,
+                "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
+                "message": [{"type": "text", "data": {"text": "#forest core status"}}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        await clients[0].emit(shell_body)
+        for _ in range(300):
+            if len(clients[0].sends) >= 3:
+                break
+            await asyncio.sleep(0.05)
+        async with store.pool.connection() as conn:
+            shell_request = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT request_id,state,rejection_code,command_id,policy_revision,"
+                        "registry_revision FROM {}.shell_requests WHERE bot_id=%s "
+                        "ORDER BY received_at DESC LIMIT 1"
+                    ).format(sql.Identifier(shell_runtime.repository.namespace)),
+                    (store.bot_id,),
+                )
+            ).fetchone()
+            shell_delivery = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT i.state AS intent_state,p.state AS part_state,i.error_code "
+                        "FROM {}.send_intents i JOIN {}.send_parts p USING(bot_id,intent_id) "
+                        "WHERE i.bot_id=%s AND i.cause_component_id='shell.command'"
+                    ).format(
+                        sql.Identifier(delivery.repository.namespace),
+                        sql.Identifier(delivery.repository.namespace),
+                    ),
+                    (store.bot_id,),
+                )
+            ).fetchone()
+        assert shell_runtime.failure is None
+        assert delivery_runtime.worker.failure is None
+        assert len(clients[0].sends) == 3, {
+            "request": dict(shell_request) if shell_request else None,
+            "delivery": dict(shell_delivery) if shell_delivery else None,
+        }
+        assert b"Forest" in clients[0].sends[2][0].wire_body
+        assert b"DATA=closed" in clients[0].sends[2][0].wire_body
+        assert len(model_clients[0].requests) == model_request_count
+        async with store.pool.connection() as conn:
+            shell_message = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT classification_state,trigger_decision,route_ref FROM {}.inbox_messages "
+                        "WHERE bot_id=%s AND platform_message_ref=%s"
+                    ).format(sql.Identifier(messaging.conversation.namespace)),
+                    (store.bot_id, "89"),
+                )
+            ).fetchone()
+        assert shell_message["classification_state"] == "FINAL"
+        assert shell_message["trigger_decision"] == "CONTROL_COMMAND"
+        assert shell_message["route_ref"].startswith("shell:request:")
+
+        ordinary_while_paused = json.dumps(
+            {
+                "time": 1700000003,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 91,
+                "group_id": 933179609,
+                "user_id": 42,
+                "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
+                "message": [{"type": "text", "data": {"text": "ordinary data"}}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        with pytest.raises(ForestError) as data_closed:
+            await clients[0].emit(ordinary_while_paused)
+        assert data_closed.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+        async with store.pool.connection() as conn:
+            paused_event = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS count FROM {}.platform_events "
+                        "WHERE bot_id=%s AND platform_message_ref=%s"
+                    ).format(sql.Identifier(messaging.adapter.namespace)),
+                    (store.bot_id, "91"),
+                )
+            ).fetchone()
+        assert paused_event["count"] == 0
+
+        denied_body = json.dumps(
+            {
+                "time": 1700000002,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 90,
+                "group_id": 933179609,
+                "user_id": 43,
+                "sender": {"user_id": 43, "nickname": "Bob", "role": "admin"},
+                "message": [{"type": "text", "data": {"text": "#forest core status"}}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        await clients[0].emit(denied_body)
+        for _ in range(300):
+            if len(clients[0].sends) >= 4:
+                break
+            await asyncio.sleep(0.05)
+        assert len(clients[0].sends) == 4
+        assert "已拒绝" in clients[0].sends[3][0].wire_body.decode("utf-8")
+        assert len(model_clients[0].requests) == model_request_count
+        async with store.pool.connection() as conn:
+            denied = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT state,rejection_code FROM {}.shell_requests "
+                        "WHERE bot_id=%s AND principal_ref=%s"
+                    ).format(sql.Identifier(shell_runtime.repository.namespace)),
+                    (store.bot_id, "qq:43"),
+                )
+            ).fetchone()
+            denied_message = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT trigger_decision FROM {}.inbox_messages "
+                        "WHERE bot_id=%s AND platform_message_ref=%s"
+                    ).format(sql.Identifier(messaging.conversation.namespace)),
+                    (store.bot_id, "90"),
+                )
+            ).fetchone()
+        assert dict(denied) == {"state": "REJECTED", "rejection_code": "SHELL_FORBIDDEN"}
+        assert denied_message["trigger_decision"] == "CONTROL_COMMAND"
+        restored = await kernel.runtime.set_data_admission(
+            lease, expected_maintenance_epoch=2, data_admission=True
+        )
+        assert restored["maintenance_epoch"] == 3
+        assert restored["data_admission"] is True
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True

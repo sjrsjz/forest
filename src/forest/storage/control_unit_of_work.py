@@ -28,9 +28,10 @@ class ShellControlResultUnitOfWork:
         channel_ref: str,
         delivery_generation_id: str,
         parts,
-        authorization_ticket_id: str,
-        authorization_operation_id: str,
+        authorization_ticket_id: str | None = None,
+        authorization_operation_id: str | None = None,
         error_code: str | None = None,
+        terminal_without_authorization: bool = False,
     ) -> dict:
         if type(claim) is not ShellClaim or claim.binding_ref != binding_ref:
             raise ForestError(
@@ -39,16 +40,38 @@ class ShellControlResultUnitOfWork:
                 409,
             )
         async with self.store.pool.connection() as conn, conn.transaction():
-            shell_result = await self.shell.complete_in(
-                conn,
-                claim,
-                operation_id=result_operation_id,
-                resulting_state=resulting_state,
-                result=result,
-                error_code=error_code,
-                authorization_ticket_id=authorization_ticket_id,
-                authorization_operation_id=authorization_operation_id,
-            )
+            if terminal_without_authorization:
+                if error_code is None:
+                    raise ForestError(
+                        "SHELL_RESULT_IDENTITY_CONFLICT",
+                        "Unprivileged terminal result requires an error code",
+                        409,
+                    )
+                shell_result = await self.shell.fail_claim_in(
+                    conn,
+                    claim,
+                    operation_id=result_operation_id,
+                    resulting_state=resulting_state,
+                    result=result,
+                    error_code=error_code,
+                )
+            else:
+                if authorization_ticket_id is None or authorization_operation_id is None:
+                    raise ForestError(
+                        "SHELL_RESULT_IDENTITY_CONFLICT",
+                        "Successful control result requires authorization",
+                        409,
+                    )
+                shell_result = await self.shell.complete_in(
+                    conn,
+                    claim,
+                    operation_id=result_operation_id,
+                    resulting_state=resulting_state,
+                    result=result,
+                    error_code=error_code,
+                    authorization_ticket_id=authorization_ticket_id,
+                    authorization_operation_id=authorization_operation_id,
+                )
             delivery_result = await self.delivery.create_intent_in(
                 conn,
                 operation_id=intent_operation_id,

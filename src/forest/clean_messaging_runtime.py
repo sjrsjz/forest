@@ -53,6 +53,7 @@ _DEFINITIONS = {
             "conversation.trigger-policy",
             "memory.graph",
             "media.capture",
+            "shell.command",
         ),
         "capabilities": ("adapter.onebot.ingress", "adapter.onebot.send"),
     },
@@ -101,12 +102,18 @@ class _RoutedSessionDecision:
 
 
 class _RoutedIngress:
-    def __init__(self, admit, on_change=None) -> None:
-        self._admit = admit
+    def __init__(self, data_admit, control_admit, on_change=None) -> None:
+        self._data_admit = data_admit
+        self._control_admit = control_admit
         self._on_change = on_change
 
     async def admit(self, **values):
-        result = await self._admit(**values)
+        handler = (
+            self._control_admit
+            if values.get("shell_command") is not None
+            else self._data_admit
+        )
+        result = await handler(**values)
         if self._on_change is not None:
             self._on_change()
         return result
@@ -180,6 +187,8 @@ def _build_onebot_ingress(context):
         conversation=context.participant("conversation.scheduler"),
         memory=context.participant("memory.graph"),
         media=context.participant("media.capture"),
+        shell=context.participant("shell.command"),
+        delivery=context.participant("delivery"),
     )
     return port.admit
 
@@ -259,6 +268,7 @@ async def bootstrap_clean_messaging(
         namespace=bundles["adapter.onebot"].spec.namespace,
         payload_verifier=kernel.payload.verify_in,
         generation_verifier=kernel.runtime.verify_active_generation_in,
+        generation_member_verifier=kernel.runtime.verify_generation_member_in,
     )
     kernel.effect.register_fence_verifier(
         "adapter.binding", adapter_repository.verify_effect_fence_in
@@ -301,9 +311,15 @@ async def bootstrap_clean_messaging(
             "secret_resolver": secret_resolver,
             "ingress_port": _RoutedIngress(
                 contracts.service("kernel.uow.onebot.ingress", 1),
+                contracts.service(
+                    "kernel.uow.onebot.ingress", 1, admission_lane="CONTROL"
+                ),
                 getattr(_runtime, "notify", None),
             ),
             "trigger_policy": contracts.service("conversation.trigger.classify", 1),
+            "shell_inspector": contracts.service(
+                "shell.ingress.inspect", 1, admission_lane="CONTROL"
+            ),
         }
         if http_client_factory is not None:
             values["http_client_factory"] = http_client_factory
@@ -361,6 +377,8 @@ async def bootstrap_clean_messaging(
                             "conversation.scheduler",
                             "memory.graph",
                             "media.capture",
+                            "shell.command",
+                            "delivery",
                         ),
                         _build_onebot_ingress,
                     ),

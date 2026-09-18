@@ -91,6 +91,9 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
             "reason_code": "mention_required",
         }
 
+    async def inspect_shell(**_values):
+        return None
+
     ingress = OneBotIngressUnitOfWork(store, adapter=adapter, conversation=scheduler)
     runtime = CleanOneBotRuntime(
         repository=adapter,
@@ -100,6 +103,7 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         secret_resolver=resolve_secret,
         ingress_port=ingress,
         trigger_policy=classify,
+        shell_inspector=inspect_shell,
         websocket_client_factory=create_client,
     )
     identity = BoundGenerationIdentity(

@@ -47,7 +47,7 @@
 ### Provider、Agent、Conversation 与 OneBot Messaging 图
 
 > **生产接线状态：** Conversation Worker、单 Agent 执行、Context 投影、Provider 调用、最终回复与 Session 交接已经进入同一干净 RuntimeGraph。Agent→Provider 与 Conversation→Agent 使用冻结到准确图/代际/契约版本的 Contract Router 句柄；Conversation 只调用输入选择、最终回复和 Session 交接三个内核 UoW 服务，Agent、Conversation、Memory、Delivery participant 由内核按声明解析。生产模块不再通过共享模块字典、直接运行实例或 bound participant 完成这条链。PostgreSQL 集成测试已从真实 OneBot 入站事实自动生成回复、原子提交 Context/SendIntent、经 Delivery 发送并静默关闭 Session。
-`provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`agent.runtime`、`conversation.scheduler`、`adapter.onebot` 和 `delivery` 已经作为平级业务模块与五个内核模块共同进入生产 RuntimeGraph：
+当前生产 RuntimeGraph 共 15 个成员：五个内核模块，以及 `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`media.capture`、`agent.runtime`、`conversation.scheduler`、`conversation.trigger-policy`、`adapter.onebot`、`delivery`、`shell.command` 十个平级业务模块：
 - `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
 - text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
 - `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
@@ -72,16 +72,18 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 `media.capture` 现已作为独立 Generation 进入生产图。Adapter/Conversation/Media 四参与者 ingress UoW 原子登记图片任务，规范 Context 只保存稳定 `media_ref`，临时 URL 仅留在 Media 私有 schema。生命周期 Worker 使用租约、重试和资源上限下载并验证图片，把像素保存为 Kernel Payload 后通过 Memory 公共端口发布保持原始段序的 TEXT/IMAGE parts；InputBatch 先于图片完成时沿用 pending eligibility，最终失败显式收敛为 `UNAVAILABLE`。当前 Context 图片由 `media.context.resolve/1` 在模型调用边界物化，历史图片由 EvidenceBundle 物化，二者均使用来源绑定的 `MediaSnapshot`。
 
-### 已有干净业务 Authority 候选
+`shell.command` 现已作为独立 Generation 和生命周期 Worker 进入同一生产图。稳定 ShellGate 在业务触发前只识别直接 `#forest` 前缀；规范参数、未知命令和拒绝载荷均写入受管 Payload。Adapter、Conversation、Memory、Media、Shell 与拒绝回执由一个入站 UoW 原子合流，因此控制消息仍进入带真实作者的群 Context 和全局记忆，但绝不回退给 Agent。命令 registry 与管理员策略在 RuntimeGraph publication 事务中绑定准确图、目标 Generation、schema 和能力摘要；执行前及提交结果前均重验当前策略、Binding fence、route fence 和一次性 `management.invoke` 票据。P0 claim 先于 P1，CONTROL SendIntent 独立于 CHAT；DATA admission 关闭时普通消息不会落业务事件，而 Shell 接纳、`core.status` 和回执仍可完成。策略在排队后撤销会以无管理效果的安全失败事实及 CONTROL 回执收敛，不会杀死整个 Worker 或把失败记录伪装成一次获准执行。
 
-以下模块已经有独立官方 baseline、Repository 和定向 PostgreSQL 测试，但尚未全部成为生产 RuntimeGraph 中的完整 Generation/Worker：
+### 已有干净业务 Authority
+
+以下模块均有独立官方 baseline、Repository 和定向 PostgreSQL 测试；其生产接线范围以上文逐项说明为准：
 
 - `memory.graph`、`embedding.multimodal` 与 `media.capture`：生命周期 Worker、Bot 级冻结语义空间、每日请求/Token 预算、每群主干、图文来源摄入、InputBatch 资格合流、查询向量、Agent 召回、当前图片投影及跨主干关系查询已进入 RuntimeGraph；
 - `delivery`：CHAT/CONTROL lane、顺序、Effect 与 Adapter 双 fence、生命周期 Worker、崩溃恢复与 UNKNOWN 对账；
-- `shell.command`：Binding/群/主体策略、P0/P1 claim、授权复核和控制回执；
+- `shell.command`：Binding/群/主体策略、RuntimeGraph 命令注册表、P0/P1 claim、双阶段授权复核、CONTROL 回执和撤权后安全终结；
 - `conversation.scheduler`：连续分类水位、同群 actor lease、安全边界、trigger cut、静默排空和恢复领取。
 
-这些 Repository 测试证明的是各自权威状态机，不代表生产启动链已经切换。
+Repository 测试证明各自权威状态机；生产启动链是否切换只按上文列出的 15 成员 RuntimeGraph 与集成测试判断。
 
 ## 仍需删除或替换的旧实现
 
@@ -99,7 +101,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 ## 当前阻断项
 
-1. 将 `shell.command` 接入 `prepare → bind → prewarm → atomic publish → local activate` 协议，并完成群管理员授权、优先级和审计闭环；Media/Memory/Embedding 生命周期 Worker、图文摄入/InputBatch 资格 UoW、Agent 召回与 Delivery Worker 已进入该协议，后续需要在完整生产启动图验证热替换排空。
+1. 扩展 `shell.command` 的模块贡献式命令目录：当前生产路径已完成 `core.status`、群管理员策略、P0/P1 优先级、DATA 关闭时的 CONTROL 准入、双阶段授权和安全失败回执；仍需接入取消、暂停/恢复、重载、任务处理及查询命令，补齐审计查询投影，并验证 Shell Generation 热替换排空。
 2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；下一步删除旧业务 `contract.router` 与旧组合根。
 3. 为多模态 Memory 做十万至百万来源的筛选、稳定分页、关系展开、图片负载和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
@@ -115,7 +117,8 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 - Agent/Conversation Worker、持久调度 Repository、十成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`124 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、Delivery Bot 能力到精确 Adapter Generation 的票据、PREPARED abandonment/requeue、DISPATCHING 崩溃后 UNKNOWN、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、Adapter 持久 binding fence、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
 - 十一成员 Kernel + Provider + Memory + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、OneBot 文本来源/群主干登记、InputBatch 与 Memory eligibility 原子提交、发送前许可、生命周期所属 Delivery Worker 的真实 OneBot wire 调用与 SENT 落账、作者/群来源和逆序关闭。最新 clean authority/RuntimeGraph 定向组合为 `68 passed`；并发测试覆盖 InputBatch 与延迟媒体来源两种完成顺序，最终没有未解析的 `PENDING_CAPTURE`。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
-- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。14 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置的新 Generation 生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布、可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger。
+- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。15 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置的新 Generation 生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布、可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger；群 Shell 在 DATA admission 关闭时仍能完成受权状态查询和拒绝回执，普通 DATA 消息保持未接纳。
+- Shell、干净模块、RuntimeGraph、Schema bundle、Delivery 与 CONTROL/DATA 准入定向组合：`169 passed`；覆盖原子控制入站、P0/P1、授权重验、撤权后安全失败、CONTROL 优先发送及 DATA 维护态隔离。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

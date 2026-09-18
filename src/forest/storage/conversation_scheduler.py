@@ -412,6 +412,7 @@ class ConversationSchedulerRepository:
     async def admit_message_in(self, conn, **values) -> dict:
         """Participate in a caller-owned Bot transaction without changing ownership."""
 
+        values.pop("admission_lane", None)
         return await self.admit_message(_connection=conn, **values)
 
     async def complete_classification(
@@ -615,6 +616,7 @@ class ConversationSchedulerRepository:
     async def complete_classification_in(self, conn, **values) -> dict:
         """Finalize classification inside a caller-owned UnitOfWork."""
 
+        values.pop("admission_lane", None)
         return await self.complete_classification(_connection=conn, **values)
 
     async def expire_classifications(self, *, limit: int = 128) -> int:
