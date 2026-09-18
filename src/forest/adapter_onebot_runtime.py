@@ -94,6 +94,17 @@ class _ActiveBinding:
     accepting: bool = False
 
 
+@dataclass(frozen=True)
+class PreparedAdapterSend:
+    binding_id: str
+    client_incarnation: str
+    binding_epoch: int
+    connection_epoch: int
+    adapter_generation_id: str
+    executor_fence_digest: str
+    prepared: PreparedSend
+
+
 class CleanOneBotRuntime:
     """One Generation of Adapter transport resources and typed ingress/send ports."""
 
@@ -523,6 +534,34 @@ class CleanOneBotRuntime:
     @staticmethod
     def prepare(route: dict[str, Any], parts: list[dict[str, Any]]) -> PreparedSend:
         return prepare_send(route["channel_kind"], route["channel_id"], parts)
+
+    def prepare_delivery(
+        self,
+        *,
+        binding_id: str,
+        channel_kind: str,
+        channel_ref: str,
+        parts: list[dict[str, Any]],
+    ) -> PreparedAdapterSend:
+        generation = self.generation_identity
+        connection = self._active.get(binding_id)
+        if (
+            not self._accepting
+            or generation is None
+            or connection is None
+            or not connection.accepting
+        ):
+            raise ForestError("STALE_BINDING", "OneBot Binding is not accepting sends", 409)
+        prepared = prepare_send(channel_kind.lower(), channel_ref, parts)
+        return PreparedAdapterSend(
+            binding_id,
+            connection.client_incarnation,
+            connection.binding_epoch,
+            connection.connection_epoch,
+            generation.generation_id,
+            connection.executor_fence_digest,
+            prepared,
+        )
 
     async def dispatch(
         self,

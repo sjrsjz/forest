@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.adapters.onebot import SendResult
 from forest.agent_model_executor import (
     AgentModelStep,
     AgentToolBinding,
@@ -32,6 +34,7 @@ from forest.storage.agent_runtime_authority import (
     AgentPayloadRef,
     AgentTriggerInput,
 )
+from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
 from forest.storage.payload_authority import PayloadSource
 
 
@@ -40,6 +43,7 @@ class FakeWebSocketClient:
         self.handler = None
         self.closed = False
         self.failure_code = None
+        self.sends = []
 
     async def get_login_info(self, *, timeout=None):
         assert timeout == 5
@@ -52,8 +56,9 @@ class FakeWebSocketClient:
     async def emit(self, body):
         return await self.handler(body)
 
-    async def send(self, _prepared, *, timeout=None):
-        raise AssertionError(("unexpected send", timeout))
+    async def send(self, prepared, *, timeout=None):
+        self.sends.append((prepared, timeout))
+        return SendResult("SENT", message_id="991")
 
     async def aclose(self):
         self.closed = True
@@ -342,6 +347,60 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert provider_runtime.active is True
         assert delivery_runtime.active is True
         assert len(clients) == 1 and clients[0].handler is not None
+
+        reply = await _agent_payload(
+            kernel.payload,
+            owner_kind="final.reply",
+            owner_id="reply:delivery-worker:test",
+            value={"text": "delivery worker reply"},
+        )
+        await delivery.repository.create_intent(
+            operation_id="intent:create:delivery-worker:test",
+            intent_id="intent:delivery-worker:test",
+            binding_ref="binding/main",
+            lane_kind="CHAT",
+            ordering_key="onebot:group:933179609",
+            conversation_ref="onebot:group:933179609",
+            channel_kind="GROUP",
+            channel_ref="933179609",
+            cause_component_id="conversation.scheduler",
+            cause_kind="context.reply",
+            cause_id="reply:delivery-worker:test",
+            delivery_generation_id=delivery_runtime.generation_identity.generation_id,
+            reply_ref="reply:delivery-worker:test",
+            parts=(
+                DeliveryPart(
+                    "part:delivery-worker:test",
+                    "effect:delivery-worker:test",
+                    DeliveryPayloadRef(
+                        reply.payload_id,
+                        reply.digest,
+                        reply.owner_component_id,
+                        reply.owner_kind,
+                        reply.owner_id,
+                    ),
+                ),
+            ),
+        )
+        delivery_runtime.worker.wake()
+        delivery_state = None
+        for _ in range(500):
+            delivery_state = (
+                await delivery.repository.load_intent("intent:delivery-worker:test")
+            )["state"]
+            if delivery_state == "SENT":
+                break
+            await asyncio.sleep(0.01)
+        assert len(clients[0].sends) == 1, (
+            delivery_runtime.worker.failure,
+            (await delivery.repository.load_intent("intent:delivery-worker:test"))["state"],
+            await delivery.repository.recoverable_attempts(),
+        )
+        prepared_send, timeout = clients[0].sends[0]
+        assert timeout is None
+        assert prepared_send.action == "send_group_msg"
+        assert b"delivery worker reply" in prepared_send.wire_body
+        assert delivery_state == "SENT"
 
         body = json.dumps(
             {

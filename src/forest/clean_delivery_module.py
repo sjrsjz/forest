@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.delivery_authorization import DeliveryAuthorizationPort
+from forest.delivery_worker import CleanDeliveryWorker
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
@@ -38,13 +39,25 @@ class CleanDeliveryRuntime:
     state_schema = 1
     state_contract = _STATE_CONTRACT
 
-    def __init__(self, *, repository, authorization, module_configuration, grants) -> None:
+    def __init__(
+        self,
+        *,
+        repository,
+        authorization,
+        adapter,
+        payloads,
+        module_configuration,
+        grants,
+    ) -> None:
         self.repository = repository
         self.authorization = authorization
+        self.adapter = adapter
+        self.payloads = payloads
         self.module_configuration = module_configuration
         self.grants = grants
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
+        self.worker: CleanDeliveryWorker | None = None
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired()
@@ -95,15 +108,31 @@ class CleanDeliveryRuntime:
                 "Delivery Generation identity was not bound",
                 503,
             )
+        self.worker = CleanDeliveryWorker(
+            repository=self.repository,
+            authorization=self.authorization,
+            adapter=self.adapter,
+            payloads=self.payloads,
+            owner_id=("delivery/" + self.generation_identity.generation_id)[-256:],
+        )
+        self.worker.start()
 
     def activate_generation(self) -> None:
         self.active = True
+        self.worker.activate()
 
     async def quiesce(self) -> None:
+        if self.worker is not None:
+            await self.worker.quiesce()
         self.active = False
 
     async def close(self) -> None:
+        if self.worker is not None:
+            await self.worker.close()
         self.active = False
+
+    def owned_tasks(self) -> tuple:
+        return self.worker.owned_tasks() if self.worker is not None else ()
 
 
 @dataclass(frozen=True)
@@ -172,10 +201,12 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         delivery_grants=grants,
     )
 
-    def factory(_runtime, _modules):
+    def factory(_runtime, modules):
         return CleanDeliveryRuntime(
             repository=repository,
             authorization=authorization,
+            adapter=modules["adapter.onebot"],
+            payloads=kernel.payload,
             module_configuration=configuration,
             grants=grants,
         )

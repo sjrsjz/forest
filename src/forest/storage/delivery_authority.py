@@ -1209,6 +1209,137 @@ class DeliveryRepository:
             )
             return dict(row)
 
+    async def recoverable_attempts(self, *, limit: int = 64) -> tuple[dict, ...]:
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ForestError("DELIVERY_INPUT_INVALID", "Invalid recovery limit", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT a.*,p.state AS part_state,p.owner_expires_at,i.state AS intent_state "
+                        "FROM {} a JOIN {} p ON p.bot_id=a.bot_id AND p.intent_id=a.intent_id "
+                        "AND p.part_index=a.part_index JOIN {} i ON i.bot_id=p.bot_id "
+                        "AND i.intent_id=p.intent_id WHERE a.bot_id=%s "
+                        "AND p.current_attempt_id=a.attempt_id "
+                        "AND a.state IN ('PREPARED','DISPATCHING') "
+                        "AND (p.owner_expires_at IS NULL OR p.owner_expires_at<=clock_timestamp()) "
+                        "ORDER BY a.prepared_at,a.attempt_id LIMIT %s"
+                    ).format(
+                        self._table("transport_attempts"),
+                        self._table("send_parts"),
+                        self._table("send_intents"),
+                    ),
+                    (self.store.bot_id, limit),
+                )
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    async def abandon_prepared_attempt(
+        self,
+        *,
+        attempt_id: str,
+        operation_id: str,
+        reason_code: str,
+    ) -> dict:
+        for value, field, limit in (
+            (attempt_id, "attempt_id", 256),
+            (operation_id, "operation_id", 256),
+            (reason_code, "reason_code", 128),
+        ):
+            _bounded(value, field, limit)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._lock(conn, "abandon:" + operation_id)
+            attempt = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s FOR UPDATE").format(
+                        self._table("transport_attempts")
+                    ),
+                    (self.store.bot_id, attempt_id),
+                )
+            ).fetchone()
+            if attempt is None:
+                raise ForestError("DELIVERY_ATTEMPT_NOT_FOUND", "Transport attempt does not exist", 404)
+            if attempt["state"] == "ABANDONED":
+                return dict(attempt)
+            part = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND intent_id=%s AND part_index=%s "
+                        "FOR UPDATE"
+                    ).format(self._table("send_parts")),
+                    (
+                        self.store.bot_id,
+                        attempt["intent_id"],
+                        attempt["part_index"],
+                    ),
+                )
+            ).fetchone()
+            if (
+                attempt["state"] != "PREPARED"
+                or part is None
+                or part["state"] != "PREPARED"
+                or part["current_attempt_id"] != attempt_id
+            ):
+                raise ForestError(
+                    "DELIVERY_ATTEMPT_NOT_ABANDONABLE",
+                    "Only the current prepared attempt can be abandoned",
+                    409,
+                )
+            if self.effect_abandoner is None:
+                raise ForestError(
+                    "EFFECT_AUTHORITY_MISSING", "Delivery Effect abandonment port is unavailable", 503
+                )
+            await _call(
+                self.effect_abandoner,
+                conn,
+                effect_operation_id=attempt["effect_operation_ref"],
+                attempt_id=attempt["effect_attempt_ref"],
+                abandonment_operation_id=operation_id,
+                reason_code=reason_code,
+                cancel_effect=False,
+            )
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='ABANDONED',settled_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND attempt_id=%s RETURNING *"
+                    ).format(self._table("transport_attempts")),
+                    (self.store.bot_id, attempt_id),
+                )
+            ).fetchone()
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='CLAIMED',current_attempt_id=NULL,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND intent_id=%s "
+                    "AND part_index=%s"
+                ).format(self._table("send_parts")),
+                (
+                    self.store.bot_id,
+                    attempt["intent_id"],
+                    attempt["part_index"],
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND intent_id=%s "
+                    "AND part_index=%s"
+                ).format(self._table("send_parts")),
+                (
+                    self.store.bot_id,
+                    attempt["intent_id"],
+                    attempt["part_index"],
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='QUEUED',error_code=NULL,updated_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND intent_id=%s"
+                ).format(self._table("send_intents")),
+                (self.store.bot_id, attempt["intent_id"]),
+            )
+            return dict(row)
+
     async def cancel_intent(
         self,
         *,

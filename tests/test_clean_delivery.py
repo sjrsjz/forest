@@ -12,6 +12,7 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.delivery_authorization import DeliveryAuthorizationPort
+from forest.delivery_worker import CleanDeliveryWorker
 from forest.errors import ForestError
 from forest.final_reply_uow import (
     FinalReplyPlan,
@@ -464,6 +465,96 @@ async def test_delivery_authorization_binds_bot_capability_to_exact_adapter_gene
     assert ticket["audience_generation_id"] == "generation/adapter/1"
     assert ticket["input_digest"] == claim.semantic_digest
     assert ticket["plan_digest"] == receipt.plan_digest
+
+
+@pytest.mark.postgres
+async def test_delivery_worker_requeues_expired_prepared_attempt(clean_delivery):
+    _store, _storage, payloads, authorization, _effects, _scheduler, adapter, delivery, grant = (
+        clean_delivery
+    )
+    await _active_binding(payloads, adapter)
+    await _create_intent(
+        payloads,
+        delivery,
+        suffix="recover-prepared",
+        part_id="part/recover-prepared/1",
+    )
+    claim = await delivery.claim(
+        operation_id="claim/recover-prepared",
+        worker_id="delivery-worker/old",
+        ttl_seconds=1,
+    )
+    assert claim is not None
+    await _prepare(
+        payloads,
+        authorization,
+        delivery,
+        grant,
+        claim,
+        "recover-prepared",
+        handoff=False,
+    )
+    await asyncio.sleep(1.05)
+    assert [row["state"] for row in await delivery.recoverable_attempts()] == ["PREPARED"]
+
+    worker = CleanDeliveryWorker(
+        repository=delivery,
+        authorization=None,
+        adapter=None,
+        payloads=None,
+        owner_id="delivery-worker/recovery",
+    )
+    await worker._recover()
+
+    assert (await delivery.load_intent("intent/recover-prepared"))["state"] == "QUEUED"
+    replacement = await delivery.claim(
+        operation_id="claim/recover-prepared/replacement",
+        worker_id="delivery-worker/new",
+    )
+    assert replacement is not None
+    assert replacement.owner_epoch == claim.owner_epoch + 1
+
+
+@pytest.mark.postgres
+async def test_delivery_worker_marks_expired_dispatching_attempt_unknown(clean_delivery):
+    _store, _storage, payloads, authorization, _effects, _scheduler, adapter, delivery, grant = (
+        clean_delivery
+    )
+    await _active_binding(payloads, adapter)
+    await _create_intent(
+        payloads,
+        delivery,
+        suffix="recover-dispatching",
+        part_id="part/recover-dispatching/1",
+    )
+    claim = await delivery.claim(
+        operation_id="claim/recover-dispatching",
+        worker_id="delivery-worker/old",
+        ttl_seconds=1,
+    )
+    assert claim is not None
+    await _prepare(
+        payloads,
+        authorization,
+        delivery,
+        grant,
+        claim,
+        "recover-dispatching",
+    )
+    await asyncio.sleep(1.05)
+    assert [row["state"] for row in await delivery.recoverable_attempts()] == ["DISPATCHING"]
+
+    worker = CleanDeliveryWorker(
+        repository=delivery,
+        authorization=None,
+        adapter=None,
+        payloads=None,
+        owner_id="delivery-worker/recovery",
+    )
+    await worker._recover()
+
+    assert (await delivery.load_intent("intent/recover-dispatching"))["state"] == "UNKNOWN"
+    assert await delivery.recoverable_attempts() == ()
 
 
 @pytest.mark.postgres
