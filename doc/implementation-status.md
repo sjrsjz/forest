@@ -66,11 +66,13 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
+`memory.graph` 已以第十一个成员进入干净 RuntimeGraph：模块独占官方 schema、ModuleConfiguration、grant set 与图 Repository，发布带 Generation 约束的主干、来源和关系查询服务。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；prepare 会用 Bot 级 domain 权威拒绝模型、revision、维数或空间变化，endpoint 与凭据引用不属于空间身份。当前这一切片尚未接入 Conversation→Memory 摄入 UoW、Embedding Worker 和 Agent 召回。
+
 ### 已有干净业务 Authority 候选
 
 以下模块已经有独立官方 baseline、Repository 和定向 PostgreSQL 测试，但尚未全部成为生产 RuntimeGraph 中的完整 Generation/Worker：
 
-- `memory.graph` 与多模态检索：Bot 级冻结语义空间、每群主干、图文来源、跨主干关系、遗忘 epoch、text/image/mixed 检索和 embedding 批次合流；
+- `memory.graph` 的摄入、检索和 Worker 后半段：生命周期外壳、Bot 级冻结语义空间、每群主干、图文来源及跨主干关系查询已进入 RuntimeGraph；Conversation 摄入 UoW、text/image/mixed 召回服务和 embedding 批次 Worker 尚未接线；
 - `delivery`：CHAT/CONTROL lane、顺序、Effect 与 Adapter 双 fence、生命周期 Worker、崩溃恢复与 UNKNOWN 对账；
 - `shell.command`：Binding/群/主体策略、P0/P1 claim、授权复核和控制回执；
 - `conversation.scheduler`：连续分类水位、同群 actor lease、安全边界、trigger cut、静默排空和恢复领取。
@@ -93,7 +95,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 ## 当前阻断项
 
-1. 将 `memory.graph`、`shell.command` 和必要的 Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议；Delivery Worker 已进入该协议，后续需要与完整生产启动图共同验证热替换排空。
+1. 补齐 `memory.graph` 的 Conversation 摄入 UoW、Embedding Worker 与 Agent 召回端口，并将 `shell.command` 接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议；Memory 生命周期外壳与 Delivery Worker 已进入该协议，后续需要在完整生产启动图验证热替换排空。
 2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；下一步删除旧业务 `contract.router` 与旧组合根。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。

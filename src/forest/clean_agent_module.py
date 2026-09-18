@@ -158,6 +158,7 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
             "kernel.payload",
             "kernel.authorization",
             "kernel.effect",
+            "memory.graph",
             "provider.chat-completions",
         ),
         factory,

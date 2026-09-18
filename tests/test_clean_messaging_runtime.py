@@ -23,6 +23,7 @@ from forest.agent_tool_executor import (
 )
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
+from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.core_runtime import bootstrap_clean_kernel
@@ -241,6 +242,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         credential_resolver=lambda _revision: "test-model-key",
         client_factory=create_model_client,
     )
+    memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
     clients = []
 
@@ -316,7 +318,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     registry = RuntimeModuleRegistry(
         host,
         kernel.descriptors
-        + (provider.descriptor, agent.descriptor)
+        + (provider.descriptor, memory.descriptor, agent.descriptor)
         + messaging.descriptors
         + (delivery.descriptor,),
     )
@@ -330,6 +332,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "kernel.effect",
             "kernel.audit",
             "provider.chat-completions",
+            "memory.graph",
             "agent.runtime",
             "conversation.scheduler",
             "adapter.onebot",
@@ -339,6 +342,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         conversation_runtime = registry.get("conversation.scheduler")
         agent_runtime = registry.get("agent.runtime")
         provider_runtime = registry.get("provider.chat-completions")
+        memory_runtime = registry.get("memory.graph")
         delivery_runtime = registry.get("delivery")
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
@@ -346,6 +350,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert conversation_runtime.active is True
         assert agent_runtime.active is True
         assert provider_runtime.active is True
+        assert memory_runtime.active is True
+        assert memory_runtime.profile.embedding.model == "Qwen/Qwen3-VL-Embedding-8B"
+        assert memory_runtime.profile.embedding.dimensions == 4096
+        assert await memory_runtime.list_trunks() == []
         assert delivery_runtime.active is True
         assert agent_runtime.provider is not provider_runtime
         provider_route = agent_runtime.provider._project.route
@@ -789,6 +797,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
     with pytest.raises(ForestError) as caught:
         await agent_runtime.load("run/missing")
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    with pytest.raises(ForestError) as caught:
+        await memory_runtime.list_trunks()
     assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
     with pytest.raises(ForestError) as caught:
         await agent_runtime.provider.prepare_request(
