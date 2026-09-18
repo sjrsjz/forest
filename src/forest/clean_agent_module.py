@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from forest.clean_agent_management import CleanAgentManagementContract
 from forest.clean_agent_runtime import CleanAgentRuntime
 from forest.packages import digest_json
 from forest.runtime_modules import (
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
     official_artifact,
     official_storage_bundle,
@@ -164,7 +166,7 @@ async def bootstrap_clean_agent(
     )
 
     def factory(_runtime, contracts):
-        return CleanAgentRuntime(
+        runtime = CleanAgentRuntime(
             repository=repository,
             module_configuration=configuration,
             grants=grants,
@@ -182,6 +184,12 @@ async def bootstrap_clean_agent(
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
+        runtime.management_contract = CleanAgentManagementContract(
+            configuration,
+            payloads=kernel.payload,
+            storage_schema=schema,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "agent.runtime",
@@ -196,6 +204,18 @@ async def bootstrap_clean_agent(
         ),
         factory,
         official_artifact("bot"),
+        management=(
+            RuntimeManagementContribution(
+                "agent-profile",
+                "Agent 协议与预设",
+                ("bot",),
+                "/static/modules/clean-agent.html",
+                "/static/clean-agent.js",
+                style="/static/modules/clean-agent.css",
+                group="runtime",
+                order=5,
+            ),
+        ),
         storage=storage,
         factory_protocol="forest.contract-module-factory/1",
     )

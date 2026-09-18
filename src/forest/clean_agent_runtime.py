@@ -44,6 +44,13 @@ def _stable(kind: str, *parts: object) -> str:
     return f"{kind}:{hashlib.sha256(value).hexdigest()}"
 
 
+def _utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeError:
+        return -1
+
+
 class CleanAgentRuntime:
     """Expose Agent authority operations only through the exact active Generation."""
 
@@ -109,17 +116,33 @@ class CleanAgentRuntime:
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired(include_value=True)
         value = desired.value
-        if not isinstance(value, dict):
+        if (
+            not isinstance(value, dict)
+            or set(value)
+            != {
+                "protocol",
+                "agent_spec_revision",
+                "preset_revision",
+                "preset",
+                "run_timeout_seconds",
+                "max_steps",
+                "output_tokens",
+                "stream",
+            }
+            or value.get("protocol") != "forest.agent.runtime/1"
+        ):
             raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent configuration is invalid", 500)
         if (
             not isinstance(value.get("agent_spec_revision"), str)
+            or not 1 <= _utf8_size(value["agent_spec_revision"]) <= 256
             or not isinstance(value.get("preset_revision"), str)
+            or not 1 <= _utf8_size(value["preset_revision"]) <= 256
             or type(value.get("run_timeout_seconds")) is not int
             or not 1 <= value["run_timeout_seconds"] <= 86400
             or type(value.get("max_steps")) is not int
             or not 1 <= value["max_steps"] <= 256
             or type(value.get("output_tokens")) is not int
-            or value["output_tokens"] < 1
+            or not 1 <= value["output_tokens"] <= 131072
             or type(value.get("stream")) is not bool
         ):
             raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent limits are invalid", 500)
@@ -157,6 +180,8 @@ class CleanAgentRuntime:
             not isinstance(messages, list)
             or len(messages) > 32
             or any(not isinstance(item, str) for item in messages)
+            or any(_utf8_size(item) < 0 for item in messages)
+            or sum(_utf8_size(item) for item in messages) > 32768
         ):
             raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent preset is invalid", 500)
         self._profile = FrozenAgentProfile(

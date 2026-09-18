@@ -1,0 +1,18 @@
+<div class="contribution-view agent-workbench">
+  <section class="agent-settings">
+    <header><div><strong>单 Agent 运行配置</strong><p id="agent-state"></p></div><button id="agent-save">计划并应用</button></header>
+    <div class="agent-fields">
+      <label>规格修订（模块只读）<input id="agent-spec" maxlength="256" readonly></label>
+      <label>Run 超时（秒）<input id="agent-timeout" type="number" min="1" max="86400"></label>
+      <label>最大步骤<input id="agent-steps" type="number" min="1" max="256"></label>
+      <label>输出 token<input id="agent-tokens" type="number" min="1" max="131072"></label>
+      <label class="agent-check"><input id="agent-stream" type="checkbox">启用 Provider 流式响应</label>
+    </div>
+    <div class="preset-head"><div><strong>Bot PresetContext</strong><p>Bot 人格与行为提示；按顺序注入，不改变不可变协议。</p></div><button id="preset-add" class="quiet" type="button">添加段落</button></div>
+    <div id="preset-list" class="preset-list"></div>
+  </section>
+  <section class="core-prompt">
+    <header><div><strong>Forest CorePrompt</strong><p id="core-identity"></p></div><span class="immutable">只读</span></header>
+    <textarea id="core-text" readonly spellcheck="false" aria-label="Forest CorePrompt"></textarea>
+  </section>
+</div>

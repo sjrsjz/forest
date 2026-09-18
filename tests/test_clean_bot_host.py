@@ -14,6 +14,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
+from forest.agent_protocol import CORE_PROMPT_SHA256
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.clean_management_app import create_clean_management_app
 from forest.embeddings import EmbeddingInput, EmbeddingResult, EmbeddingVector
@@ -672,6 +673,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert embedding_view["management_contributions"][0][
                             "contribution_id"
                         ] == "configuration"
+                        agent_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "agent.runtime"
+                        )
+                        assert [
+                            item["contribution_id"]
+                            for item in agent_view["management_contributions"]
+                        ] == ["agent-profile"]
                         memory_view = next(
                             item
                             for item in runtime_view.json()["modules"]
@@ -769,6 +779,54 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         )
                         assert applied.status_code == 200
                         assert applied.json()["replaced"] is True
+                        agent_configuration = await web.get(
+                            "/management/v1/modules/agent.runtime/configuration",
+                            headers=headers,
+                        )
+                        assert agent_configuration.status_code == 200
+                        agent_configuration = agent_configuration.json()
+                        assert agent_configuration["core_prompt"]["digest"] == CORE_PROMPT_SHA256
+                        assert agent_configuration["core_prompt"]["mutable"] is False
+                        assert agent_configuration["core_prompt"]["text"].startswith(
+                            '<forest_agent_protocol version="1">'
+                        )
+                        assert agent_configuration["desired"]["value"]["preset_context"] == [
+                            settings.agent_system_prompt
+                        ]
+                        agent_profile = deepcopy(agent_configuration["desired"]["value"])
+                        agent_profile["preset_context"] = [
+                            "You are Forest's managed single-Agent test persona.",
+                            "Keep user identities distinct.",
+                        ]
+                        agent_profile["max_steps"] = 24
+                        agent_plan = await web.post(
+                            "/management/v1/modules/agent.runtime/configuration/plans",
+                            headers={**headers, "idempotency-key": "agent-profile-plan"},
+                            json={
+                                "expected_desired_revision": agent_configuration["desired"][
+                                    "revision"
+                                ],
+                                "value": agent_profile,
+                            },
+                        )
+                        assert agent_plan.status_code == 200
+                        agent_applied = await web.post(
+                            "/management/v1/modules/agent.runtime/configuration/apply",
+                            headers={**headers, "idempotency-key": "agent-profile-apply"},
+                            json={
+                                "plan_id": agent_plan.json()["plan_id"],
+                                "expected_desired_revision": agent_configuration["desired"][
+                                    "revision"
+                                ],
+                            },
+                        )
+                        assert agent_applied.status_code == 200
+                        assert agent_applied.json()["replaced"] is True
+                        active_agent = host.registry.get("agent.runtime")
+                        assert active_agent._profile.preset_context == tuple(
+                            agent_profile["preset_context"]
+                        )
+                        assert active_agent._profile.max_steps == 24
                     replacement = host.registry
                     assert replacement.graph_identity.graph_id != previous_graph.graph_id
                     assert set(replacement.states.values()) == {ModuleLifecycleState.ACTIVE}
@@ -813,6 +871,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         assert graph_ids[0] != graph_ids[1]
         assert FakeEmbeddingClient.endpoints == [
             "http://127.0.0.1:8001/v1/embeddings",
+            "http://127.0.0.1:9001/v1/embeddings",
             "http://127.0.0.1:9001/v1/embeddings",
             "http://127.0.0.1:9001/v1/embeddings",
         ]
