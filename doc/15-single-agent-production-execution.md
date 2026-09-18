@@ -8,7 +8,7 @@
 
 | 主体 | 拥有 | 提供/调用 | 明确不拥有 |
 |---|---|---|---|
-| `conversation.scheduler` | Inbox、trigger、InputBatch、Context、群 actor lease、ConversationWorker 生命周期任务 | 冻结输入切口；经内核 Contract Router 调用 `agent.execute/1`；发起回复与 Session 交接 UnitOfWork | ModelTurn、工具状态、Provider 客户端、Delivery 状态 |
+| `conversation.scheduler` | Inbox、trigger、InputBatch、Context、群 actor lease、ConversationWorker 生命周期任务 | 冻结输入切口；经内核 Contract Router 调用 `agent.execute/1`；向内核 UnitOfWork 提交回复或 Session 交接计划 | ModelTurn、工具状态、Provider 客户端、Delivery 状态、其他模块 participant 对象 |
 | `agent.runtime` | Session、Run、CorePrompt 协议、Preset 引用、ModelTurn、ToolCall、模型 attempt 与 checkpoint | `agent.execute/1`；在每次模型调用前调用 Scheduler 提供的安全点回调；产出 `FinalCandidate` | Inbox 游标、群 actor、正式 REPLY、SendIntent |
 | `provider.*` / `tool.*` | 各自客户端、能力快照、attempt/effect 观察 | 被 Agent 通过版本化 contract 调用 | Conversation 与 Agent 状态机 |
 | `delivery` | SendIntent、part、attempt、发送回执与 UNKNOWN | `delivery.intent/1` participant；异步发送已提交意图 | 回复内容决策、Agent Run |
@@ -25,7 +25,7 @@
 |---|---|
 | owner / namespace | 仅拥有会话连续序、分类水位、trigger、InputBatch、Context、actor lease 和 Worker 任务；写 `conversation_scheduler` 私有 namespace |
 | provides | `conversation.ingress/1`、`conversation.input/1`、`conversation.context/1`、`conversation.reply-participant/1`、`conversation.session-participant/1` |
-| requires | 内核 lifecycle/Contract Router/UnitOfWork，`message.router` 的冻结分类结果，`agent.execute/1`，`delivery.intent/1` |
+| requires | 内核 lifecycle/Contract Router/UnitOfWork，`message.router` 的冻结分类结果，`agent.execute/1`；Scheduler 不直接依赖或持有 `delivery` 运行实例 |
 | Generation fence | 本 Generation 控制 Worker admission；每次领取、选批次、追加 Context 和最终提交都校验 actor epoch 与 member generation |
 | concurrency | 数据库 actor lease 保证同群单链；有界 semaphore 只控制跨群并发，进程锁不构成权威 |
 | recovery | 从 lane 的 active Session/Run 引用恢复；完成 Run 只继续交接；过期 actor 不能提交 |
@@ -41,7 +41,7 @@
 | concurrency | 同一 Run 只有一个 owner epoch；模型调用和工具因果组顺序闭合，不产生分支 Agent |
 | recovery | 从持久 checkpoint 继续；不可查询的已派发模型/工具进入 `UNKNOWN/BLOCKED_UNKNOWN`，不能换 operation 重发 |
 
-两个模块只交换类型化 DTO、稳定引用和受管 PayloadRef。Scheduler 不持有 Agent Repository；Agent 不持有 Scheduler Repository。跨模块原子提交通过注册的 participant 端口完成，不能由任一业务模块直接写其他 namespace。
+两个模块只交换类型化 DTO、稳定引用和受管 PayloadRef。Scheduler 不持有 Agent Repository 或运行实例；Agent 不持有 Scheduler Repository 或运行实例。Contract Router 句柄不是 Python bound method，必须冻结目标 Generation、契约版本和 admission fence。跨模块原子提交由内核 UnitOfWork 根据计划解析已注册 participant；不能把 participant 对象注入 Scheduler，也不能由任一业务模块直接写其他 namespace。
 
 ## 3. 单 Agent 执行循环
 
@@ -53,7 +53,7 @@
 4. Agent 用 Scheduler 返回的冻结 Context view 构造模型 snapshot。每个单元保留 `conversation_id`、平台、`channel_kind/channel_ref`、Binding、事件、作者快照和受管 payload 来源；不能从显示名或消息正文推断身份。
 5. Agent 调用冻结的 Provider contract。FunctionCall 只进入同一 Run 的顺序工具步骤；工具通过冻结目录解析准确 `tool.*` Generation，不创建另一 Agent。
 6. 工具完成或明确失败后，状态机回到同一 Run 的下一次模型调用；`DISPATCHING` 结果丢失时只查询原 effect，无法查询则进入 `BLOCKED_UNKNOWN`。
-7. 终止 ModelTurn 产生 `FinalCandidate`。Scheduler 发起三 participant UnitOfWork，原子提交 Agent Run `COMPLETED`、正式 `REPLY`、trigger `ANSWERED` 与 CHAT SendIntent。
+7. 终止 ModelTurn 产生 `FinalCandidate`。Scheduler 生成 `ReplyCommitPlan` 并调用内核 UnitOfWork；内核解析三 participant，原子提交 Agent Run `COMPLETED`、正式 `REPLY`、trigger `ANSWERED` 与 CHAT SendIntent。
 8. Scheduler 在 `SESSION_END` 边界选择后继：有新 trigger 就在同一 Session 建立唯一后继 Run；没有 trigger 就静默排空普通尾部并关闭 Session。
 
 “Agent 正在工作时有新触发”只改变下一次模型调用的输入版本，不启动并发响应；模型流和未闭合工具组中途不修改请求。Agent 完成且没有新 trigger 时，静默排空剩余普通消息，不额外调用模型。
@@ -85,7 +85,7 @@ CorePrompt 是 `agent.runtime` 包内版本化协议，随 Agent spec 和 parser
 
 ## 6. UnitOfWork 与恢复
 
-正式回复 participant 固定为 `agent.runtime + conversation.scheduler + delivery`；Session 交接 participant 固定为 `agent.runtime + conversation.scheduler`。协调器只持有公开 participant 端口和 Bot transaction handle，不得取得任一模块 Repository。
+正式回复 participant 固定为 `agent.runtime + conversation.scheduler + delivery`；Session 交接 participant 固定为 `agent.runtime + conversation.scheduler`。内核协调器只持有注册表解析出的公开 participant 端口和 Bot transaction handle，不得取得任一模块 Repository。Scheduler 只提交计划，不保存 participant、其他模块实例或共享模块字典；同一计划的恢复由稳定 operation ID 重新进入内核协调器。
 
 | 持久状态 | 恢复动作 |
 |---|---|

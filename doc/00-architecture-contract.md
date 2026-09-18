@@ -47,7 +47,7 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 | `routing.graph` / `command.router` / `message.router` | 冻结路由、业务命令/消息处理策略、dispatch trace 与相关持久工作 |
 | `scheduler.jobs` | 定时任务定义、occurrence、lease 与 misfire 处理 |
 
-模块只能经版本化契约交换 DTO、稳定引用和受管 `PayloadRef`。模块不得持有另一模块的 Repository、数据库表、客户端或运行实例。需要原子提交时，由内核调用已注册 participant；每个 participant 仍只写自己的 namespace。
+模块只能经版本化契约交换 DTO、稳定引用和受管 `PayloadRef`。模块不得持有另一模块的 Repository、数据库表、客户端或运行实例，也不得把进程内模块对象、Repository bound method 或共享 `modules` 字典伪装成“端口注入”。普通调用由 Contract Router 返回绑定准确 RuntimeGraph/Generation 的有界句柄；跨模块原子提交由内核 UnitOfWork 协调器解析并调用已注册 participant。每个 participant 仍只写自己的 namespace，业务模块只提交计划和稳定引用，不取得其他 participant 对象。
 
 `BotRuntimeSupervisor` 只监督冻结的模块图、宿主 lease、资源和健康，不得 import、构造或保存具体 Agent、Memory、Adapter、Shell、Scheduler、Job 或 Delivery 对象。`BindingRuntime`、巨型 `BotStore`/`MessageStore` 和类似业务组合根属于必须删除的错误抽象。
 

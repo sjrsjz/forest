@@ -43,6 +43,8 @@
 新工作通过 `verify_active_generation_in()` 在最终事务内复核准确组件、Generation、RuntimeGraph、Route epoch 和 DATA/CONTROL admission；已经领取的排空工作只能通过 `verify_generation_member_in()` 继续，并同时复核自己的 actor/run/call lease。绑定身份失败、预热失败、图提交失败、本地 activation 不变量失败和 freeze 后新准入拒绝都有回收测试，不会遗留可接纳工作的部分图。
 
 ### Provider、Agent、Conversation 与 OneBot Messaging 图
+
+> **生产接线状态修正：** 下述 Repository、状态机和 UnitOfWork 定向测试不等于生产启动图已接通。当前工作树中的 Agent 执行组合、Context 投影、最终回复规划和生命周期 Worker 接线仍是未提交候选；若它们通过共享模块字典、直接运行实例或 bound participant 注入跨越模块边界，即使测试通过也必须删除。只有改为内核 Contract Router 的冻结调用句柄和内核 UnitOfWork 计划接口，并通过生产图恢复/热替换测试后，自动 Agent 回复才算落地。
 `provider.chat-completions`、`agent.runtime`、`conversation.scheduler`、`adapter.onebot` 和 `delivery` 已经作为五个平级业务模块与五个内核模块共同进入一张十成员 RuntimeGraph：
 - `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
 - text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
@@ -92,7 +94,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 ## 当前阻断项
 
 1. 将 `memory.graph`、`shell.command` 和必要的 Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议；Delivery Worker 已进入该协议，后续需要与完整生产启动图共同验证热替换排空。
-2. 让 `conversation.scheduler` 的生命周期 Worker 经内核 Contract Router 取得冻结的 `agent.execute/1` 与 participant 端口；把 `agent.runtime` 接到 `DurableAgentModelExecutor`、`DurableAgentToolExecutor`、真实工具授权/Effect 端口和具体工具服务路由，并接通 Delivery 与最终回复/Session 交接 UnitOfWork。不得新增聊天业务 `contract.router`、测试端口或旧组合根进入生产图。
+2. 让 `conversation.scheduler` 的生命周期 Worker 只取得内核 Contract Router 冻结的 `agent.execute/1` 句柄，并把回复/Session 交接计划提交给内核 UnitOfWork；由内核解析 participant，禁止共享模块字典、直接运行实例和 bound method 注入。把 `agent.runtime` 接到 `DurableAgentModelExecutor`、`DurableAgentToolExecutor`、真实工具授权/Effect 端口和具体工具服务路由。不得新增聊天业务 `contract.router`、测试端口或旧组合根进入生产图。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
 5. 将 provisioning、启动、恢复和 Docker 入口切到最小 bootstrap + 所选模块 bundle + 冻结 RuntimeGraph。

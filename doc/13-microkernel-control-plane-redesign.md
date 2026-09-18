@@ -43,16 +43,25 @@ flowchart LR
   LC --> J[scheduler.jobs]
   A -->|InboundMessage 1.x| CR
   CR --> Q
-  Q -->|RunInput / safe-point batch 1.x| G
-  G -->|memory.query 1.x| M
-  G -->|FinalCandidate / checkpoint 1.x| Q
-  Q -->|atomic Reply + SendIntent UoW| D
-  D -->|adapter.send 1.x| A
+  Q -->|agent.execute 1.x| CR
+  CR --> G
+  G -->|memory.query 1.x| CR
+  CR --> M
+  G -->|FinalCandidate| CR
+  CR --> Q
+  Q -->|ReplyCommitPlan| UOW[Kernel UnitOfWork]
+  UOW -->|registered participant| G
+  UOW -->|registered participant| Q
+  UOW -->|registered participant| D
+  D -->|adapter.send 1.x| CR
+  CR --> A
 ```
 
 `BotRuntimeSupervisor` 只负责读取已冻结部署计划、按依赖图建立组件实例、授予能力、监督代际和汇总健康。它不能 `import AgentRuntime`、`MemoryRuntime` 或具体 Adapter。官方组件和第三方组件都通过同一 `ModuleDescriptor`/`ModuleFactory` 注册，只在信任级别、发行来源和允许的能力上不同。
 
-运行时代码只能按稳定 `component_id` 从 `ModuleRegistry` 解析能力，禁止在 Bot/Binding 对象上重新暴露 `agent`、`memory`、`scheduler`、`shell`、`jobs` 等便利属性。模块拥有自己的内部资源，例如 `scheduler.jobs` 拥有 JobStore；调用者不得越过模块边界持有该资源。这样删除或替换模块时，内核与业务模块之间不会留下隐式对象图，依赖关系也能由注册表完整描述和校验。
+只有内核路由与生命周期设施可以从 `ModuleRegistry` 解析实例。业务运行时代码必须消费绑定准确图、代际、契约版本、deadline 与 admission epoch 的调用句柄，不能按 `component_id` 取出另一个模块的 Python 对象。禁止在 Bot/Binding 对象上重新暴露 `agent`、`memory`、`scheduler`、`shell`、`jobs` 等便利属性，也禁止给工厂传入可变的全局 `modules` 字典后由模块自行抓取依赖。模块拥有自己的内部资源，例如 `scheduler.jobs` 拥有 JobStore；调用者不得越过模块边界持有该资源。这样删除或替换模块时，内核与业务模块之间不会留下隐式对象图，依赖和实际调用都能由注册表与 dispatch trace 完整解释。
+
+启动依赖图与运行调用图是两种契约。启动依赖只描述 PREPARE、prewarm 和 activation 的先后关系，必须无环；运行服务可以出现 `conversation.scheduler → agent.runtime → memory.graph` 及 Delivery 回到 Adapter 的调用路径，但每一跳都经过 Contract Router，不能通过添加生命周期依赖或 `graph_activated()` 后门取得实例来规避循环。模块在 `start` 前取得的只是未开放 admission 的冻结调用句柄；完整 RuntimeGraph 发布后，内核统一开放这些句柄和模块本地 gate。
 
 官方受信模块可在描述符中声明一个或多个 `management_contributions`，每项包含稳定 contribution ID、适用作用域、排序组、显示名、协议版本、HTML 模板、CSS 和 ES module 控制器资产。控制台壳只能从运行时注册表枚举并装载这些声明，不能按模块 ID 建立页面映射。受信资产必须随 Forest 发行并限制在 `/static/`；可安装包不获得这一执行级别，仍使用下节的摘要绑定沙箱 iframe。
 
@@ -78,9 +87,9 @@ flowchart LR
 
 官方 `adapter.onebot` 模块只拥有 Binding 配置与账号身份、连接代际、候选发布/恢复、平台入站观察、网络客户端和连接监督任务，并向其他模块提供 Binding 目录、已认证入站和 OneBot action 传输端口。Binding 配置只引用凭据与其他模块的策略身份；管理员名单、Shell 规则和命令权限属于 `shell.command`，不能因为它们按 Binding 生效就写进 Adapter。`conversation.scheduler` 拥有 Inbox、触发、输入切口和 Context；`shell.command` 拥有控制消息接纳、管理员策略、命令请求与执行；`delivery` 拥有 SendIntent、发送分片、attempt、平台回执引用、UNKNOWN 与对账。Adapter 只执行 Delivery 已许可的一个 transport attempt 并返回类型化观察，不能持有 `MessageStore`、`DeliveryStore`、Shell guard、发送队列或回复顺序。
 
-Agent 的最终候选不能直接创建 Delivery 记录。`agent.runtime` 先把带 checkpoint 和所答 trigger 集合的 `FinalCandidate` 交给 `conversation.scheduler`；协调器在同一 Bot UnitOfWork 中提交正式 `REPLY` Context、trigger `ANSWERED` 状态和 Delivery `SendIntent`。任一 participant 失败则整体回滚。Agent、Conversation 与 Delivery 都只能写自己的 schema，原子性由注册的 participant 端口实现，不靠跨模块直写或跨 schema 外键。
+Agent 的最终候选不能直接创建 Delivery 记录。`agent.runtime` 先把带 checkpoint 和所答 trigger 集合的 `FinalCandidate` 交给 `conversation.scheduler`；Scheduler 只构造带稳定引用、预期版本和幂等 ID 的 `ReplyCommitPlan`，再调用内核 UnitOfWork 契约。内核按冻结 RuntimeGraph 解析 Agent、Conversation 与 Delivery 的准确 participant，在同一 Bot 事务中提交正式 `REPLY` Context、trigger `ANSWERED`、Agent Run `COMPLETED` 和 Delivery `SendIntent`。任一 participant 失败则整体回滚。业务模块不能持有另两个运行实例或 participant bound method，也不能自己拼接跨模块 UnitOfWork；每个 participant 只写自己的 schema，原子性不靠跨模块直写或跨 schema 外键。
 
-`memory.graph` 拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询、组件 Event 和 ComponentJob 的持久存储及管理视图；事件/任务的查询、失败重放和 Handler 退役均通过该模块的类型化管理契约完成。`kernel.audit` 拥有 Bot 级不可变审计流的写入端口、脱敏元数据查询契约和管理 UI；它只保存并投影其他模块提交的审计事实，不接管这些事实所描述的业务资源，生产者仍负责动作语义和载荷 schema。审计查询不得直接穿过壳层访问共享表，Shell 也必须依赖该模块端口。`command.router` 与 `message.router` 依赖 `adapter.onebot` 的 Binding 目录、`conversation.scheduler` 的消息端口和 `routing.graph`，分别拥有业务命令与普通消息 Handler 的策略、容量、脱敏诊断、恢复操作和管理 UI。`component.worker-host` 独占可安装包 Worker 的准备、启动与停止资源，OneBot 通过依赖端口请求 codec。内核 Contract Router 只按冻结 RuntimeGraph 解析并调用版本化 contract，不拥有消息分派策略、Agent 选择、模板 responder 或聊天执行循环，也不理解聊天内容。`conversation.scheduler` 在其生命周期任务中领取群 actor，并通过该内核路由器调用冻结的 `agent.execute/1`、回复提交 participant 与 Session 交接端口。`scheduler.jobs` 自己构造授权端口并把冻结委派翻译为部署 authority 请求。
+`memory.graph` 拥有来源账本与回填任务。`routing.graph` 拥有 RouteGraph 查询、组件 Event 和 ComponentJob 的持久存储及管理视图；事件/任务的查询、失败重放和 Handler 退役均通过该模块的类型化管理契约完成。`kernel.audit` 拥有 Bot 级不可变审计流的写入端口、脱敏元数据查询契约和管理 UI；它只保存并投影其他模块提交的审计事实，不接管这些事实所描述的业务资源，生产者仍负责动作语义和载荷 schema。审计查询不得直接穿过壳层访问共享表，Shell 也必须依赖该模块端口。`command.router` 与 `message.router` 依赖 `adapter.onebot` 的 Binding 目录、`conversation.scheduler` 的消息端口和 `routing.graph`，分别拥有业务命令与普通消息 Handler 的策略、容量、脱敏诊断、恢复操作和管理 UI。`component.worker-host` 独占可安装包 Worker 的准备、启动与停止资源，OneBot 通过依赖端口请求 codec。内核 Contract Router 只按冻结 RuntimeGraph 解析并调用版本化 contract，不拥有消息分派策略、Agent 选择、模板 responder 或聊天执行循环，也不理解聊天内容。`conversation.scheduler` 在其生命周期任务中领取群 actor，并通过内核路由句柄调用冻结的 `agent.execute/1`；正式回复与 Session 交接通过内核 UnitOfWork 契约提交计划，由内核解析 participant。`scheduler.jobs` 通过内核授权契约请求冻结委派，不能自行构造另一套 authority port。
 
 `BindingRuntime` 是已废弃的错误抽象，目标代码中不得保留该类型或兼容别名。Bot 作用域的宿主由 `BotRuntimeSupervisor` 表达；它只监督冻结模块图、内核任务、宿主 lease、统一唤醒和故障传播。模块唤醒通过通用生命周期/工作通知端口汇总，健康状态从各 Generation 的监督结果归约。Supervisor 不得知道某次唤醒属于 Agent、Memory、OneBot 或 Job，也不得持有这些模块的 Store、客户端或业务回调。
 
