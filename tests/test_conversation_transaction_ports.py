@@ -119,7 +119,7 @@ async def test_completion_port_passes_only_an_exact_agent_context_delivery_plan(
 
 @pytest.mark.asyncio
 async def test_session_port_derives_stable_uow_plan_from_completed_run():
-    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+    completed_at = datetime.now(timezone.utc)
     plans = []
 
     class AgentRepository:
@@ -128,18 +128,21 @@ async def test_session_port_derives_stable_uow_plan_from_completed_run():
             return {
                 "session_id": "session/one",
                 "state": "COMPLETED",
-                "absolute_deadline": deadline,
+                "updated_at": completed_at,
             }
+
+        def profile(self):
+            return SimpleNamespace(run_timeout_seconds=300)
 
     class UnitOfWork:
         async def decide(self, *, actor, plan):
             plans.append((actor, plan))
             return {"action": "CLOSED", "selection": {"status": "IDLE"}}
 
-    actor = SimpleNamespace(conversation_id="group/one")
+    actor = SimpleNamespace(conversation_id="group/one", epoch=7)
     port = TransactionalSessionDecisionPort(
         unit_of_work=UnitOfWork(),
-        agent_repository=AgentRepository(),
+        agent=AgentRepository(),
     )
     first = await port.decide(
         actor=actor,
@@ -157,4 +160,4 @@ async def test_session_port_derives_stable_uow_plan_from_completed_run():
     )
     assert first == second
     assert plans[0][1] == plans[1][1]
-    assert plans[0][1].successor_deadline == deadline
+    assert plans[0][1].successor_deadline == completed_at + timedelta(seconds=300)

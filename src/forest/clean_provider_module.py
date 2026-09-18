@@ -96,6 +96,7 @@ async def bootstrap_clean_provider(
             "grants": grants,
             "credential_resolver": credential_resolver,
             "generation_verifier": kernel.runtime.verify_active_generation_in,
+            "generation_member_verifier": kernel.runtime.verify_generation_member_in,
         }
         if client_factory is not None:
             values["client_factory"] = client_factory
@@ -107,5 +108,6 @@ async def bootstrap_clean_provider(
         factory,
         official_artifact("bot"),
         storage=storage,
+        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanProviderModule(descriptor, configuration, grants)

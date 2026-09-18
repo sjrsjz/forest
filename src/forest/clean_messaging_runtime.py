@@ -5,13 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.adapter_onebot_runtime import CleanOneBotRuntime
+from forest.conversation_reply_planner import DurableFinalReplyPlanner
 from forest.conversation_runtime import CleanConversationSchedulerRuntime
+from forest.conversation_transaction_ports import (
+    TransactionalConversationCompletionPort,
+    TransactionalSessionDecisionPort,
+)
+from forest.final_reply_uow import FinalReplyUnitOfWork, RuntimeParticipant
 from forest.packages import digest_json
+from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
     official_artifact,
     official_storage_bundle,
 )
+from forest.session_handoff_uow import SessionHandoffUnitOfWork
 from forest.storage.adapter_onebot_authority import OneBotAdapterRepository
 from forest.storage.authorization_authority import CapabilityGrant, GrantSetRef
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
@@ -53,6 +61,93 @@ class CleanMessagingModules:
     descriptors: tuple[RuntimeModuleDescriptor, ...]
     configurations: dict[str, ModuleConfigurationRepository]
     grants: dict[str, GrantSetRef]
+
+
+class _RoutedAgentExecution:
+    def __init__(self, execute) -> None:
+        self._execute = execute
+
+    async def execute(self, request):
+        return await self._execute(request)
+
+
+class _RoutedCompletion:
+    def __init__(self, commit) -> None:
+        self._commit = commit
+
+    async def commit(self, **values):
+        return await self._commit(**values)
+
+
+class _RoutedSessionDecision:
+    def __init__(self, decide) -> None:
+        self._decide = decide
+
+    async def decide(self, **values):
+        return await self._decide(**values)
+
+
+class _RoutedIngress:
+    def __init__(self, admit) -> None:
+        self._admit = admit
+
+    async def admit(self, **values):
+        return await self._admit(**values)
+
+
+def _build_final_reply_commit(context):
+    agent = context.participant("agent.runtime")
+    conversation = context.participant("conversation.scheduler")
+    delivery = context.participant("delivery")
+    participants = (
+        RuntimeParticipant("agent.runtime", agent.generation_identity.generation_id),
+        RuntimeParticipant(
+            "conversation.scheduler", conversation.generation_identity.generation_id
+        ),
+        RuntimeParticipant("delivery", delivery.generation_identity.generation_id),
+    )
+    port = TransactionalConversationCompletionPort(
+        unit_of_work=FinalReplyUnitOfWork(
+            store=context.store,
+            agent_participant=agent,
+            conversation_participant=conversation,
+            delivery_participant=delivery,
+            generation_member_verifier=context.generation_member_verifier,
+            participants=participants,
+        ),
+        plans=DurableFinalReplyPlanner(
+            agent=agent,
+            conversation=conversation,
+            delivery=delivery,
+        ),
+    )
+    return port.commit
+
+
+def _build_session_handoff(context):
+    agent = context.participant("agent.runtime")
+    conversation = context.participant("conversation.scheduler")
+    port = TransactionalSessionDecisionPort(
+        unit_of_work=SessionHandoffUnitOfWork(
+            store=context.store,
+            agent_participant=agent,
+            conversation_participant=conversation,
+            generation_member_verifier=context.generation_member_verifier,
+            agent_generation_id=agent.generation_identity.generation_id,
+            conversation_generation_id=conversation.generation_identity.generation_id,
+        ),
+        agent=agent,
+    )
+    return port.decide
+
+
+def _build_onebot_ingress(context):
+    port = OneBotIngressUnitOfWork(
+        context.store,
+        adapter=context.participant("adapter.onebot"),
+        conversation=context.participant("conversation.scheduler"),
+    )
+    return port.admit
 
 
 async def bootstrap_clean_messaging(
@@ -135,26 +230,38 @@ async def bootstrap_clean_messaging(
         "adapter.binding", adapter_repository.verify_effect_fence_in
     )
 
-    def conversation_factory(_runtime, _modules):
+    def conversation_factory(_runtime, contracts):
         return CleanConversationSchedulerRuntime(
             repository=conversation_repository,
             module_configuration=configurations["conversation.scheduler"],
             grants=grants["conversation.scheduler"],
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
+            agent_execution=_RoutedAgentExecution(
+                contracts.service("agent.execute", 1, owned_work=True)
+            ),
+            completion_port=_RoutedCompletion(
+                contracts.service(
+                    "kernel.uow.conversation.final-reply", 1, owned_work=True
+                )
+            ),
+            session_decision_port=_RoutedSessionDecision(
+                contracts.service(
+                    "kernel.uow.conversation.session-handoff", 1, owned_work=True
+                )
+            ),
+            graph_admission=contracts.graph_admission,
         )
 
-    def adapter_factory(_runtime, modules):
+    def adapter_factory(_runtime, contracts):
         values = {
             "repository": adapter_repository,
             "module_configuration": configurations["adapter.onebot"],
             "grants": grants["adapter.onebot"],
             "payloads": kernel.payload,
             "secret_resolver": secret_resolver,
-            "ingress_port": OneBotIngressUnitOfWork(
-                store,
-                adapter=adapter_repository,
-                conversation=modules["conversation.scheduler"],
+            "ingress_port": _RoutedIngress(
+                contracts.service("kernel.uow.onebot.ingress", 1)
             ),
         }
         if http_client_factory is not None:
@@ -175,6 +282,40 @@ async def bootstrap_clean_messaging(
             factories[component_id],
             artifact,
             storage=bundles[component_id],
+            wakes_on_work=component_id == "conversation.scheduler",
+            work_notify_order=10 if component_id == "conversation.scheduler" else 100,
+            factory_protocol=(
+                "forest.contract-module-factory/1"
+                if component_id in {"conversation.scheduler", "adapter.onebot"}
+                else "forest.legacy-module-factory/1"
+            ),
+            kernel_services=(
+                (
+                    RuntimeKernelServiceSpec(
+                        "kernel.uow.conversation.final-reply",
+                        1,
+                        ("agent.runtime", "conversation.scheduler", "delivery"),
+                        _build_final_reply_commit,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "kernel.uow.conversation.session-handoff",
+                        1,
+                        ("agent.runtime", "conversation.scheduler"),
+                        _build_session_handoff,
+                    ),
+                )
+                if component_id == "conversation.scheduler"
+                else (
+                    RuntimeKernelServiceSpec(
+                        "kernel.uow.onebot.ingress",
+                        1,
+                        ("adapter.onebot", "conversation.scheduler"),
+                        _build_onebot_ingress,
+                    ),
+                )
+                if component_id == "adapter.onebot"
+                else ()
+            ),
         )
         for component_id, definition in _DEFINITIONS.items()
     )

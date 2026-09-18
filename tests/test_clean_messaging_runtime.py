@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -346,6 +347,29 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert agent_runtime.active is True
         assert provider_runtime.active is True
         assert delivery_runtime.active is True
+        assert agent_runtime.provider is not provider_runtime
+        provider_route = agent_runtime.provider._project.route
+        assert provider_route.caller_component_id == "agent.runtime"
+        assert provider_route.provider_component_id == "provider.chat-completions"
+        assert provider_route.provider_generation_id == (
+            registry.graph_identity.generations["provider.chat-completions"]
+        )
+        assert provider_route.graph_id == registry.graph_identity.graph_id
+        assert provider_route.owned_work is True
+        agent_route = conversation_runtime.agent_execution._execute.route
+        assert agent_route.provider_component_id == "agent.runtime"
+        assert agent_route.owned_work is True
+        reply_uow_route = conversation_runtime.completion_port._commit.route
+        assert reply_uow_route.provider_component_id == "kernel.runtime"
+        assert reply_uow_route.owned_work is True
+        assert adapter_runtime.ingress_port is not messaging.conversation
+        ingress_route = adapter_runtime.ingress_port._admit.route
+        assert ingress_route.provider_component_id == "kernel.runtime"
+        assert ingress_route.owned_work is False
+        assert delivery_runtime.adapter is not adapter_runtime
+        delivery_route = delivery_runtime.adapter._dispatch.route
+        assert delivery_route.provider_component_id == "adapter.onebot"
+        assert delivery_route.owned_work is True
         assert len(clients) == 1 and clients[0].handler is not None
 
         reply = await _agent_payload(
@@ -466,7 +490,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         )
         started = await agent_runtime.start_run(
             operation_id="agent/start/test",
-            conversation_ref="onebot:group:933179609",
+            conversation_ref="onebot:group:manual-model-test",
             session_id="agent/session/test",
             run_id="agent/run/test",
             input_batch=AgentInputBatch(
@@ -502,11 +526,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                         "unit_id": "message:88",
                         "role": "user",
                         "source": {
-                            "conversation_id": "onebot:group:933179609",
-                            "group_source_id": "qq-group:933179609",
+                            "conversation_id": "onebot:group:manual-model-test",
+                            "group_source_id": "qq-group:manual-model-test",
                             "platform": "onebot-v11",
                             "channel_kind": "group",
-                            "channel_id": "933179609",
+                            "channel_id": "manual-model-test",
                         },
                         "author": {
                             "principal_ref": "qq:42",
@@ -524,7 +548,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                     }
                 ],
             }
-        request = await provider_runtime.prepare_request(
+        request = await agent_runtime.provider.prepare_request(
             model_snapshot,
             request_id="model-request:test",
             transport_attempt_id="model-attempt:test",
@@ -540,14 +564,14 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         async def permit(_conn, *, request):
             permitted.append(request.prepared.request_id)
 
-        response = await provider_runtime.dispatch(request, permit_in=permit)
+        response = await agent_runtime.provider.dispatch(request, permit_in=permit)
         assert response.status == "RESPONDED"
         assert permitted == ["model-request:test"]
 
         owner = await agent_runtime.acquire_run("agent/run/test", "agent-worker/test")
         executor = DurableAgentModelExecutor(
             agent=agent_runtime,
-            provider=provider_runtime,
+            provider=agent_runtime.provider,
             payloads=kernel.payload,
         )
         with pytest.raises(ForestError) as caught:
@@ -725,6 +749,36 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         recovered = await agent_runtime.load_recovery("agent/run/tool")
         assert recovered["state"] == "PREPARING_MODEL"
         assert recovered["current_tool"] is None
+
+        conversation_runtime.notify()
+        for _ in range(1000):
+            if len(clients[0].sends) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert conversation_runtime.worker is not None
+        assert conversation_runtime.worker.failures == {}, "".join(
+            traceback.format_exception(
+                next(iter(conversation_runtime.worker.failures.values()))
+            )
+        )
+        assert len(clients[0].sends) == 2
+        automatic_send, automatic_timeout = clients[0].sends[1]
+        assert automatic_timeout is None
+        assert automatic_send.action == "send_group_msg"
+        assert b"ok" in automatic_send.wire_body
+        async with store.pool.connection() as conn:
+            lane = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT active_session_ref,active_run_ref,context_revision "
+                        "FROM {}.conversation_lanes WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(messaging.conversation.namespace)),
+                    (store.bot_id, "onebot:group:933179609"),
+                )
+            ).fetchone()
+        assert lane["active_session_ref"] is None
+        assert lane["active_run_ref"] is None
+        assert lane["context_revision"] >= 2
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True
@@ -736,3 +790,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     with pytest.raises(ForestError) as caught:
         await agent_runtime.load("run/missing")
     assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    with pytest.raises(ForestError) as caught:
+        await agent_runtime.provider.prepare_request(
+            model_snapshot,
+            request_id="model-request:after-close",
+            transport_attempt_id="model-attempt:after-close",
+            stream=False,
+        )
+    assert caught.value.code == "RUNTIME_SERVICE_CALLER_NOT_ACTIVE"

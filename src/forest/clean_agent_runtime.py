@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
+from forest.agent_execution import DurableSingleAgentExecution
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.storage.agent_runtime_authority import AgentPayloadRef
@@ -30,20 +32,46 @@ class FrozenAgentProfile:
     stream: bool
 
 
+@dataclass(frozen=True)
+class PreparedAgentFinalization:
+    owner: object
+    checkpoint_id: str
+    state: AgentPayloadRef
+
+
+def _stable(kind: str, *parts: object) -> str:
+    value = "\0".join(str(part) for part in parts).encode("utf-8")
+    return f"{kind}:{hashlib.sha256(value).hexdigest()}"
+
+
 class CleanAgentRuntime:
     """Expose Agent authority operations only through the exact active Generation."""
 
     runtime_contract = {
         "protocol": "forest.runtime-services/1",
         "services": [
+            {"service_id": "agent.execute", "version": 1},
             {"service_id": "agent.run.start", "version": 1},
             {"service_id": "agent.run.advance", "version": 1},
             {"service_id": "agent.model.observe", "version": 1},
             {"service_id": "agent.tool.observe", "version": 1},
         ],
+        "requires": [
+            {"service_id": "provider.model.project", "version": 1},
+            {"service_id": "provider.model.dispatch", "version": 1},
+        ],
     }
     state_schema = 1
     state_contract = _STATE_CONTRACT
+
+    def runtime_service_handlers(self) -> dict:
+        return {
+            ("agent.execute", 1): self.execute,
+            ("agent.run.start", 1): self.start_run,
+            ("agent.run.advance", 1): self.transition,
+            ("agent.model.observe", 1): self.observe_model,
+            ("agent.tool.observe", 1): self.observe_tool,
+        }
 
     def __init__(
         self,
@@ -54,16 +82,23 @@ class CleanAgentRuntime:
         payloads,
         generation_verifier,
         generation_member_verifier=None,
+        provider=None,
     ):
         self.repository = repository
         self.module_configuration = module_configuration
         self.grants = grants
         self.payloads = payloads
+        self.provider = provider
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
         self._profile: FrozenAgentProfile | None = None
+        self.execution: DurableSingleAgentExecution | None = None
+
+    @property
+    def bot_id(self) -> str:
+        return self.repository.store.bot_id
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired(include_value=True)
@@ -182,6 +217,13 @@ class CleanAgentRuntime:
                 "Agent Generation identity was not bound",
                 503,
             )
+        if self.provider is not None:
+            self.execution = DurableSingleAgentExecution(
+                agent=self,
+                provider=self.provider,
+                payloads=self.payloads,
+                owner_id=("agent-execution/" + self.generation_identity.generation_id)[-256:],
+            )
 
     def activate_generation(self) -> None:
         self.active = True
@@ -191,6 +233,77 @@ class CleanAgentRuntime:
 
     async def close(self) -> None:
         self.active = False
+        self.execution = None
+
+    async def execute(self, request):
+        if not self.active or self.execution is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Agent execution has no Contract Router provider port",
+                409,
+            )
+        return await self.execution.execute(request)
+
+    async def prepare_finalization(
+        self, *, run_id: str, reply_ref: str
+    ) -> PreparedAgentFinalization:
+        owner = await self.acquire_run(
+            run_id,
+            ("agent-finalize/" + self.generation_identity.generation_id)[-256:],
+            lease_seconds=300,
+        )
+        try:
+            run = await self.load(run_id)
+            if run["state"] != "FINAL_READY":
+                raise ForestError(
+                    "AGENT_FINALIZATION_BOUNDARY_CLOSED",
+                    "Agent Run is not ready for finalization",
+                    409,
+                )
+            expected_reply_ref = _stable("reply", run_id)
+            if reply_ref != expected_reply_ref:
+                raise ForestError(
+                    "AGENT_FINALIZATION_CONFLICT",
+                    "Final reply reference differs from the Run",
+                    409,
+                )
+            checkpoint_id = _stable("checkpoint-completed", run_id)
+            epoch = await self.payloads.epoch()
+            saved = await self.payloads.put_bytes(
+                owner_component_id="agent.runtime",
+                owner_kind="checkpoint.state",
+                owner_id=checkpoint_id,
+                media_type="application/json",
+                content=json.dumps(
+                    {"phase": "COMPLETED", "reply_ref": reply_ref},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
+                expected_deletion_epoch=epoch,
+            )
+            return PreparedAgentFinalization(
+                owner=owner,
+                checkpoint_id=checkpoint_id,
+                state=AgentPayloadRef(
+                    saved.payload_id,
+                    saved.content_digest,
+                    "agent.runtime",
+                    "checkpoint.state",
+                    checkpoint_id,
+                ),
+            )
+        except BaseException:
+            await self.release_run(owner)
+            raise
+
+    async def release_finalization(self, prepared: PreparedAgentFinalization) -> None:
+        if type(prepared) is not PreparedAgentFinalization:
+            raise ForestError(
+                "AGENT_FINALIZATION_INPUT_INVALID",
+                "Agent finalization handle is invalid",
+                422,
+            )
+        await self.release_run(prepared.owner)
 
     def profile(self) -> FrozenAgentProfile:
         if not self.active or self._profile is None:
@@ -200,6 +313,27 @@ class CleanAgentRuntime:
                 409,
             )
         return self._profile
+
+    async def _verify_member_in(self, conn) -> None:
+        if not self.active or self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Agent Generation is not executing owned work",
+                409,
+            )
+        if self.generation_member_verifier is not None:
+            await self.generation_member_verifier(
+                conn,
+                component_id="agent.runtime",
+                generation_id=self.generation_identity.generation_id,
+            )
+        else:
+            await self.generation_verifier(
+                conn,
+                component_id="agent.runtime",
+                generation_id=self.generation_identity.generation_id,
+                admission_lane="DATA",
+            )
 
     async def _call(
         self,
@@ -270,25 +404,7 @@ class CleanAgentRuntime:
         )
 
     async def mark_model_handoff_in(self, conn, owner, **values):
-        if not self.active or self.generation_identity is None:
-            raise ForestError(
-                "RUNTIME_GENERATION_NOT_ACTIVE",
-                "Agent Generation is not executing owned work",
-                409,
-            )
-        if self.generation_member_verifier is not None:
-            await self.generation_member_verifier(
-                conn,
-                component_id="agent.runtime",
-                generation_id=self.generation_identity.generation_id,
-            )
-        else:
-            await self.generation_verifier(
-                conn,
-                component_id="agent.runtime",
-                generation_id=self.generation_identity.generation_id,
-                admission_lane="DATA",
-            )
+        await self._verify_member_in(conn)
         return await self.repository.mark_model_handoff(
             owner,
             _connection=conn,
@@ -307,25 +423,7 @@ class CleanAgentRuntime:
         return await self._call("observe_tool", owner=owner, owned_work=True, **values)
 
     async def observe_tool_in(self, conn, owner, **values):
-        if not self.active or self.generation_identity is None:
-            raise ForestError(
-                "RUNTIME_GENERATION_NOT_ACTIVE",
-                "Agent Generation is not executing owned work",
-                409,
-            )
-        if self.generation_member_verifier is not None:
-            await self.generation_member_verifier(
-                conn,
-                component_id="agent.runtime",
-                generation_id=self.generation_identity.generation_id,
-            )
-        else:
-            await self.generation_verifier(
-                conn,
-                component_id="agent.runtime",
-                generation_id=self.generation_identity.generation_id,
-                admission_lane="DATA",
-            )
+        await self._verify_member_in(conn)
         return await self.repository.observe_tool(
             owner,
             _connection=conn,
@@ -338,8 +436,20 @@ class CleanAgentRuntime:
     async def transition(self, owner, **values):
         return await self._call("transition", owner=owner, owned_work=True, **values)
 
+    async def transition_in(self, conn, owner, **values):
+        await self._verify_member_in(conn)
+        return await self.repository.transition(owner, _connection=conn, **values)
+
     async def close_session(self, **values):
         return await self._call("close_session", owned_work=True, **values)
+
+    async def start_successor_run_in(self, conn, **values):
+        await self._verify_member_in(conn)
+        return await self.repository.start_successor_run(_connection=conn, **values)
+
+    async def close_session_in(self, conn, **values):
+        await self._verify_member_in(conn)
+        return await self.repository.close_session(_connection=conn, **values)
 
     async def load(self, run_id: str):
         return await self._call("load", run_id=run_id, owned_work=True)

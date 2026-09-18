@@ -115,9 +115,22 @@ class CleanOneBotRuntime:
             {"service_id": "adapter.onebot.prepare-send", "version": 1},
             {"service_id": "adapter.onebot.dispatch", "version": 1},
         ],
+        "requires": [
+            {"service_id": "kernel.uow.onebot.ingress", "version": 1},
+        ],
     }
     state_schema = 1
     state_contract = _STATE_CONTRACT
+
+    def runtime_service_handlers(self) -> dict:
+        return {
+            ("adapter.onebot.ingress", 1): self.admit_http_event,
+            ("adapter.onebot.prepare-send", 1): self.prepare_delivery,
+            ("adapter.onebot.dispatch", 1): self.dispatch,
+        }
+
+    async def record_platform_event_in(self, conn, **values):
+        return await self.repository.record_platform_event_in(conn, **values)
 
     def __init__(
         self,

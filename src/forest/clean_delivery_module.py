@@ -35,6 +35,10 @@ class CleanDeliveryRuntime:
             {"service_id": "delivery.intent.create", "version": 1},
             {"service_id": "delivery.intent.observe", "version": 1},
         ],
+        "requires": [
+            {"service_id": "adapter.onebot.prepare-send", "version": 1},
+            {"service_id": "adapter.onebot.dispatch", "version": 1},
+        ],
     }
     state_schema = 1
     state_contract = _STATE_CONTRACT
@@ -48,6 +52,7 @@ class CleanDeliveryRuntime:
         payloads,
         module_configuration,
         grants,
+        generation_member_verifier,
     ) -> None:
         self.repository = repository
         self.authorization = authorization
@@ -55,6 +60,7 @@ class CleanDeliveryRuntime:
         self.payloads = payloads
         self.module_configuration = module_configuration
         self.grants = grants
+        self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
         self.worker: CleanDeliveryWorker | None = None
@@ -134,6 +140,20 @@ class CleanDeliveryRuntime:
     def owned_tasks(self) -> tuple:
         return self.worker.owned_tasks() if self.worker is not None else ()
 
+    async def create_intent_in(self, conn, **values):
+        if not self.active or self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Delivery Generation is not executing owned work",
+                409,
+            )
+        await self.generation_member_verifier(
+            conn,
+            component_id="delivery",
+            generation_id=self.generation_identity.generation_id,
+        )
+        return await self.repository.create_intent_in(conn, **values)
+
 
 @dataclass(frozen=True)
 class CleanDeliveryModule:
@@ -142,6 +162,18 @@ class CleanDeliveryModule:
     descriptor: RuntimeModuleDescriptor
     configuration: ModuleConfigurationRepository
     grants: object
+
+
+class _RoutedAdapterDelivery:
+    def __init__(self, prepare, dispatch) -> None:
+        self._prepare = prepare
+        self._dispatch = dispatch
+
+    async def prepare_delivery(self, **values):
+        return await self._prepare(**values)
+
+    async def dispatch(self, **values):
+        return await self._dispatch(**values)
 
 
 async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> CleanDeliveryModule:
@@ -201,14 +233,18 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         delivery_grants=grants,
     )
 
-    def factory(_runtime, modules):
+    def factory(_runtime, contracts):
         return CleanDeliveryRuntime(
             repository=repository,
             authorization=authorization,
-            adapter=modules["adapter.onebot"],
+            adapter=_RoutedAdapterDelivery(
+                contracts.service("adapter.onebot.prepare-send", 1, owned_work=True),
+                contracts.service("adapter.onebot.dispatch", 1, owned_work=True),
+            ),
             payloads=kernel.payload,
             module_configuration=configuration,
             grants=grants,
+            generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
 
     descriptor = RuntimeModuleDescriptor(
@@ -223,5 +259,6 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         factory,
         official_artifact("bot"),
         storage=storage,
+        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanDeliveryModule(repository, authorization, descriptor, configuration, grants)

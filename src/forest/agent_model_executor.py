@@ -178,7 +178,7 @@ class DurableAgentModelExecutor:
             raise ForestError("AGENT_MODEL_STEP_INVALID", "Model step identity is invalid", 422)
         run = await self.agent.load(owner.run_id)
         expected = {
-            "bot_id": self.agent.repository.store.bot_id,
+            "bot_id": self.agent.bot_id,
             "run_id": owner.run_id,
             "input_revision": run["input_revision"],
             "context_revision": run["context_revision"],

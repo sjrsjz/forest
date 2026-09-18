@@ -25,6 +25,7 @@ from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.runtime_contracts import RuntimeContractRouter, RuntimeKernelServiceSpec
 from forest.runtime_generation import (
     BoundGenerationIdentity,
     PreparedGenerationBinding,
@@ -252,6 +253,8 @@ class RuntimeModuleDescriptor:
     storage: RuntimeStorageBundle | None = None
     wakes_on_work: bool = False
     work_notify_order: int = 100
+    factory_protocol: str = "forest.legacy-module-factory/1"
+    kernel_services: tuple[RuntimeKernelServiceSpec, ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -261,6 +264,14 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime work notification declaration must be boolean")
         if type(self.work_notify_order) is not int or not 0 <= self.work_notify_order <= 10_000:
             raise ValueError("Runtime work notification order is invalid")
+        if self.factory_protocol not in {
+            "forest.legacy-module-factory/1",
+            "forest.contract-module-factory/1",
+        }:
+            raise ValueError("Runtime module factory protocol is invalid")
+        service_keys = [(item.service_id, item.version) for item in self.kernel_services]
+        if len(service_keys) != len(set(service_keys)):
+            raise ValueError("Kernel service contribution identities must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -678,6 +689,7 @@ class RuntimeModuleRegistry:
         self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4())
+        self.contract_router = RuntimeContractRouter(self)
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
         self.generation_authority = getattr(runtime, "generation_authority", None)
         store = getattr(getattr(runtime, "bot", None), "store", None)
@@ -710,6 +722,8 @@ class RuntimeModuleRegistry:
             "storage": descriptor.storage.as_fact() if descriptor.storage is not None else None,
             "wakes_on_work": descriptor.wakes_on_work,
             "work_notify_order": descriptor.work_notify_order,
+            "factory_protocol": descriptor.factory_protocol,
+            "kernel_services": [item.as_fact() for item in descriptor.kernel_services],
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 
@@ -941,8 +955,14 @@ class RuntimeModuleRegistry:
             )
             try:
                 await self._install_storage(descriptor)
-                instance = descriptor.factory(self.runtime, self.instances)
+                dependencies = (
+                    self.contract_router.context(component_id)
+                    if descriptor.factory_protocol == "forest.contract-module-factory/1"
+                    else self.instances
+                )
+                instance = descriptor.factory(self.runtime, dependencies)
                 self.instances[component_id] = instance
+                self.contract_router.register(component_id, instance)
                 if self.generation_authority is not None:
                     self.generation_bindings[component_id] = (
                         await self._prepare_generation_binding(descriptor, instance)
@@ -1005,6 +1025,17 @@ class RuntimeModuleRegistry:
                             lease, self._descriptor_facts(), self.activation_id
                         )
             await self._bind_generation_identities()
+            if self.generation_authority is not None:
+                for descriptor in self.descriptors:
+                    for spec in descriptor.kernel_services:
+                        if descriptor.artifact.trust_level != "official":
+                            raise ForestError(
+                                "RUNTIME_KERNEL_SERVICE_FORBIDDEN",
+                                "Installed modules cannot contribute in-process kernel services",
+                                403,
+                            )
+                        self.contract_router.register_kernel_service(spec)
+                self.contract_router.seal()
             return lease
         except BaseException as exc:
             rollback_errors = await self._rollback_preparation()
@@ -1183,6 +1214,7 @@ class RuntimeModuleRegistry:
                     )
                 self._transition(component_id, ModuleLifecycleState.ACTIVE)
                 activated.append(component_id)
+            self.contract_router.activate()
         except BaseException as exc:
             failure_code = (
                 exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
@@ -1257,6 +1289,7 @@ class RuntimeModuleRegistry:
                     # Its persistent graph remains historical until the current
                     # owner atomically replaces or retires it.
                     lease = None
+            self.contract_router.deactivate()
             errors = []
             for component_id in reversed(self.order):
                 try:

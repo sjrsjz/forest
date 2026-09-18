@@ -91,6 +91,7 @@ class ConversationWorker:
         actor_lease_seconds: int = 30,
         max_parallel_conversations: int = 16,
         candidate_limit: int = 64,
+        graph_admission: asyncio.Event | None = None,
     ) -> None:
         if not owner_id or len(owner_id.encode("utf-8")) > 256:
             raise ValueError("owner_id must be a bounded non-empty string")
@@ -110,6 +111,7 @@ class ConversationWorker:
         self.poll_interval = poll_interval
         self.actor_lease_seconds = actor_lease_seconds
         self.candidate_limit = candidate_limit
+        self.graph_admission = graph_admission
         self._parallel = asyncio.Semaphore(max_parallel_conversations)
         self._admission = asyncio.Event()
         self._wake = asyncio.Event()
@@ -166,6 +168,8 @@ class ConversationWorker:
     async def _poll(self) -> None:
         while not self._closing:
             await self._admission.wait()
+            if self.graph_admission is not None:
+                await self.graph_admission.wait()
             if self._closing:
                 return
             candidates = await self.scheduler.claimable_conversations(
@@ -236,7 +240,7 @@ class ConversationWorker:
             if recovery:
                 session_ref = execution["session_ref"]
                 run_ref = execution["run_ref"]
-                initial = None
+                initial = execution.get("active_input")
             else:
                 session_ref = _ref("session")
                 run_ref = _ref("run")
@@ -262,6 +266,7 @@ class ConversationWorker:
                             _operation(
                                 "safe",
                                 conversation_id,
+                                actor.epoch,
                                 session_ref,
                                 run_ref,
                                 safe_point_index,

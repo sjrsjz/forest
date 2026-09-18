@@ -51,9 +51,9 @@ class FinalReplyUnitOfWork:
         self,
         *,
         store,
-        agent_repository,
-        conversation_repository,
-        delivery_repository,
+        agent_participant,
+        conversation_participant,
+        delivery_participant,
         generation_member_verifier,
         participants: tuple[RuntimeParticipant, ...],
     ) -> None:
@@ -61,20 +61,12 @@ class FinalReplyUnitOfWork:
         actual = {item.component_id for item in participants}
         if len(participants) != 3 or actual != expected:
             raise ValueError("final reply requires exact Agent, Conversation, and Delivery participants")
-        stores = {
-            id(store),
-            id(agent_repository.store),
-            id(conversation_repository.store),
-            id(delivery_repository.store),
-        }
-        if len(stores) != 1:
-            raise ValueError("final reply participants must share one Bot transaction store")
         if generation_member_verifier is None:
             raise ValueError("final reply Generation verifier is required")
         self.store = store
-        self.agent_repository = agent_repository
-        self.conversation_repository = conversation_repository
-        self.delivery_repository = delivery_repository
+        self.agent_participant = agent_participant
+        self.conversation_participant = conversation_participant
+        self.delivery_participant = delivery_participant
         self.generation_member_verifier = generation_member_verifier
         self.participants = tuple(sorted(participants, key=lambda item: item.component_id))
         self._generation_ids = {
@@ -108,15 +100,15 @@ class FinalReplyUnitOfWork:
                     generation_id=participant.generation_id,
                 )
 
-            agent_result = await self.agent_repository.transition(
+            agent_result = await self.agent_participant.transition_in(
+                conn,
                 agent_owner,
                 checkpoint_id=plan.completion_checkpoint_id,
                 expected_phase="FINAL_READY",
                 target_phase="COMPLETED",
                 state=plan.completion_state,
-                _connection=conn,
             )
-            context_result = await self.conversation_repository.append_context_in(
+            context_result = await self.conversation_participant.append_context_in(
                 conn,
                 actor,
                 operation_id=plan.context_operation_id,
@@ -126,7 +118,7 @@ class FinalReplyUnitOfWork:
                 answer_trigger_ids=plan.answered_trigger_ids,
                 reply_ref=plan.reply_ref,
             )
-            delivery_result = await self.delivery_repository.create_intent_in(
+            delivery_result = await self.delivery_participant.create_intent_in(
                 conn,
                 operation_id=plan.delivery_operation_id,
                 intent_id=plan.intent_id,

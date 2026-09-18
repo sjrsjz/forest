@@ -26,6 +26,20 @@ class CleanAgentModule:
     grants: object
 
 
+class _RoutedChatProvider:
+    """Provider facade backed only by frozen Contract Router handles."""
+
+    def __init__(self, project, dispatch) -> None:
+        self._project = project
+        self._dispatch = dispatch
+
+    async def prepare_request(self, *args, **kwargs):
+        return await self._project(*args, **kwargs)
+
+    async def dispatch(self, *args, **kwargs):
+        return await self._dispatch(*args, **kwargs)
+
+
 async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule:
     storage = official_storage_bundle(
         "agent.runtime",
@@ -123,12 +137,16 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
         payload_verifier=kernel.payload.verify_in,
     )
 
-    def factory(_runtime, _modules):
+    def factory(_runtime, contracts):
         return CleanAgentRuntime(
             repository=repository,
             module_configuration=configuration,
             grants=grants,
             payloads=kernel.payload,
+            provider=_RoutedChatProvider(
+                contracts.service("provider.model.project", 1, owned_work=True),
+                contracts.service("provider.model.dispatch", 1, owned_work=True),
+            ),
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
@@ -145,5 +163,6 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
         factory,
         official_artifact("bot"),
         storage=storage,
+        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanAgentModule(repository, descriptor, configuration, grants)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 
 from forest.errors import ForestError
@@ -202,6 +203,8 @@ class CleanDeliveryWorker:
                 channel_ref=claim.channel_ref,
                 parts=self._parts(content),
             )
+            if inspect.isawaitable(adapter_send):
+                adapter_send = await adapter_send
             epoch = await self.payloads.epoch()
             wire = await self.payloads.put_bytes(
                 owner_component_id="kernel.effect",

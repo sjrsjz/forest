@@ -804,6 +804,39 @@ class ConversationSchedulerRepository:
                         ),
                     )
                 ).fetchall()
+                batch = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT operation_id FROM {} WHERE bot_id=%s "
+                            "AND conversation_id=%s AND run_ref=%s "
+                            "ORDER BY created_at DESC,input_batch_id DESC LIMIT 1"
+                        ).format(self._table("input_batches")),
+                        (
+                            self.store.bot_id,
+                            actor.conversation_id,
+                            lane["active_run_ref"],
+                        ),
+                    )
+                ).fetchone()
+                active_input = None
+                if batch is not None:
+                    receipt = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s"
+                            ).format(self._table("selection_operations")),
+                            (self.store.bot_id, batch["operation_id"]),
+                        )
+                    ).fetchone()
+                    if receipt is None:
+                        raise ForestError(
+                            "CONVERSATION_SEQUENCE_CORRUPT",
+                            "Active Run has no input selection receipt",
+                            500,
+                        )
+                    active_input = await self._selection_result(conn, receipt)
+            else:
+                active_input = None
             return {
                 "conversation_id": actor.conversation_id,
                 "active": lane["active_session_ref"] is not None,
@@ -815,6 +848,7 @@ class ConversationSchedulerRepository:
                 "classified_through_seq": lane["classified_through_seq"],
                 "mailbox_revision": lane["mailbox_revision"],
                 "claimed_triggers": [dict(row) for row in claimed],
+                "active_input": active_input,
             }
 
     async def execution_state_in(self, conn, actor: ConversationActor) -> dict:

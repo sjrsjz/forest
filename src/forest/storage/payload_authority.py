@@ -509,6 +509,40 @@ class KernelPayloadRepository:
                 conn, payload_id, expected_deletion_epoch=epoch
             )
 
+    async def read_verified_batch(self, references) -> tuple[bytes, ...]:
+        """Read exact owner-bound payloads under one deletion-epoch snapshot."""
+
+        items = tuple(references)
+        if len(items) > 8192:
+            raise ForestError("PAYLOAD_INPUT_INVALID", "Payload batch is too large", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            epoch = await self._clock_in(conn)
+            result = []
+            for reference in items:
+                try:
+                    values = {
+                        "payload_id": reference.payload_id,
+                        "digest": reference.digest,
+                        "owner_component_id": reference.owner_component_id,
+                        "owner_kind": reference.owner_kind,
+                        "owner_id": reference.owner_id,
+                    }
+                except AttributeError as exc:
+                    raise ForestError(
+                        "PAYLOAD_INPUT_INVALID",
+                        "Payload batch contains an invalid reference",
+                        422,
+                    ) from exc
+                await self.verify_in(conn, **values)
+                result.append(
+                    await self.read_bytes_in(
+                        conn,
+                        reference.payload_id,
+                        expected_deletion_epoch=epoch,
+                    )
+                )
+            return tuple(result)
+
     async def forget_in(
         self,
         conn,

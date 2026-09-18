@@ -45,6 +45,41 @@ from forest.storage.payload_authority import KernelPayloadRepository, PayloadSou
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
 
+class _AgentParticipant:
+    def __init__(self, repository):
+        self.repository = repository
+
+    async def transition_in(self, conn, owner, **values):
+        return await self.repository.transition(owner, _connection=conn, **values)
+
+    async def start_successor_run_in(self, conn, **values):
+        return await self.repository.start_successor_run(_connection=conn, **values)
+
+    async def close_session_in(self, conn, **values):
+        return await self.repository.close_session(_connection=conn, **values)
+
+
+class _ConversationParticipant:
+    def __init__(self, repository):
+        self.repository = repository
+
+    async def append_context_in(self, conn, actor, **values):
+        return await self.repository.append_context_in(conn, actor, **values)
+
+    async def select_input_in(self, conn, actor, operation_id, **values):
+        return await self.repository.select_input_in(
+            conn, actor, operation_id, **values
+        )
+
+
+class _DeliveryParticipant:
+    def __init__(self, repository):
+        self.repository = repository
+
+    async def create_intent_in(self, conn, **values):
+        return await self.repository.create_intent_in(conn, **values)
+
+
 @pytest_asyncio.fixture
 async def clean_delivery():
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -861,9 +896,9 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
     )
     failing_uow = FinalReplyUnitOfWork(
         store=store,
-        agent_repository=agent,
-        conversation_repository=scheduler,
-        delivery_repository=failing,
+        agent_participant=_AgentParticipant(agent),
+        conversation_participant=_ConversationParticipant(scheduler),
+        delivery_participant=_DeliveryParticipant(failing),
         generation_member_verifier=verify_member,
         participants=participants,
     )
@@ -885,9 +920,9 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
 
     uow = FinalReplyUnitOfWork(
         store=store,
-        agent_repository=agent,
-        conversation_repository=scheduler,
-        delivery_repository=delivery,
+        agent_participant=_AgentParticipant(agent),
+        conversation_participant=_ConversationParticipant(scheduler),
+        delivery_participant=_DeliveryParticipant(delivery),
         generation_member_verifier=verify_member,
         participants=participants,
     )
@@ -962,8 +997,8 @@ async def test_final_reply_context_and_send_intent_share_one_unit_of_work(clean_
     )
     handoff = SessionHandoffUnitOfWork(
         store=store,
-        agent_repository=agent,
-        conversation_repository=scheduler,
+        agent_participant=_AgentParticipant(agent),
+        conversation_participant=_ConversationParticipant(scheduler),
         generation_member_verifier=verify_member,
         agent_generation_id="generation/agent/1",
         conversation_generation_id="generation/conversation/1",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
 
 from forest.conversation_worker import AgentExecutionCompletion, AgentExecutionRequest
@@ -25,6 +26,7 @@ def _operation(kind: str, *parts: object) -> str:
 class PreparedFinalReplyCommit:
     agent_owner: object
     plan: FinalReplyPlan
+    release_handle: object | None = None
 
 
 class FinalReplyPlanPort(Protocol):
@@ -82,9 +84,9 @@ class TransactionalConversationCompletionPort:
 class TransactionalSessionDecisionPort:
     """Use the Agent/Conversation UoW for successor creation or silent close."""
 
-    def __init__(self, *, unit_of_work: SessionHandoffUnitOfWork, agent_repository) -> None:
+    def __init__(self, *, unit_of_work: SessionHandoffUnitOfWork, agent) -> None:
         self.unit_of_work = unit_of_work
-        self.agent_repository = agent_repository
+        self.agent = agent
 
     async def decide(
         self,
@@ -99,7 +101,7 @@ class TransactionalSessionDecisionPort:
             raise ForestError(
                 "SESSION_HANDOFF_INPUT_INVALID", "Session decision index is invalid", 422
             )
-        run = await self.agent_repository.load(completed_run_ref)
+        run = await self.agent.load(completed_run_ref)
         if run["session_id"] != session_ref or run["state"] != "COMPLETED":
             raise ForestError(
                 "SESSION_HANDOFF_INPUT_INVALID",
@@ -108,6 +110,7 @@ class TransactionalSessionDecisionPort:
             )
         identity = (
             actor.conversation_id,
+            actor.epoch,
             session_ref,
             completed_run_ref,
             successor_run_ref,
@@ -122,6 +125,7 @@ class TransactionalSessionDecisionPort:
                 successor_run_id=successor_run_ref,
                 successor_start_operation_id=_operation("successor", *identity),
                 session_close_operation_id=_operation("close", *identity),
-                successor_deadline=run["absolute_deadline"],
+                successor_deadline=run["updated_at"]
+                + timedelta(seconds=self.agent.profile().run_timeout_seconds),
             ),
         )

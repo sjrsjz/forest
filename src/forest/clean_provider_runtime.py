@@ -53,6 +53,12 @@ class CleanChatCompletionsProviderRuntime:
     state_schema = 1
     state_contract = _STATE_CONTRACT
 
+    def runtime_service_handlers(self) -> dict:
+        return {
+            ("provider.model.project", 1): self.prepare_request,
+            ("provider.model.dispatch", 1): self.dispatch,
+        }
+
     def __init__(
         self,
         *,
@@ -61,6 +67,7 @@ class CleanChatCompletionsProviderRuntime:
         grants,
         credential_resolver,
         generation_verifier,
+        generation_member_verifier,
         client_factory=ChatCompletionsClient,
     ) -> None:
         self.store = store
@@ -68,6 +75,7 @@ class CleanChatCompletionsProviderRuntime:
         self.grants = grants
         self.credential_resolver = credential_resolver
         self.generation_verifier = generation_verifier
+        self.generation_member_verifier = generation_member_verifier
         self.client_factory = client_factory
         self.generation_identity: BoundGenerationIdentity | None = None
         self.configuration = None
@@ -196,18 +204,17 @@ class CleanChatCompletionsProviderRuntime:
         if self.client is not None:
             await self.client.aclose()
 
-    async def _verify_active(self, conn) -> None:
+    async def _verify_member(self, conn) -> None:
         if not self.active or self.generation_identity is None:
             raise ForestError(
                 "RUNTIME_GENERATION_NOT_ACTIVE",
                 "Provider Generation is not accepting work",
                 409,
             )
-        await self.generation_verifier(
+        await self.generation_member_verifier(
             conn,
             component_id="provider.chat-completions",
             generation_id=self.generation_identity.generation_id,
-            admission_lane="DATA",
         )
 
     async def prepare_request(
@@ -228,7 +235,7 @@ class CleanChatCompletionsProviderRuntime:
                 "RUNTIME_GENERATION_NOT_ACTIVE", "Provider is not prepared", 409
             )
         async with self.store.pool.connection() as conn, conn.transaction():
-            await self._verify_active(conn)
+            await self._verify_member(conn)
         prepared = prepare_model_request(
             snapshot,
             self.capabilities,
@@ -273,7 +280,7 @@ class CleanChatCompletionsProviderRuntime:
                     "PROVIDER_REQUEST_FENCE_MISMATCH", "Provider request identity changed", 409
                 )
             async with self.store.pool.connection() as conn, conn.transaction():
-                await self._verify_active(conn)
+                await self._verify_member(conn)
                 await _call(permit_in, conn, request=request)
 
         return await self.client.dispatch(request.prepared, permitcheck=permitcheck)

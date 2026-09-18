@@ -63,21 +63,17 @@ class SessionHandoffUnitOfWork:
         self,
         *,
         store,
-        agent_repository,
-        conversation_repository,
+        agent_participant,
+        conversation_participant,
         generation_member_verifier,
         agent_generation_id: str,
         conversation_generation_id: str,
     ) -> None:
         if not agent_generation_id or not conversation_generation_id:
             raise ValueError("Session handoff needs exact participant Generations")
-        if not (
-            store is agent_repository.store is conversation_repository.store
-        ):
-            raise ValueError("Session handoff participants must share one Bot store")
         self.store = store
-        self.agent_repository = agent_repository
-        self.conversation_repository = conversation_repository
+        self.agent_participant = agent_participant
+        self.conversation_participant = conversation_participant
         self.generation_member_verifier = generation_member_verifier
         self.participants = (
             ("agent.runtime", agent_generation_id),
@@ -97,7 +93,7 @@ class SessionHandoffUnitOfWork:
                     component_id=component_id,
                     generation_id=generation_id,
                 )
-            selection = await self.conversation_repository.select_input_in(
+            selection = await self.conversation_participant.select_input_in(
                 conn,
                 actor,
                 plan.selection_operation_id,
@@ -107,24 +103,24 @@ class SessionHandoffUnitOfWork:
                 next_run_ref=plan.successor_run_id,
             )
             if selection.get("kind") == "TRIGGER_INPUT":
-                successor = await self.agent_repository.start_successor_run(
+                successor = await self.agent_participant.start_successor_run_in(
+                    conn,
                     operation_id=plan.successor_start_operation_id,
                     session_id=plan.session_id,
                     completed_run_id=plan.completed_run_id,
                     run_id=plan.successor_run_id,
                     input_batch=agent_input_from_selection(selection),
                     absolute_deadline=plan.successor_deadline,
-                    _connection=conn,
                 )
                 return {"action": "SUCCESSOR", "selection": selection, "run": successor}
             if selection["status"] == "WAIT_INPUT":
                 return {"action": "WAIT_INPUT", "selection": selection}
             if selection["status"] == "IDLE" or selection.get("kind") == "SILENT_DRAIN":
-                closed = await self.agent_repository.close_session(
+                closed = await self.agent_participant.close_session_in(
+                    conn,
                     operation_id=plan.session_close_operation_id,
                     session_id=plan.session_id,
                     completed_run_id=plan.completed_run_id,
-                    _connection=conn,
                 )
                 return {"action": "CLOSED", "selection": selection, "session": closed}
             raise ForestError(

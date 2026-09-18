@@ -93,6 +93,9 @@ _MODULES = {
             "runtime.graph.retire",
             "runtime.call.admit",
             "runtime.state.publish",
+            "kernel.uow.conversation.final-reply",
+            "kernel.uow.conversation.session-handoff",
+            "kernel.uow.onebot.ingress",
         ),
         "capabilities": (
             "runtime.graph.publish",

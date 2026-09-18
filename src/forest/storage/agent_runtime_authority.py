@@ -290,6 +290,10 @@ class AgentRuntimeRepository:
         self.namespace = namespace or module_schema_namespace("forest.agent.runtime")
         self.payload_verifier = payload_verifier
 
+    @property
+    def bot_id(self) -> str:
+        return self.store.bot_id
+
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
 
@@ -2123,15 +2127,29 @@ class AgentRuntimeRepository:
                         (self.store.bot_id, expanded["current_model_request_id"]),
                     )
                 ).fetchone()
-                if request is not None and request["current_attempt_id"] is not None:
-                    attempt = await (
-                        await conn.execute(
-                            sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s").format(
-                                self._table("model_transport_attempts")
-                            ),
-                            (self.store.bot_id, request["current_attempt_id"]),
-                        )
-                    ).fetchone()
+            elif expanded["state"] == "PREPARING_MODEL":
+                request = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT * FROM {} WHERE bot_id=%s AND run_id=%s "
+                            "AND step_seq=%s ORDER BY request_id LIMIT 1"
+                        ).format(self._table("model_requests")),
+                        (
+                            self.store.bot_id,
+                            run_id,
+                            expanded["next_step_seq"],
+                        ),
+                    )
+                ).fetchone()
+            if request is not None and request["current_attempt_id"] is not None:
+                attempt = await (
+                    await conn.execute(
+                        sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s").format(
+                            self._table("model_transport_attempts")
+                        ),
+                        (self.store.bot_id, request["current_attempt_id"]),
+                    )
+                ).fetchone()
             if expanded["current_tool_call_id"] is not None:
                 tool = await (
                     await conn.execute(
@@ -2175,15 +2193,24 @@ class AgentRuntimeRepository:
             rows = await (
                 await conn.execute(
                     sql.SQL(
-                        "SELECT t.*,r.input_revision,c.tool_call_id,c.tool_name,c.state AS tool_state,"
-                        "c.result_payload_id,c.result_payload_digest,c.error_code AS tool_error_code "
+                        "SELECT t.*,r.input_revision,r.provider_component_id,c.tool_call_id,"
+                        "c.tool_name,c.state AS tool_state,c.result_payload_id,"
+                        "c.result_payload_digest,c.error_code AS tool_error_code,"
+                        "a.attempt_id AS model_attempt_id,"
+                        "a.result_payload_id AS model_result_payload_id,"
+                        "a.result_payload_digest AS model_result_payload_digest "
                         "FROM {} t JOIN {} r ON r.bot_id=t.bot_id AND r.request_id=t.request_id "
                         "LEFT JOIN {} c ON c.bot_id=t.bot_id AND c.turn_id=t.turn_id "
+                        "LEFT JOIN LATERAL (SELECT x.attempt_id,x.result_payload_id,"
+                        "x.result_payload_digest FROM {} x WHERE x.bot_id=t.bot_id "
+                        "AND x.request_id=t.request_id AND x.state='SUCCEEDED' "
+                        "ORDER BY x.attempt_no DESC LIMIT 1) a ON TRUE "
                         "WHERE t.bot_id=%s AND t.run_id=%s ORDER BY t.step_seq"
                     ).format(
                         self._table("model_turns"),
                         self._table("model_requests"),
                         self._table("tool_calls"),
+                        self._table("model_transport_attempts"),
                     ),
                     (self.store.bot_id, run_id),
                 )

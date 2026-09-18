@@ -330,7 +330,7 @@ def _attribution(value: Any, *, author: bool = False) -> dict:
         raise _error("MODEL_SOURCE_INVALID", "Context attribution must be a typed object")
     keys = ("principal_ref", "external_user_id", "display_name", "display_name_at_event",
             "group_card", "identity_origin", "is_self") if author else (
-        "conversation_id", "group_source_id", "platform", "channel_kind", "channel_id",
+        "conversation_id", "group_source_id", "binding_ref", "platform", "channel_kind", "channel_id",
         "thread_id", "group_name", "group_name_at_event", "source_event_id", "source_kind",
         "target_platform", "job_id", "occurrence_id", "task_status",
     )

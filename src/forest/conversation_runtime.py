@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from forest.conversation_worker import ConversationWorker
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 
@@ -22,6 +23,11 @@ class CleanConversationSchedulerRuntime:
             {"service_id": "conversation.admit", "version": 1},
             {"service_id": "conversation.classify", "version": 1},
         ],
+        "requires": [
+            {"service_id": "agent.execute", "version": 1},
+            {"service_id": "kernel.uow.conversation.final-reply", "version": 1},
+            {"service_id": "kernel.uow.conversation.session-handoff", "version": 1},
+        ],
     }
     state_schema = 1
     state_contract = _STATE_CONTRACT
@@ -34,14 +40,23 @@ class CleanConversationSchedulerRuntime:
         grants,
         generation_verifier,
         generation_member_verifier=None,
+        agent_execution=None,
+        completion_port=None,
+        session_decision_port=None,
+        graph_admission=None,
     ):
         self.repository = repository
         self.module_configuration = module_configuration
         self.grants = grants
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
+        self.agent_execution = agent_execution
+        self.completion_port = completion_port
+        self.session_decision_port = session_decision_port
+        self.graph_admission = graph_admission
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
+        self.worker: ConversationWorker | None = None
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired()
@@ -92,18 +107,49 @@ class CleanConversationSchedulerRuntime:
                 "Conversation Generation identity was not bound",
                 503,
             )
+        if any(
+            item is None
+            for item in (
+                self.agent_execution,
+                self.completion_port,
+                self.session_decision_port,
+                self.graph_admission,
+            )
+        ):
+            return
+        self.worker = ConversationWorker(
+            self,
+            self.agent_execution,
+            self.completion_port,
+            self.session_decision_port,
+            owner_id=(
+                "conversation-worker/" + self.generation_identity.generation_id
+            )[-256:],
+            graph_admission=self.graph_admission,
+        )
+        self.worker.start()
 
     def activate_generation(self) -> None:
         self.active = True
+        if self.worker is not None:
+            self.worker.activate()
 
     async def quiesce(self) -> None:
+        if self.worker is not None:
+            await self.worker.quiesce()
         self.active = False
 
     async def close(self) -> None:
+        if self.worker is not None:
+            await self.worker.close()
         self.active = False
 
     def owned_tasks(self) -> tuple:
-        return ()
+        return self.worker.owned_tasks() if self.worker is not None else ()
+
+    def notify(self) -> None:
+        if self.worker is not None:
+            self.worker.wake()
 
     async def _verify(self, conn, *, admission_lane: str) -> None:
         if not self.active or self.generation_identity is None:
@@ -207,6 +253,19 @@ class CleanConversationSchedulerRuntime:
             "append_context_in",
             actor=actor,
             owned_work=True,
+            **values,
+        )
+
+    async def append_context_in(self, conn, actor, **values):
+        await self._verify_member(conn)
+        return await self.repository.append_context_in(conn, actor, **values)
+
+    async def select_input_in(self, conn, actor, operation_id: str, **values):
+        await self._verify_member(conn)
+        return await self.repository.select_input_in(
+            conn,
+            actor,
+            operation_id,
             **values,
         )
 
