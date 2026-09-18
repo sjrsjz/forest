@@ -108,12 +108,12 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 ## 当前阻断项
 
 1. 扩展 `shell.command` 的模块贡献式命令目录：当前生产路径已完成 `core.status`、`core.pause/resume`、群管理员策略、P0/P1 优先级、DATA 关闭时的 CONTROL 准入、双阶段授权和安全失败回执；仍需接入取消、重载、任务处理及模块查询命令，补齐审计查询投影，并验证 Shell Generation 热替换排空。
-2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；下一步删除旧业务 `contract.router` 与旧组合根。
+2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；旧 Bot 组合根已经删除，下一步删除不再可达的旧业务 `contract.router`。
 3. 为多模态 Memory 做十万至百万来源的筛选、稳定分页、关系展开、图片负载和资源上限测试。
-4. 继续扩展模块贡献式管理协议与紧凑 WebUI 壳：当前切片已经从 Registry 动态发现贡献，并提供配置 plan/apply、Generation 热替换、Memory 的主干/来源/关系有界查询、`agent.runtime` 自有的 PresetContext/CorePrompt 工作区，以及 `adapter.onebot` 自有的 Binding 状态/fence/端点工作区；仍需补独立监督、Secret authority UI 与完整 Web 身份/授权，然后删除旧固定业务 DOM、专用 API 和旧大页面。
+4. 继续扩展模块贡献式管理协议与紧凑 WebUI 壳：当前切片已经从 Registry 动态发现贡献，并提供配置 plan/apply、Generation 热替换、Memory 的主干/来源/关系有界查询、`agent.runtime` 自有的 PresetContext/CorePrompt 工作区，以及 `adapter.onebot` 自有的 Binding 状态/fence/端点工作区；旧固定业务 DOM、专用 API 和旧大页面已经删除，仍需补独立监督、Secret authority UI 与完整 Web 身份/授权。
 5. 继续把多 Bot provisioning 和恢复控制面切到干净宿主；单 Bot `forest bot`、HostLease 续租/释放、遗留 OneBot 客户端结算和 Docker 默认入口已经切到最小 bootstrap + bundle + 冻结 RuntimeGraph。
 6. 补充 OneBot 热替换的长连接抖动、候选 publication 后进程崩溃和持续流量压力验证；正常热替换现已验证候选 BUFFERING、RuntimeGraph/Binding 原子换代、旧客户端 fence、旧图排空，以及新宿主对遗留客户端的失败结算。
-7. 删除旧 schema、迁移、兼容测试和失去所有权的代码。
+7. 删除旧 schema、迁移和失去所有权的代码；旧固定管理栈、旧 Bot 组合根、兼容测试与历史迁移夹具已经删除。
 8. 完成完整 Docker、真实 QQ 许可群 `933179609` 的低频验收；真实启动前先停止树莓派 `alicebot.service`。
 
 ## 最近可复现证据
@@ -130,6 +130,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - `adapter.onebot` 管理贡献：Binding 的账号、连接状态、desired/effective revision、binding/connection epoch、当前 client fence 与端点配置由 Adapter authority 投影；修改先生成有期限的原生 Binding plan，再由 Adapter apply，候选连接在 BUFFERING 中验证账号后随 RuntimeGraph 原子换代。应用回执丢失后用同一幂等键重放不会再替换图。访问令牌不回显；在 Secret authority UI 落地前仅允许沿用现有 secret 引用与 transport。
 - 干净生产存储入口：真实 PostgreSQL 下 `CleanBotStore` 从空库完成 kernel baseline、15 个模块 bundle、运行图多次热替换和重启；定向导入探针确认生产宿主不加载旧 `BotStore` 或 26 代迁移 helper。干净运行图组合仍为 `236 passed`。
 - 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest-goal:config-cutover` 构建成功，容器内 `forest --help` 只暴露 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能从已安装脚本启动错误架构。插件 scaffold/declaration 组合为 `35 passed, 2 skipped`。
+- 旧管理栈切除：`src/forest/management`、旧 Bot 默认模块图与组合根、固定页面/API 测试、兼容迁移测试及历史夹具已物理删除；`RuntimeModuleRegistry` 必须显式接收 Generation 描述符，不再存在旧图 fallback。裁剪后的权威套件在真实 PostgreSQL 下为 `478 passed, 4 skipped`，Ruff、Python 编译、管理端 JavaScript 语法和干净导入边界均通过。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

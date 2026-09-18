@@ -1,8 +1,0 @@
-<section id="deployment-package-registry" aria-labelledby="deployment-package-registry-title">
-  <h2 id="deployment-package-registry-title">包工件</h2>
-  <p class="muted">这里管理全部署可用的不可变插件工件。Bot 选择与启用哪个代际由目标 Bot 的组件模块决定。</p>
-  <div class="columns">
-    <div class="card"><h3>已注册工件</h3><div id="deployment-package-list" aria-live="polite"></div><button id="refresh-deployment-packages" class="subtle">刷新列表</button></div>
-    <div class="card"><h3>导入包工件</h3><form id="deployment-package-import-form"><label>插件 ZIP<input name="archive" type="file" accept=".zip,application/zip" required></label><button type="submit">校验并导入</button></form><p class="hint">最大 32 MiB。导入只发布通过 manifest、路径、schema、命名空间和完整性校验的不可变工件。</p></div>
-  </div>
-</section>

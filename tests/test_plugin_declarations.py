@@ -1,7 +1,5 @@
-import asyncio
 import io
 import json
-import os
 import shutil
 import zipfile
 from argparse import Namespace
@@ -9,15 +7,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from test_kernel import bot_database as bot_database
 
 from forest.cli import run_plugin_command
 from forest.errors import ForestError
-from forest.kernel import Kernel
 from forest.module_validation import validate_component_values
 from forest.packages import PackageCatalog, source_fingerprint
 from forest.sdk import Plugin, command, declared_commands, declared_services, plugin, service
-from forest.watch import DevWatcher
 
 
 def auto_source(tmp_path: Path, *, module: str = "demo") -> Path:
@@ -492,109 +487,3 @@ def test_runtime_plugin_decorator_preserves_command_declaration():
 
     instance = Plain()
     assert set(declared_commands(instance)) == {"hello"}
-
-
-async def eventually(predicate, *, timeout=15):
-    async with asyncio.timeout(timeout):
-        while not predicate():
-            await asyncio.sleep(0.02)
-
-
-@pytest.mark.postgres
-async def test_auto_declared_package_uses_real_hot_reload_lifecycle(
-    tmp_path, bot_database  # noqa: F811
-):
-    store, _ = bot_database
-    source = auto_source(tmp_path)
-    kernel = Kernel(store, lease_seconds=120)
-    watcher = DevWatcher(
-        kernel,
-        PackageCatalog(tmp_path / "catalog"),
-        source,
-        debounce=0.05,
-        poll_interval=0.025,
-    )
-    try:
-        await kernel.start()
-        await watcher.start()
-        await eventually(lambda: watcher.published_count == 1 or watcher.failure)
-        assert watcher.failure is None
-        first_worker = kernel.components["example.auto"].worker
-        first = await kernel.invoke(
-            "example.auto", "echo.call", {"value": "one"}, operation_id=uuid4().hex
-        )
-        assert first == {"value": "one"}
-
-        module = source / "src" / "demo" / "__init__.py"
-        module.write_text(
-            module.read_text(encoding="utf-8").replace(
-                'return {"value": payload["value"]}',
-                'return {"value": "reloaded:" + payload["value"]}',
-            ),
-            encoding="utf-8",
-        )
-        await eventually(lambda: watcher.published_count == 2 or watcher.failure)
-        assert watcher.failure is None
-        second = await kernel.invoke(
-            "example.auto", "echo.call", {"value": "two"}, operation_id=uuid4().hex
-        )
-        assert second == {"value": "reloaded:two"}
-        assert not first_worker.alive and len(kernel._workers) == 1
-        current = kernel.components["example.auto"].snapshot
-        assert current.module_root == current.root / "src"
-        current.verify()
-    finally:
-        await watcher.close()
-        await kernel.close()
-
-
-@pytest.mark.postgres
-async def test_100_real_worker_reloads_keep_one_live_generation(
-    tmp_path, bot_database  # noqa: F811
-):
-    if os.environ.get("RUN_FOREST_SOAK") != "1":
-        pytest.skip("set RUN_FOREST_SOAK=1 for the 100-generation Worker soak")
-    store, _ = bot_database
-    source = auto_source(tmp_path)
-    module = source / "src" / "demo" / "__init__.py"
-    baseline = module.read_text(encoding="utf-8")
-    kernel = Kernel(store, lease_seconds=120)
-    watcher = DevWatcher(
-        kernel,
-        PackageCatalog(tmp_path / "catalog"),
-        source,
-        debounce=0.01,
-        poll_interval=0.01,
-    )
-    try:
-        await kernel.start()
-        await watcher.start()
-        await eventually(lambda: watcher.published_count == 1 or watcher.failure)
-        assert watcher.failure is None
-        for generation in range(1, 101):
-            previous = kernel.components["example.auto"].worker
-            module.write_text(
-                baseline.replace(
-                    'return {"value": payload["value"]}',
-                    f'return {{"value": "generation-{generation}:" + payload["value"]}}',
-                ),
-                encoding="utf-8",
-            )
-            await eventually(
-                lambda: watcher.published_count == generation + 1 or watcher.failure,
-                timeout=30,
-            )
-            assert watcher.failure is None
-            assert not previous.alive and len(kernel._workers) == 1
-            result = await kernel.invoke(
-                "example.auto",
-                "echo.call",
-                {"value": "probe"},
-                operation_id=f"soak-{generation}-{uuid4().hex}",
-            )
-            assert result == {"value": f"generation-{generation}:probe"}
-            assert not kernel._operations and not kernel._calls and not kernel.cleanup_errors
-    finally:
-        await watcher.close()
-        await kernel.close()
-    assert not kernel._workers and not kernel.cleanup_errors
