@@ -674,6 +674,69 @@ class MemoryRetrievalRepository:
             await self._insert_facets_in(conn, facet_values, deletion_epoch)
             return await self._query_view_in(conn, query_id, duplicate=False)
 
+    async def resolve_query_input(
+        self,
+        *,
+        conversation_ref: str,
+        input_batch_ref: str,
+        context_revision: int,
+    ) -> dict | None:
+        for value, field in (
+            (conversation_ref, "conversation_ref"),
+            (input_batch_ref, "input_batch_ref"),
+        ):
+            _bounded(value, field, 256)
+        if type(context_revision) is not int or context_revision < 1:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid context revision", 422)
+        async with self.store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT o.occurrence_id,o.source_unit_id,u.source_revision,u.source_id,"
+                        "s.source_kind,p.part_id FROM {} o JOIN {} u ON u.bot_id=o.bot_id "
+                        "AND u.source_unit_id=o.source_unit_id JOIN {} s ON s.bot_id=u.bot_id "
+                        "AND s.source_id=u.source_id JOIN {} p ON p.bot_id=u.bot_id "
+                        "AND p.source_unit_id=u.source_unit_id WHERE o.bot_id=%s "
+                        "AND o.conversation_ref=%s AND o.input_batch_ref=%s "
+                        "AND o.context_revision=%s AND o.eligibility_state='ELIGIBLE' "
+                        "AND u.eligibility_state='ELIGIBLE' "
+                        "ORDER BY o.observed_at,o.occurrence_id,p.part_index,p.part_id"
+                    ).format(
+                        self._table("source_occurrences"),
+                        self._table("source_units"),
+                        self._table("memory_sources"),
+                        self._table("source_parts"),
+                    ),
+                    (
+                        self.store.bot_id,
+                        conversation_ref,
+                        input_batch_ref,
+                        context_revision,
+                    ),
+                )
+            ).fetchall()
+        if not rows:
+            return None
+        source_ids = {row["source_id"] for row in rows}
+        source_kinds = {row["source_kind"] for row in rows}
+        if len(source_ids) != 1 or source_kinds != {"GROUP"}:
+            return None
+        parts = {}
+        for row in rows:
+            parts.setdefault(
+                (row["source_unit_id"], row["part_id"]),
+                RetrievalQueryPart(
+                    row["source_unit_id"],
+                    row["source_revision"],
+                    row["occurrence_id"],
+                    row["part_id"],
+                ),
+            )
+        return {
+            "current_source_id": next(iter(source_ids)),
+            "parts": tuple(parts.values()),
+        }
+
     async def _query_view_in(self, conn, query_id: str, *, duplicate=False) -> dict:
         query = await (
             await conn.execute(
@@ -696,6 +759,11 @@ class MemoryRetrievalRepository:
             )
         ).fetchall()
         return {**dict(query), "duplicate": duplicate, "facets": [dict(row) for row in facets]}
+
+    async def query_view(self, query_id: str) -> dict:
+        _bounded(query_id, "query_id", 256)
+        async with self.store.pool.connection() as conn:
+            return await self._query_view_in(conn, query_id)
 
     async def materialize_facet(
         self,
@@ -1036,6 +1104,27 @@ class MemoryRetrievalRepository:
                 )
             return await self._claim_from_row(conn, claim)
 
+    async def has_pending_facets(self, *, purpose: str = "DOCUMENT") -> bool:
+        if purpose not in {"DOCUMENT", "QUERY"}:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding purpose", 422)
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT 1 FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
+                        "AND u.source_unit_id=f.source_unit_id WHERE f.bot_id=%s "
+                        "AND f.state='PENDING' AND f.purpose=%s "
+                        "AND u.eligibility_state='ELIGIBLE' "
+                        "AND u.source_revision=f.source_revision LIMIT 1"
+                    ).format(
+                        self._table("embedding_facets"),
+                        self._table("source_units"),
+                    ),
+                    (self.store.bot_id, purpose),
+                )
+            ).fetchone()
+        return row is not None
+
     async def recover_expired_attempts(self, *, limit: int = 100) -> dict:
         """Converge expired attempts without guessing whether a handed-off request ran."""
         if type(limit) is not int or not 1 <= limit <= 1000:
@@ -1303,6 +1392,7 @@ class MemoryRetrievalRepository:
         permits,
         *,
         batch_operation_id: str,
+        _connection=None,
     ) -> tuple[dict, ...]:
         """Commit every facet handoff or none before one Provider request."""
         _bounded(batch_operation_id, "batch_operation_id", 256)
@@ -1322,7 +1412,7 @@ class MemoryRetrievalRepository:
             for permit in permits
         }
         ordered = tuple(sorted(permits, key=lambda permit: permit.attempt_id))
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._transaction(_connection) as conn:
             attempts = await (
                 await conn.execute(
                     sql.SQL(

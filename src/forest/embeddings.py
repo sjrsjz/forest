@@ -45,6 +45,7 @@ SOURCE_FIELDS = frozenset(
         "binding_id",
         "conversation_id",
         "group_source_id",
+        "trunk_id",
         "platform",
         "channel_kind",
         "channel_id",

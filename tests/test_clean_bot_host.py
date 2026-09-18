@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
+from copy import deepcopy
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -9,7 +12,16 @@ import pytest
 from psycopg import sql
 
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
+from forest.embeddings import EmbeddingInput, EmbeddingResult, EmbeddingVector
+from forest.errors import ForestError
 from forest.runtime_modules import ModuleLifecycleState
+from forest.storage.memory_graph_authority import (
+    MemoryOccurrence,
+    MemoryPart,
+    MemoryPayloadRef,
+    MemorySourceIdentity,
+)
+from forest.storage.payload_authority import PayloadSource
 
 
 class FakeModelClient:
@@ -18,6 +30,36 @@ class FakeModelClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakeEmbeddingClient(FakeModelClient):
+    endpoints = []
+
+    def __init__(self, endpoint, _credential, profile, **_kwargs) -> None:
+        super().__init__()
+        self.profile = profile
+        self.endpoints.append(endpoint)
+
+    async def dispatch(self, prepared, *, permitcheck):
+        await permitcheck(prepared)
+        facets = prepared.manifest["facets"]
+        return EmbeddingResult(
+            "RESPONDED",
+            prepared.request_id,
+            prepared.transport_attempt_id,
+            prepared.payload_digest,
+            prepared.space_id,
+            vectors=tuple(
+                EmbeddingVector(
+                    facet["facet_id"],
+                    index,
+                    (1.0,) + (0.0,) * (self.profile.dimensions - 1),
+                )
+                for index, facet in enumerate(facets)
+            ),
+            usage_json='{"total_tokens":1}',
+            http_status=200,
+        )
 
 
 class FakeWebSocketClient:
@@ -60,6 +102,12 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         model_context_limit=32768,
         model_max_output_tokens=1024,
         model_input_modalities=("text",),
+        embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
+        embedding_api_key="test-embedding-key",
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
+        embedding_model_revision="test-revision/1",
+        embedding_model="Qwen/Qwen3-VL-Embedding-8B",
+        embedding_dimensions=4096,
         onebot_self_id="123456789",
         onebot_websocket_url="ws://127.0.0.1:3001/",
         onebot_access_token="test-onebot-token",
@@ -76,11 +124,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         return client
 
     try:
+        FakeEmbeddingClient.endpoints.clear()
         graph_ids = []
-        for _ in range(2):
+        for index in range(2):
             host = CleanBotHost(
                 settings,
                 model_client_factory=FakeModelClient,
+                embedding_client_factory=FakeEmbeddingClient,
                 websocket_client_factory=create_websocket,
             )
             await host.start()
@@ -93,6 +143,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "kernel.effect",
                     "kernel.audit",
                     "provider.chat-completions",
+                    "embedding.multimodal",
                     "memory.graph",
                     "agent.runtime",
                     "conversation.trigger-policy",
@@ -102,10 +153,304 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 }
                 graph_ids.append(host.registry.graph_identity.graph_id)
                 assert clients[-1].handler is not None
+                if index == 0:
+                    memory_runtime = host.registry.get("memory.graph")
+                    permitted = False
+
+                    async def permit_in(_conn, *, request):
+                        nonlocal permitted
+                        permitted = request.component_id == "embedding.multimodal"
+
+                    result = await memory_runtime.embedding_provider.encode(
+                        (
+                            EmbeddingInput(
+                                "test-facet",
+                                text="Forest multimodal route",
+                                source_json=(
+                                    '{"source_revision":1,"part_id":"part/text",'
+                                    '"trunk_id":"trunk/test","author_ref":"qq:test"}'
+                                ),
+                            ),
+                        ),
+                        request_id="test-request",
+                        transport_attempt_id="test-attempt",
+                        purpose="document",
+                        permit_in=permit_in,
+                    )
+                    assert permitted is True and result.status == "RESPONDED"
+                    embedding_runtime = host.registry.get("embedding.multimodal")
+                    async with host.store.pool.connection() as conn:
+                        attempt = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT state,result_payload_id,usage_json FROM {}."
+                                    "embedding_transport_attempts WHERE bot_id=%s "
+                                    "AND attempt_id=%s"
+                                ).format(sql.Identifier(embedding_runtime.repository.namespace)),
+                                (settings.bot_id, "test-attempt"),
+                            )
+                        ).fetchone()
+                    assert attempt["state"] == "RESPONDED"
+                    assert attempt["result_payload_id"] is not None
+                    assert attempt["usage_json"] == '{"total_tokens":1}'
+                    payload_source = PayloadSource(
+                        "adapter.onebot", "test.event", "test-memory-event", 1
+                    )
+                    epoch = await host._kernel.payload.epoch()
+                    author = await host._kernel.payload.put_bytes(
+                        owner_component_id="adapter.onebot",
+                        owner_kind="test.author",
+                        owner_id="test-memory-author",
+                        media_type="application/json",
+                        content=b'{"subject":"qq:test"}',
+                        sources=(payload_source,),
+                        expected_deletion_epoch=epoch,
+                    )
+                    text = await host._kernel.payload.put_bytes(
+                        owner_component_id="adapter.onebot",
+                        owner_kind="test.text",
+                        owner_id="test-memory-text",
+                        media_type="text/plain",
+                        content=b"durable multimodal memory",
+                        sources=(payload_source,),
+                        expected_deletion_epoch=epoch,
+                    )
+                    await memory_runtime.repository.register_source(
+                        operation_id="test-memory-source-register",
+                        identity=MemorySourceIdentity(
+                            "test-memory-source",
+                            "GROUP",
+                            platform="onebot11",
+                            realm_id="qq:test-bot",
+                            external_group_id="933179609",
+                            trunk_id="test-memory-trunk",
+                        ),
+                    )
+                    now = datetime.now(timezone.utc)
+                    await memory_runtime.repository.capture_source_unit(
+                        operation_id="test-memory-capture",
+                        source_unit_id="test-memory-unit",
+                        source_id="test-memory-source",
+                        source_revision=1,
+                        unit_kind="GROUP_MESSAGE",
+                        author_subject_ref="qq:test",
+                        author=MemoryPayloadRef(
+                            author.payload_id,
+                            author.content_digest,
+                            "adapter.onebot",
+                            "test.author",
+                            "test-memory-author",
+                        ),
+                        parts=(
+                            MemoryPart(
+                                "part/text",
+                                0,
+                                "TEXT",
+                                "text/plain",
+                                MemoryPayloadRef(
+                                    text.payload_id,
+                                    text.content_digest,
+                                    "adapter.onebot",
+                                    "test.text",
+                                    "test-memory-text",
+                                ),
+                                byte_length=25,
+                            ),
+                        ),
+                        occurrence=MemoryOccurrence(
+                            "test-memory-occurrence",
+                            "binding/main",
+                            "onebot:group:933179609",
+                            "test-memory-event",
+                            1,
+                            now,
+                        ),
+                        occurred_at=now,
+                        expected_deletion_epoch=epoch,
+                    )
+                    await memory_runtime.repository.qualify_occurrence(
+                        operation_id="test-memory-qualify",
+                        source_unit_id="test-memory-unit",
+                        occurrence_id="test-memory-occurrence",
+                        input_batch_ref="test-input-batch",
+                        context_revision=1,
+                        expected_deletion_epoch=epoch,
+                        _skip_input_batch_verification=True,
+                    )
+                    facets = await memory_runtime.retrieval.prepare_source_facets(
+                        operation_id="test-memory-facets",
+                        source_unit_id="test-memory-unit",
+                        expected_deletion_epoch=epoch,
+                    )
+                    memory_runtime.notify()
+                    async with asyncio.timeout(5):
+                        while True:
+                            async with host.store.pool.connection() as conn:
+                                ready = await (
+                                    await conn.execute(
+                                        sql.SQL(
+                                            "SELECT state FROM {}.embedding_facets "
+                                            "WHERE bot_id=%s AND facet_id=%s"
+                                        ).format(
+                                            sql.Identifier(
+                                                memory_runtime.repository.namespace
+                                            )
+                                        ),
+                                        (settings.bot_id, facets["facets"][0]["facet_id"]),
+                                    )
+                                ).fetchone()
+                            if ready["state"] == "READY":
+                                break
+                            await asyncio.sleep(0.05)
+                    query_source = PayloadSource(
+                        "adapter.onebot", "test.event", "test-query-event", 1
+                    )
+                    query_author = await host._kernel.payload.put_bytes(
+                        owner_component_id="adapter.onebot",
+                        owner_kind="test.author",
+                        owner_id="test-query-author",
+                        media_type="application/json",
+                        content=b'{"subject":"qq:questioner"}',
+                        sources=(query_source,),
+                        expected_deletion_epoch=epoch,
+                    )
+                    query_text = await host._kernel.payload.put_bytes(
+                        owner_component_id="adapter.onebot",
+                        owner_kind="test.text",
+                        owner_id="test-query-text",
+                        media_type="text/plain",
+                        content=b"what durable memory exists?",
+                        sources=(query_source,),
+                        expected_deletion_epoch=epoch,
+                    )
+                    await memory_runtime.repository.capture_source_unit(
+                        operation_id="test-query-capture",
+                        source_unit_id="test-query-unit",
+                        source_id="test-memory-source",
+                        source_revision=1,
+                        unit_kind="GROUP_MESSAGE",
+                        author_subject_ref="qq:questioner",
+                        author=MemoryPayloadRef(
+                            query_author.payload_id,
+                            query_author.content_digest,
+                            "adapter.onebot",
+                            "test.author",
+                            "test-query-author",
+                        ),
+                        parts=(
+                            MemoryPart(
+                                "part/text",
+                                0,
+                                "TEXT",
+                                "text/plain",
+                                MemoryPayloadRef(
+                                    query_text.payload_id,
+                                    query_text.content_digest,
+                                    "adapter.onebot",
+                                    "test.text",
+                                    "test-query-text",
+                                ),
+                                byte_length=27,
+                            ),
+                        ),
+                        occurrence=MemoryOccurrence(
+                            "test-query-occurrence",
+                            "binding/main",
+                            "onebot:group:933179609",
+                            "test-query-event",
+                            2,
+                            now,
+                        ),
+                        occurred_at=now,
+                        expected_deletion_epoch=epoch,
+                    )
+                    await memory_runtime.repository.qualify_occurrence(
+                        operation_id="test-query-qualify",
+                        source_unit_id="test-query-unit",
+                        occurrence_id="test-query-occurrence",
+                        input_batch_ref="test-query-input-batch",
+                        context_revision=2,
+                        expected_deletion_epoch=epoch,
+                        _skip_input_batch_verification=True,
+                    )
+                    recalled = await memory_runtime.recall(
+                        recall_id="test-agent-input-revision-2",
+                        conversation_id="onebot:group:933179609",
+                        input_batch_ref="test-query-input-batch",
+                        context_revision=2,
+                        input_cut=2,
+                        timeout_seconds=5,
+                    )
+                    assert recalled is not None
+                    assert [
+                        item["source_unit_id"] for item in recalled.evidence["evidence"]
+                    ] == ["test-memory-unit"]
+                    assert recalled.evidence["conversation_id"] == (
+                        "onebot:group:933179609"
+                    )
+                    recalled_source = recalled.evidence["evidence"][0]["source"]
+                    assert recalled_source["group_source_id"] == (
+                        "onebot:group:933179609"
+                    )
+                    assert recalled_source["channel_id"] == "933179609"
+                    assert recalled.evidence["evidence"][0]["author"] == {
+                        "principal_ref": "qq:test",
+                        "identity_origin": "memory_verified",
+                    }
+                    agent_runtime = host.registry.get("agent.runtime")
+                    assert agent_runtime.memory is not None
+                    runtime = host.registry.get("embedding.multimodal")
+                    current = await runtime.module_configuration.desired(
+                        include_value=True
+                    )
+                    changed = deepcopy(current.value)
+                    changed["endpoint"] = "http://127.0.0.1:9001/v1/embeddings"
+                    plan = await runtime.module_configuration.plan(
+                        operation_id="test:embedding:endpoint:plan",
+                        expected_desired_revision=current.revision,
+                        value=changed,
+                        validation_digest=current.validation_digest,
+                    )
+                    await runtime.module_configuration.apply(
+                        operation_id="test:embedding:endpoint:apply",
+                        plan_id=plan["plan_id"],
+                        expected_desired_revision=current.revision,
+                    )
+                else:
+                    runtime = host.registry.get("embedding.multimodal")
+                    current = await runtime.module_configuration.desired(
+                        include_value=True
+                    )
+                    changed = deepcopy(current.value)
+                    changed["profile"]["dimensions"] = 2048
+                    plan = await runtime.module_configuration.plan(
+                        operation_id="test:embedding:model:plan",
+                        expected_desired_revision=current.revision,
+                        value=changed,
+                        validation_digest=current.validation_digest,
+                    )
+                    await runtime.module_configuration.apply(
+                        operation_id="test:embedding:model:apply",
+                        plan_id=plan["plan_id"],
+                        expected_desired_revision=current.revision,
+                    )
             finally:
                 await host.close()
             assert clients[-1].closed is True
         assert graph_ids[0] != graph_ids[1]
+        assert FakeEmbeddingClient.endpoints == [
+            "http://127.0.0.1:8001/v1/embeddings",
+            "http://127.0.0.1:9001/v1/embeddings",
+        ]
+        rejected = CleanBotHost(
+            settings,
+            model_client_factory=FakeModelClient,
+            embedding_client_factory=FakeEmbeddingClient,
+            websocket_client_factory=create_websocket,
+        )
+        with pytest.raises(ForestError) as caught:
+            await rejected.start()
+        assert caught.value.code == "EMBEDDING_PROFILE_IMMUTABLE"
     finally:
         assert name.startswith("forest_host_") and len(name) == 44
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

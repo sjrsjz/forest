@@ -40,6 +40,16 @@ class _RoutedChatProvider:
         return await self._dispatch(*args, **kwargs)
 
 
+class _RoutedMemory:
+    """Memory facade backed by the active Generation's frozen route."""
+
+    def __init__(self, recall) -> None:
+        self._recall = recall
+
+    async def recall(self, *args, **kwargs):
+        return await self._recall(*args, **kwargs)
+
+
 async def bootstrap_clean_agent(
     store,
     installer,
@@ -154,6 +164,9 @@ async def bootstrap_clean_agent(
             provider=_RoutedChatProvider(
                 contracts.service("provider.model.project", 1, owned_work=True),
                 contracts.service("provider.model.dispatch", 1, owned_work=True),
+            ),
+            memory=_RoutedMemory(
+                contracts.service("memory.recall", 1, owned_work=True),
             ),
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,

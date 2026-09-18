@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
+from forest.clean_embedding_module import bootstrap_clean_embedding
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
@@ -126,6 +127,12 @@ class CleanBotSettings:
     model_context_limit: int
     model_max_output_tokens: int
     model_input_modalities: tuple[str, ...]
+    embedding_endpoint: str
+    embedding_api_key: str
+    embedding_deployment_id: str
+    embedding_model_revision: str
+    embedding_model: str
+    embedding_dimensions: int
     onebot_self_id: str
     onebot_websocket_url: str
     onebot_access_token: str
@@ -184,6 +191,27 @@ class CleanBotSettings:
                 "FOREST_MODEL_MAX_OUTPUT_TOKENS", 4096, 1, 262_144
             ),
             model_input_modalities=modalities,
+            embedding_endpoint=_origin(
+                "FOREST_EMBEDDING_ENDPOINT",
+                _required("FOREST_EMBEDDING_ENDPOINT"),
+                {"http", "https"},
+            ),
+            embedding_api_key=_secret(
+                "FOREST_EMBEDDING_API_KEY", "FOREST_EMBEDDING_API_KEY_FILE"
+            ),
+            embedding_deployment_id=os.environ.get(
+                "FOREST_EMBEDDING_DEPLOYMENT_ID",
+                "embedding.multimodal/qiyu-vl/default",
+            ),
+            embedding_model_revision=os.environ.get(
+                "FOREST_EMBEDDING_MODEL_REVISION", "operator-declared/1"
+            ),
+            embedding_model=os.environ.get(
+                "FOREST_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-8B"
+            ),
+            embedding_dimensions=_positive_int(
+                "FOREST_EMBEDDING_DIMENSIONS", 4096, 1, 4096
+            ),
             onebot_self_id=self_id,
             onebot_websocket_url=_origin(
                 "FOREST_ONEBOT_WEBSOCKET_URL",
@@ -210,6 +238,7 @@ class CleanBotHost:
         settings: CleanBotSettings,
         *,
         model_client_factory=None,
+        embedding_client_factory=None,
         websocket_client_factory=None,
     ) -> None:
         self.settings = settings
@@ -223,6 +252,7 @@ class CleanBotHost:
         self._host_id = f"forest:{settings.bot_id}"
         self._incarnation = str(uuid4())
         self._model_client_factory = model_client_factory
+        self._embedding_client_factory = embedding_client_factory
         self._websocket_client_factory = websocket_client_factory
 
     @property
@@ -240,6 +270,10 @@ class CleanBotHost:
 
     def _cleanup_lease(self):
         return self._authority(allow_closing=True)
+
+    def notify(self) -> None:
+        if self.registry is not None:
+            self.registry.notify_work()
 
     async def _json_payload(self, *, owner_kind: str, owner_id: str, value: dict):
         epoch = await self._kernel.payload.epoch()
@@ -364,8 +398,55 @@ class CleanBotHost:
                 },
                 **provider_options,
             )
+            embedding_profile = {
+                "deployment_id": self.settings.embedding_deployment_id,
+                "model_revision": self.settings.embedding_model_revision,
+                "model": self.settings.embedding_model,
+                "dimensions": self.settings.embedding_dimensions,
+            }
+            embedding_options = {}
+            if self._embedding_client_factory is not None:
+                embedding_options["client_factory"] = self._embedding_client_factory
+
+            async def resolve_embedding_secret(secret_ref, _revision):
+                if secret_ref != "secret://embedding.multimodal/main/1":
+                    raise ForestError(
+                        "EMBEDDING_CREDENTIAL_UNAVAILABLE",
+                        "Embedding credential reference differs",
+                        409,
+                    )
+                return self.settings.embedding_api_key
+
+            embedding = await bootstrap_clean_embedding(
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                credential_resolver=resolve_embedding_secret,
+                initial_configuration={
+                    "protocol": "forest.embedding.multimodal/1",
+                    "endpoint": self.settings.embedding_endpoint,
+                    "credential_ref": "secret://embedding.multimodal/main/1",
+                    "timeout_seconds": 60,
+                    "max_connections": 4,
+                    "profile": embedding_profile,
+                },
+                **embedding_options,
+            )
             memory = await bootstrap_clean_memory(
-                self.store, self.schema_bundle_installer, kernel=self._kernel
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                initial_configuration={
+                    "protocol": "forest.memory.graph/1",
+                    "embedding": embedding_profile,
+                    "fusion_policy_revision": "independent-facets/1",
+                    "embedding_budget": {
+                        "policy_revision": "daily-cost-cap/1",
+                        "daily_request_limit": 1000,
+                        "daily_token_limit": 10000000,
+                        "reservation_tokens": 32768,
+                    },
+                },
             )
             agent = await bootstrap_clean_agent(
                 self.store,
@@ -424,7 +505,13 @@ class CleanBotHost:
             await self._reconcile_abandoned_clients(messaging.adapter)
             descriptors = (
                 self._kernel.descriptors
-                + (provider.descriptor, memory.descriptor, agent.descriptor, trigger.descriptor)
+                + (
+                    provider.descriptor,
+                    embedding.descriptor,
+                    memory.descriptor,
+                    agent.descriptor,
+                    trigger.descriptor,
+                )
                 + messaging.descriptors
                 + (delivery.descriptor,)
             )

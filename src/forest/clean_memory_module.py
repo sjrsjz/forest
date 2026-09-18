@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from forest.clean_memory_runtime import CleanMemoryRuntime
 from forest.embeddings import SILICONFLOW_VL_MODEL
+from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
@@ -21,16 +22,32 @@ from forest.storage.module_configuration import ModuleConfigurationRepository
 def default_memory_configuration() -> dict:
     return {
         "protocol": "forest.memory.graph/1",
-        "endpoint": "https://api.siliconflow.cn/v1",
-        "credential_ref": "secret://memory.embedding/default",
         "embedding": {
-            "deployment_id": "memory.embedding/qiyu-vl/default",
+            "deployment_id": "embedding.multimodal/qiyu-vl/default",
             "model_revision": "operator-declared/1",
             "model": SILICONFLOW_VL_MODEL,
             "dimensions": 4096,
         },
         "fusion_policy_revision": "independent-facets/1",
+        "embedding_budget": {
+            "policy_revision": "daily-cost-cap/1",
+            "daily_request_limit": 1000,
+            "daily_token_limit": 10000000,
+            "reservation_tokens": 32768,
+        },
     }
+
+
+class _RoutedEmbeddingProvider:
+    def __init__(self, encode) -> None:
+        self._encode = encode
+
+    @property
+    def route(self):
+        return self._encode.route
+
+    async def encode(self, *args, **values):
+        return await self._encode(*args, **values)
 
 
 @dataclass(frozen=True)
@@ -72,18 +89,22 @@ async def bootstrap_clean_memory(
         "type": "object",
         "required": [
             "protocol",
-            "endpoint",
-            "credential_ref",
             "embedding",
             "fusion_policy_revision",
+            "embedding_budget",
         ],
         "additionalProperties": False,
     }
-    await configuration.initialize(
-        operation_id="bootstrap:memory.graph:configuration",
-        value=initial_configuration or default_memory_configuration(),
-        validation_digest=digest_json(schema),
-    )
+    try:
+        await configuration.desired()
+    except ForestError as exc:
+        if exc.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+            raise
+        await configuration.initialize(
+            operation_id="bootstrap:memory.graph:configuration",
+            value=initial_configuration or default_memory_configuration(),
+            validation_digest=digest_json(schema),
+        )
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(
         grantee_kind="component",
@@ -113,23 +134,35 @@ async def bootstrap_clean_memory(
         deletion_epoch_guard=kernel.payload.epoch_in,
     )
 
-    def factory(_runtime, _contracts):
+    def factory(_runtime, contracts):
         return CleanMemoryRuntime(
             repository=repository,
             retrieval=retrieval,
+            payloads=kernel.payload,
             module_configuration=configuration,
             grants=grants,
             generation_verifier=kernel.runtime.verify_active_generation,
             generation_admission_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
+            embedding_provider=_RoutedEmbeddingProvider(
+                contracts.service("embedding.encode", 1, owned_work=True)
+            ),
         )
 
     descriptor = RuntimeModuleDescriptor(
         "memory.graph",
-        ("kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect"),
+        (
+            "kernel.runtime",
+            "kernel.payload",
+            "kernel.authorization",
+            "kernel.effect",
+            "embedding.multimodal",
+        ),
         factory,
         official_artifact("bot"),
         storage=storage,
+        wakes_on_work=True,
+        work_notify_order=20,
         factory_protocol="forest.contract-module-factory/1",
     )
     return CleanMemoryModule(repository, retrieval, descriptor, configuration, grants)

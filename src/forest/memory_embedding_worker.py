@@ -13,7 +13,6 @@ from forest.embeddings import (
     EmbeddingCancelled,
     EmbeddingInput,
     EmbeddingProfile,
-    prepare_embedding_request,
 )
 from forest.errors import ForestError
 from forest.models import MediaSnapshot
@@ -57,7 +56,7 @@ class MemoryEmbeddingWorker:
         *,
         retrieval,
         payloads,
-        client,
+        provider,
         profile: EmbeddingProfile,
         component_id: str,
         generation_id: str,
@@ -68,7 +67,7 @@ class MemoryEmbeddingWorker:
             raise ForestError("EMBEDDING_CONFIG_INVALID", "Embedding profile is invalid", 422)
         self.retrieval = retrieval
         self.payloads = payloads
-        self.client = client
+        self.provider = provider
         self.profile = profile
         self.component_id = component_id
         self.generation_id = generation_id
@@ -82,7 +81,10 @@ class MemoryEmbeddingWorker:
             "source_revision": materialized["source_revision"],
             "source_id": materialized["source"]["source_id"],
             "source_kind": materialized["source"]["source_kind"],
+            "platform": materialized["source"]["platform"],
             "realm_id": materialized["source"]["realm_id"],
+            "group_source_id": materialized["source"]["external_group_id"],
+            "trunk_id": materialized["source"]["trunk_id"],
             "author_ref": materialized["source"]["author_subject_ref"],
             "part_id": materialized["part_id"],
             "payload_id": materialized["input_payload_id"],
@@ -198,13 +200,6 @@ class MemoryEmbeddingWorker:
                 "Document and query facets need separate requests",
                 422,
             )
-        prepared = prepare_embedding_request(
-            self.profile,
-            tuple(self._input(value) for value in materialized),
-            request_id="request:" + batch_attempt_id,
-            transport_attempt_id=batch_attempt_id,
-            purpose=next(iter(purposes)),
-        )
         if (self.budget is None) != (budget_claim is None):
             raise ForestError(
                 "MEMORY_EMBEDDING_BUDGET_REQUIRED",
@@ -253,17 +248,25 @@ class MemoryEmbeddingWorker:
             raise
         handoff_id = _operation("embedding-batch-handoff:", batch_attempt_id)
 
-        async def permitcheck(actual):
-            if actual is not prepared:
+        async def permit_in(conn, *, request):
+            if request.prepared.space_id != self.profile.space_id:
                 raise ForestError(
-                    "EMBEDDING_REQUEST_CHANGED", "Embedding transport changed its request", 409
+                    "EMBEDDING_ROUTE_MISMATCH",
+                    "Embedding Provider returned another Bot space",
+                    409,
                 )
             await self.retrieval.mark_batch_handoff(
-                tuple(permits), batch_operation_id=handoff_id
+                tuple(permits), batch_operation_id=handoff_id, _connection=conn
             )
 
         try:
-            result = await self.client.dispatch(prepared, permitcheck=permitcheck)
+            result = await self.provider.encode(
+                tuple(self._input(value) for value in materialized),
+                request_id="request:" + batch_attempt_id,
+                transport_attempt_id=batch_attempt_id,
+                purpose=next(iter(purposes)),
+                permit_in=permit_in,
+            )
         except EmbeddingCancelled as exc:
             await asyncio.shield(
                 self._settle_batch(

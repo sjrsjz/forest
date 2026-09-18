@@ -100,11 +100,15 @@ class _RoutedSessionDecision:
 
 
 class _RoutedIngress:
-    def __init__(self, admit) -> None:
+    def __init__(self, admit, on_change=None) -> None:
         self._admit = admit
+        self._on_change = on_change
 
     async def admit(self, **values):
-        return await self._admit(**values)
+        result = await self._admit(**values)
+        if self._on_change is not None:
+            self._on_change()
+        return result
 
 
 def _build_final_reply_commit(context):
@@ -294,7 +298,8 @@ async def bootstrap_clean_messaging(
             "payloads": kernel.payload,
             "secret_resolver": secret_resolver,
             "ingress_port": _RoutedIngress(
-                contracts.service("kernel.uow.onebot.ingress", 1)
+                contracts.service("kernel.uow.onebot.ingress", 1),
+                getattr(_runtime, "notify", None),
             ),
             "trigger_policy": contracts.service("conversation.trigger.classify", 1),
         }

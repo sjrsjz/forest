@@ -53,6 +53,7 @@ class DurableSingleAgentExecution:
         *,
         agent,
         provider,
+        memory,
         payloads,
         owner_id: str,
         tool_routes: tuple[FrozenToolRoute, ...] = (),
@@ -64,6 +65,7 @@ class DurableSingleAgentExecution:
             payloads=payloads,
         )
         self.tools = DurableAgentToolExecutor(agent=agent, payloads=payloads)
+        self.memory = memory
         self.projector = ConversationContextProjector(
             bot_id=agent.bot_id,
             payloads=payloads,
@@ -213,11 +215,27 @@ class DurableSingleAgentExecution:
                         turn_id=_stable("model-turn", run["run_id"], step_seq),
                         final_reply_ref=_stable("reply", run["run_id"]),
                     )
+                    context = await request.context_snapshot()
                     snapshot = await self.projector.project(
                         run=run,
-                        context=await request.context_snapshot(),
+                        context=context,
                         logical_step_id=f"{run['run_id']}:step:{step_seq}",
                         tool_bindings=bindings,
+                    )
+                    latest_input = run["inputs"][-1]
+                    recalled = await self.memory.recall(
+                        recall_id=_stable(
+                            "memory-recall",
+                            run["run_id"],
+                            latest_input["input_revision"],
+                            latest_input["input_batch_ref"],
+                            latest_input["context_revision"],
+                            run["selected_input_end_seq"],
+                        ),
+                        conversation_id=request.conversation_id,
+                        input_batch_ref=latest_input["input_batch_ref"],
+                        context_revision=latest_input["context_revision"],
+                        input_cut=run["selected_input_end_seq"],
                     )
                     result = await self.model.execute(
                         owner,
@@ -225,6 +243,8 @@ class DurableSingleAgentExecution:
                         snapshot,
                         preset_context=profile.preset_context,
                         tools=declarations,
+                        media=None if recalled is None else recalled.media,
+                        evidence=None if recalled is None else recalled.evidence,
                         tool_bindings=bindings,
                         output_tokens=profile.output_tokens,
                         stream=profile.stream,

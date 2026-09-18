@@ -16,6 +16,7 @@ from forest.embeddings import (
     EmbeddingProfile,
     EmbeddingResult,
     EmbeddingVector,
+    prepare_embedding_request,
 )
 from forest.errors import ForestError
 from forest.memory_embedding_worker import (
@@ -46,6 +47,38 @@ from forest.storage.memory_retrieval_authority import (
 )
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
+
+
+class _DirectEmbeddingProvider:
+    """Test transport adapter; production projection belongs to the Provider module."""
+
+    def __init__(self, store, profile, client):
+        self.client_store = store
+        self.profile = profile
+        self.client = client
+
+    async def encode(
+        self,
+        inputs,
+        *,
+        request_id,
+        transport_attempt_id,
+        purpose,
+        permit_in,
+    ):
+        prepared = prepare_embedding_request(
+            self.profile,
+            inputs,
+            request_id=request_id,
+            transport_attempt_id=transport_attempt_id,
+            purpose=purpose,
+        )
+
+        async def permitcheck(_prepared):
+            async with self.client_store.pool.connection() as conn, conn.transaction():
+                await permit_in(conn, request=type("Request", (), {"prepared": prepared})())
+
+        return await self.client.dispatch(prepared, permitcheck=permitcheck)
 
 
 @pytest_asyncio.fixture
@@ -1301,7 +1334,7 @@ async def test_clean_vl_worker_uses_handoff_fence_and_payload_lineage(clean_memo
         return MemoryEmbeddingWorker(
             retrieval=retrieval,
             payloads=payloads,
-            client=FakeClient(status),
+            provider=_DirectEmbeddingProvider(store, profile, FakeClient(status)),
             profile=profile,
             component_id="embedding.qiyu-vl",
             generation_id="generation/qiyu-vl/1",
@@ -1399,7 +1432,7 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
     worker = MemoryEmbeddingWorker(
         retrieval=retrieval,
         payloads=payloads,
-        client=client,
+        provider=_DirectEmbeddingProvider(store, profile, client),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
@@ -1532,7 +1565,7 @@ async def test_invalid_batch_response_settles_cost_and_fails_all_facets(
     worker = MemoryEmbeddingWorker(
         retrieval=retrieval,
         payloads=payloads,
-        client=client,
+        provider=_DirectEmbeddingProvider(store, profile, client),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
@@ -1696,7 +1729,7 @@ async def test_unrelated_forget_during_provider_call_keeps_valid_batch_publishab
     worker = MemoryEmbeddingWorker(
         retrieval=retrieval,
         payloads=payloads,
-        client=ForgetDuringDispatch(),
+        provider=_DirectEmbeddingProvider(store, profile, ForgetDuringDispatch()),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
@@ -1757,7 +1790,7 @@ async def test_unrelated_forget_during_provider_call_keeps_valid_batch_publishab
     forgotten_worker = MemoryEmbeddingWorker(
         retrieval=retrieval,
         payloads=payloads,
-        client=ForgetOwnSourceDuringDispatch(),
+        provider=_DirectEmbeddingProvider(store, profile, ForgetOwnSourceDuringDispatch()),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",

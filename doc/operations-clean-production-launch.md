@@ -4,10 +4,10 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 12 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 13 个成员：
 
 - `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
-- `provider.chat-completions`、`memory.graph`、`agent.runtime`；
+- `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`；
 - `adapter.onebot`、`delivery`。
 
@@ -24,13 +24,15 @@ FOREST_BOT_DSN=postgresql://...
 FOREST_MODEL_BASE_URL=https://provider.example/v1
 FOREST_MODEL_API_KEY=...
 FOREST_MODEL_NAME=...
+FOREST_EMBEDDING_ENDPOINT=https://api.siliconflow.cn/v1/embeddings
+FOREST_EMBEDDING_API_KEY=...
 FOREST_ONEBOT_SELF_ID=123456789
 FOREST_ONEBOT_WEBSOCKET_URL=ws://127.0.0.1:3001/
 FOREST_ONEBOT_ACCESS_TOKEN=...
 FOREST_ALLOWED_GROUP_IDS=933179609
 ```
 
-模型和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。Compose 使用受保护文件构造 Bot DSN，因此不要求显式提供 `FOREST_BOT_DSN`。可选项包括：
+模型、Embedding 和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE`、`FOREST_EMBEDDING_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。Compose 使用受保护文件构造 Bot DSN，因此不要求显式提供 `FOREST_BOT_DSN`。可选项包括：
 
 ```text
 FOREST_BOT_ID=forest-main
@@ -38,12 +40,18 @@ FOREST_MODEL_DEPLOYMENT_ID=provider.chat-completions/main
 FOREST_MODEL_CONTEXT_LIMIT=32768
 FOREST_MODEL_MAX_OUTPUT_TOKENS=4096
 FOREST_MODEL_INPUT_MODALITIES=text
+FOREST_EMBEDDING_DEPLOYMENT_ID=embedding.multimodal/qiyu-vl/default
+FOREST_EMBEDDING_MODEL_REVISION=operator-declared/1
+FOREST_EMBEDDING_MODEL=Qwen/Qwen3-VL-Embedding-8B
+FOREST_EMBEDDING_DIMENSIONS=4096
 FOREST_GROUP_TRIGGER_MODE=MENTION
 FOREST_PRIVATE_ENABLED=true
 FOREST_AGENT_SYSTEM_PROMPT=...
 ```
 
-`FOREST_AGENT_SYSTEM_PROMPT` 是 Agent 模块拥有的 PresetContext。不可修改的核心协议仍来自 `agent_protocol.CORE_PROMPT`，包含单 Agent 身份、作者隔离、工具调用和输出语法约束。模型 endpoint 和凭据是可替换的部署参数；模型能力与类型在首次初始化时冻结。已有数据库若收到不同的冻结初始化值，会拒绝启动，后续必须走模块配置 plan/apply 与新 Generation publication。
+`FOREST_AGENT_SYSTEM_PROMPT` 是 Agent 模块拥有的 PresetContext。不可修改的核心协议仍来自 `agent_protocol.CORE_PROMPT`，包含单 Agent 身份、作者隔离、工具调用和输出语法约束。
+
+`embedding.multimodal` 独占 VL 请求投影、凭据、HTTP 客户端、传输尝试和用量回执；`memory.graph` 只通过冻结的 `embedding.encode/1` 路由提交已获准的文本或图片 facet。两者的发送边界在同一数据库事务中把 Provider 尝试标为 `SENT`、把 Memory 尝试标为 `DISPATCHED`。Embedding 的 deployment、模型版本、模型种类、维度与派生 space 在 Bot 首次初始化时冻结；配置 plan/apply 可以替换 endpoint、凭据引用、超时和连接数，新 Generation 会采用新传输配置。改变冻结 profile 会以 `EMBEDDING_PROFILE_IMMUTABLE` 拒绝启动。
 
 当前环境变量只承担首次 bootstrap 与无 WebUI 时的真实链路验收。最终管理入口必须通过模块贡献式 WebUI 读写同一配置协议，不能把这些字段重新固化成壳层专用 Bot 表单。
 
@@ -57,7 +65,7 @@ Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `f
 
 ## 尚未接入本图的能力
 
-- 独立 `embedding.*` Provider、图片抓取、VL facets 与 Agent Memory 召回；
+- OneBot 图片抓取与受管媒体生命周期；
 - `shell.command` 的完整 Generation 装配及群管理员授权；
 - 模块贡献式管理协议与紧凑 WebUI；
 - 多 Bot provisioning 与每 Bot 独立数据库/全局 Memory 域；
