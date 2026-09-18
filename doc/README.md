@@ -20,6 +20,8 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 任何实现若需要新增顶层 Agent/Memory/Bot 业务页面、恢复已废弃的 `BindingRuntime` 组合根、在通用 Supervisor 上持有业务对象、引入产品子 Agent、按旧未发布表增加兼容迁移，或绕过注册表直接调用模块，均应视为设计错误并先修改方案。
 
+本轮语义纠偏已经把早期的“Bot/Agent 中心后台”改为模块平级的微内核工作台。后续任务不得只凭类名或现有页面继续补功能：先在 00 的废止清单中排除旧方案，再以对应模块的 `owner / contract / lifecycle / management contribution / scale query / convergence` 设计门建立实现。尤其禁止把旧页面换皮后保留固定业务 API，或把无筛选消息表包装成“记忆管理”。
+
 ## 当前实现输入
 
 编写任何模块前，必须先从 00、13、14 确定 `owner / namespace / Repository contract / provides / requires / UnitOfWork participants / Generation fence / management contribution / deletion behavior`；涉及会话 Agent 执行时还必须读取 15。缺少任一项就先补设计，不能从旧实现反推边界。
