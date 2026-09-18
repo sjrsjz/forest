@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Forest Runtime Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="login" class="login-layer">
+    <form id="login-form" class="login-card">
+      <span class="mark">FOREST</span>
+      <h1>运行时控制台</h1>
+      <p>输入部署时设置的管理令牌。</p>
+      <input name="token" type="password" autocomplete="current-password" required minlength="16">
+      <button type="submit">进入</button>
+      <output id="login-error"></output>
+    </form>
+  </div>
+  <div id="console" class="console hidden">
+    <header class="topbar">
+      <div><span class="mark">FOREST</span><strong id="bot-id"></strong></div>
+      <div class="runtime-line"><span id="runtime-state"></span><code id="graph-id"></code></div>
+      <button id="logout" class="quiet">退出</button>
+    </header>
+    <aside class="sidebar">
+      <div class="sidebar-title">运行模块 <span id="module-count"></span></div>
+      <nav id="module-nav"></nav>
+    </aside>
+    <main class="workspace">
+      <div id="notice" class="notice hidden"></div>
+      <section id="overview" class="pane">
+        <div class="pane-head"><div><small>RUNTIME GRAPH</small><h1>模块注册表</h1></div></div>
+        <div id="module-table" class="module-table"></div>
+      </section>
+      <section id="module-view" class="pane hidden">
+        <div class="pane-head"><div><small id="component-kind">MODULE</small><h1 id="component-title"></h1></div><button id="back" class="quiet">返回注册表</button></div>
+        <nav id="contribution-nav" class="tabs"></nav>
+        <div id="contribution-root" class="contribution-root"></div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.clean_management_contract import CleanMemoryManagementContract
 from forest.clean_memory_runtime import CleanMemoryRuntime
 from forest.embeddings import SILICONFLOW_VL_MODEL
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import (
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -93,6 +96,12 @@ async def bootstrap_clean_memory(
             "fusion_policy_revision",
             "embedding_budget",
         ],
+        "properties": {
+            "protocol": {"const": "forest.memory.graph/1"},
+            "embedding": {"type": "object"},
+            "fusion_policy_revision": {"type": "string", "minLength": 1},
+            "embedding_budget": {"type": "object"},
+        },
         "additionalProperties": False,
     }
     try:
@@ -134,8 +143,25 @@ async def bootstrap_clean_memory(
         deletion_epoch_guard=kernel.payload.epoch_in,
     )
 
+    async def validate_configuration(value):
+        try:
+            profile = CleanMemoryRuntime._profile(value)
+        except ForestError as exc:
+            if exc.code != "MEMORY_CONFIGURATION_INVALID":
+                raise
+            raise ForestError(exc.code, exc.message, 422, details=exc.details) from None
+        await repository.initialize_domain(
+            operation_id="management:memory.graph:validate-domain",
+            space_id=profile.embedding.space_id,
+            embedding_model_kind=profile.embedding.model,
+            model_revision_digest=digest_json(profile.embedding.as_dict()),
+            dimensions=profile.embedding.dimensions,
+            normalization="L2",
+            fusion_policy_revision=profile.fusion_policy_revision,
+        )
+
     def factory(_runtime, contracts):
-        return CleanMemoryRuntime(
+        runtime = CleanMemoryRuntime(
             repository=repository,
             retrieval=retrieval,
             payloads=kernel.payload,
@@ -148,6 +174,13 @@ async def bootstrap_clean_memory(
                 contracts.service("embedding.encode", 1, owned_work=True)
             ),
         )
+        runtime.management_contract = CleanMemoryManagementContract(
+            configuration,
+            runtime=runtime,
+            schema=schema,
+            validator=validate_configuration,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "memory.graph",
@@ -160,6 +193,19 @@ async def bootstrap_clean_memory(
         ),
         factory,
         official_artifact("bot"),
+        management=(
+            RuntimeManagementContribution(
+                "memory-explorer",
+                "来源与关系",
+                ("bot",),
+                "/static/modules/clean-memory.html",
+                "/static/clean-memory.js",
+                style="/static/modules/clean-memory.css",
+                group="data",
+                order=5,
+            ),
+            configuration_management_contribution("记忆配置"),
+        ),
         storage=storage,
         wakes_on_work=True,
         work_notify_order=20,

@@ -190,6 +190,23 @@ class RuntimeManagementContribution:
         }
 
 
+def configuration_management_contribution(
+    label: str = "配置",
+) -> RuntimeManagementContribution:
+    """Declare the shared trusted renderer for a module-owned configuration contract."""
+
+    return RuntimeManagementContribution(
+        "configuration",
+        label,
+        ("bot",),
+        "/static/modules/clean-configuration.html",
+        "/static/clean-configuration.js",
+        style="/static/modules/clean-configuration.css",
+        group="configuration",
+        order=10,
+    )
+
+
 @dataclass(frozen=True)
 class RuntimeStorageBundle:
     """Verified immutable SQL owned by one runtime module generation."""

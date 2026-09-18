@@ -11,9 +11,11 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
+from forest.clean_management_app import create_clean_management_app
 from forest.embeddings import EmbeddingInput, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
@@ -639,23 +641,135 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         )
                         == 1
                     )
-                    runtime = host.registry.get("embedding.multimodal")
-                    current = await runtime.module_configuration.desired(include_value=True)
-                    changed = deepcopy(current.value)
-                    changed["endpoint"] = "http://127.0.0.1:9001/v1/embeddings"
-                    plan = await runtime.module_configuration.plan(
-                        operation_id="test:embedding:endpoint:plan",
-                        expected_desired_revision=current.revision,
-                        value=changed,
-                        validation_digest=current.validation_digest,
-                    )
-                    await runtime.module_configuration.apply(
-                        operation_id="test:embedding:endpoint:apply",
-                        plan_id=plan["plan_id"],
-                        expected_desired_revision=current.revision,
-                    )
                     previous_graph = host.registry.graph_identity
-                    replacement = await host.replace_runtime_graph()
+                    app = create_clean_management_app(
+                        host, access_token="test-management-token"
+                    )
+                    async with AsyncClient(
+                        transport=ASGITransport(app=app), base_url="http://forest.test"
+                    ) as web:
+                        index = await web.get("/")
+                        assert index.status_code == 200
+                        assert "height:100dvh" in (
+                            await web.get("/static/style.css")
+                        ).text.replace(" ", "")
+                        assert index.headers["x-frame-options"] == "DENY"
+                        assert "default-src 'none'" in index.headers["content-security-policy"]
+                        unauthorized = await web.get("/management/v1/runtime")
+                        assert unauthorized.status_code == 401
+                        headers = {
+                            "x-forest-management-token": "test-management-token"
+                        }
+                        runtime_view = await web.get(
+                            "/management/v1/runtime", headers=headers
+                        )
+                        assert runtime_view.status_code == 200
+                        embedding_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "embedding.multimodal"
+                        )
+                        assert embedding_view["management_contributions"][0][
+                            "contribution_id"
+                        ] == "configuration"
+                        memory_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "memory.graph"
+                        )
+                        assert {
+                            item["contribution_id"]
+                            for item in memory_view["management_contributions"]
+                        } == {"memory-explorer", "configuration"}
+                        trunks = await web.post(
+                            "/management/v1/modules/memory.graph/queries/memory.trunks.list",
+                            headers=headers,
+                            json={},
+                        )
+                        assert trunks.status_code == 200
+                        assert any(
+                            row["external_group_id"] == "933179609"
+                            for row in trunks.json()
+                        )
+                        sources = await web.post(
+                            "/management/v1/modules/memory.graph/queries/memory.sources.query",
+                            headers=headers,
+                            json={
+                                "trunk_id": "test-memory-trunk",
+                                "author_subject_ref": "qq:test",
+                                "modality": "TEXT",
+                                "limit": 50,
+                            },
+                        )
+                        assert sources.status_code == 200
+                        assert [
+                            item["source_unit_id"] for item in sources.json()["items"]
+                        ] == ["test-memory-unit"]
+                        memory_configuration = await web.get(
+                            "/management/v1/modules/memory.graph/configuration",
+                            headers=headers,
+                        )
+                        assert memory_configuration.status_code == 200
+                        malformed_memory = await web.post(
+                            "/management/v1/modules/memory.graph/configuration/plans",
+                            headers={
+                                **headers,
+                                "idempotency-key": "memory-configuration-invalid",
+                            },
+                            json={
+                                "expected_desired_revision": memory_configuration.json()[
+                                    "desired"
+                                ]["revision"],
+                                "value": {"protocol": "forest.memory.graph/1"},
+                            },
+                        )
+                        assert malformed_memory.status_code == 422
+                        assert malformed_memory.json()["code"] == "MEMORY_CONFIGURATION_INVALID"
+                        current = await web.get(
+                            "/management/v1/modules/embedding.multimodal/configuration",
+                            headers=headers,
+                        )
+                        assert current.status_code == 200
+                        current = current.json()
+                        changed = deepcopy(current["desired"]["value"])
+                        immutable = deepcopy(changed)
+                        immutable["profile"]["dimensions"] = 2048
+                        rejected_plan = await web.post(
+                            "/management/v1/modules/embedding.multimodal/configuration/plans",
+                            headers={
+                                **headers,
+                                "idempotency-key": "embedding-profile-invalid",
+                            },
+                            json={
+                                "expected_desired_revision": current["desired"]["revision"],
+                                "value": immutable,
+                            },
+                        )
+                        assert rejected_plan.status_code == 409
+                        assert rejected_plan.json()["code"] == "EMBEDDING_PROFILE_IMMUTABLE"
+                        changed["endpoint"] = (
+                            "http://127.0.0.1:9001/v1/embeddings"
+                        )
+                        plan = await web.post(
+                            "/management/v1/modules/embedding.multimodal/configuration/plans",
+                            headers={**headers, "idempotency-key": "embedding-endpoint-plan"},
+                            json={
+                                "expected_desired_revision": current["desired"]["revision"],
+                                "value": changed,
+                            },
+                        )
+                        assert plan.status_code == 200
+                        applied = await web.post(
+                            "/management/v1/modules/embedding.multimodal/configuration/apply",
+                            headers={**headers, "idempotency-key": "embedding-endpoint-apply"},
+                            json={
+                                "plan_id": plan.json()["plan_id"],
+                                "expected_desired_revision": current["desired"]["revision"],
+                            },
+                        )
+                        assert applied.status_code == 200
+                        assert applied.json()["replaced"] is True
+                    replacement = host.registry
                     assert replacement.graph_identity.graph_id != previous_graph.graph_id
                     assert set(replacement.states.values()) == {ModuleLifecycleState.ACTIVE}
                     assert clients[-2].closed is True

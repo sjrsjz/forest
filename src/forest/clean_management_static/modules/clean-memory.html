@@ -1,0 +1,16 @@
+<div class="contribution-view memory-workbench">
+  <form id="memory-filters" class="memory-filters">
+    <label>群主干<select name="trunk_id"><option value="">全部主干</option></select></label>
+    <label>作者<input name="author_subject_ref" placeholder="qq:123456"></label>
+    <label>模态<select name="modality"><option value="">全部</option><option>TEXT</option><option>IMAGE</option><option>MIXED</option><option>CONTROL</option></select></label>
+    <label>类型<input name="unit_kind" placeholder="GROUP_MESSAGE"></label>
+    <label>开始时间<input name="occurred_from" type="datetime-local"></label>
+    <label>结束时间<input name="occurred_to" type="datetime-local"></label>
+    <label>页大小<select name="limit"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
+    <button type="submit">筛选</button>
+  </form>
+  <div class="memory-split">
+    <div class="memory-results"><div id="memory-summary" class="memory-summary"></div><div id="memory-rows" class="memory-rows"></div><button id="memory-more" class="quiet hidden">下一页</button></div>
+    <aside id="memory-detail" class="memory-detail"><p>选择一条来源查看准确群聊、作者、内容部件和关联关系。</p></aside>
+  </div>
+</div>

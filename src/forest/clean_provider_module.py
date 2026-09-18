@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
 from forest.models import ModelCapabilities
 from forest.packages import digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -74,6 +76,13 @@ async def bootstrap_clean_provider(
             "max_connections",
             "capabilities",
         ],
+        "properties": {
+            "protocol": {"const": "forest.provider.chat-completions/1"},
+            "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+            "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
+            "max_connections": {"type": "integer", "minimum": 1, "maximum": 128},
+            "capabilities": {"type": "object"},
+        },
         "additionalProperties": False,
     }
     await configuration.initialize(
@@ -100,13 +109,20 @@ async def bootstrap_clean_provider(
         }
         if client_factory is not None:
             values["client_factory"] = client_factory
-        return CleanChatCompletionsProviderRuntime(**values)
+        runtime = CleanChatCompletionsProviderRuntime(**values)
+        runtime.management_contract = CleanModuleConfigurationContract(
+            configuration,
+            schema=schema,
+            validator=CleanChatCompletionsProviderRuntime._parse_configuration,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "provider.chat-completions",
         ("kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect"),
         factory,
         official_artifact("bot"),
+        management=(configuration_management_contribution("模型 Provider"),),
         storage=storage,
         factory_protocol="forest.contract-module-factory/1",
     )

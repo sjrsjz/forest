@@ -81,9 +81,8 @@ class CleanMediaCaptureRuntime:
     def runtime_service_handlers(self) -> dict:
         return {("media.context.resolve", 1): self.resolve_context}
 
-    async def prepare_generation(self, context) -> PreparedGenerationBinding:
-        desired = await self.module_configuration.desired(include_value=True)
-        value = desired.value
+    @staticmethod
+    def _parse_profile(value: object) -> FrozenMediaProfile:
         if (
             not isinstance(value, dict)
             or set(value)
@@ -104,13 +103,17 @@ class CleanMediaCaptureRuntime:
             or type(value.get("context_wait_seconds")) not in {int, float}
             or not 0 <= value["context_wait_seconds"] <= 15
         ):
-            raise ForestError("MEDIA_CONFIGURATION_INVALID", "Media configuration is invalid", 500)
-        self.profile = FrozenMediaProfile(
+            raise ForestError("MEDIA_CONFIGURATION_INVALID", "Media configuration is invalid", 422)
+        return FrozenMediaProfile(
             value["timeout_seconds"],
             value["max_connections"],
             value["max_attempts"],
             float(value["context_wait_seconds"]),
         )
+
+    async def prepare_generation(self, context) -> PreparedGenerationBinding:
+        desired = await self.module_configuration.desired(include_value=True)
+        self.profile = self._parse_profile(desired.value)
         return PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,

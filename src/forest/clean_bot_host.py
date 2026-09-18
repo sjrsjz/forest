@@ -618,31 +618,85 @@ class CleanBotHost:
 async def run_clean_bot(settings: CleanBotSettings) -> None:
     host = CleanBotHost(settings)
     stop = asyncio.Event()
+    management_server = None
+    management_task = None
+    stop_task = None
+    status_file = os.environ.get("FOREST_RUNTIME_STATUS_FILE")
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(event, stop.set)
         except (NotImplementedError, RuntimeError):
             signal.signal(event, lambda *_args: loop.call_soon_threadsafe(stop.set))
-    await host.start()
-    graph = host.registry.graph_identity
-    status = {
-        "status": "active",
-        "bot_id": settings.bot_id,
-        "graph_id": graph.graph_id,
-        "components": sorted(graph.generations),
-    }
-    status_file = os.environ.get("FOREST_RUNTIME_STATUS_FILE")
-    if status_file:
-        target = Path(status_file)
-        temporary = target.with_name(target.name + ".tmp")
-        temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, target)
-    print(json.dumps(status, ensure_ascii=False), flush=True)
     try:
-        await stop.wait()
+        await host.start()
+        management_token = os.environ.get("FOREST_MANAGEMENT_TOKEN")
+        if management_token:
+            import uvicorn
+
+            from forest.clean_management_app import create_clean_management_app
+
+            management_host = os.environ.get("FOREST_MANAGEMENT_HOST", "127.0.0.1")
+            management_port = _positive_int("FOREST_MANAGEMENT_PORT", 8080, 1, 65535)
+            management_server = uvicorn.Server(
+                uvicorn.Config(
+                    create_clean_management_app(host, access_token=management_token),
+                    host=management_host,
+                    port=management_port,
+                    access_log=False,
+                    proxy_headers=False,
+                    limit_concurrency=64,
+                )
+            )
+            management_server.install_signal_handlers = lambda: None
+            management_task = asyncio.create_task(
+                management_server.serve(), name=f"management-web:{settings.bot_id}"
+            )
+            while not management_server.started:
+                if management_task.done():
+                    await management_task
+                    raise RuntimeError("Management HTTP server stopped during startup")
+                await asyncio.sleep(0.01)
+        graph = host.registry.graph_identity
+        status = {
+            "status": "active",
+            "bot_id": settings.bot_id,
+            "graph_id": graph.graph_id,
+            "components": sorted(graph.generations),
+            "management": (
+                {
+                    "host": os.environ.get("FOREST_MANAGEMENT_HOST", "127.0.0.1"),
+                    "port": _positive_int("FOREST_MANAGEMENT_PORT", 8080, 1, 65535),
+                }
+                if management_server is not None
+                else None
+            ),
+        }
+        if status_file:
+            target = Path(status_file)
+            temporary = target.with_name(target.name + ".tmp")
+            temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, target)
+        print(json.dumps(status, ensure_ascii=False), flush=True)
+        stop_task = asyncio.create_task(stop.wait(), name=f"host-stop:{settings.bot_id}")
+        if management_task is None:
+            await stop_task
+        else:
+            done, _pending = await asyncio.wait(
+                (stop_task, management_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            if management_task in done and not stop.is_set():
+                await management_task
+                raise RuntimeError("Management HTTP server stopped unexpectedly")
     finally:
         try:
+            if stop_task is not None and not stop_task.done():
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+            if management_server is not None:
+                management_server.should_exit = True
+            if management_task is not None and not management_task.done():
+                await management_task
             await host.close()
         finally:
             if status_file:

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.clean_shell_runtime import CleanShellRuntime
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -182,7 +184,7 @@ async def bootstrap_clean_shell(
             grants=grants,
             repository=repository,
         )
-        return CleanShellRuntime(
+        runtime = CleanShellRuntime(
             repository=repository,
             payloads=kernel.payload,
             gate=gate,
@@ -202,12 +204,19 @@ async def bootstrap_clean_shell(
             generation_admission_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
+        runtime.management_contract = CleanModuleConfigurationContract(
+            configuration,
+            schema=schema,
+            validator=CleanShellRuntime._parse_profile,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "shell.command",
         ("kernel.runtime", "kernel.payload", "kernel.authorization"),
         factory,
         official_artifact("bot"),
+        management=(configuration_management_contribution("群聊 Shell"),),
         storage=storage,
         wakes_on_work=True,
         work_notify_order=0,

@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.clean_embedding_runtime import CleanMultimodalEmbeddingRuntime
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.embeddings import SILICONFLOW_VL_MODEL
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -80,6 +82,14 @@ async def bootstrap_clean_embedding(
             "max_connections",
             "profile",
         ],
+        "properties": {
+            "protocol": {"const": "forest.embedding.multimodal/1"},
+            "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
+            "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+            "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300},
+            "max_connections": {"type": "integer", "minimum": 1, "maximum": 32},
+            "profile": {"type": "object"},
+        },
         "additionalProperties": False,
     }
     try:
@@ -101,6 +111,13 @@ async def bootstrap_clean_embedding(
     )
     repository = EmbeddingProviderRepository(store, namespace=storage.spec.namespace)
 
+    async def validate_configuration(value):
+        _configuration, profile = CleanMultimodalEmbeddingRuntime._parse_configuration(value)
+        await repository.initialize_identity(
+            operation_id="management:embedding.multimodal:validate-profile",
+            profile=profile,
+        )
+
     def factory(_runtime, _contracts):
         values = {
             "store": store,
@@ -113,13 +130,20 @@ async def bootstrap_clean_embedding(
         }
         if client_factory is not None:
             values["client_factory"] = client_factory
-        return CleanMultimodalEmbeddingRuntime(**values)
+        runtime = CleanMultimodalEmbeddingRuntime(**values)
+        runtime.management_contract = CleanModuleConfigurationContract(
+            configuration,
+            schema=schema,
+            validator=validate_configuration,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "embedding.multimodal",
         ("kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect"),
         factory,
         official_artifact("bot"),
+        management=(configuration_management_contribution("多模态嵌入"),),
         storage=storage,
         factory_protocol="forest.contract-module-factory/1",
     )

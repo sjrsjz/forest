@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.clean_media_runtime import CleanMediaCaptureRuntime
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -72,6 +74,13 @@ async def bootstrap_clean_media(
             "max_attempts",
             "context_wait_seconds",
         ],
+        "properties": {
+            "protocol": {"const": "forest.media.capture/1"},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30},
+            "max_connections": {"type": "integer", "minimum": 1, "maximum": 16},
+            "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10},
+            "context_wait_seconds": {"type": "number", "minimum": 0, "maximum": 15},
+        },
         "additionalProperties": False,
     }
     try:
@@ -122,7 +131,13 @@ async def bootstrap_clean_media(
         }
         if client_factory is not None:
             values["client_factory"] = client_factory
-        return CleanMediaCaptureRuntime(**values)
+        runtime = CleanMediaCaptureRuntime(**values)
+        runtime.management_contract = CleanModuleConfigurationContract(
+            configuration,
+            schema=schema,
+            validator=CleanMediaCaptureRuntime._parse_profile,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "media.capture",
@@ -134,6 +149,7 @@ async def bootstrap_clean_media(
         ),
         factory,
         official_artifact("bot"),
+        management=(configuration_management_contribution("媒体采集"),),
         storage=storage,
         wakes_on_work=True,
         work_notify_order=15,
