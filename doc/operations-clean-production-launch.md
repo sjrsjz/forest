@@ -4,10 +4,10 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 13 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 14 个成员：
 
 - `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
-- `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`agent.runtime`；
+- `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`media.capture`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`；
 - `adapter.onebot`、`delivery`。
 
@@ -53,6 +53,8 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `embedding.multimodal` 独占 VL 请求投影、凭据、HTTP 客户端、传输尝试和用量回执；`memory.graph` 只通过冻结的 `embedding.encode/1` 路由提交已获准的文本或图片 facet。两者的发送边界在同一数据库事务中把 Provider 尝试标为 `SENT`、把 Memory 尝试标为 `DISPATCHED`。Embedding 的 deployment、模型版本、模型种类、维度与派生 space 在 Bot 首次初始化时冻结；配置 plan/apply 可以替换 endpoint、凭据引用、超时和连接数，新 Generation 会采用新传输配置。改变冻结 profile 会以 `EMBEDDING_PROFILE_IMMUTABLE` 拒绝启动。
 
+`media.capture` 独占 OneBot 临时图片定位符、下载客户端、重试租约和受管图片资产。Adapter 在 ingress 事务里只向 Conversation 发布稳定 `media_ref`，并登记异步捕获任务；签名 URL 不进入规范 Context。Worker 完成有界下载和图片解码验证后，通过 `memory.source.capture/1` 发布保持原段顺序的图文来源。Agent 在下一次模型调用前从 `media.context.resolve/1` 取得当前 Context 的不可变像素快照；text-only Provider 仍只在该次投影中省略图片。
+
 当前环境变量只承担首次 bootstrap 与无 WebUI 时的真实链路验收。最终管理入口必须通过模块贡献式 WebUI 读写同一配置协议，不能把这些字段重新固化成壳层专用 Bot 表单。
 
 ## 生命周期与恢复
@@ -65,7 +67,6 @@ Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `f
 
 ## 尚未接入本图的能力
 
-- OneBot 图片抓取与受管媒体生命周期；
 - `shell.command` 的完整 Generation 装配及群管理员授权；
 - 模块贡献式管理协议与紧凑 WebUI；
 - 多 Bot provisioning 与每 Bot 独立数据库/全局 Memory 域；

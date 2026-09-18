@@ -219,18 +219,21 @@ CREATE TABLE pending_input_events (
     context_revision bigint NOT NULL CHECK (context_revision > 0),
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
     state text NOT NULL DEFAULT 'PENDING_CAPTURE'
-        CHECK (state IN ('PENDING_CAPTURE','RESOLVED')),
+        CHECK (state IN ('PENDING_CAPTURE','RESOLVED','UNAVAILABLE')),
     source_unit_id text,
     occurrence_id text,
+    error_code text CHECK (error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     resolved_at timestamptz,
     PRIMARY KEY (bot_id,conversation_ref,event_ref),
     UNIQUE (bot_id,operation_id,event_ref),
     CHECK (
         (state='PENDING_CAPTURE' AND source_unit_id IS NULL AND occurrence_id IS NULL
-            AND resolved_at IS NULL)
+            AND error_code IS NULL AND resolved_at IS NULL)
         OR (state='RESOLVED' AND source_unit_id IS NOT NULL AND occurrence_id IS NOT NULL
-            AND resolved_at IS NOT NULL)
+            AND error_code IS NULL AND resolved_at IS NOT NULL)
+        OR (state='UNAVAILABLE' AND source_unit_id IS NULL AND occurrence_id IS NULL
+            AND error_code IS NOT NULL AND resolved_at IS NOT NULL)
     ),
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
     FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)

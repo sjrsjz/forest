@@ -281,8 +281,6 @@ class ConversationSchedulerRepository:
                 "content": vars(content),
                 "author": vars(author),
                 "sent_at": sent_at.isoformat() if sent_at else None,
-                "received_at": received_at.isoformat(),
-                "classification_deadline": classification_deadline.isoformat(),
                 "context_disposition": context_disposition,
             }
         )

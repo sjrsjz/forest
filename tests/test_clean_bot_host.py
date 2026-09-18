@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from psycopg import sql
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embeddings import EmbeddingInput, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
+from forest.media_capture_io import CapturedImage
 from forest.runtime_modules import ModuleLifecycleState
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
@@ -60,6 +63,21 @@ class FakeEmbeddingClient(FakeModelClient):
             usage_json='{"total_tokens":1}',
             http_status=200,
         )
+
+
+class FakeMediaClient(FakeModelClient):
+    fetched = []
+
+    def __init__(self, **_kwargs) -> None:
+        super().__init__()
+
+    async def fetch(self, locator):
+        self.fetched.append(locator)
+        if "retry" in (locator.get("uri") or "") and sum(
+            "retry" in (item.get("uri") or "") for item in self.fetched
+        ) == 1:
+            raise ForestError("MEDIA_TRANSPORT_FAILED", "retry fixture", 502)
+        return CapturedImage(b"fake-png-bytes", "image/png", 2, 3)
 
 
 class FakeWebSocketClient:
@@ -125,12 +143,14 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
 
     try:
         FakeEmbeddingClient.endpoints.clear()
+        FakeMediaClient.fetched.clear()
         graph_ids = []
         for index in range(2):
             host = CleanBotHost(
                 settings,
                 model_client_factory=FakeModelClient,
                 embedding_client_factory=FakeEmbeddingClient,
+                media_client_factory=FakeMediaClient,
                 websocket_client_factory=create_websocket,
             )
             await host.start()
@@ -145,6 +165,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "provider.chat-completions",
                     "embedding.multimodal",
                     "memory.graph",
+                    "media.capture",
                     "agent.runtime",
                     "conversation.trigger-policy",
                     "conversation.scheduler",
@@ -154,7 +175,126 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 graph_ids.append(host.registry.graph_identity.graph_id)
                 assert clients[-1].handler is not None
                 if index == 0:
+                    await clients[-1].handler(
+                        json.dumps(
+                            {
+                                "self_id": int(settings.onebot_self_id),
+                                "post_type": "message",
+                                "message_type": "group",
+                                "sub_type": "normal",
+                                "time": 1_720_000_000,
+                                "message_id": 4242,
+                                "user_id": 20001,
+                                "group_id": 933179609,
+                                "sender": {
+                                    "user_id": 20001,
+                                    "nickname": "Image sender",
+                                    "card": "",
+                                    "role": "member",
+                                },
+                                "message": [
+                                    {"type": "text", "data": {"text": "before"}},
+                                    {
+                                        "type": "image",
+                                        "data": {
+                                            "file": "onebot-file-id",
+                                            "url": "https://media.example/image?private-token=1",
+                                        },
+                                    },
+                                    {"type": "text", "data": {"text": "after"}},
+                                ],
+                            },
+                            separators=(",", ":"),
+                        ).encode()
+                    )
+                    media_runtime = host.registry.get("media.capture")
+                    async with asyncio.timeout(5):
+                        while True:
+                            async with host.store.pool.connection() as conn:
+                                capture = await (
+                                    await conn.execute(
+                                        sql.SQL(
+                                            "SELECT * FROM {}.media_captures WHERE bot_id=%s"
+                                        ).format(
+                                            sql.Identifier(media_runtime.repository.namespace)
+                                        ),
+                                        (settings.bot_id,),
+                                    )
+                                ).fetchone()
+                            if capture is not None and capture["state"] == "READY":
+                                break
+                            await asyncio.sleep(0.05)
+                    assert FakeMediaClient.fetched == [
+                        {
+                            "kind": "onebot-source",
+                            "uri": "https://media.example/image?private-token=1",
+                            "platform_file": "onebot-file-id",
+                        }
+                    ]
+                    event_hash = hashlib.sha256(b"binding/main\x004242").hexdigest()
+                    media_ref = "media:" + hashlib.sha256(
+                        ("onebot-event:" + event_hash + "\x001").encode()
+                    ).hexdigest()
+                    assets = await media_runtime.repository.asset_rows((media_ref,))
+                    assert len(assets) == 1
+                    resolved_media = await media_runtime.resolve_context(
+                        {
+                            "units": [
+                                {
+                                    "unit_id": "input:image-test",
+                                    "parts": [
+                                        {
+                                            "part_id": "input:image-test:0",
+                                            "type": "image",
+                                            "media_ref": media_ref,
+                                            "media_revision": 1,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                    image = resolved_media[("input:image-test", "input:image-test:0")]
+                    assert image.content == b"fake-png-bytes"
+                    assert (image.width, image.height) == (2, 3)
+                    async with host.store.pool.connection() as conn:
+                        inbox = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT content_payload_id FROM {}.inbox_messages "
+                                    "WHERE bot_id=%s AND platform_message_ref='4242'"
+                                ).format(
+                                    sql.Identifier(
+                                        host.registry.get(
+                                            "conversation.scheduler"
+                                        ).repository.namespace
+                                    )
+                                ),
+                                (settings.bot_id,),
+                            )
+                        ).fetchone()
+                    normalized_body = await host._kernel.payload.read_bytes(
+                        inbox["content_payload_id"]
+                    )
+                    assert b"private-token" not in normalized_body
+                    assert media_ref.encode() in normalized_body
                     memory_runtime = host.registry.get("memory.graph")
+                    async with host.store.pool.connection() as conn:
+                        stored_parts = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT part_kind,part_index FROM {}.source_parts "
+                                    "WHERE bot_id=%s AND source_unit_id=%s ORDER BY part_index"
+                                ).format(
+                                    sql.Identifier(memory_runtime.repository.namespace)
+                                ),
+                                (settings.bot_id, capture["source_unit_id"]),
+                            )
+                        ).fetchall()
+                    assert [
+                        (part["part_kind"], part["part_index"])
+                        for part in stored_parts
+                    ] == [("TEXT", 0), ("IMAGE", 1), ("TEXT", 2)]
                     permitted = False
 
                     async def permit_in(_conn, *, request):
@@ -382,23 +522,128 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         timeout_seconds=5,
                     )
                     assert recalled is not None
-                    assert [
-                        item["source_unit_id"] for item in recalled.evidence["evidence"]
-                    ] == ["test-memory-unit"]
+                    recalled_by_unit = {
+                        item["source_unit_id"]: item
+                        for item in recalled.evidence["evidence"]
+                    }
+                    assert set(recalled_by_unit) == {
+                        "test-memory-unit",
+                        capture["source_unit_id"],
+                    }
+                    assert any(
+                        part["type"] == "image"
+                        for part in recalled_by_unit[capture["source_unit_id"]]["parts"]
+                    )
+                    assert recalled.media
                     assert recalled.evidence["conversation_id"] == (
                         "onebot:group:933179609"
                     )
-                    recalled_source = recalled.evidence["evidence"][0]["source"]
+                    recalled_source = recalled_by_unit["test-memory-unit"]["source"]
                     assert recalled_source["group_source_id"] == (
                         "onebot:group:933179609"
                     )
                     assert recalled_source["channel_id"] == "933179609"
-                    assert recalled.evidence["evidence"][0]["author"] == {
+                    assert recalled_by_unit["test-memory-unit"]["author"] == {
                         "principal_ref": "qq:test",
                         "identity_origin": "memory_verified",
                     }
                     agent_runtime = host.registry.get("agent.runtime")
                     assert agent_runtime.memory is not None
+                    await clients[-1].handler(
+                        json.dumps(
+                            {
+                                "self_id": int(settings.onebot_self_id),
+                                "post_type": "message",
+                                "message_type": "group",
+                                "sub_type": "normal",
+                                "time": 1_720_000_001,
+                                "message_id": 4243,
+                                "user_id": 20002,
+                                "group_id": 933179609,
+                                "sender": {
+                                    "user_id": 20002,
+                                    "nickname": "Retry sender",
+                                    "card": "",
+                                    "role": "member",
+                                },
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {
+                                            "file": "retry-file-id",
+                                            "url": "https://media.example/retry",
+                                        },
+                                    }
+                                ],
+                            },
+                            separators=(",", ":"),
+                        ).encode()
+                    )
+                    retry_event_hash = hashlib.sha256(
+                        b"binding/main\x004243"
+                    ).hexdigest()
+                    retry_capture_id = "media-capture:" + retry_event_hash
+                    async with asyncio.timeout(8):
+                        while True:
+                            retry_capture = await media_runtime.repository.load(
+                                retry_capture_id
+                            )
+                            if retry_capture["state"] == "READY":
+                                break
+                            await asyncio.sleep(0.05)
+                    assert retry_capture["attempt_count"] == 2
+                    assert sum(
+                        "retry" in (item.get("uri") or "")
+                        for item in FakeMediaClient.fetched
+                    ) == 2
+                    duplicate_body = json.dumps(
+                        {
+                            "self_id": int(settings.onebot_self_id),
+                            "post_type": "message",
+                            "message_type": "group",
+                            "sub_type": "normal",
+                            "time": 1_720_000_002,
+                            "message_id": 4244,
+                            "user_id": 20003,
+                            "group_id": 933179609,
+                            "sender": {
+                                "user_id": 20003,
+                                "nickname": "Duplicate sender",
+                                "card": "",
+                                "role": "member",
+                            },
+                            "message": [
+                                {
+                                    "type": "image",
+                                    "data": {
+                                        "file": "duplicate-file-id",
+                                        "url": "https://media.example/duplicate",
+                                    },
+                                }
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                    await asyncio.gather(
+                        clients[-1].handler(duplicate_body),
+                        clients[-1].handler(duplicate_body),
+                    )
+                    duplicate_event_hash = hashlib.sha256(
+                        b"binding/main\x004244"
+                    ).hexdigest()
+                    duplicate_capture_id = "media-capture:" + duplicate_event_hash
+                    async with asyncio.timeout(5):
+                        while True:
+                            duplicate_capture = await media_runtime.repository.load(
+                                duplicate_capture_id
+                            )
+                            if duplicate_capture["state"] == "READY":
+                                break
+                            await asyncio.sleep(0.05)
+                    assert sum(
+                        "duplicate" in (item.get("uri") or "")
+                        for item in FakeMediaClient.fetched
+                    ) == 1
                     runtime = host.registry.get("embedding.multimodal")
                     current = await runtime.module_configuration.desired(
                         include_value=True
@@ -446,6 +691,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
             settings,
             model_client_factory=FakeModelClient,
             embedding_client_factory=FakeEmbeddingClient,
+            media_client_factory=FakeMediaClient,
             websocket_client_factory=create_websocket,
         )
         with pytest.raises(ForestError) as caught:

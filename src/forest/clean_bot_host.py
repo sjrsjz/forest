@@ -16,6 +16,7 @@ from uuid import uuid4
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
+from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
@@ -239,6 +240,7 @@ class CleanBotHost:
         *,
         model_client_factory=None,
         embedding_client_factory=None,
+        media_client_factory=None,
         websocket_client_factory=None,
     ) -> None:
         self.settings = settings
@@ -253,6 +255,7 @@ class CleanBotHost:
         self._incarnation = str(uuid4())
         self._model_client_factory = model_client_factory
         self._embedding_client_factory = embedding_client_factory
+        self._media_client_factory = media_client_factory
         self._websocket_client_factory = websocket_client_factory
 
     @property
@@ -448,6 +451,15 @@ class CleanBotHost:
                     },
                 },
             )
+            media_options = {}
+            if self._media_client_factory is not None:
+                media_options["client_factory"] = self._media_client_factory
+            media = await bootstrap_clean_media(
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                **media_options,
+            )
             agent = await bootstrap_clean_agent(
                 self.store,
                 self.schema_bundle_installer,
@@ -509,6 +521,7 @@ class CleanBotHost:
                     provider.descriptor,
                     embedding.descriptor,
                     memory.descriptor,
+                    media.descriptor,
                     agent.descriptor,
                     trigger.descriptor,
                 )

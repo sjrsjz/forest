@@ -64,15 +64,17 @@ def _parts(unit_id: str, value: dict) -> list[dict]:
             if kind == "text" and isinstance(item.get("text"), str):
                 result.append({"part_id": part_id, "type": "text", "text": item["text"]})
             elif kind == "image":
-                # The Adapter acquisition hint stays in its immutable payload.  A
-                # media module will bind pixels to this stable reference later.
-                result.append(
-                    {
-                        "part_id": part_id,
-                        "type": "image",
-                        "media_ref": f"pending-media:{unit_id}:{index}",
-                    }
-                )
+                media_ref = item.get("media_ref")
+                if not isinstance(media_ref, str):
+                    media_ref = f"pending-media:{unit_id}:{index}"
+                projected = {
+                    "part_id": part_id,
+                    "type": "image",
+                    "media_ref": media_ref,
+                }
+                if type(item.get("media_revision")) is int:
+                    projected["media_revision"] = item["media_revision"]
+                result.append(projected)
             elif kind == "mention" and isinstance(item.get("external_user_id"), str):
                 result.append(
                     {

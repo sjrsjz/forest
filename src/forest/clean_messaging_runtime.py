@@ -52,6 +52,7 @@ _DEFINITIONS = {
             "conversation.scheduler",
             "conversation.trigger-policy",
             "memory.graph",
+            "media.capture",
         ),
         "capabilities": ("adapter.onebot.ingress", "adapter.onebot.send"),
     },
@@ -178,6 +179,7 @@ def _build_onebot_ingress(context):
         adapter=context.participant("adapter.onebot"),
         conversation=context.participant("conversation.scheduler"),
         memory=context.participant("memory.graph"),
+        media=context.participant("media.capture"),
     )
     return port.admit
 
@@ -354,7 +356,12 @@ async def bootstrap_clean_messaging(
                     RuntimeKernelServiceSpec(
                         "kernel.uow.onebot.ingress",
                         1,
-                        ("adapter.onebot", "conversation.scheduler", "memory.graph"),
+                        (
+                            "adapter.onebot",
+                            "conversation.scheduler",
+                            "memory.graph",
+                            "media.capture",
+                        ),
                         _build_onebot_ingress,
                     ),
                 )

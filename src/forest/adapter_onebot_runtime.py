@@ -27,6 +27,7 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPlatformEvent,
 )
 from forest.storage.ingress_unit_of_work import IngressClassification, IngressMemoryCapture
+from forest.storage.media_capture_authority import IngressMediaCapture, MediaImageCapture
 from forest.storage.memory_graph_authority import (
     MemoryPart,
     MemoryPayloadRef,
@@ -505,34 +506,92 @@ class CleanOneBotRuntime:
             body=body,
             source=source,
         )
-        normalized_ref = await self._payload(
-            event_id=event_id,
-            owner_kind="onebot.normalized-event",
-            body=_canonical({"parts": normalized["segments"]}),
-            source=source,
-        )
         author_ref = await self._payload(
             event_id=event_id,
             owner_kind="onebot.author-snapshot",
             body=_canonical(author),
             source=source,
         )
-        memory_capture = None
         segments = normalized["segments"]
-        if not any(part["type"] == "image" for part in segments):
-            rendered = []
-            for part in segments:
-                kind = part["type"]
-                if kind == "text":
-                    rendered.append(part["text"])
-                elif kind == "mention":
-                    rendered.append("[mention:" + part["external_user_id"] + "]")
-                elif kind == "reply":
-                    rendered.append("[reply:" + part["platform_message_id"] + "]")
-                else:
-                    rendered.append("[unsupported:" + part.get("platform_type", kind) + "]")
-            memory_text = "".join(rendered) or "[empty message]"
-            memory_owner_id = event_id + ":memory-text"
+        source_hash = hashlib.sha256(
+            (
+                normalized["platform"]
+                + "\0"
+                + connection.self_id
+                + "\0"
+                + channel_kind
+                + "\0"
+                + channel_ref
+            ).encode()
+        ).hexdigest()
+        is_group = channel_kind == "group"
+        identity = MemorySourceIdentity(
+            source_id="onebot-source:" + source_hash,
+            source_kind="GROUP" if is_group else "DIRECT",
+            platform=normalized["platform"],
+            realm_id="qq:" + connection.self_id,
+            external_group_id=channel_ref if is_group else None,
+            trunk_id="onebot-trunk:" + source_hash if is_group else None,
+        )
+        memory_texts = []
+        context_parts = []
+        images = []
+        for index, part in enumerate(segments):
+            kind = part["type"]
+            if kind == "image":
+                media_ref = "media:" + hashlib.sha256(
+                    (event_id + "\0" + str(index)).encode()
+                ).hexdigest()
+                context_parts.append(
+                    {
+                        "type": "image",
+                        "media_ref": media_ref,
+                        "media_revision": 1,
+                        "state": "PENDING_CAPTURE",
+                    }
+                )
+                locator = part["media_ref"]
+                images.append(
+                    MediaImageCapture(
+                        part_id="part:image:" + str(index),
+                        part_index=index,
+                        media_ref=media_ref,
+                        locator={
+                            "kind": "onebot-source",
+                            "uri": locator.get("uri"),
+                            "platform_file": locator.get("platform_file"),
+                        },
+                    )
+                )
+                continue
+            context_parts.append(part)
+            if kind == "text":
+                memory_texts.append((index, part["text"]))
+            elif kind == "mention":
+                memory_texts.append(
+                    (index, "[mention:" + part["external_user_id"] + "]")
+                )
+            elif kind == "reply":
+                memory_texts.append(
+                    (index, "[reply:" + part["platform_message_id"] + "]")
+                )
+            else:
+                memory_texts.append(
+                    (index, "[unsupported:" + part.get("platform_type", kind) + "]")
+                )
+        normalized_ref = await self._payload(
+            event_id=event_id,
+            owner_kind="onebot.normalized-event",
+            body=_canonical({"parts": context_parts}),
+            source=source,
+        )
+        memory_capture = None
+        media_capture = None
+        memory_parts = []
+        if not memory_texts and not images:
+            memory_texts.append((0, "[empty message]"))
+        for part_index, memory_text in memory_texts:
+            memory_owner_id = event_id + ":memory-text:" + str(part_index)
             epoch = await self.payloads.epoch()
             saved_memory_text = await self.payloads.put_bytes(
                 owner_component_id="adapter.onebot",
@@ -544,19 +603,26 @@ class CleanOneBotRuntime:
                 parents=(normalized_ref.payload_id,),
                 expected_deletion_epoch=epoch,
             )
-            source_hash = hashlib.sha256(
-                (normalized["platform"] + "\0" + connection.self_id + "\0" + channel_kind + "\0" + channel_ref).encode()
-            ).hexdigest()
-            is_group = channel_kind == "group"
-            memory_capture = IngressMemoryCapture(
-                identity=MemorySourceIdentity(
-                    source_id="onebot-source:" + source_hash,
-                    source_kind="GROUP" if is_group else "DIRECT",
-                    platform=normalized["platform"],
-                    realm_id="qq:" + connection.self_id,
-                    external_group_id=channel_ref if is_group else None,
-                    trunk_id="onebot-trunk:" + source_hash if is_group else None,
-                ),
+            memory_parts.append(
+                MemoryPart(
+                    "part:text:" + str(part_index),
+                    part_index,
+                    "TEXT",
+                    "text/plain; charset=utf-8",
+                    MemoryPayloadRef(
+                        saved_memory_text.payload_id,
+                        saved_memory_text.content_digest,
+                        "adapter.onebot",
+                        "onebot.memory-text",
+                        memory_owner_id,
+                    ),
+                    byte_length=len(memory_text.encode("utf-8")),
+                )
+            )
+        if images:
+            media_capture = IngressMediaCapture(
+                capture_id="media-capture:" + event_hash,
+                identity=identity,
                 source_unit_id="onebot-unit:" + event_hash,
                 source_revision=1,
                 unit_kind="GROUP_MESSAGE" if is_group else "DIRECT_MESSAGE",
@@ -567,22 +633,24 @@ class CleanOneBotRuntime:
                     author_ref.owner_kind,
                     author_ref.owner_id,
                 ),
-                parts=(
-                    MemoryPart(
-                        "part:text",
-                        0,
-                        "TEXT",
-                        "text/plain; charset=utf-8",
-                        MemoryPayloadRef(
-                            saved_memory_text.payload_id,
-                            saved_memory_text.content_digest,
-                            "adapter.onebot",
-                            "onebot.memory-text",
-                            memory_owner_id,
-                        ),
-                        byte_length=len(memory_text.encode("utf-8")),
-                    ),
+                text_parts=tuple(memory_parts),
+                image_parts=tuple(images),
+                occurred_at=sent_at,
+            )
+        else:
+            memory_capture = IngressMemoryCapture(
+                identity=identity,
+                source_unit_id="onebot-unit:" + event_hash,
+                source_revision=1,
+                unit_kind="GROUP_MESSAGE" if is_group else "DIRECT_MESSAGE",
+                author=MemoryPayloadRef(
+                    author_ref.payload_id,
+                    author_ref.digest,
+                    author_ref.owner_component_id,
+                    author_ref.owner_kind,
+                    author_ref.owner_id,
                 ),
+                parts=tuple(memory_parts),
                 occurred_at=sent_at,
             )
         event = OneBotPlatformEvent(
@@ -600,7 +668,7 @@ class CleanOneBotRuntime:
             classification_deadline=received_at + timedelta(minutes=2),
             sent_at=sent_at,
         )
-        classified = await self.trigger_policy(normalized=normalized)
+        classified = await self.trigger_policy(normalized={**normalized, "segments": context_parts})
         classification = IngressClassification(
             decision=classified["decision"],
             classifier_component_id=classified["classifier_component_id"],
@@ -615,6 +683,7 @@ class CleanOneBotRuntime:
             client_incarnation=connection.client_incarnation,
             event=event,
             memory_capture=memory_capture,
+            media_capture=media_capture,
             classification=classification,
         )
 

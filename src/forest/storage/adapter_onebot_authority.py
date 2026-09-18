@@ -1038,7 +1038,6 @@ class OneBotAdapterRepository:
         event.validate()
         received = _timestamp(event.received_at, "received_at")
         sent = _timestamp(event.sent_at, "sent_at", optional=True)
-        deadline = _timestamp(event.classification_deadline, "classification_deadline")
         semantic_digest = _digest(event.semantic())
         input_digest = _digest(
             {
@@ -1046,8 +1045,6 @@ class OneBotAdapterRepository:
                 "expected_binding_epoch": expected_binding_epoch,
                 "client_incarnation": client_incarnation,
                 "event": event.semantic(),
-                "received_at": received.isoformat(),
-                "classification_deadline": deadline.isoformat(),
             }
         )
         async with self._transaction(_connection) as conn:

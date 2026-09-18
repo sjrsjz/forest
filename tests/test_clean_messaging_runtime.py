@@ -23,11 +23,14 @@ from forest.agent_tool_executor import (
 )
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
+from forest.clean_embedding_module import bootstrap_clean_embedding
+from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
@@ -76,10 +79,12 @@ class FakeModelClient:
         self.deployment_id = deployment_id
         self.closed = False
         self.permitted = False
+        self.requests = []
 
     async def dispatch(self, prepared, *, permitcheck):
         await permitcheck(prepared)
         self.permitted = True
+        self.requests.append(prepared)
         if "tool" in prepared.request_id:
             text = (
                 '<valid_agent_protocol_content_block block_type="ModelTurn">'
@@ -106,6 +111,36 @@ class FakeModelClient:
 
     async def aclose(self):
         self.closed = True
+
+
+class FakeEmbeddingClient:
+    def __init__(self, _endpoint, _credential, profile, **_limits):
+        self.profile = profile
+        self.requests = []
+
+    async def dispatch(self, prepared, *, permitcheck):
+        await permitcheck(prepared)
+        self.requests.append(prepared)
+        return EmbeddingResult(
+            "RESPONDED",
+            prepared.request_id,
+            prepared.transport_attempt_id,
+            prepared.payload_digest,
+            prepared.space_id,
+            vectors=tuple(
+                EmbeddingVector(
+                    facet["facet_id"],
+                    index,
+                    (1.0,) + (0.0,) * (self.profile.dimensions - 1),
+                )
+                for index, facet in enumerate(prepared.manifest["facets"])
+            ),
+            usage_json='{"total_tokens":1}',
+            http_status=200,
+        )
+
+    async def aclose(self):
+        pass
 
 
 class FakeToolAuthorization:
@@ -243,7 +278,15 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         credential_resolver=lambda _revision: "test-model-key",
         client_factory=create_model_client,
     )
+    embedding = await bootstrap_clean_embedding(
+        store,
+        installer,
+        kernel=kernel,
+        credential_resolver=lambda *_args: "test-embedding-key",
+        client_factory=FakeEmbeddingClient,
+    )
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
+    media = await bootstrap_clean_media(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
     trigger_policy = await bootstrap_clean_trigger_policy(
         store,
@@ -332,7 +375,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         kernel.descriptors
         + (
             provider.descriptor,
+            embedding.descriptor,
             memory.descriptor,
+            media.descriptor,
             agent.descriptor,
             trigger_policy.descriptor,
         )
@@ -349,7 +394,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "kernel.effect",
             "kernel.audit",
             "provider.chat-completions",
+            "embedding.multimodal",
             "memory.graph",
+            "media.capture",
             "agent.runtime",
             "conversation.scheduler",
             "conversation.trigger-policy",
@@ -809,7 +856,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert recovered["current_tool"] is None
 
         conversation_runtime.notify()
-        for _ in range(1000):
+        for _ in range(2000):
             if len(clients[0].sends) >= 2:
                 break
             await asyncio.sleep(0.01)
@@ -820,6 +867,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             )
         )
         assert len(clients[0].sends) == 2
+        assert any(
+            request.manifest.get("memory_evidence") is not None
+            for request in model_clients[0].requests
+        )
         automatic_send, automatic_timeout = clients[0].sends[1]
         assert automatic_timeout is None
         assert automatic_send.action == "send_group_msg"

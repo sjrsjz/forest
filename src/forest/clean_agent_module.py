@@ -50,6 +50,14 @@ class _RoutedMemory:
         return await self._recall(*args, **kwargs)
 
 
+class _RoutedMedia:
+    def __init__(self, resolve_context) -> None:
+        self._resolve_context = resolve_context
+
+    async def resolve_context(self, snapshot):
+        return await self._resolve_context(snapshot)
+
+
 async def bootstrap_clean_agent(
     store,
     installer,
@@ -168,6 +176,9 @@ async def bootstrap_clean_agent(
             memory=_RoutedMemory(
                 contracts.service("memory.recall", 1, owned_work=True),
             ),
+            media=_RoutedMedia(
+                contracts.service("media.context.resolve", 1, owned_work=True),
+            ),
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
@@ -180,6 +191,7 @@ async def bootstrap_clean_agent(
             "kernel.authorization",
             "kernel.effect",
             "memory.graph",
+            "media.capture",
             "provider.chat-completions",
         ),
         factory,

@@ -68,13 +68,15 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
-`memory.graph` 与 `embedding.multimodal` 已作为两个独立成员进入干净 RuntimeGraph。Memory 独占图 schema、facet/claim、预算、向量发布和召回语义；Embedding Provider 独占 profile identity、endpoint/凭据、请求投影、HTTP 客户端、传输尝试和用量/结果载荷。Memory 的生命周期 Worker 只持有冻结的 `embedding.encode/1` 服务句柄，Provider 无法读取 Memory 私有表。Provider `SENT` 与 Memory `DISPATCHED` 在同一事务合流；交接后的崩溃只会恢复为 `UNKNOWN`，不会重复推断发送。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；Bot 首次初始化后 deployment、model revision、模型和维度由 Provider identity 与 Memory domain 双重拒绝变更，endpoint/凭据/连接参数可经配置 plan/apply 和新 Generation 替换。OneBot 文本入站已在 Adapter/Conversation/Memory 三参与者事务中登记来源；IDLE、模型安全点与 Session 结束的 InputBatch 选择会在同一事务提交 Memory eligibility，并为新获资格的来源修订创建幂等 `DOCUMENT` embedding facets。`memory.recall/1` 已把精确 InputBatch 物化为 `QUERY` facet，冻结检索包并逐条标注原始群聊和作者；`agent.runtime` 在同一单 Agent 的下一次模型调用前通过冻结路由消费召回，工具循环复用同一输入修订的查询身份。实际 OneBot 图片抓取仍未接线。
+`memory.graph` 与 `embedding.multimodal` 已作为两个独立成员进入干净 RuntimeGraph。Memory 独占图 schema、facet/claim、预算、向量发布和召回语义；Embedding Provider 独占 profile identity、endpoint/凭据、请求投影、HTTP 客户端、传输尝试和用量/结果载荷。Memory 的生命周期 Worker 只持有冻结的 `embedding.encode/1` 服务句柄，Provider 无法读取 Memory 私有表。Provider `SENT` 与 Memory `DISPATCHED` 在同一事务合流；交接后的崩溃只会恢复为 `UNKNOWN`，不会重复推断发送。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；Bot 首次初始化后 deployment、model revision、模型和维度由 Provider identity 与 Memory domain 双重拒绝变更，endpoint/凭据/连接参数可经配置 plan/apply 和新 Generation 替换。OneBot 文本入站已在 Adapter/Conversation/Memory 三参与者事务中登记来源；IDLE、模型安全点与 Session 结束的 InputBatch 选择会在同一事务提交 Memory eligibility，并为新获资格的来源修订创建幂等 `DOCUMENT` embedding facets。`memory.recall/1` 已把精确 InputBatch 物化为 `QUERY` facet，冻结检索包并逐条标注原始群聊和作者；`agent.runtime` 在同一单 Agent 的下一次模型调用前通过冻结路由消费召回，工具循环复用同一输入修订的查询身份。
+
+`media.capture` 现已作为独立 Generation 进入生产图。Adapter/Conversation/Media 四参与者 ingress UoW 原子登记图片任务，规范 Context 只保存稳定 `media_ref`，临时 URL 仅留在 Media 私有 schema。生命周期 Worker 使用租约、重试和资源上限下载并验证图片，把像素保存为 Kernel Payload 后通过 Memory 公共端口发布保持原始段序的 TEXT/IMAGE parts；InputBatch 先于图片完成时沿用 pending eligibility，最终失败显式收敛为 `UNAVAILABLE`。当前 Context 图片由 `media.context.resolve/1` 在模型调用边界物化，历史图片由 EvidenceBundle 物化，二者均使用来源绑定的 `MediaSnapshot`。
 
 ### 已有干净业务 Authority 候选
 
 以下模块已经有独立官方 baseline、Repository 和定向 PostgreSQL 测试，但尚未全部成为生产 RuntimeGraph 中的完整 Generation/Worker：
 
-- `memory.graph` 的媒体摄入后半段：生命周期 Worker、Bot 级冻结语义空间、每日请求/Token 预算、每群主干、文本来源摄入、InputBatch 资格合流、查询向量、Agent 召回、图文来源及跨主干关系查询已进入 RuntimeGraph；实际 OneBot 图片抓取和受管媒体物化尚未接线；
+- `memory.graph`、`embedding.multimodal` 与 `media.capture`：生命周期 Worker、Bot 级冻结语义空间、每日请求/Token 预算、每群主干、图文来源摄入、InputBatch 资格合流、查询向量、Agent 召回、当前图片投影及跨主干关系查询已进入 RuntimeGraph；
 - `delivery`：CHAT/CONTROL lane、顺序、Effect 与 Adapter 双 fence、生命周期 Worker、崩溃恢复与 UNKNOWN 对账；
 - `shell.command`：Binding/群/主体策略、P0/P1 claim、授权复核和控制回执；
 - `conversation.scheduler`：连续分类水位、同群 actor lease、安全边界、trigger cut、静默排空和恢复领取。
@@ -97,7 +99,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 ## 当前阻断项
 
-1. 补齐独立 `media.capture` 的 OneBot 图片抓取与受管媒体物化，并将 `shell.command` 接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议；Memory/Embedding 生命周期 Worker、文本摄入/InputBatch 资格 UoW、Agent 召回与 Delivery Worker 已进入该协议，后续需要在完整生产启动图验证热替换排空。
+1. 将 `shell.command` 接入 `prepare → bind → prewarm → atomic publish → local activate` 协议，并完成群管理员授权、优先级和审计闭环；Media/Memory/Embedding 生命周期 Worker、图文摄入/InputBatch 资格 UoW、Agent 召回与 Delivery Worker 已进入该协议，后续需要在完整生产启动图验证热替换排空。
 2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；下一步删除旧业务 `contract.router` 与旧组合根。
 3. 为多模态 Memory 做十万至百万来源的筛选、稳定分页、关系展开、图片负载和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
@@ -113,7 +115,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 - Agent/Conversation Worker、持久调度 Repository、十成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`124 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、Delivery Bot 能力到精确 Adapter Generation 的票据、PREPARED abandonment/requeue、DISPATCHING 崩溃后 UNKNOWN、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、Adapter 持久 binding fence、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
 - 十一成员 Kernel + Provider + Memory + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、OneBot 文本来源/群主干登记、InputBatch 与 Memory eligibility 原子提交、发送前许可、生命周期所属 Delivery Worker 的真实 OneBot wire 调用与 SENT 落账、作者/群来源和逆序关闭。最新 clean authority/RuntimeGraph 定向组合为 `68 passed`；并发测试覆盖 InputBatch 与延迟媒体来源两种完成顺序，最终没有未解析的 `PENDING_CAPTURE`。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
-- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。13 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置的新 Generation 生效而冻结 profile 变更被拒绝；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger。
+- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。14 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置的新 Generation 生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布、可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

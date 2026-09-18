@@ -8,6 +8,7 @@ from datetime import datetime
 from forest.errors import ForestError
 from forest.storage.adapter_onebot_authority import OneBotPlatformEvent
 from forest.storage.conversation_scheduler import SchedulerPayloadRef
+from forest.storage.media_capture_authority import IngressMediaCapture
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
     MemoryPart,
@@ -53,11 +54,14 @@ class IngressClassification:
 class OneBotIngressUnitOfWork:
     """Coordinate participant ports without taking ownership of their facts."""
 
-    def __init__(self, store, *, adapter, conversation, memory=None, shell=None) -> None:
+    def __init__(
+        self, store, *, adapter, conversation, memory=None, media=None, shell=None
+    ) -> None:
         self.store = store
         self.adapter = adapter
         self.conversation = conversation
         self.memory = memory
+        self.media = media
         self.shell = shell
 
     @staticmethod
@@ -104,6 +108,7 @@ class OneBotIngressUnitOfWork:
         client_incarnation: str,
         event: OneBotPlatformEvent,
         memory_capture: IngressMemoryCapture | None = None,
+        media_capture: IngressMediaCapture | None = None,
         classification: IngressClassification | None = None,
         shell_command: ShellIngressCommand | None = None,
     ) -> dict:
@@ -183,6 +188,29 @@ class OneBotIngressUnitOfWork:
                     expected_deletion_epoch=deletion_epoch,
                 )
                 memory_result = {"source": source, "capture": captured}
+            media_result = None
+            if media_capture is not None:
+                if self.media is None:
+                    raise ForestError(
+                        "MEDIA_CAPTURE_AUTHORITY_MISSING",
+                        "Media capture participant is unavailable",
+                        503,
+                    )
+                if type(media_capture) is not IngressMediaCapture:
+                    raise ForestError(
+                        "MEDIA_CAPTURE_INPUT_INVALID", "Invalid ingress media capture", 422
+                    )
+                media_result = await self.media.register_capture_in(
+                    conn,
+                    operation_id="onebot-media-capture:" + event.event_id,
+                    capture=media_capture,
+                    author_subject_ref=event.author_subject_ref,
+                    binding_ref=binding_id,
+                    conversation_ref=event.conversation_ref,
+                    event_ref=scheduler_event_id,
+                    ingress_seq=conversation_result["ingress_seq"],
+                    observed_at=event.received_at,
+                )
             shell_result = None
             classification_result = None
             if classification is not None:
@@ -236,6 +264,7 @@ class OneBotIngressUnitOfWork:
                 "adapter": adapter_result,
                 "conversation": conversation_result,
                 "memory": memory_result,
+                "media": media_result,
                 "shell": shell_result,
                 "classification": classification_result,
             }

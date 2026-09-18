@@ -1147,6 +1147,58 @@ class MemoryGraphRepository:
             ).fetchone()
         )
 
+    async def resolve_pending_unavailable(
+        self,
+        *,
+        conversation_ref: str,
+        event_ref: str,
+        error_code: str,
+    ) -> dict | None:
+        for value, field, limit in (
+            (conversation_ref, "conversation_ref", 256),
+            (event_ref, "event_ref", 256),
+            (error_code, "error_code", 128),
+        ):
+            _bounded(value, field, limit)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._lock(
+                conn,
+                "event-eligibility:" + _digest([conversation_ref, event_ref]),
+            )
+            pending = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s "
+                        "AND event_ref=%s FOR UPDATE"
+                    ).format(self._table("pending_input_events")),
+                    (self.store.bot_id, conversation_ref, event_ref),
+                )
+            ).fetchone()
+            if pending is None:
+                return None
+            if pending["state"] == "UNAVAILABLE":
+                if pending["error_code"] != error_code:
+                    raise ForestError(
+                        "MEMORY_ELIGIBILITY_CONFLICT",
+                        "Unavailable Memory reason differs",
+                        409,
+                    )
+                return dict(pending)
+            if pending["state"] != "PENDING_CAPTURE":
+                return dict(pending)
+            return dict(
+                await (
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET state='UNAVAILABLE',error_code=%s,"
+                            "resolved_at=clock_timestamp() WHERE bot_id=%s "
+                            "AND conversation_ref=%s AND event_ref=%s RETURNING *"
+                        ).format(self._table("pending_input_events")),
+                        (error_code, self.store.bot_id, conversation_ref, event_ref),
+                    )
+                ).fetchone()
+            )
+
     async def suppress_sources_in(
         self,
         conn,

@@ -54,6 +54,7 @@ class DurableSingleAgentExecution:
         agent,
         provider,
         memory,
+        media,
         payloads,
         owner_id: str,
         tool_routes: tuple[FrozenToolRoute, ...] = (),
@@ -66,6 +67,7 @@ class DurableSingleAgentExecution:
         )
         self.tools = DurableAgentToolExecutor(agent=agent, payloads=payloads)
         self.memory = memory
+        self.media = media
         self.projector = ConversationContextProjector(
             bot_id=agent.bot_id,
             payloads=payloads,
@@ -237,13 +239,16 @@ class DurableSingleAgentExecution:
                         context_revision=latest_input["context_revision"],
                         input_cut=run["selected_input_end_seq"],
                     )
+                    current_media = await self.media.resolve_context(snapshot)
+                    recalled_media = {} if recalled is None else recalled.media
+                    combined_media = {**current_media, **recalled_media}
                     result = await self.model.execute(
                         owner,
                         step,
                         snapshot,
                         preset_context=profile.preset_context,
                         tools=declarations,
-                        media=None if recalled is None else recalled.media,
+                        media=combined_media,
                         evidence=None if recalled is None else recalled.evidence,
                         tool_bindings=bindings,
                         output_tokens=profile.output_tokens,

@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+import io
+import socket
+
+import pytest
+from PIL import Image
+
+from forest.errors import ForestError
+from forest.media_capture_io import PublicImageCaptureClient, _validate
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "file:///tmp/image.png",
+        "http://user@example.com/image.png",
+        "http://127.0.0.1/image.png",
+        "http://[::1]/image.png",
+    ),
+)
+async def test_media_capture_rejects_non_public_or_credentialed_urls(url):
+    with pytest.raises(ForestError) as caught:
+        await PublicImageCaptureClient._public_url(url)
+    assert caught.value.code == "MEDIA_URL_FORBIDDEN"
+
+
+async def test_media_capture_rejects_host_when_any_dns_answer_is_private(monkeypatch):
+    def mixed_answers(_host, port, *, type):
+        assert type == socket.SOCK_STREAM
+        return (
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", port)),
+        )
+
+    monkeypatch.setattr(socket, "getaddrinfo", mixed_answers)
+    with pytest.raises(ForestError) as caught:
+        await PublicImageCaptureClient._public_url("https://example.invalid/image.png")
+    assert caught.value.code == "MEDIA_URL_FORBIDDEN"
+
+
+def test_media_capture_validates_and_identifies_decoded_image():
+    body = io.BytesIO()
+    Image.new("RGB", (3, 2), (12, 34, 56)).save(body, format="PNG")
+
+    image = _validate(body.getvalue())
+
+    assert image.media_type == "image/png"
+    assert (image.width, image.height) == (3, 2)
+    assert image.content == body.getvalue()
+
+
+def test_media_capture_rejects_invalid_image_bytes():
+    with pytest.raises(ForestError) as caught:
+        _validate(b"not an image")
+    assert caught.value.code == "MEDIA_IMAGE_INVALID"

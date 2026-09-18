@@ -51,6 +51,8 @@ class CleanMemoryRuntime:
             {"service_id": "memory.graph.sources.query", "version": 1},
             {"service_id": "memory.graph.relations.query", "version": 1},
             {"service_id": "memory.recall", "version": 1},
+            {"service_id": "memory.source.capture", "version": 1},
+            {"service_id": "memory.source.unavailable", "version": 1},
         ],
         "requires": [{"service_id": "embedding.encode", "version": 1}],
     }
@@ -91,6 +93,8 @@ class CleanMemoryRuntime:
             ("memory.graph.sources.query", 1): self.query_sources,
             ("memory.graph.relations.query", 1): self.query_relations,
             ("memory.recall", 1): self.recall,
+            ("memory.source.capture", 1): self.capture_ingress_source,
+            ("memory.source.unavailable", 1): self.mark_source_unavailable,
         }
 
     @staticmethod
@@ -498,6 +502,59 @@ class CleanMemoryRuntime:
             bundle,
             conversation_id=conversation_id,
             input_cut=input_cut,
+        )
+
+    async def capture_ingress_source(
+        self,
+        *,
+        operation_id: str,
+        identity,
+        source_unit_id: str,
+        source_revision: int,
+        unit_kind: str,
+        author_subject_ref: str,
+        author,
+        parts,
+        occurrence,
+        occurred_at,
+    ) -> dict:
+        await self._admit()
+        async with self.repository.store.pool.connection() as conn, conn.transaction():
+            source = await self.repository.register_source_in(
+                conn,
+                operation_id=operation_id + ":source",
+                identity=identity,
+            )
+            epoch = await self.payloads.epoch_in(conn)
+            captured = await self.capture_source_unit_in(
+                conn,
+                operation_id=operation_id + ":unit",
+                source_unit_id=source_unit_id,
+                source_id=identity.source_id,
+                source_revision=source_revision,
+                unit_kind=unit_kind,
+                author_subject_ref=author_subject_ref,
+                author=author,
+                parts=parts,
+                occurrence=occurrence,
+                occurred_at=occurred_at,
+                expected_deletion_epoch=epoch,
+            )
+        self.notify()
+        return {"source": source, "capture": captured}
+
+    async def mark_source_unavailable(
+        self,
+        *,
+        conversation_ref: str,
+        event_ref: str,
+        error_code: str,
+    ) -> dict | None:
+        await self._admit()
+        return await self.repository.resolve_pending_unavailable(
+            conversation_ref=conversation_ref,
+            event_ref=event_ref,
+            error_code=error_code,
         )
 
     async def _admit_in(self, conn, *, owned_work: bool) -> None:

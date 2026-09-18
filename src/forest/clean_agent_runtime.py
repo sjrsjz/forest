@@ -60,6 +60,7 @@ class CleanAgentRuntime:
             {"service_id": "provider.model.project", "version": 1},
             {"service_id": "provider.model.dispatch", "version": 1},
             {"service_id": "memory.recall", "version": 1},
+            {"service_id": "media.context.resolve", "version": 1},
         ],
     }
     state_schema = 1
@@ -85,6 +86,7 @@ class CleanAgentRuntime:
         generation_member_verifier=None,
         provider=None,
         memory=None,
+        media=None,
     ):
         self.repository = repository
         self.module_configuration = module_configuration
@@ -92,6 +94,7 @@ class CleanAgentRuntime:
         self.payloads = payloads
         self.provider = provider
         self.memory = memory
+        self.media = media
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
@@ -220,11 +223,12 @@ class CleanAgentRuntime:
                 "Agent Generation identity was not bound",
                 503,
             )
-        if self.provider is not None and self.memory is not None:
+        if self.provider is not None and self.memory is not None and self.media is not None:
             self.execution = DurableSingleAgentExecution(
                 agent=self,
                 provider=self.provider,
                 memory=self.memory,
+                media=self.media,
                 payloads=self.payloads,
                 owner_id=("agent-execution/" + self.generation_identity.generation_id)[-256:],
             )
