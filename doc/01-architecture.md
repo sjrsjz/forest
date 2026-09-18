@@ -115,7 +115,7 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | `adapter.onebot` | 平台帧 → 已认证 `InboundMessage`；获许可 `TransportAttempt` → 传输观察 | Binding 配置引用、连接/客户端代际、平台事件观察与待回执映射 | 绑定离线，Delivery 持久排队；不拖垮其他绑定 |
 | `bot.directory` | Bot 身份、账号归属预留与作用域解析 | 部署目录与 Bot 元数据；不拥有目标 Bot 的 Binding 配置 | 启动依赖；新账号归属操作暂停 |
 | `conversation.scheduler` | 全量入站 → 分类流水、输入切口、Context、Agent 启动/续跑请求、最终回复提交 | 每会话邮箱、actor lease、输入游标、触发、InputBatch、Context 与 reply sequence；只引用 Agent Session/Run | 暂停消费，Inbox/触发状态保留 |
-| `contract.router` / `command.router` / `message.router` | 冻结路由分派；业务命令与 Handler 策略/执行 → 分类结果 | RuntimeGraph 引用、各自策略、claim 与结果；不拥有 Inbox 或 Agent | 错误按阶段策略隔离，禁止全链静默吞错 |
+| `command.router` / `message.router` | 业务命令与普通 Handler 的策略/执行 → 分类结果；调用目标由内核 Contract Router 按冻结 RuntimeGraph 解析 | 各自策略、claim 与结果；不拥有 Inbox、Agent 或内核 service head | 错误按阶段策略隔离，禁止全链静默吞错 |
 | `agent.runtime` | 冻结 Run 输入 → checkpoint、ModelTurn、ToolCall、最终候选 | Agent Session、Run、模型请求/观察、轮次、工具与 checkpoint；不拥有 Context、trigger 或 SendIntent | 从安全边界恢复，其他会话继续 |
 | `provider.*` | 实际模型能力快照、规范投影请求 → 规范流事件 | 客户端、限流器与逐请求manifest | 切换实际模型须重做模态投影/预算，不改完整历史；记录真正可见parts |
 | `embedding.*` | text/image/mixed输入 → 对齐空间向量 | 版本化EmbeddingProfile、异步批量任务与工件 | 图片索引失败显式降级/修复，不能用caption假装原生图片嵌入 |

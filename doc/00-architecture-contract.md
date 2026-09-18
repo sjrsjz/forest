@@ -61,11 +61,13 @@ flowchart LR
   A --> U1[Ingress UnitOfWork]
   U1 --> C[conversation.scheduler]
   U1 --> S[shell.command 可选 participant]
-  C --> R[冻结 RouteGraph 分类]
-  R -->|trigger cut| G[agent.runtime]
+  C --> R[message.router 冻结分类]
+  R -->|trigger cut| C
+  C -->|经内核 Contract Router 调 agent.execute/1| G[agent.runtime]
   G -->|memory.query| M[memory.graph]
   G -->|tool intent| E[Effect Gateway]
-  G -->|FinalCandidate| U2[Reply UnitOfWork]
+  G -->|FinalCandidate| C
+  C --> U2[Reply UnitOfWork]
   U2 --> C
   U2 --> D[delivery]
   D --> E

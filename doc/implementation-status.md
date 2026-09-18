@@ -2,7 +2,7 @@
 
 更新日期：2026-09-18。
 
-> 本页只记录当前工作树事实，不定义目标架构。发生冲突时依次以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md) 和 [14 干净 Schema 与载荷来源](14-clean-schema-and-payload-provenance.md) 为准。Forest 尚不可发布。
+> 本页只记录当前工作树事实，不定义目标架构。发生冲突时依次以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净 Schema 与载荷来源](14-clean-schema-and-payload-provenance.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。Forest 尚不可发布。
 
 ## 不可改变的当前语义
 
@@ -60,7 +60,7 @@
 - raw event、normalized parts 和 author snapshot 先成为带来源闭包的 payload，再由一个调用方 UoW 原子提交 Adapter platform event 和 Conversation Inbox；
 - Binding head、client 和事件接纳已统一锁序，同一账号不同群可以并行。
 
-Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。Worker 已不再直接追加回复 Context 或自行提交 `SESSION_END` 选择，也不会在执行异常后擅自把仍有持久 Agent Session 的 Run 退回空闲；它强制依赖 `ConversationCompletionPort` 和 `SessionDecisionPort`。`TransactionalConversationCompletionPort` 逐项核对 Agent completion 与 `FinalReplyPlan` 后调用三方 UoW；`TransactionalSessionDecisionPort` 从已完成 Run 固定 deadline 和稳定操作 ID 后调用 Agent/Conversation 交接 UoW。领取、续租、输入选择和释放仍在调用方事务内复核 Conversation Generation。活跃 Session 本身已作为恢复候选；Worker 重启后读取持久 `session_ref/run_ref` 并恢复原执行链，Agent authority 也能枚举包含已完成但尚未排空 Session 的活动 Run 头。完成端口必须显式返回实际回答的 trigger 集合，不能依赖丢失即不可恢复的进程内累计列表。`FinalReplyUnitOfWork` 已在写入前复核 Agent、Conversation、Delivery 三个精确 Generation，并在一个 Bot PostgreSQL 事务中把 Run 从 `FINAL_READY` 置为 `COMPLETED`、追加正式 `REPLY`/终结明确 trigger、创建 CHAT SendIntent；Delivery participant 失败时三者整体回滚。`SessionHandoffUnitOfWork` 也已把 `SESSION_END` 的输入选择与 Agent Session 的后继 Run 建立/显式关闭放入同一事务；InputBatch 现在冻结 `context_view_revision`，后继 Run 不再从后来状态猜测模型视图。`DurableAgentModelExecutor` 已按持久 Run 输入 fence 构造 Provider 投影，写入 ModelRequest/TransportAttempt，在 Provider 的发送前许可事务中原子标记 Agent handoff，持久化 SUCCEEDED/NOT_APPLIED/UNKNOWN 观察，解析固定 CorePrompt 协议并把终止回答推进到 `FINAL_READY`；输入版本、trigger 和 InputBatch 任一不符都会在调用前拒绝。FunctionCall 现在冻结准确工具 component/Generation/service/contract 绑定和原触发 principal，并持久化单个 ToolProposal；`DurableAgentToolExecutor` 只接受回显相同输入摘要和 audience Generation 的授权票据收据，通过 Effect 端口的事务回调原子标记 `DISPATCHING`，结果丢失后由新 owner 查询原 effect，不能重新 dispatch；成功载荷必须由工具组件以自身身份发布，协调器不能冒充工具写 payload。`KernelToolAuthorizationPort` 已把可委托的 `tool.invoke` grant 收窄为目标工具的精确 Generation，按策略建立通用批准信封，并在同一事务中单次消费已批准对象和签发短票；批准决定也必须消费准确 scope、决定摘要、计划和主体的 `approval.decide` 票据。票据已经拆分唯一 issuance operation 与最终 effect operation；handoff 前过期会形成新签发 attempt，同一 effect 的并发票据消费由 operation advisory lock 和唯一消费事实确定地收敛。`KernelToolExecutionPort` 已把票据消费、当前 RuntimeGraph fence、Effect handoff 和 Agent `DISPATCHING` 放入一个事务，外部返回丢失时持久化 `UNKNOWN`，恢复只查询原效果；工具结果引用随 Effect evidence 持久化且保持工具组件所有权。恢复投影会携带当前 request/attempt/tool/checkpoint；无法查询的 `DISPATCHING` 模型或工具 attempt 幂等落为 `BLOCKED_UNKNOWN`。`conversation.scheduler` 现在只拥有调度权威，不再暗中启动未接事务端口的任务；独立生产执行模块、具体工具服务路由和回复计划构造尚未进入启动图，因此生产启动图仍未启用 Agent Worker。
+Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。Worker 已不再直接追加回复 Context 或自行提交 `SESSION_END` 选择，也不会在执行异常后擅自把仍有持久 Agent Session 的 Run 退回空闲；它强制依赖 `ConversationCompletionPort` 和 `SessionDecisionPort`。`TransactionalConversationCompletionPort` 逐项核对 Agent completion 与 `FinalReplyPlan` 后调用三方 UoW；`TransactionalSessionDecisionPort` 从已完成 Run 固定 deadline 和稳定操作 ID 后调用 Agent/Conversation 交接 UoW。领取、续租、输入选择和释放仍在调用方事务内复核 Conversation Generation。活跃 Session 本身已作为恢复候选；Worker 重启后读取持久 `session_ref/run_ref` 并恢复原执行链，Agent authority 也能枚举包含已完成但尚未排空 Session 的活动 Run 头。完成端口必须显式返回实际回答的 trigger 集合，不能依赖丢失即不可恢复的进程内累计列表。`FinalReplyUnitOfWork` 已在写入前复核 Agent、Conversation、Delivery 三个精确 Generation，并在一个 Bot PostgreSQL 事务中把 Run 从 `FINAL_READY` 置为 `COMPLETED`、追加正式 `REPLY`/终结明确 trigger、创建 CHAT SendIntent；Delivery participant 失败时三者整体回滚。`SessionHandoffUnitOfWork` 也已把 `SESSION_END` 的输入选择与 Agent Session 的后继 Run 建立/显式关闭放入同一事务；InputBatch 现在冻结 `context_view_revision`，后继 Run 不再从后来状态猜测模型视图。`DurableAgentModelExecutor` 已按持久 Run 输入 fence 构造 Provider 投影，写入 ModelRequest/TransportAttempt，在 Provider 的发送前许可事务中原子标记 Agent handoff，持久化 SUCCEEDED/NOT_APPLIED/UNKNOWN 观察，解析固定 CorePrompt 协议并把终止回答推进到 `FINAL_READY`；输入版本、trigger 和 InputBatch 任一不符都会在调用前拒绝。FunctionCall 现在冻结准确工具 component/Generation/service/contract 绑定和原触发 principal，并持久化单个 ToolProposal；`DurableAgentToolExecutor` 只接受回显相同输入摘要和 audience Generation 的授权票据收据，通过 Effect 端口的事务回调原子标记 `DISPATCHING`，结果丢失后由新 owner 查询原 effect，不能重新 dispatch；成功载荷必须由工具组件以自身身份发布，协调器不能冒充工具写 payload。`KernelToolAuthorizationPort` 已把可委托的 `tool.invoke` grant 收窄为目标工具的精确 Generation，按策略建立通用批准信封，并在同一事务中单次消费已批准对象和签发短票；批准决定也必须消费准确 scope、决定摘要、计划和主体的 `approval.decide` 票据。票据已经拆分唯一 issuance operation 与最终 effect operation；handoff 前过期会形成新签发 attempt，同一 effect 的并发票据消费由 operation advisory lock 和唯一消费事实确定地收敛。`KernelToolExecutionPort` 已把票据消费、当前 RuntimeGraph fence、Effect handoff 和 Agent `DISPATCHING` 放入一个事务，外部返回丢失时持久化 `UNKNOWN`，恢复只查询原效果；工具结果引用随 Effect evidence 持久化且保持工具组件所有权。恢复投影会携带当前 request/attempt/tool/checkpoint；无法查询的 `DISPATCHING` 模型或工具 attempt 幂等落为 `BLOCKED_UNKNOWN`。`conversation.scheduler` 现在只拥有调度权威，不再暗中启动未接事务端口的任务；具体 Agent 执行端口、工具服务路由和回复计划构造尚未经内核 Contract Router 注入其生命周期 Worker，因此生产启动图仍未启用 Agent Worker。目标设计不再新增一个拥有聊天语义的“生产执行模块”。
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
@@ -83,6 +83,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 - `migration_v*`、升级夹具和 writer-fence 升级测试；
 - 旧 `OneBotRuntime` 中的 `BindingStore`、`MessageStore`、`ShellIngressGuard`、`DeliveryStore` 和发送 Worker 组合根；
 - 旧 `RuntimeModuleRegistry` 路径及旧 RuntimeGraph 表；
+- 旧业务 `contract.router` 模块及其 Agent 选择、模板 responder 和聊天执行职责；内核 Contract Router 保留为无聊天语义的版本化调用机制；
 - 固定 Agent/Memory/OneBot/Bot 管理页面和壳层专用 API；
 - `BotProvisioner`、Fleet、Restore 和 CLI 对 `BotStore.migrate()` 的调用。
 
@@ -91,7 +92,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 ## 当前阻断项
 
 1. 将 `memory.graph`、`shell.command` 和必要的 Embedding 模块接入相同的 `prepare → bind → prewarm → atomic publish → local activate` 协议；Delivery Worker 已进入该协议，后续需要与完整生产启动图共同验证热替换排空。
-2. 将已验证的 `conversation.scheduler` Worker 接到 `DurableAgentModelExecutor`、`DurableAgentToolExecutor`、真实工具授权/Effect 端口、具体工具服务路由、Delivery 与最终回复/Session 交接 UnitOfWork，不得用测试端口或旧组合根进入生产图。
+2. 让 `conversation.scheduler` 的生命周期 Worker 经内核 Contract Router 取得冻结的 `agent.execute/1` 与 participant 端口；把 `agent.runtime` 接到 `DurableAgentModelExecutor`、`DurableAgentToolExecutor`、真实工具授权/Effect 端口和具体工具服务路由，并接通 Delivery 与最终回复/Session 交接 UnitOfWork。不得新增聊天业务 `contract.router`、测试端口或旧组合根进入生产图。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
 5. 将 provisioning、启动、恢复和 Docker 入口切到最小 bootstrap + 所选模块 bundle + 冻结 RuntimeGraph。
