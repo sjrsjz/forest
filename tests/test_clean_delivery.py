@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.delivery_authorization import DeliveryAuthorizationPort
 from forest.errors import ForestError
 from forest.final_reply_uow import (
     FinalReplyPlan,
@@ -41,14 +42,6 @@ from forest.storage.delivery_authority import (
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
-
-PART_IDS = (
-    "part/reply/1",
-    "part/reply/2",
-    "part/control/1",
-    "part/retry/1",
-    "part/race/1",
-)
 
 
 @pytest_asyncio.fixture
@@ -161,7 +154,7 @@ async def clean_delivery():
     grant = await authorization.create_grant_set(
         grantee_kind="component",
         grantee_id="delivery",
-        entries=tuple(CapabilityGrant("delivery.send", "delivery-part", item) for item in PART_IDS),
+        entries=(CapabilityGrant("delivery.send", "bot", store.bot_id),),
         expected_policy_revision=1,
         audience_component_id="adapter.onebot",
         audience_generation_id="generation/adapter/1",
@@ -351,8 +344,8 @@ async def _prepare(
         subject_kind="component",
         subject_id="delivery",
         action="delivery.send",
-        resource_kind="delivery-part",
-        resource_id=claim.part_operation_id,
+        resource_kind="bot",
+        resource_id=delivery.store.bot_id,
         operation_id=prepare_operation,
         input_digest=claim.semantic_digest,
         plan_digest=None,
@@ -431,6 +424,46 @@ async def test_clean_delivery_schema_has_no_adapter_socket_context_or_inline_bod
         assert forbidden not in lowered
     assert b"delivery_lanes" in lowered
     assert b"delivery_observations" in lowered
+
+
+@pytest.mark.postgres
+async def test_delivery_authorization_binds_bot_capability_to_exact_adapter_generation(
+    clean_delivery,
+):
+    store, _storage, payloads, authorization, _effects, _scheduler, _adapter, delivery, grant = (
+        clean_delivery
+    )
+    await _create_intent(
+        payloads,
+        delivery,
+        suffix="authorization",
+        part_id="part/authorization/1",
+    )
+    claim = await delivery.claim(
+        operation_id="claim/authorization",
+        worker_id="delivery-worker/authorization",
+    )
+    assert claim is not None
+    port = DeliveryAuthorizationPort(
+        authority=authorization,
+        delivery_grants=grant,
+    )
+    receipt = await port.authorize(
+        claim,
+        permit_operation_id="prepare/authorization",
+        adapter_generation_id="generation/adapter/1",
+        binding_epoch=1,
+        connection_epoch=1,
+        client_incarnation="client/main/1",
+        executor_fence_digest="sha256:" + "b" * 64,
+    )
+    ticket = await authorization.ticket(receipt.ticket_id)
+    assert ticket["resource_kind"] == "bot"
+    assert ticket["resource_id"] == store.bot_id
+    assert ticket["audience_component_id"] == "adapter.onebot"
+    assert ticket["audience_generation_id"] == "generation/adapter/1"
+    assert ticket["input_digest"] == claim.semantic_digest
+    assert ticket["plan_digest"] == receipt.plan_digest
 
 
 @pytest.mark.postgres

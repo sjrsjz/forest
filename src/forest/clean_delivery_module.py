@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.delivery_authorization import DeliveryAuthorizationPort
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
@@ -37,8 +38,9 @@ class CleanDeliveryRuntime:
     state_schema = 1
     state_contract = _STATE_CONTRACT
 
-    def __init__(self, *, repository, module_configuration, grants) -> None:
+    def __init__(self, *, repository, authorization, module_configuration, grants) -> None:
         self.repository = repository
+        self.authorization = authorization
         self.module_configuration = module_configuration
         self.grants = grants
         self.generation_identity: BoundGenerationIdentity | None = None
@@ -107,6 +109,7 @@ class CleanDeliveryRuntime:
 @dataclass(frozen=True)
 class CleanDeliveryModule:
     repository: DeliveryRepository
+    authorization: DeliveryAuthorizationPort
     descriptor: RuntimeModuleDescriptor
     configuration: ModuleConfigurationRepository
     grants: object
@@ -164,10 +167,15 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         effect_observer=kernel.effect.observe_in,
         effect_abandoner=kernel.effect.abandon_prepared_in,
     )
+    authorization = DeliveryAuthorizationPort(
+        authority=kernel.authorization,
+        delivery_grants=grants,
+    )
 
     def factory(_runtime, _modules):
         return CleanDeliveryRuntime(
             repository=repository,
+            authorization=authorization,
             module_configuration=configuration,
             grants=grants,
         )
@@ -185,4 +193,4 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         official_artifact("bot"),
         storage=storage,
     )
-    return CleanDeliveryModule(repository, descriptor, configuration, grants)
+    return CleanDeliveryModule(repository, authorization, descriptor, configuration, grants)
