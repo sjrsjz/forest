@@ -19,7 +19,7 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPayloadRef,
     OneBotPlatformEvent,
 )
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
 from forest.storage.ingress_unit_of_work import OneBotIngressUnitOfWork
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
@@ -36,7 +36,7 @@ async def clean_onebot():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = BotStore(uri, "bot-onebot")
+    store = CleanBotStore(uri, "bot-onebot")
     await store.open()
     installer = SchemaBundleInstaller(store)
     await installer.initialize_kernel()

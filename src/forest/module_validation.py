@@ -2,11 +2,100 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
-from forest.kernel import DependencyPlan, resolve_dependencies
-from forest.packages import PackageSnapshot
+from forest.packages import PackageSnapshot, contract_matches
+
+
+@dataclass
+class DependencyPlan:
+    order: list[str]
+    bindings: dict[str, dict[str, tuple[str, str]]]
+    closures: dict[str, tuple[str, ...]]
+    degraded: dict[str, list[dict[str, str]]]
+
+
+def resolve_dependencies(snapshots: dict[str, PackageSnapshot]) -> DependencyPlan:
+    """Resolve an immutable package graph without importing plugin code."""
+    providers: dict[tuple[str, int], tuple[str, str]] = {}
+    for component_id, snapshot in snapshots.items():
+        for provided in snapshot.component["provides"]:
+            key = provided["name"], int(provided["contract"].split(".")[0])
+            if key in providers:
+                raise ForestError(
+                    "DUPLICATE_SERVICE",
+                    "Two components provide the same service and contract major",
+                    422,
+                )
+            providers[key] = component_id, provided["contract"]
+
+    bindings: dict[str, dict[str, tuple[str, str]]] = {}
+    graph: dict[str, set[str]] = {}
+    degraded: dict[str, list[dict[str, str]]] = {}
+    for component_id, snapshot in snapshots.items():
+        bindings[component_id], graph[component_id], degraded[component_id] = {}, set(), []
+        for required in snapshot.component.get("requires", []):
+            matches = [
+                provider
+                for (name, _), provider in providers.items()
+                if name == required["name"] and contract_matches(required["contract"], provider[1])
+            ]
+            if len(matches) > 1:
+                raise ForestError(
+                    "DEPENDENCY_AMBIGUOUS",
+                    "Dependency contract resolves to more than one provider",
+                    422,
+                )
+            if not matches:
+                code = (
+                    "DEPENDENCY_INCOMPATIBLE"
+                    if any(name == required["name"] for name, _ in providers)
+                    else "DEPENDENCY_MISSING"
+                )
+                if required.get("required", True):
+                    raise ForestError(
+                        code,
+                        "Required component service is unavailable or incompatible",
+                        422,
+                    )
+                degraded[component_id].append(
+                    {"service": required["name"], "contract": required["contract"], "reason": code}
+                )
+                continue
+            bindings[component_id][required["name"]] = matches[0]
+            graph[component_id].add(matches[0][0])
+
+    order: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(component_id: str) -> None:
+        if component_id in visiting:
+            raise ForestError(
+                "DEPENDENCY_CYCLE", "Synchronous component dependencies must form a DAG", 422
+            )
+        if component_id in visited:
+            return
+        visiting.add(component_id)
+        for target in sorted(graph[component_id]):
+            visit(target)
+        visiting.remove(component_id)
+        visited.add(component_id)
+        order.append(component_id)
+
+    for component_id in sorted(graph):
+        visit(component_id)
+
+    closures: dict[str, tuple[str, ...]] = {}
+    for component_id in order:
+        closure = set(graph[component_id])
+        for target in graph[component_id]:
+            closure.update(closures[target])
+        closures[component_id] = tuple(sorted(closure))
+    return DependencyPlan(order, bindings, closures, degraded)
 
 
 def validate_component_values(

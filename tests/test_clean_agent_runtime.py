@@ -31,7 +31,7 @@ from forest.storage.agent_runtime_authority import (
     ModelRequestPlan,
     ToolProposal,
 )
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
 
@@ -46,7 +46,7 @@ async def clean_agent_runtime():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = BotStore(uri, "bot-agent-runtime")
+    store = CleanBotStore(uri, "bot-agent-runtime")
     await store.open()
     installer = SchemaBundleInstaller(store)
     await installer.initialize_kernel()

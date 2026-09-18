@@ -20,7 +20,7 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPayloadRef,
     OneBotPlatformEvent,
 )
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.control_unit_of_work import ShellControlResultUnitOfWork
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
 from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef, DeliveryRepository
@@ -81,7 +81,7 @@ async def clean_shell():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = BotStore(uri, "bot-shell")
+    store = CleanBotStore(uri, "bot-shell")
     await store.open()
     installer = SchemaBundleInstaller(store)
     await installer.initialize_kernel()

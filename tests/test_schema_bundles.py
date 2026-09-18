@@ -42,7 +42,7 @@ from forest.storage.authorization_authority import (
     CapabilityGrant,
     KernelAuthorizationRepository,
 )
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
@@ -124,7 +124,7 @@ async def clean_authority():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = BotStore(uri, "bot-bundle")
+    store = CleanBotStore(uri, "bot-bundle")
     await store.open()
     installer = SchemaBundleInstaller(store)
     try:

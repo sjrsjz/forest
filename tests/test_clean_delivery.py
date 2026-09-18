@@ -29,7 +29,7 @@ from forest.storage.agent_runtime_authority import (
     AgentTriggerInput,
 )
 from forest.storage.authorization_authority import CapabilityGrant, KernelAuthorizationRepository
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.conversation_scheduler import (
     ConversationSchedulerRepository,
     SchedulerContextFact,
@@ -90,7 +90,7 @@ async def clean_delivery():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = BotStore(uri, "bot-delivery")
+    store = CleanBotStore(uri, "bot-delivery")
     await store.open()
     installer = SchemaBundleInstaller(store)
     await installer.initialize_kernel()

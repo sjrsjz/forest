@@ -25,7 +25,7 @@ from forest.memory_embedding_worker import (
     MemoryEmbeddingWorker,
 )
 from forest.runtime_modules import official_storage_bundle
-from forest.storage.bot import BotStore
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
 from forest.storage.conversation_scheduler import (
     ConversationSchedulerRepository,
@@ -91,7 +91,7 @@ async def clean_memory_graph():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = BotStore(uri, "bot-memory")
+    store = CleanBotStore(uri, "bot-memory")
     await store.open()
     installer = SchemaBundleInstaller(store)
     await installer.initialize_kernel()
