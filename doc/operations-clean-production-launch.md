@@ -55,7 +55,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `media.capture` 独占 OneBot 临时图片定位符、下载客户端、重试租约和受管图片资产。Adapter 在 ingress 事务里只向 Conversation 发布稳定 `media_ref`，并登记异步捕获任务；签名 URL 不进入规范 Context。Worker 完成有界下载和图片解码验证后，通过 `memory.source.capture/1` 发布保持原段顺序的图文来源。Agent 在下一次模型调用前从 `media.context.resolve/1` 取得当前 Context 的不可变像素快照；text-only Provider 仍只在该次投影中省略图片。
 
-当前环境变量承担首次 bootstrap 与无 WebUI 时的真实链路验收。设置 `FOREST_MANAGEMENT_TOKEN`（至少 16 字符）后，宿主同时启动首个干净管理面切片；默认监听 `127.0.0.1:8080`，容器内监听地址由 Compose 固定为 `0.0.0.0`，宿主端口仍只绑定 loopback。`FOREST_MANAGEMENT_HOST` 与 `FOREST_MANAGEMENT_PORT` 可调整监听。当前页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询，以及 Agent PresetContext 编辑和不可变 CorePrompt 查看；token 只保存在浏览器 `sessionStorage`。该切片还不是最终独立 Supervisor/Web 身份控制面。环境变量不能演变为壳层专用 Bot 表单。
+当前环境变量承担首次 bootstrap 与无 WebUI 时的真实链路验收。设置 `FOREST_MANAGEMENT_TOKEN`（至少 16 字符）后，宿主同时启动首个干净管理面切片；默认监听 `127.0.0.1:8080`，容器内监听地址由 Compose 固定为 `0.0.0.0`，宿主端口仍只绑定 loopback。`FOREST_MANAGEMENT_HOST` 与 `FOREST_MANAGEMENT_PORT` 可调整监听。当前页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询、Agent PresetContext/CorePrompt，以及 OneBot Binding 状态、fence 与端点变更；token 只保存在浏览器 `sessionStorage`。Binding 密钥不回显，当前页面只沿用 bootstrap secret 引用，不能更换访问令牌或 transport。该切片还不是最终独立 Supervisor/Web 身份控制面。环境变量不能演变为壳层专用 Bot 表单。
 
 ## 生命周期与恢复
 

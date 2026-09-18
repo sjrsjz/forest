@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from forest.clean_management_contract import (
-    CleanMemoryManagementContract,
+    CleanManagementActionResult,
     CleanModuleConfigurationContract,
 )
 from forest.errors import ForestError
@@ -189,10 +189,48 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
     ):
         authenticated(x_forest_management_token)
         contract = gateway.contract(component_id)
-        if not isinstance(contract, CleanMemoryManagementContract):
+        query = getattr(contract, "query", None)
+        if not callable(query):
             raise ForestError(
                 "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Module query does not exist", 404
             )
-        return await contract.query(query_id, body)
+        return await query(query_id, body)
+
+    @app.post("/management/v1/modules/{component_id}/actions/{action_id}")
+    async def module_action(
+        component_id: str,
+        action_id: str,
+        body: dict,
+        x_forest_management_token: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None),
+    ):
+        authenticated(x_forest_management_token)
+        operation_id = gateway.operation_id(component_id, action_id, idempotency_key)
+        async with gateway._apply_lock:
+            contract = gateway.contract(component_id)
+            action = getattr(contract, "action", None)
+            if not callable(action):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Module action does not exist", 404
+                )
+            result = await action(action_id, operation_id=operation_id, payload=body)
+            if not isinstance(result, CleanManagementActionResult):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_CONTRACT_INVALID",
+                    "Module action returned an invalid result",
+                    500,
+                )
+            replaced = result.replace_runtime_graph
+            if replaced:
+                registry = await host.replace_runtime_graph()
+            else:
+                registry = host.registry
+            graph = registry.graph_identity
+            return {
+                **result.value,
+                "replaced": replaced,
+                "graph_id": graph.graph_id,
+                "graph_revision": graph.graph_revision,
+            }
 
     return app

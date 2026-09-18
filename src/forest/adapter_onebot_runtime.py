@@ -241,7 +241,7 @@ class CleanOneBotRuntime:
             raise ForestError("BINDING_SECRET_INVALID", "OneBot access token is invalid", 422)
         return result
 
-    async def _configuration(self, row: dict) -> dict[str, Any]:
+    async def binding_configuration(self, row: dict) -> dict[str, Any]:
         body = await self.payloads.read_bytes(row["config_payload_id"])
         digest = "sha256:" + hashlib.sha256(body).hexdigest()
         if digest != row["config_payload_digest"]:
@@ -288,7 +288,7 @@ class CleanOneBotRuntime:
         if not row["enabled"]:
             self._prepared[binding_id] = _PreparedBinding(row, None, None, None, "")
             return
-        values = await self._configuration(row)
+        values = await self.binding_configuration(row)
         secrets = await self._resolve_secret(row)
         generation = self.generation_identity
         assert generation is not None

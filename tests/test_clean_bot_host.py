@@ -143,6 +143,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
 
     async def create_websocket(_url, _token, **_limits):
         client = FakeWebSocketClient(settings.onebot_self_id)
+        client.url = _url
         clients.append(client)
         return client
 
@@ -682,6 +683,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             item["contribution_id"]
                             for item in agent_view["management_contributions"]
                         ] == ["agent-profile"]
+                        adapter_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "adapter.onebot"
+                        )
+                        assert [
+                            item["contribution_id"]
+                            for item in adapter_view["management_contributions"]
+                        ] == ["onebot-bindings"]
                         memory_view = next(
                             item
                             for item in runtime_view.json()["modules"]
@@ -827,6 +837,53 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             agent_profile["preset_context"]
                         )
                         assert active_agent._profile.max_steps == 24
+                        bindings = await web.post(
+                            "/management/v1/modules/adapter.onebot/queries/onebot.bindings.list",
+                            headers=headers,
+                            json={},
+                        )
+                        assert bindings.status_code == 200
+                        binding = bindings.json()["items"][0]
+                        assert binding["binding_id"] == "binding/main"
+                        assert binding["state"] == "ONLINE"
+                        assert binding["config"]["websocket_url"] == (
+                            "ws://127.0.0.1:3001/"
+                        )
+                        binding_config = deepcopy(binding["config"])
+                        binding_config["websocket_url"] = "ws://127.0.0.1:3002/"
+                        binding_plan = await web.post(
+                            "/management/v1/modules/adapter.onebot/actions/onebot.binding.plan",
+                            headers={**headers, "idempotency-key": "onebot-binding-plan"},
+                            json={
+                                "binding_id": binding["binding_id"],
+                                "expected_revision": binding["desired_revision"],
+                                "enabled": binding["desired_enabled"],
+                                "receive_enabled": binding["receive_enabled"],
+                                "transport": binding["transport"],
+                                "config": binding_config,
+                                "secret_ref": binding["secret_ref"],
+                                "secret_digest": binding["secret_digest"],
+                            },
+                        )
+                        assert binding_plan.status_code == 200
+                        binding_applied = await web.post(
+                            "/management/v1/modules/adapter.onebot/actions/onebot.binding.apply",
+                            headers={**headers, "idempotency-key": "onebot-binding-apply"},
+                            json={"plan_id": binding_plan.json()["plan_id"]},
+                        )
+                        assert binding_applied.status_code == 200
+                        assert binding_applied.json()["replaced"] is True
+                        assert clients[-1].url == "ws://127.0.0.1:3002/"
+                        binding_replay = await web.post(
+                            "/management/v1/modules/adapter.onebot/actions/onebot.binding.apply",
+                            headers={**headers, "idempotency-key": "onebot-binding-apply"},
+                            json={"plan_id": binding_plan.json()["plan_id"]},
+                        )
+                        assert binding_replay.status_code == 200
+                        assert binding_replay.json()["replaced"] is False
+                        assert binding_replay.json()["graph_id"] == binding_applied.json()[
+                            "graph_id"
+                        ]
                     replacement = host.registry
                     assert replacement.graph_identity.graph_id != previous_graph.graph_id
                     assert set(replacement.states.values()) == {ModuleLifecycleState.ACTIVE}
@@ -871,6 +928,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         assert graph_ids[0] != graph_ids[1]
         assert FakeEmbeddingClient.endpoints == [
             "http://127.0.0.1:8001/v1/embeddings",
+            "http://127.0.0.1:9001/v1/embeddings",
             "http://127.0.0.1:9001/v1/embeddings",
             "http://127.0.0.1:9001/v1/embeddings",
             "http://127.0.0.1:9001/v1/embeddings",

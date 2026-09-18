@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.adapter_onebot_runtime import CleanOneBotRuntime
+from forest.clean_onebot_management import CleanOneBotManagementContract
 from forest.conversation_reply_planner import DurableFinalReplyPlanner
 from forest.conversation_runtime import CleanConversationSchedulerRuntime
 from forest.conversation_transaction_ports import (
@@ -15,6 +16,7 @@ from forest.final_reply_uow import FinalReplyUnitOfWork, RuntimeParticipant
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
     official_artifact,
     official_storage_bundle,
@@ -317,7 +319,14 @@ async def bootstrap_clean_messaging(
             values["http_client_factory"] = http_client_factory
         if websocket_client_factory is not None:
             values["websocket_client_factory"] = websocket_client_factory
-        return CleanOneBotRuntime(**values)
+        runtime = CleanOneBotRuntime(**values)
+        runtime.management_contract = CleanOneBotManagementContract(
+            configurations["adapter.onebot"],
+            repository=adapter_repository,
+            payloads=kernel.payload,
+            runtime=runtime,
+        )
+        return runtime
 
     artifact = official_artifact("bot")
     factories = {
@@ -330,6 +339,20 @@ async def bootstrap_clean_messaging(
             definition["requires"],
             factories[component_id],
             artifact,
+            management=(
+                RuntimeManagementContribution(
+                    "onebot-bindings",
+                    "OneBot Binding",
+                    ("bot",),
+                    "/static/modules/clean-onebot.html",
+                    "/static/clean-onebot.js",
+                    style="/static/modules/clean-onebot.css",
+                    group="transport",
+                    order=5,
+                ),
+            )
+            if component_id == "adapter.onebot"
+            else (),
             storage=bundles[component_id],
             wakes_on_work=component_id == "conversation.scheduler",
             work_notify_order=10 if component_id == "conversation.scheduler" else 100,
