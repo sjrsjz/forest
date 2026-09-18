@@ -160,6 +160,252 @@ class DurableAgentModelExecutor:
             owner_id,
         )
 
+    async def _record_response(
+        self,
+        owner,
+        step: AgentModelStep,
+        candidate: str,
+        *,
+        tools=(),
+        tool_bindings: tuple[AgentToolBinding, ...] = (),
+        repair_of_request_id: str | None = None,
+    ) -> AgentModelStepResult:
+        """Parse and commit one already durable provider response idempotently."""
+
+        turn = parse_model_turn(
+            candidate,
+            allowed_tools=tuple(item["name"] for item in tools),
+        )
+        if any(type(item) is not AgentToolBinding for item in tool_bindings):
+            raise ForestError(
+                "AGENT_TOOL_BINDING_INVALID", "Tool binding set is invalid", 422
+            )
+        bindings = {item.name: item for item in tool_bindings}
+        declared_names = {item.get("name") for item in tools if isinstance(item, dict)}
+        if len(bindings) != len(tool_bindings) or set(bindings) != declared_names:
+            raise ForestError(
+                "AGENT_TOOL_BINDING_INVALID",
+                "Tool declarations and runtime bindings differ",
+                422,
+            )
+        turn_payload = await self._payload(
+            "agent.runtime",
+            "model.turn",
+            step.turn_id,
+            _canonical(turn.as_dict()),
+        )
+        assistant_payload = None
+        if turn.assistant_text:
+            assistant_payload = await self._payload(
+                "agent.runtime",
+                "assistant.candidate",
+                step.turn_id,
+                _canonical({"text": turn.assistant_text}),
+            )
+        proposal = None
+        if turn.function_call is not None:
+            binding = bindings.get(turn.function_call.name)
+            if binding is None:
+                raise ForestError(
+                    "AGENT_TOOL_PORT_UNAVAILABLE",
+                    "Model proposed a tool without an exact typed binding",
+                    503,
+                )
+            wrapper = turn.function_call.arguments
+            authority_trigger = wrapper.get("authority_trigger_id")
+            arguments = wrapper.get("arguments")
+            if set(wrapper) != {"authority_trigger_id", "arguments"} or not isinstance(
+                arguments, dict
+            ):
+                raise ForestError(
+                    "AGENT_TOOL_AUTHORITY_INVALID",
+                    "Tool call does not bind arguments to one trigger",
+                    409,
+                )
+            call_digest = hashlib.sha256(
+                _canonical(
+                    {
+                        "turn_id": step.turn_id,
+                        "binding": {
+                            "name": binding.name,
+                            "component_id": binding.component_id,
+                            "generation_id": binding.generation_id,
+                            "service_id": binding.service_id,
+                            "contract_digest": binding.contract_digest,
+                            "approval_required": binding.approval_required,
+                            "supports_query": binding.supports_query,
+                        },
+                        "arguments": wrapper,
+                    }
+                )
+            ).hexdigest()
+            tool_call_id = "tool-call:" + call_digest
+            argument_payload = await self._payload(
+                "agent.runtime",
+                "tool.arguments",
+                tool_call_id,
+                _canonical(wrapper),
+            )
+            proposal = ToolProposal(
+                tool_call_id=tool_call_id,
+                arguments=argument_payload,
+                authority_trigger_ref=authority_trigger,
+                tool_contract_digest=binding.binding_digest,
+                effect_operation_ref="tool-effect:" + call_digest,
+            )
+        await self.agent.record_model_turn(
+            owner,
+            turn_id=step.turn_id,
+            request_id=step.request_id,
+            turn=turn,
+            turn_payload=turn_payload,
+            assistant_payload=assistant_payload,
+            tool=proposal,
+            repair_of_request_id=repair_of_request_id,
+        )
+        if proposal is not None:
+            return AgentModelStepResult(
+                "TOOL_PROPOSED",
+                turn=turn,
+                tool_call_id=proposal.tool_call_id,
+            )
+        if not turn.terminal:
+            return AgentModelStepResult("CONTINUE", turn=turn)
+        return await self.resume_safe_boundary(owner, step, turn=turn)
+
+    async def resume_parsing(
+        self,
+        owner,
+        step: AgentModelStep,
+        *,
+        tools=(),
+        tool_bindings: tuple[AgentToolBinding, ...] = (),
+    ) -> AgentModelStepResult:
+        """Replay parsing from the immutable successful transport payload."""
+
+        recovery = await self.agent.load_recovery(owner.run_id)
+        request = recovery["current_request"]
+        attempt = recovery["current_attempt"]
+        if (
+            recovery["state"] != "PARSING"
+            or request is None
+            or attempt is None
+            or request["request_id"] != step.request_id
+            or attempt["attempt_id"] != step.attempt_id
+            or request["state"] != "SUCCEEDED"
+            or attempt["state"] != "SUCCEEDED"
+            or attempt["result_payload_id"] is None
+        ):
+            raise ForestError(
+                "AGENT_RECOVERY_BOUNDARY_INVALID",
+                "Run has no durable model response to parse",
+                409,
+            )
+        try:
+            result = json.loads(await self.payloads.read_bytes(attempt["result_payload_id"]))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ForestError(
+                "MODEL_RESULT_PAYLOAD_CORRUPT",
+                "Durable model result cannot be parsed",
+                500,
+            ) from exc
+        if (
+            not isinstance(result, dict)
+            or result.get("status") != "RESPONDED"
+            or result.get("request_id") != step.request_id
+            or result.get("transport_attempt_id") != step.attempt_id
+            or not isinstance(result.get("text"), str)
+        ):
+            raise ForestError(
+                "MODEL_RESULT_PAYLOAD_CONFLICT",
+                "Durable model result differs from the execution head",
+                409,
+            )
+        return await self._record_response(
+            owner,
+            step,
+            result["text"],
+            tools=tools,
+            tool_bindings=tool_bindings,
+        )
+
+    async def resume_safe_boundary(
+        self,
+        owner,
+        step: AgentModelStep,
+        *,
+        turn: ModelTurn | None = None,
+    ) -> AgentModelStepResult:
+        """Create the final candidate from a committed terminal ModelTurn."""
+
+        recovery = await self.agent.load_recovery(owner.run_id)
+        latest = recovery["latest_turn"]
+        if (
+            recovery["state"] != "SAFE_BOUNDARY"
+            or latest is None
+            or latest["turn_id"] != step.turn_id
+            or latest["request_id"] != step.request_id
+            or not latest["terminal"]
+            or latest["assistant_payload_id"] is None
+        ):
+            raise ForestError(
+                "AGENT_RECOVERY_BOUNDARY_INVALID",
+                "Run has no terminal ModelTurn at the safe boundary",
+                409,
+            )
+        try:
+            assistant = json.loads(
+                await self.payloads.read_bytes(latest["assistant_payload_id"])
+            )
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ForestError(
+                "MODEL_TURN_PAYLOAD_CORRUPT",
+                "Terminal assistant candidate cannot be parsed",
+                500,
+            ) from exc
+        if (
+            not isinstance(assistant, dict)
+            or set(assistant) != {"text"}
+            or not isinstance(assistant["text"], str)
+        ):
+            raise ForestError(
+                "MODEL_TURN_PAYLOAD_CONFLICT",
+                "Terminal assistant candidate is invalid",
+                409,
+            )
+        final_candidate = await self._payload(
+            "agent.runtime",
+            "final.reply",
+            step.final_reply_ref,
+            _canonical(assistant),
+        )
+        state = await self._payload(
+            "agent.runtime",
+            "checkpoint.state",
+            f"final-ready:{step.turn_id}",
+            _canonical(
+                {
+                    "phase": "FINAL_READY",
+                    "turn_id": step.turn_id,
+                    "reply_ref": step.final_reply_ref,
+                }
+            ),
+        )
+        await self.agent.transition(
+            owner,
+            checkpoint_id=f"checkpoint:final-ready:{step.turn_id}",
+            expected_phase="SAFE_BOUNDARY",
+            target_phase="FINAL_READY",
+            state=state,
+            final_candidate=final_candidate,
+        )
+        return AgentModelStepResult(
+            "FINAL_READY",
+            turn=turn,
+            final_candidate=final_candidate,
+            text=assistant["text"],
+        )
+
     async def execute(
         self,
         owner,
@@ -293,134 +539,10 @@ class DurableAgentModelExecutor:
                 error_code=result.error_code,
             )
 
-        turn = parse_model_turn(
+        return await self._record_response(
+            owner,
+            step,
             result.text,
-            allowed_tools=tuple(item["name"] for item in tools),
-        )
-        if any(type(item) is not AgentToolBinding for item in tool_bindings):
-            raise ForestError(
-                "AGENT_TOOL_BINDING_INVALID", "Tool binding set is invalid", 422
-            )
-        bindings = {item.name: item for item in tool_bindings}
-        declared_names = {item.get("name") for item in tools if isinstance(item, dict)}
-        if len(bindings) != len(tool_bindings) or set(bindings) != declared_names:
-            raise ForestError(
-                "AGENT_TOOL_BINDING_INVALID",
-                "Tool declarations and runtime bindings differ",
-                422,
-            )
-        turn_payload = await self._payload(
-            "agent.runtime",
-            "model.turn",
-            step.turn_id,
-            _canonical(turn.as_dict()),
-        )
-        assistant_payload = None
-        if turn.assistant_text:
-            assistant_payload = await self._payload(
-                "agent.runtime",
-                "assistant.candidate",
-                step.turn_id,
-                _canonical({"text": turn.assistant_text}),
-            )
-        proposal = None
-        if turn.function_call is not None:
-            binding = bindings.get(turn.function_call.name)
-            if binding is None:
-                raise ForestError(
-                    "AGENT_TOOL_PORT_UNAVAILABLE",
-                    "Model proposed a tool without an exact typed binding",
-                    503,
-                )
-            wrapper = turn.function_call.arguments
-            authority_trigger = wrapper.get("authority_trigger_id")
-            arguments = wrapper.get("arguments")
-            if set(wrapper) != {"authority_trigger_id", "arguments"} or not isinstance(
-                arguments, dict
-            ):
-                raise ForestError(
-                    "AGENT_TOOL_AUTHORITY_INVALID",
-                    "Tool call does not bind arguments to one trigger",
-                    409,
-                )
-            call_digest = hashlib.sha256(
-                _canonical(
-                    {
-                        "turn_id": step.turn_id,
-                        "binding": {
-                            "name": binding.name,
-                            "component_id": binding.component_id,
-                            "generation_id": binding.generation_id,
-                            "service_id": binding.service_id,
-                            "contract_digest": binding.contract_digest,
-                            "approval_required": binding.approval_required,
-                            "supports_query": binding.supports_query,
-                        },
-                        "arguments": wrapper,
-                    }
-                )
-            ).hexdigest()
-            tool_call_id = "tool-call:" + call_digest
-            argument_payload = await self._payload(
-                "agent.runtime",
-                "tool.arguments",
-                tool_call_id,
-                _canonical(wrapper),
-            )
-            proposal = ToolProposal(
-                tool_call_id=tool_call_id,
-                arguments=argument_payload,
-                authority_trigger_ref=authority_trigger,
-                tool_contract_digest=binding.binding_digest,
-                effect_operation_ref="tool-effect:" + call_digest,
-            )
-        await self.agent.record_model_turn(
-            owner,
-            turn_id=step.turn_id,
-            request_id=step.request_id,
-            turn=turn,
-            turn_payload=turn_payload,
-            assistant_payload=assistant_payload,
-            tool=proposal,
-        )
-        if proposal is not None:
-            return AgentModelStepResult(
-                "TOOL_PROPOSED",
-                turn=turn,
-                tool_call_id=proposal.tool_call_id,
-            )
-        if not turn.terminal:
-            return AgentModelStepResult("CONTINUE", turn=turn)
-
-        final_candidate = await self._payload(
-            "agent.runtime",
-            "final.reply",
-            step.final_reply_ref,
-            _canonical({"text": turn.assistant_text}),
-        )
-        state = await self._payload(
-            "agent.runtime",
-            "checkpoint.state",
-            f"final-ready:{step.turn_id}",
-            _canonical(
-                {
-                    "phase": "FINAL_READY",
-                    "turn_id": step.turn_id,
-                    "reply_ref": step.final_reply_ref,
-                }
-            ),
-        )
-        await self.agent.transition(
-            owner,
-            checkpoint_id=f"checkpoint:final-ready:{step.turn_id}",
-            expected_phase="SAFE_BOUNDARY",
-            target_phase="FINAL_READY",
-            state=state,
-            final_candidate=final_candidate,
-        )
-        return AgentModelStepResult(
-            "FINAL_READY",
-            turn=turn,
-            final_candidate=final_candidate,
-            text=turn.assistant_text,
+            tools=tools,
+            tool_bindings=tool_bindings,
         )

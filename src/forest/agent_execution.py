@@ -243,6 +243,53 @@ class DurableSingleAgentExecution:
                         result.error_code or "Model result is unknown",
                         409,
                     )
+                if state in {"PARSING", "SAFE_BOUNDARY"}:
+                    request_head = recovery["current_request"]
+                    attempt_head = recovery["current_attempt"]
+                    latest_turn = recovery["latest_turn"]
+                    if (state == "PARSING" and request_head is None) or (
+                        state == "SAFE_BOUNDARY" and latest_turn is None
+                    ):
+                        raise ForestError(
+                            "AGENT_HISTORY_INCOMPLETE",
+                            "Agent recovery head is missing its durable model step",
+                            500,
+                        )
+                    request_id = (
+                        request_head["request_id"]
+                        if request_head is not None
+                        else latest_turn["request_id"]
+                    )
+                    step_seq = (
+                        request_head["step_seq"]
+                        if request_head is not None
+                        else latest_turn["step_seq"]
+                    )
+                    step = AgentModelStep(
+                        request_id=request_id,
+                        attempt_id=(
+                            attempt_head["attempt_id"]
+                            if attempt_head is not None
+                            else _stable("model-attempt", request_id, 1)
+                        ),
+                        effect_operation_ref=(
+                            attempt_head["effect_operation_ref"]
+                            if attempt_head is not None
+                            else _stable("model-effect", request_id)
+                        ),
+                        turn_id=_stable("model-turn", recovery["run_id"], step_seq),
+                        final_reply_ref=_stable("reply", recovery["run_id"]),
+                    )
+                    if state == "PARSING":
+                        await self.model.resume_parsing(
+                            owner,
+                            step,
+                            tools=declarations,
+                            tool_bindings=bindings,
+                        )
+                    else:
+                        await self.model.resume_safe_boundary(owner, step)
+                    continue
                 if state in {"WAIT_TOOL", "WAIT_APPROVAL"}:
                     tool = recovery["current_tool"]
                     if tool is None:
@@ -277,8 +324,6 @@ class DurableSingleAgentExecution:
                         )
                     continue
                 if state in {
-                    "PARSING",
-                    "SAFE_BOUNDARY",
                     "REPAIR_READY",
                     "RELOAD_WAIT",
                     "BLOCKED_UNKNOWN",

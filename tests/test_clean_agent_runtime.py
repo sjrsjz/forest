@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
-from forest.agent_model_executor import DurableAgentModelExecutor
+from forest.agent_model_executor import AgentModelStep, DurableAgentModelExecutor
 from forest.agent_protocol import (
     CORE_PROMPT,
     CORE_PROMPT_SHA256,
@@ -631,6 +631,87 @@ async def test_model_request_attempt_success_and_terminal_turn_are_one_agent_cha
     assert (await agent.load_recovery("run/one"))["latest_turn"]["turn_id"] == (
         "turn/terminal"
     )
+    resumed = await DurableAgentModelExecutor(
+        agent=agent,
+        provider=None,
+        payloads=payloads,
+    ).resume_safe_boundary(
+        owner,
+        AgentModelStep(
+            request_id=plan.request_id,
+            attempt_id=attempt["attempt_id"],
+            effect_operation_ref=attempt["effect_operation_ref"],
+            turn_id="turn/terminal",
+            final_reply_ref="reply/recovered-terminal",
+        ),
+    )
+    assert resumed.status == "FINAL_READY"
+    assert resumed.text == "done"
+    assert (await agent.load("run/one"))["state"] == "FINAL_READY"
+
+
+@pytest.mark.postgres
+async def test_durable_model_response_resumes_parsing_without_provider_recall(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/parse-recovery")
+    plan, attempt = await _prepare_dispatched(agent, payloads, owner, "parse-recovery")
+    candidate = (
+        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
+        '<block block_type="Assistant"><content><text>recovered</text></content></block>'
+        "</blocks></payload></valid_agent_protocol_content_block>"
+    )
+    result = await _payload(
+        payloads,
+        owner_kind="model.result",
+        owner_id=attempt["attempt_id"],
+        body=_json_bytes(
+            {
+                "status": "RESPONDED",
+                "request_id": plan.request_id,
+                "transport_attempt_id": attempt["attempt_id"],
+                "payload_digest": "sha256:" + "9" * 64,
+                "text": candidate,
+                "tool_calls": [],
+                "usage": None,
+                "finish_reason": "stop",
+                "provider_response_id": "response/recovered",
+                "provider_model": "test",
+                "error_code": None,
+            }
+        ),
+        source_id="run/one",
+        owner_component_id="provider.test",
+    )
+    await agent.observe_model(
+        owner,
+        observation_operation_id="observe/parse-recovery/success",
+        request_id=plan.request_id,
+        attempt_id=attempt["attempt_id"],
+        observed_state="SUCCEEDED",
+        evidence_kind="EXECUTOR",
+        effect_observation_ref="effect-observation/parse-recovery/success",
+        result=result,
+    )
+    executor = DurableAgentModelExecutor(agent=agent, provider=None, payloads=payloads)
+    resumed = await executor.resume_parsing(
+        owner,
+        AgentModelStep(
+            request_id=plan.request_id,
+            attempt_id=attempt["attempt_id"],
+            effect_operation_ref=attempt["effect_operation_ref"],
+            turn_id="turn/parse-recovery",
+            final_reply_ref="reply/parse-recovery",
+        ),
+    )
+    assert resumed.status == "FINAL_READY"
+    assert resumed.text == "recovered"
+    run = await agent.load_recovery("run/one")
+    assert run["state"] == "FINAL_READY"
+    assert run["latest_turn"]["turn_id"] == "turn/parse-recovery"
 
 
 @pytest.mark.postgres
