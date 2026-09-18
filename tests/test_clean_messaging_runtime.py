@@ -498,6 +498,19 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert remembered["items"][0]["external_group_id"] == "933179609"
         assert remembered["items"][0]["author_subject_ref"] == "qq:42"
         assert remembered["items"][0]["parts"][0]["part_kind"] == "TEXT"
+        async with store.pool.connection() as conn:
+            facet = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT purpose,modality,state FROM {}.embedding_facets"
+                    ).format(sql.Identifier(memory.repository.namespace))
+                )
+            ).fetchone()
+        assert dict(facet) == {
+            "purpose": "DOCUMENT",
+            "modality": "TEXT",
+            "state": "PENDING",
+        }
         assert await conversation_runtime.claimable_conversations() == (
             "onebot:group:933179609",
         )

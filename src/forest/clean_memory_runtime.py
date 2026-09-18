@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from forest.embeddings import EmbeddingProfile
@@ -44,6 +45,7 @@ class CleanMemoryRuntime:
         self,
         *,
         repository,
+        retrieval,
         module_configuration,
         grants,
         generation_verifier,
@@ -51,6 +53,7 @@ class CleanMemoryRuntime:
         generation_member_verifier,
     ) -> None:
         self.repository = repository
+        self.retrieval = retrieval
         self.module_configuration = module_configuration
         self.grants = grants
         self.generation_verifier = generation_verifier
@@ -214,7 +217,18 @@ class CleanMemoryRuntime:
 
     async def qualify_input_batch_in(self, conn, **values):
         await self._admit_in(conn, owned_work=True)
-        return await self.repository.qualify_input_batch_in(conn, **values)
+        qualifications = await self.repository.qualify_input_batch_in(conn, **values)
+        expected_epoch = values["expected_deletion_epoch"]
+        for item in qualifications:
+            source_unit_id = item.get("source_unit_id")
+            if source_unit_id is None or item.get("state") == "PENDING_CAPTURE":
+                continue
+            await self._prepare_source_facets_in(
+                conn,
+                source_unit_id=source_unit_id,
+                expected_deletion_epoch=expected_epoch,
+            )
+        return qualifications
 
     async def register_source_in(self, conn, **values):
         await self._admit_in(conn, owned_work=False)
@@ -222,7 +236,27 @@ class CleanMemoryRuntime:
 
     async def capture_source_unit_in(self, conn, **values):
         await self._admit_in(conn, owned_work=False)
-        return await self.repository.capture_source_unit_in(conn, **values)
+        captured = await self.repository.capture_source_unit_in(conn, **values)
+        if captured["eligibility_state"] == "ELIGIBLE":
+            await self._prepare_source_facets_in(
+                conn,
+                source_unit_id=values["source_unit_id"],
+                expected_deletion_epoch=values["expected_deletion_epoch"],
+            )
+        return captured
+
+    async def _prepare_source_facets_in(
+        self, conn, *, source_unit_id: str, expected_deletion_epoch: int
+    ) -> dict:
+        operation_id = "source-facets:" + hashlib.sha256(
+            (self.repository.store.bot_id + "\0" + source_unit_id).encode("utf-8")
+        ).hexdigest()
+        return await self.retrieval.prepare_source_facets(
+            operation_id=operation_id,
+            source_unit_id=source_unit_id,
+            expected_deletion_epoch=expected_deletion_epoch,
+            _connection=conn,
+        )
 
     async def deletion_epoch_in(self, conn) -> int:
         await self._admit_in(conn, owned_work=True)

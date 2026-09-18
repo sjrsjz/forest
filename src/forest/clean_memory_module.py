@@ -14,6 +14,7 @@ from forest.runtime_modules import (
 )
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.memory_graph_authority import MemoryGraphRepository
+from forest.storage.memory_retrieval_authority import MemoryRetrievalRepository
 from forest.storage.module_configuration import ModuleConfigurationRepository
 
 
@@ -35,6 +36,7 @@ def default_memory_configuration() -> dict:
 @dataclass(frozen=True)
 class CleanMemoryModule:
     repository: MemoryGraphRepository
+    retrieval: MemoryRetrievalRepository
     descriptor: RuntimeModuleDescriptor
     configuration: ModuleConfigurationRepository
     grants: object
@@ -103,10 +105,18 @@ async def bootstrap_clean_memory(
         payload_verifier=kernel.payload.verify_in,
         deletion_epoch_guard=kernel.payload.epoch_in,
     )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=storage.spec.namespace,
+        payload_verifier=kernel.payload.verify_in,
+        payload_reader=kernel.payload.read_bytes_in,
+        deletion_epoch_guard=kernel.payload.epoch_in,
+    )
 
     def factory(_runtime, _contracts):
         return CleanMemoryRuntime(
             repository=repository,
+            retrieval=retrieval,
             module_configuration=configuration,
             grants=grants,
             generation_verifier=kernel.runtime.verify_active_generation,
@@ -122,4 +132,4 @@ async def bootstrap_clean_memory(
         storage=storage,
         factory_protocol="forest.contract-module-factory/1",
     )
-    return CleanMemoryModule(repository, descriptor, configuration, grants)
+    return CleanMemoryModule(repository, retrieval, descriptor, configuration, grants)
