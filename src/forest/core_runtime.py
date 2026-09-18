@@ -102,6 +102,7 @@ _MODULES = {
             "kernel.uow.shell.route-fence",
             "kernel.uow.shell.authorization.consume",
             "kernel.runtime.status",
+            "kernel.runtime.maintenance",
         ),
         "capabilities": (
             "runtime.graph.publish",

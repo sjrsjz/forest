@@ -41,6 +41,19 @@ def _runtime_status(context):
     return context.participant("kernel.runtime").service.status
 
 
+def _runtime_maintenance(context):
+    runtime = context.participant("kernel.runtime").service
+
+    async def set_data_admission(*, expected_maintenance_epoch, data_admission):
+        return await runtime.set_data_admission(
+            context.host_lease,
+            expected_maintenance_epoch=expected_maintenance_epoch,
+            data_admission=data_admission,
+        )
+
+    return set_data_admission
+
+
 def _binding_fence(context):
     return context.participant("adapter.onebot").verify_transport_fence_in
 
@@ -180,6 +193,9 @@ async def bootstrap_clean_shell(
             status=contracts.service(
                 "kernel.runtime.status", 1, admission_lane="CONTROL", owned_work=True
             ),
+            maintenance=contracts.service(
+                "kernel.runtime.maintenance", 1, admission_lane="CONTROL", owned_work=True
+            ),
             result_commit=contracts.service(
                 "kernel.uow.shell.result", 1, admission_lane="CONTROL", owned_work=True
             ),
@@ -199,6 +215,12 @@ async def bootstrap_clean_shell(
         kernel_services=(
             RuntimeKernelServiceSpec(
                 "kernel.runtime.status", 1, ("kernel.runtime",), _runtime_status
+            ),
+            RuntimeKernelServiceSpec(
+                "kernel.runtime.maintenance",
+                1,
+                ("kernel.runtime",),
+                _runtime_maintenance,
             ),
             RuntimeKernelServiceSpec(
                 "kernel.uow.shell.binding-fence",

@@ -13,6 +13,7 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.runtime_modules import official_storage_bundle
+from forest.shell_command_parser import ShellCommandParser
 from forest.shell_gate import CoreShellGate
 from forest.storage.adapter_onebot_authority import (
     OneBotAdapterRepository,
@@ -37,6 +38,23 @@ SCHEMA = "sha256:" + "1" * 64
 CAPABILITIES = "sha256:" + "2" * 64
 GRAPH = "sha256:" + "3" * 64
 FENCE = "sha256:" + "4" * 64
+
+
+def test_core_maintenance_parser_requires_explicit_positive_epoch():
+    paused = ShellCommandParser.parse("core pause --expect-maintenance 7")
+    resumed = ShellCommandParser.parse("core resume --expect-maintenance=8")
+    assert (paused.command_id, paused.document["arguments"]) == (
+        "core.pause",
+        {"expected_maintenance_epoch": 7},
+    )
+    assert (resumed.command_id, resumed.document["arguments"]) == (
+        "core.resume",
+        {"expected_maintenance_epoch": 8},
+    )
+    assert ShellCommandParser.parse("core pause").command_id == "core.pause"
+    assert ShellCommandParser.parse(
+        "core resume --expect-maintenance 0"
+    ).document["arguments"] == {"error_code": "SHELL_COMMAND_NOT_FOUND"}
 
 
 async def _parse(*, command_text, command_id, command_version, argument_schema_digest, arguments):

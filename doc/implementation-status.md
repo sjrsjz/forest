@@ -72,7 +72,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 `media.capture` 现已作为独立 Generation 进入生产图。Adapter/Conversation/Media 四参与者 ingress UoW 原子登记图片任务，规范 Context 只保存稳定 `media_ref`，临时 URL 仅留在 Media 私有 schema。生命周期 Worker 使用租约、重试和资源上限下载并验证图片，把像素保存为 Kernel Payload 后通过 Memory 公共端口发布保持原始段序的 TEXT/IMAGE parts；InputBatch 先于图片完成时沿用 pending eligibility，最终失败显式收敛为 `UNAVAILABLE`。当前 Context 图片由 `media.context.resolve/1` 在模型调用边界物化，历史图片由 EvidenceBundle 物化，二者均使用来源绑定的 `MediaSnapshot`。
 
-`shell.command` 现已作为独立 Generation 和生命周期 Worker 进入同一生产图。稳定 ShellGate 在业务触发前只识别直接 `#forest` 前缀；规范参数、未知命令和拒绝载荷均写入受管 Payload。Adapter、Conversation、Memory、Media、Shell 与拒绝回执由一个入站 UoW 原子合流，因此控制消息仍进入带真实作者的群 Context 和全局记忆，但绝不回退给 Agent。命令 registry 与管理员策略在 RuntimeGraph publication 事务中绑定准确图、目标 Generation、schema 和能力摘要；执行前及提交结果前均重验当前策略、Binding fence、route fence 和一次性 `management.invoke` 票据。P0 claim 先于 P1，CONTROL SendIntent 独立于 CHAT；DATA admission 关闭时普通消息不会落业务事件，而 Shell 接纳、`core.status` 和回执仍可完成。策略在排队后撤销会以无管理效果的安全失败事实及 CONTROL 回执收敛，不会杀死整个 Worker 或把失败记录伪装成一次获准执行。
+`shell.command` 现已作为独立 Generation 和生命周期 Worker 进入同一生产图。稳定 ShellGate 在业务触发前只识别直接 `#forest` 前缀；规范参数、未知命令和拒绝载荷均写入受管 Payload。Adapter、Conversation、Memory、Media、Shell 与拒绝回执由一个入站 UoW 原子合流，因此控制消息仍进入带真实作者的群 Context 和全局记忆，但绝不回退给 Agent。命令 registry 与管理员策略在 RuntimeGraph publication 事务中绑定准确图、目标 Generation、schema 和能力摘要；执行前及提交结果前均重验当前策略、Binding fence、route fence 和一次性 `management.invoke` 票据。P0 claim 先于 P1，CONTROL SendIntent 独立于 CHAT；`core.pause/resume` 通过类型化内核服务和 `maintenance_epoch` CAS 关闭/恢复 DATA admission，关闭期间普通消息不会落业务事件，而 Shell 接纳、`core.status`、`core.resume` 和回执仍可完成。策略在排队后撤销会以无管理效果的安全失败事实及 CONTROL 回执收敛，不会杀死整个 Worker 或把失败记录伪装成一次获准执行。
 
 ### 已有干净业务 Authority
 
@@ -101,7 +101,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 
 ## 当前阻断项
 
-1. 扩展 `shell.command` 的模块贡献式命令目录：当前生产路径已完成 `core.status`、群管理员策略、P0/P1 优先级、DATA 关闭时的 CONTROL 准入、双阶段授权和安全失败回执；仍需接入取消、暂停/恢复、重载、任务处理及查询命令，补齐审计查询投影，并验证 Shell Generation 热替换排空。
+1. 扩展 `shell.command` 的模块贡献式命令目录：当前生产路径已完成 `core.status`、`core.pause/resume`、群管理员策略、P0/P1 优先级、DATA 关闭时的 CONTROL 准入、双阶段授权和安全失败回执；仍需接入取消、重载、任务处理及模块查询命令，补齐审计查询投影，并验证 Shell Generation 热替换排空。
 2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；下一步删除旧业务 `contract.router` 与旧组合根。
 3. 为多模态 Memory 做十万至百万来源的筛选、稳定分页、关系展开、图片负载和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
@@ -118,7 +118,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - 十一成员 Kernel + Provider + Memory + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、OneBot 文本来源/群主干登记、InputBatch 与 Memory eligibility 原子提交、发送前许可、生命周期所属 Delivery Worker 的真实 OneBot wire 调用与 SENT 落账、作者/群来源和逆序关闭。最新 clean authority/RuntimeGraph 定向组合为 `68 passed`；并发测试覆盖 InputBatch 与延迟媒体来源两种完成顺序，最终没有未解析的 `PENDING_CAPTURE`。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
 - [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。15 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置的新 Generation 生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布、可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger；群 Shell 在 DATA admission 关闭时仍能完成受权状态查询和拒绝回执，普通 DATA 消息保持未接纳。
-- Shell、干净模块、RuntimeGraph、Schema bundle、Delivery 与 CONTROL/DATA 准入定向组合：`169 passed`；覆盖原子控制入站、P0/P1、授权重验、撤权后安全失败、CONTROL 优先发送及 DATA 维护态隔离。
+- Shell、干净模块、RuntimeGraph、Schema bundle、Delivery 与 CONTROL/DATA 准入定向组合：`170 passed`；覆盖原子控制入站、P0/P1、授权重验、撤权后安全失败、CONTROL 优先发送、群聊 pause/resume 及 DATA 维护态隔离。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

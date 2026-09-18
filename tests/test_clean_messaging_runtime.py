@@ -903,11 +903,35 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert lane["active_run_ref"] is None
         assert lane["context_revision"] >= 2
 
-        paused = await kernel.runtime.set_data_admission(
-            lease, expected_maintenance_epoch=1, data_admission=False
-        )
+        pause_body = json.dumps(
+            {
+                "time": 1700000001,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 92,
+                "group_id": 933179609,
+                "user_id": 42,
+                "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
+                "message": [
+                    {
+                        "type": "text",
+                        "data": {"text": "#forest core pause --expect-maintenance 1"},
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        ).encode()
+        await clients[0].emit(pause_body)
+        for _ in range(300):
+            if len(clients[0].sends) >= 3:
+                break
+            await asyncio.sleep(0.05)
+        paused = await kernel.runtime.status()
         assert paused["maintenance_epoch"] == 2
         assert paused["data_admission"] is False
+        assert "已暂停" in clients[0].sends[2][0].wire_body.decode("utf-8")
         model_request_count = len(model_clients[0].requests)
         shell_body = json.dumps(
             {
@@ -926,7 +950,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         ).encode()
         await clients[0].emit(shell_body)
         for _ in range(300):
-            if len(clients[0].sends) >= 3:
+            if len(clients[0].sends) >= 4:
                 break
             await asyncio.sleep(0.05)
         async with store.pool.connection() as conn:
@@ -955,12 +979,12 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             ).fetchone()
         assert shell_runtime.failure is None
         assert delivery_runtime.worker.failure is None
-        assert len(clients[0].sends) == 3, {
+        assert len(clients[0].sends) == 4, {
             "request": dict(shell_request) if shell_request else None,
             "delivery": dict(shell_delivery) if shell_delivery else None,
         }
-        assert b"Forest" in clients[0].sends[2][0].wire_body
-        assert b"DATA=closed" in clients[0].sends[2][0].wire_body
+        assert b"Forest" in clients[0].sends[3][0].wire_body
+        assert b"DATA=closed" in clients[0].sends[3][0].wire_body
         assert len(model_clients[0].requests) == model_request_count
         async with store.pool.connection() as conn:
             shell_message = await (
@@ -1023,11 +1047,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         ).encode()
         await clients[0].emit(denied_body)
         for _ in range(300):
-            if len(clients[0].sends) >= 4:
+            if len(clients[0].sends) >= 5:
                 break
             await asyncio.sleep(0.05)
-        assert len(clients[0].sends) == 4
-        assert "已拒绝" in clients[0].sends[3][0].wire_body.decode("utf-8")
+        assert len(clients[0].sends) == 5
+        assert "已拒绝" in clients[0].sends[4][0].wire_body.decode("utf-8")
         assert len(model_clients[0].requests) == model_request_count
         async with store.pool.connection() as conn:
             denied = await (
@@ -1050,11 +1074,35 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             ).fetchone()
         assert dict(denied) == {"state": "REJECTED", "rejection_code": "SHELL_FORBIDDEN"}
         assert denied_message["trigger_decision"] == "CONTROL_COMMAND"
-        restored = await kernel.runtime.set_data_admission(
-            lease, expected_maintenance_epoch=2, data_admission=True
-        )
+        resume_body = json.dumps(
+            {
+                "time": 1700000004,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 93,
+                "group_id": 933179609,
+                "user_id": 42,
+                "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
+                "message": [
+                    {
+                        "type": "text",
+                        "data": {"text": "#forest core resume --expect-maintenance=2"},
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        ).encode()
+        await clients[0].emit(resume_body)
+        for _ in range(300):
+            if len(clients[0].sends) >= 6:
+                break
+            await asyncio.sleep(0.05)
+        restored = await kernel.runtime.status()
         assert restored["maintenance_epoch"] == 3
         assert restored["data_admission"] is True
+        assert "已恢复" in clients[0].sends[5][0].wire_body.decode("utf-8")
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True

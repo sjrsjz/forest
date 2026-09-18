@@ -11,6 +11,8 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.shell_command_parser import (
+    PAUSE_ARGUMENT_SCHEMA_DIGEST,
+    RESUME_ARGUMENT_SCHEMA_DIGEST,
     STATUS_ARGUMENT_SCHEMA_DIGEST,
     ShellCommandParser,
     direct_shell_text,
@@ -34,6 +36,9 @@ _STATE_CONTRACT = {
 _STATUS_CAPABILITIES_DIGEST = digest_json(
     {"protocol": "forest.management-capabilities/1", "capabilities": ["runtime.status.read"]}
 )
+_MAINTENANCE_CAPABILITIES_DIGEST = digest_json(
+    {"protocol": "forest.management-capabilities/1", "capabilities": ["runtime.maintenance"]}
+)
 
 
 def _stable(kind: str, *parts: object) -> str:
@@ -53,6 +58,7 @@ class CleanShellRuntime:
         "services": [{"service_id": "shell.ingress.inspect", "version": 1}],
         "requires": [
             {"service_id": "kernel.runtime.status", "version": 1},
+            {"service_id": "kernel.runtime.maintenance", "version": 1},
             {"service_id": "kernel.uow.shell.result", "version": 1},
             {"service_id": "kernel.uow.shell.binding-fence", "version": 1},
             {"service_id": "kernel.uow.shell.route-fence", "version": 1},
@@ -73,6 +79,7 @@ class CleanShellRuntime:
         module_configuration,
         grants,
         status,
+        maintenance,
         result_commit,
         generation_admission_verifier,
         generation_member_verifier,
@@ -85,6 +92,7 @@ class CleanShellRuntime:
         self.module_configuration = module_configuration
         self.grants = grants
         self.status = status
+        self.maintenance = maintenance
         self.result_commit = result_commit
         self.generation_admission_verifier = generation_admission_verifier
         self.generation_member_verifier = generation_member_verifier
@@ -218,6 +226,32 @@ class CleanShellRuntime:
                     target_scope="BOT",
                     service_class="P0",
                     required_capabilities_digest=_STATUS_CAPABILITIES_DIGEST,
+                    output_policy="SHORT",
+                    timeout_seconds=10,
+                ),
+                ShellCommandRoute(
+                    command_id="core.pause",
+                    command_version=1,
+                    owner_component_id=route.provider_component_id,
+                    owner_generation_id=route.provider_generation_id,
+                    argument_schema_digest=PAUSE_ARGUMENT_SCHEMA_DIGEST,
+                    management_operation_id="runtime.maintenance",
+                    target_scope="BOT",
+                    service_class="P0",
+                    required_capabilities_digest=_MAINTENANCE_CAPABILITIES_DIGEST,
+                    output_policy="SHORT",
+                    timeout_seconds=10,
+                ),
+                ShellCommandRoute(
+                    command_id="core.resume",
+                    command_version=1,
+                    owner_component_id=route.provider_component_id,
+                    owner_generation_id=route.provider_generation_id,
+                    argument_schema_digest=RESUME_ARGUMENT_SCHEMA_DIGEST,
+                    management_operation_id="runtime.maintenance",
+                    target_scope="BOT",
+                    service_class="P0",
+                    required_capabilities_digest=_MAINTENANCE_CAPABILITIES_DIGEST,
                     output_policy="SHORT",
                     timeout_seconds=10,
                 ),
@@ -441,6 +475,25 @@ class CleanShellRuntime:
                 return kind, conversation_ref[len(prefix) :]
         raise ForestError("SHELL_RESULT_ROUTE_INVALID", "Shell conversation route is invalid", 409)
 
+    async def _maintenance_epoch(self, claim) -> int:
+        try:
+            body = json.loads((await self.payloads.read_bytes(claim.arguments.payload_id)))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ForestError(
+                "SHELL_ARGUMENTS_INVALID", "Shell maintenance arguments are invalid", 422
+            ) from exc
+        arguments = body.get("arguments") if isinstance(body, dict) else None
+        if (
+            not isinstance(arguments, dict)
+            or set(arguments) != {"expected_maintenance_epoch"}
+            or type(arguments["expected_maintenance_epoch"]) is not int
+            or arguments["expected_maintenance_epoch"] <= 0
+        ):
+            raise ForestError(
+                "SHELL_ARGUMENTS_INVALID", "Shell maintenance arguments are invalid", 422
+            )
+        return arguments["expected_maintenance_epoch"]
+
     async def _execute(self, claim) -> None:
         invoke_operation = _stable("authorize-invoke", claim.request_id, claim.owner_epoch)
         receipt = await self.authorization.issue(
@@ -454,18 +507,29 @@ class CleanShellRuntime:
             authorization_operation_id=receipt.operation_id,
         )
         await self.repository.start(claim)
-        if claim.command_id != "core.status":
+        if claim.command_id == "core.status":
+            status = await self.status()
+            member_failures = [item for item in status["members"] if item["status"] != "ACTIVE"]
+            text = (
+                f"Forest {status['bot_id']}：{status['status']} / {status['graph_state']}；"
+                f"Graph r{status['graph_revision']}，{len(status['members'])} 个模块；"
+                f"DATA={'open' if status['data_admission'] else 'closed'}，"
+                f"CONTROL={'open' if status['control_admission'] else 'closed'}"
+            )
+            if member_failures:
+                text += f"；异常模块 {len(member_failures)} 个"
+        elif claim.command_id in {"core.pause", "core.resume"}:
+            data_admission = claim.command_id == "core.resume"
+            changed = await self.maintenance(
+                expected_maintenance_epoch=await self._maintenance_epoch(claim),
+                data_admission=data_admission,
+            )
+            text = (
+                f"Forest DATA admission 已{'恢复' if data_admission else '暂停'}；"
+                f"maintenance_epoch={changed['maintenance_epoch']}"
+            )
+        else:
             raise ForestError("SHELL_ROUTE_UNSUPPORTED", "Shell route is unsupported", 409)
-        status = await self.status()
-        member_failures = [item for item in status["members"] if item["status"] != "ACTIVE"]
-        text = (
-            f"Forest {status['bot_id']}：{status['status']} / {status['graph_state']}；"
-            f"Graph r{status['graph_revision']}，{len(status['members'])} 个模块；"
-            f"DATA={'open' if status['data_admission'] else 'closed'}，"
-            f"CONTROL={'open' if status['control_admission'] else 'closed'}"
-        )
-        if member_failures:
-            text += f"；异常模块 {len(member_failures)} 个"
         shell_result, delivery_result = await self._payload(claim, text)
         final_operation = _stable("authorize-result", claim.request_id, claim.owner_epoch)
         final_receipt = await self.authorization.issue(

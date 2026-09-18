@@ -77,6 +77,12 @@ class RuntimeKernelServiceContext:
     def generation_member_verifier(self):
         return self._registry.generation_authority.verify_generation_member_in
 
+    @property
+    def host_lease(self):
+        """Current fenced host lease for kernel-owned management coordinators."""
+
+        return self._registry._lease()
+
     def participant(self, component_id: str):
         if component_id not in self._participants:
             raise ForestError(

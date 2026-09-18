@@ -26,6 +26,36 @@ STATUS_ARGUMENT_SCHEMA = {
 STATUS_ARGUMENT_SCHEMA_DIGEST = digest_json(STATUS_ARGUMENT_SCHEMA)
 
 
+def _maintenance_schema(command_id: str) -> dict:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "protocol": {"const": "forest.shell.arguments/1"},
+            "command_id": {"const": command_id},
+            "arguments": {
+                "type": "object",
+                "properties": {
+                    "expected_maintenance_epoch": {"type": "integer", "minimum": 1}
+                },
+                "required": ["expected_maintenance_epoch"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["protocol", "command_id", "arguments"],
+        "additionalProperties": False,
+    }
+
+
+PAUSE_ARGUMENT_SCHEMA_DIGEST = digest_json(_maintenance_schema("core.pause"))
+RESUME_ARGUMENT_SCHEMA_DIGEST = digest_json(_maintenance_schema("core.resume"))
+_SCHEMA_DIGESTS = {
+    "core.status": STATUS_ARGUMENT_SCHEMA_DIGEST,
+    "core.pause": PAUSE_ARGUMENT_SCHEMA_DIGEST,
+    "core.resume": RESUME_ARGUMENT_SCHEMA_DIGEST,
+}
+
+
 def _stable(kind: str, value: str) -> str:
     return f"shell:{kind}:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
 
@@ -120,6 +150,27 @@ class ShellCommandParser:
                     "arguments": {},
                 },
             )
+        if len(tokens) in {3, 4} and tokens[:2] in {
+            ("core", "pause"),
+            ("core", "resume"),
+        }:
+            value = None
+            if len(tokens) == 3 and tokens[2].startswith("--expect-maintenance="):
+                value = tokens[2].partition("=")[2]
+            elif len(tokens) == 4 and tokens[2] == "--expect-maintenance":
+                value = tokens[3]
+            parsed_epoch = int(value) if value is not None and value.isdecimal() else 0
+            if 0 < parsed_epoch <= 9_223_372_036_854_775_807:
+                command_id = "core." + tokens[1]
+                return ParsedShellCommand(
+                    command_id,
+                    1,
+                    {
+                        "protocol": "forest.shell.arguments/1",
+                        "command_id": command_id,
+                        "arguments": {"expected_maintenance_epoch": parsed_epoch},
+                    },
+                )
         command_id = "shell.invalid"
         if tokens:
             candidate = ".".join(tokens[:2]).lower()
@@ -198,10 +249,15 @@ class ShellCommandParser:
         argument_schema_digest: str,
         arguments: ShellPayloadRef,
     ) -> bool:
-        if command_version != 1 or argument_schema_digest != STATUS_ARGUMENT_SCHEMA_DIGEST:
+        if (
+            command_version != 1
+            or _SCHEMA_DIGESTS.get(command_id) != argument_schema_digest
+        ):
             return False
         parsed = self.parse(command_text)
-        if parsed.command_id != command_id or command_id != "core.status":
+        if parsed.command_id != command_id:
+            return False
+        if "error_code" in parsed.document.get("arguments", {}):
             return False
         body = await self.payloads.read_bytes(arguments.payload_id)
         return body == _canonical(parsed.document)
