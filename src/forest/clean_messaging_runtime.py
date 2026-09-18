@@ -109,9 +109,7 @@ class _RoutedIngress:
 
     async def admit(self, **values):
         handler = (
-            self._control_admit
-            if values.get("shell_command") is not None
-            else self._data_admit
+            self._control_admit if values.get("shell_command") is not None else self._data_admit
         )
         result = await handler(**values)
         if self._on_change is not None:
@@ -201,6 +199,7 @@ async def bootstrap_clean_messaging(
     secret_resolver,
     http_client_factory=None,
     websocket_client_factory=None,
+    register_effect_fence: bool = True,
 ) -> CleanMessagingModules:
     """Create module-owned authorities and descriptor factories for one Bot."""
 
@@ -270,9 +269,10 @@ async def bootstrap_clean_messaging(
         generation_verifier=kernel.runtime.verify_active_generation_in,
         generation_member_verifier=kernel.runtime.verify_generation_member_in,
     )
-    kernel.effect.register_fence_verifier(
-        "adapter.binding", adapter_repository.verify_effect_fence_in
-    )
+    if register_effect_fence:
+        kernel.effect.register_fence_verifier(
+            "adapter.binding", adapter_repository.verify_effect_fence_in
+        )
 
     def conversation_factory(_runtime, contracts):
         return CleanConversationSchedulerRuntime(
@@ -285,19 +285,13 @@ async def bootstrap_clean_messaging(
                 contracts.service("agent.execute", 1, owned_work=True)
             ),
             input_selection_port=_RoutedInputSelection(
-                contracts.service(
-                    "kernel.uow.conversation.select-input", 1, owned_work=True
-                )
+                contracts.service("kernel.uow.conversation.select-input", 1, owned_work=True)
             ),
             completion_port=_RoutedCompletion(
-                contracts.service(
-                    "kernel.uow.conversation.final-reply", 1, owned_work=True
-                )
+                contracts.service("kernel.uow.conversation.final-reply", 1, owned_work=True)
             ),
             session_decision_port=_RoutedSessionDecision(
-                contracts.service(
-                    "kernel.uow.conversation.session-handoff", 1, owned_work=True
-                )
+                contracts.service("kernel.uow.conversation.session-handoff", 1, owned_work=True)
             ),
             graph_admission=contracts.graph_admission,
         )
@@ -311,9 +305,7 @@ async def bootstrap_clean_messaging(
             "secret_resolver": secret_resolver,
             "ingress_port": _RoutedIngress(
                 contracts.service("kernel.uow.onebot.ingress", 1),
-                contracts.service(
-                    "kernel.uow.onebot.ingress", 1, admission_lane="CONTROL"
-                ),
+                contracts.service("kernel.uow.onebot.ingress", 1, admission_lane="CONTROL"),
                 getattr(_runtime, "notify", None),
             ),
             "trigger_policy": contracts.service("conversation.trigger.classify", 1),

@@ -182,9 +182,7 @@ async def test_official_bundle_profile_is_persisted_and_part_of_identity(clean_a
     baseline = b"CREATE TABLE records(record_id text PRIMARY KEY);"
     spec = bundle(baseline, schema_id="example.official")
     package_digest = "sha256:" + "5" * 64
-    row = await installer.install(
-        spec, baseline, package_digest, execution_profile="official"
-    )
+    row = await installer.install(spec, baseline, package_digest, execution_profile="official")
     assert row["execution_profile"] == "official"
     with pytest.raises(ForestError) as caught:
         await installer.install(spec, baseline, package_digest)
@@ -265,9 +263,7 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
         )
         seeded = await (
             await conn.execute(
-                sql.SQL("SELECT bot_id FROM {}.runtime_state").format(
-                    sql.Identifier(namespace)
-                )
+                sql.SQL("SELECT bot_id FROM {}.runtime_state").format(sql.Identifier(namespace))
             )
         ).fetchone()
         assert seeded["bot_id"] == store.bot_id
@@ -301,9 +297,7 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
         )
         with pytest.raises(psycopg.Error):
             await conn.execute(
-                sql.SQL("DELETE FROM {}.host_incarnations").format(
-                    sql.Identifier(namespace)
-                )
+                sql.SQL("DELETE FROM {}.host_incarnations").format(sql.Identifier(namespace))
             )
         digest = "sha256:" + "1" * 64
         await conn.execute(
@@ -475,9 +469,7 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
     )
     kernel = runtime_binding("kernel.runtime", marker="1", storage=storage)
     kernel = replace(kernel, package_digest=runtime_storage.package_digest)
-    consumer = runtime_binding(
-        "example.consumer", marker="2", requires=("kernel.runtime",)
-    )
+    consumer = runtime_binding("example.consumer", marker="2", requires=("kernel.runtime",))
     activation_id = str(uuid4())
     graph = await repository.prepare_graph(renewed, [consumer, kernel], activation_id)
     assert await repository.prepare_graph(renewed, [kernel, consumer], activation_id) == graph
@@ -488,9 +480,7 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
     async with store.pool.connection() as conn:
         head = await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
-                    sql.Identifier(namespace)
-                )
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(sql.Identifier(namespace))
             )
         ).fetchone()
         routes = await (
@@ -533,12 +523,8 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
         runtime_binding("kernel.runtime", marker="5", storage=storage),
         package_digest=runtime_storage.package_digest,
     )
-    consumer_v2 = runtime_binding(
-        "example.consumer", marker="6", requires=("kernel.runtime",)
-    )
-    graph_v2 = await repository.prepare_graph(
-        renewed, [kernel_v2, consumer_v2], str(uuid4())
-    )
+    consumer_v2 = runtime_binding("example.consumer", marker="6", requires=("kernel.runtime",))
+    graph_v2 = await repository.prepare_graph(renewed, [kernel_v2, consumer_v2], str(uuid4()))
     assert graph_v2.graph_revision > graph.graph_revision
     assert await repository.publish_graph(renewed, graph_v2) == graph_v2.graph_revision
     with pytest.raises(ForestError) as caught:
@@ -562,9 +548,9 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
             )
         ).fetchall()
     assert all(item["route_epoch"] == 2 for item in routes)
-    assert {item["status"] for item in statuses if item["generation_id"] in graph.generations.values()} == {
-        "QUIESCING"
-    }
+    assert {
+        item["status"] for item in statuses if item["generation_id"] in graph.generations.values()
+    } == {"QUIESCING"}
     assert {
         item["status"]
         for item in statuses
@@ -616,9 +602,7 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
     async with store.pool.connection() as conn:
         head = await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
-                    sql.Identifier(namespace)
-                )
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(sql.Identifier(namespace))
             )
         ).fetchone()
         routes = await (
@@ -649,9 +633,7 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
     assert saved_graph["state"] == "STOPPED"
     assert {
         item["component_id"]: [
-            fact["state"]
-            for fact in lifecycle
-            if fact["component_id"] == item["component_id"]
+            fact["state"] for fact in lifecycle if fact["component_id"] == item["component_id"]
         ]
         for item in routes
     } == {
@@ -702,9 +684,9 @@ async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_au
 
     async with store.pool.connection() as conn:
         await conn.execute(
-            sql.SQL(
-                "UPDATE {}.host_lease SET expires_at='1970-01-01 UTC' WHERE bot_id=%s"
-            ).format(sql.Identifier(runtime_storage.spec.namespace)),
+            sql.SQL("UPDATE {}.host_lease SET expires_at='1970-01-01 UTC' WHERE bot_id=%s").format(
+                sql.Identifier(runtime_storage.spec.namespace)
+            ),
             (store.bot_id,),
         )
     claims = await asyncio.gather(
@@ -728,9 +710,9 @@ async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_au
     assert caught.value.code == "STALE_HOST"
     async with store.pool.connection() as conn:
         await conn.execute(
-            sql.SQL(
-                "UPDATE {}.host_lease SET expires_at='1970-01-01 UTC' WHERE bot_id=%s"
-            ).format(sql.Identifier(runtime_storage.spec.namespace)),
+            sql.SQL("UPDATE {}.host_lease SET expires_at='1970-01-01 UTC' WHERE bot_id=%s").format(
+                sql.Identifier(runtime_storage.spec.namespace)
+            ),
             (store.bot_id,),
         )
     with pytest.raises(ForestError) as caught:
@@ -911,9 +893,9 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     async with store.pool.connection() as conn:
         bind_failure_graph = await (
             await conn.execute(
-                sql.SQL(
-                    "SELECT state FROM {}.runtime_graphs WHERE graph_id=%s"
-                ).format(sql.Identifier(runtime_storage.spec.namespace)),
+                sql.SQL("SELECT state FROM {}.runtime_graphs WHERE graph_id=%s").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                ),
                 (bind_failure_registry.graph_identity.graph_id,),
             )
         ).fetchone()
@@ -936,9 +918,9 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     async with store.pool.connection() as conn:
         failed_graph = await (
             await conn.execute(
-                sql.SQL(
-                    "SELECT state FROM {}.runtime_graphs WHERE graph_id=%s"
-                ).format(sql.Identifier(runtime_storage.spec.namespace)),
+                sql.SQL("SELECT state FROM {}.runtime_graphs WHERE graph_id=%s").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                ),
                 (failed_registry.graph_identity.graph_id,),
             )
         ).fetchone()
@@ -960,6 +942,58 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     with pytest.raises(ForestError) as caught:
         await mismatch_registry.prepare()
     assert caught.value.code == "RUNTIME_GENERATION_BINDING_MISMATCH"
+
+    first = RuntimeModuleRegistry(runtime, (descriptor,))
+    await first.start()
+    second = RuntimeModuleRegistry(runtime, (descriptor,))
+    await second.start()
+    first_graph_id = first.graph_identity.graph_id
+    first_generation_id = first.graph_identity.generations["kernel.runtime"]
+    second_graph_id = second.graph_identity.graph_id
+    second_generation_id = second.graph_identity.generations["kernel.runtime"]
+
+    assert first_graph_id != second_graph_id
+    assert await first.close() == []
+    assert await repository.verify_active_generation(
+        component_id="kernel.runtime",
+        generation_id=second_generation_id,
+    )
+    async with store.pool.connection() as conn:
+        graphs = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT graph_id,state FROM {}.runtime_graphs "
+                    "WHERE graph_id IN (%s,%s) ORDER BY graph_id"
+                ).format(sql.Identifier(runtime_storage.spec.namespace)),
+                (first_graph_id, second_graph_id),
+            )
+        ).fetchall()
+        generations = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT generation_id,status FROM {}.generations "
+                    "WHERE generation_id IN (%s,%s) ORDER BY generation_id"
+                ).format(sql.Identifier(runtime_storage.spec.namespace)),
+                (first_generation_id, second_generation_id),
+            )
+        ).fetchall()
+        head = await (
+            await conn.execute(
+                sql.SQL("SELECT graph_id FROM {}.runtime_graph_head").format(
+                    sql.Identifier(runtime_storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+    assert {row["graph_id"]: row["state"] for row in graphs} == {
+        first_graph_id: "STOPPED",
+        second_graph_id: "ACTIVE",
+    }
+    assert {row["generation_id"]: row["status"] for row in generations} == {
+        first_generation_id: "DISPOSED",
+        second_generation_id: "ACTIVE",
+    }
+    assert head["graph_id"] == second_graph_id
+    assert await second.close() == []
 
 
 @pytest.mark.postgres
@@ -1134,12 +1168,8 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
     core = await bootstrap_clean_kernel(store, installer)
     replay = await bootstrap_clean_kernel(store, installer)
     assert {
-        component_id: grant.grant_set_digest
-        for component_id, grant in core.grants.items()
-    } == {
-        component_id: grant.grant_set_digest
-        for component_id, grant in replay.grants.items()
-    }
+        component_id: grant.grant_set_digest for component_id, grant in core.grants.items()
+    } == {component_id: grant.grant_set_digest for component_id, grant in replay.grants.items()}
     assert {item.component_id for item in core.descriptors} == {
         "kernel.runtime",
         "kernel.payload",
@@ -1182,26 +1212,19 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
         ).fetchall()
         head = await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(
-                    sql.Identifier(namespace)
-                )
+                sql.SQL("SELECT * FROM {}.runtime_graph_head").format(sql.Identifier(namespace))
             )
         ).fetchone()
     assert head["graph_id"] == graph.graph_id
-    assert {
-        row["component_id"]: row["capability_grants_digest"] for row in rows
-    } == {
-        component_id: grant.grant_set_digest
-        for component_id, grant in core.grants.items()
+    assert {row["component_id"]: row["capability_grants_digest"] for row in rows} == {
+        component_id: grant.grant_set_digest for component_id, grant in core.grants.items()
     }
     assert all(row["status"] == "ACTIVE" for row in rows)
     assert await registry.close() == []
     async with store.pool.connection() as conn:
         statuses = await (
             await conn.execute(
-                sql.SQL("SELECT status FROM {}.generations").format(
-                    sql.Identifier(namespace)
-                )
+                sql.SQL("SELECT status FROM {}.generations").format(sql.Identifier(namespace))
             )
         ).fetchall()
     assert {row["status"] for row in statuses} == {"DISPOSED"}
@@ -1234,9 +1257,7 @@ async def test_clean_kernel_authorization_fences_exact_tickets_and_revocation(
     grant_args = {
         "grantee_kind": "platform.user",
         "grantee_id": "qq/1234",
-        "entries": (
-            CapabilityGrant("module.reload", "component", "example.worker"),
-        ),
+        "entries": (CapabilityGrant("module.reload", "component", "example.worker"),),
         "expected_policy_revision": 1,
         "audience_component_id": "component.worker-host",
         "audience_generation_id": "generation/one",
@@ -1298,19 +1319,25 @@ async def test_clean_kernel_authorization_fences_exact_tickets_and_revocation(
         expected_policy_revision=1,
     )
     assert revocation["policy_revision"] == 2
-    assert await authority.revoke(
-        operation_id="revoke/one",
-        selector_kind="principal",
-        selector_id="qq/1234",
-        expected_policy_revision=1,
-    ) == revocation
+    assert (
+        await authority.revoke(
+            operation_id="revoke/one",
+            selector_kind="principal",
+            selector_id="qq/1234",
+            expected_policy_revision=1,
+        )
+        == revocation
+    )
     assert await authority.consume_ticket(**consume_args) == receipt
-    assert await authority.issue_ticket(
-        ticket_id="ticket/pending",
-        operation_id="operation/pending",
-        expires_at=pending_expiry,
-        **ticket_args,
-    ) == pending_ticket
+    assert (
+        await authority.issue_ticket(
+            ticket_id="ticket/pending",
+            operation_id="operation/pending",
+            expires_at=pending_expiry,
+            **ticket_args,
+        )
+        == pending_ticket
+    )
     with pytest.raises(ForestError) as caught:
         await authority.consume_ticket(
             **{**consume_args, "ticket_id": "ticket/pending", "operation_id": "operation/pending"}
@@ -1780,9 +1807,7 @@ async def test_tool_effect_port_commits_handoff_and_reconciles_unknown_without_r
         entries=(CapabilityGrant("tool.invoke", "bot", store.bot_id, delegable=True),),
         expected_policy_revision=1,
     )
-    auth_port = KernelToolAuthorizationPort(
-        authority=authorization, agent_grants=agent_grants
-    )
+    auth_port = KernelToolAuthorizationPort(authority=authorization, agent_grants=agent_grants)
     request = ToolAuthorizationRequest(
         tool_call_id="tool-call/weather/reconcile",
         effect_operation_ref="effect/tool/weather/reconcile",
@@ -2096,19 +2121,22 @@ async def test_clean_kernel_effect_preserves_unknown_and_reconciles_explicitly(
         input_payload_id=input_payload.payload_id,
         input_payload_digest=input_payload.content_digest,
     )
-    assert await effects.admit(
-        effect_operation_id=effect_operation_id,
-        input_digest=semantic_digest,
-        effect_kind="external.dispatch",
-        target_kind="channel",
-        target_id="group/933179609",
-        producer_component_id="delivery",
-        producer_generation_id="generation/delivery-one",
-        root_operation_kind="conversation.reply",
-        root_operation_id="reply/one",
-        input_payload_id=input_payload.payload_id,
-        input_payload_digest=input_payload.content_digest,
-    ) == effect
+    assert (
+        await effects.admit(
+            effect_operation_id=effect_operation_id,
+            input_digest=semantic_digest,
+            effect_kind="external.dispatch",
+            target_kind="channel",
+            target_id="group/933179609",
+            producer_component_id="delivery",
+            producer_generation_id="generation/delivery-one",
+            root_operation_kind="conversation.reply",
+            root_operation_id="reply/one",
+            input_payload_id=input_payload.payload_id,
+            input_payload_digest=input_payload.content_digest,
+        )
+        == effect
+    )
 
     grant = await authorization.create_grant_set(
         grantee_kind="component",
@@ -2160,13 +2188,12 @@ async def test_clean_kernel_effect_preserves_unknown_and_reconciles_explicitly(
     synchronize_first_permits = False
     assert permit_replay == permit
     assert permit.attempt_no == 1
-    handoff = await effects.mark_handoff(
-        permit=permit, handoff_operation_id="handoff/send-one/1"
-    )
+    handoff = await effects.mark_handoff(permit=permit, handoff_operation_id="handoff/send-one/1")
     assert handoff["state"] == "DISPATCHING"
-    assert await effects.mark_handoff(
-        permit=permit, handoff_operation_id="handoff/send-one/1"
-    ) == handoff
+    assert (
+        await effects.mark_handoff(permit=permit, handoff_operation_id="handoff/send-one/1")
+        == handoff
+    )
 
     unknown = await effects.observe(
         effect_operation_id=effect_operation_id,
@@ -2394,12 +2421,15 @@ async def test_clean_kernel_effect_preserves_unknown_and_reconciles_explicitly(
         abandonment_operation_id="abandon/abandoned-retry/1",
         reason_code="PREPARE_EXPIRED",
     )
-    assert await effects.abandon_prepared(
-        effect_operation_id=abandoned_effect_id,
-        attempt_id=first_abandoned.attempt_id,
-        abandonment_operation_id="abandon/abandoned-retry/1",
-        reason_code="PREPARE_EXPIRED",
-    ) == abandonment
+    assert (
+        await effects.abandon_prepared(
+            effect_operation_id=abandoned_effect_id,
+            attempt_id=first_abandoned.attempt_id,
+            abandonment_operation_id="abandon/abandoned-retry/1",
+            reason_code="PREPARE_EXPIRED",
+        )
+        == abandonment
+    )
     second_abandoned = await prepare_abandon_attempt(2)
     assert second_abandoned.attempt_no == 2
     await effects.abandon_prepared(
@@ -2475,9 +2505,7 @@ async def test_clean_kernel_audit_bundle_is_filterable_immutable_and_payload_onl
         details_payload_digest="sha256:" + "1" * 64,
     )
     with pytest.raises(ForestError) as caught:
-        await KernelAuditRepository(
-            store, namespace=storage.spec.namespace
-        ).append(envelope)
+        await KernelAuditRepository(store, namespace=storage.spec.namespace).append(envelope)
     assert caught.value.code == "AUDIT_PAYLOAD_PORT_REQUIRED"
     first = await repository.append(envelope)
     assert await repository.append(envelope) == first
@@ -2490,9 +2518,7 @@ async def test_clean_kernel_audit_bundle_is_filterable_immutable_and_payload_onl
     }
     with pytest.raises(ForestError) as caught:
         await repository.append(
-            AuditEnvelope(
-                **{**envelope.__dict__, "action": "component.disable"}
-            )
+            AuditEnvelope(**{**envelope.__dict__, "action": "component.disable"})
         )
     assert caught.value.code == "AUDIT_ID_CONFLICT"
     await repository.append(
@@ -2658,8 +2684,7 @@ async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL(
-                    "SELECT deletion_epoch FROM {}.deletion_clock "
-                    "WHERE bot_id=%s FOR SHARE"
+                    "SELECT deletion_epoch FROM {}.deletion_clock WHERE bot_id=%s FOR SHARE"
                 ).format(sql.Identifier(storage.spec.namespace)),
                 (store.bot_id,),
             )
@@ -2694,24 +2719,25 @@ async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
         expected_deletion_epoch=0,
     )
     assert receipt["selected_count"] == 3
-    assert await repository.forget(
-        operation_id="forget/1",
-        source_targets=(
-            SourceTarget(
-                source_component_id=source.source_component_id,
-                source_kind=source.source_kind,
-                source_id=source.source_id,
-                source_revision=source.source_revision,
-                part_id=source.part_id,
+    assert (
+        await repository.forget(
+            operation_id="forget/1",
+            source_targets=(
+                SourceTarget(
+                    source_component_id=source.source_component_id,
+                    source_kind=source.source_kind,
+                    source_id=source.source_id,
+                    source_revision=source.source_revision,
+                    part_id=source.part_id,
+                ),
             ),
-        ),
-        expected_deletion_epoch=0,
-    ) == receipt
+            expected_deletion_epoch=0,
+        )
+        == receipt
+    )
     async with store.pool.connection() as conn, conn.transaction():
         with pytest.raises(ForestError) as caught:
-            await repository.read_bytes_in(
-                conn, child.payload_id, expected_deletion_epoch=1
-            )
+            await repository.read_bytes_in(conn, child.payload_id, expected_deletion_epoch=1)
         assert caught.value.code == "PAYLOAD_REVOKED"
     with pytest.raises(ForestError) as caught:
         await repository.put_bytes(
@@ -2746,9 +2772,7 @@ async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
         execution_profile=storage.execution_profile,
     )
     repository = KernelPayloadRepository(store, namespace=storage.spec.namespace)
-    first_source = PayloadSource(
-        "conversation.scheduler", "group.message", "message/first", 1
-    )
+    first_source = PayloadSource("conversation.scheduler", "group.message", "message/first", 1)
     first_target = SourceTarget(
         first_source.source_component_id,
         first_source.source_kind,
@@ -2791,9 +2815,7 @@ async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
     first_ref, first_receipt = await asyncio.gather(admission_task, forget_task)
     assert first_receipt["selected_count"] == 1
 
-    second_source = PayloadSource(
-        "conversation.scheduler", "group.message", "message/second", 1
-    )
+    second_source = PayloadSource("conversation.scheduler", "group.message", "message/second", 1)
     second_target = SourceTarget(
         second_source.source_component_id,
         second_source.source_kind,
@@ -2833,9 +2855,7 @@ async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
     second_admission_task = asyncio.create_task(admit_second())
     await forget_committed.wait()
     release_forget.set()
-    second_receipt, rejected_code = await asyncio.gather(
-        second_forget_task, second_admission_task
-    )
+    second_receipt, rejected_code = await asyncio.gather(second_forget_task, second_admission_task)
     assert second_receipt["selected_count"] == 0
     assert rejected_code == "SOURCE_SUPPRESSED"
 

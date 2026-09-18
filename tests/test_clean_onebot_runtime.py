@@ -164,10 +164,68 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         ).fetchone()
     assert event_count["count"] == inbox_count["count"] == 1
 
-    await runtime.quiesce()
+    async def verify_handoff_generation(_conn, *, component_id, generation_id, admission_lane):
+        assert component_id == "adapter.onebot"
+        assert generation_id in {"generation/adapter/1", "generation/adapter/2"}
+        assert admission_lane == "DATA"
+        return {"active": True}
+
+    adapter.generation_verifier = verify_handoff_generation
+    successor = CleanOneBotRuntime(
+        repository=adapter,
+        module_configuration=configuration,
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "8" * 64),
+        payloads=payloads,
+        secret_resolver=resolve_secret,
+        ingress_port=ingress,
+        trigger_policy=classify,
+        shell_inspector=inspect_shell,
+        websocket_client_factory=create_client,
+    )
+    successor_identity = BoundGenerationIdentity(
+        component_id="adapter.onebot",
+        generation_id="generation/adapter/2",
+        graph_id="runtime-graph/2",
+        graph_revision=2,
+        graph_digest="sha256:" + "6" * 64,
+        activation_id="activation-2",
+    )
+    await successor.bind_generation(successor_identity)
+    await successor.start()
+    assert len(clients) == 2 and clients[1].handler is None
+    async with store.pool.connection() as conn, conn.transaction():
+        await successor.publish_generation_in(
+            conn,
+            generation_id=successor_identity.generation_id,
+            graph_id=successor_identity.graph_id,
+        )
+    successor.activate_generation()
+    head = await adapter.load_binding("binding/main")
+    assert head["state"] == "ONLINE" and head["binding_epoch"] == 2
+    assert head["current_client_incarnation"].startswith("client:activation-2:")
+
     with pytest.raises(ForestError) as caught:
         await clients[0].emit(body)
     assert caught.value.code == "STALE_BINDING"
+    await runtime.quiesce()
     await runtime.close()
     assert clients[0].closed is True
+    assert (await adapter.load_binding("binding/main"))["state"] == "ONLINE"
+
+    successor_body = json.loads(body)
+    successor_body["message_id"] = 78
+    await clients[1].emit(json.dumps(successor_body, separators=(",", ":")).encode())
+    async with store.pool.connection() as conn:
+        event_count = await (
+            await conn.execute(
+                sql.SQL("SELECT count(*) AS count FROM {}.platform_events").format(
+                    sql.Identifier(storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+    assert event_count["count"] == 2
+
+    await successor.quiesce()
+    await successor.close()
+    assert clients[1].closed is True
     assert (await adapter.load_binding("binding/main"))["state"] == "OFFLINE"

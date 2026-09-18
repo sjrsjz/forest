@@ -285,12 +285,6 @@ class CleanOneBotRuntime:
 
     async def _prewarm_binding(self, row: dict) -> None:
         binding_id = row["binding_id"]
-        if row["current_client_incarnation"] is not None:
-            raise ForestError(
-                "BINDING_RECOVERY_REQUIRED",
-                "A previous OneBot client must be reconciled before Generation startup",
-                409,
-            )
         if not row["enabled"]:
             self._prepared[binding_id] = _PreparedBinding(row, None, None, None, "")
             return
@@ -545,9 +539,9 @@ class CleanOneBotRuntime:
         for index, part in enumerate(segments):
             kind = part["type"]
             if kind == "image":
-                media_ref = "media:" + hashlib.sha256(
-                    (event_id + "\0" + str(index)).encode()
-                ).hexdigest()
+                media_ref = (
+                    "media:" + hashlib.sha256((event_id + "\0" + str(index)).encode()).hexdigest()
+                )
                 context_parts.append(
                     {
                         "type": "image",
@@ -574,13 +568,9 @@ class CleanOneBotRuntime:
             if kind == "text":
                 memory_texts.append((index, part["text"]))
             elif kind == "mention":
-                memory_texts.append(
-                    (index, "[mention:" + part["external_user_id"] + "]")
-                )
+                memory_texts.append((index, "[mention:" + part["external_user_id"] + "]"))
             elif kind == "reply":
-                memory_texts.append(
-                    (index, "[reply:" + part["platform_message_id"] + "]")
-                )
+                memory_texts.append((index, "[reply:" + part["platform_message_id"] + "]"))
             else:
                 memory_texts.append(
                     (index, "[unsupported:" + part.get("platform_type", kind) + "]")
@@ -713,11 +703,7 @@ class CleanOneBotRuntime:
         self, *, binding_id: str, body: bytes, signature: str | None
     ) -> None:
         connection = self._active.get(binding_id)
-        if (
-            connection is None
-            or connection.transport != "HTTP_POST"
-            or not connection.accepting
-        ):
+        if connection is None or connection.transport != "HTTP_POST" or not connection.accepting:
             raise ForestError("STALE_BINDING", "HTTP Binding is not accepting events", 409)
         verify_signature(body, connection.webhook_secret, signature)
         await self._ingest(connection, body)

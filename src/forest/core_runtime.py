@@ -134,9 +134,7 @@ class PreparedAuthorityModule:
         self.grants = grants
         self.runtime_contract = {
             "protocol": "forest.runtime-services/1",
-            "services": [
-                {"service_id": service_id, "version": 1} for service_id in services
-            ],
+            "services": [{"service_id": service_id, "version": 1} for service_id in services],
         }
         self.generation_identity = None
         self.generation_active = False
@@ -311,21 +309,19 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         )
 
     artifact = official_artifact("bot")
-    prepared = {
-        component_id: PreparedAuthorityModule(
-            component_id,
-            services[component_id],
-            configurations[component_id],
-            grants[component_id],
-            definition["services"],
-        )
-        for component_id, definition in _MODULES.items()
-    }
     descriptors = tuple(
         RuntimeModuleDescriptor(
             component_id,
             definition["requires"],
-            lambda _runtime, _modules, module=prepared[component_id]: module,
+            lambda _runtime, _modules, identity=component_id, service=services[component_id], configuration=configurations[component_id], grant=grants[component_id], provided_services=definition["services"]: (
+                PreparedAuthorityModule(
+                    identity,
+                    service,
+                    configuration,
+                    grant,
+                    provided_services,
+                )
+            ),
             artifact,
             storage=bundles[component_id],
         )

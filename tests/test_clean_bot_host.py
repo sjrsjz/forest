@@ -73,9 +73,10 @@ class FakeMediaClient(FakeModelClient):
 
     async def fetch(self, locator):
         self.fetched.append(locator)
-        if "retry" in (locator.get("uri") or "") and sum(
-            "retry" in (item.get("uri") or "") for item in self.fetched
-        ) == 1:
+        if (
+            "retry" in (locator.get("uri") or "")
+            and sum("retry" in (item.get("uri") or "") for item in self.fetched) == 1
+        ):
             raise ForestError("MEDIA_TRANSPORT_FAILED", "retry fixture", 502)
         return CapturedImage(b"fake-png-bytes", "image/png", 2, 3)
 
@@ -234,9 +235,12 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         }
                     ]
                     event_hash = hashlib.sha256(b"binding/main\x004242").hexdigest()
-                    media_ref = "media:" + hashlib.sha256(
-                        ("onebot-event:" + event_hash + "\x001").encode()
-                    ).hexdigest()
+                    media_ref = (
+                        "media:"
+                        + hashlib.sha256(
+                            ("onebot-event:" + event_hash + "\x001").encode()
+                        ).hexdigest()
+                    )
                     assets = await media_runtime.repository.asset_rows((media_ref,))
                     assert len(assets) == 1
                     resolved_media = await media_runtime.resolve_context(
@@ -287,16 +291,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                                 sql.SQL(
                                     "SELECT part_kind,part_index FROM {}.source_parts "
                                     "WHERE bot_id=%s AND source_unit_id=%s ORDER BY part_index"
-                                ).format(
-                                    sql.Identifier(memory_runtime.repository.namespace)
-                                ),
+                                ).format(sql.Identifier(memory_runtime.repository.namespace)),
                                 (settings.bot_id, capture["source_unit_id"]),
                             )
                         ).fetchall()
-                    assert [
-                        (part["part_kind"], part["part_index"])
-                        for part in stored_parts
-                    ] == [("TEXT", 0), ("IMAGE", 1), ("TEXT", 2)]
+                    assert [(part["part_kind"], part["part_index"]) for part in stored_parts] == [
+                        ("TEXT", 0),
+                        ("IMAGE", 1),
+                        ("TEXT", 2),
+                    ]
                     permitted = False
 
                     async def permit_in(_conn, *, request):
@@ -434,9 +437,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                                             "SELECT state FROM {}.embedding_facets "
                                             "WHERE bot_id=%s AND facet_id=%s"
                                         ).format(
-                                            sql.Identifier(
-                                                memory_runtime.repository.namespace
-                                            )
+                                            sql.Identifier(memory_runtime.repository.namespace)
                                         ),
                                         (settings.bot_id, facets["facets"][0]["facet_id"]),
                                     )
@@ -525,8 +526,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     )
                     assert recalled is not None
                     recalled_by_unit = {
-                        item["source_unit_id"]: item
-                        for item in recalled.evidence["evidence"]
+                        item["source_unit_id"]: item for item in recalled.evidence["evidence"]
                     }
                     assert set(recalled_by_unit) == {
                         "test-memory-unit",
@@ -537,13 +537,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         for part in recalled_by_unit[capture["source_unit_id"]]["parts"]
                     )
                     assert recalled.media
-                    assert recalled.evidence["conversation_id"] == (
-                        "onebot:group:933179609"
-                    )
+                    assert recalled.evidence["conversation_id"] == ("onebot:group:933179609")
                     recalled_source = recalled_by_unit["test-memory-unit"]["source"]
-                    assert recalled_source["group_source_id"] == (
-                        "onebot:group:933179609"
-                    )
+                    assert recalled_source["group_source_id"] == ("onebot:group:933179609")
                     assert recalled_source["channel_id"] == "933179609"
                     assert recalled_by_unit["test-memory-unit"]["author"] == {
                         "principal_ref": "qq:test",
@@ -581,23 +577,19 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             separators=(",", ":"),
                         ).encode()
                     )
-                    retry_event_hash = hashlib.sha256(
-                        b"binding/main\x004243"
-                    ).hexdigest()
+                    retry_event_hash = hashlib.sha256(b"binding/main\x004243").hexdigest()
                     retry_capture_id = "media-capture:" + retry_event_hash
                     async with asyncio.timeout(8):
                         while True:
-                            retry_capture = await media_runtime.repository.load(
-                                retry_capture_id
-                            )
+                            retry_capture = await media_runtime.repository.load(retry_capture_id)
                             if retry_capture["state"] == "READY":
                                 break
                             await asyncio.sleep(0.05)
                     assert retry_capture["attempt_count"] == 2
-                    assert sum(
-                        "retry" in (item.get("uri") or "")
-                        for item in FakeMediaClient.fetched
-                    ) == 2
+                    assert (
+                        sum("retry" in (item.get("uri") or "") for item in FakeMediaClient.fetched)
+                        == 2
+                    )
                     duplicate_body = json.dumps(
                         {
                             "self_id": int(settings.onebot_self_id),
@@ -630,9 +622,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         clients[-1].handler(duplicate_body),
                         clients[-1].handler(duplicate_body),
                     )
-                    duplicate_event_hash = hashlib.sha256(
-                        b"binding/main\x004244"
-                    ).hexdigest()
+                    duplicate_event_hash = hashlib.sha256(b"binding/main\x004244").hexdigest()
                     duplicate_capture_id = "media-capture:" + duplicate_event_hash
                     async with asyncio.timeout(5):
                         while True:
@@ -642,14 +632,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             if duplicate_capture["state"] == "READY":
                                 break
                             await asyncio.sleep(0.05)
-                    assert sum(
-                        "duplicate" in (item.get("uri") or "")
-                        for item in FakeMediaClient.fetched
-                    ) == 1
-                    runtime = host.registry.get("embedding.multimodal")
-                    current = await runtime.module_configuration.desired(
-                        include_value=True
+                    assert (
+                        sum(
+                            "duplicate" in (item.get("uri") or "")
+                            for item in FakeMediaClient.fetched
+                        )
+                        == 1
                     )
+                    runtime = host.registry.get("embedding.multimodal")
+                    current = await runtime.module_configuration.desired(include_value=True)
                     changed = deepcopy(current.value)
                     changed["endpoint"] = "http://127.0.0.1:9001/v1/embeddings"
                     plan = await runtime.module_configuration.plan(
@@ -663,11 +654,32 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         plan_id=plan["plan_id"],
                         expected_desired_revision=current.revision,
                     )
+                    previous_graph = host.registry.graph_identity
+                    replacement = await host.replace_runtime_graph()
+                    assert replacement.graph_identity.graph_id != previous_graph.graph_id
+                    assert set(replacement.states.values()) == {ModuleLifecycleState.ACTIVE}
+                    assert clients[-2].closed is True
+                    assert clients[-1].handler is not None
+                    async with host.store.pool.connection() as conn:
+                        graph_states = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT graph_id,state FROM {}.runtime_graphs "
+                                    "WHERE graph_id IN (%s,%s)"
+                                ).format(sql.Identifier(host._kernel.runtime.namespace)),
+                                (
+                                    previous_graph.graph_id,
+                                    replacement.graph_identity.graph_id,
+                                ),
+                            )
+                        ).fetchall()
+                    assert {row["graph_id"]: row["state"] for row in graph_states} == {
+                        previous_graph.graph_id: "STOPPED",
+                        replacement.graph_identity.graph_id: "ACTIVE",
+                    }
                 else:
                     runtime = host.registry.get("embedding.multimodal")
-                    current = await runtime.module_configuration.desired(
-                        include_value=True
-                    )
+                    current = await runtime.module_configuration.desired(include_value=True)
                     changed = deepcopy(current.value)
                     changed["profile"]["dimensions"] = 2048
                     plan = await runtime.module_configuration.plan(
@@ -687,6 +699,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         assert graph_ids[0] != graph_ids[1]
         assert FakeEmbeddingClient.endpoints == [
             "http://127.0.0.1:8001/v1/embeddings",
+            "http://127.0.0.1:9001/v1/embeddings",
             "http://127.0.0.1:9001/v1/embeddings",
         ]
         rejected = CleanBotHost(

@@ -53,9 +53,7 @@ def _secret(name: str, file_name: str) -> str:
     try:
         value = Path(path).read_text(encoding="utf-8").strip()
     except OSError as exc:
-        raise ForestError(
-            "BOT_SECRET_UNAVAILABLE", f"Unable to read {file_name}", 503
-        ) from exc
+        raise ForestError("BOT_SECRET_UNAVAILABLE", f"Unable to read {file_name}", 503) from exc
     if not value:
         raise ForestError("BOT_SECRET_UNAVAILABLE", f"{file_name} is empty", 503)
     return value
@@ -163,9 +161,7 @@ class CleanBotSettings:
         if any(not item.isdecimal() for item in shell_administrators) or len(
             shell_administrators
         ) != len(set(shell_administrators)):
-            raise ForestError(
-                "BOT_CONFIGURATION_INVALID", "FOREST_SHELL_ADMIN_IDS is invalid", 422
-            )
+            raise ForestError("BOT_CONFIGURATION_INVALID", "FOREST_SHELL_ADMIN_IDS is invalid", 422)
         modalities = tuple(
             part.strip()
             for part in os.environ.get("FOREST_MODEL_INPUT_MODALITIES", "text").split(",")
@@ -178,15 +174,11 @@ class CleanBotSettings:
             )
         private = os.environ.get("FOREST_PRIVATE_ENABLED", "true").lower()
         if private not in {"true", "false"}:
-            raise ForestError(
-                "BOT_CONFIGURATION_INVALID", "FOREST_PRIVATE_ENABLED is invalid", 422
-            )
+            raise ForestError("BOT_CONFIGURATION_INVALID", "FOREST_PRIVATE_ENABLED is invalid", 422)
         bot_id = os.environ.get("FOREST_BOT_ID", "forest-main")
         self_id = _required("FOREST_ONEBOT_SELF_ID")
         if not self_id.isdecimal():
-            raise ForestError(
-                "BOT_CONFIGURATION_INVALID", "FOREST_ONEBOT_SELF_ID is invalid", 422
-            )
+            raise ForestError("BOT_CONFIGURATION_INVALID", "FOREST_ONEBOT_SELF_ID is invalid", 422)
         return cls(
             bot_id=bot_id,
             dsn=_bot_dsn(),
@@ -198,9 +190,7 @@ class CleanBotSettings:
             model_deployment_id=os.environ.get(
                 "FOREST_MODEL_DEPLOYMENT_ID", "provider.chat-completions/main"
             ),
-            model_context_limit=_positive_int(
-                "FOREST_MODEL_CONTEXT_LIMIT", 32768, 256, 2_000_000
-            ),
+            model_context_limit=_positive_int("FOREST_MODEL_CONTEXT_LIMIT", 32768, 256, 2_000_000),
             model_max_output_tokens=_positive_int(
                 "FOREST_MODEL_MAX_OUTPUT_TOKENS", 4096, 1, 262_144
             ),
@@ -210,9 +200,7 @@ class CleanBotSettings:
                 _required("FOREST_EMBEDDING_ENDPOINT"),
                 {"http", "https"},
             ),
-            embedding_api_key=_secret(
-                "FOREST_EMBEDDING_API_KEY", "FOREST_EMBEDDING_API_KEY_FILE"
-            ),
+            embedding_api_key=_secret("FOREST_EMBEDDING_API_KEY", "FOREST_EMBEDDING_API_KEY_FILE"),
             embedding_deployment_id=os.environ.get(
                 "FOREST_EMBEDDING_DEPLOYMENT_ID",
                 "embedding.multimodal/qiyu-vl/default",
@@ -220,12 +208,8 @@ class CleanBotSettings:
             embedding_model_revision=os.environ.get(
                 "FOREST_EMBEDDING_MODEL_REVISION", "operator-declared/1"
             ),
-            embedding_model=os.environ.get(
-                "FOREST_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-8B"
-            ),
-            embedding_dimensions=_positive_int(
-                "FOREST_EMBEDDING_DIMENSIONS", 4096, 1, 4096
-            ),
+            embedding_model=os.environ.get("FOREST_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-8B"),
+            embedding_dimensions=_positive_int("FOREST_EMBEDDING_DIMENSIONS", 4096, 1, 4096),
             onebot_self_id=self_id,
             onebot_websocket_url=_origin(
                 "FOREST_ONEBOT_WEBSOCKET_URL",
@@ -264,6 +248,7 @@ class CleanBotHost:
         self.registry: RuntimeModuleRegistry | None = None
         self._lease = None
         self._renewal_task: asyncio.Task | None = None
+        self._replacement_lock: asyncio.Lock | None = None
         self._closing = False
         self._host_id = f"forest:{settings.bot_id}"
         self._incarnation = str(uuid4())
@@ -383,180 +368,177 @@ class CleanBotHost:
                     error_code="HOST_RESTARTED",
                 )
 
+    async def _assemble_registry(self) -> tuple[RuntimeModuleRegistry, object]:
+        capabilities = ModelCapabilities(
+            deployment_id=self.settings.model_deployment_id,
+            model=self.settings.model,
+            capability_revision="operator-declared/1",
+            input_modalities=self.settings.model_input_modalities,
+            context_limit=self.settings.model_context_limit,
+            max_output_tokens=self.settings.model_max_output_tokens,
+        )
+        provider_options = {}
+        if self._model_client_factory is not None:
+            provider_options["client_factory"] = self._model_client_factory
+        provider = await bootstrap_clean_provider(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            credential_resolver=lambda _revision: self.settings.model_api_key,
+            initial_configuration={
+                "protocol": "forest.provider.chat-completions/1",
+                "base_url": self.settings.model_base_url,
+                "timeout_seconds": 120,
+                "max_connections": 8,
+                "capabilities": capabilities.as_dict(),
+            },
+            **provider_options,
+        )
+        embedding_profile = {
+            "deployment_id": self.settings.embedding_deployment_id,
+            "model_revision": self.settings.embedding_model_revision,
+            "model": self.settings.embedding_model,
+            "dimensions": self.settings.embedding_dimensions,
+        }
+        embedding_options = {}
+        if self._embedding_client_factory is not None:
+            embedding_options["client_factory"] = self._embedding_client_factory
+
+        async def resolve_embedding_secret(secret_ref, _revision):
+            if secret_ref != "secret://embedding.multimodal/main/1":
+                raise ForestError(
+                    "EMBEDDING_CREDENTIAL_UNAVAILABLE",
+                    "Embedding credential reference differs",
+                    409,
+                )
+            return self.settings.embedding_api_key
+
+        embedding = await bootstrap_clean_embedding(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            credential_resolver=resolve_embedding_secret,
+            initial_configuration={
+                "protocol": "forest.embedding.multimodal/1",
+                "endpoint": self.settings.embedding_endpoint,
+                "credential_ref": "secret://embedding.multimodal/main/1",
+                "timeout_seconds": 60,
+                "max_connections": 4,
+                "profile": embedding_profile,
+            },
+            **embedding_options,
+        )
+        memory = await bootstrap_clean_memory(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={
+                "protocol": "forest.memory.graph/1",
+                "embedding": embedding_profile,
+                "fusion_policy_revision": "independent-facets/1",
+                "embedding_budget": {
+                    "policy_revision": "daily-cost-cap/1",
+                    "daily_request_limit": 1000,
+                    "daily_token_limit": 10000000,
+                    "reservation_tokens": 32768,
+                },
+            },
+        )
+        media_options = {}
+        if self._media_client_factory is not None:
+            media_options["client_factory"] = self._media_client_factory
+        media = await bootstrap_clean_media(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            **media_options,
+        )
+        agent = await bootstrap_clean_agent(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            preset_system=(self.settings.agent_system_prompt,)
+            if self.settings.agent_system_prompt
+            else (),
+        )
+        trigger = await bootstrap_clean_trigger_policy(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={
+                "protocol": "forest.conversation.trigger-policy/1",
+                "allowed_group_ids": list(self.settings.allowed_group_ids),
+                "group_trigger_mode": self.settings.group_trigger_mode,
+                "private_enabled": self.settings.private_enabled,
+            },
+        )
+
+        token_digest = (
+            "sha256:" + hashlib.sha256(self.settings.onebot_access_token.encode()).hexdigest()
+        )
+
+        async def resolve_onebot_secret(*, secret_ref, expected_digest):
+            if secret_ref != "secret://onebot/main/1" or expected_digest != token_digest:
+                raise ForestError("BINDING_SECRET_INVALID", "OneBot secret reference differs", 409)
+            return {"access_token": self.settings.onebot_access_token}
+
+        messaging_options = {}
+        if self._websocket_client_factory is not None:
+            messaging_options["websocket_client_factory"] = self._websocket_client_factory
+        messaging = await bootstrap_clean_messaging(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            secret_resolver=resolve_onebot_secret,
+            register_effect_fence=self.registry is None,
+            **messaging_options,
+        )
+        delivery = await bootstrap_clean_delivery(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            adapter=messaging.adapter,
+        )
+        shell = await bootstrap_clean_shell(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={
+                "protocol": "forest.shell.command/1",
+                "binding_ref": "binding/main",
+                "administrator_principals": [
+                    "qq:" + value for value in self.settings.shell_administrator_ids
+                ],
+            },
+        )
+        descriptors = (
+            self._kernel.descriptors
+            + (
+                provider.descriptor,
+                embedding.descriptor,
+                memory.descriptor,
+                media.descriptor,
+                agent.descriptor,
+                trigger.descriptor,
+                shell.descriptor,
+            )
+            + messaging.descriptors
+            + (delivery.descriptor,)
+        )
+        return RuntimeModuleRegistry(self, descriptors), messaging.adapter
+
     async def start(self) -> None:
         await self.store.open()
         try:
-            self._kernel = await bootstrap_clean_kernel(
-                self.store, self.schema_bundle_installer
-            )
+            self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
             self.generation_authority = self._kernel.runtime
-            capabilities = ModelCapabilities(
-                deployment_id=self.settings.model_deployment_id,
-                model=self.settings.model,
-                capability_revision="operator-declared/1",
-                input_modalities=self.settings.model_input_modalities,
-                context_limit=self.settings.model_context_limit,
-                max_output_tokens=self.settings.model_max_output_tokens,
-            )
-            provider_options = {}
-            if self._model_client_factory is not None:
-                provider_options["client_factory"] = self._model_client_factory
-            provider = await bootstrap_clean_provider(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                credential_resolver=lambda _revision: self.settings.model_api_key,
-                initial_configuration={
-                    "protocol": "forest.provider.chat-completions/1",
-                    "base_url": self.settings.model_base_url,
-                    "timeout_seconds": 120,
-                    "max_connections": 8,
-                    "capabilities": capabilities.as_dict(),
-                },
-                **provider_options,
-            )
-            embedding_profile = {
-                "deployment_id": self.settings.embedding_deployment_id,
-                "model_revision": self.settings.embedding_model_revision,
-                "model": self.settings.embedding_model,
-                "dimensions": self.settings.embedding_dimensions,
-            }
-            embedding_options = {}
-            if self._embedding_client_factory is not None:
-                embedding_options["client_factory"] = self._embedding_client_factory
-
-            async def resolve_embedding_secret(secret_ref, _revision):
-                if secret_ref != "secret://embedding.multimodal/main/1":
-                    raise ForestError(
-                        "EMBEDDING_CREDENTIAL_UNAVAILABLE",
-                        "Embedding credential reference differs",
-                        409,
-                    )
-                return self.settings.embedding_api_key
-
-            embedding = await bootstrap_clean_embedding(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                credential_resolver=resolve_embedding_secret,
-                initial_configuration={
-                    "protocol": "forest.embedding.multimodal/1",
-                    "endpoint": self.settings.embedding_endpoint,
-                    "credential_ref": "secret://embedding.multimodal/main/1",
-                    "timeout_seconds": 60,
-                    "max_connections": 4,
-                    "profile": embedding_profile,
-                },
-                **embedding_options,
-            )
-            memory = await bootstrap_clean_memory(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                initial_configuration={
-                    "protocol": "forest.memory.graph/1",
-                    "embedding": embedding_profile,
-                    "fusion_policy_revision": "independent-facets/1",
-                    "embedding_budget": {
-                        "policy_revision": "daily-cost-cap/1",
-                        "daily_request_limit": 1000,
-                        "daily_token_limit": 10000000,
-                        "reservation_tokens": 32768,
-                    },
-                },
-            )
-            media_options = {}
-            if self._media_client_factory is not None:
-                media_options["client_factory"] = self._media_client_factory
-            media = await bootstrap_clean_media(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                **media_options,
-            )
-            agent = await bootstrap_clean_agent(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                preset_system=(self.settings.agent_system_prompt,)
-                if self.settings.agent_system_prompt
-                else (),
-            )
-            trigger = await bootstrap_clean_trigger_policy(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                initial_configuration={
-                    "protocol": "forest.conversation.trigger-policy/1",
-                    "allowed_group_ids": list(self.settings.allowed_group_ids),
-                    "group_trigger_mode": self.settings.group_trigger_mode,
-                    "private_enabled": self.settings.private_enabled,
-                },
-            )
-
-            token_digest = "sha256:" + hashlib.sha256(
-                self.settings.onebot_access_token.encode()
-            ).hexdigest()
-
-            async def resolve_onebot_secret(*, secret_ref, expected_digest):
-                if (
-                    secret_ref != "secret://onebot/main/1"
-                    or expected_digest != token_digest
-                ):
-                    raise ForestError(
-                        "BINDING_SECRET_INVALID", "OneBot secret reference differs", 409
-                    )
-                return {"access_token": self.settings.onebot_access_token}
-
-            messaging_options = {}
-            if self._websocket_client_factory is not None:
-                messaging_options["websocket_client_factory"] = self._websocket_client_factory
-            messaging = await bootstrap_clean_messaging(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                secret_resolver=resolve_onebot_secret,
-                **messaging_options,
-            )
-            delivery = await bootstrap_clean_delivery(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                adapter=messaging.adapter,
-            )
-            shell = await bootstrap_clean_shell(
-                self.store,
-                self.schema_bundle_installer,
-                kernel=self._kernel,
-                initial_configuration={
-                    "protocol": "forest.shell.command/1",
-                    "binding_ref": "binding/main",
-                    "administrator_principals": [
-                        "qq:" + value for value in self.settings.shell_administrator_ids
-                    ],
-                },
-            )
-            await self._configure_binding(messaging.adapter)
-            self._lease = await self._kernel.runtime.claim_host(
-                self._host_id, self._incarnation
-            )
-            await self._reconcile_abandoned_clients(messaging.adapter)
-            descriptors = (
-                self._kernel.descriptors
-                + (
-                    provider.descriptor,
-                    embedding.descriptor,
-                    memory.descriptor,
-                    media.descriptor,
-                    agent.descriptor,
-                    trigger.descriptor,
-                    shell.descriptor,
-                )
-                + messaging.descriptors
-                + (delivery.descriptor,)
-            )
-            self.registry = RuntimeModuleRegistry(self, descriptors)
-            await self.registry.start()
+            self._replacement_lock = asyncio.Lock()
+            registry, adapter = await self._assemble_registry()
+            await self._configure_binding(adapter)
+            self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
+            await self._reconcile_abandoned_clients(adapter)
+            await registry.start()
+            self.registry = registry
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
             )
@@ -564,14 +546,47 @@ class CleanBotHost:
             await self.close()
             raise
 
+    async def replace_runtime_graph(self) -> RuntimeModuleRegistry:
+        """Publish a candidate graph, then drain the superseded graph."""
+
+        lock = self._replacement_lock
+        if lock is None or self.registry is None or self._closing:
+            raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+        async with lock:
+            if self.registry is None or self._closing:
+                raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+            previous = self.registry
+            candidate, _adapter = await self._assemble_registry()
+            try:
+                await candidate.start()
+            except BaseException:
+                await candidate.close()
+                raise
+            self.registry = candidate
+            errors = await previous.close()
+            if errors:
+                raise ForestError(
+                    "RUNTIME_GRAPH_DRAIN_FAILED",
+                    "The replacement graph is active but the superseded graph did not drain",
+                    503,
+                    details={"errors": len(errors)},
+                )
+            return candidate
+
     async def _renew_lease(self) -> None:
         while True:
             await asyncio.sleep(10)
-            self._lease = await self._kernel.runtime.claim_host(
-                self._host_id, self._incarnation
-            )
+            self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
 
     async def close(self) -> None:
+        lock = self._replacement_lock
+        if lock is None:
+            await self._close_locked()
+            return
+        async with lock:
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
         self._closing = True
         failure = None
         task, self._renewal_task = self._renewal_task, None

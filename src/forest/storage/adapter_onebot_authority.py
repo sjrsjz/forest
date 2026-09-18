@@ -66,9 +66,7 @@ def _timestamp(value, field: str, *, optional: bool = False):
 
 
 def _lock_key(bot_id: str, identity: str) -> int:
-    digest = hashlib.sha256(
-        _LOCK_DOMAIN + bot_id.encode() + b"\0" + identity.encode()
-    ).digest()
+    digest = hashlib.sha256(_LOCK_DOMAIN + bot_id.encode() + b"\0" + identity.encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
@@ -95,6 +93,7 @@ class OneBotPayloadRef:
             "owner_kind": self.owner_kind,
             "owner_id": self.owner_id,
         }
+
 
 @dataclass(frozen=True)
 class OneBotPlatformEvent:
@@ -123,9 +122,7 @@ class OneBotPlatformEvent:
         ):
             _bounded(value, field, limit)
         if self.channel_kind not in {"GROUP", "PRIVATE"}:
-            raise ForestError(
-                "ONEBOT_AUTHORITY_INPUT_INVALID", "Invalid OneBot channel kind", 422
-            )
+            raise ForestError("ONEBOT_AUTHORITY_INPUT_INVALID", "Invalid OneBot channel kind", 422)
         for reference, field, kind in (
             (self.raw, "raw", "onebot.raw-event"),
             (self.normalized, "normalized", "onebot.normalized-event"),
@@ -147,7 +144,9 @@ class OneBotPlatformEvent:
         sent = _timestamp(self.sent_at, "sent_at", optional=True)
         if not received < deadline <= received + timedelta(minutes=15):
             raise ForestError(
-                "ONEBOT_AUTHORITY_INPUT_INVALID", "Classification deadline is outside its bound", 422
+                "ONEBOT_AUTHORITY_INPUT_INVALID",
+                "Classification deadline is outside its bound",
+                422,
             )
         if sent is not None and sent > received + timedelta(minutes=5):
             raise ForestError(
@@ -221,9 +220,7 @@ class OneBotAdapterRepository:
             owner_id=reference.owner_id,
         )
 
-    async def _verify_generation(
-        self, conn, generation_id: str, *, admission_lane: str
-    ) -> object:
+    async def _verify_generation(self, conn, generation_id: str, *, admission_lane: str) -> object:
         if not callable(self.generation_verifier):
             raise ForestError(
                 "RUNTIME_AUTHORITY_MISSING",
@@ -239,9 +236,7 @@ class OneBotAdapterRepository:
 
     async def _verify_generation_member(self, conn, generation_id: str) -> object:
         if self.generation_member_verifier is None:
-            return await self._verify_generation(
-                conn, generation_id, admission_lane="DATA"
-            )
+            return await self._verify_generation(conn, generation_id, admission_lane="DATA")
         return await self.generation_member_verifier(
             conn,
             component_id="adapter.onebot",
@@ -254,10 +249,10 @@ class OneBotAdapterRepository:
             raise AssertionError("invalid internal lock mode")
         row = await (
             await conn.execute(
-                sql.SQL("SELECT *,clock_timestamp() AS database_now FROM {} "
-                        "WHERE bot_id=%s AND binding_id=%s {}").format(
-                    self._table("binding_heads"), suffix[lock]
-                ),
+                sql.SQL(
+                    "SELECT *,clock_timestamp() AS database_now FROM {} "
+                    "WHERE bot_id=%s AND binding_id=%s {}"
+                ).format(self._table("binding_heads"), suffix[lock]),
                 (self.store.bot_id, binding_id),
             )
         ).fetchone()
@@ -314,9 +309,11 @@ class OneBotAdapterRepository:
             await self._verify_payload(conn, display)
             occupied = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND "
-                            "(binding_id=%s OR (platform='onebot-v11' AND self_id=%s)) "
-                            "FOR UPDATE").format(self._table("binding_heads")),
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND "
+                        "(binding_id=%s OR (platform='onebot-v11' AND self_id=%s)) "
+                        "FOR UPDATE"
+                    ).format(self._table("binding_heads")),
                     (self.store.bot_id, binding_id, self_id),
                 )
             ).fetchone()
@@ -427,8 +424,10 @@ class OneBotAdapterRepository:
             head = await self._head(conn, binding_id, lock="share")
             if head["desired_revision"] != expected_revision:
                 raise ForestError("BINDING_REVISION_CONFLICT", "Binding revision changed", 409)
-            if not head["database_now"] < expires_at <= head["database_now"] + timedelta(
-                minutes=15
+            if (
+                not head["database_now"]
+                < expires_at
+                <= head["database_now"] + timedelta(minutes=15)
             ):
                 raise ForestError(
                     "ONEBOT_AUTHORITY_INPUT_INVALID", "Binding config plan expiry is invalid", 422
@@ -488,15 +487,17 @@ class OneBotAdapterRepository:
                 return dict(replay)
             plan = await (
                 await conn.execute(
-                    sql.SQL("SELECT *,clock_timestamp() AS database_now FROM {} "
-                            "WHERE bot_id=%s AND plan_id=%s").format(
-                        self._table("binding_config_plans")
-                    ),
+                    sql.SQL(
+                        "SELECT *,clock_timestamp() AS database_now FROM {} "
+                        "WHERE bot_id=%s AND plan_id=%s"
+                    ).format(self._table("binding_config_plans")),
                     (self.store.bot_id, plan_id),
                 )
             ).fetchone()
             if plan is None:
-                raise ForestError("BINDING_PLAN_NOT_FOUND", "Binding config plan does not exist", 404)
+                raise ForestError(
+                    "BINDING_PLAN_NOT_FOUND", "Binding config plan does not exist", 404
+                )
             head = await self._head(conn, plan["binding_id"], lock="update")
             if plan["database_now"] >= plan["expires_at"]:
                 raise ForestError("BINDING_PLAN_EXPIRED", "Binding config plan expired", 409)
@@ -536,10 +537,10 @@ class OneBotAdapterRepository:
                 )
             ).fetchone()
             await conn.execute(
-                sql.SQL("UPDATE {} SET desired_revision=%s,desired_enabled=%s,"
-                        "updated_at=clock_timestamp() WHERE bot_id=%s AND binding_id=%s").format(
-                    self._table("binding_heads")
-                ),
+                sql.SQL(
+                    "UPDATE {} SET desired_revision=%s,desired_enabled=%s,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND binding_id=%s"
+                ).format(self._table("binding_heads")),
                 (revision, plan["enabled"], self.store.bot_id, plan["binding_id"]),
             )
             return dict(row)
@@ -603,8 +604,9 @@ class OneBotAdapterRepository:
                 raise ForestError("STALE_BINDING", "Binding epoch changed", 409)
             revision_row = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s "
-                            "AND revision=%s").format(self._table("binding_revisions")),
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s AND revision=%s"
+                    ).format(self._table("binding_revisions")),
                     (self.store.bot_id, binding_id, revision),
                 )
             ).fetchone()
@@ -685,15 +687,17 @@ class OneBotAdapterRepository:
             head = await self._head(conn, binding_id, lock="update")
             client = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s "
-                            "FOR UPDATE").format(self._table("binding_clients")),
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s FOR UPDATE"
+                    ).format(self._table("binding_clients")),
                     (self.store.bot_id, client_incarnation),
                 )
             ).fetchone()
             revision_row = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s "
-                            "AND revision=%s").format(self._table("binding_revisions")),
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s AND revision=%s"
+                    ).format(self._table("binding_revisions")),
                     (self.store.bot_id, binding_id, revision),
                 )
             ).fetchone()
@@ -710,9 +714,11 @@ class OneBotAdapterRepository:
                 raise ForestError("STALE_BINDING", "Binding publication fence changed", 409)
             if client["state"] != "BUFFERING":
                 raise ForestError("BINDING_CLIENT_CONFLICT", "Client is not buffering", 409)
-            if head["current_client_incarnation"] is not None:
-                raise ForestError("BINDING_DRAIN_REQUIRED", "Current client must retire first", 409)
             if _candidate_generation_id is None:
+                if head["current_client_incarnation"] is not None:
+                    raise ForestError(
+                        "BINDING_DRAIN_REQUIRED", "Current client must retire first", 409
+                    )
                 await self._verify_generation(
                     conn, client["adapter_generation_id"], admission_lane="DATA"
                 )
@@ -725,10 +731,35 @@ class OneBotAdapterRepository:
             resulting_binding_epoch = expected_binding_epoch + 1
             resulting_connection_epoch = head["connection_epoch"] + 1
             now = head["database_now"]
+            previous_client_incarnation = head["current_client_incarnation"]
+            if previous_client_incarnation is not None:
+                previous = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT * FROM {} WHERE bot_id=%s AND client_incarnation=%s FOR UPDATE"
+                        ).format(self._table("binding_clients")),
+                        (self.store.bot_id, previous_client_incarnation),
+                    )
+                ).fetchone()
+                if previous is None or previous["state"] != "ACTIVE":
+                    raise ForestError(
+                        "BINDING_CLIENT_CONFLICT",
+                        "Published Binding client is not active",
+                        409,
+                    )
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='RETIRING',retired_at=%s WHERE bot_id=%s "
+                        "AND client_incarnation=%s"
+                    ).format(self._table("binding_clients")),
+                    (now, self.store.bot_id, previous_client_incarnation),
+                )
             await conn.execute(
-                sql.SQL("UPDATE {} SET state='ACTIVE',published_binding_epoch=%s,"
-                        "connection_epoch=%s,activated_at=%s WHERE bot_id=%s "
-                        "AND client_incarnation=%s").format(self._table("binding_clients")),
+                sql.SQL(
+                    "UPDATE {} SET state='ACTIVE',published_binding_epoch=%s,"
+                    "connection_epoch=%s,activated_at=%s WHERE bot_id=%s "
+                    "AND client_incarnation=%s"
+                ).format(self._table("binding_clients")),
                 (
                     resulting_binding_epoch,
                     resulting_connection_epoch,
@@ -738,12 +769,12 @@ class OneBotAdapterRepository:
                 ),
             )
             await conn.execute(
-                sql.SQL("UPDATE {} SET effective_revision=%s,binding_epoch=%s,"
-                        "connection_epoch=%s,state='ONLINE',effective_enabled=true,"
-                        "receive_enabled=%s,current_client_incarnation=%s,error_code=NULL,"
-                        "updated_at=%s WHERE bot_id=%s AND binding_id=%s").format(
-                    self._table("binding_heads")
-                ),
+                sql.SQL(
+                    "UPDATE {} SET effective_revision=%s,binding_epoch=%s,"
+                    "connection_epoch=%s,state='ONLINE',effective_enabled=true,"
+                    "receive_enabled=%s,current_client_incarnation=%s,error_code=NULL,"
+                    "updated_at=%s WHERE bot_id=%s AND binding_id=%s"
+                ).format(self._table("binding_heads")),
                 (
                     revision,
                     resulting_binding_epoch,
@@ -831,8 +862,9 @@ class OneBotAdapterRepository:
             head = await self._head(conn, binding_id, lock="update")
             revision_row = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s "
-                            "AND revision=%s").format(self._table("binding_revisions")),
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND binding_id=%s AND revision=%s"
+                    ).format(self._table("binding_revisions")),
                     (self.store.bot_id, binding_id, revision),
                 )
             ).fetchone()
@@ -847,11 +879,11 @@ class OneBotAdapterRepository:
                 raise ForestError("BINDING_DRAIN_REQUIRED", "Current client must retire first", 409)
             resulting_epoch = expected_binding_epoch + 1
             await conn.execute(
-                sql.SQL("UPDATE {} SET effective_revision=%s,binding_epoch=%s,state='DISABLED',"
-                        "effective_enabled=false,receive_enabled=false,error_code=NULL,"
-                        "updated_at=clock_timestamp() WHERE bot_id=%s AND binding_id=%s").format(
-                    self._table("binding_heads")
-                ),
+                sql.SQL(
+                    "UPDATE {} SET effective_revision=%s,binding_epoch=%s,state='DISABLED',"
+                    "effective_enabled=false,receive_enabled=false,error_code=NULL,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND binding_id=%s"
+                ).format(self._table("binding_heads")),
                 (revision, resulting_epoch, self.store.bot_id, binding_id),
             )
             row = await (
@@ -978,30 +1010,32 @@ class OneBotAdapterRepository:
             if not accepted:
                 return dict(row)
             is_current = head["current_client_incarnation"] == client_incarnation
-            if previous in {"ACTIVE", "RETIRING"} and not is_current:
+            if previous == "ACTIVE" and not is_current:
                 raise ForestError(
                     "BINDING_CLIENT_CONFLICT", "Published client is not the Binding head", 409
                 )
             now = client["database_now"]
             if observed_state == "RETIRING":
                 await conn.execute(
-                    sql.SQL("UPDATE {} SET state='RETIRING',retired_at=%s WHERE bot_id=%s "
-                            "AND client_incarnation=%s").format(self._table("binding_clients")),
+                    sql.SQL(
+                        "UPDATE {} SET state='RETIRING',retired_at=%s WHERE bot_id=%s "
+                        "AND client_incarnation=%s"
+                    ).format(self._table("binding_clients")),
                     (now, self.store.bot_id, client_incarnation),
                 )
                 await conn.execute(
-                    sql.SQL("UPDATE {} SET state='DRAINING',receive_enabled=false,"
-                            "updated_at=%s WHERE bot_id=%s AND binding_id=%s").format(
-                        self._table("binding_heads")
-                    ),
+                    sql.SQL(
+                        "UPDATE {} SET state='DRAINING',receive_enabled=false,"
+                        "updated_at=%s WHERE bot_id=%s AND binding_id=%s"
+                    ).format(self._table("binding_heads")),
                     (now, self.store.bot_id, client["binding_id"]),
                 )
             else:
                 await conn.execute(
-                    sql.SQL("UPDATE {} SET state=%s,error_code=%s,closed_at=%s "
-                            "WHERE bot_id=%s AND client_incarnation=%s").format(
-                        self._table("binding_clients")
-                    ),
+                    sql.SQL(
+                        "UPDATE {} SET state=%s,error_code=%s,closed_at=%s "
+                        "WHERE bot_id=%s AND client_incarnation=%s"
+                    ).format(self._table("binding_clients")),
                     (
                         observed_state,
                         error_code,
@@ -1013,11 +1047,11 @@ class OneBotAdapterRepository:
                 if is_current:
                     head_state = "OFFLINE" if head["effective_enabled"] else "DISABLED"
                     await conn.execute(
-                        sql.SQL("UPDATE {} SET state=%s,receive_enabled=false,"
-                                "current_client_incarnation=NULL,error_code=%s,updated_at=%s "
-                                "WHERE bot_id=%s AND binding_id=%s").format(
-                            self._table("binding_heads")
-                        ),
+                        sql.SQL(
+                            "UPDATE {} SET state=%s,receive_enabled=false,"
+                            "current_client_incarnation=NULL,error_code=%s,updated_at=%s "
+                            "WHERE bot_id=%s AND binding_id=%s"
+                        ).format(self._table("binding_heads")),
                         (
                             head_state,
                             error_code,
@@ -1098,9 +1132,9 @@ class OneBotAdapterRepository:
             )
             replay = await (
                 await conn.execute(
-                    sql.SQL(
-                        "SELECT o.* FROM {} o WHERE o.bot_id=%s AND o.operation_id=%s"
-                    ).format(self._table("event_admission_operations")),
+                    sql.SQL("SELECT o.* FROM {} o WHERE o.bot_id=%s AND o.operation_id=%s").format(
+                        self._table("event_admission_operations")
+                    ),
                     (self.store.bot_id, operation_id),
                 )
             ).fetchone()
@@ -1185,10 +1219,10 @@ class OneBotAdapterRepository:
             )
             row = await (
                 await conn.execute(
-                    sql.SQL("INSERT INTO {}(bot_id,operation_id,input_digest,event_id,duplicate) "
-                            "VALUES (%s,%s,%s,%s,false) RETURNING *").format(
-                        self._table("event_admission_operations")
-                    ),
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,operation_id,input_digest,event_id,duplicate) "
+                        "VALUES (%s,%s,%s,%s,false) RETURNING *"
+                    ).format(self._table("event_admission_operations")),
                     (self.store.bot_id, operation_id, input_digest, event.event_id),
                 )
             ).fetchone()
@@ -1218,9 +1252,7 @@ class OneBotAdapterRepository:
                         "LEFT JOIN {} r ON r.bot_id=h.bot_id AND r.binding_id=h.binding_id "
                         "AND r.revision=h.desired_revision WHERE h.bot_id=%s "
                         "ORDER BY h.binding_id"
-                    ).format(
-                        self._table("binding_heads"), self._table("binding_revisions")
-                    ),
+                    ).format(self._table("binding_heads"), self._table("binding_revisions")),
                     (self.store.bot_id,),
                 )
             ).fetchall()

@@ -86,7 +86,13 @@ def official_artifact(scope: str = "bot") -> RuntimeArtifactIdentity:
                 if child.name != "__pycache__":
                     walk(child, relative)
             elif child.name != "RECORD" and child.suffix.lower() in {
-                ".py", ".sql", ".html", ".css", ".js", ".json", ".toml"
+                ".py",
+                ".sql",
+                ".html",
+                ".css",
+                ".js",
+                ".json",
+                ".toml",
             }:
                 captured[relative] = hashlib.sha256(child.read_bytes()).hexdigest()
 
@@ -135,8 +141,10 @@ class RuntimeManagementContribution:
         if (
             not self.scope_kinds
             or len(set(self.scope_kinds)) != len(self.scope_kinds)
-            or any(scope not in {"deployment", "host", "bot", "binding", "component"}
-                   for scope in self.scope_kinds)
+            or any(
+                scope not in {"deployment", "host", "bot", "binding", "component"}
+                for scope in self.scope_kinds
+            )
         ):
             raise ValueError("Management contribution scopes are invalid")
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", self.group):
@@ -176,8 +184,9 @@ class RuntimeManagementContribution:
             "scope_kinds": list(self.scope_kinds),
             "group": self.group,
             "order": self.order,
-            "surface": surface if public else {key: value for key, value in surface.items()
-                                                  if key != "kind"},
+            "surface": surface
+            if public
+            else {key: value for key, value in surface.items() if key != "kind"},
         }
 
 
@@ -196,15 +205,11 @@ class RuntimeStorageBundle:
         elif self.execution_profile == "official":
             validate_official_storage_baseline(self.baseline, self.spec.baseline_sha256)
         else:
-            raise ForestError(
-                "INVALID_STORAGE_BUNDLE", "Storage execution profile is invalid", 422
-            )
+            raise ForestError("INVALID_STORAGE_BUNDLE", "Storage execution profile is invalid", 422)
         if not isinstance(self.package_digest, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", self.package_digest
         ):
-            raise ForestError(
-                "INVALID_STORAGE_BUNDLE", "Storage package digest is invalid", 422
-            )
+            raise ForestError("INVALID_STORAGE_BUNDLE", "Storage package digest is invalid", 422)
 
     def as_fact(self) -> dict:
         return {
@@ -222,9 +227,7 @@ def official_storage_bundle(
 ) -> RuntimeStorageBundle:
     """Bind one packaged official baseline to the complete distribution identity."""
 
-    common = files("forest").joinpath(
-        "storage/official/module_configuration.sql"
-    ).read_bytes()
+    common = files("forest").joinpath("storage/official/module_configuration.sql").read_bytes()
     owned = files("forest").joinpath(resource).read_bytes()
     baseline = common + b"\n" + owned
     artifact = official_artifact("bot")
@@ -497,75 +500,88 @@ OFFICIAL_MODULES = (
         (),
         _kernel_runtime,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "runtime",
-            "运行与业务接纳",
-            ("bot",),
-            "/static/modules/kernel.runtime.html",
-            "/static/kernel-runtime.js",
-            group="runtime",
-            order=10,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "runtime",
+                "运行与业务接纳",
+                ("bot",),
+                "/static/modules/kernel.runtime.html",
+                "/static/kernel-runtime.js",
+                group="runtime",
+                order=10,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "component.worker-host",
         (),
         _component_workers,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "components",
-            "可安装组件",
-            ("bot",),
-            "/static/modules/component.worker-host.html",
-            "/static/component-worker-host.js",
-            group="runtime",
-            order=20,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "components",
+                "可安装组件",
+                ("bot",),
+                "/static/modules/component.worker-host.html",
+                "/static/component-worker-host.js",
+                group="runtime",
+                order=20,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "adapter.onebot",
         ("component.worker-host",),
         _onebot,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "connections",
-            "OneBot 连接与投递",
-            ("bot",),
-            "/static/modules/adapter.onebot.html",
-            "/static/onebot-panel.js",
-            style="/static/modules/adapter.onebot.css",
-            group="adapter",
-            order=10,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "connections",
+                "OneBot 连接与投递",
+                ("bot",),
+                "/static/modules/adapter.onebot.html",
+                "/static/onebot-panel.js",
+                style="/static/modules/adapter.onebot.css",
+                group="adapter",
+                order=10,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "routing.graph",
         (),
         _routing_graph,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "routing",
-            "路由与执行图",
-            ("bot",),
-            "/static/modules/routing.graph.html",
-            "/static/routing-graph.js",
-            style="/static/modules/routing.graph.css",
-            group="runtime",
-            order=30,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "routing",
+                "路由与执行图",
+                ("bot",),
+                "/static/modules/routing.graph.html",
+                "/static/routing-graph.js",
+                style="/static/modules/routing.graph.css",
+                group="runtime",
+                order=30,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "memory.graph",
         ("adapter.onebot",),
         _memory,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "memory",
-            "图文记忆", ("bot",), "/static/modules/memory.graph.html", "/static/memory.js",
-            style="/static/modules/memory.graph.css",
-            group="business",
-            order=30,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "memory",
+                "图文记忆",
+                ("bot",),
+                "/static/modules/memory.graph.html",
+                "/static/memory.js",
+                style="/static/modules/memory.graph.css",
+                group="business",
+                order=30,
+            ),
+        ),
         wakes_on_work=True,
         work_notify_order=30,
     ),
@@ -574,58 +590,69 @@ OFFICIAL_MODULES = (
         ("adapter.onebot", "memory.graph"),
         _agent,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "agent",
-            "Agent 与模型", ("bot",), "/static/modules/agent.runtime.html", "/static/agent-panel.js",
-            style="/static/modules/agent.runtime.css",
-            group="business",
-            order=20,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "agent",
+                "Agent 与模型",
+                ("bot",),
+                "/static/modules/agent.runtime.html",
+                "/static/agent-panel.js",
+                style="/static/modules/agent.runtime.css",
+                group="business",
+                order=20,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "command.router",
         ("adapter.onebot", "routing.graph"),
         _command_routing,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "commands",
-            "业务命令路由",
-            ("bot",),
-            "/static/modules/command.router.html",
-            "/static/command-router.js",
-            group="routing",
-            order=40,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "commands",
+                "业务命令路由",
+                ("bot",),
+                "/static/modules/command.router.html",
+                "/static/command-router.js",
+                group="routing",
+                order=40,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "kernel.audit",
         (),
         _audit,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "audit",
-            "审计元数据",
-            ("bot",),
-            "/static/modules/kernel.audit.html",
-            "/static/kernel-audit.js",
-            group="runtime",
-            order=40,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "audit",
+                "审计元数据",
+                ("bot",),
+                "/static/modules/kernel.audit.html",
+                "/static/kernel-audit.js",
+                group="runtime",
+                order=40,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "message.router",
         ("adapter.onebot", "routing.graph"),
         _message_routing,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "messages",
-            "普通消息路由",
-            ("bot",),
-            "/static/modules/message.router.html",
-            "/static/message-router.js",
-            group="routing",
-            order=50,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "messages",
+                "普通消息路由",
+                ("bot",),
+                "/static/modules/message.router.html",
+                "/static/message-router.js",
+                group="routing",
+                order=50,
+            ),
+        ),
     ),
     RuntimeModuleDescriptor(
         "contract.router",
@@ -655,16 +682,18 @@ OFFICIAL_MODULES = (
         ("adapter.onebot", "conversation.scheduler"),
         _jobs,
         _OFFICIAL_ARTIFACT,
-        management=(RuntimeManagementContribution(
-            "schedules",
-            "定时任务",
-            ("bot",),
-            "/static/modules/scheduler.jobs.html",
-            "/static/jobs-panel.js",
-            style="/static/modules/scheduler.jobs.css",
-            group="automation",
-            order=20,
-        ),),
+        management=(
+            RuntimeManagementContribution(
+                "schedules",
+                "定时任务",
+                ("bot",),
+                "/static/modules/scheduler.jobs.html",
+                "/static/jobs-panel.js",
+                style="/static/modules/scheduler.jobs.css",
+                group="automation",
+                order=20,
+            ),
+        ),
         wakes_on_work=True,
         work_notify_order=20,
     ),
@@ -878,7 +907,9 @@ class RuntimeModuleRegistry:
     def _build(self) -> None:
         remaining = {item.component_id: item for item in self.descriptors}
         if len(remaining) != len(self.descriptors):
-            raise ForestError("DUPLICATE_RUNTIME_MODULE", "Runtime module identities must be unique")
+            raise ForestError(
+                "DUPLICATE_RUNTIME_MODULE", "Runtime module identities must be unique"
+            )
         for descriptor in self.descriptors:
             identity = descriptor.component_id
             if (
@@ -893,8 +924,7 @@ class RuntimeModuleRegistry:
                     descriptor.storage is not None
                     and (
                         descriptor.storage.spec.component_id != identity
-                        or descriptor.storage.package_digest
-                        != descriptor.artifact.package_digest
+                        or descriptor.storage.package_digest != descriptor.artifact.package_digest
                         or (
                             descriptor.storage.execution_profile == "official"
                             and descriptor.artifact.trust_level != "official"
@@ -909,8 +939,11 @@ class RuntimeModuleRegistry:
         resolved = set()
         while remaining:
             ready = sorted(
-                (item for item in remaining.values()
-                 if all(required in resolved for required in item.requires)),
+                (
+                    item
+                    for item in remaining.values()
+                    if all(required in resolved for required in item.requires)
+                ),
                 key=lambda item: item.component_id,
             )
             if not ready:
@@ -964,8 +997,8 @@ class RuntimeModuleRegistry:
                 self.instances[component_id] = instance
                 self.contract_router.register(component_id, instance)
                 if self.generation_authority is not None:
-                    self.generation_bindings[component_id] = (
-                        await self._prepare_generation_binding(descriptor, instance)
+                    self.generation_bindings[component_id] = await self._prepare_generation_binding(
+                        descriptor, instance
                     )
                 self._transition(component_id, ModuleLifecycleState.PREPARED)
             except BaseException:
@@ -1071,8 +1104,7 @@ class RuntimeModuleRegistry:
                     "RUNTIME_MODULE_REGISTRY_CLOSED", "Runtime module registry is closed", 503
                 )
             if all(
-                self.states[item]
-                in {ModuleLifecycleState.PREPARED, ModuleLifecycleState.ACTIVE}
+                self.states[item] in {ModuleLifecycleState.PREPARED, ModuleLifecycleState.ACTIVE}
                 for item in self.order
             ):
                 return
@@ -1123,7 +1155,8 @@ class RuntimeModuleRegistry:
             if (
                 self.graph_store is not None
                 and current is not None
-                and self.states[current] in {
+                and self.states[current]
+                in {
                     ModuleLifecycleState.PREPARED,
                     ModuleLifecycleState.ACTIVE,
                 }
@@ -1191,9 +1224,7 @@ class RuntimeModuleRegistry:
                 publication_participants={
                     component_id: self.instances[component_id]
                     for component_id in self.order
-                    if getattr(
-                        self.instances[component_id], "publish_generation_in", None
-                    )
+                    if getattr(self.instances[component_id], "publish_generation_in", None)
                     is not None
                 },
             )
@@ -1273,6 +1304,7 @@ class RuntimeModuleRegistry:
             if self._closed:
                 return []
             lease = None
+            superseded = False
             if self.graph_store is not None and self.graph_identity is not None:
                 try:
                     lease = self._lease(allow_closing=True)
@@ -1283,12 +1315,22 @@ class RuntimeModuleRegistry:
                     else:
                         await self.graph_store.retire(lease, self.graph_identity)
                 except ForestError as exc:
-                    if not self._lost_persistence_authority(exc):
+                    if (
+                        self.generation_authority is not None
+                        and exc.code == "RUNTIME_GRAPH_NOT_CURRENT"
+                    ):
+                        # A newer graph published under the same HostLease has
+                        # already fenced this graph from new work. Keep the
+                        # lease so this owner can drain its process-local
+                        # resources and persist their terminal lifecycle facts.
+                        superseded = True
+                    elif not self._lost_persistence_authority(exc):
                         raise
-                    # A fenced owner must still release process-local resources.
-                    # Its persistent graph remains historical until the current
-                    # owner atomically replaces or retires it.
-                    lease = None
+                    else:
+                        # A fenced owner must still release process-local resources.
+                        # Its persistent graph remains historical until the current
+                        # owner atomically replaces or retires it.
+                        lease = None
             self.contract_router.deactivate()
             errors = []
             for component_id in reversed(self.order):
@@ -1310,7 +1352,7 @@ class RuntimeModuleRegistry:
                 except Exception as exc:
                     errors.append(exc)
             if lease is not None:
-                if self.generation_authority is not None:
+                if self.generation_authority is not None and not superseded:
                     try:
                         await self.generation_authority.retire_graph(lease, self.graph_identity)
                     except ForestError as exc:
@@ -1360,8 +1402,10 @@ class RuntimeModuleRegistry:
                 continue
             instance = self.instances[component_id]
             owned = getattr(instance, "owned_tasks", None)
-            tasks = tuple(owned()) if owned is not None else (
-                (task,) if (task := getattr(instance, "task", None)) is not None else ()
+            tasks = (
+                tuple(owned())
+                if owned is not None
+                else ((task,) if (task := getattr(instance, "task", None)) is not None else ())
             )
             if any(not isinstance(task, asyncio.Task) for task in tasks):
                 raise ForestError(
@@ -1391,27 +1435,29 @@ class RuntimeModuleRegistry:
                 "requires": list(descriptor.requires),
                 "state": self.states[descriptor.component_id],
                 "artifact": descriptor.artifact.as_fact(),
-                "graph_id": self.graph_identity.graph_id if self.graph_identity is not None else None,
+                "graph_id": self.graph_identity.graph_id
+                if self.graph_identity is not None
+                else None,
                 "generation_id": (
                     self.graph_identity.generations[descriptor.component_id]
                     if self.graph_identity is not None
                     else None
                 ),
                 "management_contributions": [
-                    contribution.as_fact(public=True)
-                    for contribution in descriptor.management
+                    contribution.as_fact(public=True) for contribution in descriptor.management
                 ],
                 "management_contract": (
                     contract.describe()
-                    if (contract := getattr(
-                        self.instances.get(descriptor.component_id), "management_contract", None
-                    )) is not None
+                    if (
+                        contract := getattr(
+                            self.instances.get(descriptor.component_id), "management_contract", None
+                        )
+                    )
+                    is not None
                     else None
                 ),
                 "storage": (
-                    descriptor.storage.as_fact()
-                    if descriptor.storage is not None
-                    else None
+                    descriptor.storage.as_fact() if descriptor.storage is not None else None
                 ),
             }
             for descriptor in self.descriptors

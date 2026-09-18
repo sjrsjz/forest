@@ -42,6 +42,8 @@
 6. `activate_generation` 只打开本地 admission gate，不执行 I/O；
 7. 关闭先原子冻结所有 route admission，保留当前 graph head 供已持 lease 的工作以 member fence 排空；逆依赖达到 QUIESCENT 后才撤下 head并落 STOPPED/FAILED。
 
+同一 HostLease 下的候选图现已支持完整热替换：新图及其 OneBot 客户端先在 `BUFFERING` 状态预热，RuntimeGraph publication 事务同时把旧图/旧客户端置为 `RETIRED/RETIRING`、切换准确 Generation route 与 Binding epoch；提交后候选连接才打开事件流。旧连接即使尚未关闭也会被持久 fence 拒绝，旧 Registry 随后独立排空并记录 `STOPPED/DISPOSED`，不会冻结、退休或下线新图。宿主用单一替换锁串行候选发布、Registry 指针切换和旧图排空，配置 revision 因此可以在不停 HostLease 的情况下生效。
+
 新工作通过 `verify_active_generation_in()` 在最终事务内复核准确组件、Generation、RuntimeGraph、Route epoch 和 DATA/CONTROL admission；已经领取的排空工作只能通过 `verify_generation_member_in()` 继续，并同时复核自己的 actor/run/call lease。绑定身份失败、预热失败、图提交失败、本地 activation 不变量失败和 freeze 后新准入拒绝都有回收测试，不会遗留可接纳工作的部分图。
 
 ### Provider、Agent、Conversation 与 OneBot Messaging 图
@@ -106,7 +108,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 3. 为多模态 Memory 做十万至百万来源的筛选、稳定分页、关系展开、图片负载和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
 5. 继续把多 Bot provisioning 和恢复控制面切到干净宿主；单 Bot `forest bot`、HostLease 续租/释放、遗留 OneBot 客户端结算和 Docker 默认入口已经切到最小 bootstrap + bundle + 冻结 RuntimeGraph。
-6. 完成 OneBot 热替换时旧客户端排空、新候选 publication、长连接抖动验证；当前已验证正常关闭后立即重启以及新宿主对遗留客户端的失败结算。
+6. 补充 OneBot 热替换的长连接抖动、候选 publication 后进程崩溃和持续流量压力验证；正常热替换现已验证候选 BUFFERING、RuntimeGraph/Binding 原子换代、旧客户端 fence、旧图排空，以及新宿主对遗留客户端的失败结算。
 7. 删除旧 schema、迁移、兼容测试和失去所有权的代码。
 8. 完成完整 Docker、真实 QQ 许可群 `933179609` 的低频验收；真实启动前先停止树莓派 `alicebot.service`。
 
@@ -116,8 +118,8 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：上一基线 `183 passed`。
 - Agent/Conversation Worker、持久调度 Repository、十成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`124 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、Delivery Bot 能力到精确 Adapter Generation 的票据、PREPARED abandonment/requeue、DISPATCHING 崩溃后 UNKNOWN、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、Adapter 持久 binding fence、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
 - 十一成员 Kernel + Provider + Memory + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、OneBot 文本来源/群主干登记、InputBatch 与 Memory eligibility 原子提交、发送前许可、生命周期所属 Delivery Worker 的真实 OneBot wire 调用与 SENT 落账、作者/群来源和逆序关闭。最新 clean authority/RuntimeGraph 定向组合为 `68 passed`；并发测试覆盖 InputBatch 与延迟媒体来源两种完成顺序，最终没有未解析的 `PENDING_CAPTURE`。
-- OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
-- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。15 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置的新 Generation 生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布、可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger；群 Shell 在 DATA admission 关闭时仍能完成受权状态查询和拒绝回执，普通 DATA 消息保持未接纳。
+- OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、首次 publication、运行中候选预热、原子客户端换代、旧连接 fence、旧连接异步关闭、新连接继续接纳、quiesce 和 CLOSED。
+- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。15 成员图可以从空库启动、在同一 HostLease 下热替换并排空旧图、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置 revision 可通过候选 Generation 立即生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布、可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger；群 Shell 在 DATA admission 关闭时仍能完成受权状态查询和拒绝回执，普通 DATA 消息保持未接纳。
 - Shell、干净模块、RuntimeGraph、Schema bundle、Delivery 与 CONTROL/DATA 准入定向组合：`170 passed`；覆盖原子控制入站、P0/P1、授权重验、撤权后安全失败、CONTROL 优先发送、群聊 pause/resume 及 DATA 维护态隔离。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
