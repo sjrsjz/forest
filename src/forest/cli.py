@@ -63,6 +63,10 @@ def main() -> None:
     serve.add_argument(
         "--public-origin", default=os.environ.get("FOREST_PUBLIC_ORIGIN", "http://127.0.0.1:8080")
     )
+    sub.add_parser(
+        "bot",
+        help="start one clean microkernel Bot graph from deployment environment",
+    )
     pair = sub.add_parser("setup-token", help="通过本机运维通道获取/轮换一次性初始化凭据")
     pair.add_argument(
         "--data-dir", type=Path, default=Path(os.environ.get("FOREST_DATA_DIR", ".forest"))
@@ -139,6 +143,11 @@ def main() -> None:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         if args.command in {"plugin", "dev"}:
             asyncio.run(run_plugin_command(args))
+            return
+        if args.command == "bot":
+            from forest.clean_bot_host import CleanBotSettings, run_clean_bot
+
+            asyncio.run(run_clean_bot(CleanBotSettings.from_environment()))
             return
         if args.command == "deployment-recovery":
             from forest.deployment_lock import DeploymentLock

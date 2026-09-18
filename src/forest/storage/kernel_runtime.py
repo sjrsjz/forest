@@ -111,6 +111,29 @@ class KernelRuntimeRepository:
             ).fetchone()
             return self._lease(saved)
 
+    async def release_host(self, lease: HostLease) -> None:
+        """Relinquish one live host lease after its runtime graph is retired."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET host_id=NULL,incarnation=NULL,"
+                        "expires_at=clock_timestamp() WHERE bot_id=%s AND host_id=%s "
+                        "AND incarnation=%s AND owner_epoch=%s RETURNING owner_epoch"
+                    ).format(self._table("host_lease")),
+                    (
+                        self.store.bot_id,
+                        lease.host_id,
+                        lease.incarnation,
+                        lease.owner_epoch,
+                    ),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError("STALE_HOST", "Bot host lease is no longer current", 409)
+
     async def verify_active_generation(
         self,
         *,

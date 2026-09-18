@@ -50,6 +50,7 @@ _DEFINITIONS = {
             "kernel.payload",
             "kernel.authorization",
             "conversation.scheduler",
+            "conversation.trigger-policy",
             "memory.graph",
         ),
         "capabilities": ("adapter.onebot.ingress", "adapter.onebot.send"),
@@ -295,6 +296,7 @@ async def bootstrap_clean_messaging(
             "ingress_port": _RoutedIngress(
                 contracts.service("kernel.uow.onebot.ingress", 1)
             ),
+            "trigger_policy": contracts.service("conversation.trigger.classify", 1),
         }
         if http_client_factory is not None:
             values["http_client_factory"] = http_client_factory

@@ -4,15 +4,15 @@
 
 下面的对象必须分开持久化，不能用模块名或路径兼任所有身份。
 
-| 对象 | 身份 | 可变性 |
-|---|---|---|
-| Package | `package_id + version + content_digest` | 内容不可变；同版本不同摘要拒绝静默替换 |
-| ComponentSpec | `package_digest + component_id` | 声明契约、作用域、运行时、资源和能力请求 |
-| Instance | `instance_id` | 对应一个 Worker/受管理执行容器 |
-| Generation | `component_id + scope_key + generation_id` | 完整绑定代码、schema、依赖、能力授予与配置快照 |
-| Route | `bot_id + service_name + contract_major` | 指向 Generation，带单调 `route_epoch` |
-| ResourceOwner | `scope(host / bot:bot_id) + generation_id + run_id?` | 树状所有权，父级退出必须回收子级 |
-| LifecycleOperation | `operation_id` | 持久操作日志，记录每步完成与失败原因 |
+| 对象               | 身份                                                   | 可变性                                         |
+| ------------------ | ------------------------------------------------------ | ---------------------------------------------- |
+| Package            | `package_id + version + content_digest`              | 内容不可变；同版本不同摘要拒绝静默替换         |
+| ComponentSpec      | `package_digest + component_id`                      | 声明契约、作用域、运行时、资源和能力请求       |
+| Instance           | `instance_id`                                        | 对应一个 Worker/受管理执行容器                 |
+| Generation         | `component_id + scope_key + generation_id`           | 完整绑定代码、schema、依赖、能力授予与配置快照 |
+| Route              | `bot_id + service_name + contract_major`             | 指向 Generation，带单调`route_epoch`         |
+| ResourceOwner      | `scope(host / bot:bot_id) + generation_id + run_id?` | 树状所有权，父级退出必须回收子级               |
+| LifecycleOperation | `operation_id`                                       | 持久操作日志，记录每步完成与失败原因           |
 
 Generation ID 在部署中全局唯一，是不可变身份；`route_epoch` 是单条组件路由的发布顺序，两者不可互换。Bot 的 `registry_revision` 只表示路由集合修订，不能作为所有组件共用的失效开关。重新部署同一二进制也创建新 Generation；token 同时绑定宿主和 Worker incarnation。按文件路径重新查找身份会导致旧代码携带新权限，因此实际执行代码和调用身份在领取请求时一次绑定。
 
@@ -153,17 +153,17 @@ stateDiagram-v2
 
 `DISPOSED` 和 `FAILED` 实例不能重新激活；恢复创建新 Instance/Generation。包可以留在缓存中，但活跃实例不能因 LRU 淘汰而失去运行身份。
 
-| 阶段 | 允许行为 | 成功条件/失败处理 |
-|---|---|---|
-| VALIDATED | 读取声明，无用户代码副作用 | 依赖和授权计划固定；失败返回诊断 |
-| PREPARING | 临时资源、只读预热、恢复候选状态 | 超时终止候选，不影响旧代 |
-| READY | 健康探测、待命 | 无生产订阅/写权限；可直接回收 |
-| ACTIVE | 持有效 token 接单和执行 | readiness 与 liveness 分开判断 |
-| QUIESCING | 完成已领取工作、写安全 checkpoint | 禁止新顶层请求；既有调用树保留有限执行权 |
-| QUIESCENT | 导出状态、健康维护 | 无可提交的用户任务、未交接的资源或外发临界区 |
-| STOPPING | 释放资源 | 不允许新增任务，超时后 Driver 强制终止 |
-| STOPPED | 内核清理残余账本 | Worker 已退出，不能仅因 callback 返回就认定完成 |
-| DISPOSED | 无 | 订阅、句柄、租约、子进程和临时对象均已回收 |
+| 阶段      | 允许行为                          | 成功条件/失败处理                               |
+| --------- | --------------------------------- | ----------------------------------------------- |
+| VALIDATED | 读取声明，无用户代码副作用        | 依赖和授权计划固定；失败返回诊断                |
+| PREPARING | 临时资源、只读预热、恢复候选状态  | 超时终止候选，不影响旧代                        |
+| READY     | 健康探测、待命                    | 无生产订阅/写权限；可直接回收                   |
+| ACTIVE    | 持有效 token 接单和执行           | readiness 与 liveness 分开判断                  |
+| QUIESCING | 完成已领取工作、写安全 checkpoint | 禁止新顶层请求；既有调用树保留有限执行权        |
+| QUIESCENT | 导出状态、健康维护                | 无可提交的用户任务、未交接的资源或外发临界区    |
+| STOPPING  | 释放资源                          | 不允许新增任务，超时后 Driver 强制终止          |
+| STOPPED   | 内核清理残余账本                  | Worker 已退出，不能仅因 callback 返回就认定完成 |
+| DISPOSED  | 无                                | 订阅、句柄、租约、子进程和临时对象均已回收      |
 
 生命周期命令携带 `operation_id + phase`。宿主记录完成结果，重复命令返回同一结果；组件清理方法应幂等。callback 本身不保证 exactly-once，崩溃恢复依靠持久阶段与资源所有者校验。
 
@@ -233,14 +233,14 @@ Router 校验不是最终保护。持久提交事务必须同时验证组件 `ro
 
 ### 6.3 回滚与崩溃恢复
 
-| 失败点 | 恢复动作 |
-|---|---|
-| 新包校验、预热或状态 handoff 失败 | 回收候选，旧代按最新维护策略继续/恢复 admission，记录失败 |
-| freeze 后协调器崩溃，尚无 route commit | 恢复器读旧路由，校验旧代健康；恢复旧代或以旧包创建新代并提升 epoch |
-| route commit 成功，内存发布前崩溃 | 以 Bot 数据库已提交路由为准；可重新握手接管仍存活的候选。若需重建 Worker，则创建新 Instance/Generation 并再次递增 epoch，不能按控制库缓存回旧代 |
-| 新代已接单后健康失败 | 执行一次新的替换操作；回旧包也必须创建新 Generation、递增 epoch |
-| 旧实例 stop 失败 | 撤销句柄、终止 Worker、检查资源账本；残余资源使操作标记 `CLEANUP_FAILED` |
-| 外部副作用结果不明 | 意图保持 UNKNOWN，由专用对账路径处理；不能恢复 Run 后重新生成同一效果 |
+| 失败点                                 | 恢复动作                                                                                                                                        |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 新包校验、预热或状态 handoff 失败      | 回收候选，旧代按最新维护策略继续/恢复 admission，记录失败                                                                                       |
+| freeze 后协调器崩溃，尚无 route commit | 恢复器读旧路由，校验旧代健康；恢复旧代或以旧包创建新代并提升 epoch                                                                              |
+| route commit 成功，内存发布前崩溃      | 以 Bot 数据库已提交路由为准；可重新握手接管仍存活的候选。若需重建 Worker，则创建新 Instance/Generation 并再次递增 epoch，不能按控制库缓存回旧代 |
+| 新代已接单后健康失败                   | 执行一次新的替换操作；回旧包也必须创建新 Generation、递增 epoch                                                                                 |
+| 旧实例 stop 失败                       | 撤销句柄、终止 Worker、检查资源账本；残余资源使操作标记 `CLEANUP_FAILED`                                                                         |
+| 外部副作用结果不明                     | 意图保持 UNKNOWN，由专用对账路径处理；不能恢复 Run 后重新生成同一效果                                                                           |
 
 切换后的回滚不等于恢复旧快照。新代已经提交的数据必须保留；仅在旧代码能读取当前 baseline contract、checkpoint 与事件版本时才允许部署旧包。当前未发布阶段的 schema 不兼容变化不走热重载或回滚，直接重建开发数据库；不得预埋 expand/contract、旧列 fallback 或双写。
 
@@ -262,13 +262,13 @@ dynamic字段以新的不可变请求配置覆盖层发布，Generation的构造
 
 ## 7. 状态分类与代际交接
 
-| 状态 | 示例 | 替换策略 |
-|---|---|---|
-| 无状态/可重建缓存 | schema 缓存、只读索引句柄 | 丢弃并预热，不要求 snapshot |
-| 会话临时状态 | Prompt 视图、stream 缓冲 | 在安全边界结束/取消后重建；不交接活跃流 |
-| 小型组件状态 | 有界游标、计数快照 | 序列化 snapshot，检查基准 revision 与 checksum |
-| 持久业务状态 | Context、记忆、Job、工具结果 | 保留模块 Repository 中的事实；随准确 schema bundle 身份重新挂载，不混入 Generation snapshot |
-| 外部资源 | WebSocket、浏览器、模型流 | 原实例关闭，新实例重建；必要时交接持久游标 |
+| 状态              | 示例                         | 替换策略                                                                                                  |
+| ----------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 无状态/可重建缓存 | schema 缓存、只读索引句柄    | 丢弃并预热，不要求 snapshot                                                                               |
+| 会话临时状态      | Prompt 视图、stream 缓冲     | 在安全边界结束/取消后重建；不交接活跃流                                                                   |
+| 小型组件状态      | 有界游标、计数快照           | 序列化 snapshot，检查基准 revision 与 checksum                                                            |
+| 持久业务状态      | Context、记忆、Job、工具结果 | 保留模块 Repository 中的事实；随准确 schema bundle 身份重新挂载，不混入 Generation snapshot              |
+| 外部资源          | WebSocket、浏览器、模型流    | 原实例关闭，新实例重建；必要时交接持久游标                                                                |
 
 snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source_revision, captured_at, checksum, payload_ref`。禁止序列化凭据、Python 对象引用、锁、执行栈或模块数据库。handoff 转换函数输入旧值对象、输出新值对象，不访问数据库、模型、网络或真实平台；重复转换应得到相同结果。持久事实不进入 snapshot；首发前 schema 变化直接重建数据库，不能借 handoff 回调绕过。
 

@@ -101,10 +101,10 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 2. 为 `agent.runtime` 注册真实工具目录、授权/Effect 与查询路由，补齐 WAIT_APPROVAL 唤醒、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；PARSING 和 SAFE_BOUNDARY 已支持确定性自动重放，当前自动链仍只验证无工具终止回答。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；下一步删除旧业务 `contract.router` 与旧组合根。
 3. 把完整多模态 Memory/Embedding Worker 接入 RuntimeGraph，并做十万至百万来源的筛选、稳定分页、关系展开和资源上限测试。
 4. 建立模块贡献式管理协议与新 WebUI 壳；删除当前固定业务 DOM、专用 API 和旧大页面。
-5. 将 provisioning、启动、恢复和 Docker 入口切到最小 bootstrap + 所选模块 bundle + 冻结 RuntimeGraph。
-6. 完成 OneBot 热替换时旧客户端排空、新候选 publication、崩溃恢复和长连接抖动验证。
+5. 继续把多 Bot provisioning 和恢复控制面切到干净宿主；单 Bot `forest bot`、HostLease 续租/释放、遗留 OneBot 客户端结算和 Docker 默认入口已经切到最小 bootstrap + bundle + 冻结 RuntimeGraph。
+6. 完成 OneBot 热替换时旧客户端排空、新候选 publication、长连接抖动验证；当前已验证正常关闭后立即重启以及新宿主对遗留客户端的失败结算。
 7. 删除旧 schema、迁移、兼容测试和失去所有权的代码。
-8. 完成 Docker、完整 PostgreSQL、真实 QQ 许可群 `933179609` 的低频验收；真实启动前先停止树莓派 `alicebot.service`。
+8. 完成完整 Docker、真实 QQ 许可群 `933179609` 的低频验收；真实启动前先停止树莓派 `alicebot.service`。
 
 ## 最近可复现证据
 
@@ -113,6 +113,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 - Agent/Conversation Worker、持久调度 Repository、十成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`124 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复三参与者事务回滚、Delivery Bot 能力到精确 Adapter Generation 的票据、PREPARED abandonment/requeue、DISPATCHING 崩溃后 UNKNOWN、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、Adapter 持久 binding fence、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
 - 十一成员 Kernel + Provider + Memory + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、OneBot 文本来源/群主干登记、InputBatch 与 Memory eligibility 原子提交、发送前许可、生命周期所属 Delivery Worker 的真实 OneBot wire 调用与 SENT 落账、作者/群来源和逆序关闭。最新 clean authority/RuntimeGraph 定向组合为 `68 passed`；并发测试覆盖 InputBatch 与延迟媒体来源两种完成顺序，最终没有未解析的 `PENDING_CAPTURE`。
 - OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、原子 publication、事件 UoW、quiesce 和 CLOSED。
+- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。12 成员图可以从空库启动、退休、显式释放 HostLease 并立即以新 incarnation 重启；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger。当前 clean 定向组合为 `69 passed`。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
-测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 启动、百万级记忆以及生产 cutover 尚未完成。
+测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

@@ -41,6 +41,15 @@ class IngressMemoryCapture:
     occurred_at: datetime
 
 
+@dataclass(frozen=True)
+class IngressClassification:
+    decision: str
+    classifier_component_id: str
+    classifier_generation_id: str
+    rule_revision: str
+    reason_code: str
+
+
 class OneBotIngressUnitOfWork:
     """Coordinate participant ports without taking ownership of their facts."""
 
@@ -95,6 +104,7 @@ class OneBotIngressUnitOfWork:
         client_incarnation: str,
         event: OneBotPlatformEvent,
         memory_capture: IngressMemoryCapture | None = None,
+        classification: IngressClassification | None = None,
         shell_command: ShellIngressCommand | None = None,
     ) -> dict:
         if shell_command is not None:
@@ -174,7 +184,27 @@ class OneBotIngressUnitOfWork:
                 )
                 memory_result = {"source": source, "capture": captured}
             shell_result = None
-            classification = None
+            classification_result = None
+            if classification is not None:
+                if type(classification) is not IngressClassification:
+                    raise ForestError(
+                        "CONVERSATION_INPUT_INVALID", "Invalid ingress classification", 422
+                    )
+                is_trigger = classification.decision == "TRIGGER"
+                classification_result = await self.conversation.complete_classification_in(
+                    conn,
+                    operation_id="onebot-classification:" + event.event_id,
+                    conversation_id=event.conversation_ref,
+                    event_id=scheduler_event_id,
+                    decision=classification.decision,
+                    classifier_component_id=classification.classifier_component_id,
+                    classifier_generation_id=classification.classifier_generation_id,
+                    rule_revision=classification.rule_revision,
+                    reason_code=classification.reason_code,
+                    route_ref=None,
+                    trigger_id=("onebot-trigger:" + event.event_id) if is_trigger else None,
+                    principal_ref=event.author_subject_ref if is_trigger else None,
+                )
             if shell_command is not None:
                 shell_result = await self.shell.admit_command_in(
                     conn,
@@ -188,7 +218,7 @@ class OneBotIngressUnitOfWork:
                     received_at=event.received_at,
                     admission_deadline=event.classification_deadline,
                 )
-                classification = await self.conversation.complete_classification_in(
+                classification_result = await self.conversation.complete_classification_in(
                     conn,
                     operation_id="onebot-shell-classification:" + event.event_id,
                     conversation_id=event.conversation_ref,
@@ -207,5 +237,5 @@ class OneBotIngressUnitOfWork:
                 "conversation": conversation_result,
                 "memory": memory_result,
                 "shell": shell_result,
-                "classification": classification,
+                "classification": classification_result,
             }

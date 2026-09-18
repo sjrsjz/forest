@@ -81,6 +81,16 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         assert expected_digest == "sha256:" + "a" * 64
         return {"access_token": "test-access-token"}
 
+    async def classify(*, normalized):
+        assert normalized["channel_id"] == "933179609"
+        return {
+            "decision": "NO_TRIGGER",
+            "classifier_component_id": "conversation.trigger-policy",
+            "classifier_generation_id": "generation/trigger-policy/1",
+            "rule_revision": "trigger-policy:1:test",
+            "reason_code": "mention_required",
+        }
+
     ingress = OneBotIngressUnitOfWork(store, adapter=adapter, conversation=scheduler)
     runtime = CleanOneBotRuntime(
         repository=adapter,
@@ -89,6 +99,7 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         payloads=payloads,
         secret_resolver=resolve_secret,
         ingress_port=ingress,
+        trigger_policy=classify,
         websocket_client_factory=create_client,
     )
     identity = BoundGenerationIdentity(

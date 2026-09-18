@@ -40,7 +40,13 @@ class _RoutedChatProvider:
         return await self._dispatch(*args, **kwargs)
 
 
-async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule:
+async def bootstrap_clean_agent(
+    store,
+    installer,
+    *,
+    kernel,
+    preset_system: tuple[str, ...] = (),
+) -> CleanAgentModule:
     storage = official_storage_bundle(
         "agent.runtime",
         "forest.agent.runtime",
@@ -66,7 +72,9 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
         owner_kind="preset.context",
         owner_id=preset_owner_id,
         media_type="application/json",
-        content=json.dumps({"system": []}, separators=(",", ":")).encode(),
+        content=json.dumps(
+            {"system": list(preset_system)}, ensure_ascii=False, separators=(",", ":")
+        ).encode(),
         sources=(
             PayloadSource(
                 "agent.runtime",

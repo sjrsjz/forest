@@ -26,7 +26,7 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPayloadRef,
     OneBotPlatformEvent,
 )
-from forest.storage.ingress_unit_of_work import IngressMemoryCapture
+from forest.storage.ingress_unit_of_work import IngressClassification, IngressMemoryCapture
 from forest.storage.memory_graph_authority import (
     MemoryPart,
     MemoryPayloadRef,
@@ -123,6 +123,7 @@ class CleanOneBotRuntime:
         ],
         "requires": [
             {"service_id": "kernel.uow.onebot.ingress", "version": 1},
+            {"service_id": "conversation.trigger.classify", "version": 1},
         ],
     }
     state_schema = 1
@@ -147,6 +148,7 @@ class CleanOneBotRuntime:
         payloads: KernelPayloadRepository,
         secret_resolver: Callable[..., Awaitable[Mapping[str, str]] | Mapping[str, str]],
         ingress_port,
+        trigger_policy,
         http_client_factory=OneBotHTTPClient,
         websocket_client_factory=OneBotWebSocketClient.create,
     ) -> None:
@@ -156,6 +158,7 @@ class CleanOneBotRuntime:
         self.payloads = payloads
         self.secret_resolver = secret_resolver
         self.ingress_port = ingress_port
+        self.trigger_policy = trigger_policy
         self.http_client_factory = http_client_factory
         self.websocket_client_factory = websocket_client_factory
         self.generation_identity: BoundGenerationIdentity | None = None
@@ -597,6 +600,14 @@ class CleanOneBotRuntime:
             classification_deadline=received_at + timedelta(minutes=2),
             sent_at=sent_at,
         )
+        classified = await self.trigger_policy(normalized=normalized)
+        classification = IngressClassification(
+            decision=classified["decision"],
+            classifier_component_id=classified["classifier_component_id"],
+            classifier_generation_id=classified["classifier_generation_id"],
+            rule_revision=classified["rule_revision"],
+            reason_code=classified["reason_code"],
+        )
         await self.ingress_port.admit(
             operation_id="onebot-admit:" + event_hash,
             binding_id=connection.binding_id,
@@ -604,6 +615,7 @@ class CleanOneBotRuntime:
             client_incarnation=connection.client_incarnation,
             event=event,
             memory_capture=memory_capture,
+            classification=classification,
         )
 
     async def admit_http_event(

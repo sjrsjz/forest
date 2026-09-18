@@ -26,6 +26,7 @@ from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
+from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.models import ModelResult
@@ -244,6 +245,17 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     )
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
+    trigger_policy = await bootstrap_clean_trigger_policy(
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={
+            "protocol": "forest.conversation.trigger-policy/1",
+            "allowed_group_ids": ["933179609"],
+            "group_trigger_mode": "MENTION",
+            "private_enabled": True,
+        },
+    )
     clients = []
 
     async def create_client(_url, _token, **_limits):
@@ -318,7 +330,12 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     registry = RuntimeModuleRegistry(
         host,
         kernel.descriptors
-        + (provider.descriptor, memory.descriptor, agent.descriptor)
+        + (
+            provider.descriptor,
+            memory.descriptor,
+            agent.descriptor,
+            trigger_policy.descriptor,
+        )
         + messaging.descriptors
         + (delivery.descriptor,),
     )
@@ -335,6 +352,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "memory.graph",
             "agent.runtime",
             "conversation.scheduler",
+            "conversation.trigger-policy",
             "adapter.onebot",
             "delivery",
         }
@@ -448,7 +466,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                 "group_id": 933179609,
                 "user_id": 42,
                 "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
-                "message": [{"type": "text", "data": {"text": "hello graph"}}],
+                "message": [
+                    {"type": "at", "data": {"qq": "123456789"}},
+                    {"type": "text", "data": {"text": " hello graph"}},
+                ],
             },
             separators=(",", ":"),
         ).encode()
@@ -473,22 +494,21 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert trunks[0]["external_group_id"] == "933179609"
         assert trunks[0]["registered_sources"] == 1
         assert trunks[0]["eligible_sources"] == 0
-        async with store.pool.connection() as conn, conn.transaction():
-            classified = await conversation_runtime.complete_classification_in(
-                conn,
-                operation_id="classify:onebot:88",
-                conversation_id="onebot:group:933179609",
-                event_id=inbox["event_id"],
-                decision="TRIGGER",
-                classifier_component_id="conversation.classifier",
-                classifier_generation_id="generation:classifier:test",
-                rule_revision="rules:test/1",
-                reason_code="test_trigger",
-                route_ref=None,
-                trigger_id="trigger:onebot:88",
-                principal_ref="qq:42",
-            )
-        assert classified["classified_through_seq"] == 1
+        async with store.pool.connection() as conn:
+            classified = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT classification_state,trigger_decision,classifier_component_id "
+                        "FROM {}.inbox_messages WHERE bot_id=%s AND event_id=%s"
+                    ).format(sql.Identifier(messaging.conversation.namespace)),
+                    (store.bot_id, inbox["event_id"]),
+                )
+            ).fetchone()
+        assert classified == {
+            "classification_state": "FINAL",
+            "trigger_decision": "TRIGGER",
+            "classifier_component_id": "conversation.trigger-policy",
+        }
         for _ in range(500):
             remembered = await memory_runtime.query_sources()
             if remembered["items"]:

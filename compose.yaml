@@ -26,7 +26,7 @@ services:
       initialize:
         condition: service_completed_successfully
     environment:
-      POSTGRES_DB: forest
+      POSTGRES_DB: forest_bot
       POSTGRES_USER: forest
       POSTGRES_PASSWORD_FILE: /run/forest-secrets/postgres_password
       PGDATA: /var/lib/postgresql/data/pgdata
@@ -34,7 +34,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - forest_secrets:/run/forest-secrets:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U forest -d forest"]
+      test: ["CMD-SHELL", "pg_isready -U forest -d forest_bot"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -55,10 +55,20 @@ services:
     environment:
       FOREST_DATABASE_PASSWORD_FILE: /run/forest-secrets/postgres_password
       FOREST_DATABASE_HOST: postgres
+      FOREST_DATABASE_NAME: forest_bot
+      FOREST_BOT_ID: ${FOREST_BOT_ID:-forest-main}
+      FOREST_MODEL_BASE_URL: ${FOREST_MODEL_BASE_URL:?set FOREST_MODEL_BASE_URL}
+      FOREST_MODEL_API_KEY: ${FOREST_MODEL_API_KEY:?set FOREST_MODEL_API_KEY}
+      FOREST_MODEL_NAME: ${FOREST_MODEL_NAME:?set FOREST_MODEL_NAME}
+      FOREST_MODEL_INPUT_MODALITIES: ${FOREST_MODEL_INPUT_MODALITIES:-text}
+      FOREST_ONEBOT_SELF_ID: ${FOREST_ONEBOT_SELF_ID:?set FOREST_ONEBOT_SELF_ID}
+      FOREST_ONEBOT_WEBSOCKET_URL: ${FOREST_ONEBOT_WEBSOCKET_URL:?set FOREST_ONEBOT_WEBSOCKET_URL}
+      FOREST_ONEBOT_ACCESS_TOKEN: ${FOREST_ONEBOT_ACCESS_TOKEN:?set FOREST_ONEBOT_ACCESS_TOKEN}
+      FOREST_ALLOWED_GROUP_IDS: ${FOREST_ALLOWED_GROUP_IDS:-933179609}
+      FOREST_GROUP_TRIGGER_MODE: ${FOREST_GROUP_TRIGGER_MODE:-MENTION}
+      FOREST_AGENT_SYSTEM_PROMPT: ${FOREST_AGENT_SYSTEM_PROMPT:-}
+      FOREST_RUNTIME_STATUS_FILE: /data/runtime-status.json
       FOREST_DATA_DIR: /data
-      FOREST_PUBLIC_ORIGIN: ${FOREST_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
-    ports:
-      - "127.0.0.1:${FOREST_HTTP_PORT:-8080}:8080"
     volumes:
       - forest_data:/data
       - forest_secrets:/run/forest-secrets:ro
