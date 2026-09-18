@@ -209,22 +209,17 @@ Python 的 reload 不会自动重绑定其他模块持有的旧对象引用，�
 ```text
 forest plugin init ./plugins/hello --id example.hello
 forest plugin check ./plugins/hello
-forest dev --bot dev-alice --watch ./plugins/hello
 forest plugin build ./plugins/hello
 forest plugin lock ./plugins/hello --require "example-lib==1.2.3"
 forest plugin export sha256:<digest> --output hello.zip
 forest plugin import hello.zip
 ```
 
-`check` 检查声明/编译/契约并在独立候选中验证；`dev` 单次模式可以调用合成输入，watch 模式持续管理 Worker 生命周期；`build` 输出工件路径和内容摘要，工件内包含完整 manifest、schema 与已声明的依赖锁。锁定依赖环境在 Worker 启动前校验并物化。CLI 隐藏 IPC 与 Worker 启动细节，不隐藏失败、权限拒绝或被降级的保证。
+`check` 检查声明、编译和契约，并在独立候选 Worker 中完成 prepare/start/health/stop；`build` 输出工件路径和内容摘要，工件内包含完整 manifest、schema 与已声明的依赖锁。锁定依赖环境在 Worker 启动前校验并物化。CLI 隐藏 IPC 与 Worker 启动细节，不隐藏失败、权限拒绝或被降级的保证。
 
-`dev --watch` 持续持有开发 Bot 的宿主租约，使用 `FOREST_BOT_DSN` 指定该 Bot 的独立 PostgreSQL 数据库；数据库不得同时交给另一开发进程或 Web 托管宿主。`--config-json` 默认 `{}`，`--grant` 可重复指定，例如 counter 示例需要 `--grant state.read --grant state.write`。第一次注册 watch 时冻结绝对源码路径、配置、初始 grants 和策略 revision；保存源码不会扩权，同一 watch 重启也不能偷偷改写这些授权。源码可以删掉或损坏，恢复仍先加载数据库记录的 last-good 工件并校验摘要，不能从工作区补文件；指定的 `--cache-dir` 必须保有该工件。
+旧 `forest dev` 已删除。它把插件 watch 直接接入旧 `BotStore.migrate()` 和旧 Kernel，违反当前模块 bundle、Generation 与 RuntimeGraph publication 合同，不能继续作为开发热重载入口。新的 watch 必须成为受监督的开发模块或控制面操作：捕获完整快照，先持久化期望摘要，再生成候选 Generation，通过与生产模块相同的 prepare/start/publication/drain 协议提交；实现完成前只提供离线 `plugin check/build`，不得把旧命令或文件 watcher 宣称为热重载。
 
-watch 按与构建器相同的有界全包捕获规则轮询，默认每 100 ms 检查一次；使用 300 ms debounce，持续编辑的候选调度等待上限为 2 s。运行中至多一个候选和一个被合并的待处理请求；已有候选尚在执行限时生命周期时，后续构建等待它退出，不能为满足调度间隔无限增开 Worker。每次观察到不同内容（包括无法捕获的坏路径）先在 Bot 数据库接受新的 `build_request_id`，之后才构建。新的期望请求立即使旧候选失去提交资格，语法错误不会恢复旧候选的资格。
-
-开发控制使用当前本机宿主权限，独立记录 `bot_dev_watch_heads / requests / builds / activations / results`，不伪造 Web ticket。完整快照摘要与操作 ID 冻结后进入普通 `Kernel.install`；watch 无权写路由。`Kernel.publish` 同一事务中的持久触发器锁定 watch head，核对最新请求、组件身份、工件、配置、grants 和宿主，再更新 last-good。拿到最后的业务锁后复查宿主及操作到期时间，过期的候选只能在仍有当前宿主权威时终结并恢复旧代。请求、候选操作、提交结果均持久化；重启先恢复 last-good，再为尚未完成的工作区意图创建新请求，避免复用已 FAILED 或 ABANDONED 的生命周期操作。
-
-`plugin init` 只接受新的目标路径，先在同父目录的临时树中生成并执行与 build 共用的双捕获静态校验，再原子发布源码目录；任何阶段失败或目标已存在都不会覆盖用户文件。CLI 输出逐行 JSON 的 accepted/building/validating/published/failed/restored 状态；语法失败提供文件和行列，插件 hook 失败不回显任意异常正文。Ctrl+C 会停止观察，等待被持有的文件捕获线程与候选收尾，再关闭 Worker、撤销宿主租约和数据库池。原有单次模式仍可用：`forest dev --bot dev-alice --package ./plugins/hello --service hello.echo --input-json '{"text":"hi"}'`。`inprocess-dev` 仍是预留工作流，当前 CLI 不提供。
+`plugin init` 只接受新的目标路径，先在同父目录的临时树中生成并执行与 build 共用的双捕获静态校验，再原子发布源码目录；任何阶段失败或目标已存在都不会覆盖用户文件。语法失败提供文件和行列，插件 hook 失败不回显任意异常正文。
 
 `plugin lock` 只读取包内已提供的 wheel，验证当前 Python/平台对应的完整依赖闭包，然后原子写入 `dependencies.lock.json`；不会解析联网源或执行安装脚本。作者需在 manifest 顶层显式设置 `dependency_lock = "dependencies.lock.json"`。`plugin export/import` 按完整 ZIP 和内容摘要搬运工件，导入先完成边界及静态验证，同版本不同内容仍被拒绝。
 
