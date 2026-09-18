@@ -16,6 +16,9 @@ from forest.final_reply_uow import FinalReplyPlan
 
 
 def _request():
+    async def context_snapshot():
+        return {"conversation_id": "group/one"}
+
     async def next_input():
         return None
 
@@ -25,6 +28,7 @@ def _request():
         run_ref="run/one",
         initial_batch=None,
         recovery=True,
+        context_snapshot=context_snapshot,
         next_model_input=next_input,
     )
 
@@ -63,12 +67,18 @@ async def test_completion_port_passes_only_an_exact_agent_context_delivery_plan(
     calls = []
 
     class Plans:
-        async def prepare(self, request, completion):
+        released = []
+
+        async def prepare(self, actor, request, completion):
+            assert actor.conversation_id == "group/one"
             assert request.conversation_id == "group/one"
             assert request.session_ref == "session/one"
             assert request.run_ref == "run/one"
             assert completion == _completion()
             return PreparedFinalReplyCommit("owner/one", _plan())
+
+        async def release(self, prepared):
+            self.released.append(prepared)
 
     class UnitOfWork:
         async def commit(self, **values):
@@ -76,24 +86,28 @@ async def test_completion_port_passes_only_an_exact_agent_context_delivery_plan(
             return {"committed": True}
 
     actor = SimpleNamespace(conversation_id="group/one")
-    port = TransactionalConversationCompletionPort(
-        unit_of_work=UnitOfWork(),
-        plans=Plans(),
-    )
+    plans = Plans()
+    port = TransactionalConversationCompletionPort(unit_of_work=UnitOfWork(), plans=plans)
     assert await port.commit(
         actor=actor,
         request=_request(),
         completion=_completion(),
     ) == {"committed": True}
     assert calls == [{"actor": actor, "agent_owner": "owner/one", "plan": _plan()}]
+    assert plans.released == [PreparedFinalReplyCommit("owner/one", _plan())]
 
     class WrongPlans:
-        async def prepare(self, _request_value, _completion_value):
+        released = []
+
+        async def prepare(self, _actor, _request_value, _completion_value):
             plan = _plan()
             return PreparedFinalReplyCommit(
                 "owner/one",
                 FinalReplyPlan(**{**plan.__dict__, "reply_ref": "reply/other"}),
             )
+
+        async def release(self, prepared):
+            self.released.append(prepared)
 
     port = TransactionalConversationCompletionPort(
         unit_of_work=UnitOfWork(), plans=WrongPlans()

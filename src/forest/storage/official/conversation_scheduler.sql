@@ -5,6 +5,7 @@ CREATE TABLE conversation_lanes (
     source_component_id text NOT NULL CHECK (octet_length(source_component_id) BETWEEN 1 AND 128),
     binding_ref text NOT NULL CHECK (octet_length(binding_ref) BETWEEN 1 AND 256),
     platform text NOT NULL CHECK (octet_length(platform) BETWEEN 1 AND 64),
+    channel_kind text NOT NULL CHECK (channel_kind IN ('GROUP','PRIVATE','SYSTEM')),
     channel_ref text NOT NULL CHECK (octet_length(channel_ref) BETWEEN 1 AND 256),
     thread_ref text CHECK (thread_ref IS NULL OR octet_length(thread_ref) BETWEEN 1 AND 256),
     next_ingress_seq bigint NOT NULL DEFAULT 1 CHECK (next_ingress_seq > 0),

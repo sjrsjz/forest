@@ -27,7 +27,7 @@ class SessionHandoffPlan:
     successor_deadline: datetime
 
 
-def _agent_input(selection: dict) -> AgentInputBatch:
+def agent_input_from_selection(selection: dict) -> AgentInputBatch:
     triggers = tuple(
         AgentTriggerInput(
             item["trigger_id"],
@@ -112,7 +112,7 @@ class SessionHandoffUnitOfWork:
                     session_id=plan.session_id,
                     completed_run_id=plan.completed_run_id,
                     run_id=plan.successor_run_id,
-                    input_batch=_agent_input(selection),
+                    input_batch=agent_input_from_selection(selection),
                     absolute_deadline=plan.successor_deadline,
                     _connection=conn,
                 )

@@ -352,6 +352,14 @@ class ModuleConfigurationRepository:
 
         return await self._head_configuration("desired_revision", include_value=include_value)
 
+    async def owner_id(self, revision: int) -> str:
+        if type(revision) is not int or revision < 1:
+            raise ForestError(
+                "MODULE_CONFIGURATION_NOT_FOUND", "Configuration revision does not exist", 404
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self._owner_id_in(conn, revision)
+
     async def _head_configuration(
         self, field: str, *, include_value: bool
     ) -> EffectiveModuleConfiguration:

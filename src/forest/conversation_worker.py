@@ -38,6 +38,7 @@ class AgentExecutionRequest:
     run_ref: str
     initial_batch: dict | None
     recovery: bool
+    context_snapshot: Callable[[], Awaitable[dict]]
     next_model_input: Callable[[], Awaitable[dict | None]]
 
 
@@ -46,6 +47,7 @@ class AgentExecutionCompletion:
     facts: tuple[SchedulerContextFact, ...]
     reply_ref: str
     answered_trigger_ids: tuple[str, ...]
+    already_committed: bool = False
 
 
 class AgentExecutionPort(Protocol):
@@ -281,6 +283,7 @@ class ConversationWorker:
                     run_ref=run_ref,
                     initial_batch=batch,
                     recovery=recovery,
+                    context_snapshot=lambda: self.scheduler.context_snapshot(actor),
                     next_model_input=next_model_input,
                 )
                 completion = await self.agent.execute(request)
@@ -297,11 +300,12 @@ class ConversationWorker:
                         "Agent completion must identify each answered trigger once",
                         500,
                     )
-                await self.completion.commit(
-                    actor=actor,
-                    request=request,
-                    completion=completion,
-                )
+                if not completion.already_committed:
+                    await self.completion.commit(
+                        actor=actor,
+                        request=request,
+                        completion=completion,
+                    )
 
                 successor_run_ref = _ref("run")
                 end_index = 0

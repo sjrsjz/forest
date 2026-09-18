@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
+from forest.storage.agent_runtime_authority import AgentPayloadRef
 
 _STATE_CONTRACT = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11,6 +15,19 @@ _STATE_CONTRACT = {
     "properties": {},
     "additionalProperties": False,
 }
+
+
+@dataclass(frozen=True)
+class FrozenAgentProfile:
+    agent_spec_revision: str
+    config: AgentPayloadRef
+    preset_revision: str
+    preset: AgentPayloadRef
+    preset_context: tuple[str, ...]
+    run_timeout_seconds: int
+    max_steps: int
+    output_tokens: int
+    stream: bool
 
 
 class CleanAgentRuntime:
@@ -34,19 +51,90 @@ class CleanAgentRuntime:
         repository,
         module_configuration,
         grants,
+        payloads,
         generation_verifier,
         generation_member_verifier=None,
     ):
         self.repository = repository
         self.module_configuration = module_configuration
         self.grants = grants
+        self.payloads = payloads
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
+        self._profile: FrozenAgentProfile | None = None
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
-        desired = await self.module_configuration.desired()
+        desired = await self.module_configuration.desired(include_value=True)
+        value = desired.value
+        if not isinstance(value, dict):
+            raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent configuration is invalid", 500)
+        if (
+            not isinstance(value.get("agent_spec_revision"), str)
+            or not isinstance(value.get("preset_revision"), str)
+            or type(value.get("run_timeout_seconds")) is not int
+            or not 1 <= value["run_timeout_seconds"] <= 86400
+            or type(value.get("max_steps")) is not int
+            or not 1 <= value["max_steps"] <= 256
+            or type(value.get("output_tokens")) is not int
+            or value["output_tokens"] < 1
+            or type(value.get("stream")) is not bool
+        ):
+            raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent limits are invalid", 500)
+        preset_value = value.get("preset")
+        if not isinstance(preset_value, dict):
+            raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent preset reference is invalid", 500)
+        preset = AgentPayloadRef(
+            preset_value.get("payload_id"),
+            preset_value.get("digest"),
+            "agent.runtime",
+            "preset.context",
+            preset_value.get("owner_id"),
+        )
+        preset.validate("preset")
+        async with self.payloads.store.pool.connection() as conn, conn.transaction():
+            reference = await self.payloads.verify_in(
+                conn,
+                payload_id=preset.payload_id,
+                digest=preset.digest,
+                owner_component_id=preset.owner_component_id,
+                owner_kind=preset.owner_kind,
+                owner_id=preset.owner_id,
+            )
+            body = await self.payloads.read_bytes_in(
+                conn,
+                preset.payload_id,
+                expected_deletion_epoch=reference.accepted_deletion_epoch,
+            )
+        try:
+            preset_document = json.loads(body)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent preset is invalid", 500) from exc
+        messages = preset_document.get("system") if isinstance(preset_document, dict) else None
+        if (
+            not isinstance(messages, list)
+            or len(messages) > 32
+            or any(not isinstance(item, str) for item in messages)
+        ):
+            raise ForestError("AGENT_CONFIGURATION_INVALID", "Agent preset is invalid", 500)
+        self._profile = FrozenAgentProfile(
+            agent_spec_revision=value["agent_spec_revision"],
+            config=AgentPayloadRef(
+                desired.payload_id,
+                desired.payload_digest,
+                "agent.runtime",
+                "module.configuration",
+                await self.module_configuration.owner_id(desired.revision),
+            ),
+            preset_revision=value["preset_revision"],
+            preset=preset,
+            preset_context=tuple(messages),
+            run_timeout_seconds=value["run_timeout_seconds"],
+            max_steps=value["max_steps"],
+            output_tokens=value["output_tokens"],
+            stream=value["stream"],
+        )
         return PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,
@@ -103,6 +191,15 @@ class CleanAgentRuntime:
 
     async def close(self) -> None:
         self.active = False
+
+    def profile(self) -> FrozenAgentProfile:
+        if not self.active or self._profile is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Agent Generation has no active frozen profile",
+                409,
+            )
+        return self._profile
 
     async def _call(
         self,
@@ -249,6 +346,9 @@ class CleanAgentRuntime:
 
     async def load_recovery(self, run_id: str):
         return await self._call("load_recovery", run_id=run_id, owned_work=True)
+
+    async def execution_history(self, run_id: str):
+        return await self._call("execution_history", run_id=run_id, owned_work=True)
 
     async def recoverable_runs(self, *, limit: int = 64):
         return await self._call(

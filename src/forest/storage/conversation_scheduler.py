@@ -199,9 +199,9 @@ class ConversationSchedulerRepository:
 
     @staticmethod
     def _lane_identity(
-        *, source_component_id, binding_ref, platform, channel_ref, thread_ref
+        *, source_component_id, binding_ref, platform, channel_kind, channel_ref, thread_ref
     ) -> tuple:
-        return source_component_id, binding_ref, platform, channel_ref, thread_ref
+        return source_component_id, binding_ref, platform, channel_kind, channel_ref, thread_ref
 
     async def admit_message(
         self,
@@ -211,6 +211,7 @@ class ConversationSchedulerRepository:
         source_component_id: str,
         binding_ref: str,
         platform: str,
+        channel_kind: str,
         channel_ref: str,
         thread_ref: str | None,
         event_id: str,
@@ -232,6 +233,7 @@ class ConversationSchedulerRepository:
             (source_component_id, "source_component_id", 128),
             (binding_ref, "binding_ref", 256),
             (platform, "platform", 64),
+            (channel_kind, "channel_kind", 16),
             (channel_ref, "channel_ref", 256),
             (event_id, "event_id", 256),
             (source_event_ref, "source_event_ref", 512),
@@ -241,6 +243,8 @@ class ConversationSchedulerRepository:
             _bounded(value, field, limit)
         _bounded(thread_ref, "thread_ref", 256, optional=True)
         _bounded(platform_message_ref, "platform_message_ref", 512, optional=True)
+        if channel_kind not in {"GROUP", "PRIVATE", "SYSTEM"}:
+            raise ForestError("CONVERSATION_INPUT_INVALID", "Invalid channel_kind", 422)
         content.validate("content")
         author.validate("author")
         received_at = _timestamp(received_at, "received_at")
@@ -260,6 +264,7 @@ class ConversationSchedulerRepository:
             source_component_id=source_component_id,
             binding_ref=binding_ref,
             platform=platform,
+            channel_kind=channel_kind,
             channel_ref=channel_ref,
             thread_ref=thread_ref,
         )
@@ -314,8 +319,8 @@ class ConversationSchedulerRepository:
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,conversation_id,conversation_key_digest,"
-                    "source_component_id,binding_ref,platform,channel_ref,thread_ref) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING"
+                    "source_component_id,binding_ref,platform,channel_kind,channel_ref,thread_ref) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING"
                 ).format(self._table("conversation_lanes")),
                 (
                     self.store.bot_id,
@@ -324,6 +329,7 @@ class ConversationSchedulerRepository:
                     source_component_id,
                     binding_ref,
                     platform,
+                    channel_kind,
                     channel_ref,
                     thread_ref,
                 ),
@@ -333,6 +339,7 @@ class ConversationSchedulerRepository:
                 source_component_id=lane["source_component_id"],
                 binding_ref=lane["binding_ref"],
                 platform=lane["platform"],
+                channel_kind=lane["channel_kind"],
                 channel_ref=lane["channel_ref"],
                 thread_ref=lane["thread_ref"],
             )
@@ -1663,6 +1670,12 @@ class ConversationSchedulerRepository:
                 "classified_through_seq": lane["classified_through_seq"],
                 "context_revision": lane["context_revision"],
                 "context_view_revision": lane["context_view_revision"],
+                "source_component_id": lane["source_component_id"],
+                "binding_ref": lane["binding_ref"],
+                "platform": lane["platform"],
+                "channel_kind": lane["channel_kind"],
+                "channel_ref": lane["channel_ref"],
+                "thread_ref": lane["thread_ref"],
                 "units": [dict(row) for row in units],
             }
 

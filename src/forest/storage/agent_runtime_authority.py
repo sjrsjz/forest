@@ -776,10 +776,31 @@ class AgentRuntimeRepository:
                 if actual != expected:
                     raise ForestError("AGENT_INPUT_CONFLICT", "InputBatch identity differs", 409)
                 return await self._expanded_run(conn, owner.run_id)
-            if run["state"] not in {"WAIT_INPUT", "SAFE_BOUNDARY", "FINAL_READY"}:
+            if run["state"] not in {
+                "WAIT_INPUT",
+                "PREPARING_MODEL",
+                "SAFE_BOUNDARY",
+                "FINAL_READY",
+            }:
                 raise ForestError(
                     "AGENT_INPUT_BOUNDARY_CLOSED", "Run is not at a model-safe input boundary", 409
                 )
+            if run["state"] == "PREPARING_MODEL":
+                frozen_request = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT 1 FROM {} WHERE bot_id=%s AND run_id=%s "
+                            "AND step_seq=%s LIMIT 1"
+                        ).format(self._table("model_requests")),
+                        (self.store.bot_id, owner.run_id, run["next_step_seq"]),
+                    )
+                ).fetchone()
+                if frozen_request is not None:
+                    raise ForestError(
+                        "AGENT_INPUT_BOUNDARY_CLOSED",
+                        "The next model request already froze its input",
+                        409,
+                    )
             if input_batch.selected_input_end_seq <= run["selected_input_end_seq"]:
                 raise ForestError(
                     "AGENT_INPUT_CONFLICT", "Input cut did not advance", 409
@@ -2092,6 +2113,7 @@ class AgentRuntimeRepository:
             request = None
             attempt = None
             tool = None
+            turn = None
             if expanded["current_model_request_id"] is not None:
                 request = await (
                     await conn.execute(
@@ -2128,13 +2150,45 @@ class AgentRuntimeRepository:
                     (self.store.bot_id, run_id),
                 )
             ).fetchone()
+            turn = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND run_id=%s "
+                        "ORDER BY step_seq DESC,turn_id DESC LIMIT 1"
+                    ).format(self._table("model_turns")),
+                    (self.store.bot_id, run_id),
+                )
+            ).fetchone()
             return {
                 **expanded,
                 "current_request": dict(request) if request is not None else None,
                 "current_attempt": dict(attempt) if attempt is not None else None,
                 "current_tool": dict(tool) if tool is not None else None,
+                "latest_turn": dict(turn) if turn is not None else None,
                 "latest_checkpoint": dict(checkpoint) if checkpoint is not None else None,
             }
+
+    async def execution_history(self, run_id: str, *, _connection=None) -> tuple[dict, ...]:
+        _bounded(run_id, "run_id", 256)
+        async with self._transaction(_connection) as conn:
+            await self._run(conn, run_id)
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT t.*,r.input_revision,c.tool_call_id,c.tool_name,c.state AS tool_state,"
+                        "c.result_payload_id,c.result_payload_digest,c.error_code AS tool_error_code "
+                        "FROM {} t JOIN {} r ON r.bot_id=t.bot_id AND r.request_id=t.request_id "
+                        "LEFT JOIN {} c ON c.bot_id=t.bot_id AND c.turn_id=t.turn_id "
+                        "WHERE t.bot_id=%s AND t.run_id=%s ORDER BY t.step_seq"
+                    ).format(
+                        self._table("model_turns"),
+                        self._table("model_requests"),
+                        self._table("tool_calls"),
+                    ),
+                    (self.store.bot_id, run_id),
+                )
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
 
     async def recoverable_runs(self, *, limit: int = 64, _connection=None) -> tuple[dict, ...]:
         """List active Session heads that must resume or be explicitly closed.

@@ -516,6 +516,12 @@ async def _prepare_dispatched(agent, payloads, owner, suffix: str):
     )
     request = await agent.prepare_model_request(owner, plan)
     assert await agent.prepare_model_request(owner, plan) == request
+    with pytest.raises(ForestError) as caught:
+        await agent.append_input(
+            owner,
+            _batch(2, ("trigger/late/3", "principal/late", 3)),
+        )
+    assert caught.value.code == "AGENT_INPUT_BOUNDARY_CLOSED"
     wire = await _payload(
         payloads,
         owner_kind="model.wire",
@@ -617,6 +623,14 @@ async def test_model_request_attempt_success_and_terminal_turn_are_one_agent_cha
     run = await agent.load("run/one")
     assert run["state"] == "SAFE_BOUNDARY"
     assert run["next_step_seq"] == 2
+    history = await agent.execution_history("run/one")
+    assert len(history) == 1
+    assert history[0]["turn_id"] == "turn/terminal"
+    assert history[0]["input_revision"] == 1
+    assert history[0]["tool_call_id"] is None
+    assert (await agent.load_recovery("run/one"))["latest_turn"]["turn_id"] == (
+        "turn/terminal"
+    )
 
 
 @pytest.mark.postgres

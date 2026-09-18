@@ -740,6 +740,7 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
             source_component_id="adapter.onebot",
             binding_ref="binding/a",
             platform="onebot11",
+            channel_kind="GROUP",
             channel_ref="group-a",
             thread_ref=None,
             event_id=f"event/{suffix}",

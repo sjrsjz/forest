@@ -30,9 +30,12 @@ class PreparedFinalReplyCommit:
 class FinalReplyPlanPort(Protocol):
     async def prepare(
         self,
+        actor,
         request: AgentExecutionRequest,
         completion: AgentExecutionCompletion,
     ) -> PreparedFinalReplyCommit: ...
+
+    async def release(self, prepared: PreparedFinalReplyCommit) -> None: ...
 
 
 async def _call(port, *args, **kwargs):
@@ -48,29 +51,32 @@ class TransactionalConversationCompletionPort:
         self.plans = plans
 
     async def commit(self, *, actor, request, completion) -> dict:
-        prepared = await _call(self.plans.prepare, request, completion)
+        prepared = await _call(self.plans.prepare, actor, request, completion)
         if type(prepared) is not PreparedFinalReplyCommit or type(prepared.plan) is not FinalReplyPlan:
             raise ForestError(
                 "FINAL_REPLY_PLAN_INVALID", "Final reply planner returned an invalid plan", 500
             )
         plan = prepared.plan
-        if (
-            plan.session_ref != request.session_ref
-            or plan.run_ref != request.run_ref
-            or plan.reply_ref != completion.reply_ref
-            or plan.facts != completion.facts
-            or plan.answered_trigger_ids != completion.answered_trigger_ids
-        ):
-            raise ForestError(
-                "FINAL_REPLY_PLAN_CONFLICT",
-                "Final reply plan differs from the Agent completion",
-                409,
+        try:
+            if (
+                plan.session_ref != request.session_ref
+                or plan.run_ref != request.run_ref
+                or plan.reply_ref != completion.reply_ref
+                or plan.facts != completion.facts
+                or plan.answered_trigger_ids != completion.answered_trigger_ids
+            ):
+                raise ForestError(
+                    "FINAL_REPLY_PLAN_CONFLICT",
+                    "Final reply plan differs from the Agent completion",
+                    409,
+                )
+            return await self.unit_of_work.commit(
+                actor=actor,
+                agent_owner=prepared.agent_owner,
+                plan=plan,
             )
-        return await self.unit_of_work.commit(
-            actor=actor,
-            agent_owner=prepared.agent_owner,
-            plan=plan,
-        )
+        finally:
+            await _call(self.plans.release, prepared)
 
 
 class TransactionalSessionDecisionPort:

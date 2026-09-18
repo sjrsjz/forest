@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from forest.clean_agent_runtime import CleanAgentRuntime
@@ -14,6 +15,7 @@ from forest.runtime_modules import (
 from forest.storage.agent_runtime_authority import AgentRuntimeRepository
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.module_configuration import ModuleConfigurationRepository
+from forest.storage.payload_authority import PayloadSource
 
 
 @dataclass(frozen=True)
@@ -43,16 +45,65 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
+    preset_owner_id = "preset:default:1"
+    epoch = await kernel.payload.epoch()
+    preset = await kernel.payload.put_bytes(
+        owner_component_id="agent.runtime",
+        owner_kind="preset.context",
+        owner_id=preset_owner_id,
+        media_type="application/json",
+        content=json.dumps({"system": []}, separators=(",", ":")).encode(),
+        sources=(
+            PayloadSource(
+                "agent.runtime",
+                "DEFAULT_PRESET",
+                preset_owner_id,
+                1,
+            ),
+        ),
+        expected_deletion_epoch=epoch,
+    )
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "properties": {"protocol": {"const": "forest.agent.runtime/1"}},
-        "required": ["protocol"],
+        "properties": {
+            "protocol": {"const": "forest.agent.runtime/1"},
+            "agent_spec_revision": {"type": "string"},
+            "preset_revision": {"type": "string"},
+            "preset": {"type": "object"},
+            "run_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+            "max_steps": {"type": "integer", "minimum": 1, "maximum": 256},
+            "output_tokens": {"type": "integer", "minimum": 1},
+            "stream": {"type": "boolean"},
+        },
+        "required": [
+            "protocol",
+            "agent_spec_revision",
+            "preset_revision",
+            "preset",
+            "run_timeout_seconds",
+            "max_steps",
+            "output_tokens",
+            "stream",
+        ],
         "additionalProperties": False,
     }
     await configuration.initialize(
         operation_id="bootstrap:agent.runtime:configuration",
-        value={"protocol": "forest.agent.runtime/1"},
+        value={
+            "protocol": "forest.agent.runtime/1",
+            "agent_spec_revision": "forest.agent.default/1",
+            "preset_revision": "preset:default/1",
+            "preset": {
+                "payload_id": preset.payload_id,
+                "digest": preset.content_digest,
+                "owner_id": preset_owner_id,
+            },
+            "run_timeout_seconds": 300,
+            "max_steps": 32,
+            "output_tokens": 1024,
+            "stream": False,
+        },
         validation_digest=digest_json(schema),
     )
     policy_revision = await kernel.authorization.revision()
@@ -77,6 +128,7 @@ async def bootstrap_clean_agent(store, installer, *, kernel) -> CleanAgentModule
             repository=repository,
             module_configuration=configuration,
             grants=grants,
+            payloads=kernel.payload,
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )

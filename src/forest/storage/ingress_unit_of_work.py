@@ -105,6 +105,7 @@ class OneBotIngressUnitOfWork:
                 source_component_id="adapter.onebot",
                 binding_ref=binding_id,
                 platform="onebot-v11",
+                channel_kind=event.channel_kind,
                 channel_ref=event.channel_ref,
                 thread_ref=None,
                 event_id=scheduler_event_id,
