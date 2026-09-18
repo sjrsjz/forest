@@ -166,6 +166,21 @@ cache_key = H(bot_id, storage_generation, profile_revision, space_id,
 
 Worker 使用有界批次、积压阈值、每 Bot 预算和重试退避。媒体未就绪时图像部分状态为 `WAIT_MEDIA`；文本部分可独立完成，但同一条图文消息的索引完整性仍是 `PARTIAL`。向量发布明确包含成功的段与失败段，不能以一段文字成功就标记整条多模态消息已完成。
 
+### 6.1 Memory 调度与 Embedding Provider 边界
+
+索引流水由两个平级 Generation 协作：
+
+| 所有者 | 拥有 | 禁止拥有 |
+|---|---|---|
+| `memory.graph` | 来源资格、facet、claim/lease、重试时机、索引覆盖、向量发布、召回、删除 epoch | Embedding endpoint、API key、HTTP client、Provider 私有 attempt 表 |
+| `embedding.*` | 与 Bot 空间绑定兼容的 endpoint 配置、凭据引用、客户端、请求 manifest、网络 attempt、usage/费用观察、结果载荷 | Memory 来源/主干/可见性表、facet 状态、召回结果或删除决策 |
+
+`memory.graph` 领取一批 facet 后物化有界 `EmbeddingEncodeRequest`，其中只包含受管 text/image payload 引用、逐项来源摘要、purpose、空间身份、请求 deadline 和稳定 effect identity。它经内核 Contract Router 调用准确 `embedding.encode/1` Generation。Embedding 在实际发送前验证这些引用、实际输入模态、大小和冻结空间，写自己的 transport attempt；它不根据 Memory 表补字段，也不决定某个来源是否有资格进入索引。
+
+Embedding 返回 `EmbeddingEncodeObservation`：固定 request/attempt、空间、逐 facet 向量结果载荷、usage 与 `RESPONDED | REJECTED | NOT_SENT | UNKNOWN`。向量字节由 Embedding 以自身 owner 身份发布，Memory 只能引用和读取获准结果。Memory 的结算事务重新验证 claim/lease、当前 RuntimeGraph member、facet/source revision、删除 epoch、空间和结果摘要，再推进 `READY/RETRYABLE_FAILURE/UNKNOWN/SUPPRESSED`。网络调用和向量计算不在该事务内。
+
+热替换时，Memory claim 固定准确 Embedding Generation 与契约版本。交接前失败可按相同 facet 创建新 attempt；交接后失去结果必须保持 `UNKNOWN` 并向原 Generation/外部 effect 查询，不能换 endpoint 重发。Embedding endpoint 或凭据轮换会建立新 Generation，但只有声明与 Bot 已冻结 `EmbeddingSpaceIdentity` 完全兼容时才可进入 RuntimeGraph；模型种类、修订、维度、预处理、归一化或对齐语义变化仍必须拒绝。
+
 `QUEUED / WAIT_MEDIA / ENCODING / READY / RETRYABLE_FAILURE / UNSUPPORTED / SUPPRESSED` 是索引工件状态，独立于媒体状态和来源是否可见。积压、预算耗尽和模型暂不可用进入可恢复状态；源删除后进入 SUPPRESSED，不继续向旧索引写入。
 
 领取编码前固定实际媒体物化版本、blob_digest 和全部变换，纳入 encoded_media_manifest 与缓存键。仅有 media_id 或“图片稍后可用”的占位不能命中一个有效图片向量；媒体尚未获取时也不能先编码空值，随后以相同 cache key 偷换成真实图片。

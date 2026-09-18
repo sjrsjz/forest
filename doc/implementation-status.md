@@ -68,7 +68,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
-`memory.graph` 已以第十一个成员进入干净 RuntimeGraph：模块独占官方 schema、ModuleConfiguration、grant set 与图 Repository，发布带 Generation 约束的主干、来源和关系查询服务。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；prepare 会用 Bot 级 domain 权威拒绝模型、revision、维数或空间变化，endpoint 与凭据引用不属于空间身份。OneBot 文本入站已在 Adapter/Conversation/Memory 三参与者事务中登记来源；IDLE、模型安全点与 Session 结束的 InputBatch 选择会在同一事务提交 Memory eligibility，并为新获资格的来源修订创建幂等 `DOCUMENT` embedding facets。图片尚未物化时记录 `PENDING_CAPTURE` 而不阻塞 Conversation，图片先到或 InputBatch 先到两种并发顺序通过事件锁收敛，晚到来源会自动取得原 InputBatch 资格并创建图像 facets。Embedding 网络 Worker、实际图片抓取模块和 Agent 召回仍未接线。
+`memory.graph` 已以第十一个成员进入干净 RuntimeGraph：模块独占官方 schema、ModuleConfiguration、grant set 与图 Repository，发布带 Generation 约束的主干、来源和关系查询服务。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；prepare 会用 Bot 级 domain 权威拒绝模型、revision、维数或空间变化，endpoint 与凭据引用不属于空间身份。OneBot 文本入站已在 Adapter/Conversation/Memory 三参与者事务中登记来源；IDLE、模型安全点与 Session 结束的 InputBatch 选择会在同一事务提交 Memory eligibility，并为新获资格的来源修订创建幂等 `DOCUMENT` embedding facets。图片尚未物化时记录 `PENDING_CAPTURE` 而不阻塞 Conversation，图片先到或 InputBatch 先到两种并发顺序通过事件锁收敛，晚到来源会自动取得原 InputBatch 资格并创建图像 facets。Embedding 网络模块、实际图片抓取模块和 Agent 召回仍未接线。现有 `MemoryEmbeddingWorker` 同时持有 Memory Repository 与 Embedding Client，只是已测试的传输/结算原型；它不符合最终平级模块边界，必须拆成 Memory claim Worker 与 `embedding.encode/1` Provider 后才能进入生产 RuntimeGraph。
 
 ### 已有干净业务 Authority 候选
 
