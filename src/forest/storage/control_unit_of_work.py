@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from forest.errors import ForestError
+from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.shell_command_authority import ShellClaim, ShellPayloadRef
 
 
 class ShellControlResultUnitOfWork:
     """Commit the Shell result and its CONTROL SendIntent atomically."""
 
-    def __init__(self, store, *, shell, delivery) -> None:
+    def __init__(self, store, *, shell, delivery, audit) -> None:
         self.store = store
         self.shell = shell
         self.delivery = delivery
+        self.audit = audit
 
     async def commit(
         self,
@@ -28,6 +32,7 @@ class ShellControlResultUnitOfWork:
         channel_ref: str,
         delivery_generation_id: str,
         parts,
+        producer_generation_id: str,
         authorization_ticket_id: str | None = None,
         authorization_operation_id: str | None = None,
         error_code: str | None = None,
@@ -89,4 +94,28 @@ class ShellControlResultUnitOfWork:
                 reply_ref=None,
                 parts=parts,
             )
-            return {"shell": shell_result, "delivery": delivery_result}
+            audit_id = "shell:result:" + hashlib.sha256(
+                (claim.bot_id + "\0" + claim.request_id).encode("utf-8")
+            ).hexdigest()
+            audit_result = await self.audit.append_in(
+                conn,
+                AuditEnvelope(
+                    audit_id=audit_id,
+                    action="shell.command." + resulting_state.lower(),
+                    producer_component_id="shell.command",
+                    producer_generation_id=producer_generation_id,
+                    origin_kind=channel_kind.lower() + ".shell",
+                    severity=("INFO" if resulting_state == "SUCCEEDED" else "ERROR"),
+                    actor_kind="principal",
+                    actor_id=claim.principal_ref,
+                    resource_kind="bot",
+                    resource_id=claim.bot_id,
+                    operation_kind="shell.request",
+                    operation_id=claim.request_id,
+                ),
+            )
+            return {
+                "shell": shell_result,
+                "delivery": delivery_result,
+                "audit": audit_result,
+            }

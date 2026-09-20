@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.errors import ForestError
@@ -78,7 +79,7 @@ _MODULES = {
         "repository_contract": "forest.kernel-audit.repository/1",
         "resource": "storage/official/kernel_audit.sql",
         "requires": ("kernel.payload",),
-        "services": ("audit.append", "audit.query"),
+        "services": ("audit.append", "audit.query", "shell.audit.execute"),
         "capabilities": ("audit.append", "audit.query"),
     },
     "kernel.runtime": {
@@ -191,6 +192,21 @@ class PreparedAuthorityModule:
 
     async def close(self) -> None:
         self.generation_active = False
+
+
+class PreparedAuditAuthorityModule(PreparedAuthorityModule):
+    """Expose the audit Repository and its Shell projection from its own Generation."""
+
+    def __init__(self, component_id, service, configuration, grants, services) -> None:
+        super().__init__(component_id, service, configuration, grants, services)
+        self._shell_execute = audit_shell_service(service)
+
+    def runtime_service_handlers(self) -> dict:
+        return {
+            ("audit.append", 1): self.service.append,
+            ("audit.query", 1): self.service.scan,
+            ("shell.audit.execute", 1): self._shell_execute,
+        }
 
 
 @dataclass(frozen=True)
@@ -318,7 +334,11 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
             component_id,
             definition["requires"],
             lambda _runtime, _modules, identity=component_id, service=services[component_id], configuration=configurations[component_id], grant=grants[component_id], provided_services=definition["services"]: (
-                PreparedAuthorityModule(
+                (
+                    PreparedAuditAuthorityModule
+                    if identity == "kernel.audit"
+                    else PreparedAuthorityModule
+                )(
                     identity,
                     service,
                     configuration,
@@ -350,7 +370,11 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 (RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()
             ),
             shell_commands=(
-                RUNTIME_SHELL_COMMANDS if component_id == "kernel.runtime" else ()
+                RUNTIME_SHELL_COMMANDS
+                if component_id == "kernel.runtime"
+                else AUDIT_SHELL_COMMANDS
+                if component_id == "kernel.audit"
+                else ()
             ),
         )
         for component_id, definition in _MODULES.items()

@@ -73,7 +73,10 @@ def _authorization_consumer(context):
 def _result_commit(context):
     shell = context.participant("shell.command")
     delivery = context.participant("delivery")
-    unit = ShellControlResultUnitOfWork(context.store, shell=shell, delivery=delivery)
+    audit = context.participant("kernel.audit").service
+    unit = ShellControlResultUnitOfWork(
+        context.store, shell=shell, delivery=delivery, audit=audit
+    )
 
     async def commit(claim, **values):
         generation = delivery.generation_identity
@@ -81,9 +84,15 @@ def _result_commit(context):
             raise ForestError(
                 "SHELL_RESULT_ROUTE_INVALID", "Delivery Generation is unavailable", 503
             )
+        shell_generation = shell.generation_identity
+        if shell_generation is None:
+            raise ForestError(
+                "SHELL_RESULT_ROUTE_INVALID", "Shell Generation is unavailable", 503
+            )
         return await unit.commit(
             claim,
             delivery_generation_id=generation.generation_id,
+            producer_generation_id=shell_generation.generation_id,
             **values,
         )
 
@@ -225,7 +234,7 @@ async def bootstrap_clean_shell(
             RuntimeKernelServiceSpec(
                 "kernel.uow.shell.result",
                 1,
-                ("shell.command", "delivery"),
+                ("shell.command", "delivery", "kernel.audit"),
                 _result_commit,
             ),
         ),

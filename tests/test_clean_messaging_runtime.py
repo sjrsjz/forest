@@ -23,6 +23,7 @@ from forest.agent_tool_executor import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
@@ -457,7 +458,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert shell.descriptor.shell_commands == ()
         assert set(shell_runtime.command_routes) == {
             (item.command_id, item.command_version)
-            for item in (*RUNTIME_SHELL_COMMANDS, *MEMORY_SHELL_COMMANDS)
+            for item in (
+                *RUNTIME_SHELL_COMMANDS,
+                *AUDIT_SHELL_COMMANDS,
+                *MEMORY_SHELL_COMMANDS,
+            )
         }
         for owner, _contribution, service in shell_runtime.command_routes.values():
             assert service.route.provider_component_id == owner

@@ -387,6 +387,19 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "adapter.onebot",
                     "delivery",
                 }
+                audit_descriptor = next(
+                    item
+                    for item in host.registry.descriptors
+                    if item.component_id == "kernel.audit"
+                )
+                assert [item.command_id for item in audit_descriptor.shell_commands] == [
+                    "audit.tail"
+                ]
+                audit_route = host.registry.get("shell.command").command_routes[
+                    ("audit.tail", 1)
+                ]
+                assert audit_route[0] == "kernel.audit"
+                assert audit_route[2].route.provider_component_id == "kernel.audit"
                 graph_ids.append(host.registry.graph_identity.graph_id)
                 assert clients[-1].handler is not None
                 if index == 0:

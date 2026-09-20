@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS, execute_memory_shell
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.errors import ForestError
@@ -28,6 +29,7 @@ from forest.storage.control_unit_of_work import ShellControlResultUnitOfWork
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
 from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef, DeliveryRepository
 from forest.storage.ingress_unit_of_work import OneBotIngressUnitOfWork, ShellIngressCommand
+from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.storage.shell_command_authority import (
@@ -136,6 +138,66 @@ def test_memory_commands_are_derived_from_memory_owned_schemas():
     }
 
 
+def test_audit_tail_parser_is_derived_from_kernel_audit_schema():
+    parser = ShellCommandParser(None, AUDIT_SHELL_COMMANDS)
+
+    parsed = parser.parse(
+        "audit tail --action shell.command.succeeded --resource-kind bot "
+        "--resource-id bot-shell --limit 7"
+    )
+
+    assert parsed.document["arguments"] == {
+        "action": "shell.command.succeeded",
+        "resource_kind": "bot",
+        "resource_id": "bot-shell",
+        "limit": 7,
+    }
+    assert parser.parse("audit tail --limit 11").document["arguments"] == {
+        "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
+
+
+@pytest.mark.asyncio
+async def test_audit_shell_uses_module_query_port_and_emits_cursor():
+    class Audit:
+        async def scan(self, **arguments):
+            assert arguments == {"limit": 2, "action": "shell.command.succeeded"}
+            return {
+                "records": [
+                    {
+                        "created_at": "2026-09-20T08:00:00+00:00",
+                        "severity": "INFO",
+                        "action": "shell.command.succeeded",
+                        "producer_component_id": "shell.command",
+                        "actor_kind": "principal",
+                        "actor_id": "qq:3244658766",
+                        "resource_kind": "bot",
+                        "resource_id": "bot-shell",
+                        "operation_kind": "shell.request",
+                        "operation_id": "request/1",
+                        "audit_id": "audit:1",
+                    }
+                ],
+                "next_before": "audit:1",
+            }
+
+    execute = audit_shell_service(Audit())
+    result = await execute(
+        ShellCommandExecutionRequest(
+            "audit.tail",
+            1,
+            {"action": "shell.command.succeeded", "limit": 2},
+            "request/query",
+            "qq:3244658766",
+            "onebot:group:933179609",
+        )
+    )
+
+    assert "producer=shell.command" in result.text
+    assert "actor=principal:qq:3244658766" in result.text
+    assert "next: --before audit:1" in result.text
+
+
 @pytest.mark.asyncio
 async def test_memory_relation_shell_output_names_evidence_groups():
     class Repository:
@@ -214,6 +276,12 @@ async def clean_shell():
             "forest.kernel.payload",
             "forest.kernel-payload.repository/1",
             "storage/official/kernel_payload.sql",
+        ),
+        official_storage_bundle(
+            "kernel.audit",
+            "forest.kernel.audit",
+            "forest.kernel-audit.repository/1",
+            "storage/official/kernel_audit.sql",
         ),
         official_storage_bundle(
             "adapter.onebot",
@@ -927,7 +995,12 @@ async def test_shell_result_and_control_send_intent_commit_atomically(clean_shel
         effect_admitter=fail_effect,
     )
     failing = ShellControlResultUnitOfWork(
-        store, shell=shell, delivery=failing_delivery
+        store,
+        shell=shell,
+        delivery=failing_delivery,
+        audit=KernelAuditRepository(
+            store, namespace=storage["kernel.audit"].spec.namespace
+        ),
     )
     with pytest.raises(ForestError) as caught:
         await failing.commit(
@@ -941,12 +1014,17 @@ async def test_shell_result_and_control_send_intent_commit_atomically(clean_shel
             channel_kind="GROUP",
             channel_ref="933179609",
             delivery_generation_id="generation/delivery/1",
+            producer_generation_id="generation/shell/1",
             parts=(part,),
             authorization_ticket_id="ticket/control-result/final",
             authorization_operation_id="invoke/control-result/final",
         )
     assert caught.value.code == "TEST_EFFECT_FAILED"
     assert (await shell.load_request("request/control-result"))["state"] == "EXECUTING"
+    audit = KernelAuditRepository(
+        store, namespace=storage["kernel.audit"].spec.namespace
+    )
+    assert (await audit.scan())["records"] == []
 
     async def admit_effect(_conn, **_values):
         return None
@@ -958,7 +1036,10 @@ async def test_shell_result_and_control_send_intent_commit_atomically(clean_shel
         effect_admitter=admit_effect,
     )
     committed = await ShellControlResultUnitOfWork(
-        store, shell=shell, delivery=delivery
+        store,
+        shell=shell,
+        delivery=delivery,
+        audit=audit,
     ).commit(
         claim,
         result_operation_id="result/control-result",
@@ -970,11 +1051,18 @@ async def test_shell_result_and_control_send_intent_commit_atomically(clean_shel
         channel_kind="GROUP",
         channel_ref="933179609",
         delivery_generation_id="generation/delivery/1",
+        producer_generation_id="generation/shell/1",
         parts=(part,),
         authorization_ticket_id="ticket/control-result/final",
         authorization_operation_id="invoke/control-result/final",
     )
     assert committed["delivery"]["state"] == "QUEUED"
+    assert committed["audit"]["action"] == "shell.command.succeeded"
+    assert committed["audit"]["actor_id"] == "admin/control"
+    assert committed["audit"]["origin_kind"] == "group.shell"
+    assert [item["audit_id"] for item in (await audit.scan())["records"]] == [
+        committed["audit"]["audit_id"]
+    ]
     assert (await shell.load_request("request/control-result"))["state"] == "SUCCEEDED"
 
 
