@@ -113,7 +113,8 @@ def prepare_secrets(path: Path) -> None:
                     f"Existing {name} credential has unexpected ownership or permissions"
                 )
             value = application_secret.read_bytes()
-            if any(not 33 <= item <= 126 for item in value):
+            minimum = 32 if name == "deployment_web_bootstrap" else 33
+            if any(not minimum <= item <= 126 for item in value):
                 raise RuntimeError(f"Existing {name} credential is not printable ASCII")
         os.chown(path, APP_UID, POSTGRES_GID)
         os.chmod(path, 0o550)

@@ -27,7 +27,7 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _read_secret() -> bytes:
+def _read_secret(name: str) -> bytes:
     value = sys.stdin.buffer.read(MAX_SECRET_BYTES + 2)
     if value.startswith(codecs.BOM_UTF8):
         value = value[len(codecs.BOM_UTF8) :]
@@ -37,7 +37,8 @@ def _read_secret() -> bytes:
         value = value[:-1]
     if not 1 <= len(value) <= MAX_SECRET_BYTES or b"\x00" in value or b"\n" in value or b"\r" in value:
         raise RuntimeError("Secret input must be one bounded nonempty line")
-    if any(not 33 <= item <= 126 for item in value):
+    minimum = 32 if name == "deployment_web_bootstrap" else 33
+    if any(not minimum <= item <= 126 for item in value):
         raise RuntimeError("Secret input must contain printable ASCII only")
     return value
 
@@ -90,7 +91,7 @@ def main() -> None:
         if os.geteuid() != 0:
             raise RuntimeError("Secret installation requires the dedicated bootstrap container")
         name = os.environ.get("FOREST_SECRET_NAME", "")
-        install_secret(Path("/run/forest-secrets"), name, _read_secret())
+        install_secret(Path("/run/forest-secrets"), name, _read_secret(name))
     except (OSError, RuntimeError) as exc:
         print(f"Forest secret installation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
