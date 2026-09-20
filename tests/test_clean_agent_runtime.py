@@ -137,7 +137,9 @@ def _batch(number: int, *triggers: tuple[str, str, int]):
     )
 
 
-async def _start(agent, payloads, *, suffix="one", conversation="group/one"):
+async def _start(
+    agent, payloads, *, suffix="one", conversation="group/one", batch_number=1
+):
     config = await _payload(
         payloads,
         owner_kind="agent.config",
@@ -156,7 +158,7 @@ async def _start(agent, payloads, *, suffix="one", conversation="group/one"):
         session_id=f"session/{suffix}",
         run_id=f"run/{suffix}",
         input_batch=_batch(
-            1,
+            batch_number,
             (f"trigger/{suffix}/1", "principal/a", 1),
             (f"trigger/{suffix}/2", "principal/b", 2),
         ),
@@ -222,6 +224,56 @@ async def test_clean_agent_runtime_freezes_core_prompt_and_converges_start(
             )
         ).fetchall()
         assert "core_prompt" not in {row["column_name"] for row in columns}
+
+
+@pytest.mark.postgres
+async def test_run_management_query_is_filtered_and_keyset_paginated(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    for batch_number, suffix, conversation in (
+        (1, "alpha", "group/alpha"),
+        (2, "beta", "group/beta"),
+        (3, "gamma", "group/gamma"),
+    ):
+        values, _config, _preset = await _start(
+            agent,
+            payloads,
+            suffix=suffix,
+            conversation=conversation,
+            batch_number=batch_number,
+        )
+        await agent.start_run(**values)
+
+    first = await agent.query_runs(limit=2)
+    assert len(first["items"]) == 2
+    assert first["has_more"] is True
+    second = await agent.query_runs(
+        snapshot_created_at=first["snapshot_created_at"],
+        before_created_at=first["next_before_created_at"],
+        before_run_id=first["next_before_run_id"],
+        limit=2,
+    )
+    assert len(second["items"]) == 1
+    assert second["has_more"] is False
+    assert {item["run_id"] for item in first["items"] + second["items"]} == {
+        "run/alpha",
+        "run/beta",
+        "run/gamma",
+    }
+
+    conversation = await agent.query_runs(conversation_ref="group/alpha", limit=10)
+    assert [item["run_id"] for item in conversation["items"]] == ["run/alpha"]
+
+    states = await agent.query_runs(states=("PREPARING_MODEL",), limit=10)
+    assert {item["run_id"] for item in states["items"]} == {
+        "run/alpha",
+        "run/beta",
+        "run/gamma",
+    }
+    with pytest.raises(ForestError) as caught:
+        await agent.query_runs(before_run_id="run/alpha")
+    assert caught.value.code == "AGENT_RUNTIME_INPUT_INVALID"
 
 
 @pytest.mark.postgres

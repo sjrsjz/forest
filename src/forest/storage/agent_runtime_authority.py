@@ -2655,6 +2655,93 @@ class AgentRuntimeRepository:
         async with self._transaction(_connection) as conn:
             return await self._expanded_run(conn, run_id)
 
+    async def query_runs(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        conversation_ref: str | None = None,
+        snapshot_created_at: datetime | None = None,
+        before_created_at: datetime | None = None,
+        before_run_id: str | None = None,
+        limit: int = 100,
+        _connection=None,
+    ) -> dict:
+        """Return one bounded, keyset-paginated management projection of Runs."""
+
+        if (
+            not isinstance(states, tuple)
+            or len(states) > len(_RUN_PHASES)
+            or len(states) != len(set(states))
+            or any(state not in _RUN_PHASES for state in states)
+            or type(limit) is not int
+            or not 1 <= limit <= 200
+        ):
+            raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid Run query", 422)
+        _bounded(conversation_ref, "conversation_ref", 256, optional=True)
+        if (before_created_at is None) != (before_run_id is None):
+            raise ForestError(
+                "AGENT_RUNTIME_INPUT_INVALID",
+                "Run query cursor requires both created_at and run_id",
+                422,
+            )
+        _bounded(before_run_id, "before_run_id", 256, optional=True)
+        for value in (snapshot_created_at, before_created_at):
+            if value is not None and (
+                not isinstance(value, datetime) or value.tzinfo is None
+            ):
+                raise ForestError(
+                    "AGENT_RUNTIME_INPUT_INVALID",
+                    "Run query timestamps require a timezone",
+                    422,
+                )
+        async with self._transaction(_connection) as conn:
+            snapshot = snapshot_created_at
+            if snapshot is None:
+                clock = await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
+                snapshot = clock["value"]
+            conditions = [sql.SQL("r.bot_id=%s"), sql.SQL("r.created_at<=%s")]
+            parameters: list[object] = [self.store.bot_id, snapshot]
+            if states:
+                conditions.append(sql.SQL("r.state=ANY(%s)"))
+                parameters.append(list(states))
+            if conversation_ref is not None:
+                conditions.append(sql.SQL("s.conversation_ref=%s"))
+                parameters.append(conversation_ref)
+            if before_created_at is not None:
+                conditions.append(sql.SQL("(r.created_at,r.run_id)<(%s,%s)"))
+                parameters.extend((before_created_at, before_run_id))
+            parameters.append(limit + 1)
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT r.run_id,r.session_id,s.conversation_ref,r.state,"
+                        "r.checkpoint_seq,r.input_revision,r.next_step_seq,r.owner_id,"
+                        "r.owner_expires_at,r.absolute_deadline,r.error_code,r.created_at,"
+                        "r.updated_at,r.terminal_at,c.operation_id AS cancel_operation_id,"
+                        "c.requested_by AS cancel_requested_by,c.reason_code AS cancel_reason_code "
+                        "FROM {} r JOIN {} s ON s.bot_id=r.bot_id AND s.session_id=r.session_id "
+                        "LEFT JOIN {} c ON c.bot_id=r.bot_id AND c.run_id=r.run_id WHERE {} "
+                        "ORDER BY r.created_at DESC,r.run_id DESC LIMIT %s"
+                    ).format(
+                        self._table("agent_runs"),
+                        self._table("agent_sessions"),
+                        self._table("run_cancel_requests"),
+                        sql.SQL(" AND ").join(conditions),
+                    ),
+                    tuple(parameters),
+                )
+            ).fetchall()
+            has_more = len(rows) > limit
+            items = [dict(row) for row in rows[:limit]]
+            tail = items[-1] if has_more else None
+            return {
+                "snapshot_created_at": snapshot,
+                "items": items,
+                "has_more": has_more,
+                "next_before_created_at": tail["created_at"] if tail else None,
+                "next_before_run_id": tail["run_id"] if tail else None,
+            }
+
     async def load_recovery(self, run_id: str, *, _connection=None) -> dict:
         """Load the current recoverable execution head without claiming it."""
 

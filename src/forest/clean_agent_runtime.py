@@ -566,6 +566,9 @@ class CleanAgentRuntime:
     async def load(self, run_id: str):
         return await self._call("load", run_id=run_id, owned_work=True)
 
+    async def query_runs(self, **filters):
+        return await self._call("query_runs", owned_work=True, **filters)
+
     async def load_recovery(self, run_id: str):
         return await self._call("load_recovery", run_id=run_id, owned_work=True)
 

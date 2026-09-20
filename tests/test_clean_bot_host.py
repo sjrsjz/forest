@@ -921,6 +921,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             item["contribution_id"]
                             for item in agent_view["management_contributions"]
                         ] == ["agent-profile"]
+                        assert {
+                            item["query_id"]
+                            for item in agent_view["management_contract"]["queries"]
+                        } == {"agent.runs.query", "agent.run.read"}
+                        assert agent_view["management_contract"]["actions"] == [
+                            {"action_id": "agent.run.cancel", "priority": "P0"}
+                        ]
                         adapter_view = next(
                             item
                             for item in runtime_view.json()["modules"]
@@ -1070,6 +1077,19 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert agent_configuration["desired"]["value"]["preset_context"] == [
                             settings.agent_system_prompt
                         ]
+                        agent_runs = await web.post(
+                            "/management/v1/modules/agent.runtime/queries/agent.runs.query",
+                            headers=headers,
+                            json={"states": ["PREPARING_MODEL"], "limit": 25},
+                        )
+                        assert agent_runs.status_code == 200
+                        assert agent_runs.json()["items"] == []
+                        malformed_agent_runs = await web.post(
+                            "/management/v1/modules/agent.runtime/queries/agent.runs.query",
+                            headers=headers,
+                            json={"limit": 1000},
+                        )
+                        assert malformed_agent_runs.status_code == 422
                         agent_profile = deepcopy(agent_configuration["desired"]["value"])
                         agent_profile["preset_context"] = [
                             "You are Forest's managed single-Agent test persona.",

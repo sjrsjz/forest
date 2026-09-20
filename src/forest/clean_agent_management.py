@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 
 from forest.agent_protocol import (
     CORE_PROMPT,
@@ -12,7 +13,10 @@ from forest.agent_protocol import (
     PROTOCOL_ID,
     PROTOCOL_VERSION,
 )
-from forest.clean_management_contract import CleanModuleConfigurationContract
+from forest.clean_management_contract import (
+    CleanManagementActionResult,
+    CleanModuleConfigurationContract,
+)
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.payload_authority import PayloadSource
@@ -51,9 +55,10 @@ class CleanAgentManagementContract(CleanModuleConfigurationContract):
 
     protocol = "forest.agent-management/1"
 
-    def __init__(self, configuration, *, payloads, storage_schema: dict) -> None:
+    def __init__(self, configuration, *, payloads, runtime, storage_schema: dict) -> None:
         super().__init__(configuration, schema=AGENT_MANAGEMENT_SCHEMA)
         self.payloads = payloads
+        self.runtime = runtime
         self.storage_schema_digest = digest_json(storage_schema)
 
     def describe(self) -> dict:
@@ -65,7 +70,147 @@ class CleanAgentManagementContract(CleanModuleConfigurationContract):
             "digest": CORE_PROMPT_SHA256,
             "mutable": False,
         }
+        value["queries"] = [
+            {"query_id": "agent.runs.query", "default_limit": 100, "max_limit": 200},
+            {"query_id": "agent.run.read"},
+        ]
+        value["actions"] = [{"action_id": "agent.run.cancel", "priority": "P0"}]
         return value
+
+    async def query(self, query_id: str, payload: dict) -> object:
+        if not isinstance(payload, dict):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Agent query input must be an object", 422
+            )
+        if query_id == "agent.runs.query":
+            allowed = {
+                "states",
+                "conversation_ref",
+                "snapshot_created_at",
+                "before_created_at",
+                "before_run_id",
+                "limit",
+            }
+            if set(payload) - allowed:
+                raise ForestError(
+                    "MODULE_MANAGEMENT_INPUT_INVALID",
+                    "Agent Run query contains unknown fields",
+                    422,
+                )
+            values = {key: value for key, value in payload.items() if value not in (None, "")}
+            states = values.get("states", [])
+            if not isinstance(states, list) or any(not isinstance(item, str) for item in states):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_INPUT_INVALID", "Agent Run states are invalid", 422
+                )
+            values["states"] = tuple(states)
+            for field in ("snapshot_created_at", "before_created_at"):
+                if field in values:
+                    values[field] = self._datetime(values[field], field)
+            return await self.runtime.query_runs(**values)
+        if query_id == "agent.run.read":
+            if set(payload) != {"run_id"} or not isinstance(payload["run_id"], str):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_INPUT_INVALID", "Agent Run identity is invalid", 422
+                )
+            recovery = await self.runtime.load_recovery(payload["run_id"])
+            history = await self.runtime.execution_history(payload["run_id"])
+            return self._run_detail(recovery, history)
+        raise ForestError(
+            "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Agent query does not exist", 404
+        )
+
+    async def action(
+        self,
+        action_id: str,
+        *,
+        operation_id: str,
+        payload: dict,
+    ) -> CleanManagementActionResult:
+        if action_id != "agent.run.cancel":
+            raise ForestError(
+                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Agent action does not exist", 404
+            )
+        if not isinstance(payload, dict) or set(payload) - {
+            "run_id",
+            "expected_checkpoint_seq",
+            "reason_code",
+        } or not {"run_id", "expected_checkpoint_seq"} <= set(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Agent cancellation input is invalid", 422
+            )
+        saved = await self.runtime.request_cancel(
+            operation_id=operation_id,
+            run_id=payload["run_id"],
+            expected_checkpoint_seq=payload["expected_checkpoint_seq"],
+            requested_by="management.web",
+            reason_code=payload.get("reason_code", "ADMIN_REQUESTED"),
+        )
+        return CleanManagementActionResult(
+            {
+                "operation_id": saved["operation_id"],
+                "run_id": saved["run_id"],
+                "expected_checkpoint_seq": saved["expected_checkpoint_seq"],
+                "reason_code": saved["reason_code"],
+                "created_at": saved["created_at"],
+            }
+        )
+
+    @staticmethod
+    def _datetime(value: object, field: str) -> datetime:
+        if not isinstance(value, str) or len(value) > 64:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} is not an ISO timestamp", 422
+            )
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} is not an ISO timestamp", 422
+            ) from None
+        if parsed.tzinfo is None:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} requires a timezone", 422
+            )
+        return parsed
+
+    @staticmethod
+    def _run_detail(run: dict, history: tuple[dict, ...]) -> dict:
+        fields = (
+            "run_id",
+            "session_id",
+            "state",
+            "checkpoint_seq",
+            "input_revision",
+            "selected_input_end_seq",
+            "next_step_seq",
+            "current_model_request_id",
+            "current_tool_call_id",
+            "absolute_deadline",
+            "error_code",
+            "created_at",
+            "updated_at",
+            "terminal_at",
+        )
+        return {
+            **{field: run.get(field) for field in fields},
+            "conversation_ref": run["session"]["conversation_ref"],
+            "cancel_request": run.get("cancel_request"),
+            "triggers": [
+                {
+                    "trigger_ref": item["trigger_ref"],
+                    "principal_ref": item["principal_ref"],
+                    "ingress_seq": item["ingress_seq"],
+                    "input_revision": item["input_revision"],
+                }
+                for item in run["triggers"]
+            ],
+            "current_request": run.get("current_request"),
+            "current_attempt": run.get("current_attempt"),
+            "current_tool": run.get("current_tool"),
+            "latest_checkpoint": run.get("latest_checkpoint"),
+            "history": list(history),
+        }
 
     async def read(self) -> dict:
         value = await super().read()

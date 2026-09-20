@@ -273,6 +273,7 @@ async def bootstrap_clean_agent(
         runtime.management_contract = CleanAgentManagementContract(
             configuration,
             payloads=kernel.payload,
+            runtime=runtime,
             storage_schema=schema,
         )
         return runtime

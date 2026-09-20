@@ -1,4 +1,16 @@
 <div class="contribution-view agent-workbench">
+  <section class="agent-runs">
+    <header><div><strong>Agent Run 控制</strong><p>按会话与状态筛选；列表使用稳定游标，不加载消息正文。</p></div><button id="run-refresh" class="quiet" type="button">刷新</button></header>
+    <div class="run-filters">
+      <label>会话引用<input id="run-conversation" maxlength="256" placeholder="例如 onebot:group:933179609"></label>
+      <label>状态<select id="run-state"><option value="">全部</option><option value="PREPARING_MODEL,MODEL_PENDING,PARSING,REPAIR_READY,WAIT_TOOL,WAIT_APPROVAL,BLOCKED_UNKNOWN,SAFE_BOUNDARY,FINAL_READY,RELOAD_WAIT,WAIT_INPUT">运行中</option><option value="COMPLETED">COMPLETED</option><option value="FAILED">FAILED</option><option value="CANCELLED">CANCELLED</option></select></label>
+      <button id="run-search" type="button">查询</button>
+    </div>
+    <div class="run-grid run-grid-head"><span>Run / 会话</span><span>状态</span><span>检查点</span><span>更新时间</span><span>操作</span></div>
+    <div id="run-list" class="run-list"></div>
+    <footer><button id="run-more" class="quiet hidden" type="button">加载更多</button><span id="run-count" class="muted"></span></footer>
+    <pre id="run-detail" class="run-detail hidden"></pre>
+  </section>
   <section class="agent-settings">
     <header><div><strong>单 Agent 运行配置</strong><p id="agent-state"></p></div><button id="agent-save">计划并应用</button></header>
     <div class="agent-fields">
