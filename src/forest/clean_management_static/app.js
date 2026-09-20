@@ -189,6 +189,31 @@ $('scope-select').onchange = async event => {
   }
 };
 
+$('setup-form').onsubmit = async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  apiBase = '/management/v1';
+  try {
+    await api('/management/v1/setup/complete', {
+      method: 'POST',
+      body: JSON.stringify({
+        pairing_code: form.get('pairing_code'),
+        username: form.get('username'),
+        display_name: form.get('display_name'),
+        password: form.get('password'),
+      }),
+    });
+    const username = form.get('username');
+    event.currentTarget.reset();
+    $('setup').classList.add('hidden');
+    $('login').classList.remove('hidden');
+    $('login-form').elements.username.value = username;
+    $('setup-error').textContent = '';
+  } catch (error) {
+    $('setup-error').textContent = error.message;
+  }
+};
+
 $('login-form').onsubmit = async event => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -219,10 +244,22 @@ $('logout').onclick = async () => {
 };
 $('back').onclick = showOverview;
 
-api('/management/v1/auth/session')
-    .then(() => refresh())
-    .then(() => {
-      $('login').classList.add('hidden');
-      $('console').classList.remove('hidden');
-    })
-    .catch(() => {});
+async function start() {
+  try {
+    await api('/management/v1/auth/session');
+    await refresh();
+    $('console').classList.remove('hidden');
+    return;
+  } catch (_error) {
+    // An absent session is expected before login.
+  }
+  try {
+    const status = await api('/management/v1/setup/status');
+    (status.setup_required ? $('setup') : $('login')).classList.remove('hidden');
+  } catch (error) {
+    $('login').classList.remove('hidden');
+    $('login-error').textContent = error.message;
+  }
+}
+
+start();

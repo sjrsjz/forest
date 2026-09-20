@@ -39,10 +39,13 @@ Compose 先启动只具本地卷权限、无网络的初始化器，再从标准
 ```sh
 docker compose run --rm initialize
 python -c 'import base64,json,secrets,sys; kid="master/default/1"; sys.stdout.write(json.dumps({"protocol":"forest.deployment-master-keyring/1","active_key_id":kid,"keys":{kid:base64.b64encode(secrets.token_bytes(32)).decode()}},separators=(",",":")))' | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_master_keyring secret
-python -c 'import json,sys; sys.stdout.write(json.dumps({"protocol":"forest.deployment-web-bootstrap/1","username":"admin","display_name":"Administrator","password":sys.argv[1]},separators=(",",":")))' "$DEPLOYMENT_WEB_PASSWORD" | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_web_bootstrap secret
+SETUP_ID="setup/$(python -c 'import secrets; print(secrets.token_urlsafe(18))')"
+PAIRING_CODE="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+python -c 'from datetime import datetime,timedelta,timezone; import json,sys; now=datetime.now(timezone.utc); sys.stdout.write(json.dumps({"protocol":"forest.deployment-web-bootstrap/2","setup_id":sys.argv[1],"pairing_code":sys.argv[2],"issued_at":now.isoformat(),"expires_at":(now+timedelta(hours=1)).isoformat()},separators=(",",":")))' "$SETUP_ID" "$PAIRING_CODE" | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_web_bootstrap secret
+printf 'Forest WebUI 一次性配对码（1 小时有效）：%s\n' "$PAIRING_CODE"
 ```
 
-安装器只接受上述两个 allowlist 名称和单行可打印 ASCII 值；它会移除 Windows PowerShell 管道可能添加的单个 UTF-8 BOM，随后执行原子替换并把文件收敛为应用 UID 独占的 `0400`。它不会打印凭据。Compose 使用同一受保护卷中的 PostgreSQL 口令构造部署 DSN；模型、Embedding 与 OneBot 凭据通过 deployment WebUI/API 写入加密 Secret authority，只在准确 Bot 供应与启动边界解析。显式诊断入口的可选项包括：
+安装器只接受上述两个 allowlist 名称和单行可打印 ASCII 值；它会移除 Windows PowerShell 管道可能添加的单个 UTF-8 BOM，随后执行原子替换并把文件收敛为应用 UID 独占的 `0400`。Secret 容器不回显内容；上面的本地命令只把新生成的配对码交付给当前操作员。启动 Supervisor 后访问 WebUI，输入该配对码并创建首位管理员。账号密码不写入 bootstrap 文件，配对码不放入 URL 或服务日志，成功后数据库会清除其摘要并永久关闭首次设置入口。若配对码在完成前过期，保留原 `SETUP_ID`、生成新的配对码和时间窗、重新安装该 secret 并重启 Supervisor；未过期凭据不能被替换，完成状态也不能被轮换重新打开。Compose 使用同一受保护卷中的 PostgreSQL 口令构造部署 DSN；模型、Embedding 与 OneBot 凭据通过 deployment WebUI/API 写入加密 Secret authority，只在准确 Bot 供应与启动边界解析。显式诊断入口的可选项包括：
 
 ```text
 FOREST_BOT_ID=forest-main

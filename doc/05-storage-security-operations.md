@@ -44,7 +44,7 @@ PostgreSQL 作为首版持久事实与协调账本。每个 Bot 的共享图包�
 | `config_revisions` | config_revision_ref、resource_key、revision、previous_revision_ref、inherited_revision_refs、schema_digest、values_ref、values_digest、secret_refs、origin_ref、plan_digest、created_by、created_at | 资源权威库；不可变且资源内 revision 唯一；previous_revision_ref 是同资源上一修订，inherited_revision_refs 固定物化快照的所有父配置，来源管理请求/目标资源幂等唯一，密钥仅保存版本化引用 |
 | `config_heads` | resource_key、desired_revision_ref、effective_revision_ref、head_revision、apply_policy、operation_ref、last_error_ref | 与配置资源同库；desired 接纳不代表 effective 已切换；head_revision 做 CAS，不用目录缓存替代；各资源独立显示状态 |
 | `web_accounts` / `web_sessions` | subject_id、issuer/subject、credential_record_ref、account_revision；session_id_hash、subject_id、session_revision、authn_strength、expires_at、revoked_at | 部署库；显示名不参与身份等价；认证凭据受限存储；服务端会话撤销后停止发放新操作票据 |
-| `web_setup_state` | deployment_id、state、setup_token_digest、expires_at、consumed_at、initial_admin_ref、revision | 部署库；未初始化状态 CAS 创建首管理员并单次消费初始化令牌；无公开默认管理员或可重复远程注册窗口 |
+| `web_setup_state` | deployment_id、setup_id、state、pairing_code_digest、issued_at、expires_at、consumed_at、initial_admin_ref、revision | 部署库；凭据有效窗口不超过 24 小时；未初始化状态 CAS 创建首管理员并单次消费配对码，完成时清除摘要；无公开默认管理员或可重复远程注册窗口 |
 
 生命周期资源互斥以逐资源的 `lifecycle_resource_leases(resource_key PK, operation_id, op_epoch, lease_until)` 实现，按排序后 resource_key 获取全部资源；不使用“检查无重载→稍后写入”的竞态流程。跨 Bot 批量操作在部署库记录父操作，每个 Bot 使用自己的子操作事务。
 

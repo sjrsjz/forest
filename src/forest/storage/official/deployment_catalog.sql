@@ -27,10 +27,37 @@ CREATE TABLE forest_deployment.web_accounts (
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TABLE forest_deployment.web_setup_state (
+    deployment_id text PRIMARY KEY REFERENCES forest_deployment.deployment_identity(deployment_id),
+    setup_id text NOT NULL UNIQUE CHECK (
+        octet_length(setup_id) BETWEEN 22 AND 134
+        AND setup_id ~ '^setup/[A-Za-z0-9_-]{16,128}$'
+    ),
+    state text NOT NULL CHECK (state IN ('PENDING','COMPLETED')),
+    pairing_code_digest text CHECK (
+        pairing_code_digest IS NULL OR pairing_code_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    issued_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    initial_admin_ref text REFERENCES forest_deployment.web_accounts(subject_id),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '24 hours'),
+    CHECK (
+        (state='PENDING' AND pairing_code_digest IS NOT NULL
+            AND consumed_at IS NULL AND initial_admin_ref IS NULL)
+        OR
+        (state='COMPLETED' AND pairing_code_digest IS NULL
+            AND consumed_at IS NOT NULL AND initial_admin_ref IS NOT NULL)
+    )
+);
+
 CREATE TABLE forest_deployment.web_account_operations (
     operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     operation_kind text NOT NULL CHECK (
-        operation_kind IN ('BOOTSTRAP','CREATE','UPDATE','PASSWORD','REVOKE_SESSIONS')
+        operation_kind IN ('SETUP','CREATE','UPDATE','PASSWORD','REVOKE_SESSIONS')
     ),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     credential_key_id text CHECK (octet_length(credential_key_id) BETWEEN 1 AND 256),
@@ -39,7 +66,7 @@ CREATE TABLE forest_deployment.web_account_operations (
     result jsonb NOT NULL CHECK (jsonb_typeof(result)='object'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK (
-        (operation_kind IN ('BOOTSTRAP','CREATE','PASSWORD')) =
+        (operation_kind IN ('SETUP','CREATE','PASSWORD')) =
         (credential_key_id IS NOT NULL)
     )
 );
@@ -346,6 +373,35 @@ CREATE TRIGGER deployment_operation_immutable
 CREATE TRIGGER web_account_operation_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.web_account_operations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE FUNCTION forest_deployment.guard_web_setup_change() RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''DELETE'' OR OLD.state <> ''PENDING''
+       OR ROW(NEW.deployment_id,NEW.setup_id,NEW.created_at)
+          IS DISTINCT FROM ROW(OLD.deployment_id,OLD.setup_id,OLD.created_at)
+       OR NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION ''invalid Web setup lifecycle transition'';
+    END IF;
+    IF NEW.state = ''PENDING'' AND (
+        clock_timestamp() < OLD.expires_at
+        OR NEW.issued_at < OLD.expires_at
+        OR NEW.pairing_code_digest IS NOT DISTINCT FROM OLD.pairing_code_digest
+    ) THEN
+        RAISE EXCEPTION ''invalid Web setup credential rotation'';
+    ELSIF NEW.state = ''COMPLETED'' AND
+        ROW(NEW.issued_at,NEW.expires_at)
+        IS DISTINCT FROM ROW(OLD.issued_at,OLD.expires_at) THEN
+        RAISE EXCEPTION ''invalid Web setup completion'';
+    ELSIF NEW.state NOT IN (''PENDING'',''COMPLETED'') THEN
+        RAISE EXCEPTION ''invalid Web setup target state'';
+    END IF;
+    RETURN NEW;
+END;
+';
+
+CREATE TRIGGER web_setup_change_guard
+    BEFORE UPDATE OR DELETE ON forest_deployment.web_setup_state
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_web_setup_change();
 
 CREATE TRIGGER web_authority_receipt_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.web_authority_receipts

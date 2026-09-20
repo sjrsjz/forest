@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -792,8 +793,18 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         active_key_id="master/test/1",
         key_resolver=lambda _key_id: bytes(range(32)),
     )
-    await web_identity.ensure_bootstrap_admin(
-        operation_id="web/bootstrap/test",
+    pairing_code = "p" * 48
+    setup_issued_at = datetime.now(timezone.utc)
+    await web_identity.initialize_setup(
+        SimpleNamespace(
+            setup_id="setup/catalogwebui0001",
+            pairing_code=pairing_code,
+            issued_at=setup_issued_at,
+            expires_at=setup_issued_at + timedelta(hours=1),
+        )
+    )
+    await web_identity.complete_setup(
+        pairing_code=pairing_code,
         username="admin",
         display_name="Administrator",
         password="deployment-web-password",

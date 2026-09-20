@@ -7,6 +7,7 @@ import pytest
 
 from forest.clean_supervisor_host import CleanSupervisorSettings
 from forest.deployment_master_keyring import DeploymentMasterKeyring
+from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
 
 
@@ -31,10 +32,11 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     web_bootstrap.write_text(
         json.dumps(
             {
-                "protocol": "forest.deployment-web-bootstrap/1",
-                "username": "admin",
-                "display_name": "Administrator",
-                "password": "deployment-web-password",
+                "protocol": "forest.deployment-web-bootstrap/2",
+                "setup_id": "setup/0123456789abcdef",
+                "pairing_code": "p" * 48,
+                "issued_at": "2029-12-31T23:00:00+00:00",
+                "expires_at": "2030-01-01T00:00:00+00:00",
             },
             separators=(",", ":"),
         ),
@@ -53,10 +55,12 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     )
     rendered = repr(settings)
     assert "database-password" not in rendered
-    assert "deployment-web-password" not in rendered
+    assert "p" * 48 not in rendered
     assert repr(bytes(range(32))) not in rendered
     assert settings.master_keyring.active_key_id == "master/test/2"
     assert settings.master_keyring.resolve("master/test/1") == b"a" * 32
+    assert settings.web_bootstrap.setup_id == "setup/0123456789abcdef"
+    assert settings.web_bootstrap.pairing_code == "p" * 48
 
 
 @pytest.mark.parametrize(
@@ -75,3 +79,23 @@ def test_deployment_master_keyring_rejects_malformed_or_incomplete_documents(con
     with pytest.raises(ForestError) as caught:
         DeploymentMasterKeyring.from_bytes(content)
     assert caught.value.code == "SUPERVISOR_MASTER_KEYRING_INVALID"
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        b'{"protocol":"forest.deployment-web-bootstrap/1","setup_id":"setup/0123456789abcdef",'
+        b'"pairing_code":"pppppppppppppppppppppppppppppppppppppppppppppppp",'
+        b'"issued_at":"2030-01-01T00:00:00+00:00","expires_at":"2030-01-01T01:00:00+00:00"}',
+        b'{"protocol":"forest.deployment-web-bootstrap/2","setup_id":"setup/0123456789abcdef",'
+        b'"pairing_code":"short","issued_at":"2030-01-01T00:00:00+00:00",'
+        b'"expires_at":"2030-01-01T01:00:00+00:00"}',
+        b'{"protocol":"forest.deployment-web-bootstrap/2","setup_id":"setup/0123456789abcdef",'
+        b'"pairing_code":"pppppppppppppppppppppppppppppppppppppppppppppppp",'
+        b'"issued_at":"2030-01-01T00:00:00+00:00","expires_at":"2030-01-03T00:00:00+00:00"}',
+    ),
+)
+def test_deployment_web_pairing_credential_rejects_old_or_unbounded_documents(content):
+    with pytest.raises(ForestError) as caught:
+        DeploymentWebBootstrap.from_bytes(content)
+    assert caught.value.code == "SUPERVISOR_WEB_BOOTSTRAP_INVALID"

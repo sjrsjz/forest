@@ -1,16 +1,18 @@
-"""Strict one-use bootstrap credential for the deployment Web authority."""
+"""Strict installer-delivered pairing credential for first Web setup."""
 
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from forest.errors import ForestError
 
-_PROTOCOL = "forest.deployment-web-bootstrap/1"
-_USERNAME = re.compile(r"[a-z][a-z0-9._-]{2,63}\Z")
+_PROTOCOL = "forest.deployment-web-bootstrap/2"
+_SETUP_ID = re.compile(r"setup/[A-Za-z0-9_-]{16,128}\Z")
+_PAIRING_CODE = re.compile(r"[A-Za-z0-9_-]{43,128}\Z")
 
 
 def _object(pairs):
@@ -28,9 +30,10 @@ def _reject_constant(_value):
 
 @dataclass(frozen=True)
 class DeploymentWebBootstrap:
-    username: str
-    display_name: str
-    password: str = field(repr=False)
+    setup_id: str
+    pairing_code: str = field(repr=False)
+    issued_at: datetime
+    expires_at: datetime
 
     @classmethod
     def from_bytes(cls, content: bytes) -> "DeploymentWebBootstrap":
@@ -44,33 +47,36 @@ class DeploymentWebBootstrap:
             )
             if not isinstance(document, dict) or set(document) != {
                 "protocol",
-                "username",
-                "display_name",
-                "password",
+                "setup_id",
+                "pairing_code",
+                "issued_at",
+                "expires_at",
             }:
                 raise ValueError("document")
-            username = document["username"]
-            display_name = document["display_name"]
-            password = document["password"]
+            setup_id = document["setup_id"]
+            pairing_code = document["pairing_code"]
+            issued_at = datetime.fromisoformat(document["issued_at"])
+            expires_at = datetime.fromisoformat(document["expires_at"])
+            if issued_at.tzinfo is None or expires_at.tzinfo is None:
+                raise ValueError("timezone")
+            issued_at = issued_at.astimezone(timezone.utc)
+            expires_at = expires_at.astimezone(timezone.utc)
             if (
                 document["protocol"] != _PROTOCOL
-                or not isinstance(username, str)
-                or _USERNAME.fullmatch(username) is None
-                or not isinstance(display_name, str)
-                or not 1 <= len(display_name.encode("utf-8")) <= 128
-                or any(ord(char) < 32 or ord(char) == 127 for char in display_name)
-                or not isinstance(password, str)
-                or len(password) < 12
-                or len(password.encode("utf-8")) > 1024
+                or not isinstance(setup_id, str)
+                or _SETUP_ID.fullmatch(setup_id) is None
+                or not isinstance(pairing_code, str)
+                or _PAIRING_CODE.fullmatch(pairing_code) is None
+                or not issued_at < expires_at <= issued_at + timedelta(hours=24)
             ):
                 raise ValueError("value")
-        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError, KeyError):
             raise ForestError(
                 "SUPERVISOR_WEB_BOOTSTRAP_INVALID",
-                "Deployment Web bootstrap credential is invalid",
+                "Deployment Web pairing credential is invalid",
                 422,
             ) from None
-        return cls(username, display_name, password)
+        return cls(setup_id, pairing_code, issued_at, expires_at)
 
     @classmethod
     def read(cls, path: Path) -> "DeploymentWebBootstrap":
@@ -79,7 +85,7 @@ class DeploymentWebBootstrap:
         except OSError:
             raise ForestError(
                 "SUPERVISOR_WEB_BOOTSTRAP_INVALID",
-                "Deployment Web bootstrap credential is unavailable",
+                "Deployment Web pairing credential is unavailable",
                 422,
             ) from None
         return cls.from_bytes(content)

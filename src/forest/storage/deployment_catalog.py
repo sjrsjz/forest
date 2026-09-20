@@ -136,6 +136,7 @@ class DeploymentCatalogRepository:
             "deployment_identity",
             "supervisor_lease",
             "web_accounts",
+            "web_setup_state",
             "web_account_operations",
             "web_sessions",
             "web_login_throttles",
@@ -171,6 +172,7 @@ class DeploymentCatalogRepository:
             "guard_provisioning_job_change",
             "guard_web_account_change",
             "guard_web_session_change",
+            "guard_web_setup_change",
         }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",

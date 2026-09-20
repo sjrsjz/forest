@@ -35,6 +35,7 @@ class _IdentityAuthority:
 
     def __init__(self):
         self.revoked = False
+        self.setup_required = False
         self.subject = WebSubject(
             "web-subject/test", "admin", "Administrator", "ADMIN", True, 1
         )
@@ -84,6 +85,23 @@ class _IdentityAuthority:
     async def logout(self, token):
         if token == self.session_token:
             self.revoked = True
+
+    async def setup_status(self):
+        return {
+            "state": "PENDING" if self.setup_required else "COMPLETED",
+            "setup_required": self.setup_required,
+            "expires_at": "2030-01-01T00:00:00+00:00" if self.setup_required else None,
+            "credential_expired": False,
+        }
+
+    async def complete_setup(self, *, pairing_code, username, display_name, password):
+        if not self.setup_required or pairing_code != "p" * 48:
+            raise ForestError("WEB_SETUP_CREDENTIAL_INVALID", "Pairing credential is invalid", 401)
+        self.setup_required = False
+        self.subject = WebSubject(
+            "web-subject/paired", username, display_name, "ADMIN", True, 1
+        )
+        return self.subject
 
 
 class _Configuration:
@@ -232,6 +250,47 @@ class _Registry:
         ]
 
 
+async def test_first_setup_endpoint_requires_exact_origin_and_closes_after_pairing():
+    identity = _IdentityAuthority()
+    identity.setup_required = True
+    app = create_deployment_management_app(
+        deployment_id="deployment/test",
+        components=(),
+        identity_authority=identity,
+        allowed_origin="http://forest.test",
+    )
+    payload = {
+        "pairing_code": "p" * 48,
+        "username": "admin",
+        "display_name": "Administrator",
+        "password": "correct-password",
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://forest.test"
+    ) as client:
+        status = await client.get("/management/v1/setup/status")
+        assert status.json()["setup_required"] is True
+        denied = await client.post(
+            "/management/v1/setup/complete",
+            headers={"origin": "http://evil.test"},
+            json=payload,
+        )
+        assert denied.status_code == 403
+        completed = await client.post(
+            "/management/v1/setup/complete",
+            headers={"origin": "http://forest.test"},
+            json=payload,
+        )
+        assert completed.status_code == 200
+        assert completed.json()["subject"]["role"] == "ADMIN"
+        assert (await client.get("/management/v1/setup/status")).json() == {
+            "state": "COMPLETED",
+            "setup_required": False,
+            "expires_at": None,
+            "credential_expired": False,
+        }
+
+
 async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_registries():
     contract = _Contract(
         _Configuration(),
@@ -278,6 +337,13 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://forest.test"
     ) as client:
+        status = await client.get("/management/v1/setup/status")
+        assert status.json() == {
+            "state": "COMPLETED",
+            "setup_required": False,
+            "expires_at": None,
+            "credential_expired": False,
+        }
         assert (await client.get("/management/v1/runtime")).status_code == 401
         assert (
             await client.post(

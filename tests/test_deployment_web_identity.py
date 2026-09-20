@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -47,23 +49,77 @@ def _authority(deployment_catalog):
     )
 
 
+def _credential(*, code: str = "p" * 48):
+    issued_at = datetime.now(timezone.utc)
+    return SimpleNamespace(
+        setup_id="setup/0123456789abcdef",
+        pairing_code=code,
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(hours=1),
+    )
+
+
+async def _initial_admin(authority, *, password="bootstrap-password-1"):
+    credential = _credential()
+    await authority.initialize_setup(credential)
+    return await authority.complete_setup(
+        pairing_code=credential.pairing_code,
+        username="admin",
+        display_name="Administrator",
+        password=password,
+    )
+
+
 @pytest.mark.postgres
 async def test_web_identity_bootstrap_login_csrf_and_revocation(deployment_catalog):
     await deployment_catalog.initialize()
     authority = _authority(deployment_catalog)
-    admin = await authority.ensure_bootstrap_admin(
-        operation_id="web/bootstrap/admin",
+    credential = _credential()
+    pending = await authority.initialize_setup(credential)
+    assert pending["setup_required"] is True
+    assert set(pending) == {
+        "state",
+        "setup_required",
+        "expires_at",
+        "credential_expired",
+    }
+    admin = await authority.complete_setup(
+        pairing_code=credential.pairing_code,
         username="admin",
         display_name="Deployment Administrator",
         password="bootstrap-password-1",
     )
-    replay = await authority.ensure_bootstrap_admin(
-        operation_id="web/bootstrap/admin",
-        username="admin",
-        display_name="Deployment Administrator",
-        password="bootstrap-password-1",
-    )
-    assert replay == admin
+    restarted = await authority.initialize_setup(credential)
+    assert restarted == {
+        "state": "COMPLETED",
+        "setup_required": False,
+        "expires_at": None,
+        "credential_expired": False,
+    }
+    replacement = _credential(code="z" * 48)
+    replacement.setup_id = "setup/replacement000000"
+    assert await authority.initialize_setup(replacement) == restarted
+    async with deployment_catalog.store.pool.connection() as conn:
+        state = await (
+            await conn.execute(
+                "SELECT state,pairing_code_digest,initial_admin_ref,revision "
+                "FROM forest_deployment.web_setup_state"
+            )
+        ).fetchone()
+    assert state == {
+        "state": "COMPLETED",
+        "pairing_code_digest": None,
+        "initial_admin_ref": admin.subject_id,
+        "revision": 2,
+    }
+    with pytest.raises(ForestError) as consumed:
+        await authority.complete_setup(
+            pairing_code=credential.pairing_code,
+            username="other",
+            display_name="Other",
+            password="other-password-1",
+        )
+    assert consumed.value.code == "WEB_SETUP_ALREADY_COMPLETE"
     assert admin.role == "ADMIN"
     assert "password_hash" not in (await authority.list_accounts())[0]
 
@@ -92,17 +148,83 @@ async def test_web_identity_bootstrap_login_csrf_and_revocation(deployment_catal
 
 
 @pytest.mark.postgres
+async def test_web_setup_rejects_wrong_pairing_credential(deployment_catalog):
+    await deployment_catalog.initialize()
+    authority = _authority(deployment_catalog)
+    credential = _credential()
+    await authority.initialize_setup(credential)
+    assert (await authority.setup_status())["credential_expired"] is False
+    active_replacement = _credential(code="q" * 48)
+    with pytest.raises(ForestError) as conflict:
+        await authority.initialize_setup(active_replacement)
+    assert conflict.value.code == "WEB_SETUP_CREDENTIAL_CONFLICT"
+    with pytest.raises(ForestError) as wrong:
+        await authority.complete_setup(
+            pairing_code="x" * 48,
+            username="admin",
+            display_name="Administrator",
+            password="bootstrap-password-1",
+        )
+    assert wrong.value.code == "WEB_SETUP_CREDENTIAL_INVALID"
+    assert await authority.list_accounts() == ()
+
+
+@pytest.mark.postgres
+async def test_web_setup_rejects_expired_pairing_credential(deployment_catalog):
+    await deployment_catalog.initialize()
+    authority = _authority(deployment_catalog)
+    credential = SimpleNamespace(
+        setup_id="setup/expired0123456789",
+        pairing_code="e" * 48,
+        issued_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    await authority.initialize_setup(credential)
+    assert (await authority.setup_status())["credential_expired"] is True
+    with pytest.raises(ForestError) as expired:
+        await authority.complete_setup(
+            pairing_code=credential.pairing_code,
+            username="admin",
+            display_name="Administrator",
+            password="bootstrap-password-1",
+        )
+    assert expired.value.code == "WEB_SETUP_CREDENTIAL_EXPIRED"
+    assert await authority.list_accounts() == ()
+
+    renewed_at = datetime.now(timezone.utc)
+    renewed = SimpleNamespace(
+        setup_id=credential.setup_id,
+        pairing_code="r" * 48,
+        issued_at=renewed_at,
+        expires_at=renewed_at + timedelta(hours=1),
+    )
+    status = await authority.initialize_setup(renewed)
+    assert status["credential_expired"] is False
+    with pytest.raises(ForestError) as stale:
+        await authority.complete_setup(
+            pairing_code=credential.pairing_code,
+            username="admin",
+            display_name="Administrator",
+            password="bootstrap-password-1",
+        )
+    assert stale.value.code == "WEB_SETUP_CREDENTIAL_INVALID"
+    assert (
+        await authority.complete_setup(
+            pairing_code=renewed.pairing_code,
+            username="admin",
+            display_name="Administrator",
+            password="bootstrap-password-1",
+        )
+    ).role == "ADMIN"
+
+
+@pytest.mark.postgres
 async def test_web_identity_roles_last_admin_and_password_change_revoke_sessions(
     deployment_catalog,
 ):
     await deployment_catalog.initialize()
     authority = _authority(deployment_catalog)
-    admin = await authority.ensure_bootstrap_admin(
-        operation_id="web/bootstrap/admin",
-        username="admin",
-        display_name="Administrator",
-        password="bootstrap-password-1",
-    )
+    admin = await _initial_admin(authority)
     auditor = await authority.create_account(
         operation_id="web/account/auditor",
         username="auditor",
@@ -182,11 +304,13 @@ async def test_concurrent_first_administrator_has_one_authoritative_winner(
 ):
     await deployment_catalog.initialize()
     authority = _authority(deployment_catalog)
+    credential = _credential()
+    await authority.initialize_setup(credential)
 
     async def create(index: int):
         try:
-            return await authority.ensure_bootstrap_admin(
-                operation_id=f"web/bootstrap/{index}",
+            return await authority.complete_setup(
+                pairing_code=credential.pairing_code,
                 username=f"admin{index}",
                 display_name=f"Administrator {index}",
                 password=f"bootstrap-password-{index}",
@@ -198,7 +322,7 @@ async def test_concurrent_first_administrator_has_one_authoritative_winner(
     winners = [result for result in results if not isinstance(result, str)]
     failures = [result for result in results if isinstance(result, str)]
     assert len(winners) == 1
-    assert failures == ["WEB_BOOTSTRAP_ALREADY_COMPLETE"]
+    assert failures == ["WEB_SETUP_ALREADY_COMPLETE"]
     assert len(await authority.list_accounts()) == 1
 
 
@@ -213,11 +337,13 @@ async def test_credential_operation_replay_uses_recorded_key_after_rotation(
         active_key_id="master/test/1",
         key_resolver=keys.get,
     )
-    saved = await first.ensure_bootstrap_admin(
-        operation_id="web/bootstrap/admin",
-        username="admin",
-        display_name="Administrator",
-        password="bootstrap-password-1",
+    await _initial_admin(first)
+    saved = await first.create_account(
+        operation_id="web/account/operator",
+        username="operator",
+        display_name="Operator",
+        password="operator-password-1",
+        role="AUDITOR",
     )
     rotated = DeploymentWebIdentityAuthority(
         deployment_catalog.store,
@@ -225,19 +351,21 @@ async def test_credential_operation_replay_uses_recorded_key_after_rotation(
         key_resolver=keys.get,
     )
     assert (
-        await rotated.ensure_bootstrap_admin(
-            operation_id="web/bootstrap/admin",
-            username="admin",
-            display_name="Administrator",
-            password="bootstrap-password-1",
+        await rotated.create_account(
+            operation_id="web/account/operator",
+            username="operator",
+            display_name="Operator",
+            password="operator-password-1",
+            role="AUDITOR",
         )
     ) == saved
     with pytest.raises(ForestError) as conflict:
-        await rotated.ensure_bootstrap_admin(
-            operation_id="web/bootstrap/admin",
-            username="admin",
-            display_name="Administrator",
+        await rotated.create_account(
+            operation_id="web/account/operator",
+            username="operator",
+            display_name="Operator",
             password="different-password-1",
+            role="AUDITOR",
         )
     assert conflict.value.code == "WEB_ACCOUNT_OPERATION_CONFLICT"
 
@@ -248,12 +376,7 @@ async def test_login_failures_converge_into_persistent_identity_throttle(
 ):
     await deployment_catalog.initialize()
     authority = _authority(deployment_catalog)
-    await authority.ensure_bootstrap_admin(
-        operation_id="web/bootstrap/admin",
-        username="admin",
-        display_name="Administrator",
-        password="bootstrap-password-1",
-    )
+    await _initial_admin(authority)
 
     async def reject_once(index: int) -> str:
         try:

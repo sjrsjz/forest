@@ -193,12 +193,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
     stop_task = None
     try:
         await supervisor.start()
-        await web_identity.ensure_bootstrap_admin(
-            operation_id="deployment/web/bootstrap/1",
-            username=settings.web_bootstrap.username,
-            display_name=settings.web_bootstrap.display_name,
-            password=settings.web_bootstrap.password,
-        )
+        await web_identity.initialize_setup(settings.web_bootstrap)
         import uvicorn
 
         management_server = uvicorn.Server(

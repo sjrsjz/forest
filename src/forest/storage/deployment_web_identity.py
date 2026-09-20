@@ -102,23 +102,201 @@ class DeploymentWebIdentityAuthority:
         self.active_key_id = _text(active_key_id, "active_key_id", 256)
         self.key_resolver = key_resolver
 
-    async def ensure_bootstrap_admin(
+    async def initialize_setup(self, credential) -> dict:
+        """Install one pairing challenge without ever reopening completed setup."""
+        digest = self._pairing_code_digest(credential.pairing_code)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.web-setup",),
+            )
+            row = await (
+                await conn.execute(
+                    "SELECT *,clock_timestamp() AS database_now "
+                    "FROM forest_deployment.web_setup_state "
+                    "WHERE deployment_id=%s FOR UPDATE",
+                    (self.store.deployment_id,),
+                )
+            ).fetchone()
+            if row is None:
+                row = await (
+                    await conn.execute(
+                        "INSERT INTO forest_deployment.web_setup_state("
+                        "deployment_id,setup_id,state,pairing_code_digest,issued_at,expires_at) "
+                        "VALUES (%s,%s,'PENDING',%s,%s,%s) "
+                        "RETURNING *,clock_timestamp() AS database_now",
+                        (
+                            self.store.deployment_id,
+                            credential.setup_id,
+                            digest,
+                            credential.issued_at,
+                            credential.expires_at,
+                        ),
+                    )
+                ).fetchone()
+            elif row["state"] == "PENDING" and (
+                row["setup_id"] != credential.setup_id
+                or row["pairing_code_digest"] != digest
+                or row["issued_at"] != credential.issued_at
+                or row["expires_at"] != credential.expires_at
+            ):
+                if (
+                    row["setup_id"] != credential.setup_id
+                    or row["expires_at"] > row["database_now"]
+                    or credential.issued_at < row["expires_at"]
+                    or credential.expires_at <= row["database_now"]
+                ):
+                    raise ForestError(
+                        "WEB_SETUP_CREDENTIAL_CONFLICT",
+                        "Pending setup belongs to another active installer credential",
+                        409,
+                    )
+                row = await (
+                    await conn.execute(
+                        "UPDATE forest_deployment.web_setup_state SET "
+                        "pairing_code_digest=%s,issued_at=%s,expires_at=%s,"
+                        "revision=revision+1,updated_at=clock_timestamp() "
+                        "WHERE deployment_id=%s "
+                        "RETURNING *,clock_timestamp() AS database_now",
+                        (
+                            digest,
+                            credential.issued_at,
+                            credential.expires_at,
+                            self.store.deployment_id,
+                        ),
+                    )
+                ).fetchone()
+            return self._setup_status(row)
+
+    async def setup_status(self) -> dict:
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT *,clock_timestamp() AS database_now "
+                    "FROM forest_deployment.web_setup_state "
+                    "WHERE deployment_id=%s",
+                    (self.store.deployment_id,),
+                )
+            ).fetchone()
+        if row is None:
+            raise ForestError("WEB_SETUP_UNAVAILABLE", "Web setup is unavailable", 503)
+        return self._setup_status(row)
+
+    async def complete_setup(
         self,
         *,
-        operation_id: str,
+        pairing_code: str,
         username: str,
         display_name: str,
         password: str,
     ) -> WebSubject:
-        return await self._create_account(
-            operation_id=operation_id,
-            operation_kind="BOOTSTRAP",
-            username=username,
-            display_name=display_name,
-            password=password,
-            role="ADMIN",
-            require_empty=True,
-        )
+        pairing_digest = self._pairing_code_digest(pairing_code)
+        username = _username(username)
+        display_name = _text(display_name, "display_name", 128)
+        await self._verify_pending_setup(pairing_digest)
+        password_hash = await asyncio.to_thread(hash_password, password)
+        subject_id = "web-subject/" + hashlib.sha256(username.encode()).hexdigest()[:32]
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.web-setup",),
+            )
+            row = await (
+                await conn.execute(
+                    "SELECT *,clock_timestamp() AS database_now "
+                    "FROM forest_deployment.web_setup_state "
+                    "WHERE deployment_id=%s FOR UPDATE",
+                    (self.store.deployment_id,),
+                )
+            ).fetchone()
+            self._require_pending_setup(row, pairing_digest)
+            occupied = await (
+                await conn.execute(
+                    "SELECT EXISTS(SELECT 1 FROM forest_deployment.web_accounts) AS value"
+                )
+            ).fetchone()
+            if occupied["value"]:
+                raise ForestError(
+                    "WEB_SETUP_STATE_INVALID",
+                    "Web setup state conflicts with existing accounts",
+                    409,
+                )
+            saved = await (
+                await conn.execute(
+                    "INSERT INTO forest_deployment.web_accounts("
+                    "subject_id,username,display_name,password_hash,role) "
+                    "VALUES (%s,%s,%s,%s,'ADMIN') RETURNING *",
+                    (subject_id, username, display_name, password_hash),
+                )
+            ).fetchone()
+            subject = self._subject(saved)
+            operation_id = "deployment/web/" + row["setup_id"]
+            input_digest = await self._credential_input_digest(
+                key_id=self.active_key_id,
+                operation_id=operation_id,
+                password=password,
+                payload=["SETUP", row["setup_id"], username, display_name, "ADMIN"],
+            )
+            await conn.execute(
+                "INSERT INTO forest_deployment.web_account_operations("
+                "operation_id,operation_kind,input_digest,credential_key_id,subject_id,"
+                "resulting_revision,result) VALUES (%s,'SETUP',%s,%s,%s,%s,%s)",
+                (
+                    operation_id,
+                    input_digest,
+                    self.active_key_id,
+                    subject_id,
+                    subject.revision,
+                    Jsonb(subject.as_dict()),
+                ),
+            )
+            await conn.execute(
+                "UPDATE forest_deployment.web_setup_state SET state='COMPLETED',"
+                "pairing_code_digest=NULL,consumed_at=clock_timestamp(),"
+                "initial_admin_ref=%s,revision=revision+1,updated_at=clock_timestamp() "
+                "WHERE deployment_id=%s",
+                (subject_id, self.store.deployment_id),
+            )
+            return subject
+
+    async def _verify_pending_setup(self, pairing_digest: str) -> None:
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT *,clock_timestamp() AS database_now "
+                    "FROM forest_deployment.web_setup_state WHERE deployment_id=%s",
+                    (self.store.deployment_id,),
+                )
+            ).fetchone()
+        self._require_pending_setup(row, pairing_digest)
+
+    @staticmethod
+    def _require_pending_setup(row, pairing_digest: str) -> None:
+        if row is None:
+            raise ForestError("WEB_SETUP_UNAVAILABLE", "Web setup is unavailable", 503)
+        if row["state"] != "PENDING":
+            raise ForestError("WEB_SETUP_ALREADY_COMPLETE", "Web setup is complete", 409)
+        if row["expires_at"] <= row["database_now"]:
+            raise ForestError("WEB_SETUP_CREDENTIAL_EXPIRED", "Pairing credential expired", 410)
+        if not hmac.compare_digest(row["pairing_code_digest"], pairing_digest):
+            raise ForestError("WEB_SETUP_CREDENTIAL_INVALID", "Pairing credential is invalid", 401)
+
+    @staticmethod
+    def _pairing_code_digest(value: object) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", value):
+            raise ForestError("WEB_SETUP_CREDENTIAL_INVALID", "Pairing credential is invalid", 401)
+        return "sha256:" + hashlib.sha256(value.encode("ascii")).hexdigest()
+
+    @staticmethod
+    def _setup_status(row) -> dict:
+        return {
+            "state": row["state"],
+            "setup_required": row["state"] == "PENDING",
+            "expires_at": row["expires_at"].isoformat() if row["state"] == "PENDING" else None,
+            "credential_expired": (
+                row["state"] == "PENDING" and row["expires_at"] <= row["database_now"]
+            ),
+        }
 
     async def create_account(
         self,
@@ -137,7 +315,6 @@ class DeploymentWebIdentityAuthority:
             display_name=display_name,
             password=password,
             role=role,
-            require_empty=False,
             authorization=authorization,
         )
 
@@ -150,7 +327,6 @@ class DeploymentWebIdentityAuthority:
         display_name: str,
         password: str,
         role: str,
-        require_empty: bool,
         authorization=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
@@ -186,18 +362,6 @@ class DeploymentWebIdentityAuthority:
                         "WEB_ACCOUNT_OPERATION_CONFLICT", "Account operation differs", 409
                     )
                 return self._operation_subject(replay)
-            if require_empty:
-                occupied = await (
-                    await conn.execute(
-                        "SELECT EXISTS(SELECT 1 FROM forest_deployment.web_accounts) AS value"
-                    )
-                ).fetchone()
-                if occupied["value"]:
-                    raise ForestError(
-                        "WEB_BOOTSTRAP_ALREADY_COMPLETE",
-                        "The first administrator already exists",
-                        409,
-                    )
             exists = await (
                 await conn.execute(
                     "SELECT 1 FROM forest_deployment.web_accounts "

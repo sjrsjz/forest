@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from forest.clean_management_app import ConfigurationApplyInput, ConfigurationPlanInput
 from forest.errors import ForestError
@@ -27,8 +27,16 @@ _CSRF_COOKIE = "forest_management_csrf"
 
 class LoginInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    username: str
-    password: str
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class SetupCompleteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pairing_code: str = Field(min_length=43, max_length=128)
+    username: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=12, max_length=1024)
 
 
 def create_deployment_management_app(
@@ -182,6 +190,21 @@ def create_deployment_management_app(
             max_age=lifetime,
         )
         return response
+
+    @app.get("/management/v1/setup/status")
+    async def setup_status():
+        return await identity_authority.setup_status()
+
+    @app.post("/management/v1/setup/complete")
+    async def complete_setup(request: Request, body: SetupCompleteInput):
+        same_origin(request)
+        subject = await identity_authority.complete_setup(
+            pairing_code=body.pairing_code,
+            username=body.username,
+            display_name=body.display_name,
+            password=body.password,
+        )
+        return {"state": "COMPLETED", "subject": subject.as_dict()}
 
     @app.get("/management/v1/auth/session")
     async def current_session(request: Request):

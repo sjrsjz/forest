@@ -8,7 +8,20 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div id="login" class="login-layer">
+  <div id="setup" class="login-layer hidden">
+    <form id="setup-form" class="login-card">
+      <span class="mark">FOREST · FIRST SETUP</span>
+      <h1>创建首位管理员</h1>
+      <p>输入安装程序生成的一次性配对码。配对成功后，该凭据立即失效。</p>
+      <label>配对码<input name="pairing_code" type="password" autocomplete="one-time-code" required minlength="43" maxlength="128"></label>
+      <label>用户名<input name="username" autocomplete="username" required minlength="3" maxlength="64" pattern="[a-z][a-z0-9._-]{2,63}"></label>
+      <label>显示名称<input name="display_name" autocomplete="name" required maxlength="128"></label>
+      <label>新密码<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label>
+      <button type="submit">完成配对</button>
+      <output id="setup-error"></output>
+    </form>
+  </div>
+  <div id="login" class="login-layer hidden">
     <form id="login-form" class="login-card">
       <span class="mark">FOREST</span>
       <h1>运行时控制台</h1>
