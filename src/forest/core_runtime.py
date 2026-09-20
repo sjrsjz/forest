@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
+from forest.builtin_runtime_job import (
+    RUNTIME_HEALTH_SNAPSHOT_JOB,
+    runtime_health_snapshot_service,
+)
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.clean_management_contract import CleanAuditManagementContract
@@ -119,6 +123,7 @@ _MODULES = {
             "kernel.uow.agent.cancel-wake",
             "shell.core-runtime.execute",
             "agent.tool.runtime-status",
+            "job.runtime.health-snapshot",
         ),
         "capabilities": (
             "runtime.graph.publish",
@@ -388,6 +393,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         ("kernel.runtime",),
                         runtime_shell_service,
                     ),
+                    RuntimeKernelServiceSpec(
+                        RUNTIME_HEALTH_SNAPSHOT_JOB.service_id,
+                        RUNTIME_HEALTH_SNAPSHOT_JOB.service_version,
+                        ("kernel.runtime",),
+                        runtime_health_snapshot_service,
+                    ),
                 )
                 if component_id == "kernel.runtime"
                 else ()
@@ -400,6 +411,11 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 if component_id == "kernel.runtime"
                 else AUDIT_SHELL_COMMANDS
                 if component_id == "kernel.audit"
+                else ()
+            ),
+            job_types=(
+                (RUNTIME_HEALTH_SNAPSHOT_JOB,)
+                if component_id == "kernel.runtime"
                 else ()
             ),
         )

@@ -1,0 +1,27 @@
+<div class="contribution-view job-workbench">
+  <section class="job-control">
+    <header>
+      <div><strong>持久任务</strong><p>模块贡献任务类型；Scheduler 只管理队列、租约、取消与终态。</p></div>
+      <button id="job-refresh" class="quiet" type="button">刷新</button>
+    </header>
+    <div class="job-filters">
+      <label>任务类型<select id="job-filter-type"><option value="">全部</option></select></label>
+      <label>状态<select id="job-filter-state"><option value="">全部</option><option>QUEUED</option><option>RUNNING</option><option>SUCCEEDED</option><option>FAILED</option><option>CANCELLED</option><option>UNKNOWN</option></select></label>
+      <label>请求主体<input id="job-filter-principal" maxlength="256" placeholder="精确匹配"></label>
+      <button id="job-search" type="button">查询</button>
+    </div>
+    <div class="job-grid job-grid-head"><span>任务 / 类型</span><span>状态</span><span>尝试</span><span>更新时间</span><span>操作</span></div>
+    <div id="job-list" class="job-list"></div>
+    <footer><button id="job-more" class="quiet hidden" type="button">加载更多</button><span id="job-count" class="muted"></span></footer>
+  </section>
+  <section class="job-runner">
+    <header><div><strong>创建任务</strong><p id="job-type-owner">选择当前 RuntimeGraph 发布的任务类型。</p></div><button id="job-run" type="button">入队</button></header>
+    <label>任务类型<select id="job-run-type"></select></label>
+    <label>输入 JSON<textarea id="job-input" spellcheck="false">{}</textarea></label>
+    <pre id="job-schema"></pre>
+  </section>
+  <section class="job-detail">
+    <header><div><strong>任务详情</strong><p>输入、结果和 claim 元数据从模块权威读取。</p></div></header>
+    <pre id="job-detail">选择一条任务查看详情。</pre>
+  </section>
+</div>

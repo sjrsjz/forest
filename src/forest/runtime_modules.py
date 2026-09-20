@@ -334,6 +334,60 @@ class RuntimeShellCommandContribution:
         }
 
 
+@dataclass(frozen=True)
+class RuntimeJobTypeContribution:
+    """One durable job type executed by a generation-bound module service."""
+
+    job_type: str
+    job_version: int
+    service_id: str
+    service_version: int
+    input_schema: dict
+    max_attempts: int = 3
+    timeout_seconds: int = 300
+    max_concurrency: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.job_type)
+            or type(self.job_version) is not int
+            or self.job_version < 1
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.service_id)
+            or type(self.service_version) is not int
+            or self.service_version < 1
+            or not isinstance(self.input_schema, dict)
+            or self.input_schema.get("$schema")
+            != "https://json-schema.org/draft/2020-12/schema"
+            or self.input_schema.get("type") != "object"
+            or type(self.max_attempts) is not int
+            or not 1 <= self.max_attempts <= 32
+            or type(self.timeout_seconds) is not int
+            or not 1 <= self.timeout_seconds <= 86_400
+            or type(self.max_concurrency) is not int
+            or not 1 <= self.max_concurrency <= 128
+        ):
+            raise ValueError("Runtime job type contribution is invalid")
+        digest_json(self.input_schema)
+
+    @property
+    def input_schema_digest(self) -> str:
+        return digest_json(self.input_schema)
+
+    def as_fact(self) -> dict:
+        return {
+            "protocol": "forest.job-type-contribution/1",
+            "job_type": self.job_type,
+            "job_version": self.job_version,
+            "service_id": self.service_id,
+            "service_version": self.service_version,
+            "input_schema": self.input_schema,
+            "input_schema_digest": self.input_schema_digest,
+            "max_attempts": self.max_attempts,
+            "timeout_seconds": self.timeout_seconds,
+            "max_concurrency": self.max_concurrency,
+        }
+
+
 def configuration_management_contribution(
     label: str = "配置",
 ) -> RuntimeManagementContribution:
@@ -421,6 +475,7 @@ class RuntimeModuleDescriptor:
     kernel_services: tuple[RuntimeKernelServiceSpec, ...] = ()
     agent_tools: tuple[RuntimeAgentToolContribution, ...] = ()
     shell_commands: tuple[RuntimeShellCommandContribution, ...] = ()
+    job_types: tuple[RuntimeJobTypeContribution, ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -449,6 +504,9 @@ class RuntimeModuleDescriptor:
         ]
         if len(command_keys) != len(set(command_keys)):
             raise ValueError("Runtime Shell command contribution identities must be unique")
+        job_keys = [(item.job_type, item.job_version) for item in self.job_types]
+        if len(job_keys) != len(set(job_keys)):
+            raise ValueError("Runtime job type contribution identities must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -540,6 +598,12 @@ class RuntimeModuleRegistry:
                 for descriptor in self.descriptors
                 if descriptor.shell_commands and descriptor.component_id != "shell.command"
             )
+        if "job.scheduler" in component_ids:
+            dynamic_requires["job.scheduler"].update(
+                descriptor.component_id
+                for descriptor in self.descriptors
+                if descriptor.job_types and descriptor.component_id != "job.scheduler"
+            )
         self._dynamic_requires = {
             component_id: tuple(sorted(required))
             for component_id, required in dynamic_requires.items()
@@ -588,6 +652,7 @@ class RuntimeModuleRegistry:
             "kernel_services": [item.as_fact() for item in descriptor.kernel_services],
             "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
             "shell_commands": [item.as_fact() for item in descriptor.shell_commands],
+            "job_types": [item.as_fact() for item in descriptor.job_types],
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 
@@ -770,6 +835,27 @@ class RuntimeModuleRegistry:
             raise ForestError(
                 "RUNTIME_SHELL_COMMAND_CONFLICT",
                 "Runtime Shell command identities must be graph-unique",
+                409,
+            )
+        job_keys = [
+            (job.job_type, job.job_version)
+            for descriptor in self.descriptors
+            for job in descriptor.job_types
+        ]
+        job_services = [
+            ((job.service_id, job.service_version), descriptor.component_id)
+            for descriptor in self.descriptors
+            for job in descriptor.job_types
+        ]
+        service_owners: dict[tuple[str, int], set[str]] = {}
+        for service_key, owner in job_services:
+            service_owners.setdefault(service_key, set()).add(owner)
+        if len(job_keys) != len(set(job_keys)) or any(
+            len(owners) > 1 for owners in service_owners.values()
+        ):
+            raise ForestError(
+                "RUNTIME_JOB_TYPE_CONFLICT",
+                "Runtime job types and executor services must be graph-unique",
                 409,
             )
         for descriptor in self.descriptors:

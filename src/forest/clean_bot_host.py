@@ -16,6 +16,7 @@ from uuid import uuid4
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
+from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
@@ -500,6 +501,11 @@ class CleanBotHost:
                 "private_enabled": self.settings.private_enabled,
             },
         )
+        jobs = await bootstrap_clean_job(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+        )
 
         token_digest = (
             "sha256:" + hashlib.sha256(self.settings.onebot_access_token.encode()).hexdigest()
@@ -548,6 +554,7 @@ class CleanBotHost:
                 media.descriptor,
                 agent.descriptor,
                 trigger.descriptor,
+                jobs.descriptor,
                 shell.descriptor,
             )
             + messaging.descriptors

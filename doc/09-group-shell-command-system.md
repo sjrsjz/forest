@@ -64,6 +64,8 @@ RuntimeShellCommandContribution {
 
 当前 `memory.graph` 已作为首个非内核命令贡献者提供 `memory trunks`、`memory sources` 和 `memory relations`。群聊输出只给最多十项的短投影；来源项明确标注作者、模态和来源群，关系项明确标注证据来自哪些群。需要稳定游标、组合筛选或展开完整证据时，回执引导管理员进入同一模块的 WebUI 查询面，不能在群里倾倒大页数据。
 
+当前 `job.scheduler` 提供 `jobs list/inspect/run/cancel`，但不拥有具体任务语义。执行模块通过 `RuntimeJobTypeContribution` 声明稳定任务类型、版本、输入 schema、服务、超时、最大尝试和并发上限；Scheduler 在 claim 时冻结准确 provider Generation，并以持久 lease/token 拒绝旧 Worker 的迟到结果。热替换先排空旧 Scheduler 已领取任务，新 Generation 才继续领取排队任务。`jobs cancel` 使用调用者看到的 job revision：排队任务直接终结，运行中任务只登记可观察的取消意图，由执行器在安全点响应；已经产生的真实结果不能被改写成“从未执行”。首个内置类型为只读 `runtime.health-snapshot`。
+
 `kernel.audit` 贡献 `audit tail`，允许按 `action`、`producer_component_id`、`origin_kind`、资源二元组、操作二元组和 `before` 游标筛选，单页最多十项。回执只投影时间、级别、动作、生产者、主体、资源、操作和稳定 audit ID，不读取详情载荷正文。查询句柄必须由当前 `kernel.audit` Generation 提供；Shell 结果、CONTROL SendIntent 与对应不可变审计 envelope 在同一 UnitOfWork 中提交，任一参与者失败时整体回滚。
 
 `RuntimeModuleDescriptor.shell_commands` 是唯一命令目录。命令词由 `command_id` 的点分段确定，参数名和类型来自完整 Draft 2020-12 schema，CLI 风格别名只能显式映射到 schema 中已声明的属性。RuntimeGraph 构建时拒绝重复 `(command_id, command_version)`；Contract Router 只向 `shell.command` 暴露贡献目录，并为每项解析由贡献模块准确 Generation 提供的类型化服务句柄。Shell 不按命令 ID 导入模块，也不含模块命令分支。

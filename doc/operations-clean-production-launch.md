@@ -4,12 +4,12 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 15 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 16 个成员：
 
 - `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
 - `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`media.capture`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`；
-- `adapter.onebot`、`delivery`、`shell.command`。
+- `adapter.onebot`、`delivery`、`job.scheduler`、`shell.command`。
 
 OneBot 消息进入后，Adapter 只做协议校验、身份归一化和载荷落库。`conversation.trigger-policy` 根据冻结配置给出 `TRIGGER` 或 `NO_TRIGGER`；内核 OneBot ingress UoW 在同一事务中提交平台事件、Conversation Inbox、群主干 Memory 来源与分类结果。Scheduler 因此不再依赖测试或管理端手工补写触发记录。
 
@@ -65,7 +65,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `media.capture` 独占 OneBot 临时图片定位符、下载客户端、重试租约和受管图片资产。Adapter 在 ingress 事务里只向 Conversation 发布稳定 `media_ref`，并登记异步捕获任务；签名 URL 不进入规范 Context。Worker 完成有界下载和图片解码验证后，通过 `memory.source.capture/1` 发布保持原段顺序的图文来源。Agent 在下一次模型调用前从 `media.context.resolve/1` 取得当前 Context 的不可变像素快照；text-only Provider 仍只在该次投影中省略图片。
 
-当前环境变量承担首次 bootstrap 与无 WebUI 时的真实链路验收。设置 `FOREST_MANAGEMENT_TOKEN`（至少 16 字符）后，宿主同时启动首个干净管理面切片；默认监听 `127.0.0.1:8080`，容器内监听地址由 Compose 固定为 `0.0.0.0`，宿主端口仍只绑定 loopback。`FOREST_MANAGEMENT_HOST` 与 `FOREST_MANAGEMENT_PORT` 可调整监听。当前页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询、Agent PresetContext/CorePrompt、带会话/状态/游标的 Run 查询、Run/ModelTurn/ToolStep 详情与 checkpoint CAS 取消，以及 OneBot Binding 状态、fence 与端点变更；token 只保存在浏览器 `sessionStorage`。Binding 密钥不回显，当前页面只沿用 bootstrap secret 引用，不能更换访问令牌或 transport。该切片还不是最终独立 Supervisor/Web 身份控制面。环境变量不能演变为壳层专用 Bot 表单。
+当前环境变量承担首次 bootstrap 与无 WebUI 时的真实链路验收。设置 `FOREST_MANAGEMENT_TOKEN`（至少 16 字符）后，宿主同时启动首个干净管理面切片；默认监听 `127.0.0.1:8080`，容器内监听地址由 Compose 固定为 `0.0.0.0`，宿主端口仍只绑定 loopback。`FOREST_MANAGEMENT_HOST` 与 `FOREST_MANAGEMENT_PORT` 可调整监听。当前页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询、Agent PresetContext/CorePrompt、带会话/状态/游标的 Run 查询、Run/ModelTurn/ToolStep 详情与 checkpoint CAS 取消、Job 类型发现/筛选/运行/取消，以及 OneBot Binding 状态、fence 与端点变更；token 只保存在浏览器 `sessionStorage`。Binding 密钥不回显，当前页面只沿用 bootstrap secret 引用，不能更换访问令牌或 transport。该切片还不是最终独立 Supervisor/Web 身份控制面。环境变量不能演变为壳层专用 Bot 表单。
 
 ## 生命周期与恢复
 
@@ -77,7 +77,7 @@ Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `f
 
 ## 尚未接入本图的能力
 
-- `shell.command` 的受控任务处理命令；取消、审计查询和持久 RuntimeGraph 重载请求已经进入当前图；
+- 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
 - 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
 - 多 Bot provisioning 与每 Bot 独立数据库/全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。

@@ -441,6 +441,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "media.capture",
                     "agent.runtime",
                     "conversation.trigger-policy",
+                    "job.scheduler",
                     "shell.command",
                     "conversation.scheduler",
                     "adapter.onebot",
@@ -462,6 +463,21 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 graph_ids.append(host.registry.graph_identity.graph_id)
                 assert clients[-1].handler is not None
                 if index == 0:
+                    jobs = host.registry.get("job.scheduler")
+                    queued = await jobs.enqueue(
+                        job_type="runtime.health-snapshot",
+                        operation_id="host-test:runtime-health",
+                        requested_by="test:operator",
+                        input_value={},
+                    )
+                    jobs.notify()
+                    async with asyncio.timeout(5):
+                        while True:
+                            job = await jobs.inspect(queued["job_id"])
+                            if job["state"] == "SUCCEEDED":
+                                break
+                            await asyncio.sleep(0.05)
+                    assert job["result_payload_id"]
                     await clients[-1].handler(
                         json.dumps(
                             {
@@ -951,6 +967,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         ).text.replace(" ", "")
                         assert (await web.get("/static/modules/clean-audit.html")).status_code == 200
                         assert (await web.get("/static/clean-audit.js")).status_code == 200
+                        assert (await web.get("/static/modules/clean-jobs.html")).status_code == 200
+                        assert (await web.get("/static/clean-jobs.js")).status_code == 200
                         assert index.headers["x-frame-options"] == "DENY"
                         assert "default-src 'none'" in index.headers["content-security-policy"]
                         unauthorized = await web.get("/management/v1/runtime")
@@ -1013,6 +1031,62 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             item["contribution_id"]
                             for item in audit_view["management_contributions"]
                         ] == ["audit-explorer"]
+                        job_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "job.scheduler"
+                        )
+                        assert [
+                            item["contribution_id"]
+                            for item in job_view["management_contributions"]
+                        ] == ["job-control", "configuration"]
+                        assert {
+                            item["query_id"]
+                            for item in job_view["management_contract"]["queries"]
+                        } == {"jobs.types", "jobs.query", "jobs.read"}
+                        job_types = await web.post(
+                            "/management/v1/modules/job.scheduler/queries/jobs.types",
+                            headers=headers,
+                            json={},
+                        )
+                        assert job_types.status_code == 200
+                        assert [item["job_type"] for item in job_types.json()["items"]] == [
+                            "runtime.health-snapshot"
+                        ]
+                        web_job = await web.post(
+                            "/management/v1/modules/job.scheduler/actions/jobs.run",
+                            headers={**headers, "idempotency-key": "web-health-job"},
+                            json={"job_type": "runtime.health-snapshot", "input": {}},
+                        )
+                        assert web_job.status_code == 200
+                        web_job_id = web_job.json()["job_id"]
+                        async with asyncio.timeout(5):
+                            while True:
+                                jobs_page = await web.post(
+                                    "/management/v1/modules/job.scheduler/queries/jobs.query",
+                                    headers=headers,
+                                    json={
+                                        "states": ["SUCCEEDED"],
+                                        "job_type": "runtime.health-snapshot",
+                                        "requested_by": "management.web",
+                                        "limit": 25,
+                                    },
+                                )
+                                if any(
+                                    item["job_id"] == web_job_id
+                                    for item in jobs_page.json()["items"]
+                                ):
+                                    break
+                                await asyncio.sleep(0.05)
+                        web_job_detail = await web.post(
+                            "/management/v1/modules/job.scheduler/queries/jobs.read",
+                            headers=headers,
+                            json={"job_id": web_job_id},
+                        )
+                        assert web_job_detail.status_code == 200
+                        assert web_job_detail.json()["result"]["protocol"] == (
+                            "forest.runtime-health-snapshot/1"
+                        )
                         audits = await web.post(
                             "/management/v1/modules/kernel.audit/queries/audit.records.query",
                             headers=headers,

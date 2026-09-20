@@ -149,6 +149,11 @@ class RuntimeModuleFactoryContext:
 
         return self._router.shell_commands(self.component_id)
 
+    def job_types(self) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        """Discover durable job executors without exposing module instances."""
+
+        return self._router.job_types(self.component_id)
+
 
 class RuntimeContractRouter:
     """Resolve runtime service contracts without exposing module instances."""
@@ -262,6 +267,33 @@ class RuntimeContractRouter:
                     service_id=contribution.service_id,
                     version=contribution.service_version,
                     admission_lane="CONTROL",
+                    owned_work=True,
+                )
+                discovered.append((descriptor.component_id, contribution, handle))
+        return tuple(discovered)
+
+    def job_types(
+        self, caller_component_id: str
+    ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        if caller_component_id != "job.scheduler":
+            raise ForestError(
+                "RUNTIME_JOB_TYPE_DISCOVERY_FORBIDDEN",
+                "Only the Job scheduler may consume the graph job directory",
+                403,
+            )
+        discovered = []
+        for descriptor in sorted(
+            self.registry.descriptors, key=lambda item: item.component_id
+        ):
+            for contribution in sorted(
+                descriptor.job_types,
+                key=lambda item: (item.job_type, item.job_version),
+            ):
+                handle = self.request(
+                    caller_component_id=caller_component_id,
+                    service_id=contribution.service_id,
+                    version=contribution.service_version,
+                    admission_lane="DATA",
                     owned_work=True,
                 )
                 discovered.append((descriptor.component_id, contribution, handle))
