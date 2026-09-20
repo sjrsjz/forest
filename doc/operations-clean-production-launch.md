@@ -79,7 +79,7 @@ Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `f
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
 - 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
-- 多 Bot 的模块 bootstrap profile、供应 Job、deployment scope 管理贡献和正式 Supervisor 入口；独立部署目录与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
+- 多 Bot 的供应 Job、deployment scope 管理贡献和正式 Supervisor 入口；独立部署目录、不可变组件级 bootstrap profile 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。

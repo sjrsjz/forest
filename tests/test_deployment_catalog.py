@@ -14,6 +14,7 @@ from psycopg import sql
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
 from forest.errors import ForestError
 from forest.storage.clean_deployment_store import CleanDeploymentStore
+from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
@@ -295,6 +296,74 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
     with pytest.raises(ForestError) as caught:
         await wrong.resolve(first.secret_ref)
     assert caught.value.code == "SECRET_DECRYPTION_FAILED"
+
+
+@pytest.mark.postgres
+async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_only(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/profile", "profile")
+    key = bytes(range(32))
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: key,
+    )
+    await secrets.put(
+        operation_id="secret/profile/model/1",
+        secret_ref="secret://profile/model-api",
+        purpose="provider.chat-completions.credential",
+        plaintext=b"provider-key",
+        expected_revision=0,
+    )
+    profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
+    components = {
+        "provider.chat-completions": {
+            "protocol": "forest.provider.chat-completions/1",
+            "base_url": "https://model.example/v1",
+            "credential_ref": "secret://profile/model-api",
+        },
+        "conversation.trigger-policy": {
+            "protocol": "forest.conversation.trigger-policy/1",
+            "allowed_group_ids": ["933179609"],
+        },
+    }
+    schemas = {component_id: "sha256:" + str(index) * 64 for index, component_id in enumerate(components, 1)}
+    created = await profiles.create(
+        operation_id="bootstrap-profile/profile/1",
+        profile_ref="bootstrap-profile/profile/1",
+        bot_id="bot/profile",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=1,
+        components=components,
+        schema_digests=schemas,
+    )
+    replay = await profiles.create(
+        operation_id="bootstrap-profile/profile/1",
+        profile_ref="bootstrap-profile/profile/1",
+        bot_id="bot/profile",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=1,
+        components=components,
+        schema_digests=schemas,
+    )
+    assert replay == created
+    assert [item.component_id for item in created.components] == sorted(components)
+    assert all(item.config_digest.startswith("sha256:") for item in created.components)
+
+    with pytest.raises(ForestError) as caught:
+        await profiles.create(
+            operation_id="bootstrap-profile/plaintext/1",
+            profile_ref="bootstrap-profile/plaintext/1",
+            bot_id="bot/profile",
+            storage_profile_ref=storage.profile_ref,
+            storage_generation=1,
+            components={"provider.chat-completions": {"model_api_key": "forbidden"}},
+            schema_digests={"provider.chat-completions": "sha256:" + "f" * 64},
+        )
+    assert caught.value.code == "BOOTSTRAP_SECRET_PLAINTEXT_FORBIDDEN"
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

@@ -141,6 +141,9 @@ class DeploymentCatalogRepository:
             "secret_versions",
             "storage_profiles",
             "storage_profile_operations",
+            "bootstrap_profiles",
+            "bootstrap_profile_components",
+            "bootstrap_profile_operations",
         }
         functions = await (
             await conn.execute(

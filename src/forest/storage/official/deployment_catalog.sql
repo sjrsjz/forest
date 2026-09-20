@@ -31,6 +31,33 @@ CREATE TABLE forest_deployment.storage_profile_operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TABLE forest_deployment.bootstrap_profiles (
+    profile_ref text PRIMARY KEY CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
+    bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
+    storage_profile_ref text NOT NULL,
+    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    manifest_digest text NOT NULL CHECK (manifest_digest ~ '^sha256:[a-f0-9]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (storage_profile_ref,bot_id,storage_generation)
+        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation)
+);
+
+CREATE TABLE forest_deployment.bootstrap_profile_components (
+    profile_ref text NOT NULL REFERENCES forest_deployment.bootstrap_profiles(profile_ref),
+    component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    schema_digest text NOT NULL CHECK (schema_digest ~ '^sha256:[a-f0-9]{64}$'),
+    config_digest text NOT NULL CHECK (config_digest ~ '^sha256:[a-f0-9]{64}$'),
+    config jsonb NOT NULL CHECK (jsonb_typeof(config)='object'),
+    PRIMARY KEY (profile_ref,component_id)
+);
+
+CREATE TABLE forest_deployment.bootstrap_profile_operations (
+    operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    profile_ref text NOT NULL REFERENCES forest_deployment.bootstrap_profiles(profile_ref),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE forest_deployment.bots (
     bot_id text PRIMARY KEY CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
     display_name text NOT NULL CHECK (octet_length(display_name) BETWEEN 1 AND 256),
@@ -130,6 +157,18 @@ CREATE TRIGGER deployment_storage_profile_immutable
 
 CREATE TRIGGER deployment_storage_profile_operation_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.storage_profile_operations
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_bootstrap_profile_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.bootstrap_profiles
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_bootstrap_component_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.bootstrap_profile_components
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_bootstrap_operation_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.bootstrap_profile_operations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE FUNCTION forest_deployment.guard_bot_change() RETURNS trigger LANGUAGE plpgsql AS '
