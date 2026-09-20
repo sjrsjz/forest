@@ -8,16 +8,18 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_NATIVE_TLS=true
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+    uv sync --frozen --no-dev --no-install-project
+COPY src ./src
 
 FROM build AS test
 COPY tests ./tests
 COPY examples ./examples
+COPY doc ./doc
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-editable
+    uv sync --frozen --no-install-project
 ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/src" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp
@@ -26,14 +28,16 @@ CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 
 FROM python:3.11.13-slim AS runtime
 ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/src" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     FOREST_DATA_DIR=/data
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
+COPY --from=build /app/src /app/src
 USER 10001:10001
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD ["python", "-c", "from pathlib import Path; import sys; sys.exit(0 if Path('/data/runtime-status.json').is_file() else 1)"]
-CMD ["forest", "bot"]
+CMD ["python", "-m", "forest", "bot"]

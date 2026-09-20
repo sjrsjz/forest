@@ -15,4 +15,3 @@ dist
 test-results
 .coverage
 htmlcov
-doc

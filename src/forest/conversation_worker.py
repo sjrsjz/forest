@@ -118,7 +118,8 @@ class ConversationWorker:
         self.graph_admission = graph_admission
         self._parallel = asyncio.Semaphore(max_parallel_conversations)
         self._admission = asyncio.Event()
-        self._wake = asyncio.Event()
+        self._poll_wake = asyncio.Event()
+        self._input_wake = asyncio.Event()
         self._closing = False
         self._poll_task: asyncio.Task | None = None
         self._conversation_tasks: dict[str, asyncio.Task] = {}
@@ -131,14 +132,16 @@ class ConversationWorker:
 
     def activate(self) -> None:
         self._admission.set()
-        self._wake.set()
+        self._poll_wake.set()
 
     def wake(self) -> None:
-        self._wake.set()
+        self._poll_wake.set()
+        self._input_wake.set()
 
     async def quiesce(self) -> None:
         self._admission.clear()
-        self._wake.set()
+        self._poll_wake.set()
+        self._input_wake.set()
         active = tuple(self._conversation_tasks.values())
         if active:
             await asyncio.gather(*active, return_exceptions=True)
@@ -146,7 +149,8 @@ class ConversationWorker:
     async def close(self) -> None:
         self._closing = True
         self._admission.set()
-        self._wake.set()
+        self._poll_wake.set()
+        self._input_wake.set()
         tasks = tuple(self._conversation_tasks.values())
         for task in tasks:
             task.cancel()
@@ -164,10 +168,10 @@ class ConversationWorker:
 
     async def _wait_for_wake(self) -> None:
         try:
-            await asyncio.wait_for(self._wake.wait(), timeout=self.poll_interval)
+            await asyncio.wait_for(self._poll_wake.wait(), timeout=self.poll_interval)
         except TimeoutError:
             pass
-        self._wake.clear()
+        self._poll_wake.clear()
 
     async def _poll(self) -> None:
         while not self._closing:
@@ -232,7 +236,11 @@ class ConversationWorker:
                 )
 
     async def _wait_input(self) -> None:
-        await self._wait_for_wake()
+        try:
+            await asyncio.wait_for(self._input_wake.wait(), timeout=self.poll_interval)
+        except TimeoutError:
+            pass
+        self._input_wake.clear()
         if not self._admission.is_set() or self._closing:
             raise _WorkerQuiescing
 

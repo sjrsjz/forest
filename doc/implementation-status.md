@@ -129,9 +129,10 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - `agent.runtime` 管理贡献：真实 PostgreSQL 宿主集成通过，完整 CorePrompt 正文、协议版本、parser revision 与固定摘要可见且不可编辑；PresetContext 经 Agent 自有 Payload authority 生成带来源的新 PayloadRef，再通过配置 CAS 和完整 RuntimeGraph 替换生效。不存在子 Agent、Agent 目录或第二套聊天执行链。
 - `adapter.onebot` 管理贡献：Binding 的账号、连接状态、desired/effective revision、binding/connection epoch、当前 client fence 与端点配置由 Adapter authority 投影；修改先生成有期限的原生 Binding plan，再由 Adapter apply，候选连接在 BUFFERING 中验证账号后随 RuntimeGraph 原子换代。应用回执丢失后用同一幂等键重放不会再替换图。访问令牌不回显；在 Secret authority UI 落地前仅允许沿用现有 secret 引用与 transport。
 - 干净生产存储入口：真实 PostgreSQL 下 `CleanBotStore` 从空库完成 kernel baseline、15 个模块 bundle、运行图多次热替换和重启；定向导入探针确认生产宿主不加载旧 `BotStore` 或 26 代迁移 helper。干净运行图组合仍为 `236 passed`。
-- 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest-goal:config-cutover` 构建成功，容器内 `forest --help` 只暴露 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能从已安装脚本启动错误架构。插件 scaffold/declaration 组合为 `35 passed, 2 skipped`。
+- 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest-goal:memory-scale` 与 test target 构建成功，容器直接从不可变的 `/app/src` 启动 `python -m forest bot`；依赖按 lock 在源码复制前安装，源码变化不再触发未锁定的 `hatchling` 下载。容器内 CLI 只暴露 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能启动错误架构。插件 scaffold/declaration 组合为 `35 passed, 2 skipped`。
 - 旧管理栈切除：`src/forest/management`、旧 Bot 默认模块图与组合根、旧业务 `contract.router`、固定页面/API 测试、兼容迁移测试及历史夹具已物理删除；`RuntimeModuleRegistry` 必须显式接收 Generation 描述符，不再存在旧图 fallback。裁剪后的权威套件在真实 PostgreSQL 下为 `492 passed, 4 skipped`，Ruff、Python 编译、管理端 JavaScript 语法和干净导入边界均通过。该基线包含模块贡献式 Agent 工具目录、模块贡献式 Shell 命令目录及其派生生命周期依赖、Memory 主干/来源/关系群聊查询、`module.list` 群聊控制命令及 `runtime_status` 的真实模型调用、RuntimeGraph、授权、Effect、结果载荷、下一轮模型输入和查询重放集成验证；Conversation poller 在 DATA 维护态关闭期间保持存活，恢复后可继续领取持久 trigger，`WAIT_APPROVAL` 也不会形成 actor 高频失败循环。
 - Memory 十万来源规模基线：单个真实 PostgreSQL 测试库写入 `100,000` 个来源单元及内容部件、`20,000` 个关系贡献和证据，验证主干/作者/模态/类型组合筛选、消息与关系的快照复合游标续页、无重复页、每条关系证据的群号与主干标注。`EXPLAIN (FORMAT JSON)` 证明来源查询不对 `source_units` 做顺序扫描，关系查询同时使用左右端点索引；定向用例约 `18s`。
+- Linux 容器调度复核发现并修复 Conversation Worker 的唤醒串扰：Runtime 激活只唤醒全局 durable-work poller，入站/退出另用 active-session 输入信号，避免新 Session 的 `WAIT_INPUT` 消费遗留激活 Event 后无消息空转。Agent/Conversation 组合在三个并行 Linux 容器中各自 `20 passed`。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。
