@@ -129,12 +129,8 @@ def prepare_secrets(path: Path) -> None:
                     f"Existing {name} credential has unexpected ownership or permissions"
                 )
             value = application_secret.read_bytes()
-            try:
-                value.decode("utf-8")
-            except UnicodeDecodeError:
-                raise RuntimeError(f"Existing {name} credential is not UTF-8") from None
-            if b"\x00" in value or b"\n" in value or b"\r" in value:
-                raise RuntimeError(f"Existing {name} credential is not a single line")
+            if any(not 33 <= item <= 126 for item in value):
+                raise RuntimeError(f"Existing {name} credential is not printable ASCII")
         os.chown(path, APP_UID, POSTGRES_GID)
         os.chmod(path, 0o550)
         fsync_directory(path)

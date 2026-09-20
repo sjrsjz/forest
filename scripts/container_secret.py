@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import os
 import secrets
@@ -30,16 +31,16 @@ def _fsync_directory(path: Path) -> None:
 
 def _read_secret() -> bytes:
     value = sys.stdin.buffer.read(MAX_SECRET_BYTES + 2)
+    if value.startswith(codecs.BOM_UTF8):
+        value = value[len(codecs.BOM_UTF8) :]
     if value.endswith(b"\r\n"):
         value = value[:-2]
     elif value.endswith(b"\n"):
         value = value[:-1]
     if not 1 <= len(value) <= MAX_SECRET_BYTES or b"\x00" in value or b"\n" in value or b"\r" in value:
         raise RuntimeError("Secret input must be one bounded nonempty line")
-    try:
-        value.decode("utf-8")
-    except UnicodeDecodeError:
-        raise RuntimeError("Secret input must be UTF-8") from None
+    if any(not 33 <= item <= 126 for item in value):
+        raise RuntimeError("Secret input must contain printable ASCII only")
     return value
 
 

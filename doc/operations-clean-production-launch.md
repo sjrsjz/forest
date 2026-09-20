@@ -42,7 +42,7 @@ printf '%s' "$ONEBOT_ACCESS_TOKEN" | docker compose run --rm -T -e FOREST_SECRET
 printf '%s' "$MANAGEMENT_TOKEN" | docker compose run --rm -T -e FOREST_SECRET_NAME=management_token secret
 ```
 
-安装器只接受这四个固定名称和单行 UTF-8 值，执行原子替换并把文件收敛为应用 UID 独占的 `0400`；它不会打印凭据。Compose 同样使用该受保护卷构造 Bot DSN，因此不要求显式提供 `FOREST_BOT_DSN`。可选项包括：
+安装器只接受这四个固定名称和单行可打印 ASCII 值；它会移除 Windows PowerShell 管道可能添加的单个 UTF-8 BOM，随后执行原子替换并把文件收敛为应用 UID 独占的 `0400`。它不会打印凭据。Compose 同样使用该受保护卷构造 Bot DSN，因此不要求显式提供 `FOREST_BOT_DSN`。可选项包括：
 
 ```text
 FOREST_BOT_ID=forest-main

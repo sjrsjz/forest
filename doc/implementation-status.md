@@ -114,7 +114,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 5. 继续把多 Bot provisioning 和恢复控制面切到干净宿主；单 Bot `forest bot`、HostLease 续租/释放、遗留 OneBot 客户端结算和 Docker 默认入口已经切到最小 bootstrap + bundle + 冻结 RuntimeGraph。
 6. 补充 OneBot 热替换的长连接抖动、候选 publication 后进程崩溃和持续流量压力验证；正常热替换现已验证候选 BUFFERING、RuntimeGraph/Binding 原子换代、旧客户端 fence、旧图排空，以及新宿主对遗留客户端的失败结算。
 7. 删除旧 schema、迁移和失去所有权的代码；旧固定管理栈、旧 Bot 组合根、兼容测试与历史迁移夹具已经删除。
-8. 完成完整 Docker、真实 QQ 许可群 `933179609` 的低频验收；真实启动前先停止树莓派 `alicebot.service`。
+8. 完成真实 QQ 许可群 `933179609` 的低频消息/图片/排队验收；Docker 真实进程已经启动，树莓派 `alicebot.service` 已停止，当前等待人工触发而不由验收脚本主动发送群消息。
 
 ## 最近可复现证据
 
@@ -129,10 +129,11 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - `agent.runtime` 管理贡献：真实 PostgreSQL 宿主集成通过，完整 CorePrompt 正文、协议版本、parser revision 与固定摘要可见且不可编辑；PresetContext 经 Agent 自有 Payload authority 生成带来源的新 PayloadRef，再通过配置 CAS 和完整 RuntimeGraph 替换生效。不存在子 Agent、Agent 目录或第二套聊天执行链。
 - `adapter.onebot` 管理贡献：Binding 的账号、连接状态、desired/effective revision、binding/connection epoch、当前 client fence 与端点配置由 Adapter authority 投影；修改先生成有期限的原生 Binding plan，再由 Adapter apply，候选连接在 BUFFERING 中验证账号后随 RuntimeGraph 原子换代。应用回执丢失后用同一幂等键重放不会再替换图。访问令牌不回显；在 Secret authority UI 落地前仅允许沿用现有 secret 引用与 transport。
 - 干净生产存储入口：真实 PostgreSQL 下 `CleanBotStore` 从空库完成 kernel baseline、15 个模块 bundle、运行图多次热替换和重启；定向导入探针确认生产宿主不加载旧 `BotStore` 或 26 代迁移 helper。干净运行图组合仍为 `236 passed`。
-- 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest-goal:repair-ready` 与 test target 构建成功，容器直接从不可变的 `/app/src` 启动 `python -m forest bot`；依赖按 lock 在源码复制前安装，源码变化不再触发未锁定的 `hatchling` 下载。容器内 CLI 只暴露 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能启动错误架构。Compose 不再把模型、Embedding、OneBot 或管理端凭据注入环境，四者通过无网络 bootstrap 容器从标准输入原子写入专用 secret volume，并在每次启动前复核文件类型、所有权、权限、大小和单行 UTF-8 约束；虚构凭据的初始化、逐项安装、重验和临时卷清理已在 Linux 容器通过。插件 scaffold/declaration 组合为 `35 passed, 2 skipped`。
+- 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest-goal:repair-ready` 与 test target 构建成功，容器直接从不可变的 `/app/src` 启动 `python -m forest bot`；依赖按 lock 在源码复制前安装，源码变化不再触发未锁定的 `hatchling` 下载。容器内 CLI 只暴露 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能启动错误架构。Compose 不再把模型、Embedding、OneBot 或管理端凭据注入环境，四者通过无网络 bootstrap 容器从标准输入原子写入专用 secret volume，并在每次启动前复核文件类型、所有权、权限、大小和单行可打印 ASCII 约束；安装器会移除 Windows PowerShell 管道添加的单个 UTF-8 BOM。虚构凭据的初始化、逐项安装、重验和临时卷清理已在 Linux 容器通过。插件 scaffold/declaration 组合为 `35 passed, 2 skipped`。
 - 旧管理栈切除：`src/forest/management`、旧 Bot 默认模块图与组合根、旧业务 `contract.router`、固定页面/API 测试、兼容迁移测试及历史夹具已物理删除；`RuntimeModuleRegistry` 必须显式接收 Generation 描述符，不再存在旧图 fallback。裁剪后的权威套件在真实 PostgreSQL 下为 `508 passed, 4 skipped`，Ruff、Python 编译、管理端 JavaScript 语法和干净导入边界均通过。该基线包含模块贡献式 Agent 工具目录、模块贡献式 Shell 命令目录及其派生生命周期依赖、Memory 主干/来源/关系群聊查询、`module.list` 群聊控制命令及 `runtime_status` 的真实模型调用、RuntimeGraph、授权、Effect、结果载荷、下一轮模型输入和查询重放集成验证；Conversation poller 在 DATA 维护态关闭期间保持存活，恢复后可继续领取持久 trigger；协议错误保留准确 request/attempt、候选摘要和有界反馈，只允许一次可跨重启恢复的 REPAIR，耗尽后以独立幂等失败操作终结准确 trigger 并释放 lane；热替换在候选发布前冻结并排空旧 Worker，模型与工具的新外部步骤不会越过 quiesce 边界，Agent 以 operation 绑定的 `RELOAD_WAIT` 检查点持久交接，候选发布、回滚和宿主重启只释放相应等待；`WAIT_APPROVAL` 使用精确批准引用和提交后通知提前唤醒，同时保留期限恢复，因此不会形成 actor 高频失败循环或决定先提交后的永久阻塞。
 - Memory 十万来源规模基线：单个真实 PostgreSQL 测试库写入 `100,000` 个来源单元及内容部件、`20,000` 个关系贡献和证据，验证主干/作者/模态/类型组合筛选、消息与关系的快照复合游标续页、无重复页、每条关系证据的群号与主干标注。`EXPLAIN (FORMAT JSON)` 证明来源查询不对 `source_units` 做顺序扫描，关系查询同时使用左右端点索引；定向用例约 `18s`。
 - Linux 容器调度复核发现并修复 Conversation Worker 的唤醒串扰：Runtime 激活只唤醒全局 durable-work poller，入站/退出另用 active-session 输入信号，避免新 Session 的 `WAIT_INPUT` 消费遗留激活 Event 后无消息空转。Agent/Conversation 组合在三个并行 Linux 容器中各自 `20 passed`。
+- 真实单 Bot 实例：树莓派旧 `alicebot.service` 保持 `inactive`，PC 通过 SSH loopback 隧道连接其 OneBot；全新 PostgreSQL 卷上的 `forest-forest-1` 已发布包含 `shell.command` 在内的 15 成员 RuntimeGraph 并持续为 `healthy`，WebUI `127.0.0.1:8080` 返回 200。启动过程实际发现并修复 Windows PowerShell secret 管道 BOM 污染；固定后的四类凭据均为应用 UID 独占 `0400` 且不进入容器环境。独立低成本探针确认 `deepseek-flash` 接受当前 SSE Chat Completions 参数，QiYu 的 `Qwen/Qwen3-VL-Embedding-8B` 返回准确 4096 维向量。尚未由自动验收向 QQ 发送消息。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
-测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。
+测试数字只对应相应提交和命令。真实 QQ 低频交互、长时间连接、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。
