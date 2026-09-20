@@ -19,6 +19,8 @@ APP_UID = 10001
 APP_GID = 10001
 POSTGRES_GID = 70
 APPLICATION_SECRET_NAMES = {
+    "deployment_management_token",
+    "deployment_master_key",
     "model_api_key",
     "embedding_api_key",
     "management_token",

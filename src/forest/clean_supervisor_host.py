@@ -8,8 +8,9 @@ import binascii
 import json
 import os
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
@@ -37,15 +38,54 @@ def _required(name: str) -> str:
     return value
 
 
+def _positive_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = -1
+    if not minimum <= value <= maximum:
+        raise ForestError(
+            "SUPERVISOR_CONFIGURATION_INVALID", f"{name} is outside its bound", 422
+        )
+    return value
+
+
+def _deployment_dsn() -> str:
+    configured = os.environ.get("FOREST_DEPLOYMENT_DSN")
+    if configured:
+        return configured
+    password_path = Path(_required("FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE"))
+    try:
+        password = password_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        raise ForestError(
+            "SUPERVISOR_DATABASE_CREDENTIAL_UNAVAILABLE",
+            "Deployment database credential is unavailable",
+            503,
+        ) from None
+    host = os.environ.get("FOREST_DEPLOYMENT_DATABASE_HOST", "postgres")
+    port = _positive_int("FOREST_DEPLOYMENT_DATABASE_PORT", 5432, 1, 65535)
+    database = os.environ.get("FOREST_DEPLOYMENT_DATABASE_NAME", "forest_deployment")
+    user = os.environ.get("FOREST_DEPLOYMENT_DATABASE_USER", "forest")
+    if not password or not host or not database or not user:
+        raise ForestError(
+            "SUPERVISOR_CONFIGURATION_INVALID", "Deployment database identity is invalid", 422
+        )
+    return (
+        f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@"
+        f"{host}:{port}/{quote(database, safe='')}"
+    )
+
+
 @dataclass(frozen=True)
 class CleanSupervisorSettings:
     deployment_id: str
-    dsn: str
+    dsn: str = field(repr=False)
     active_key_id: str
-    master_key: bytes
+    master_key: bytes = field(repr=False)
     poll_seconds: float = 1.0
     max_starting: int = 2
-    management_token: str = ""
+    management_token: str = field(default="", repr=False)
     management_host: str = "127.0.0.1"
     management_port: int = 8081
 
@@ -104,7 +144,7 @@ class CleanSupervisorSettings:
             )
         return cls(
             deployment_id=os.environ.get("FOREST_DEPLOYMENT_ID", "forest/default"),
-            dsn=_required("FOREST_DEPLOYMENT_DSN"),
+            dsn=_deployment_dsn(),
             active_key_id=os.environ.get("FOREST_DEPLOYMENT_ACTIVE_KEY_ID", "master/default/1"),
             master_key=key,
             poll_seconds=poll_seconds,

@@ -43,15 +43,16 @@ services:
       initialize:
         condition: service_completed_successfully
     environment:
-      POSTGRES_DB: forest_bot
+      POSTGRES_DB: forest_deployment
       POSTGRES_USER: forest
       POSTGRES_PASSWORD_FILE: /run/forest-secrets/postgres_password
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - forest_secrets:/run/forest-secrets:ro
+      - ./scripts/postgres_init.sql:/docker-entrypoint-initdb.d/10-forest-databases.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U forest -d forest_bot"]
+      test: ["CMD-SHELL", "pg_isready -U forest -d forest_deployment"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -59,7 +60,48 @@ services:
     security_opt: [no-new-privileges:true]
     shm_size: 128mb
 
+  supervisor:
+    build: .
+    image: forest:local
+    command: ["python", "-m", "forest", "supervisor"]
+    restart: unless-stopped
+    init: true
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      FOREST_DEPLOYMENT_ID: ${FOREST_DEPLOYMENT_ID:-forest/default}
+      FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE: /run/forest-secrets/postgres_password
+      FOREST_DEPLOYMENT_DATABASE_HOST: postgres
+      FOREST_DEPLOYMENT_DATABASE_NAME: forest_deployment
+      FOREST_DEPLOYMENT_MASTER_KEY_FILE: /run/forest-secrets/deployment_master_key
+      FOREST_DEPLOYMENT_ACTIVE_KEY_ID: ${FOREST_DEPLOYMENT_ACTIVE_KEY_ID:-master/default/1}
+      FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE: /run/forest-secrets/deployment_management_token
+      FOREST_DEPLOYMENT_MANAGEMENT_HOST: 0.0.0.0
+      FOREST_DEPLOYMENT_MANAGEMENT_PORT: 8081
+      FOREST_SUPERVISOR_POLL_SECONDS: ${FOREST_SUPERVISOR_POLL_SECONDS:-1}
+      FOREST_SUPERVISOR_MAX_STARTING: ${FOREST_SUPERVISOR_MAX_STARTING:-2}
+    ports:
+      - "127.0.0.1:${FOREST_MANAGEMENT_PORT:-8080}:8081"
+    volumes:
+      - forest_secrets:/run/forest-secrets:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8081),2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
   forest:
+    profiles: [single-bot]
     build: .
     image: forest:local
     restart: unless-stopped
@@ -74,18 +116,18 @@ services:
       FOREST_DATABASE_HOST: postgres
       FOREST_DATABASE_NAME: forest_bot
       FOREST_BOT_ID: ${FOREST_BOT_ID:-forest-main}
-      FOREST_MODEL_BASE_URL: ${FOREST_MODEL_BASE_URL:?set FOREST_MODEL_BASE_URL}
+      FOREST_MODEL_BASE_URL: ${FOREST_MODEL_BASE_URL:-}
       FOREST_MODEL_API_KEY_FILE: /run/forest-secrets/model_api_key
-      FOREST_MODEL_NAME: ${FOREST_MODEL_NAME:?set FOREST_MODEL_NAME}
+      FOREST_MODEL_NAME: ${FOREST_MODEL_NAME:-}
       FOREST_MODEL_INPUT_MODALITIES: ${FOREST_MODEL_INPUT_MODALITIES:-text}
-      FOREST_EMBEDDING_ENDPOINT: ${FOREST_EMBEDDING_ENDPOINT:?set FOREST_EMBEDDING_ENDPOINT}
+      FOREST_EMBEDDING_ENDPOINT: ${FOREST_EMBEDDING_ENDPOINT:-}
       FOREST_EMBEDDING_API_KEY_FILE: /run/forest-secrets/embedding_api_key
       FOREST_EMBEDDING_DEPLOYMENT_ID: ${FOREST_EMBEDDING_DEPLOYMENT_ID:-embedding.multimodal/qiyu-vl/default}
       FOREST_EMBEDDING_MODEL_REVISION: ${FOREST_EMBEDDING_MODEL_REVISION:-operator-declared/1}
       FOREST_EMBEDDING_MODEL: ${FOREST_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-8B}
       FOREST_EMBEDDING_DIMENSIONS: ${FOREST_EMBEDDING_DIMENSIONS:-4096}
-      FOREST_ONEBOT_SELF_ID: ${FOREST_ONEBOT_SELF_ID:?set FOREST_ONEBOT_SELF_ID}
-      FOREST_ONEBOT_WEBSOCKET_URL: ${FOREST_ONEBOT_WEBSOCKET_URL:?set FOREST_ONEBOT_WEBSOCKET_URL}
+      FOREST_ONEBOT_SELF_ID: ${FOREST_ONEBOT_SELF_ID:-}
+      FOREST_ONEBOT_WEBSOCKET_URL: ${FOREST_ONEBOT_WEBSOCKET_URL:-}
       FOREST_ONEBOT_ACCESS_TOKEN_FILE: /run/forest-secrets/onebot_access_token
       FOREST_ALLOWED_GROUP_IDS: ${FOREST_ALLOWED_GROUP_IDS:-933179609}
       FOREST_GROUP_TRIGGER_MODE: ${FOREST_GROUP_TRIGGER_MODE:-MENTION}
