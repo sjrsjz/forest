@@ -88,6 +88,7 @@ class ConversationWorker:
         *,
         owner_id: str,
         poll_interval: float = 0.1,
+        approval_poll_interval: float = 1.0,
         actor_lease_seconds: int = 30,
         max_parallel_conversations: int = 16,
         candidate_limit: int = 64,
@@ -97,6 +98,8 @@ class ConversationWorker:
             raise ValueError("owner_id must be a bounded non-empty string")
         if poll_interval <= 0:
             raise ValueError("poll_interval must be positive")
+        if not 0.1 <= approval_poll_interval <= 300:
+            raise ValueError("approval_poll_interval must be between 0.1 and 300 seconds")
         if not 1 <= actor_lease_seconds <= 300:
             raise ValueError("actor_lease_seconds is outside the repository lease range")
         if not 1 <= max_parallel_conversations <= 1024:
@@ -109,6 +112,7 @@ class ConversationWorker:
         self.session_decision = session_decision
         self.owner_id = owner_id
         self.poll_interval = poll_interval
+        self.approval_poll_interval = approval_poll_interval
         self.actor_lease_seconds = actor_lease_seconds
         self.candidate_limit = candidate_limit
         self.graph_admission = graph_admission
@@ -302,7 +306,17 @@ class ConversationWorker:
                     context_snapshot=lambda: self.scheduler.context_snapshot(actor),
                     next_model_input=next_model_input,
                 )
-                completion = await self.agent.execute(request)
+                try:
+                    completion = await self.agent.execute(request)
+                except ForestError as exc:
+                    if exc.code != "AGENT_WAITING_APPROVAL":
+                        raise
+                    await self.scheduler.defer_actor(
+                        actor,
+                        delay_seconds=self.approval_poll_interval,
+                        reason_code="AGENT_WAITING_APPROVAL",
+                    )
+                    return
                 if type(completion) is not AgentExecutionCompletion:
                     raise ForestError(
                         "AGENT_EXECUTION_RESULT_INVALID",

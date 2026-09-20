@@ -67,6 +67,7 @@ class FakeScheduler:
         self.actors: set[str] = set()
         self.appends: list[dict] = []
         self.selections: list[tuple[str, str, str | None, str | None]] = []
+        self.deferrals: list[tuple[str, float, str]] = []
 
     async def claimable_conversations(self, *, limit):
         return tuple(self.lanes)[:limit]
@@ -101,6 +102,10 @@ class FakeScheduler:
 
     async def release_actor(self, actor):
         self.actors.remove(actor.conversation_id)
+
+    async def defer_actor(self, actor, *, delay_seconds, reason_code):
+        assert actor.conversation_id in self.actors
+        self.deferrals.append((actor.conversation_id, delay_seconds, reason_code))
 
     async def select_input(
         self,
@@ -318,6 +323,36 @@ async def test_active_lane_resumes_same_session_and_run_without_idle_selection()
     assert agent.request.run_ref == "run/existing"
     assert all(boundary != "IDLE" for _, boundary, _, _ in scheduler.selections)
     assert scheduler.appends[0]["answer_trigger_ids"] == ("trigger/existing",)
+
+
+@pytest.mark.asyncio
+async def test_waiting_approval_defers_durable_lane_without_worker_failure_loop():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/existing",),
+            )
+        }
+    )
+
+    class WaitingAgent:
+        async def execute(self, _request):
+            raise ForestError(
+                "AGENT_WAITING_APPROVAL",
+                "Agent tool call is waiting for approval",
+                409,
+            )
+
+    worker = _worker(scheduler, WaitingAgent(), "generation/waiting")
+    await worker.run_once("group/a")
+
+    assert scheduler.deferrals == [
+        ("group/a", 1.0, "AGENT_WAITING_APPROVAL")
+    ]
+    assert scheduler.actors == set()
+    assert scheduler.appends == []
 
 
 @pytest.mark.asyncio

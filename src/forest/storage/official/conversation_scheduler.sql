@@ -23,6 +23,10 @@ CREATE TABLE conversation_lanes (
     active_run_ref text CHECK (
         active_run_ref IS NULL OR octet_length(active_run_ref) BETWEEN 1 AND 256
     ),
+    resume_not_before timestamptz,
+    resume_reason_code text CHECK (
+        resume_reason_code IS NULL OR octet_length(resume_reason_code) BETWEEN 1 AND 128
+    ),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, conversation_id),
@@ -33,7 +37,9 @@ CREATE TABLE conversation_lanes (
         (actor_owner_id IS NULL AND actor_expires_at IS NULL)
         OR (actor_owner_id IS NOT NULL AND actor_expires_at IS NOT NULL AND actor_epoch > 0)
     ),
-    CHECK (active_run_ref IS NULL OR active_session_ref IS NOT NULL)
+    CHECK (active_run_ref IS NULL OR active_session_ref IS NOT NULL),
+    CHECK ((resume_not_before IS NULL) = (resume_reason_code IS NULL)),
+    CHECK (resume_not_before IS NULL OR active_session_ref IS NOT NULL)
 );
 
 CREATE TABLE inbox_messages (
@@ -412,7 +418,9 @@ CREATE INDEX trigger_pending_idx
     ON conversation_triggers(bot_id, conversation_id, status, ingress_seq, trigger_id);
 CREATE INDEX context_order_idx
     ON context_units(bot_id, conversation_id, context_revision, unit_index);
-CREATE INDEX lane_wakeup_idx ON conversation_lanes(bot_id, mailbox_revision, conversation_id);
+CREATE INDEX lane_wakeup_idx ON conversation_lanes(
+    bot_id,resume_not_before,mailbox_revision,conversation_id
+);
 
 CREATE FUNCTION guard_inbox_message() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$

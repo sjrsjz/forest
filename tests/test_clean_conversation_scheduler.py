@@ -415,6 +415,44 @@ async def test_active_session_is_a_recovery_candidate_even_without_new_mail(
 
 
 @pytest.mark.postgres
+async def test_waiting_external_decision_defers_recovery_candidate_durably(
+    clean_scheduler,
+):
+    _store, _storage, payloads, scheduler = clean_scheduler
+    conversation = "group/deferred-approval"
+    await _admit(scheduler, payloads, conversation, 1, "user/a")
+    await _classify(scheduler, conversation, 1, "TRIGGER", "user/a")
+    actor = await scheduler.acquire_actor(conversation, "worker/waiting")
+    await scheduler.select_input(
+        actor,
+        "select/deferred/initial",
+        boundary="IDLE",
+        session_ref="session/deferred",
+        run_ref="run/deferred",
+    )
+
+    deferred = await scheduler.defer_actor(
+        actor,
+        delay_seconds=0.2,
+        reason_code="AGENT_WAITING_APPROVAL",
+    )
+    assert deferred["resume_reason_code"] == "AGENT_WAITING_APPROVAL"
+    await scheduler.release_actor(actor)
+
+    assert conversation not in await scheduler.claimable_conversations()
+    with pytest.raises(ForestError) as early:
+        await scheduler.acquire_actor(conversation, "worker/too-early")
+    assert early.value.code == "CONVERSATION_DEFERRED"
+
+    await asyncio.sleep(0.25)
+    assert conversation in await scheduler.claimable_conversations()
+    resumed = await scheduler.acquire_actor(conversation, "worker/resumed")
+    state = await scheduler.execution_state(resumed)
+    assert state["active"] is True
+    await scheduler.release_actor(resumed)
+
+
+@pytest.mark.postgres
 async def test_admission_and_selection_converge_and_other_lanes_do_not_share_row_lock(
     clean_scheduler,
 ):

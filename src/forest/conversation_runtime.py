@@ -238,6 +238,14 @@ class CleanConversationSchedulerRuntime:
             "release_actor_in", actor=actor, owned_work=True
         )
 
+    async def defer_actor(self, actor, **values):
+        return await self._repository_call(
+            "defer_actor_in",
+            actor=actor,
+            owned_work=True,
+            **values,
+        )
+
     async def select_input(self, actor, operation_id: str, **values):
         if self.input_selection_port is None:
             raise ForestError(
