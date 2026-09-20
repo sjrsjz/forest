@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.errors import ForestError
-from forest.official_bot_provisioning import official_bootstrap_schema_digests
 from forest.runtime_modules import RuntimeManagementContribution
 
 
@@ -86,6 +86,7 @@ class DeploymentProvisioningManagement:
         bootstrap_profiles,
         jobs,
         supervisor,
+        bootstrap_contributions,
         database_allocator=None,
     ) -> None:
         self.secrets = secrets
@@ -93,16 +94,22 @@ class DeploymentProvisioningManagement:
         self.bootstrap_profiles = bootstrap_profiles
         self.jobs = jobs
         self.supervisor = supervisor
+        self.bootstrap_registry = BootstrapConfigurationRegistry(
+            tuple(bootstrap_contributions)
+        )
         self.database_allocator = database_allocator
 
     async def query(self, query_id: str, payload: dict):
         if query_id == "provisioning.jobs.list":
             values = _fields(payload, set(), {"limit"})
             return {"items": list(await self.jobs.list(limit=values.get("limit", 100)))}
-        if query_id == "provisioning.schemas":
+        if query_id == "provisioning.bootstrap-catalog":
             if payload:
                 raise ForestError("DEPLOYMENT_MANAGEMENT_INPUT_INVALID", "Query takes no fields", 422)
-            return {"schema_digests": official_bootstrap_schema_digests()}
+            return {
+                "protocol": "forest.bootstrap-configuration-catalog/1",
+                "items": self.bootstrap_registry.facts(),
+            }
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
 
     async def action(self, action_id: str, *, operation_id: str, payload: dict):
@@ -159,10 +166,16 @@ class DeploymentProvisioningManagement:
                     "storage_profile_ref",
                     "storage_generation",
                     "components",
-                    "schema_digests",
                 },
             )
-            saved = await self.bootstrap_profiles.create(operation_id=operation_id, **values)
+            values["components"] = self.bootstrap_registry.validate_components(
+                values["components"]
+            )
+            saved = await self.bootstrap_profiles.create(
+                operation_id=operation_id,
+                schema_digests=self.bootstrap_registry.schema_digests(),
+                **values,
+            )
             return {
                 "profile_ref": saved.profile_ref,
                 "bot_id": saved.bot_id,
@@ -198,6 +211,7 @@ def deployment_management_components(
     bootstrap_profiles,
     jobs,
     supervisor,
+    bootstrap_contributions,
     database_allocator=None,
 ):
     def contribution(identity: str, label: str, order: int) -> tuple[RuntimeManagementContribution, ...]:
@@ -233,6 +247,7 @@ def deployment_management_components(
                 bootstrap_profiles=bootstrap_profiles,
                 jobs=jobs,
                 supervisor=supervisor,
+                bootstrap_contributions=bootstrap_contributions,
                 database_allocator=database_allocator,
             ),
             contribution("deployment-provisioning", "Bot 供应", 30),

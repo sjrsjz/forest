@@ -6,17 +6,27 @@ from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator
 
+from forest.bootstrap_contributions import BootstrapConfigurationContribution
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
-from forest.clean_embedding_module import EMBEDDING_CONFIGURATION_SCHEMA
+from forest.clean_embedding_module import (
+    EMBEDDING_CONFIGURATION_SCHEMA,
+    default_embedding_configuration,
+)
 from forest.clean_embedding_runtime import CleanMultimodalEmbeddingRuntime
-from forest.clean_provider_module import PROVIDER_CONFIGURATION_SCHEMA
+from forest.clean_provider_module import (
+    PROVIDER_CONFIGURATION_SCHEMA,
+    default_provider_configuration,
+)
 from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
-from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA
+from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA, default_shell_configuration
 from forest.clean_shell_runtime import CleanShellRuntime
-from forest.clean_trigger_policy_module import TRIGGER_POLICY_CONFIGURATION_SCHEMA
+from forest.clean_trigger_policy_module import (
+    TRIGGER_POLICY_CONFIGURATION_SCHEMA,
+    default_trigger_policy_configuration,
+)
 from forest.conversation_trigger_policy import ConversationTriggerPolicyRuntime
 from forest.errors import ForestError
-from forest.packages import digest_json
+from forest.runtime_modules import RuntimeManagementContribution
 
 AGENT_BOOTSTRAP_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -63,11 +73,112 @@ OFFICIAL_BOOTSTRAP_SCHEMAS = {
 }
 
 
+def _bootstrap_surface(component_id: str, label: str) -> RuntimeManagementContribution:
+    return RuntimeManagementContribution(
+        "bootstrap-" + component_id,
+        label,
+        ("deployment",),
+        "/static/modules/bootstrap-component.html",
+        "/static/bootstrap-component.js",
+        style="/static/modules/bootstrap-component.css",
+        group="bootstrap",
+    )
+
+
+def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContribution, ...]:
+    """Return the official install catalog without constructing a Bot runtime graph."""
+
+    values = (
+        (
+            "provider.chat-completions",
+            "Chat Completions Provider",
+            "Model endpoint, credential reference, limits, and declared capabilities.",
+            default_provider_configuration(),
+            CleanChatCompletionsProviderRuntime._parse_configuration,
+        ),
+        (
+            "embedding.multimodal",
+            "Multimodal Embedding Provider",
+            "Bot-lifetime text and image embedding identity and endpoint.",
+            default_embedding_configuration(),
+            CleanMultimodalEmbeddingRuntime._parse_configuration,
+        ),
+        (
+            "conversation.trigger-policy",
+            "Conversation Trigger Policy",
+            "Allowed groups and the conditions that create an Agent turn.",
+            default_trigger_policy_configuration(),
+            ConversationTriggerPolicyRuntime._parse_configuration,
+        ),
+        (
+            "shell.command",
+            "Group Shell",
+            "Binding and administrator principals allowed to invoke control commands.",
+            default_shell_configuration(),
+            CleanShellRuntime._parse_profile,
+        ),
+        (
+            "agent.runtime",
+            "Agent Runtime",
+            "Core system-prompt preset injected into every Agent run.",
+            {
+                "protocol": "forest.agent.runtime.bootstrap/1",
+                "preset_system": [],
+            },
+            None,
+        ),
+        (
+            "adapter.onebot",
+            "OneBot Adapter",
+            "Bot identity, WebSocket endpoint, binding, and access-token reference.",
+            {
+                "protocol": "forest.adapter.onebot.bootstrap/1",
+                "binding_id": "binding/main",
+                "self_id": "10000",
+                "websocket_url": "ws://127.0.0.1:3001/",
+                "access_token_ref": "secret://adapter.onebot/default",
+            },
+            None,
+        ),
+    )
+    return tuple(
+        BootstrapConfigurationContribution(
+            component_id=component_id,
+            label=label,
+            description=description,
+            schema=OFFICIAL_BOOTSTRAP_SCHEMAS[component_id],
+            initial_value=initial_value,
+            surface=_bootstrap_surface(component_id, label),
+            order=index * 10,
+            validator=validator,
+        )
+        for index, (component_id, label, description, initial_value, validator) in enumerate(
+            values, 1
+        )
+    )
+
+
 def official_bootstrap_schema_digests() -> dict[str, str]:
-    return {
-        component_id: digest_json(schema)
-        for component_id, schema in OFFICIAL_BOOTSTRAP_SCHEMAS.items()
-    }
+    return {item.component_id: item.schema_digest for item in official_bootstrap_contributions()}
+
+
+def validate_official_bootstrap_components(components: object) -> dict[str, dict]:
+    if not isinstance(components, dict) or set(components) != set(OFFICIAL_BOOTSTRAP_SCHEMAS):
+        raise ForestError(
+            "OFFICIAL_BOOTSTRAP_COMPONENT_SET_INVALID",
+            "Official Bot bootstrap component set differs",
+            422,
+        )
+    for component_id, schema in OFFICIAL_BOOTSTRAP_SCHEMAS.items():
+        errors = tuple(Draft202012Validator(schema).iter_errors(components[component_id]))
+        if errors:
+            raise ForestError(
+                "OFFICIAL_BOOTSTRAP_CONFIGURATION_INVALID",
+                "Bootstrap component configuration is invalid",
+                422,
+                details={"component_id": component_id},
+            )
+    return components
 
 
 class OfficialBotSettingsResolver:
@@ -88,12 +199,9 @@ class OfficialBotSettingsResolver:
                 409,
             )
         components = {item.component_id: item for item in profile.components}
-        if set(components) != set(OFFICIAL_BOOTSTRAP_SCHEMAS):
-            raise ForestError(
-                "OFFICIAL_BOOTSTRAP_COMPONENT_SET_INVALID",
-                "Official Bot bootstrap component set differs",
-                422,
-            )
+        validate_official_bootstrap_components(
+            {component_id: item.config for component_id, item in components.items()}
+        )
         expected_digests = official_bootstrap_schema_digests()
         for component_id, item in components.items():
             if item.schema_digest != expected_digests[component_id]:
@@ -101,14 +209,6 @@ class OfficialBotSettingsResolver:
                     "OFFICIAL_BOOTSTRAP_SCHEMA_MISMATCH",
                     "Bootstrap component schema differs from the installed module",
                     409,
-                    details={"component_id": component_id},
-                )
-            errors = tuple(Draft202012Validator(OFFICIAL_BOOTSTRAP_SCHEMAS[component_id]).iter_errors(item.config))
-            if errors:
-                raise ForestError(
-                    "OFFICIAL_BOOTSTRAP_CONFIGURATION_INVALID",
-                    "Bootstrap component configuration is invalid",
-                    422,
                     details={"component_id": component_id},
                 )
 

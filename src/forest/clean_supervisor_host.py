@@ -22,6 +22,7 @@ from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
+    official_bootstrap_contributions,
 )
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.storage.clean_deployment_store import CleanDeploymentStore
@@ -222,6 +223,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
                         bootstrap_profiles=bootstrap_profiles,
                         jobs=jobs,
                         supervisor=supervisor,
+                        bootstrap_contributions=official_bootstrap_contributions(),
                         database_allocator=database_allocator,
                     ),
                     access_token=settings.management_token,

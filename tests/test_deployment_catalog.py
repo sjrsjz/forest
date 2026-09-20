@@ -22,6 +22,7 @@ from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
+    official_bootstrap_contributions,
     official_bootstrap_schema_digests,
 )
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
@@ -751,6 +752,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             bootstrap_profiles=bootstrap_profiles,
             jobs=jobs,
             supervisor=supervisor,
+            bootstrap_contributions=official_bootstrap_contributions(),
             database_allocator=allocator,
         ),
         access_token="deployment-management-test-token",
@@ -829,14 +831,78 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             },
         )
         assert replayed_storage.json() == storage.json()
-        schemas = await client.post(
+        bootstrap_catalog = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/queries/provisioning.schemas",
+            "deployment.provisioning/queries/provisioning.bootstrap-catalog",
             headers=headers,
             json={},
         )
-        assert schemas.status_code == 200
-        assert len(schemas.json()["schema_digests"]) == 6
+        assert bootstrap_catalog.status_code == 200
+        catalog_body = bootstrap_catalog.json()
+        assert catalog_body["protocol"] == "forest.bootstrap-configuration-catalog/1"
+        assert len(catalog_body["items"]) == 6
+        assert all(item["surface"]["kind"] == "trusted-module" for item in catalog_body["items"])
+        assert all(item["schema_digest"].startswith("sha256:") for item in catalog_body["items"])
+        assert (await client.get("/static/bootstrap-component.js")).status_code == 200
+        assert "textarea name=\"components\"" not in (
+            await client.get("/static/modules/deployment-provisioning.html")
+        ).text
+
+        components = {
+            item["component_id"]: item["initial_value"] for item in catalog_body["items"]
+        }
+        for index, (secret_ref, purpose) in enumerate(
+            (
+                (
+                    components["provider.chat-completions"]["credential_ref"],
+                    "provider.chat-completions.credential",
+                ),
+                (
+                    components["embedding.multimodal"]["credential_ref"],
+                    "embedding.multimodal.credential",
+                ),
+                (
+                    components["adapter.onebot"]["access_token_ref"],
+                    "adapter.onebot.access-token",
+                ),
+            ),
+            1,
+        ):
+            await secrets.put(
+                operation_id=f"secret/bootstrap-ui/{index}",
+                secret_ref=secret_ref,
+                purpose=purpose,
+                plaintext=b"test-only",
+                expected_revision=0,
+            )
+        bootstrap = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/actions/bootstrap.create",
+            headers={**headers, "idempotency-key": "bootstrap-web-1"},
+            json={
+                "profile_ref": "bootstrap-profile/web/1",
+                "bot_id": "bot/web",
+                "storage_profile_ref": "storage-profile/web/1",
+                "storage_generation": 1,
+                "components": components,
+            },
+        )
+        assert bootstrap.status_code == 200
+        assert bootstrap.json()["manifest_digest"].startswith("sha256:")
+        client_digest_injection = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/actions/bootstrap.create",
+            headers={**headers, "idempotency-key": "bootstrap-web-injected"},
+            json={
+                "profile_ref": "bootstrap-profile/web/2",
+                "bot_id": "bot/web",
+                "storage_profile_ref": "storage-profile/web/1",
+                "storage_generation": 1,
+                "components": components,
+                "schema_digests": {},
+            },
+        )
+        assert client_digest_injection.status_code == 422
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

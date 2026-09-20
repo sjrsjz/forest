@@ -1,1 +1,40 @@
-<section class="deploy-pane"><header><div><small>PROVISIONING</small><h2>组件级供应任务</h2></div><button data-refresh>刷新任务</button></header><details open><summary>创建本地 PostgreSQL Storage Profile</summary><form data-storage class="deploy-form"><input name="profile_ref" placeholder="storage-profile/main/1" required><input name="bot_id" placeholder="bot/main" required><input name="storage_generation" type="number" min="1" value="1" required><input name="dsn_secret_ref" placeholder="secret://main/storage" required><button>创建</button></form><p class="deploy-hint">数据库名由 Bot ID 确定生成，DSN 只写入 Secret authority；供应任务首次执行时创建数据库。</p></details><details><summary>创建 Bootstrap Profile</summary><form data-bootstrap class="deploy-stack"><input name="profile_ref" placeholder="bootstrap-profile/main/1" required><input name="bot_id" placeholder="bot/main" required><input name="storage_profile_ref" placeholder="storage-profile/main/1" required><input name="storage_generation" type="number" min="1" value="1" required><textarea name="components" rows="8" placeholder='{"provider.chat-completions":{...}}' required></textarea><button>按官方 schema 创建</button></form></details><details><summary>加入供应队列</summary><form data-job class="deploy-form"><input name="job_id" placeholder="provisioning/main/1" required><input name="bot_id" placeholder="bot/main" required><input name="display_name" placeholder="Main Bot" required><input name="storage_profile_ref" placeholder="storage-profile/main/1" required><input name="storage_generation" type="number" min="1" value="1" required><input name="bootstrap_profile_ref" placeholder="bootstrap-profile/main/1" required><button>入队</button></form></details><div data-list class="deploy-list"></div></section>
+<section class="deploy-pane">
+  <header><div><small>PROVISIONING</small><h2>组件级 Bot 供应</h2></div><button data-refresh>刷新</button></header>
+  <details open>
+    <summary>1. 创建隔离 PostgreSQL Storage Profile</summary>
+    <form data-storage class="deploy-form">
+      <input name="profile_ref" placeholder="storage-profile/main/1" required>
+      <input name="bot_id" placeholder="bot/main" required>
+      <input name="storage_generation" type="number" min="1" value="1" required>
+      <input name="dsn_secret_ref" placeholder="secret://main/storage" required>
+      <button>创建 Storage</button>
+    </form>
+    <p class="deploy-hint">数据库名和无特权角色由 Bot ID 确定生成，DSN 只写入 Secret authority。</p>
+  </details>
+  <details open>
+    <summary>2. 按模块配置并冻结 Bootstrap Profile</summary>
+    <form data-bootstrap class="deploy-stack">
+      <div class="deploy-form">
+        <input name="profile_ref" placeholder="bootstrap-profile/main/1" required>
+        <input name="bot_id" placeholder="bot/main" required>
+        <input name="storage_profile_ref" placeholder="storage-profile/main/1" required>
+        <input name="storage_generation" type="number" min="1" value="1" required>
+      </div>
+      <div data-bootstrap-components class="bootstrap-components"></div>
+      <button>校验并冻结模块配置</button>
+    </form>
+  </details>
+  <details>
+    <summary>3. 加入供应队列</summary>
+    <form data-job class="deploy-form">
+      <input name="job_id" placeholder="provisioning/main/1" required>
+      <input name="bot_id" placeholder="bot/main" required>
+      <input name="display_name" placeholder="Main Bot" required>
+      <input name="storage_profile_ref" placeholder="storage-profile/main/1" required>
+      <input name="storage_generation" type="number" min="1" value="1" required>
+      <input name="bootstrap_profile_ref" placeholder="bootstrap-profile/main/1" required>
+      <button>入队</button>
+    </form>
+  </details>
+  <div data-list class="deploy-list"></div>
+</section>

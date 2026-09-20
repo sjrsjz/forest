@@ -112,6 +112,19 @@ Agent、Memory、OneBot、Shell、Scheduler、Delivery、Event、ComponentJob �
 
 ## 5. 模块携带管理 UI
 
+Bot 尚未创建时也不能退回中央大表单。可安装模块通过 `BootstrapConfigurationContribution`
+发布稳定 component ID、配置 schema 及摘要、无敏感初值、纯校验器和 setup UI surface；deployment
+组合根把贡献集合注入 `BootstrapConfigurationRegistry`。`deployment.provisioning` 只负责发现目录、
+按注册 schema 和模块校验器检查各组件结果、使用服务端持有的 schema digest 冻结 profile，再创建供应
+Job。浏览器不得提交 `schema_digests`，也不得用一个六组件 JSON 文本框代替模块设置界面。贡献目录按
+`(order, component_id)` 确定排序并拒绝重复 component/surface 身份；profile 必须准确覆盖本次注册的
+组件集合，缺项、多项或失配都在入队前拒绝。
+
+创建期 UI 使用与运行期管理贡献相同的受控 surface 身份。内置模块可以共享宿主提供的 schema 表单
+renderer，模块也可以发布自己的 template/module/style；两者都只能返回该组件的配置值，不能选择
+其他组件、伪造摘要、直接建库或启动 RuntimeGraph。Bot 建成后，配置所有权转交各模块自己的
+configuration authority，bootstrap profile 保持不可变来源事实，不成为长期全局配置对象。
+
 组件 manifest 可声明：
 
 ```toml
