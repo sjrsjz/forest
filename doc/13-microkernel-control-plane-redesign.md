@@ -161,10 +161,12 @@ Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模�
 
 运行时模块使用 `forest.module-management/1` 声明管理契约。每个 operation 必须由模块固定声明 `operation_id`、`query | action`、权限名、输入模型和 handler；需要签发不同于执行正文的权限证明时，还要声明确定性的 `authorization_payload` 投影。模块描述符只向控制台投影 operation 目录，不把 Python handler 或密钥正文暴露到浏览器。
 
-宿主只提供两条通用传输路由：
+宿主只提供通用作用域发现与模块传输路由：
 
 ```text
-GET  /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/queries/{operation_id}
+GET  /management/v1/scopes/{scope_kind}/{scope_id}/runtime
+GET  /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/configuration
+POST /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/queries/{operation_id}
 POST /management/v1/scopes/{scope_kind}/{scope_id}/modules/{component_id}/actions/{operation_id}
 ```
 

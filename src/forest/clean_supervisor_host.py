@@ -225,6 +225,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
                         database_allocator=database_allocator,
                     ),
                     access_token=settings.management_token,
+                    bot_supervisor=supervisor,
                 ),
                 host=settings.management_host,
                 port=settings.management_port,

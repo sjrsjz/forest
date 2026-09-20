@@ -48,9 +48,7 @@ class CleanManagementGateway:
             raise ForestError("MANAGEMENT_AUTHENTICATION_REQUIRED", "Management token is invalid", 401)
 
     def contract(self, component_id: str) -> CleanModuleConfigurationContract:
-        registry = self.host.registry
-        if registry is None:
-            raise ForestError("KERNEL_UNAVAILABLE", "Bot runtime is unavailable", 503)
+        registry = self.registry()
         try:
             module = registry.get(component_id)
         except KeyError:
@@ -63,6 +61,12 @@ class CleanManagementGateway:
                 404,
             )
         return contract
+
+    def registry(self):
+        registry = self.host.registry
+        if registry is None:
+            raise ForestError("KERNEL_UNAVAILABLE", "Bot runtime is unavailable", 503)
+        return registry
 
     def operation_id(self, component_id: str, kind: str, key: str | None) -> str:
         if key is None or not 1 <= len(key) <= 128:
@@ -78,6 +82,108 @@ class CleanManagementGateway:
                 "key": key,
             }
         )
+
+    async def runtime(self) -> dict:
+        registry = self.registry()
+        return {
+            "protocol": "forest.clean-management-runtime/1",
+            "runtime": await self.host.generation_authority.status(),
+            "modules": registry.describe(),
+        }
+
+    async def read_configuration(self, component_id: str) -> dict:
+        return await self.contract(component_id).read()
+
+    async def plan_configuration(
+        self,
+        component_id: str,
+        *,
+        body: ConfigurationPlanInput,
+        idempotency_key: str | None,
+    ) -> dict:
+        return await self.contract(component_id).plan(
+            operation_id=self.operation_id(
+                component_id, "configuration.plan", idempotency_key
+            ),
+            expected_desired_revision=body.expected_desired_revision,
+            value=body.value,
+        )
+
+    async def apply_configuration(
+        self,
+        component_id: str,
+        *,
+        body: ConfigurationApplyInput,
+        idempotency_key: str | None,
+    ) -> dict:
+        operation_id = self.operation_id(
+            component_id, "configuration.apply", idempotency_key
+        )
+        async with self._apply_lock:
+            contract = self.contract(component_id)
+            saved = await contract.apply(
+                operation_id=operation_id,
+                plan_id=body.plan_id,
+                expected_desired_revision=body.expected_desired_revision,
+            )
+            effective = await contract.configuration.effective()
+            replaced = effective.revision != saved["revision"]
+            registry = (
+                await self.host.replace_runtime_graph() if replaced else self.registry()
+            )
+            graph = registry.graph_identity
+            return {
+                "configuration": saved,
+                "replaced": replaced,
+                "graph_id": graph.graph_id,
+                "graph_revision": graph.graph_revision,
+            }
+
+    async def module_query(self, component_id: str, query_id: str, body: dict):
+        contract = self.contract(component_id)
+        query = getattr(contract, "query", None)
+        if not callable(query):
+            raise ForestError(
+                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Module query does not exist", 404
+            )
+        return await query(query_id, body)
+
+    async def module_action(
+        self,
+        component_id: str,
+        action_id: str,
+        *,
+        body: dict,
+        idempotency_key: str | None,
+    ) -> dict:
+        operation_id = self.operation_id(component_id, action_id, idempotency_key)
+        async with self._apply_lock:
+            contract = self.contract(component_id)
+            action = getattr(contract, "action", None)
+            if not callable(action):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_OPERATION_NOT_FOUND",
+                    "Module action does not exist",
+                    404,
+                )
+            result = await action(action_id, operation_id=operation_id, payload=body)
+            if not isinstance(result, CleanManagementActionResult):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_CONTRACT_INVALID",
+                    "Module action returned an invalid result",
+                    500,
+                )
+            replaced = result.replace_runtime_graph
+            registry = (
+                await self.host.replace_runtime_graph() if replaced else self.registry()
+            )
+            graph = registry.graph_identity
+            return {
+                **result.value,
+                "replaced": replaced,
+                "graph_id": graph.graph_id,
+                "graph_revision": graph.graph_revision,
+            }
 
 
 def create_clean_management_app(host, *, access_token: str) -> FastAPI:
@@ -118,15 +224,7 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
     @app.get("/management/v1/runtime")
     async def runtime(x_forest_management_token: str | None = Header(default=None)):
         authenticated(x_forest_management_token)
-        registry = host.registry
-        if registry is None:
-            raise ForestError("KERNEL_UNAVAILABLE", "Bot runtime is unavailable", 503)
-        status = await host.generation_authority.status()
-        return {
-            "protocol": "forest.clean-management-runtime/1",
-            "runtime": status,
-            "modules": registry.describe(),
-        }
+        return await gateway.runtime()
 
     @app.get("/management/v1/modules/{component_id}/configuration")
     async def read_configuration(
@@ -144,10 +242,10 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
         idempotency_key: str | None = Header(default=None),
     ):
         authenticated(x_forest_management_token)
-        return await gateway.contract(component_id).plan(
-            operation_id=gateway.operation_id(component_id, "configuration.plan", idempotency_key),
-            expected_desired_revision=body.expected_desired_revision,
-            value=body.value,
+        return await gateway.plan_configuration(
+            component_id,
+            body=body,
+            idempotency_key=idempotency_key,
         )
 
     @app.post("/management/v1/modules/{component_id}/configuration/apply")
@@ -158,27 +256,11 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
         idempotency_key: str | None = Header(default=None),
     ):
         authenticated(x_forest_management_token)
-        operation_id = gateway.operation_id(component_id, "configuration.apply", idempotency_key)
-        async with gateway._apply_lock:
-            contract = gateway.contract(component_id)
-            saved = await contract.apply(
-                operation_id=operation_id,
-                plan_id=body.plan_id,
-                expected_desired_revision=body.expected_desired_revision,
-            )
-            effective = await contract.configuration.effective()
-            replaced = effective.revision != saved["revision"]
-            if replaced:
-                registry = await host.replace_runtime_graph()
-            else:
-                registry = host.registry
-            graph = registry.graph_identity
-            return {
-                "configuration": saved,
-                "replaced": replaced,
-                "graph_id": graph.graph_id,
-                "graph_revision": graph.graph_revision,
-            }
+        return await gateway.apply_configuration(
+            component_id,
+            body=body,
+            idempotency_key=idempotency_key,
+        )
 
     @app.post("/management/v1/modules/{component_id}/queries/{query_id}")
     async def module_query(
@@ -188,13 +270,7 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
         x_forest_management_token: str | None = Header(default=None),
     ):
         authenticated(x_forest_management_token)
-        contract = gateway.contract(component_id)
-        query = getattr(contract, "query", None)
-        if not callable(query):
-            raise ForestError(
-                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Module query does not exist", 404
-            )
-        return await query(query_id, body)
+        return await gateway.module_query(component_id, query_id, body)
 
     @app.post("/management/v1/modules/{component_id}/actions/{action_id}")
     async def module_action(
@@ -205,32 +281,11 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
         idempotency_key: str | None = Header(default=None),
     ):
         authenticated(x_forest_management_token)
-        operation_id = gateway.operation_id(component_id, action_id, idempotency_key)
-        async with gateway._apply_lock:
-            contract = gateway.contract(component_id)
-            action = getattr(contract, "action", None)
-            if not callable(action):
-                raise ForestError(
-                    "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Module action does not exist", 404
-                )
-            result = await action(action_id, operation_id=operation_id, payload=body)
-            if not isinstance(result, CleanManagementActionResult):
-                raise ForestError(
-                    "MODULE_MANAGEMENT_CONTRACT_INVALID",
-                    "Module action returned an invalid result",
-                    500,
-                )
-            replaced = result.replace_runtime_graph
-            if replaced:
-                registry = await host.replace_runtime_graph()
-            else:
-                registry = host.registry
-            graph = registry.graph_identity
-            return {
-                **result.value,
-                "replaced": replaced,
-                "graph_id": graph.graph_id,
-                "graph_revision": graph.graph_revision,
-            }
+        return await gateway.module_action(
+            component_id,
+            action_id,
+            body=body,
+            idempotency_key=idempotency_key,
+        )
 
     return app

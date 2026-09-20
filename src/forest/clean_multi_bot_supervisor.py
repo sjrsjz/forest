@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import re
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -18,7 +20,11 @@ _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 @dataclass
 class _BotRunner:
     stop: asyncio.Event
-    task: asyncio.Task
+    task: asyncio.Task | None = None
+    host: object | None = None
+    management_accepting: bool = False
+    management_inflight: int = 0
+    management_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
 class CleanMultiBotSupervisor:
@@ -88,16 +94,73 @@ class CleanMultiBotSupervisor:
             task
             for task in (self._renewal_task, self._reconcile_task, self._provisioning_task)
             if task is not None
-        ) + tuple(runner.task for runner in self._runners.values())
+        ) + tuple(
+            runner.task for runner in self._runners.values() if runner.task is not None
+        )
+
+    @staticmethod
+    def management_scope_id(bot_id: str) -> str:
+        return "bot-" + hashlib.sha256(bot_id.encode("utf-8")).hexdigest()[:32]
+
+    async def management_scopes(self) -> tuple[dict, ...]:
+        scopes = []
+        for bot in await self.catalog.list_bots():
+            runner = self._runners.get(bot["bot_id"])
+            scopes.append(
+                {
+                    "scope_id": self.management_scope_id(bot["bot_id"]),
+                    "scope_kind": "bot",
+                    "bot_id": bot["bot_id"],
+                    "label": bot["display_name"],
+                    "available": (
+                        runner is not None
+                        and runner.host is not None
+                        and runner.management_accepting
+                    ),
+                    "desired_state": bot["desired_state"],
+                    "observed_state": bot["observed_state"],
+                }
+            )
+        return tuple(scopes)
+
+    @asynccontextmanager
+    async def management_host(self, scope_id: str):
+        selected = None
+        for bot_id, runner in self._runners.items():
+            if self.management_scope_id(bot_id) == scope_id:
+                selected = runner
+                break
+        if selected is None:
+            raise ForestError("BOT_MANAGEMENT_SCOPE_NOT_FOUND", "Bot scope does not exist", 404)
+        async with selected.management_condition:
+            if not selected.management_accepting or selected.host is None:
+                raise ForestError(
+                    "BOT_MANAGEMENT_UNAVAILABLE",
+                    "Bot runtime is not available for management",
+                    409,
+                )
+            selected.management_inflight += 1
+            host = selected.host
+        try:
+            yield host
+        finally:
+            async with selected.management_condition:
+                selected.management_inflight -= 1
+                selected.management_condition.notify_all()
 
     async def close(self) -> None:
         self._closing = True
         self._wake.set()
         runners = tuple(self._runners.values())
         for runner in runners:
+            runner.management_accepting = False
+            runner.host = None
             runner.stop.set()
         if runners:
-            await asyncio.gather(*(runner.task for runner in runners), return_exceptions=True)
+            await asyncio.gather(
+                *(runner.task for runner in runners if runner.task is not None),
+                return_exceptions=True,
+            )
         self._runners.clear()
         for name in ("_provisioning_task", "_reconcile_task", "_renewal_task"):
             task = getattr(self, name)
@@ -126,6 +189,8 @@ class CleanMultiBotSupervisor:
             self.failure = exc.code
             self._closing = True
             for runner in self._runners.values():
+                runner.management_accepting = False
+                runner.host = None
                 runner.stop.set()
             self._wake.set()
             raise
@@ -133,6 +198,8 @@ class CleanMultiBotSupervisor:
             self.failure = "DEPLOYMENT_SUPERVISOR_RENEWAL_FAILED"
             self._closing = True
             for runner in self._runners.values():
+                runner.management_accepting = False
+                runner.host = None
                 runner.stop.set()
             self._wake.set()
             raise
@@ -155,6 +222,8 @@ class CleanMultiBotSupervisor:
             self.failure = exc.code
             self._closing = True
             for runner in self._runners.values():
+                runner.management_accepting = False
+                runner.host = None
                 runner.stop.set()
             self._wake.set()
             raise
@@ -162,6 +231,8 @@ class CleanMultiBotSupervisor:
             self.failure = "DEPLOYMENT_PROVISIONING_WORKER_FAILED"
             self._closing = True
             for runner in self._runners.values():
+                runner.management_accepting = False
+                runner.host = None
                 runner.stop.set()
             self._wake.set()
             raise
@@ -184,11 +255,14 @@ class CleanMultiBotSupervisor:
                     )
                     if should_run and runner is None:
                         stop = asyncio.Event()
-                        task = asyncio.create_task(
-                            self._run_bot(bot, stop), name="bot-runtime/" + bot["bot_id"]
+                        runner = _BotRunner(stop)
+                        runner.task = asyncio.create_task(
+                            self._run_bot(bot, runner), name="bot-runtime/" + bot["bot_id"]
                         )
-                        self._runners[bot["bot_id"]] = _BotRunner(stop, task)
+                        self._runners[bot["bot_id"]] = runner
                     elif not should_run and runner is not None:
+                        runner.management_accepting = False
+                        runner.host = None
                         runner.stop.set()
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=self.poll_seconds)
@@ -206,18 +280,18 @@ class CleanMultiBotSupervisor:
 
     def _reap(self) -> None:
         for bot_id, runner in tuple(self._runners.items()):
-            if runner.task.done():
+            if runner.task is not None and runner.task.done():
                 self._runners.pop(bot_id, None)
                 failure = runner.task.exception()
                 if failure is not None:
                     raise failure
 
-    async def _run_bot(self, bot: dict, stop: asyncio.Event) -> None:
+    async def _run_bot(self, bot: dict, runner: _BotRunner) -> None:
         bot_id = bot["bot_id"]
         host = None
         try:
             async with self._start_slots:
-                if stop.is_set():
+                if runner.stop.is_set():
                     return
                 await self.catalog.observe(
                     self.lease, bot_id=bot_id, observed_state="STARTING"
@@ -248,16 +322,33 @@ class CleanMultiBotSupervisor:
                 observed_state="ONLINE",
                 graph_id=graph_id,
             )
-            await stop.wait()
+            if not runner.stop.is_set():
+                runner.host = host
+                runner.management_accepting = True
+            await runner.stop.wait()
+            runner.management_accepting = False
+            runner.host = None
+            async with runner.management_condition:
+                await runner.management_condition.wait_for(
+                    lambda: runner.management_inflight == 0
+                )
             await self.catalog.observe(self.lease, bot_id=bot_id, observed_state="STOPPING")
             await host.close()
             host = None
             await self.catalog.observe(self.lease, bot_id=bot_id, observed_state="OFFLINE")
         except asyncio.CancelledError:
+            runner.management_accepting = False
+            runner.host = None
+            async with runner.management_condition:
+                await runner.management_condition.wait_for(
+                    lambda: runner.management_inflight == 0
+                )
             if host is not None:
                 await host.close()
             raise
         except Exception as exc:
+            runner.management_accepting = False
+            runner.host = None
             if host is not None:
                 try:
                     await host.close()

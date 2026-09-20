@@ -1,8 +1,7 @@
-"""Generic module-contributed Web gateway for deployment scope."""
+"""Generic module-contributed Web gateway across registered management scopes."""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 from importlib.resources import files
@@ -11,18 +10,40 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from forest.clean_management_app import ConfigurationApplyInput, ConfigurationPlanInput
 from forest.errors import ForestError
-from forest.packages import digest_json
+from forest.management_scopes import (
+    BotManagementScopeProvider,
+    DeploymentManagementGateway,
+    DeploymentManagementScopeProvider,
+    ManagementScopeRegistry,
+)
 
 
 def create_deployment_management_app(
-    *, deployment_id: str, components: tuple, access_token: str
+    *, deployment_id: str, components: tuple, access_token: str, bot_supervisor=None
 ) -> FastAPI:
     if not isinstance(access_token, str) or not 16 <= len(access_token) <= 4096:
         raise ValueError("Management access token must contain at least 16 characters")
     token_digest = hashlib.sha256(access_token.encode()).digest()
-    registry = {component.component_id: component for component in components}
-    operation_lock = asyncio.Lock()
+    deployment_gateway = DeploymentManagementGateway(
+        deployment_id=deployment_id,
+        components=components,
+    )
+    providers = [
+        DeploymentManagementScopeProvider(
+            deployment_id=deployment_id,
+            gateway=deployment_gateway,
+        )
+    ]
+    if bot_supervisor is not None:
+        providers.append(
+            BotManagementScopeProvider(
+                supervisor=bot_supervisor,
+                access_token=access_token,
+            )
+        )
+    scopes = ManagementScopeRegistry(tuple(providers))
     static = files("forest").joinpath("clean_management_static")
     app = FastAPI(title="Forest Deployment Console", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=str(static)), name="static")
@@ -57,20 +78,9 @@ def create_deployment_management_app(
                 "MANAGEMENT_AUTHENTICATION_REQUIRED", "Management token is invalid", 401
             )
 
-    def contract(component_id: str):
-        component = registry.get(component_id)
-        if component is None:
-            raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
-        return component.contract
-
-    def operation_id(component_id: str, action_id: str, key: str | None) -> str:
-        if key is None or not 1 <= len(key) <= 128:
-            raise ForestError(
-                "IDEMPOTENCY_KEY_REQUIRED", "A stable Idempotency-Key is required", 422
-            )
-        return "web:" + digest_json(
-            ["forest.deployment-management-operation/1", deployment_id, component_id, action_id, key]
-        )
+    async def runtime_projection(gateway) -> dict:
+        result = await gateway.runtime()
+        return {**result, "scopes": await scopes.list_scopes()}
 
     @app.get("/", include_in_schema=False)
     async def index():
@@ -79,28 +89,95 @@ def create_deployment_management_app(
     @app.get("/management/v1/runtime")
     async def runtime(x_forest_management_token: str | None = Header(default=None)):
         authorize(x_forest_management_token)
-        return {
-            "protocol": "forest.deployment-management-runtime/1",
-            "runtime": {
-                "bot_id": deployment_id,
-                "graph_state": "CONTROL_PLANE",
-                "graph_id": "deployment/control-plane/1",
-            },
-            "modules": [component.describe() for component in components],
-        }
+        return await runtime_projection(deployment_gateway)
 
-    @app.post("/management/v1/modules/{component_id}/queries/{query_id}")
-    async def query(
+    @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/runtime")
+    async def scoped_runtime(
+        scope_kind: str,
+        scope_id: str,
+        x_forest_management_token: str | None = Header(default=None),
+    ):
+        authorize(x_forest_management_token)
+        async with scopes.gateway(scope_kind, scope_id) as gateway:
+            return await runtime_projection(gateway)
+
+    @app.get(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/configuration"
+    )
+    async def scoped_configuration(
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        x_forest_management_token: str | None = Header(default=None),
+    ):
+        authorize(x_forest_management_token)
+        async with scopes.gateway(scope_kind, scope_id) as gateway:
+            return await gateway.read_configuration(component_id)
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/configuration/plans"
+    )
+    async def scoped_configuration_plan(
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        body: ConfigurationPlanInput,
+        x_forest_management_token: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None),
+    ):
+        authorize(x_forest_management_token)
+        async with scopes.gateway(scope_kind, scope_id) as gateway:
+            return await gateway.plan_configuration(
+                component_id,
+                body=body,
+                idempotency_key=idempotency_key,
+            )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/configuration/apply"
+    )
+    async def scoped_configuration_apply(
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        body: ConfigurationApplyInput,
+        x_forest_management_token: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None),
+    ):
+        authorize(x_forest_management_token)
+        async with scopes.gateway(scope_kind, scope_id) as gateway:
+            return await gateway.apply_configuration(
+                component_id,
+                body=body,
+                idempotency_key=idempotency_key,
+            )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/queries/{query_id}"
+    )
+    async def scoped_module_query(
+        scope_kind: str,
+        scope_id: str,
         component_id: str,
         query_id: str,
         body: dict,
         x_forest_management_token: str | None = Header(default=None),
     ):
         authorize(x_forest_management_token)
-        return await contract(component_id).query(query_id, body)
+        async with scopes.gateway(scope_kind, scope_id) as gateway:
+            return await gateway.module_query(component_id, query_id, body)
 
-    @app.post("/management/v1/modules/{component_id}/actions/{action_id}")
-    async def action(
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/actions/{action_id}"
+    )
+    async def scoped_module_action(
+        scope_kind: str,
+        scope_id: str,
         component_id: str,
         action_id: str,
         body: dict,
@@ -108,11 +185,12 @@ def create_deployment_management_app(
         idempotency_key: str | None = Header(default=None),
     ):
         authorize(x_forest_management_token)
-        async with operation_lock:
-            return await contract(component_id).action(
+        async with scopes.gateway(scope_kind, scope_id) as gateway:
+            return await gateway.module_action(
+                component_id,
                 action_id,
-                operation_id=operation_id(component_id, action_id, idempotency_key),
-                payload=body,
+                body=body,
+                idempotency_key=idempotency_key,
             )
 
     return app

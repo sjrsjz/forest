@@ -769,11 +769,15 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "deployment.secrets",
             "deployment.provisioning",
         }
-        assert (
-            await client.get("/static/deployment-provisioning.js")
-        ).status_code == 200
+        assert (await client.get("/static/deployment-provisioning.js")).status_code == 200
+        shell_script = (await client.get("/static/app.js")).text
+        assert "/management/v1/scopes/" in shell_script
+        assert "bot-scopes" not in shell_script
+        assert "scope_kind}:${scope.scope_id" in shell_script
+        assert runtime.json()["scopes"][0]["scope_kind"] == "deployment"
         saved = await client.post(
-            "/management/v1/modules/deployment.secrets/actions/secret.put",
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.secrets/actions/secret.put",
             headers={**headers, "idempotency-key": "secret-web-1"},
             json={
                 "secret_ref": "secret://web/test",
@@ -785,7 +789,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert saved.status_code == 200
         assert "never-return-this" not in saved.text
         listed = await client.post(
-            "/management/v1/modules/deployment.secrets/queries/secrets.list",
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.secrets/queries/secrets.list",
             headers=headers,
             json={},
         )
@@ -793,7 +798,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert listed.json()["items"][0]["secret_ref"] == "secret://web/test"
         assert "never-return-this" not in listed.text
         storage = await client.post(
-            "/management/v1/modules/deployment.provisioning/actions/storage.create-local",
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/actions/storage.create-local",
             headers={**headers, "idempotency-key": "storage-web-1"},
             json={
                 "profile_ref": "storage-profile/web/1",
@@ -812,7 +818,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert "hidden-password" not in storage.text
         assert await secrets.resolve_text("secret://web/storage") == allocated_dsn
         replayed_storage = await client.post(
-            "/management/v1/modules/deployment.provisioning/actions/storage.create-local",
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/actions/storage.create-local",
             headers={**headers, "idempotency-key": "storage-web-1"},
             json={
                 "profile_ref": "storage-profile/web/1",
@@ -823,7 +830,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert replayed_storage.json() == storage.json()
         schemas = await client.post(
-            "/management/v1/modules/deployment.provisioning/queries/provisioning.schemas",
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/queries/provisioning.schemas",
             headers=headers,
             json={},
         )
@@ -910,15 +918,32 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
 
         await _eventually(both_online)
         assert set(instances) == {"bot/alpha", "bot/beta"}
+        scopes = {item["bot_id"]: item for item in await supervisor.management_scopes()}
+        assert scopes["bot/alpha"]["available"] is True
+        assert scopes["bot/beta"]["available"] is True
+        beta_scope = supervisor.management_scope_id("bot/beta")
+        async with supervisor.management_host(beta_scope) as managed_host:
+            assert managed_host is instances["bot/beta"]
 
         alpha = await repository.inspect("bot/alpha")
-        await repository.set_desired(
-            operation_id="runtime/alpha/offline",
-            bot_id="bot/alpha",
-            desired_state="OFFLINE",
-            expected_revision=alpha["intent_revision"],
-        )
-        supervisor.notify()
+        alpha_scope = supervisor.management_scope_id("bot/alpha")
+        async with supervisor.management_host(alpha_scope):
+            await repository.set_desired(
+                operation_id="runtime/alpha/offline",
+                bot_id="bot/alpha",
+                desired_state="OFFLINE",
+                expected_revision=alpha["intent_revision"],
+            )
+            supervisor.notify()
+
+            async def alpha_withdrawn():
+                rows = {
+                    item["bot_id"]: item for item in await supervisor.management_scopes()
+                }
+                return rows["bot/alpha"]["available"] is False
+
+            await _eventually(alpha_withdrawn)
+            assert instances["bot/alpha"].closed is False
 
         async def alpha_offline():
             return (await repository.inspect("bot/alpha"))["observed_state"] == "OFFLINE"
@@ -927,6 +952,14 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
         assert instances["bot/alpha"].closed is True
         assert instances["bot/beta"].closed is False
         assert (await repository.inspect("bot/beta"))["observed_state"] == "ONLINE"
+        scopes = {item["bot_id"]: item for item in await supervisor.management_scopes()}
+        assert scopes["bot/alpha"]["available"] is False
+        with pytest.raises(ForestError) as unavailable:
+            async with supervisor.management_host(
+                supervisor.management_scope_id("bot/alpha")
+            ):
+                pass
+        assert unavailable.value.code == "BOT_MANAGEMENT_UNAVAILABLE"
     finally:
         await supervisor.close()
     assert instances["bot/beta"].closed is True

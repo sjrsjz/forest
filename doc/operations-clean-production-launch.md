@@ -95,7 +95,7 @@ FOREST_SUPERVISOR_MAX_STARTING=2
 
 Compose 中无需设置 `FOREST_DEPLOYMENT_DSN`：Supervisor 从 `/run/forest-secrets/postgres_password` 构造只指向 `forest_deployment` 的 DSN。显式 DSN 仅供非 Compose 部署。默认 `docker compose up -d` 启动 `initialize`、`postgres` 和 `supervisor`；Compose 中不存在绕过部署控制面的单 Bot 服务。
 
-Supervisor 同时启动 deployment scope WebUI。页面从三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建只暴露引用的本地 PostgreSQL storage profile、创建 bootstrap profile、加入供应队列并切换 READY Bot 的 runtime intent。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权、主密钥多版本 keyring 和跨 Bot 模块工作区路由仍是发布前缺口。
+Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 的三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建只暴露引用的本地 PostgreSQL storage profile、创建 bootstrap profile、加入供应队列并切换 READY Bot 的 runtime intent。Bot 进入 ONLINE 后，壳层作用域选择器会通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不把 Agent、Memory、OneBot 或 Job 页面拷贝到 deployment 后台。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权和主密钥多版本 keyring 仍是发布前缺口。
 
 ## 尚未接入本图的能力
 
