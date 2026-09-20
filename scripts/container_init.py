@@ -18,6 +18,11 @@ from pathlib import Path
 APP_UID = 10001
 APP_GID = 10001
 POSTGRES_GID = 70
+APPLICATION_SECRET_NAMES = {
+    "model_api_key",
+    "embedding_api_key",
+    "onebot_access_token",
+}
 
 
 def fsync_directory(path: Path) -> None:
@@ -51,9 +56,11 @@ def prepare_secrets(path: Path) -> None:
     info = directory_info(path)
     if info.st_uid not in {0, APP_UID}:
         raise RuntimeError("Secret volume belongs to another service account")
-    permitted = {".initialize.lock", "postgres_password"}
+    permitted = {".initialize.lock", "postgres_password", *APPLICATION_SECRET_NAMES}
     if any(
-        item.name not in permitted and not item.name.startswith(".password-")
+        item.name not in permitted
+        and not item.name.startswith(".password-")
+        and not item.name.startswith(".secret-")
         for item in path.iterdir()
     ):
         raise RuntimeError("Refusing to repurpose a volume containing unrelated files")
@@ -104,6 +111,29 @@ def prepare_secrets(path: Path) -> None:
                 fsync_directory(path)
             finally:
                 temporary.unlink(missing_ok=True)
+        for name in APPLICATION_SECRET_NAMES:
+            application_secret = path / name
+            if not application_secret.exists() and not application_secret.is_symlink():
+                continue
+            saved = application_secret.lstat()
+            if (
+                not stat.S_ISREG(saved.st_mode)
+                or saved.st_nlink != 1
+                or saved.st_uid != APP_UID
+                or saved.st_gid != APP_GID
+                or stat.S_IMODE(saved.st_mode) != 0o400
+                or not 1 <= saved.st_size <= 65536
+            ):
+                raise RuntimeError(
+                    f"Existing {name} credential has unexpected ownership or permissions"
+                )
+            value = application_secret.read_bytes()
+            try:
+                value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise RuntimeError(f"Existing {name} credential is not UTF-8") from None
+            if b"\x00" in value or b"\n" in value or b"\r" in value:
+                raise RuntimeError(f"Existing {name} credential is not a single line")
         os.chown(path, APP_UID, POSTGRES_GID)
         os.chmod(path, 0o550)
         fsync_directory(path)

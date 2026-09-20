@@ -18,6 +18,23 @@ services:
       - forest_secrets:/run/forest-secrets
       - postgres_data:/var/lib/forest-postgres:ro
 
+  secret:
+    image: python:3.11.13-slim
+    profiles: [bootstrap]
+    user: "0:0"
+    command: ["python", "/opt/forest/container_secret.py"]
+    stdin_open: true
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    environment:
+      FOREST_SECRET_NAME: ${FOREST_SECRET_NAME:-}
+    volumes:
+      - ./scripts/container_secret.py:/opt/forest/container_secret.py:ro
+      - forest_secrets:/run/forest-secrets
+
   postgres:
     image: postgres:17.10-alpine3.23
     pull_policy: missing
@@ -58,18 +75,18 @@ services:
       FOREST_DATABASE_NAME: forest_bot
       FOREST_BOT_ID: ${FOREST_BOT_ID:-forest-main}
       FOREST_MODEL_BASE_URL: ${FOREST_MODEL_BASE_URL:?set FOREST_MODEL_BASE_URL}
-      FOREST_MODEL_API_KEY: ${FOREST_MODEL_API_KEY:?set FOREST_MODEL_API_KEY}
+      FOREST_MODEL_API_KEY_FILE: /run/forest-secrets/model_api_key
       FOREST_MODEL_NAME: ${FOREST_MODEL_NAME:?set FOREST_MODEL_NAME}
       FOREST_MODEL_INPUT_MODALITIES: ${FOREST_MODEL_INPUT_MODALITIES:-text}
       FOREST_EMBEDDING_ENDPOINT: ${FOREST_EMBEDDING_ENDPOINT:?set FOREST_EMBEDDING_ENDPOINT}
-      FOREST_EMBEDDING_API_KEY: ${FOREST_EMBEDDING_API_KEY:?set FOREST_EMBEDDING_API_KEY}
+      FOREST_EMBEDDING_API_KEY_FILE: /run/forest-secrets/embedding_api_key
       FOREST_EMBEDDING_DEPLOYMENT_ID: ${FOREST_EMBEDDING_DEPLOYMENT_ID:-embedding.multimodal/qiyu-vl/default}
       FOREST_EMBEDDING_MODEL_REVISION: ${FOREST_EMBEDDING_MODEL_REVISION:-operator-declared/1}
       FOREST_EMBEDDING_MODEL: ${FOREST_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-8B}
       FOREST_EMBEDDING_DIMENSIONS: ${FOREST_EMBEDDING_DIMENSIONS:-4096}
       FOREST_ONEBOT_SELF_ID: ${FOREST_ONEBOT_SELF_ID:?set FOREST_ONEBOT_SELF_ID}
       FOREST_ONEBOT_WEBSOCKET_URL: ${FOREST_ONEBOT_WEBSOCKET_URL:?set FOREST_ONEBOT_WEBSOCKET_URL}
-      FOREST_ONEBOT_ACCESS_TOKEN: ${FOREST_ONEBOT_ACCESS_TOKEN:?set FOREST_ONEBOT_ACCESS_TOKEN}
+      FOREST_ONEBOT_ACCESS_TOKEN_FILE: /run/forest-secrets/onebot_access_token
       FOREST_ALLOWED_GROUP_IDS: ${FOREST_ALLOWED_GROUP_IDS:-933179609}
       FOREST_GROUP_TRIGGER_MODE: ${FOREST_GROUP_TRIGGER_MODE:-MENTION}
       FOREST_AGENT_SYSTEM_PROMPT: ${FOREST_AGENT_SYSTEM_PROMPT:-}

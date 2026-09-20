@@ -4,12 +4,12 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 14 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 15 个成员：
 
 - `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
 - `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`media.capture`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`；
-- `adapter.onebot`、`delivery`。
+- `adapter.onebot`、`delivery`、`shell.command`。
 
 OneBot 消息进入后，Adapter 只做协议校验、身份归一化和载荷落库。`conversation.trigger-policy` 根据冻结配置给出 `TRIGGER` 或 `NO_TRIGGER`；内核 OneBot ingress UoW 在同一事务中提交平台事件、Conversation Inbox、群主干 Memory 来源与分类结果。Scheduler 因此不再依赖测试或管理端手工补写触发记录。
 
@@ -32,7 +32,16 @@ FOREST_ONEBOT_ACCESS_TOKEN=...
 FOREST_ALLOWED_GROUP_IDS=933179609
 ```
 
-模型、Embedding 和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE`、`FOREST_EMBEDDING_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。Compose 使用受保护文件构造 Bot DSN，因此不要求显式提供 `FOREST_BOT_DSN`。可选项包括：
+模型、Embedding 和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE`、`FOREST_EMBEDDING_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。Compose 强制使用专用 secret volume，不再把三类凭据放进容器环境。先启动只具本地卷权限、无网络的初始化器，再从标准输入逐项安装凭据：
+
+```sh
+docker compose run --rm initialize
+printf '%s' "$MODEL_API_KEY" | docker compose run --rm -T -e FOREST_SECRET_NAME=model_api_key secret
+printf '%s' "$EMBEDDING_API_KEY" | docker compose run --rm -T -e FOREST_SECRET_NAME=embedding_api_key secret
+printf '%s' "$ONEBOT_ACCESS_TOKEN" | docker compose run --rm -T -e FOREST_SECRET_NAME=onebot_access_token secret
+```
+
+安装器只接受这三个固定名称和单行 UTF-8 值，执行原子替换并把文件收敛为应用 UID 独占的 `0400`；它不会打印凭据。Compose 同样使用该受保护卷构造 Bot DSN，因此不要求显式提供 `FOREST_BOT_DSN`。可选项包括：
 
 ```text
 FOREST_BOT_ID=forest-main
@@ -67,8 +76,8 @@ Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `f
 
 ## 尚未接入本图的能力
 
-- `shell.command` 的完整 Generation 装配及群管理员授权；
-- 模块贡献式管理协议与紧凑 WebUI；
+- `shell.command` 的取消、重载、任务处理与审计查询命令；
+- 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
 - 多 Bot provisioning 与每 Bot 独立数据库/全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
