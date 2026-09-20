@@ -19,6 +19,7 @@ from forest.clean_management_contract import (
 )
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.web_operation_policy import authorize_web_operation
 
 
 class ConfigurationPlanInput(BaseModel):
@@ -138,6 +139,41 @@ class CleanManagementGateway:
             plan_digest=plan_digest,
             required_role=required_role,
         )
+        await self._authorize_bot_policy(
+            ticket,
+            component_id=component_id,
+            action_key=action_key,
+        )
+
+    async def _authorize_bot_policy(
+        self,
+        ticket,
+        *,
+        component_id: str,
+        action_key: str,
+        conn=None,
+    ) -> int:
+        try:
+            configuration = self.host._kernel.configurations["kernel.authorization"]
+        except (AttributeError, KeyError):
+            raise ForestError(
+                "WEB_OPERATION_POLICY_UNAVAILABLE",
+                "Bot Web operation policy is unavailable",
+                503,
+            ) from None
+        effective = (
+            await configuration.effective(include_value=True)
+            if conn is None
+            else await configuration.effective_in(conn, include_value=True)
+        )
+        authorize_web_operation(
+            effective.value,
+            web_subject_ref=ticket.web_subject_ref,
+            web_role=ticket.web_role,
+            target_component_id=component_id,
+            action_key=action_key,
+        )
+        return effective.revision
 
     async def _authorize_mutation_in(
         self,
@@ -181,6 +217,12 @@ class CleanManagementGateway:
                 "Web authority ticket names another RuntimeGraph revision",
                 403,
             )
+        await self._authorize_bot_policy(
+            ticket,
+            component_id=component_id,
+            action_key=action_key,
+            conn=conn,
+        )
         return await self.host._kernel.authorization.accept_web_authority_ticket_in(
             conn, ticket=ticket
         )

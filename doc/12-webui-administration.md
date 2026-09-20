@@ -240,6 +240,8 @@ API 使用 `/management/v1` 等显式大版本路径和版本化 DTO；下表是
 
 管理账号具有独立身份；平台用户可显式关联账号用于批准政策，但必须验证双方身份，不能通过昵称/QQ 号文本相同自动绑定。角色提供部署管理员、Bot 管理员、运维、审计只读模板，真实许可由 action + authority_scope + 资源/数据范围决定。隐藏按钮只用于提示，HTTP、目标操作及最终效果各自检查授权。
 
+每个 Bot 的 `kernel.authorization` 必须通过自身 Generation 贡献版本化 Web operation policy 与设置界面。首版规则只精确匹配一个 `target_component_id + action_key`，可以禁用该操作，或把已有 ADMIN/AUDITOR 角色门禁进一步限制到角色子集和稳定 Web 主体集合；不提供通配符、规则顺序或隐式覆盖，也不能用策略把写操作提升给原本无权的角色。未声明规则时沿用安全角色模板。读请求在目标网关验签后读取当前 effective policy；写请求还必须在业务 authority 的最终事务内再次读取同一 policy、复核当前 RuntimeGraph/Generation、写授权收据并提交业务事实。策略配置自身仍走 plan/apply、revision CAS 和 RuntimeGraph 替换，因此新策略生效后，绑定旧 graph revision 的在途票据不能命中新图。
+
 使用服务端会话和有期限、可撤销的安全 Cookie：`HttpOnly`、HTTPS 下 `Secure`、适当 `SameSite`、受限 Path；登录/提权后轮换会话 ID。写接口执行 CSRF 防护及 Origin 校验，GET 不产生副作用，禁止宽泛凭据 CORS。可信代理名单显式配置，不信任任意转发身份头；认证限速，敏感动作可按政策要求近期重认证。
 
 账号封禁、会话撤销和目标能力撤销分别有权威修订。新的 HTTP 请求校验当前会话；部署库撤销会话后停止签发新票，但已签 `WebAuthorityTicket` 保留 05 规定的最多 30 秒在途窗口。目标即时阻止尚未许可动作需提交本 Bot policy 撤销/取消，逐目标显示完成状态，不宣称跨库原子撤权。

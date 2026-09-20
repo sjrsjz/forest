@@ -1,0 +1,37 @@
+<div class="contribution-view policy-workbench">
+  <header class="policy-header">
+    <div>
+      <strong>Bot Web 操作策略</strong>
+      <span id="policy-revision"></span>
+    </div>
+    <div class="policy-actions">
+      <button id="policy-add" class="quiet" type="button">添加规则</button>
+      <button id="policy-save" type="button">保存并热重载</button>
+    </div>
+  </header>
+  <p class="policy-help">规则精确匹配组件与动作，只会收窄现有角色权限。主体留空表示该角色中的所有主体。</p>
+  <div class="policy-table-wrap">
+    <table class="policy-table">
+      <thead>
+        <tr><th>启用</th><th>组件</th><th>动作</th><th>角色</th><th>允许主体</th><th></th></tr>
+      </thead>
+      <tbody id="policy-rows"></tbody>
+    </table>
+  </div>
+  <template id="policy-row-template">
+    <tr>
+      <td><input data-field="enabled" type="checkbox" checked aria-label="启用规则"></td>
+      <td><input data-field="component" placeholder="agent.runtime" maxlength="128"></td>
+      <td><input data-field="action" placeholder="agent.run.cancel" maxlength="200"></td>
+      <td>
+        <select data-field="roles">
+          <option value="ADMIN">仅 ADMIN</option>
+          <option value="AUDITOR">仅 AUDITOR</option>
+          <option value="ADMIN,AUDITOR">ADMIN 与 AUDITOR</option>
+        </select>
+      </td>
+      <td><input data-field="subjects" placeholder="留空表示全部；多个主体用逗号分隔"></td>
+      <td><button data-action="remove" class="quiet" type="button">删除</button></td>
+    </tr>
+  </template>
+</div>

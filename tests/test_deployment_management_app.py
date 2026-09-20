@@ -5,8 +5,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
+from forest.clean_management_app import CleanManagementGateway
 from forest.clean_management_contract import (
     CleanManagementActionResult,
     CleanModuleConfigurationContract,
@@ -18,6 +20,8 @@ from forest.storage.deployment_web_identity import (
     WebSession,
     WebSubject,
 )
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
+from forest.web_operation_policy import WEB_OPERATION_POLICY_DEFAULT
 
 
 class _IdentityAuthority:
@@ -107,6 +111,83 @@ class _GenerationAuthority:
         }
 
 
+class _PolicyConfiguration:
+    def __init__(self, value=WEB_OPERATION_POLICY_DEFAULT):
+        self.value = value
+
+    async def effective(self, *, include_value=False):
+        return SimpleNamespace(
+            revision=1,
+            value=self.value if include_value else None,
+        )
+
+    async def effective_in(self, _conn, *, include_value=False):
+        return await self.effective(include_value=include_value)
+
+
+async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_check():
+    contract = _Contract(_Configuration(), schema={"type": "object"})
+    policy = {
+        "protocol": "forest.web-operation-policy/1",
+        "rules": [
+            {
+                "target_component_id": "test.component",
+                "action_key": "test.query",
+                "enabled": False,
+                "allowed_roles": ["ADMIN", "AUDITOR"],
+                "allowed_subject_refs": None,
+            }
+        ],
+    }
+    host = SimpleNamespace(
+        settings=SimpleNamespace(bot_id="bot/managed"),
+        registry=_Registry(SimpleNamespace(management_contract=contract)),
+        _kernel=SimpleNamespace(
+            configurations={"kernel.authorization": _PolicyConfiguration(policy)}
+        ),
+    )
+    signer = WebAuthorityTicketAuthority(
+        issuer_id="deployment/test",
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"k" * 32,
+    )
+    session = AuthenticatedWebSession(
+        "token-digest",
+        "web-session/test",
+        1,
+        "csrf-digest",
+        WebSubject("web-subject/test", "admin", "Administrator", "ADMIN", True, 1),
+        datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    operation_id = "web-read:test-policy"
+    ticket = await signer.issue(
+        session=session,
+        target_scope_kind="bot",
+        target_scope_id="bot-scope-test",
+        target_component_id="test.component",
+        target_generation_id="generation/test/1",
+        target_graph_revision=1,
+        target_operation_ref=operation_id,
+        action_key="test.query",
+        input_digest="sha256:" + hashlib.sha256(b"{}").hexdigest(),
+    )
+    gateway = CleanManagementGateway(
+        host,
+        "management-token-long-enough",
+        ticket_authority=signer,
+        scope_id="bot-scope-test",
+    )
+    with pytest.raises(ForestError) as denied:
+        await gateway.module_query(
+            "test.component",
+            "test.query",
+            {},
+            authorization=ticket,
+            operation_id=operation_id,
+        )
+    assert denied.value.code == "WEB_OPERATION_POLICY_DENIED"
+
+
 class _Contract(CleanModuleConfigurationContract):
     async def query(self, query_id, payload):
         return {"query_id": query_id, "payload": payload}
@@ -159,6 +240,9 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
     host = SimpleNamespace(
         settings=SimpleNamespace(bot_id="bot/managed"),
         generation_authority=_GenerationAuthority(),
+        _kernel=SimpleNamespace(
+            configurations={"kernel.authorization": _PolicyConfiguration()}
+        ),
     )
     host.registry = _Registry(SimpleNamespace(management_contract=contract))
 

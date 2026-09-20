@@ -967,6 +967,14 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         ).text.replace(" ", "")
                         assert (await web.get("/static/modules/clean-audit.html")).status_code == 200
                         assert (await web.get("/static/clean-audit.js")).status_code == 200
+                        assert (
+                            await web.get(
+                                "/static/modules/clean-authorization-policy.html"
+                            )
+                        ).status_code == 200
+                        assert (
+                            await web.get("/static/clean-authorization-policy.js")
+                        ).status_code == 200
                         assert (await web.get("/static/modules/clean-jobs.html")).status_code == 200
                         assert (await web.get("/static/clean-jobs.js")).status_code == 200
                         assert index.headers["x-frame-options"] == "DENY"
@@ -1031,6 +1039,20 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             item["contribution_id"]
                             for item in audit_view["management_contributions"]
                         ] == ["audit-explorer"]
+                        authorization_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "kernel.authorization"
+                        )
+                        assert [
+                            item["contribution_id"]
+                            for item in authorization_view["management_contributions"]
+                        ] == ["web-operation-policy"]
+                        assert authorization_view["management_contract"]["configuration"][
+                            "schema"
+                        ]["properties"]["protocol"]["const"] == (
+                            "forest.web-operation-policy/1"
+                        )
                         job_view = next(
                             item
                             for item in runtime_view.json()["modules"]

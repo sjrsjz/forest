@@ -11,7 +11,10 @@ from forest.builtin_runtime_job import (
 )
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
-from forest.clean_management_contract import CleanAuditManagementContract
+from forest.clean_management_contract import (
+    CleanAuditManagementContract,
+    CleanModuleConfigurationContract,
+)
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
@@ -32,6 +35,11 @@ from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import KernelPayloadRepository
+from forest.web_operation_policy import (
+    WEB_OPERATION_POLICY_DEFAULT,
+    WEB_OPERATION_POLICY_SCHEMA,
+    validate_web_operation_policy,
+)
 
 _STATE_CONTRACT = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -231,6 +239,18 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
         }
 
 
+class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
+    """Publish the Bot Web operation policy from the authorization Generation."""
+
+    def __init__(self, component_id, service, configuration, grants, services) -> None:
+        super().__init__(component_id, service, configuration, grants, services)
+        self.management_contract = CleanModuleConfigurationContract(
+            configuration,
+            schema=WEB_OPERATION_POLICY_SCHEMA,
+            validator=validate_web_operation_policy,
+        )
+
+
 @dataclass(frozen=True)
 class CleanKernelModules:
     runtime: KernelRuntimeRepository
@@ -324,10 +344,20 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         for component_id, bundle in bundles.items()
     }
     for component_id, configuration in configurations.items():
+        value = (
+            WEB_OPERATION_POLICY_DEFAULT
+            if component_id == "kernel.authorization"
+            else {"protocol": "forest.kernel-module/1"}
+        )
+        schema = (
+            WEB_OPERATION_POLICY_SCHEMA
+            if component_id == "kernel.authorization"
+            else _KERNEL_CONFIGURATION_SCHEMA
+        )
         await configuration.initialize(
             operation_id=f"bootstrap:{component_id}:configuration",
-            value={"protocol": "forest.kernel-module/1"},
-            validation_digest=digest_json(_KERNEL_CONFIGURATION_SCHEMA),
+            value=value,
+            validation_digest=digest_json(schema),
         )
 
     policy_revision = await authorization.revision()
@@ -352,6 +382,8 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 (
                     PreparedAuditAuthorityModule
                     if identity == "kernel.audit"
+                    else PreparedAuthorizationAuthorityModule
+                    if identity == "kernel.authorization"
                     else PreparedAuthorityModule
                 )(
                     identity,
@@ -376,6 +408,19 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                     ),
                 )
                 if component_id == "kernel.audit"
+                else (
+                    RuntimeManagementContribution(
+                        "web-operation-policy",
+                        "Web 操作策略",
+                        ("bot",),
+                        "/static/modules/clean-authorization-policy.html",
+                        "/static/clean-authorization-policy.js",
+                        style="/static/modules/clean-authorization-policy.css",
+                        group="security",
+                        order=4,
+                    ),
+                )
+                if component_id == "kernel.authorization"
                 else ()
             ),
             storage=bundles[component_id],

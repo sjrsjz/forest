@@ -299,6 +299,8 @@ Web 管理主体来自服务端验证的本地账户或显式接入的身份提�
 
 部署库 Web 会话与独立 Bot 的授权不具有跨库原子性。首版采用用途限定的 `WebAuthorityTicket`：可信管理网关在部署库验证未撤销会话后签发，绑定 `ticket_id, issuer/key_revision, web_subject_ref, session_ref/session_revision, target_scope, target_operation_ref, action_key, input_digest, plan_digest, issued_at, expires_at`。票据只在后端传递，初始最大有效期 30 秒；目标在自己的最终许可事务中验证签名、期限、精确目标/输入/计划和当前 Bot policy/fences，再把票据依据记入原操作或配置修订。`target_operation_ref` 预分配且由请求稳定派生，同票重放只能恢复原操作，不得创建新效果；票据不能替代 Bot 授权，也不让普通 Worker 持有长效 Web 登录权限。
 
+Bot Web operation policy 是 `kernel.authorization` Generation 的版本化模块配置，不放在 deployment 会话库，也不由 Web 壳硬编码。规则只精确匹配 `target_component_id + action_key`，并以启用状态、允许角色子集和可选稳定 Web 主体集合收窄既有角色门禁；不使用通配符、优先级或先后覆盖。未命中规则沿用安全角色模板，规则不能把写操作开放给原本无权的角色。读操作在目标网关读取当前 effective policy；写操作在业务事务内再次读取同一配置。策略 plan/apply 通过配置 revision CAS 和 RuntimeGraph publication 生效，因而策略换代同时使旧 graph revision 的短票失效。
+
 目标库不能先单独插入一条“验票成功”记录再调用业务 repository。每个管理写 authority 必须提供接收调用方连接的 `*_in(conn)` 入口，由目标 UoW 在同一事务内依次锁定当前 policy revision、当前 RuntimeGraph/Generation fence 和业务资源，验证票据，写入 `web_authority_receipt`，再提交配置修订、取消意图、Binding 变更或持久 Job 接纳。收据至少保存 ticket digest（不保存原始签名）、主体与 Session revision、精确 scope/component/Generation、policy revision、operation/action、输入/plan 摘要和接纳时间；业务事实保存该收据引用。任一参与者失败时收据与业务写入一起回滚，因此“有收据”准确表示目标事务已经接纳，而不是网关曾经检查过。
 
 `target_operation_ref` 是业务幂等身份，`ticket_id` 是一次短票尝试。票据过期后允许为同一 operation 签发新 ticket attempt，但目标事务只允许它恢复或完成摘要完全相同的操作；不同主体、目标、action、input 或 plan 使用相同 operation 时返回冲突。并发 ticket attempts 由 operation advisory lock 与业务唯一约束收敛，只能有一个权威业务结果。读取类请求不预写接纳收据，但每次分页、流式增量和媒体物化都重新验签并执行当前可见性查询。

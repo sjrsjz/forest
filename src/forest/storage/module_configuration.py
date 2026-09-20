@@ -398,6 +398,13 @@ class ModuleConfigurationRepository:
     async def effective(self, *, include_value: bool = False) -> EffectiveModuleConfiguration:
         return await self._head_configuration("effective_revision", include_value=include_value)
 
+    async def effective_in(
+        self, conn, *, include_value: bool = False
+    ) -> EffectiveModuleConfiguration:
+        return await self._head_configuration_in(
+            conn, "effective_revision", include_value=include_value
+        )
+
     async def desired(self, *, include_value: bool = False) -> EffectiveModuleConfiguration:
         """Return the validated candidate a newly prepared Generation must adopt."""
 
@@ -415,43 +422,50 @@ class ModuleConfigurationRepository:
         self, field: str, *, include_value: bool
     ) -> EffectiveModuleConfiguration:
         async with self.store.pool.connection() as conn, conn.transaction():
-            head = await self._head_in(conn)
-            revision = head[field]
-            if revision == 0:
-                raise ForestError(
-                    "MODULE_CONFIGURATION_UNINITIALIZED",
-                    "Module has no configuration revision",
-                    409,
-                )
-            saved = await self._revision_in(conn, revision, verify=True)
-            if not include_value:
-                return saved
-            reference = await self.payloads.verify_in(
-                conn,
-                payload_id=saved.payload_id,
-                digest=saved.payload_digest,
-                owner_component_id=self.component_id,
-                owner_kind="module.configuration",
-                owner_id=await self._owner_id_in(conn, saved.revision),
+            return await self._head_configuration_in(
+                conn, field, include_value=include_value
             )
-            body = await self.payloads.read_bytes_in(
-                conn,
-                saved.payload_id,
-                expected_deletion_epoch=reference.accepted_deletion_epoch,
+
+    async def _head_configuration_in(
+        self, conn, field: str, *, include_value: bool
+    ) -> EffectiveModuleConfiguration:
+        head = await self._head_in(conn)
+        revision = head[field]
+        if revision == 0:
+            raise ForestError(
+                "MODULE_CONFIGURATION_UNINITIALIZED",
+                "Module has no configuration revision",
+                409,
             )
-            try:
-                value = json.loads(body)
-            except (UnicodeError, json.JSONDecodeError) as exc:  # database invariant
-                raise ForestError(
-                    "MODULE_CONFIGURATION_CORRUPT", "Configuration payload is not JSON", 500
-                ) from exc
-            return EffectiveModuleConfiguration(
-                saved.revision,
-                saved.payload_id,
-                saved.payload_digest,
-                saved.validation_digest,
-                value,
-            )
+        saved = await self._revision_in(conn, revision, verify=True)
+        if not include_value:
+            return saved
+        reference = await self.payloads.verify_in(
+            conn,
+            payload_id=saved.payload_id,
+            digest=saved.payload_digest,
+            owner_component_id=self.component_id,
+            owner_kind="module.configuration",
+            owner_id=await self._owner_id_in(conn, saved.revision),
+        )
+        body = await self.payloads.read_bytes_in(
+            conn,
+            saved.payload_id,
+            expected_deletion_epoch=reference.accepted_deletion_epoch,
+        )
+        try:
+            value = json.loads(body)
+        except (UnicodeError, json.JSONDecodeError) as exc:  # database invariant
+            raise ForestError(
+                "MODULE_CONFIGURATION_CORRUPT", "Configuration payload is not JSON", 500
+            ) from exc
+        return EffectiveModuleConfiguration(
+            saved.revision,
+            saved.payload_id,
+            saved.payload_digest,
+            saved.validation_digest,
+            value,
+        )
 
     async def _authorize_management_in(
         self,

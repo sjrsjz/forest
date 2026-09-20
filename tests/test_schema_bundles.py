@@ -1334,6 +1334,18 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
     registry = RuntimeModuleRegistry(host, core.descriptors)
     await registry.start()
     assert set(registry.states.values()) == {ModuleLifecycleState.ACTIVE}
+    authorization_module = registry.get("kernel.authorization")
+    authorization_configuration = await authorization_module.management_contract.read()
+    assert authorization_configuration["desired"]["value"] == {
+        "protocol": "forest.web-operation-policy/1",
+        "rules": [],
+    }
+    authorization_descriptor = next(
+        item for item in core.descriptors if item.component_id == "kernel.authorization"
+    )
+    assert [item.contribution_id for item in authorization_descriptor.management] == [
+        "web-operation-policy"
+    ]
     graph = registry.graph_identity
     assert graph is not None and set(graph.generations) == {
         "kernel.runtime",
