@@ -21,6 +21,7 @@ POSTGRES_GID = 70
 APPLICATION_SECRET_NAMES = {
     "model_api_key",
     "embedding_api_key",
+    "management_token",
     "onebot_access_token",
 }
 

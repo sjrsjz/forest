@@ -59,6 +59,14 @@ def _secret(name: str, file_name: str) -> str:
     return value
 
 
+def _optional_secret(name: str, file_name: str) -> str | None:
+    inline = os.environ.get(name)
+    path = os.environ.get(file_name)
+    if not inline and not path:
+        return None
+    return _secret(name, file_name)
+
+
 def _positive_int(name: str, default: int, minimum: int, maximum: int) -> int:
     raw = os.environ.get(name, str(default))
     try:
@@ -700,7 +708,9 @@ async def run_clean_bot(settings: CleanBotSettings) -> None:
             signal.signal(event, lambda *_args: loop.call_soon_threadsafe(stop.set))
     try:
         await host.start()
-        management_token = os.environ.get("FOREST_MANAGEMENT_TOKEN")
+        management_token = _optional_secret(
+            "FOREST_MANAGEMENT_TOKEN", "FOREST_MANAGEMENT_TOKEN_FILE"
+        )
         if management_token:
             import uvicorn
 

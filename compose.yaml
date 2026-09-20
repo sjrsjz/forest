@@ -92,7 +92,7 @@ services:
       FOREST_AGENT_SYSTEM_PROMPT: ${FOREST_AGENT_SYSTEM_PROMPT:-}
       FOREST_RUNTIME_STATUS_FILE: /data/runtime-status.json
       FOREST_DATA_DIR: /data
-      FOREST_MANAGEMENT_TOKEN: ${FOREST_MANAGEMENT_TOKEN:-}
+      FOREST_MANAGEMENT_TOKEN_FILE: /run/forest-secrets/management_token
       FOREST_MANAGEMENT_HOST: 0.0.0.0
       FOREST_MANAGEMENT_PORT: 8080
     ports:
