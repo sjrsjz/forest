@@ -126,6 +126,8 @@ class CleanAgentManagementContract(CleanModuleConfigurationContract):
         *,
         operation_id: str,
         payload: dict,
+        authorization=None,
+        authorization_guard=None,
     ) -> CleanManagementActionResult:
         if action_id != "agent.run.cancel":
             raise ForestError(
@@ -143,8 +145,11 @@ class CleanAgentManagementContract(CleanModuleConfigurationContract):
             operation_id=operation_id,
             run_id=payload["run_id"],
             expected_checkpoint_seq=payload["expected_checkpoint_seq"],
-            requested_by="management.web",
+            requested_by=getattr(authorization, "web_subject_ref", "management.web"),
             reason_code=payload.get("reason_code", "ADMIN_REQUESTED"),
+            authorization=authorization,
+            authorization_guard=authorization_guard,
+            authorization_input_digest=digest_json(payload),
         )
         return CleanManagementActionResult(
             {

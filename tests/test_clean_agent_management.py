@@ -6,6 +6,7 @@ import pytest
 
 from forest.clean_agent_management import CleanAgentManagementContract
 from forest.errors import ForestError
+from forest.packages import digest_json
 
 
 class FakeRuntime:
@@ -121,4 +122,9 @@ async def test_agent_management_cancel_uses_checkpoint_cas_and_stable_operation(
         "expected_checkpoint_seq": 4,
         "requested_by": "management.web",
         "reason_code": "ADMIN_REQUESTED",
+        "authorization": None,
+        "authorization_guard": None,
+        "authorization_input_digest": digest_json(
+            {"run_id": "run/one", "expected_checkpoint_seq": 4}
+        ),
     }

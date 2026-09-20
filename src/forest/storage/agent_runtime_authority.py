@@ -390,6 +390,9 @@ class AgentRuntimeRepository:
         expected_checkpoint_seq: int,
         requested_by: str,
         reason_code: str,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
         _connection=None,
     ) -> dict:
         for value, field, limit in (
@@ -412,6 +415,33 @@ class AgentRuntimeRepository:
             }
         )
         async with self._transaction(_connection) as conn:
+            if authorization_guard is not None:
+                if authorization is None:
+                    raise ForestError(
+                        "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
+                    )
+                await authorization_guard(
+                    conn,
+                    ticket=authorization,
+                    component_id="agent.runtime",
+                    operation_id=operation_id,
+                    action_key="agent.run.cancel",
+                    input_digest=authorization_input_digest
+                    or _digest(
+                        {
+                            "run_id": run_id,
+                            "expected_checkpoint_seq": expected_checkpoint_seq,
+                            "reason_code": reason_code,
+                        }
+                    ),
+                    plan_digest=None,
+                )
+            elif authorization is not None:
+                raise ForestError(
+                    "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                    "Web authority transaction guard is unavailable",
+                    503,
+                )
             await self._lock(conn, "cancel:" + operation_id)
             replay = await (
                 await conn.execute(

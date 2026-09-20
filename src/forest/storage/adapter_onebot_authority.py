@@ -243,6 +243,38 @@ class OneBotAdapterRepository:
             generation_id=generation_id,
         )
 
+    async def _authorize_management_in(
+        self,
+        conn,
+        *,
+        authorization,
+        authorization_guard,
+        operation_id: str,
+        action_key: str,
+        input_digest: str,
+        plan_digest: str | None,
+    ) -> None:
+        if authorization_guard is not None:
+            if authorization is None:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
+                )
+            await authorization_guard(
+                conn,
+                ticket=authorization,
+                component_id="adapter.onebot",
+                operation_id=operation_id,
+                action_key=action_key,
+                input_digest=input_digest,
+                plan_digest=plan_digest,
+            )
+        elif authorization is not None:
+            raise ForestError(
+                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                "Web authority transaction guard is unavailable",
+                503,
+            )
+
     async def _head(self, conn, binding_id: str, *, lock: str = "") -> dict:
         suffix = {"": sql.SQL(""), "share": sql.SQL("FOR SHARE"), "update": sql.SQL("FOR UPDATE")}
         if lock not in suffix:
@@ -361,6 +393,10 @@ class OneBotAdapterRepository:
         secret_digest: str,
         actor_principal_ref: str,
         expires_at: datetime,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
+        authorization_operation_id: str | None = None,
     ) -> dict:
         for value, field, limit in (
             (plan_id, "plan_id", 256),
@@ -401,10 +437,18 @@ class OneBotAdapterRepository:
                 "secret_ref": secret_ref,
                 "secret_digest": secret_digest,
                 "actor_principal_ref": actor_principal_ref,
-                "expires_at": expires_at.isoformat(),
             }
         )
         async with self.store.pool.connection() as conn, conn.transaction():
+            await self._authorize_management_in(
+                conn,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                operation_id=authorization_operation_id or plan_id,
+                action_key="onebot.binding.plan",
+                input_digest=authorization_input_digest or input_digest,
+                plan_digest=None,
+            )
             await self._lock(conn, "config-plan:" + plan_id)
             replay = await (
                 await conn.execute(
@@ -465,11 +509,28 @@ class OneBotAdapterRepository:
             ).fetchone()
             return dict(row)
 
-    async def apply_configuration(self, *, operation_id: str, plan_id: str) -> dict:
+    async def apply_configuration(
+        self,
+        *,
+        operation_id: str,
+        plan_id: str,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
+    ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         _bounded(plan_id, "plan_id", 256)
         input_digest = _digest({"plan_id": plan_id})
         async with self.store.pool.connection() as conn, conn.transaction():
+            await self._authorize_management_in(
+                conn,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                operation_id=operation_id,
+                action_key="onebot.binding.apply",
+                input_digest=authorization_input_digest or input_digest,
+                plan_digest=_digest({"plan_id": plan_id}),
+            )
             await self._lock(conn, "config-apply:" + operation_id)
             replay = await (
                 await conn.execute(

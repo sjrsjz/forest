@@ -420,11 +420,21 @@ class _AuthorizedGateway:
 
     async def module_action(self, component_id: str, action_id: str, **values):
         self._write()
+        plan_resolver = getattr(self.gateway, "action_plan_digest", None)
+        plan_digest = (
+            plan_resolver(component_id, action_id, values["body"])
+            if callable(plan_resolver)
+            else None
+        )
         operation_id = self.gateway.operation_id(
             component_id, action_id, values.get("idempotency_key")
         )
         ticket, operation_id = await self._ticket(
-            component_id, action_id, values["body"], operation_id=operation_id
+            component_id,
+            action_id,
+            values["body"],
+            operation_id=operation_id,
+            plan_digest=plan_digest,
         )
         return await self.gateway.module_action(
             component_id,

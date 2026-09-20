@@ -205,6 +205,9 @@ class CleanJobRuntime:
         requested_by: str,
         input_value: dict,
         source_conversation_ref: str | None = None,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
     ) -> dict:
         await self._admit("CONTROL")
         owner, contribution, service = self._route(job_type, 1)
@@ -217,6 +220,9 @@ class CleanJobRuntime:
             input_value=input_value,
             source_conversation_ref=source_conversation_ref,
             scheduler_generation_id=self.generation_identity.generation_id,
+            authorization=authorization,
+            authorization_guard=authorization_guard,
+            authorization_input_digest=authorization_input_digest,
         )
 
     async def cancel(self, **values) -> dict:

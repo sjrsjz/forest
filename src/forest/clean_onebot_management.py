@@ -12,6 +12,7 @@ from forest.clean_management_contract import (
     CleanModuleConfigurationContract,
 )
 from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.payload_authority import PayloadSource
 
@@ -103,16 +104,47 @@ class CleanOneBotManagementContract(CleanModuleConfigurationContract):
         *,
         operation_id: str,
         payload: dict,
+        authorization=None,
+        authorization_guard=None,
     ) -> CleanManagementActionResult:
         if action_id == "onebot.binding.plan":
-            return CleanManagementActionResult(await self._plan(operation_id, payload))
+            return CleanManagementActionResult(
+                await self._plan(
+                    operation_id,
+                    payload,
+                    authorization=authorization,
+                    authorization_guard=authorization_guard,
+                )
+            )
         if action_id == "onebot.binding.apply":
-            return await self._apply(operation_id, payload)
+            return await self._apply(
+                operation_id,
+                payload,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+            )
         raise ForestError(
             "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "OneBot action does not exist", 404
         )
 
-    async def _plan(self, operation_id: str, payload: dict) -> dict:
+    @staticmethod
+    def authorization_plan_digest(action_id: str, payload: dict) -> str | None:
+        if (
+            action_id == "onebot.binding.apply"
+            and isinstance(payload, dict)
+            and set(payload) == {"plan_id"}
+        ):
+            return digest_json({"plan_id": payload["plan_id"]})
+        return None
+
+    async def _plan(
+        self,
+        operation_id: str,
+        payload: dict,
+        *,
+        authorization=None,
+        authorization_guard=None,
+    ) -> dict:
         required = {
             "binding_id",
             "expected_revision",
@@ -204,8 +236,14 @@ class CleanOneBotManagementContract(CleanModuleConfigurationContract):
             ),
             secret_ref=payload["secret_ref"],
             secret_digest=payload["secret_digest"],
-            actor_principal_ref="management/shared-token",
+            actor_principal_ref=getattr(
+                authorization, "web_subject_ref", "management/shared-token"
+            ),
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            authorization=authorization,
+            authorization_guard=authorization_guard,
+            authorization_input_digest=digest_json(payload),
+            authorization_operation_id=operation_id,
         )
         return {
             "plan_id": plan["plan_id"],
@@ -215,7 +253,12 @@ class CleanOneBotManagementContract(CleanModuleConfigurationContract):
         }
 
     async def _apply(
-        self, operation_id: str, payload: dict
+        self,
+        operation_id: str,
+        payload: dict,
+        *,
+        authorization=None,
+        authorization_guard=None,
     ) -> CleanManagementActionResult:
         if not isinstance(payload, dict) or set(payload) != {"plan_id"}:
             raise ForestError(
@@ -224,6 +267,9 @@ class CleanOneBotManagementContract(CleanModuleConfigurationContract):
         row = await self.repository.apply_configuration(
             operation_id=operation_id,
             plan_id=payload["plan_id"],
+            authorization=authorization,
+            authorization_guard=authorization_guard,
+            authorization_input_digest=digest_json(payload),
         )
         head = await self.repository.load_binding(row["binding_id"])
         return CleanManagementActionResult(

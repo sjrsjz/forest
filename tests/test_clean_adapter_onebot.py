@@ -153,7 +153,7 @@ async def _configured(clean_onebot, *, enabled: bool = True):
         ).encode(),
         source_id="binding/main/config/1",
     )
-    await adapter.plan_configuration(
+    plan_values = dict(
         plan_id="binding/config/1",
         binding_id="binding/main",
         expected_revision=0,
@@ -166,6 +166,14 @@ async def _configured(clean_onebot, *, enabled: bool = True):
         actor_principal_ref="admin/root",
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
+    planned = await adapter.plan_configuration(**plan_values)
+    replay = await adapter.plan_configuration(
+        **{
+            **plan_values,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+    )
+    assert replay == planned
     revision = await adapter.apply_configuration(
         operation_id="binding/apply/1",
         plan_id="binding/config/1",

@@ -23,6 +23,7 @@ from forest.agent_protocol import (
     parse_model_turn,
 )
 from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.runtime_modules import official_storage_bundle
 from forest.storage.agent_runtime_authority import (
     AgentInputBatch,
@@ -32,9 +33,11 @@ from forest.storage.agent_runtime_authority import (
     ModelRequestPlan,
     ToolProposal,
 )
+from forest.storage.authorization_authority import KernelAuthorizationRepository
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
 @pytest_asyncio.fixture
@@ -303,6 +306,120 @@ async def test_cancel_request_is_checkpoint_cas_idempotent_and_unique_per_run(
     with pytest.raises(ForestError) as caught:
         await agent.request_cancel(**{**request, "operation_id": "cancel/two"})
     assert caught.value.code == "AGENT_CANCEL_ALREADY_REQUESTED"
+
+
+@pytest.mark.postgres
+async def test_web_agent_cancel_commits_receipt_and_request_in_one_transaction(
+    clean_agent_runtime,
+):
+    store, _storage, payloads, agent = clean_agent_runtime
+    authorization_storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    installer = SchemaBundleInstaller(store)
+    await installer.install(
+        authorization_storage.spec,
+        authorization_storage.baseline,
+        authorization_storage.package_digest,
+        execution_profile=authorization_storage.execution_profile,
+    )
+    receipts = KernelAuthorizationRepository(
+        store, namespace=authorization_storage.spec.namespace
+    )
+    signer = WebAuthorityTicketAuthority(
+        issuer_id="deployment/test",
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"w" * 32,
+    )
+    session = type(
+        "Session",
+        (),
+        {
+            "session_ref": "web-session/agent-cancel",
+            "session_revision": 1,
+            "subject": type(
+                "Subject",
+                (),
+                {"subject_id": "web-subject/admin", "role": "ADMIN"},
+            )(),
+        },
+    )()
+
+    async def issue(operation_id: str, body: dict):
+        return await signer.issue(
+            session=session,
+            target_scope_kind="bot",
+            target_scope_id=store.bot_id,
+            target_component_id="agent.runtime",
+            target_generation_id="generation/agent/one",
+            target_graph_revision=1,
+            target_operation_ref=operation_id,
+            action_key="agent.run.cancel",
+            input_digest=digest_json(body),
+        )
+
+    async def authorize(conn, *, ticket, **expected):
+        expected = {
+            "target_component_id": expected["component_id"],
+            "target_operation_ref": expected["operation_id"],
+            "action_key": expected["action_key"],
+            "input_digest": expected["input_digest"],
+            "plan_digest": expected["plan_digest"],
+        }
+        await signer.verify(
+            ticket,
+            target_scope_kind="bot",
+            target_scope_id=store.bot_id,
+            target_generation_id="generation/agent/one",
+            target_graph_revision=1,
+            required_role="ADMIN",
+            **expected,
+        )
+        return await receipts.accept_web_authority_ticket_in(conn, ticket=ticket)
+
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    rejected_body = {"run_id": "run/one", "expected_checkpoint_seq": 1}
+    with pytest.raises(ForestError) as rejected:
+        await agent.request_cancel(
+            operation_id="web:agent-cancel/rejected",
+            run_id="run/one",
+            expected_checkpoint_seq=1,
+            requested_by="management.web",
+            reason_code="ADMIN_REQUESTED",
+            authorization=await issue("web:agent-cancel/rejected", rejected_body),
+            authorization_guard=authorize,
+            authorization_input_digest=digest_json(rejected_body),
+        )
+    assert rejected.value.code == "AGENT_CHECKPOINT_CONFLICT"
+
+    accepted_body = {"run_id": "run/one", "expected_checkpoint_seq": 0}
+    saved = await agent.request_cancel(
+        operation_id="web:agent-cancel/accepted",
+        run_id="run/one",
+        expected_checkpoint_seq=0,
+        requested_by="management.web",
+        reason_code="ADMIN_REQUESTED",
+        authorization=await issue("web:agent-cancel/accepted", accepted_body),
+        authorization_guard=authorize,
+        authorization_input_digest=digest_json(accepted_body),
+    )
+    assert saved["operation_id"] == "web:agent-cancel/accepted"
+    async with store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT target_operation_ref FROM {}.web_authority_receipts "
+                    "ORDER BY target_operation_ref"
+                ).format(sql.Identifier(authorization_storage.spec.namespace))
+            )
+        ).fetchall()
+    assert [row["target_operation_ref"] for row in rows] == [
+        "web:agent-cancel/accepted"
+    ]
 
 
 @pytest.mark.postgres

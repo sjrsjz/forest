@@ -116,6 +116,37 @@ class JobSchedulerRepository:
             generation_id=generation_id,
         )
 
+    async def _authorize_management_in(
+        self,
+        conn,
+        *,
+        authorization,
+        authorization_guard,
+        operation_id: str,
+        action_key: str,
+        input_digest: str,
+    ) -> None:
+        if authorization_guard is not None:
+            if authorization is None:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
+                )
+            await authorization_guard(
+                conn,
+                ticket=authorization,
+                component_id="job.scheduler",
+                operation_id=operation_id,
+                action_key=action_key,
+                input_digest=input_digest,
+                plan_digest=None,
+            )
+        elif authorization is not None:
+            raise ForestError(
+                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                "Web authority transaction guard is unavailable",
+                503,
+            )
+
     @staticmethod
     def _validate_route(route: JobRoute) -> None:
         if (
@@ -188,6 +219,9 @@ class JobSchedulerRepository:
         source_conversation_ref: str | None = None,
         priority: int = 4,
         scheduler_generation_id: str | None = None,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
     ) -> dict:
         self._validate_route(route)
         _bounded(operation_id, "operation_id", 256)
@@ -211,6 +245,15 @@ class JobSchedulerRepository:
             if scheduler_generation_id is not None:
                 _bounded(scheduler_generation_id, "scheduler_generation_id", 256)
                 await self._admit_in(conn, scheduler_generation_id, "CONTROL")
+            await self._authorize_management_in(
+                conn,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                operation_id=operation_id,
+                action_key="jobs.run",
+                input_digest=authorization_input_digest
+                or digest_json({"job_type": route.job_type, "input": input_value}),
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.job.scheduler/{self.store.bot_id}/{operation_id}",),
@@ -443,6 +486,9 @@ class JobSchedulerRepository:
         requested_by: str,
         reason_code: str = "ADMIN_REQUESTED",
         scheduler_generation_id: str | None = None,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
     ) -> dict:
         for value, field in (
             (operation_id, "operation_id"),
@@ -464,6 +510,21 @@ class JobSchedulerRepository:
             if scheduler_generation_id is not None:
                 _bounded(scheduler_generation_id, "scheduler_generation_id", 256)
                 await self._admit_in(conn, scheduler_generation_id, "CONTROL")
+            await self._authorize_management_in(
+                conn,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                operation_id=operation_id,
+                action_key="jobs.cancel",
+                input_digest=authorization_input_digest
+                or digest_json(
+                    {
+                        "job_id": job_id,
+                        "expected_revision": expected_revision,
+                        "reason_code": reason_code,
+                    }
+                ),
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.job.scheduler/cancel/{self.store.bot_id}/{job_id}",),

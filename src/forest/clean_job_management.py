@@ -11,6 +11,7 @@ from forest.clean_management_contract import (
     CleanModuleConfigurationContract,
 )
 from forest.errors import ForestError
+from forest.packages import digest_json
 
 
 class CleanJobManagementContract(CleanModuleConfigurationContract):
@@ -134,6 +135,8 @@ class CleanJobManagementContract(CleanModuleConfigurationContract):
         *,
         operation_id: str,
         payload: dict,
+        authorization=None,
+        authorization_guard=None,
     ) -> CleanManagementActionResult:
         if action_id == "jobs.run":
             if (
@@ -148,8 +151,11 @@ class CleanJobManagementContract(CleanModuleConfigurationContract):
             saved = await self.runtime.enqueue(
                 job_type=payload["job_type"],
                 operation_id=operation_id,
-                requested_by="management.web",
+                requested_by=getattr(authorization, "web_subject_ref", "management.web"),
                 input_value=payload["input"],
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                authorization_input_digest=digest_json(payload),
             )
             self.runtime.notify()
             return CleanManagementActionResult(saved)
@@ -166,8 +172,11 @@ class CleanJobManagementContract(CleanModuleConfigurationContract):
                 operation_id=operation_id,
                 job_id=payload["job_id"],
                 expected_revision=payload["expected_revision"],
-                requested_by="management.web",
+                requested_by=getattr(authorization, "web_subject_ref", "management.web"),
                 reason_code=payload.get("reason_code", "ADMIN_REQUESTED"),
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                authorization_input_digest=digest_json(payload),
             )
             self.runtime.notify()
             return CleanManagementActionResult(

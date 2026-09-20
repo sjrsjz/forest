@@ -111,7 +111,15 @@ class _Contract(CleanModuleConfigurationContract):
     async def query(self, query_id, payload):
         return {"query_id": query_id, "payload": payload}
 
-    async def action(self, action_id, *, operation_id, payload):
+    async def action(
+        self,
+        action_id,
+        *,
+        operation_id,
+        payload,
+        authorization=None,
+        authorization_guard=None,
+    ):
         return CleanManagementActionResult(
             {"action_id": action_id, "operation_id": operation_id, "payload": payload}
         )

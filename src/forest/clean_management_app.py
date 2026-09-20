@@ -103,6 +103,10 @@ class CleanManagementGateway:
             ) from None
         return generation_id, graph.graph_revision
 
+    def action_plan_digest(self, component_id: str, action_id: str, body: dict) -> str | None:
+        resolver = getattr(self.contract(component_id), "authorization_plan_digest", None)
+        return resolver(action_id, body) if callable(resolver) else None
+
     async def _authorize(
         self,
         ticket,
@@ -135,7 +139,7 @@ class CleanManagementGateway:
             required_role=required_role,
         )
 
-    async def _authorize_configuration_in(
+    async def _authorize_mutation_in(
         self,
         conn,
         *,
@@ -236,7 +240,7 @@ class CleanManagementGateway:
             value=body.value,
             authorization=authorization,
             authorization_guard=(
-                self._authorize_configuration_in if self.ticket_authority is not None else None
+                self._authorize_mutation_in if self.ticket_authority is not None else None
             ),
         )
 
@@ -269,7 +273,7 @@ class CleanManagementGateway:
                 expected_desired_revision=body.expected_desired_revision,
                 authorization=authorization,
                 authorization_guard=(
-                    self._authorize_configuration_in
+                    self._authorize_mutation_in
                     if self.ticket_authority is not None
                     else None
                 ),
@@ -323,12 +327,14 @@ class CleanManagementGateway:
         operation_id=None,
     ) -> dict:
         operation_id = operation_id or self.operation_id(component_id, action_id, idempotency_key)
+        plan_digest = self.action_plan_digest(component_id, action_id, body)
         await self._authorize(
             authorization,
             component_id=component_id,
             operation_id=operation_id,
             action_key=action_id,
             input_digest=digest_json(body),
+            plan_digest=plan_digest,
             required_role="ADMIN",
         )
         async with self._apply_lock:
@@ -340,7 +346,15 @@ class CleanManagementGateway:
                     "Module action does not exist",
                     404,
                 )
-            result = await action(action_id, operation_id=operation_id, payload=body)
+            result = await action(
+                action_id,
+                operation_id=operation_id,
+                payload=body,
+                authorization=authorization,
+                authorization_guard=(
+                    self._authorize_mutation_in if self.ticket_authority is not None else None
+                ),
+            )
             if not isinstance(result, CleanManagementActionResult):
                 raise ForestError(
                     "MODULE_MANAGEMENT_CONTRACT_INVALID",
