@@ -475,6 +475,11 @@ class CleanAgentRuntime:
     async def observe_model(self, owner, **values):
         return await self._call("observe_model", owner=owner, owned_work=True, **values)
 
+    async def record_protocol_failure(self, owner, **values):
+        return await self._call(
+            "record_protocol_failure", owner=owner, owned_work=True, **values
+        )
+
     async def record_model_turn(self, owner, **values):
         return await self._call(
             "record_model_turn", owner=owner, owned_work=True, **values

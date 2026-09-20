@@ -879,9 +879,26 @@ class AgentRuntimeRepository:
                 return dict(existing)
             await self._verify_payload(conn, plan.projection)
             run = await self._guard_owner(conn, owner)
-            if run["state"] != "PREPARING_MODEL":
+            repair = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND run_id=%s "
+                        "AND repair_step_seq=%s ORDER BY created_at,failure_id LIMIT 1"
+                    ).format(self._table("protocol_failures")),
+                    (self.store.bot_id, owner.run_id, run["next_step_seq"]),
+                )
+            ).fetchone()
+            if run["state"] not in {"PREPARING_MODEL", "REPAIR_READY"}:
                 raise ForestError(
                     "MODEL_REQUEST_BOUNDARY_CLOSED", "Run is not preparing a model request", 409
+                )
+            if (repair is None and plan.request_kind == "REPAIR") or (
+                repair is not None and plan.request_kind != "REPAIR"
+            ):
+                raise ForestError(
+                    "MODEL_REQUEST_KIND_CONFLICT",
+                    "Model request kind differs from the durable repair boundary",
+                    409,
                 )
             semantic_digest = _digest(
                 {
@@ -942,6 +959,14 @@ class AgentRuntimeRepository:
                     ),
                 )
             ).fetchone()
+            if run["state"] == "REPAIR_READY":
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='PREPARING_MODEL',current_model_request_id=NULL,"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND run_id=%s"
+                    ).format(self._table("agent_runs")),
+                    (self.store.bot_id, owner.run_id),
+                )
             return dict(row)
 
     async def prepare_model_attempt(
@@ -1299,6 +1324,248 @@ class AgentRuntimeRepository:
             )
             return dict(observation)
 
+    async def record_protocol_failure(
+        self,
+        owner: AgentRunOwner,
+        *,
+        failure_id: str,
+        request_id: str,
+        attempt_id: str,
+        error_code: str,
+        candidate_digest: str,
+        feedback: AgentPayloadRef,
+        checkpoint_id: str,
+        checkpoint_state: AgentPayloadRef,
+        allow_repair: bool,
+        _connection=None,
+    ) -> dict:
+        """Commit an invalid ModelTurn and its sole bounded repair decision."""
+
+        for value, field, limit in (
+            (failure_id, "failure_id", 256),
+            (request_id, "request_id", 256),
+            (attempt_id, "attempt_id", 256),
+            (error_code, "error_code", 128),
+            (checkpoint_id, "checkpoint_id", 256),
+        ):
+            _bounded(value, field, limit)
+        _validated_digest(candidate_digest, "candidate_digest")
+        feedback.validate("feedback")
+        checkpoint_state.validate("checkpoint_state")
+        if type(allow_repair) is not bool:
+            raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid repair decision", 422)
+        if (
+            feedback.owner_component_id != "agent.runtime"
+            or feedback.owner_kind != "protocol.repair.feedback"
+            or feedback.owner_id != failure_id
+        ):
+            raise ForestError(
+                "AGENT_PROTOCOL_FAILURE_PAYLOAD_CONFLICT",
+                "Protocol repair feedback owner differs",
+                409,
+            )
+        target_phase = "REPAIR_READY" if allow_repair else "FAILED"
+        if (
+            checkpoint_state.owner_component_id != "agent.runtime"
+            or checkpoint_state.owner_kind != "checkpoint.state"
+            or checkpoint_state.owner_id != checkpoint_id
+        ):
+            raise ForestError(
+                "AGENT_PROTOCOL_FAILURE_PAYLOAD_CONFLICT",
+                "Protocol failure checkpoint owner differs",
+                409,
+            )
+        input_digest = _digest(
+            {
+                "run_id": owner.run_id,
+                "owner_id": owner.owner_id,
+                "owner_epoch": owner.epoch,
+                "failure_id": failure_id,
+                "request_id": request_id,
+                "attempt_id": attempt_id,
+                "error_code": error_code,
+                "candidate_digest": candidate_digest,
+                "feedback": feedback.canonical(),
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_state": checkpoint_state.canonical(),
+                "allow_repair": allow_repair,
+            }
+        )
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "protocol-failure:" + failure_id)
+            existing = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND failure_id=%s"
+                    ).format(self._table("protocol_failures")),
+                    (self.store.bot_id, failure_id),
+                )
+            ).fetchone()
+            if existing is not None:
+                await self._guard_owner(conn, owner)
+                if existing["input_digest"] != input_digest:
+                    raise ForestError(
+                        "AGENT_PROTOCOL_FAILURE_CONFLICT",
+                        "Protocol failure identity differs",
+                        409,
+                    )
+                return dict(existing)
+            for reference in sorted(
+                (feedback, checkpoint_state), key=lambda item: item.payload_id
+            ):
+                await self._verify_payload(conn, reference)
+            run = await self._guard_owner(conn, owner)
+            request = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND request_id=%s FOR UPDATE"
+                    ).format(self._table("model_requests")),
+                    (self.store.bot_id, request_id),
+                )
+            ).fetchone()
+            attempt = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s FOR SHARE"
+                    ).format(self._table("model_transport_attempts")),
+                    (self.store.bot_id, attempt_id),
+                )
+            ).fetchone()
+            if (
+                request is None
+                or attempt is None
+                or run["state"] != "PARSING"
+                or run["current_model_request_id"] != request_id
+                or request["run_id"] != owner.run_id
+                or request["step_seq"] != run["next_step_seq"]
+                or request["state"] != "SUCCEEDED"
+                or request["current_attempt_id"] != attempt_id
+                or attempt["request_id"] != request_id
+                or attempt["state"] != "SUCCEEDED"
+                or attempt["result_payload_id"] is None
+            ):
+                raise ForestError(
+                    "AGENT_PROTOCOL_FAILURE_BOUNDARY_CLOSED",
+                    "Model response is not the current parse boundary",
+                    409,
+                )
+            if allow_repair and run["repair_count"] >= 1:
+                raise ForestError(
+                    "AGENT_PROTOCOL_REPAIR_EXHAUSTED",
+                    "The bounded protocol repair was already consumed",
+                    409,
+                )
+            next_step_seq = run["next_step_seq"] + 1
+            repair_step_seq = next_step_seq if allow_repair else None
+            sequence = run["checkpoint_seq"] + 1
+            checkpoint_digest = _digest(
+                {
+                    "run_id": owner.run_id,
+                    "failure_id": failure_id,
+                    "phase": target_phase,
+                    "input_revision": run["input_revision"],
+                    "next_step_seq": next_step_seq,
+                    "state": checkpoint_state.canonical(),
+                    "owner_epoch": owner.epoch,
+                }
+            )
+            checksum = _digest(
+                [
+                    owner.run_id,
+                    sequence,
+                    target_phase,
+                    run["input_revision"],
+                    next_step_seq,
+                    checkpoint_state.digest,
+                    owner.epoch,
+                ]
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,"
+                    "phase,input_revision,next_step_seq,state_payload_id,state_payload_digest,"
+                    "state_owner_component_id,state_owner_kind,state_owner_id,"
+                    "checkpoint_checksum,owner_epoch) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                ).format(self._table("run_checkpoints")),
+                (
+                    self.store.bot_id,
+                    owner.run_id,
+                    sequence,
+                    checkpoint_id,
+                    checkpoint_digest,
+                    target_phase,
+                    run["input_revision"],
+                    next_step_seq,
+                    checkpoint_state.payload_id,
+                    checkpoint_state.digest,
+                    checkpoint_state.owner_component_id,
+                    checkpoint_state.owner_kind,
+                    checkpoint_state.owner_id,
+                    checksum,
+                    owner.epoch,
+                ),
+            )
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,failure_id,input_digest,run_id,failed_request_id,"
+                        "failed_attempt_id,error_code,candidate_digest,feedback_payload_id,"
+                        "feedback_payload_digest,feedback_owner_component_id,feedback_owner_kind,"
+                        "feedback_owner_id,resulting_state,repair_step_seq) VALUES "
+                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+                    ).format(self._table("protocol_failures")),
+                    (
+                        self.store.bot_id,
+                        failure_id,
+                        input_digest,
+                        owner.run_id,
+                        request_id,
+                        attempt_id,
+                        error_code,
+                        candidate_digest,
+                        feedback.payload_id,
+                        feedback.digest,
+                        feedback.owner_component_id,
+                        feedback.owner_kind,
+                        feedback.owner_id,
+                        target_phase,
+                        repair_step_seq,
+                    ),
+                )
+            ).fetchone()
+            terminal_at = run["database_now"] if target_phase == "FAILED" else None
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state=%s,next_step_seq=%s,checkpoint_seq=%s,"
+                    "repair_count=repair_count+%s,current_model_request_id=NULL,"
+                    "error_code=%s,terminal_at=%s,updated_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND run_id=%s"
+                ).format(self._table("agent_runs")),
+                (
+                    target_phase,
+                    next_step_seq,
+                    sequence,
+                    1 if allow_repair else 0,
+                    "AGENT_PROTOCOL_FAILED" if target_phase == "FAILED" else None,
+                    terminal_at,
+                    self.store.bot_id,
+                    owner.run_id,
+                ),
+            )
+            if target_phase == "FAILED":
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='FAILED',active_run_id=NULL,"
+                        "terminal_reason_code='AGENT_PROTOCOL_FAILED',"
+                        "closed_at=clock_timestamp(),updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND session_id=%s AND state='ACTIVE' "
+                        "AND active_run_id=%s"
+                    ).format(self._table("agent_sessions")),
+                    (self.store.bot_id, run["session_id"], owner.run_id),
+                )
+            return dict(row)
+
     async def record_model_turn(
         self,
         owner: AgentRunOwner,
@@ -1480,6 +1747,28 @@ class AgentRuntimeRepository:
                 or run["state"] != "PARSING"
             ):
                 raise ForestError("MODEL_TURN_BOUNDARY_CLOSED", "ModelTurn boundary closed", 409)
+            if request["request_kind"] == "REPAIR":
+                repair = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT failed_request_id FROM {} WHERE bot_id=%s AND run_id=%s "
+                            "AND repair_step_seq=%s"
+                        ).format(self._table("protocol_failures")),
+                        (self.store.bot_id, owner.run_id, request["step_seq"]),
+                    )
+                ).fetchone()
+                if repair is None or repair_of_request_id != repair["failed_request_id"]:
+                    raise ForestError(
+                        "MODEL_TURN_REPAIR_CONFLICT",
+                        "Repair ModelTurn does not name its failed request",
+                        409,
+                    )
+            elif repair_of_request_id is not None:
+                raise ForestError(
+                    "MODEL_TURN_REPAIR_CONFLICT",
+                    "A non-repair ModelTurn cannot name a failed request",
+                    409,
+                )
             principal_ref = None
             if tool is not None:
                 trigger = await (
@@ -2220,6 +2509,7 @@ class AgentRuntimeRepository:
             attempt = None
             tool = None
             turn = None
+            protocol_failure = None
             if expanded["current_model_request_id"] is not None:
                 request = await (
                     await conn.execute(
@@ -2279,6 +2569,15 @@ class AgentRuntimeRepository:
                     (self.store.bot_id, run_id),
                 )
             ).fetchone()
+            protocol_failure = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND run_id=%s "
+                        "AND repair_step_seq=%s ORDER BY created_at DESC,failure_id DESC LIMIT 1"
+                    ).format(self._table("protocol_failures")),
+                    (self.store.bot_id, run_id, expanded["next_step_seq"]),
+                )
+            ).fetchone()
             return {
                 **expanded,
                 "current_request": dict(request) if request is not None else None,
@@ -2286,6 +2585,9 @@ class AgentRuntimeRepository:
                 "current_tool": dict(tool) if tool is not None else None,
                 "latest_turn": dict(turn) if turn is not None else None,
                 "latest_checkpoint": dict(checkpoint) if checkpoint is not None else None,
+                "current_protocol_failure": (
+                    dict(protocol_failure) if protocol_failure is not None else None
+                ),
             }
 
     async def execution_history(self, run_id: str, *, _connection=None) -> tuple[dict, ...]:

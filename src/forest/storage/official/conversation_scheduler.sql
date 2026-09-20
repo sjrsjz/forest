@@ -426,6 +426,37 @@ CREATE INDEX lane_wakeup_idx ON conversation_lanes(
     bot_id,resume_not_before,mailbox_revision,conversation_id
 );
 
+CREATE TABLE trigger_failures (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    conversation_id text NOT NULL,
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    failed_session_ref text NOT NULL
+        CHECK (octet_length(failed_session_ref) BETWEEN 1 AND 256),
+    failed_run_ref text NOT NULL CHECK (octet_length(failed_run_ref) BETWEEN 1 AND 256),
+    reason_code text NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 128),
+    actor_owner_id text NOT NULL CHECK (octet_length(actor_owner_id) BETWEEN 1 AND 256),
+    actor_epoch bigint NOT NULL CHECK (actor_epoch > 0),
+    trigger_count integer NOT NULL CHECK (trigger_count > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id, operation_id),
+    FOREIGN KEY (bot_id, conversation_id)
+        REFERENCES conversation_lanes(bot_id, conversation_id)
+);
+
+CREATE TABLE trigger_failure_items (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL,
+    item_index integer NOT NULL CHECK (item_index >= 0),
+    trigger_id text NOT NULL,
+    PRIMARY KEY (bot_id, operation_id, item_index),
+    UNIQUE (bot_id, operation_id, trigger_id),
+    FOREIGN KEY (bot_id, operation_id)
+        REFERENCES trigger_failures(bot_id, operation_id),
+    FOREIGN KEY (bot_id, trigger_id)
+        REFERENCES conversation_triggers(bot_id, trigger_id)
+);
+
 CREATE FUNCTION guard_inbox_message() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
@@ -505,6 +536,10 @@ CREATE TRIGGER input_batch_triggers_immutable BEFORE UPDATE OR DELETE ON input_b
 CREATE TRIGGER trigger_requeues_immutable BEFORE UPDATE OR DELETE ON trigger_requeues
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER trigger_requeue_items_immutable BEFORE UPDATE OR DELETE ON trigger_requeue_items
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER trigger_failures_immutable BEFORE UPDATE OR DELETE ON trigger_failures
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER trigger_failure_items_immutable BEFORE UPDATE OR DELETE ON trigger_failure_items
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_units_immutable BEFORE UPDATE OR DELETE ON context_units
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();

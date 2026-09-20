@@ -132,7 +132,7 @@ Before sending, silently verify one root, valid block order, complete XML, escap
 
 PresetContext 只允许宿主生成的 Bot 人格、语气和行为约束，具有独立 revision/digest；它不进入群 Context、归档、嵌入或记忆，也不能为 token 预算局部裁剪。CorePrompt 与 PresetContext 合计超过模型硬窗口时，请求以 `MODEL_FIXED_PREFIX_TOO_LARGE` 失败。
 
-Provider 输出先按字节、事件数和 UTF-8 限制收敛，再由禁用 DTD/entity 的有界 XML parser 校验唯一根、节点深度、属性、mixed content、block 顺序和 JSON 参数。第一个完整 FunctionCall 之后的尾部一律不可信。格式错误最多允许一次使用相同冻结 ContextView 的有界修复 attempt；再次失败则 Run 进入 `FAILED_PROTOCOL`，候选不进入聊天 Context。流式 delta 只是未提交预览，群聊只能发送完整解析并经最终事务提交的 Assistant。
+Provider 输出先按字节、事件数和 UTF-8 限制收敛，再由禁用 DTD/entity 的有界 XML parser 校验唯一根、节点深度、属性、mixed content、block 顺序和 JSON 参数。第一个完整 FunctionCall 之后的尾部一律不可信。格式错误最多允许一次使用相同冻结 ContextView 的有界修复 attempt：原 request/attempt、解析错误码、候选摘要和有界反馈先作为不可变失败事实提交，Run 进入 `REPAIR_READY`；修复请求必须声明 `request_kind=REPAIR` 并准确引用原失败请求。进程可在两次调用之间退出并从该边界恢复。修复输出再次失败，或同一 Run 后续再出现协议错误时，Run 进入 `FAILED/AGENT_PROTOCOL_FAILED`，其已领取 trigger 由 Conversation 的幂等失败操作终结并释放 lane；所有非法候选都不进入聊天 Context。流式 delta 只是未提交预览，群聊只能发送完整解析并经最终事务提交的 Assistant。
 
 ### 3.2 Run 输入与资源
 

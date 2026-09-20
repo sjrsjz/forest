@@ -71,7 +71,8 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 | `conversation.scheduler` | `input_batches` | `input_batch_id, kind, start_seq?, end_seq?, trigger_cut_seq?, selected_input_end_seq, session_ref?, run_ref?, context_revision`；固定来源切口与输入语义 |
 | `conversation.scheduler` | `selection_operations` | 每次选择 operation 的输入摘要、边界、冻结结果和可选 InputBatch 引用；`WAIT_INPUT/CONTINUE/IDLE` 也有可重放回执 |
 | `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
-| `conversation.scheduler` | `trigger_requeues / trigger_requeue_items` | Worker/Run 明确失效后的幂等重排事实及逐 trigger 成员；不能靠 `context_applied_seq` 猜测触发已经完成 |
+| `conversation.scheduler` | `trigger_requeues / trigger_requeue_items` | 可恢复的 Worker/Run 明确失效后的幂等重排事实及逐 trigger 成员；不能靠 `context_applied_seq` 猜测触发已经完成 |
+| `conversation.scheduler` | `trigger_failures / trigger_failure_items` | Run 明确不可恢复后的幂等终结事实、原因及逐 trigger 成员；保留原 Session/Run 归属并释放 lane |
 | `conversation.scheduler` | `context_units` | 输入及其他模块已提交事实的有序 PayloadRef；保存来源、作者、所属批次和 `commit_seq/unit_index`，不复制正文 |
 | `conversation.scheduler` | `context_append_operations` | Agent/控制模块追加闭合步骤或最终回复的幂等回执；固定 Context revision、unit 集及可选回复引用 |
 | `conversation.scheduler` | `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
@@ -116,7 +117,7 @@ PENDING ------------> FAILED / CANCELLED
 
 对被取消、过期或明确终结的触发保留原因。其他用户后来加入的独立触发不因当前 Run 被取消而自动取消。可恢复故障可以继续原 Run，或由恢复器在提升所有权 epoch 后重新排队；不能仅因 `context_applied_seq >= trigger.ingress_seq` 就忽略它。
 
-重排是显式 operation：持有效 actor 的恢复器必须指出失效的 `session_ref/run_ref` 与原因，事务锁定 lane 及该 Run 已领取的 trigger，写 `trigger_requeues` 和规范化成员后才把这些 trigger 从 `CLAIMED` 放回 `PENDING` 并释放 lane 的活动 Session 引用。相同 operation 精确重放同一成员集；不能扫描所有 `CLAIMED` 项后无条件重置，也不能把别的 Run 后来领取的 trigger 一并回退。
+重排是显式 operation：持有效 actor 的恢复器必须指出失效的 `session_ref/run_ref` 与原因，事务锁定 lane 及该 Run 已领取的 trigger，写 `trigger_requeues` 和规范化成员后才把这些 trigger 从 `CLAIMED` 放回 `PENDING` 并释放 lane 的活动 Session 引用。不可恢复的终态使用独立 `trigger_failures` operation，在相同精确 fence 下把成员置为 `FAILED` 并记录原因，不能借重排反复调用同一失败模型。相同 operation 精确重放同一成员集；不能扫描所有 `CLAIMED` 项后无条件重置，也不能把别的 Run 后来领取的 trigger 一并回退。
 
 ## 3. 上下文消息与用户身份
 

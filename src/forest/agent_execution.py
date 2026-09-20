@@ -200,6 +200,43 @@ class DurableSingleAgentExecution:
             reload_resume_phase=resume_phase,
         )
 
+    async def _with_protocol_repair(self, recovery: dict, snapshot: dict) -> tuple[dict, str]:
+        failure = recovery.get("current_protocol_failure")
+        if (
+            not isinstance(failure, dict)
+            or failure.get("resulting_state") != "REPAIR_READY"
+            or failure.get("repair_step_seq") != recovery.get("next_step_seq")
+        ):
+            raise ForestError(
+                "AGENT_HISTORY_INCOMPLETE",
+                "Repair boundary has no durable protocol failure",
+                500,
+            )
+        try:
+            feedback = json.loads(await self.payloads.read_bytes(failure["feedback_payload_id"]))
+        except (KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ForestError(
+                "AGENT_PROTOCOL_REPAIR_PAYLOAD_CORRUPT",
+                "Protocol repair feedback cannot be restored",
+                500,
+            ) from exc
+        if (
+            not isinstance(feedback, dict)
+            or set(feedback)
+            != {"repair_count", "error_code", "candidate_digest", "feedback"}
+            or feedback.get("repair_count") != recovery.get("repair_count")
+            or feedback.get("error_code") != failure.get("error_code")
+            or feedback.get("candidate_digest") != failure.get("candidate_digest")
+            or not isinstance(feedback.get("feedback"), str)
+            or len(feedback["feedback"].encode("utf-8")) > 32768
+        ):
+            raise ForestError(
+                "AGENT_PROTOCOL_REPAIR_PAYLOAD_CONFLICT",
+                "Protocol repair feedback differs from its durable boundary",
+                409,
+            )
+        return {**snapshot, "protocol_repair": feedback}, failure["failed_request_id"]
+
     async def execute(self, request: AgentExecutionRequest) -> AgentExecutionCompletion:
         if type(request) is not AgentExecutionRequest:
             raise ForestError(
@@ -208,6 +245,12 @@ class DurableSingleAgentExecution:
         run = await self._load_or_start(request)
         if run["state"] == "COMPLETED":
             return self._completion(run, already_committed=True)
+        if run["state"] in {"FAILED", "CANCELLED"}:
+            raise ForestError(
+                run.get("error_code") or f"AGENT_RUN_{run['state']}",
+                f"Agent Run is already {run['state'].lower()}",
+                409,
+            )
         owner = await self.agent.acquire_run(
             request.run_ref,
             self.owner_id,
@@ -230,8 +273,13 @@ class DurableSingleAgentExecution:
                         "Agent Run exceeded its configured model-step limit",
                         409,
                     )
-                if state == "PREPARING_MODEL":
-                    if recovery["current_request"] is None:
+                if state in {"PREPARING_MODEL", "REPAIR_READY"}:
+                    repair = recovery.get("current_protocol_failure")
+                    is_repair = (
+                        isinstance(repair, dict)
+                        and repair.get("repair_step_seq") == recovery["next_step_seq"]
+                    )
+                    if recovery["current_request"] is None and not is_repair:
                         new_input = await request.next_model_input()
                         if new_input is not None:
                             await self.agent.append_input(
@@ -271,6 +319,12 @@ class DurableSingleAgentExecution:
                         logical_step_id=f"{run['run_id']}:step:{step_seq}",
                         tool_bindings=bindings,
                     )
+                    repair_of_request_id = None
+                    if is_repair:
+                        snapshot, repair_of_request_id = await self._with_protocol_repair(
+                            recovery,
+                            snapshot,
+                        )
                     latest_input = run["inputs"][-1]
                     recalled = await self.memory.recall(
                         recall_id=_stable(
@@ -301,12 +355,25 @@ class DurableSingleAgentExecution:
                         tool_bindings=bindings,
                         output_tokens=profile.output_tokens,
                         stream=profile.stream,
+                        request_kind="REPAIR" if is_repair else "PRIMARY",
+                        repair_of_request_id=repair_of_request_id,
+                        allow_protocol_repair=(
+                            not is_repair
+                            and recovery["repair_count"] < 1
+                            and recovery["next_step_seq"] < profile.max_steps
+                        ),
                     )
                     if result.status == "UNKNOWN":
                         raise ForestError(
                             "AGENT_MODEL_RESULT_UNKNOWN",
                             "Model result is unknown and requires reconciliation",
                             409,
+                        )
+                    if result.status == "FAILED":
+                        raise ForestError(
+                            result.error_code or "AGENT_PROTOCOL_FAILED",
+                            "Model output failed the bounded Agent protocol repair",
+                            422,
                         )
                     continue
                 if state == "MODEL_PENDING":
@@ -354,12 +421,18 @@ class DurableSingleAgentExecution:
                         final_reply_ref=_stable("reply", recovery["run_id"]),
                     )
                     if state == "PARSING":
-                        await self.model.resume_parsing(
+                        parsed = await self.model.resume_parsing(
                             owner,
                             step,
                             tools=declarations,
                             tool_bindings=bindings,
                         )
+                        if parsed.status == "FAILED":
+                            raise ForestError(
+                                parsed.error_code or "AGENT_PROTOCOL_FAILED",
+                                "Model output failed the bounded Agent protocol repair",
+                                422,
+                            )
                     else:
                         await self.model.resume_safe_boundary(owner, step)
                     continue
@@ -399,7 +472,6 @@ class DurableSingleAgentExecution:
                         )
                     continue
                 if state in {
-                    "REPAIR_READY",
                     "RELOAD_WAIT",
                     "BLOCKED_UNKNOWN",
                     "WAIT_INPUT",

@@ -356,6 +356,22 @@ class ConversationWorker:
                 try:
                     completion = await self.agent.execute(request)
                 except ForestError as exc:
+                    if exc.code == "AGENT_PROTOCOL_FAILED":
+                        await self.scheduler.fail_run(
+                            actor,
+                            operation_id=_operation(
+                                "failed",
+                                conversation_id,
+                                actor.epoch,
+                                session_ref,
+                                run_ref,
+                                exc.code,
+                            ),
+                            session_ref=session_ref,
+                            run_ref=run_ref,
+                            reason_code=exc.code,
+                        )
+                        return
                     if exc.code == "AGENT_RELOAD_WAIT":
                         operation_id = (
                             exc.details.get("operation_id")

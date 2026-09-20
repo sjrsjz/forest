@@ -95,6 +95,29 @@ def test_group_authors_and_literal_data_are_preserved_without_role_forgery():
     assert result.manifest["trigger_ids"] == value["trigger_ids"]
 
 
+def test_protocol_repair_is_one_host_system_record_over_the_same_frozen_input():
+    value = snapshot(unit(text="keep the original user input"))
+    value["protocol_repair"] = {
+        "repair_count": 1,
+        "error_code": "AGENT_PROTOCOL_XML",
+        "candidate_digest": "sha256:" + "a" * 64,
+        "feedback": "invalid candidate excerpt",
+    }
+    result = prepared(value, stream=False)
+    body = json.loads(result.body)
+    repair_messages = [
+        item
+        for item in body["messages"]
+        if item["role"] == "system"
+        and "forest_protocol_repair" in json.dumps(item["content"], ensure_ascii=False)
+    ]
+    assert len(repair_messages) == 1
+    assert result.manifest["agent_protocol"]["repair_count"] == 1
+    assert result.manifest["trigger_ids"] == value["trigger_ids"]
+    assert result.manifest["input_revision"] == value["input_revision"]
+    assert "keep the original user input" in result.body.decode()
+
+
 def test_text_projection_omits_images_media_wrappers_and_nested_images_without_mutating_facts():
     value = snapshot(unit(parts=[
         {"type": "text", "text": "User text https://ordinary.example/a stays text"},

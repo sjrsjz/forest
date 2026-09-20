@@ -317,6 +317,39 @@ CREATE TABLE model_observations (
     CHECK ((accepted AND conflict_code IS NULL) OR (NOT accepted AND conflict_code IS NOT NULL))
 );
 
+CREATE TABLE protocol_failures (
+    bot_id text NOT NULL,
+    failure_id text NOT NULL CHECK (octet_length(failure_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    run_id text NOT NULL,
+    failed_request_id text NOT NULL,
+    failed_attempt_id text NOT NULL,
+    error_code text NOT NULL CHECK (octet_length(error_code) BETWEEN 1 AND 128),
+    candidate_digest text NOT NULL CHECK (candidate_digest ~ '^sha256:[a-f0-9]{64}$'),
+    feedback_payload_id text NOT NULL
+        CHECK (octet_length(feedback_payload_id) BETWEEN 1 AND 256),
+    feedback_payload_digest text NOT NULL
+        CHECK (feedback_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    feedback_owner_component_id text NOT NULL
+        CHECK (octet_length(feedback_owner_component_id) BETWEEN 1 AND 128),
+    feedback_owner_kind text NOT NULL
+        CHECK (octet_length(feedback_owner_kind) BETWEEN 1 AND 128),
+    feedback_owner_id text NOT NULL CHECK (octet_length(feedback_owner_id) BETWEEN 1 AND 512),
+    resulting_state text NOT NULL CHECK (resulting_state IN ('REPAIR_READY','FAILED')),
+    repair_step_seq integer CHECK (repair_step_seq IS NULL OR repair_step_seq > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,failure_id),
+    UNIQUE (bot_id,failed_request_id),
+    UNIQUE (bot_id,run_id,repair_step_seq),
+    FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id),
+    FOREIGN KEY (bot_id,failed_request_id) REFERENCES model_requests(bot_id,request_id),
+    FOREIGN KEY (bot_id,failed_attempt_id) REFERENCES model_transport_attempts(bot_id,attempt_id),
+    CHECK (
+        (resulting_state='REPAIR_READY' AND repair_step_seq IS NOT NULL)
+        OR (resulting_state='FAILED' AND repair_step_seq IS NULL)
+    )
+);
+
 CREATE TABLE model_turns (
     bot_id text NOT NULL,
     turn_id text NOT NULL CHECK (octet_length(turn_id) BETWEEN 1 AND 256),
@@ -644,4 +677,6 @@ $$;
 CREATE TRIGGER tool_calls_one_way BEFORE UPDATE OR DELETE ON tool_calls
     FOR EACH ROW EXECUTE FUNCTION guard_tool_call();
 CREATE TRIGGER model_observations_immutable BEFORE UPDATE OR DELETE ON model_observations
+    FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
+CREATE TRIGGER protocol_failures_immutable BEFORE UPDATE OR DELETE ON protocol_failures
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();

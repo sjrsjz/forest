@@ -26,6 +26,24 @@ def _canonical(value) -> bytes:
     ).encode("utf-8")
 
 
+def _stable(kind: str, *parts: object) -> str:
+    encoded = "\0".join(str(part) for part in parts).encode("utf-8")
+    return f"{kind}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _bounded_excerpt(value: str, limit: int) -> str:
+    raw = value.encode("utf-8", errors="replace")
+    if len(raw) <= limit:
+        return value
+    marker = b"\n...[candidate truncated by host]...\n"
+    remaining = max(0, limit - len(marker))
+    prefix_size = remaining // 2
+    suffix_size = remaining - prefix_size
+    prefix = raw[:prefix_size].decode("utf-8", errors="ignore").encode("utf-8")
+    suffix = raw[-suffix_size:].decode("utf-8", errors="ignore").encode("utf-8")
+    return (prefix + marker + suffix).decode("utf-8")
+
+
 @dataclass(frozen=True)
 class AgentModelStep:
     request_id: str
@@ -160,6 +178,79 @@ class DurableAgentModelExecutor:
             owner_id,
         )
 
+    async def _record_protocol_failure(
+        self,
+        owner,
+        step: AgentModelStep,
+        candidate: str,
+        error: ForestError,
+        *,
+        allow_repair: bool,
+        feedback_byte_limit: int,
+    ) -> AgentModelStepResult:
+        if (
+            type(allow_repair) is not bool
+            or type(feedback_byte_limit) is not int
+            or not 1024 <= feedback_byte_limit <= 32768
+        ):
+            raise ForestError(
+                "AGENT_PROTOCOL_REPAIR_CONFIGURATION_INVALID",
+                "Protocol repair limits are invalid",
+                500,
+            )
+        candidate_digest = "sha256:" + hashlib.sha256(
+            candidate.encode("utf-8", errors="surrogatepass")
+        ).hexdigest()
+        failure_id = _stable("protocol-failure", owner.run_id, step.request_id)
+        feedback_body = {
+            "repair_count": 1,
+            "error_code": error.code,
+            "candidate_digest": candidate_digest,
+            "feedback": _bounded_excerpt(candidate, feedback_byte_limit),
+        }
+        feedback = await self._payload(
+            "agent.runtime",
+            "protocol.repair.feedback",
+            failure_id,
+            _canonical(feedback_body),
+        )
+        target = "REPAIR_READY" if allow_repair else "FAILED"
+        checkpoint_id = _stable("checkpoint-protocol-failure", failure_id, target)
+        checkpoint = await self._payload(
+            "agent.runtime",
+            "checkpoint.state",
+            checkpoint_id,
+            _canonical(
+                {
+                    "phase": target,
+                    "failure_id": failure_id,
+                    "failed_request_id": step.request_id,
+                    "error_code": error.code,
+                    "candidate_digest": candidate_digest,
+                }
+            ),
+        )
+        failure = await self.agent.record_protocol_failure(
+            owner,
+            failure_id=failure_id,
+            request_id=step.request_id,
+            attempt_id=step.attempt_id,
+            error_code=error.code,
+            candidate_digest=candidate_digest,
+            feedback=feedback,
+            checkpoint_id=checkpoint_id,
+            checkpoint_state=checkpoint,
+            allow_repair=allow_repair,
+        )
+        return AgentModelStepResult(
+            failure["resulting_state"],
+            error_code=(
+                "AGENT_PROTOCOL_FAILED"
+                if failure["resulting_state"] == "FAILED"
+                else error.code
+            ),
+        )
+
     async def _record_response(
         self,
         owner,
@@ -169,13 +260,27 @@ class DurableAgentModelExecutor:
         tools=(),
         tool_bindings: tuple[AgentToolBinding, ...] = (),
         repair_of_request_id: str | None = None,
+        allow_protocol_repair: bool = True,
+        repair_feedback_byte_limit: int = 8192,
     ) -> AgentModelStepResult:
         """Parse and commit one already durable provider response idempotently."""
 
-        turn = parse_model_turn(
-            candidate,
-            allowed_tools=tuple(item["name"] for item in tools),
-        )
+        try:
+            turn = parse_model_turn(
+                candidate,
+                allowed_tools=tuple(item["name"] for item in tools),
+            )
+        except ForestError as exc:
+            if not exc.code.startswith("AGENT_PROTOCOL_"):
+                raise
+            return await self._record_protocol_failure(
+                owner,
+                step,
+                candidate,
+                exc,
+                allow_repair=allow_protocol_repair,
+                feedback_byte_limit=repair_feedback_byte_limit,
+            )
         if any(type(item) is not AgentToolBinding for item in tool_bindings):
             raise ForestError(
                 "AGENT_TOOL_BINDING_INVALID", "Tool binding set is invalid", 422
@@ -280,6 +385,7 @@ class DurableAgentModelExecutor:
         *,
         tools=(),
         tool_bindings: tuple[AgentToolBinding, ...] = (),
+        repair_feedback_byte_limit: int = 8192,
     ) -> AgentModelStepResult:
         """Replay parsing from the immutable successful transport payload."""
 
@@ -321,12 +427,27 @@ class DurableAgentModelExecutor:
                 "Durable model result differs from the execution head",
                 409,
             )
+        repair_of_request_id = None
+        if request["request_kind"] == "REPAIR":
+            failure = recovery["current_protocol_failure"]
+            if failure is None:
+                raise ForestError(
+                    "AGENT_HISTORY_INCOMPLETE",
+                    "Repair request has no durable protocol failure",
+                    500,
+                )
+            repair_of_request_id = failure["failed_request_id"]
         return await self._record_response(
             owner,
             step,
             result["text"],
             tools=tools,
             tool_bindings=tool_bindings,
+            repair_of_request_id=repair_of_request_id,
+            allow_protocol_repair=(
+                request["request_kind"] != "REPAIR" and recovery["repair_count"] < 1
+            ),
+            repair_feedback_byte_limit=repair_feedback_byte_limit,
         )
 
     async def resume_safe_boundary(
@@ -419,6 +540,10 @@ class DurableAgentModelExecutor:
         tool_bindings: tuple[AgentToolBinding, ...] = (),
         output_tokens: int = 1024,
         stream: bool = True,
+        request_kind: str = "PRIMARY",
+        repair_of_request_id: str | None = None,
+        allow_protocol_repair: bool = True,
+        repair_feedback_byte_limit: int = 8192,
     ) -> AgentModelStepResult:
         if type(step) is not AgentModelStep:
             raise ForestError("AGENT_MODEL_STEP_INVALID", "Model step identity is invalid", 422)
@@ -461,7 +586,7 @@ class DurableAgentModelExecutor:
             owner,
             ModelRequestPlan(
                 request_id=step.request_id,
-                request_kind="PRIMARY",
+                request_kind=request_kind,
                 provider_component_id=bound.component_id,
                 provider_generation_id=bound.generation_id,
                 provider_profile_ref=bound.provider_profile_ref,
@@ -545,4 +670,7 @@ class DurableAgentModelExecutor:
             result.text,
             tools=tools,
             tool_bindings=tool_bindings,
+            repair_of_request_id=repair_of_request_id,
+            allow_protocol_repair=allow_protocol_repair,
+            repair_feedback_byte_limit=repair_feedback_byte_limit,
         )

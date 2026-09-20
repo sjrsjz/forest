@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.agent_execution import DurableSingleAgentExecution
 from forest.agent_model_executor import AgentModelStep, DurableAgentModelExecutor
 from forest.agent_protocol import (
     CORE_PROMPT,
@@ -611,6 +612,87 @@ async def _prepare_dispatched(agent, payloads, owner, suffix: str):
     return plan, attempt
 
 
+async def _prepare_repair_dispatched(agent, payloads, owner, suffix: str):
+    projection = await _payload(
+        payloads,
+        owner_kind="model.projection",
+        owner_id=f"request/{suffix}",
+        body=b'{"messages":["repair"]}',
+        source_id="run/one",
+    )
+    plan = ModelRequestPlan(
+        request_id=f"request/{suffix}",
+        request_kind="REPAIR",
+        provider_component_id="provider.test",
+        provider_generation_id="generation/provider/1",
+        provider_profile_ref="profile/test",
+        model_ref="model/test",
+        instruction_channel="SYSTEM",
+        capability_digest="sha256:" + "a" * 64,
+        projection=projection,
+        projected_content_digest=projection.digest,
+        source_manifest_digest="sha256:" + "b" * 64,
+        output_token_budget=1024,
+    )
+    request = await agent.prepare_model_request(owner, plan)
+    wire = await _payload(
+        payloads,
+        owner_kind="model.wire",
+        owner_id=f"attempt/{suffix}",
+        body=b'{"wire":"repair"}',
+        source_id="run/one",
+        owner_component_id="provider.test",
+    )
+    attempt = await agent.prepare_model_attempt(
+        owner,
+        request_id=plan.request_id,
+        attempt_id=f"attempt/{suffix}",
+        effect_operation_ref=f"effect/model/{suffix}",
+        wire=wire,
+    )
+    await agent.mark_model_handoff(
+        owner,
+        request_id=request["request_id"],
+        attempt_id=attempt["attempt_id"],
+    )
+    return plan, attempt
+
+
+async def _observe_candidate(agent, payloads, owner, plan, attempt, candidate: str, suffix: str):
+    result = await _payload(
+        payloads,
+        owner_kind="model.result",
+        owner_id=attempt["attempt_id"],
+        body=_json_bytes(
+            {
+                "status": "RESPONDED",
+                "request_id": plan.request_id,
+                "transport_attempt_id": attempt["attempt_id"],
+                "payload_digest": "sha256:" + "9" * 64,
+                "text": candidate,
+                "tool_calls": [],
+                "usage": None,
+                "finish_reason": "stop",
+                "provider_response_id": f"response/{suffix}",
+                "provider_model": "test",
+                "error_code": None,
+            }
+        ),
+        source_id="run/one",
+        owner_component_id="provider.test",
+    )
+    await agent.observe_model(
+        owner,
+        observation_operation_id=f"observe/{suffix}/success",
+        request_id=plan.request_id,
+        attempt_id=attempt["attempt_id"],
+        observed_state="SUCCEEDED",
+        evidence_kind="EXECUTOR",
+        effect_observation_ref=f"effect-observation/{suffix}/success",
+        result=result,
+    )
+
+
 @pytest.mark.postgres
 async def test_model_request_attempt_success_and_terminal_turn_are_one_agent_chain(
     clean_agent_runtime,
@@ -779,6 +861,166 @@ async def test_durable_model_response_resumes_parsing_without_provider_recall(
     run = await agent.load_recovery("run/one")
     assert run["state"] == "FINAL_READY"
     assert run["latest_turn"]["turn_id"] == "turn/parse-recovery"
+
+
+@pytest.mark.postgres
+async def test_invalid_model_turn_recovers_one_durable_repair_after_owner_restart(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/invalid-primary")
+    plan, attempt = await _prepare_dispatched(agent, payloads, owner, "invalid-primary")
+    await _observe_candidate(agent, payloads, owner, plan, attempt, "not xml", "invalid-primary")
+    executor = DurableAgentModelExecutor(agent=agent, provider=None, payloads=payloads)
+    failed = await executor.resume_parsing(
+        owner,
+        AgentModelStep(
+            request_id=plan.request_id,
+            attempt_id=attempt["attempt_id"],
+            effect_operation_ref=attempt["effect_operation_ref"],
+            turn_id="turn/invalid-primary",
+            final_reply_ref="reply/invalid-primary",
+        ),
+    )
+    assert failed.status == "REPAIR_READY"
+    recovery = await agent.load_recovery("run/one")
+    assert recovery["state"] == "REPAIR_READY"
+    assert recovery["repair_count"] == 1
+    assert recovery["next_step_seq"] == 2
+    failure = recovery["current_protocol_failure"]
+    assert failure["failed_request_id"] == plan.request_id
+    assert failure["failed_attempt_id"] == attempt["attempt_id"]
+    assert failure["error_code"] == "AGENT_PROTOCOL_XML"
+    assert failure["resulting_state"] == "REPAIR_READY"
+    assert failure["repair_step_seq"] == 2
+
+    await agent.release_run(owner)
+    owner = await agent.acquire_run("run/one", "worker/repaired-after-restart")
+    recovery = await agent.load_recovery("run/one")
+    execution = object.__new__(DurableSingleAgentExecution)
+    execution.payloads = payloads
+    repair_snapshot, repair_of = await execution._with_protocol_repair(
+        recovery,
+        {"run_id": "run/one", "units": []},
+    )
+    assert repair_of == plan.request_id
+    assert repair_snapshot["protocol_repair"] == {
+        "repair_count": 1,
+        "error_code": "AGENT_PROTOCOL_XML",
+        "candidate_digest": failure["candidate_digest"],
+        "feedback": "not xml",
+    }
+
+    repair_plan, repair_attempt = await _prepare_repair_dispatched(
+        agent,
+        payloads,
+        owner,
+        "repair",
+    )
+    candidate = (
+        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
+        '<block block_type="Assistant"><content><text>fixed</text></content></block>'
+        "</blocks></payload></valid_agent_protocol_content_block>"
+    )
+    await _observe_candidate(
+        agent,
+        payloads,
+        owner,
+        repair_plan,
+        repair_attempt,
+        candidate,
+        "repair",
+    )
+    repaired = await executor.resume_parsing(
+        owner,
+        AgentModelStep(
+            request_id=repair_plan.request_id,
+            attempt_id=repair_attempt["attempt_id"],
+            effect_operation_ref=repair_attempt["effect_operation_ref"],
+            turn_id="turn/repair",
+            final_reply_ref="reply/repair",
+        ),
+    )
+    assert repaired.status == "FINAL_READY"
+    assert repaired.text == "fixed"
+    final = await agent.load_recovery("run/one")
+    assert final["state"] == "FINAL_READY"
+    assert final["latest_turn"]["repair_of_request_id"] == plan.request_id
+    assert final["latest_turn"]["request_id"] == repair_plan.request_id
+
+
+@pytest.mark.postgres
+async def test_second_invalid_model_turn_fails_protocol_without_a_third_dispatch(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads, suffix="twice")
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/twice", "worker/invalid-twice")
+    first_plan, first_attempt = await _prepare_dispatched(
+        agent,
+        payloads,
+        owner,
+        "first-invalid",
+    )
+    await _observe_candidate(
+        agent,
+        payloads,
+        owner,
+        first_plan,
+        first_attempt,
+        "bad one",
+        "first-invalid",
+    )
+    executor = DurableAgentModelExecutor(agent=agent, provider=None, payloads=payloads)
+    assert (
+        await executor.resume_parsing(
+            owner,
+            AgentModelStep(
+                request_id=first_plan.request_id,
+                attempt_id=first_attempt["attempt_id"],
+                effect_operation_ref=first_attempt["effect_operation_ref"],
+                turn_id="turn/first-invalid",
+                final_reply_ref="reply/first-invalid",
+            ),
+        )
+    ).status == "REPAIR_READY"
+    second_plan, second_attempt = await _prepare_repair_dispatched(
+        agent,
+        payloads,
+        owner,
+        "second-invalid",
+    )
+    await _observe_candidate(
+        agent,
+        payloads,
+        owner,
+        second_plan,
+        second_attempt,
+        "bad two",
+        "second-invalid",
+    )
+    terminal = await executor.resume_parsing(
+        owner,
+        AgentModelStep(
+            request_id=second_plan.request_id,
+            attempt_id=second_attempt["attempt_id"],
+            effect_operation_ref=second_attempt["effect_operation_ref"],
+            turn_id="turn/second-invalid",
+            final_reply_ref="reply/second-invalid",
+        ),
+    )
+    assert terminal.status == "FAILED"
+    assert terminal.error_code == "AGENT_PROTOCOL_FAILED"
+    failed = await agent.load_recovery("run/twice")
+    assert failed["state"] == "FAILED"
+    assert failed["error_code"] == "AGENT_PROTOCOL_FAILED"
+    assert failed["session"]["state"] == "FAILED"
+    assert failed["repair_count"] == 1
+    assert failed["next_step_seq"] == 3
+    assert failed["current_protocol_failure"] is None
 
 
 @pytest.mark.postgres

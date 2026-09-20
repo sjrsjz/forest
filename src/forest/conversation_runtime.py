@@ -319,6 +319,14 @@ class CleanConversationSchedulerRuntime:
             **values,
         )
 
+    async def fail_run(self, actor, **values):
+        return await self._repository_call(
+            "fail_run_in",
+            actor=actor,
+            owned_work=True,
+            **values,
+        )
+
     async def context_snapshot(self, actor):
         return await self._repository_call(
             "context_snapshot_in",

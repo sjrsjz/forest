@@ -92,11 +92,13 @@ CorePrompt 是 `agent.runtime` 包内版本化协议，随 Agent spec 和 parser
 | 持久状态 | 恢复动作 |
 |---|---|
 | `PREPARING_MODEL` | 在下一次模型调用前重新检查安全点，使用确定性 step identity 继续 |
+| `REPAIR_READY` | 读取不可变协议失败事实和有界反馈，保持原 InputBatch/ContextView fence，以 `request_kind=REPAIR` 发起唯一修复调用；不得接入新群消息或重建第二条 Agent 链 |
 | 模型 `DISPATCHING` | Provider 没有可靠查询时记 `UNKNOWN` 并阻断，不能重发 |
 | 工具 `PROPOSED/WAIT_APPROVAL` | 用原 tool call、authority trigger、principal 与 approval ref 继续授权流程 |
 | 工具 `DISPATCHING` | 只通过工具 contract 的 query 端口查询原 effect；不支持查询则阻断 |
 | `FINAL_READY` | 用稳定计划 ID 重试三 participant UnitOfWork |
 | `COMPLETED` 且 Session 活跃 | 跳过模型和回复提交，只执行幂等 Session 交接 |
+| `FAILED/AGENT_PROTOCOL_FAILED` | Conversation 以准确 Session/Run fence 终结该 Run 已领取的 trigger，保存失败成员与原因并释放 lane；重启后重放同一失败 operation |
 
 Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模型/工具 handoff 临界区并到达 checkpoint。不能通过取消协程把已 handoff 的外部调用伪装成未执行；结果必须由 Provider/Effect/Delivery 账本决定。
 

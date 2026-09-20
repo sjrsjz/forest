@@ -69,6 +69,7 @@ class FakeScheduler:
         self.appends: list[dict] = []
         self.selections: list[tuple[str, str, str | None, str | None]] = []
         self.deferrals: list[tuple[str, float, str, str | None]] = []
+        self.failed_runs: list[dict] = []
 
     async def claimable_conversations(self, *, limit):
         return tuple(self.lanes)[:limit]
@@ -145,6 +146,11 @@ class FakeScheduler:
 
     async def requeue_run(self, *_args, **_values):
         return ()
+
+    async def fail_run(self, actor, **values):
+        self.failed_runs.append({"conversation_id": actor.conversation_id, **values})
+        self.lanes[actor.conversation_id].active = None
+        return self.lanes[actor.conversation_id].claimed
 
 
 class FakeCompletionPort:
@@ -363,6 +369,40 @@ async def test_waiting_approval_defers_durable_lane_without_worker_failure_loop(
     assert scheduler.deferrals == [
         ("group/a", 1.0, "AGENT_WAITING_APPROVAL", "approval/tool/waiting")
     ]
+    assert scheduler.actors == set()
+    assert scheduler.appends == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_protocol_failure_settles_claimed_triggers_and_releases_lane():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/one", "trigger/two"),
+            )
+        }
+    )
+
+    class FailedAgent:
+        async def execute(self, _request):
+            raise ForestError(
+                "AGENT_PROTOCOL_FAILED",
+                "The bounded protocol repair failed",
+                422,
+            )
+
+    worker = _worker(scheduler, FailedAgent(), "generation/protocol-failed")
+    await worker.run_once("group/a")
+
+    assert len(scheduler.failed_runs) == 1
+    failure = scheduler.failed_runs[0]
+    assert failure["conversation_id"] == "group/a"
+    assert failure["session_ref"] == "session/existing"
+    assert failure["run_ref"] == "run/existing"
+    assert failure["reason_code"] == "AGENT_PROTOCOL_FAILED"
+    assert scheduler.lanes["group/a"].active is None
     assert scheduler.actors == set()
     assert scheduler.appends == []
 
