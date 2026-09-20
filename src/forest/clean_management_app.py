@@ -135,6 +135,52 @@ class CleanManagementGateway:
             required_role=required_role,
         )
 
+    async def _authorize_configuration_in(
+        self,
+        conn,
+        *,
+        ticket,
+        component_id: str,
+        operation_id: str,
+        action_key: str,
+        input_digest: str,
+        plan_digest: str | None,
+    ) -> dict:
+        if self.ticket_authority is None:
+            raise ForestError(
+                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                "Web authority transaction guard is unavailable",
+                503,
+            )
+        await self.ticket_authority.verify(
+            ticket,
+            target_scope_kind="bot",
+            target_scope_id=self.scope_id,
+            target_component_id=component_id,
+            target_generation_id=ticket.target_generation_id,
+            target_graph_revision=ticket.target_graph_revision,
+            target_operation_ref=operation_id,
+            action_key=action_key,
+            input_digest=input_digest,
+            plan_digest=plan_digest,
+            required_role="ADMIN",
+        )
+        route = await self.host._kernel.runtime.verify_active_generation_in(
+            conn,
+            component_id=component_id,
+            generation_id=ticket.target_generation_id,
+            admission_lane="CONTROL",
+        )
+        if route.graph_revision != ticket.target_graph_revision:
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
+                "Web authority ticket names another RuntimeGraph revision",
+                403,
+            )
+        return await self.host._kernel.authorization.accept_web_authority_ticket_in(
+            conn, ticket=ticket
+        )
+
     async def runtime(self, *, authorization=None, operation_id=None) -> dict:
         await self._authorize(
             authorization,
@@ -188,6 +234,10 @@ class CleanManagementGateway:
             operation_id=operation_id,
             expected_desired_revision=body.expected_desired_revision,
             value=body.value,
+            authorization=authorization,
+            authorization_guard=(
+                self._authorize_configuration_in if self.ticket_authority is not None else None
+            ),
         )
 
     async def apply_configuration(
@@ -217,6 +267,12 @@ class CleanManagementGateway:
                 operation_id=operation_id,
                 plan_id=body.plan_id,
                 expected_desired_revision=body.expected_desired_revision,
+                authorization=authorization,
+                authorization_guard=(
+                    self._authorize_configuration_in
+                    if self.ticket_authority is not None
+                    else None
+                ),
             )
             effective = await contract.configuration.effective()
             replaced = effective.revision != saved["revision"]

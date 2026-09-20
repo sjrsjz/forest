@@ -100,6 +100,34 @@ CREATE TABLE ticket_consumptions (
     CHECK (plan_digest IS NULL OR plan_digest ~ '^sha256:[a-f0-9]{64}$')
 );
 
+CREATE TABLE web_authority_receipts (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    ticket_id text NOT NULL CHECK (octet_length(ticket_id) BETWEEN 1 AND 256),
+    ticket_digest text NOT NULL CHECK (ticket_digest ~ '^sha256:[a-f0-9]{64}$'),
+    issuer_id text NOT NULL CHECK (octet_length(issuer_id) BETWEEN 1 AND 128),
+    key_id text NOT NULL CHECK (octet_length(key_id) BETWEEN 1 AND 256),
+    web_subject_ref text NOT NULL CHECK (octet_length(web_subject_ref) BETWEEN 1 AND 128),
+    web_role text NOT NULL CHECK (web_role IN ('ADMIN','AUDITOR')),
+    session_ref text NOT NULL CHECK (octet_length(session_ref) BETWEEN 1 AND 128),
+    session_revision bigint NOT NULL CHECK (session_revision > 0),
+    target_scope_kind text NOT NULL CHECK (octet_length(target_scope_kind) BETWEEN 1 AND 64),
+    target_scope_id text NOT NULL CHECK (octet_length(target_scope_id) BETWEEN 1 AND 128),
+    target_component_id text NOT NULL CHECK (octet_length(target_component_id) BETWEEN 1 AND 128),
+    target_generation_id text NOT NULL CHECK (octet_length(target_generation_id) BETWEEN 1 AND 256),
+    target_graph_revision bigint NOT NULL CHECK (target_graph_revision > 0),
+    target_operation_ref text NOT NULL CHECK (octet_length(target_operation_ref) BETWEEN 1 AND 256),
+    action_key text NOT NULL CHECK (octet_length(action_key) BETWEEN 1 AND 200),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    plan_digest text CHECK (plan_digest IS NULL OR plan_digest ~ '^sha256:[a-f0-9]{64}$'),
+    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
+    issued_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,ticket_id),
+    UNIQUE (bot_id,target_operation_ref),
+    CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '30 seconds')
+);
+
 CREATE TABLE revocations (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -162,6 +190,9 @@ CREATE TABLE approvals (
 );
 
 CREATE INDEX tickets_expiry_idx ON tickets(bot_id, expires_at, ticket_id);
+CREATE INDEX web_authority_receipts_subject_idx ON web_authority_receipts(
+    bot_id,web_subject_ref,accepted_at DESC,ticket_id
+);
 CREATE INDEX approvals_pending_idx ON approvals(bot_id, expires_at, approval_id)
     WHERE state = 'PENDING';
 CREATE INDEX approvals_requester_idx ON approvals(
@@ -186,6 +217,8 @@ CREATE TRIGGER grant_entries_immutable BEFORE UPDATE OR DELETE ON grant_entries
 CREATE TRIGGER tickets_immutable BEFORE UPDATE OR DELETE ON tickets
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_authorization_fact();
 CREATE TRIGGER ticket_consumptions_immutable BEFORE UPDATE OR DELETE ON ticket_consumptions
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_authorization_fact();
+CREATE TRIGGER web_authority_receipts_immutable BEFORE UPDATE OR DELETE ON web_authority_receipts
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_authorization_fact();
 CREATE TRIGGER revocations_immutable BEFORE UPDATE OR DELETE ON revocations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_authorization_fact();

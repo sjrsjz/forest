@@ -21,6 +21,7 @@ from forest.agent_tool_executor import (
 )
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.runtime_generation import (
     PreparedGenerationBinding,
     RuntimeStorageBinding,
@@ -55,6 +56,7 @@ from forest.storage.payload_authority import (
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.tool_authorization import KernelToolAuthorizationPort
 from forest.tool_effect_execution import KernelToolExecutionPort
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
 def bundle(
@@ -1049,7 +1051,13 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
         "forest.kernel-runtime.repository/1",
         "storage/official/kernel_runtime.sql",
     )
-    for storage_bundle in (payload_storage, runtime_storage):
+    authorization_storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    for storage_bundle in (payload_storage, runtime_storage, authorization_storage):
         await installer.install(
             storage_bundle.spec,
             storage_bundle.baseline,
@@ -1057,6 +1065,9 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
             execution_profile=storage_bundle.execution_profile,
         )
     payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    web_receipts = KernelAuthorizationRepository(
+        store, namespace=authorization_storage.spec.namespace
+    )
     configuration = ModuleConfigurationRepository(
         store,
         component_id="kernel.runtime",
@@ -1144,17 +1155,117 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
     effective = await configuration.effective(include_value=True)
     assert effective.revision == 2 and effective.value == {"label": "two"}
 
+    signer = WebAuthorityTicketAuthority(
+        issuer_id="deployment/test",
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"w" * 32,
+    )
+    web_session = SimpleNamespace(
+        session_ref="web-session/configuration",
+        session_revision=1,
+        subject=SimpleNamespace(subject_id="web-subject/admin", role="ADMIN"),
+    )
+    generation_id = graph.generations["kernel.runtime"]
+
+    async def ticket(operation_id, action_key, body, plan_digest=None):
+        return await signer.issue(
+            session=web_session,
+            target_scope_kind="bot",
+            target_scope_id=store.bot_id,
+            target_component_id="kernel.runtime",
+            target_generation_id=generation_id,
+            target_graph_revision=graph.graph_revision,
+            target_operation_ref=operation_id,
+            action_key=action_key,
+            input_digest=digest_json(body),
+            plan_digest=plan_digest,
+        )
+
+    async def authorize_configuration(
+        conn,
+        *,
+        ticket,
+        component_id,
+        operation_id,
+        action_key,
+        input_digest,
+        plan_digest,
+    ):
+        await signer.verify(
+            ticket,
+            target_scope_kind="bot",
+            target_scope_id=store.bot_id,
+            target_component_id=component_id,
+            target_generation_id=generation_id,
+            target_graph_revision=graph.graph_revision,
+            target_operation_ref=operation_id,
+            action_key=action_key,
+            input_digest=input_digest,
+            plan_digest=plan_digest,
+            required_role="ADMIN",
+        )
+        route = await runtime.verify_active_generation_in(
+            conn,
+            component_id=component_id,
+            generation_id=generation_id,
+            admission_lane="CONTROL",
+        )
+        assert route.graph_revision == graph.graph_revision
+        return await web_receipts.accept_web_authority_ticket_in(conn, ticket=ticket)
+
+    plan_v3_body = {"expected_desired_revision": 2, "value": {"label": "three"}}
     plan_v3 = await configuration.plan(
         operation_id="configuration.plan.3",
         expected_desired_revision=2,
         value={"label": "three"},
         validation_digest=validation_digest,
+        authorization=await ticket(
+            "configuration.plan.3", "configuration.plan", plan_v3_body
+        ),
+        authorization_guard=authorize_configuration,
     )
+    apply_v3_body = {
+        "plan_id": plan_v3["plan_id"],
+        "expected_desired_revision": 2,
+    }
     desired_v3 = await configuration.apply(
         operation_id="configuration.apply.3",
         plan_id=plan_v3["plan_id"],
         expected_desired_revision=2,
+        authorization=await ticket(
+            "configuration.apply.3",
+            "configuration.apply",
+            apply_v3_body,
+            digest_json({"plan_id": plan_v3["plan_id"]}),
+        ),
+        authorization_guard=authorize_configuration,
     )
+    rejected_body = {"expected_desired_revision": 3, "value": {"label": "rejected"}}
+    with pytest.raises(ForestError) as rejected:
+        await configuration.plan(
+            operation_id="configuration.plan.rejected",
+            expected_desired_revision=3,
+            value={"label": "rejected"},
+            validation_digest=validation_digest,
+            authorization=await ticket(
+                "configuration.plan.rejected", "configuration.plan", rejected_body
+            ),
+            authorization_guard=authorize_configuration,
+        )
+    assert rejected.value.code == "MODULE_CONFIGURATION_CONFLICT"
+    async with store.pool.connection() as conn:
+        receipt_operations = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT target_operation_ref FROM {}.web_authority_receipts "
+                    "ORDER BY target_operation_ref"
+                ).format(sql.Identifier(authorization_storage.spec.namespace))
+            )
+        ).fetchall()
+    assert [row["target_operation_ref"] for row in receipt_operations] == [
+        "configuration.apply.3",
+        "configuration.plan.3",
+    ]
     candidate_v3 = replace(
         runtime_binding("kernel.runtime", marker="8", storage=storage_binding),
         package_digest=runtime_storage.package_digest,
@@ -1477,6 +1588,88 @@ async def test_clean_kernel_authorization_fences_exact_tickets_and_revocation(
         with pytest.raises(psycopg.Error):
             await conn.execute(
                 sql.SQL("DELETE FROM {}.tickets WHERE bot_id=%s").format(
+                    sql.Identifier(storage.spec.namespace)
+                ),
+                (store.bot_id,),
+            )
+
+
+@pytest.mark.postgres
+async def test_web_authority_receipt_is_immutable_idempotent_and_rolls_back(
+    clean_authority,
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.authorization",
+        "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    authority = KernelAuthorizationRepository(store, namespace=storage.spec.namespace)
+    signer = WebAuthorityTicketAuthority(
+        issuer_id="deployment/test",
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"w" * 32,
+    )
+    session = SimpleNamespace(
+        session_ref="web-session/test",
+        session_revision=1,
+        subject=SimpleNamespace(subject_id="web-subject/admin", role="ADMIN"),
+    )
+
+    async def issue():
+        return await signer.issue(
+            session=session,
+            target_scope_kind="bot",
+            target_scope_id="bot-bundle",
+            target_component_id="agent.runtime",
+            target_generation_id="generation/agent/1",
+            target_graph_revision=1,
+            target_operation_ref="web:operation/configuration",
+            action_key="configuration.apply",
+            input_digest="sha256:" + "a" * 64,
+            plan_digest="sha256:" + "b" * 64,
+        )
+
+    first = await issue()
+    with pytest.raises(RuntimeError):
+        async with store.pool.connection() as conn, conn.transaction():
+            await authority.accept_web_authority_ticket_in(conn, ticket=first)
+            raise RuntimeError("rollback")
+    async with store.pool.connection() as conn:
+        count = await (
+            await conn.execute(
+                sql.SQL("SELECT count(*) AS value FROM {}.web_authority_receipts").format(
+                    sql.Identifier(storage.spec.namespace)
+                )
+            )
+        ).fetchone()
+    assert count["value"] == 0
+
+    receipt = await authority.accept_web_authority_ticket(ticket=first)
+    assert receipt["policy_revision"] == 1
+    assert receipt["target_operation_ref"] == "web:operation/configuration"
+    renewed = await issue()
+    assert renewed.ticket_id != first.ticket_id
+    assert await authority.accept_web_authority_ticket(ticket=renewed) == receipt
+
+    with pytest.raises(ForestError) as conflict:
+        await authority.accept_web_authority_ticket(
+            ticket=replace(renewed, input_digest="sha256:" + "c" * 64)
+        )
+    assert conflict.value.code == "WEB_AUTHORITY_RECEIPT_CONFLICT"
+
+    async with store.pool.connection() as conn:
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                sql.SQL("DELETE FROM {}.web_authority_receipts WHERE bot_id=%s").format(
                     sql.Identifier(storage.spec.namespace)
                 ),
                 (store.bot_id,),

@@ -13,6 +13,7 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.schema_bundles import module_schema_namespace
+from forest.web_authority_ticket import WebAuthorityTicket
 
 _SHA256_RE = re.compile(r"sha256:[a-f0-9]{64}\Z")
 
@@ -602,6 +603,98 @@ class KernelAuthorizationRepository:
     async def consume_ticket(self, **values) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.consume_ticket_in(conn, **values)
+
+    async def accept_web_authority_ticket_in(
+        self, conn, *, ticket: WebAuthorityTicket
+    ) -> dict:
+        if not isinstance(ticket, WebAuthorityTicket):
+            raise ForestError("WEB_AUTHORITY_TICKET_INVALID", "Invalid Web authority ticket", 403)
+        await self._operation_lock_in(conn, ticket.target_operation_ref)
+        ticket_digest = _digest(
+            {"payload": ticket.payload(), "signature": ticket.signature}
+        )
+        expected = {
+            "issuer_id": ticket.issuer_id,
+            "web_subject_ref": ticket.web_subject_ref,
+            "web_role": ticket.web_role,
+            "session_ref": ticket.session_ref,
+            "session_revision": ticket.session_revision,
+            "target_scope_kind": ticket.target_scope_kind,
+            "target_scope_id": ticket.target_scope_id,
+            "target_component_id": ticket.target_component_id,
+            "target_generation_id": ticket.target_generation_id,
+            "target_graph_revision": ticket.target_graph_revision,
+            "target_operation_ref": ticket.target_operation_ref,
+            "action_key": ticket.action_key,
+            "input_digest": ticket.input_digest,
+            "plan_digest": ticket.plan_digest,
+        }
+        existing = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND "
+                    "(ticket_id=%s OR target_operation_ref=%s)"
+                ).format(self._table("web_authority_receipts")),
+                (self.store.bot_id, ticket.ticket_id, ticket.target_operation_ref),
+            )
+        ).fetchone()
+        if existing is not None:
+            if any(existing[key] != value for key, value in expected.items()):
+                raise ForestError(
+                    "WEB_AUTHORITY_RECEIPT_CONFLICT",
+                    "Web authority operation identity differs",
+                    409,
+                )
+            return dict(existing)
+        now = (
+            await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
+        )["value"]
+        if ticket.expires_at <= now:
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_EXPIRED", "Web authority ticket has expired", 403
+            )
+        revision = await self._clock_in(conn)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,ticket_id,ticket_digest,issuer_id,key_id,"
+                    "web_subject_ref,web_role,session_ref,session_revision,target_scope_kind,"
+                    "target_scope_id,target_component_id,target_generation_id,"
+                    "target_graph_revision,target_operation_ref,action_key,input_digest,"
+                    "plan_digest,policy_revision,issued_at,expires_at) VALUES ("
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "RETURNING *"
+                ).format(self._table("web_authority_receipts")),
+                (
+                    self.store.bot_id,
+                    ticket.ticket_id,
+                    ticket_digest,
+                    ticket.issuer_id,
+                    ticket.key_id,
+                    ticket.web_subject_ref,
+                    ticket.web_role,
+                    ticket.session_ref,
+                    ticket.session_revision,
+                    ticket.target_scope_kind,
+                    ticket.target_scope_id,
+                    ticket.target_component_id,
+                    ticket.target_generation_id,
+                    ticket.target_graph_revision,
+                    ticket.target_operation_ref,
+                    ticket.action_key,
+                    ticket.input_digest,
+                    ticket.plan_digest,
+                    revision,
+                    ticket.issued_at,
+                    ticket.expires_at,
+                ),
+            )
+        ).fetchone()
+        return dict(row)
+
+    async def accept_web_authority_ticket(self, *, ticket: WebAuthorityTicket) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.accept_web_authority_ticket_in(conn, ticket=ticket)
 
     @staticmethod
     def approval_decision_digest(*, approval_id: str, decision: str) -> str:

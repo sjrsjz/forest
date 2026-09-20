@@ -232,6 +232,8 @@ class CleanAgentManagementContract(CleanModuleConfigurationContract):
         operation_id: str,
         expected_desired_revision: int,
         value: object,
+        authorization=None,
+        authorization_guard=None,
     ) -> dict:
         profile = self._validate_profile(value)
         current = await self.configuration.desired(include_value=True)
@@ -289,6 +291,11 @@ class CleanAgentManagementContract(CleanModuleConfigurationContract):
             expected_desired_revision=expected_desired_revision,
             value=stored,
             validation_digest=self.storage_schema_digest,
+            authorization=authorization,
+            authorization_guard=authorization_guard,
+            authorization_input_digest=digest_json(
+                {"expected_desired_revision": expected_desired_revision, "value": value}
+            ),
         )
         return {
             "plan_id": plan["plan_id"],

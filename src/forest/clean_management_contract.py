@@ -68,6 +68,8 @@ class CleanModuleConfigurationContract:
         operation_id: str,
         expected_desired_revision: int,
         value: object,
+        authorization=None,
+        authorization_guard=None,
     ) -> dict:
         if self.validator is not None:
             try:
@@ -88,6 +90,8 @@ class CleanModuleConfigurationContract:
             expected_desired_revision=expected_desired_revision,
             value=value,
             validation_digest=self.schema_digest,
+            authorization=authorization,
+            authorization_guard=authorization_guard,
         )
         return {
             "plan_id": plan["plan_id"],
@@ -103,11 +107,15 @@ class CleanModuleConfigurationContract:
         operation_id: str,
         plan_id: str,
         expected_desired_revision: int,
+        authorization=None,
+        authorization_guard=None,
     ) -> dict:
         saved = await self.configuration.apply(
             operation_id=operation_id,
             plan_id=plan_id,
             expected_desired_revision=expected_desired_revision,
+            authorization=authorization,
+            authorization_guard=authorization_guard,
         )
         return self._configuration(saved)
 

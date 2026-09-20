@@ -125,6 +125,9 @@ class ModuleConfigurationRepository:
         expected_desired_revision: int,
         value: object,
         validation_digest: str,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
     ) -> dict:
         input_digest = digest_json(
             [
@@ -139,6 +142,18 @@ class ModuleConfigurationRepository:
             f"{self.store.bot_id}\0{self.component_id}\0{operation_id}".encode()
         ).hexdigest()
         async with self.store.pool.connection() as conn, conn.transaction():
+            await self._authorize_management_in(
+                conn,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                operation_id=operation_id,
+                action_key="configuration.plan",
+                input_digest=authorization_input_digest
+                or digest_json(
+                    {"expected_desired_revision": expected_desired_revision, "value": value}
+                ),
+                plan_digest=None,
+            )
             head = await self._head_in(conn, lock=True)
             existing = await (
                 await conn.execute(
@@ -199,6 +214,8 @@ class ModuleConfigurationRepository:
         operation_id: str,
         plan_id: str,
         expected_desired_revision: int,
+        authorization=None,
+        authorization_guard=None,
     ) -> EffectiveModuleConfiguration:
         input_digest = digest_json(
             [
@@ -209,6 +226,20 @@ class ModuleConfigurationRepository:
             ]
         )
         async with self.store.pool.connection() as conn, conn.transaction():
+            await self._authorize_management_in(
+                conn,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                operation_id=operation_id,
+                action_key="configuration.apply",
+                input_digest=digest_json(
+                    {
+                        "plan_id": plan_id,
+                        "expected_desired_revision": expected_desired_revision,
+                    }
+                ),
+                plan_digest=digest_json({"plan_id": plan_id}),
+            )
             head = await self._head_in(conn, lock=True)
             existing = await self._revision_by_operation_in(conn, operation_id)
             if existing is not None:
@@ -421,6 +452,41 @@ class ModuleConfigurationRepository:
                 saved.validation_digest,
                 value,
             )
+
+    async def _authorize_management_in(
+        self,
+        conn,
+        *,
+        authorization,
+        authorization_guard,
+        operation_id: str,
+        action_key: str,
+        input_digest: str,
+        plan_digest: str | None,
+    ) -> None:
+        if authorization is None:
+            if authorization_guard is not None:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_REQUIRED",
+                    "Management authorization ticket is required",
+                    403,
+                )
+            return
+        if not callable(authorization_guard):
+            raise ForestError(
+                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                "Management authorization transaction guard is unavailable",
+                503,
+            )
+        await authorization_guard(
+            conn,
+            ticket=authorization,
+            component_id=self.component_id,
+            operation_id=operation_id,
+            action_key=action_key,
+            input_digest=input_digest,
+            plan_digest=plan_digest,
+        )
 
     async def _head_in(self, conn, *, lock: bool = False):
         suffix = sql.SQL(" FOR UPDATE") if lock else sql.SQL(" FOR SHARE")
