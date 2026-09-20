@@ -139,6 +139,11 @@ class RuntimeModuleFactoryContext:
     def graph_admission(self) -> asyncio.Event:
         return self._router.graph_admission
 
+    def agent_tools(self) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        """Discover frozen tool declarations without exposing module instances."""
+
+        return self._router.agent_tools(self.component_id)
+
 
 class RuntimeContractRouter:
     """Resolve runtime service contracts without exposing module instances."""
@@ -203,6 +208,32 @@ class RuntimeContractRouter:
             handle = RuntimeServiceHandle(self, request_key)
             self._requests[request_key] = handle
         return handle
+
+    def agent_tools(
+        self, caller_component_id: str
+    ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        if caller_component_id != "agent.runtime":
+            raise ForestError(
+                "RUNTIME_AGENT_TOOL_DISCOVERY_FORBIDDEN",
+                "Only the Agent runtime may consume the graph tool directory",
+                403,
+            )
+        discovered = []
+        for descriptor in sorted(
+            self.registry.descriptors, key=lambda item: item.component_id
+        ):
+            for contribution in sorted(
+                descriptor.agent_tools, key=lambda item: item.name
+            ):
+                handle = self.request(
+                    caller_component_id=caller_component_id,
+                    service_id=contribution.service_id,
+                    version=contribution.version,
+                    admission_lane="DATA",
+                    owned_work=True,
+                )
+                discovered.append((descriptor.component_id, contribution, handle))
+        return tuple(discovered)
 
     def register(self, component_id: str, instance: Any) -> None:
         if self._sealed:

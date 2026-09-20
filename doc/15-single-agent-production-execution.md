@@ -43,6 +43,8 @@
 
 两个模块只交换类型化 DTO、稳定引用和受管 PayloadRef。Scheduler 不持有 Agent Repository 或运行实例；Agent 不持有 Scheduler Repository 或运行实例。Contract Router 句柄不是 Python bound method，必须冻结目标 Generation、契约版本和 admission fence。跨模块原子提交由内核 UnitOfWork 根据计划解析已注册 participant；不能把 participant 对象注入 Scheduler，也不能由任一业务模块直接写其他 namespace。
 
+工具目录由各执行模块通过 `RuntimeModuleDescriptor.agent_tools` 贡献，不写死在 Agent 工厂或 Bot 组合根。贡献冻结工具名、模型声明、服务 ID/版本、审批要求和查询能力，并作为模块 descriptor digest 的一部分进入 RuntimeGraph；同一图中的工具名与服务键都必须唯一。`agent.runtime` 只能通过受限 factory context 枚举贡献并请求对应服务句柄，随后把贡献者的准确 component/Generation、service 和 contract digest 冻结为 `AgentToolBinding`。Contract Router sealing 必须确认该服务确实由声明贡献的模块提供；所有权不符时整张候选图拒绝发布。工具结果仍由执行模块拥有，Agent 只持有 PayloadRef，并统一经 Authorization 与 Effect Gateway 完成 handoff 和恢复。
+
 ## 3. 单 Agent 执行循环
 
 每个群的执行顺序固定如下：
@@ -51,7 +53,7 @@
 2. Worker 经内核 Contract Router 调用当前 RuntimeGraph 中冻结的 `agent.execute/1`。请求携带稳定 Session/Run 引用、初始 InputBatch 引用、Context snapshot 回调和下一模型安全点回调。
 3. Agent 建立或恢复同一个 Session/Run 并取得 Run owner。每次模型调用前调用安全点回调；若出现新 trigger，Scheduler 只返回截至最后一个 trigger 的连续前缀，Agent 把该 InputBatch 追加到同一 Run。
 4. Agent 用 Scheduler 返回的冻结 Context view 构造模型 snapshot。每个单元保留 `conversation_id`、平台、`channel_kind/channel_ref`、Binding、事件、作者快照和受管 payload 来源；不能从显示名或消息正文推断身份。
-5. Agent 调用冻结的 Provider contract。FunctionCall 只进入同一 Run 的顺序工具步骤；工具通过冻结目录解析准确 `tool.*` Generation，不创建另一 Agent。
+5. Agent 调用冻结的 Provider contract。FunctionCall 只进入同一 Run 的顺序工具步骤；工具通过当前 RuntimeGraph 的模块贡献目录解析准确 executor Generation，不创建另一 Agent。
 6. 工具完成或明确失败后，状态机回到同一 Run 的下一次模型调用；`DISPATCHING` 结果丢失时只查询原 effect，无法查询则进入 `BLOCKED_UNKNOWN`。
 7. 终止 ModelTurn 产生 `FinalCandidate`。Scheduler 生成 `ReplyCommitPlan` 并调用内核 UnitOfWork；内核解析三 participant，原子提交 Agent Run `COMPLETED`、正式 `REPLY`、trigger `ANSWERED` 与 CHAT SendIntent。
 8. Scheduler 在 `SESSION_END` 边界选择后继：有新 trigger 就在同一 Session 建立唯一后继 Run；没有 trigger 就静默排空普通尾部并关闭 Session。

@@ -68,7 +68,6 @@ class CleanAgentRuntime:
             {"service_id": "provider.model.dispatch", "version": 1},
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "media.context.resolve", "version": 1},
-            {"service_id": "agent.tool.runtime-status", "version": 1},
         ],
     }
     state_schema = 1
@@ -96,6 +95,7 @@ class CleanAgentRuntime:
         memory=None,
         media=None,
         tool_route_factories=(),
+        tool_requirements=(),
     ):
         self.repository = repository
         self.module_configuration = module_configuration
@@ -107,6 +107,27 @@ class CleanAgentRuntime:
         self.tool_route_factories = tuple(tool_route_factories)
         if any(not callable(factory) for factory in self.tool_route_factories):
             raise ValueError("Agent tool route factories must be callable")
+        tool_requirements = tuple(tool_requirements)
+        if any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or type(item[1]) is not int
+            or item[1] < 1
+            for item in tool_requirements
+        ) or len(tool_requirements) != len(set(tool_requirements)):
+            raise ValueError("Agent tool service requirements are invalid")
+        self.runtime_contract = {
+            **type(self).runtime_contract,
+            "services": [dict(item) for item in type(self).runtime_contract["services"]],
+            "requires": [
+                *(dict(item) for item in type(self).runtime_contract["requires"]),
+                *(
+                    {"service_id": service_id, "version": version}
+                    for service_id, version in tool_requirements
+                ),
+            ],
+        }
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None

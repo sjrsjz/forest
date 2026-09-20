@@ -190,6 +190,59 @@ class RuntimeManagementContribution:
         }
 
 
+@dataclass(frozen=True)
+class RuntimeAgentToolContribution:
+    """One generation-bound Agent tool published by its executor module."""
+
+    name: str
+    service_id: str
+    version: int
+    declaration: dict
+    approval_required: bool = True
+    supports_query: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}", self.name)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.service_id)
+            or type(self.version) is not int
+            or self.version < 1
+            or type(self.approval_required) is not bool
+            or type(self.supports_query) is not bool
+            or not isinstance(self.declaration, dict)
+            or self.declaration.get("name") != self.name
+            or not isinstance(self.declaration.get("description"), str)
+            or not self.declaration["description"].strip()
+            or not isinstance(self.declaration.get("parameters"), dict)
+        ):
+            raise ValueError("Runtime Agent tool contribution is invalid")
+        # Require a JSON-serializable declaration at descriptor construction.
+        digest_json(self.declaration)
+
+    @property
+    def contract_digest(self) -> str:
+        return digest_json(
+            {
+                "protocol": "forest.agent-tool/1",
+                "service_id": self.service_id,
+                "version": self.version,
+                "declaration": self.declaration,
+            }
+        )
+
+    def as_fact(self) -> dict:
+        return {
+            "protocol": "forest.agent-tool-contribution/1",
+            "name": self.name,
+            "service_id": self.service_id,
+            "version": self.version,
+            "declaration": self.declaration,
+            "contract_digest": self.contract_digest,
+            "approval_required": self.approval_required,
+            "supports_query": self.supports_query,
+        }
+
+
 def configuration_management_contribution(
     label: str = "配置",
 ) -> RuntimeManagementContribution:
@@ -275,6 +328,7 @@ class RuntimeModuleDescriptor:
     work_notify_order: int = 100
     factory_protocol: str = "forest.legacy-module-factory/1"
     kernel_services: tuple[RuntimeKernelServiceSpec, ...] = ()
+    agent_tools: tuple[RuntimeAgentToolContribution, ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -292,6 +346,12 @@ class RuntimeModuleDescriptor:
         service_keys = [(item.service_id, item.version) for item in self.kernel_services]
         if len(service_keys) != len(set(service_keys)):
             raise ValueError("Kernel service contribution identities must be unique")
+        tool_names = [item.name for item in self.agent_tools]
+        tool_services = [(item.service_id, item.version) for item in self.agent_tools]
+        if len(tool_names) != len(set(tool_names)) or len(tool_services) != len(
+            set(tool_services)
+        ):
+            raise ValueError("Runtime Agent tool contribution identities must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -387,6 +447,7 @@ class RuntimeModuleRegistry:
             "work_notify_order": descriptor.work_notify_order,
             "factory_protocol": descriptor.factory_protocol,
             "kernel_services": [item.as_fact() for item in descriptor.kernel_services],
+            "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 
@@ -543,6 +604,22 @@ class RuntimeModuleRegistry:
         if len(remaining) != len(self.descriptors):
             raise ForestError(
                 "DUPLICATE_RUNTIME_MODULE", "Runtime module identities must be unique"
+            )
+        tool_names = [
+            tool.name for descriptor in self.descriptors for tool in descriptor.agent_tools
+        ]
+        tool_services = [
+            (tool.service_id, tool.version)
+            for descriptor in self.descriptors
+            for tool in descriptor.agent_tools
+        ]
+        if len(tool_names) != len(set(tool_names)) or len(tool_services) != len(
+            set(tool_services)
+        ):
+            raise ForestError(
+                "RUNTIME_AGENT_TOOL_CONFLICT",
+                "Runtime Agent tool names and services must be graph-unique",
+                409,
             )
         for descriptor in self.descriptors:
             identity = descriptor.component_id

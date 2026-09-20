@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
@@ -325,6 +327,21 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
             ),
             artifact,
             storage=bundles[component_id],
+            kernel_services=(
+                (
+                    RuntimeKernelServiceSpec(
+                        RUNTIME_STATUS_TOOL.service_id,
+                        RUNTIME_STATUS_TOOL.version,
+                        ("kernel.runtime", "kernel.payload"),
+                        runtime_status_tool_service,
+                    ),
+                )
+                if component_id == "kernel.runtime"
+                else ()
+            ),
+            agent_tools=(
+                (RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()
+            ),
         )
         for component_id, definition in _MODULES.items()
     )

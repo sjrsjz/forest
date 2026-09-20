@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from forest.errors import ForestError
+from forest.runtime_modules import (
+    RuntimeAgentToolContribution,
+    RuntimeArtifactIdentity,
+    RuntimeModuleDescriptor,
+    RuntimeModuleRegistry,
+)
+
+_ARTIFACT = RuntimeArtifactIdentity(
+    "test.tools",
+    "1.0.0",
+    "sha256:" + "a" * 64,
+    "bot",
+    "test.in-process/1",
+    "installed",
+)
+
+
+def _tool(name: str, service_id: str) -> RuntimeAgentToolContribution:
+    return RuntimeAgentToolContribution(
+        name,
+        service_id,
+        1,
+        {
+            "name": name,
+            "description": f"Invoke {name}",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    )
+
+
+def _runtime():
+    return SimpleNamespace(
+        scope_kind="bot",
+        generation_authority=None,
+        bot=SimpleNamespace(store=None),
+    )
+
+
+def test_agent_tool_contribution_freezes_contract_identity():
+    tool = _tool("inspect", "module.inspect")
+
+    assert tool.as_fact() == {
+        "protocol": "forest.agent-tool-contribution/1",
+        "name": "inspect",
+        "service_id": "module.inspect",
+        "version": 1,
+        "declaration": tool.declaration,
+        "contract_digest": tool.contract_digest,
+        "approval_required": True,
+        "supports_query": False,
+    }
+    assert tool.contract_digest.startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (_tool("inspect", "module.inspect-a"), _tool("inspect", "module.inspect-b")),
+        (_tool("inspect_a", "module.inspect"), _tool("inspect_b", "module.inspect")),
+    ],
+)
+def test_runtime_graph_rejects_ambiguous_agent_tool_directory(left, right):
+    descriptors = (
+        RuntimeModuleDescriptor(
+            "module.a",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+            agent_tools=(left,),
+        ),
+        RuntimeModuleDescriptor(
+            "module.b",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+            agent_tools=(right,),
+        ),
+    )
+
+    with pytest.raises(ForestError) as caught:
+        RuntimeModuleRegistry(_runtime(), descriptors)
+    assert caught.value.code == "RUNTIME_AGENT_TOOL_CONFLICT"
+
+
+def test_agent_tool_declaration_must_match_its_directory_name():
+    with pytest.raises(ValueError, match="Agent tool contribution"):
+        RuntimeAgentToolContribution(
+            "inspect",
+            "module.inspect",
+            1,
+            {
+                "name": "different",
+                "description": "Mismatch",
+                "parameters": {"type": "object"},
+            },
+        )

@@ -23,6 +23,7 @@ from forest.agent_tool_executor import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
@@ -454,6 +455,12 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert provider_runtime.active is True
         assert agent_runtime.execution is not None
         assert set(agent_runtime.execution.routes) == {"runtime_status"}
+        runtime_descriptor = next(
+            item for item in kernel.descriptors if item.component_id == "kernel.runtime"
+        )
+        assert runtime_descriptor.agent_tools == (RUNTIME_STATUS_TOOL,)
+        assert agent.descriptor.agent_tools == ()
+        assert agent.descriptor.kernel_services == ()
         runtime_tool = agent_runtime.execution.routes["runtime_status"]
         assert runtime_tool.binding.component_id == "kernel.runtime"
         assert runtime_tool.binding.generation_id == registry.graph_identity.generations[
@@ -461,6 +468,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         ]
         assert runtime_tool.binding.approval_required is False
         assert runtime_tool.binding.supports_query is True
+        assert runtime_tool.binding.contract_digest == RUNTIME_STATUS_TOOL.contract_digest
         tool_request = ToolAuthorizationRequest(
             tool_call_id="tool-call:runtime-status:integration",
             effect_operation_ref="tool-effect:runtime-status:integration",
