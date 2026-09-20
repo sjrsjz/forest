@@ -236,6 +236,8 @@ API 使用 `/management/v1` 等显式大版本路径和版本化 DTO；下表是
 
 部署级审计由 `deployment.audit` 贡献白名单投影详情，并按时间与 audit ID 的稳定键集游标分页，在读取前后复核会话。它不合并各 Bot 数据库日志；Bot 审计由目标 Bot 的 `kernel.audit` contribution 暴露。实现完成度与已运行证据只记录在[实现状态](implementation-status.md)，不能反向改变本节的模块边界。
 
+`kernel.audit` 的首个 Bot 管理面只公开脱敏 envelope 元数据，组合筛选字段为动作、生产组件、来源类型、资源二元组和操作二元组；分页使用不可变 audit ID 对应的时间键集游标。详情 Payload 不随列表读取，页面也不能根据 payload ID 绕过该模块另行取正文。
+
 管理账号具有独立身份；平台用户可显式关联账号用于批准政策，但必须验证双方身份，不能通过昵称/QQ 号文本相同自动绑定。角色提供部署管理员、Bot 管理员、运维、审计只读模板，真实许可由 action + authority_scope + 资源/数据范围决定。隐藏按钮只用于提示，HTTP、目标操作及最终效果各自检查授权。
 
 使用服务端会话和有期限、可撤销的安全 Cookie：`HttpOnly`、HTTPS 下 `Secure`、适当 `SameSite`、受限 Path；登录/提权后轮换会话 ID。写接口执行 CSRF 防护及 Origin 校验，GET 不产生副作用，禁止宽泛凭据 CORS。可信代理名单显式配置，不信任任意转发身份头；认证限速，敏感动作可按政策要求近期重认证。

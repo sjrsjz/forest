@@ -217,3 +217,58 @@ class CleanMemoryManagementContract(CleanModuleConfigurationContract):
                 "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} requires a timezone", 422
             )
         return parsed
+
+
+class CleanAuditManagementContract(CleanModuleConfigurationContract):
+    """Audit-owned metadata query projection plus immutable kernel configuration."""
+
+    _fields_allowed = {
+        "action",
+        "producer_component_id",
+        "origin_kind",
+        "resource_kind",
+        "resource_id",
+        "operation_kind",
+        "operation_id",
+        "before",
+        "limit",
+    }
+
+    def __init__(self, configuration, *, audit, schema: dict) -> None:
+        super().__init__(configuration, schema=schema)
+        self.audit = audit
+
+    def describe(self) -> dict:
+        value = super().describe()
+        value["queries"] = [
+            {"query_id": "audit.records.query", "default_limit": 50, "max_limit": 100}
+        ]
+        return value
+
+    async def query(self, query_id: str, payload: dict) -> object:
+        if query_id != "audit.records.query":
+            raise ForestError(
+                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Audit query does not exist", 404
+            )
+        if not isinstance(payload, dict) or set(payload) - self._fields_allowed:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Audit query contains unknown fields",
+                422,
+            )
+        values = {
+            key: value
+            for key, value in payload.items()
+            if value is not None and value != ""
+        }
+        for kind, identity in (
+            ("resource_kind", "resource_id"),
+            ("operation_kind", "operation_id"),
+        ):
+            if (kind in values) != (identity in values):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_INPUT_INVALID",
+                    f"{kind} and {identity} must be supplied together",
+                    422,
+                )
+        return await self.audit.scan(**values)

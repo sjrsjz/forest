@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
+from forest.clean_management_contract import CleanAuditManagementContract
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
 from forest.runtime_modules import (
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
     official_artifact,
     official_storage_bundle,
@@ -31,6 +33,13 @@ _STATE_CONTRACT = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {},
+    "additionalProperties": False,
+}
+_KERNEL_CONFIGURATION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {"protocol": {"const": "forest.kernel-module/1"}},
+    "required": ["protocol"],
     "additionalProperties": False,
 }
 
@@ -200,6 +209,11 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
     def __init__(self, component_id, service, configuration, grants, services) -> None:
         super().__init__(component_id, service, configuration, grants, services)
         self._shell_execute = audit_shell_service(service)
+        self.management_contract = CleanAuditManagementContract(
+            configuration,
+            audit=service,
+            schema=_KERNEL_CONFIGURATION_SCHEMA,
+        )
 
     def runtime_service_handlers(self) -> dict:
         return {
@@ -302,17 +316,10 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         for component_id, bundle in bundles.items()
     }
     for component_id, configuration in configurations.items():
-        schema = {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {"protocol": {"const": "forest.kernel-module/1"}},
-            "required": ["protocol"],
-            "additionalProperties": False,
-        }
         await configuration.initialize(
             operation_id=f"bootstrap:{component_id}:configuration",
             value={"protocol": "forest.kernel-module/1"},
-            validation_digest=digest_json(schema),
+            validation_digest=digest_json(_KERNEL_CONFIGURATION_SCHEMA),
         )
 
     policy_revision = await authorization.revision()
@@ -347,6 +354,22 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 )
             ),
             artifact,
+            management=(
+                (
+                    RuntimeManagementContribution(
+                        "audit-explorer",
+                        "审计记录",
+                        ("bot",),
+                        "/static/modules/clean-audit.html",
+                        "/static/clean-audit.js",
+                        style="/static/modules/clean-audit.css",
+                        group="security",
+                        order=5,
+                    ),
+                )
+                if component_id == "kernel.audit"
+                else ()
+            ),
             storage=bundles[component_id],
             kernel_services=(
                 (

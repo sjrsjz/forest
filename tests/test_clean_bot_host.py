@@ -21,6 +21,7 @@ from forest.embeddings import EmbeddingInput, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.runtime_modules import ModuleLifecycleState
+from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
     MemoryPart,
@@ -865,6 +866,20 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         == 1
                     )
                     previous_graph = host.registry.graph_identity
+                    await host._kernel.audit.append(
+                        AuditEnvelope(
+                            audit_id="test:audit:web",
+                            action="test.audit.visible",
+                            producer_component_id="test.fixture",
+                            origin_kind="test",
+                            actor_kind="principal",
+                            actor_id="qq:42",
+                            resource_kind="bot",
+                            resource_id=settings.bot_id,
+                            operation_kind="test.operation",
+                            operation_id="web-audit",
+                        )
+                    )
                     app = create_clean_management_app(
                         host, access_token="test-management-token"
                     )
@@ -876,6 +891,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert "height:100dvh" in (
                             await web.get("/static/style.css")
                         ).text.replace(" ", "")
+                        assert (await web.get("/static/modules/clean-audit.html")).status_code == 200
+                        assert (await web.get("/static/clean-audit.js")).status_code == 200
                         assert index.headers["x-frame-options"] == "DENY"
                         assert "default-src 'none'" in index.headers["content-security-policy"]
                         unauthorized = await web.get("/management/v1/runtime")
@@ -922,6 +939,35 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             item["contribution_id"]
                             for item in memory_view["management_contributions"]
                         } == {"memory-explorer", "configuration"}
+                        audit_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "kernel.audit"
+                        )
+                        assert [
+                            item["contribution_id"]
+                            for item in audit_view["management_contributions"]
+                        ] == ["audit-explorer"]
+                        audits = await web.post(
+                            "/management/v1/modules/kernel.audit/queries/audit.records.query",
+                            headers=headers,
+                            json={
+                                "action": "test.audit.visible",
+                                "resource_kind": "bot",
+                                "resource_id": settings.bot_id,
+                                "limit": 25,
+                            },
+                        )
+                        assert audits.status_code == 200
+                        assert [
+                            item["audit_id"] for item in audits.json()["records"]
+                        ] == ["test:audit:web"]
+                        malformed_audit = await web.post(
+                            "/management/v1/modules/kernel.audit/queries/audit.records.query",
+                            headers=headers,
+                            json={"resource_kind": "bot"},
+                        )
+                        assert malformed_audit.status_code == 422
                         trunks = await web.post(
                             "/management/v1/modules/memory.graph/queries/memory.trunks.list",
                             headers=headers,
