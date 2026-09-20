@@ -148,6 +148,101 @@ async def test_approval_decision_wakes_only_its_exact_conversation_blocker():
     ]
 
 
+@pytest.mark.asyncio
+async def test_runtime_replacement_prewarms_then_drains_before_publication():
+    events = []
+
+    class Previous:
+        async def drain_owned_work_for_replacement(self):
+            events.append("drain-previous")
+
+        async def close(self):
+            events.append("close-previous")
+            return []
+
+    class Candidate:
+        async def prewarm(self):
+            events.append("prewarm-candidate")
+
+        async def start(self):
+            events.append("publish-candidate")
+
+        async def close(self):
+            events.append("close-candidate")
+            return []
+
+    previous = Previous()
+    candidate = Candidate()
+    host = object.__new__(CleanBotHost)
+    host._replacement_lock = asyncio.Lock()
+    host._closing = False
+    host.registry = previous
+
+    async def assemble():
+        events.append("assemble-candidate")
+        return candidate, object()
+
+    host._assemble_registry = assemble
+    result = await host.replace_runtime_graph()
+
+    assert result is candidate
+    assert host.registry is candidate
+    assert events == [
+        "assemble-candidate",
+        "prewarm-candidate",
+        "drain-previous",
+        "publish-candidate",
+        "close-previous",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_replacement_resumes_previous_graph_when_publication_fails():
+    events = []
+
+    class Previous:
+        async def drain_owned_work_for_replacement(self):
+            events.append("drain-previous")
+
+        async def resume_owned_work_after_failed_replacement(self):
+            events.append("resume-previous")
+
+    class Candidate:
+        async def prewarm(self):
+            events.append("prewarm-candidate")
+
+        async def start(self):
+            events.append("publish-candidate")
+            raise RuntimeError("publication failed")
+
+        async def close(self):
+            events.append("close-candidate")
+            return []
+
+    previous = Previous()
+    candidate = Candidate()
+    host = object.__new__(CleanBotHost)
+    host._replacement_lock = asyncio.Lock()
+    host._closing = False
+    host.registry = previous
+
+    async def assemble():
+        return candidate, object()
+
+    host._assemble_registry = assemble
+    with pytest.raises(RuntimeError, match="publication failed"):
+        await host.replace_runtime_graph()
+
+    assert host.registry is previous
+    assert events == [
+        "prewarm-candidate",
+        "drain-previous",
+        "publish-candidate",
+        "close-candidate",
+        "resume-previous",
+    ]
+
+
 @pytest.mark.postgres
 async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
     dsn = os.environ.get("FOREST_TEST_DSN")

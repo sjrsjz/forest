@@ -483,6 +483,7 @@ _TRANSITIONS = {
         ModuleLifecycleState.FAILED,
     },
     ModuleLifecycleState.QUIESCENT: {
+        ModuleLifecycleState.ACTIVE,
         ModuleLifecycleState.STOPPED,
         ModuleLifecycleState.FAILED,
     },
@@ -506,6 +507,9 @@ class RuntimeModuleRegistry:
         }
         self._lifecycle_lock = None
         self._closed = False
+        self._prewarmed = False
+        self._contract_routes_sealed = False
+        self._replacement_quiesced: tuple[str, ...] = ()
         self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4())
@@ -906,7 +910,7 @@ class RuntimeModuleRegistry:
                             lease, self._descriptor_facts(), self.activation_id
                         )
             await self._bind_generation_identities()
-            if self.generation_authority is not None:
+            if self.generation_authority is not None and not self._contract_routes_sealed:
                 for descriptor in self.descriptors:
                     for spec in descriptor.kernel_services:
                         if descriptor.artifact.trust_level != "official":
@@ -917,6 +921,7 @@ class RuntimeModuleRegistry:
                             )
                         self.contract_router.register_kernel_service(spec)
                 self.contract_router.seal()
+                self._contract_routes_sealed = True
             return lease
         except BaseException as exc:
             rollback_errors = await self._rollback_preparation()
@@ -973,6 +978,29 @@ class RuntimeModuleRegistry:
                 await self._start_clean(lease)
                 return
             await self._start_legacy(lease)
+
+    async def prewarm(self) -> None:
+        """Construct clean Generation resources without publishing their routes."""
+
+        if self.generation_authority is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_PREWARM_UNAVAILABLE",
+                "Only clean Generation graphs support separate prewarming",
+                409,
+            )
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise ForestError(
+                    "RUNTIME_MODULE_REGISTRY_CLOSED",
+                    "Runtime module registry is closed",
+                    503,
+                )
+            if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
+                return
+            lease = await self._prepare_graph()
+            await self._start_clean(lease, publish=False)
 
     async def _start_legacy(self, lease) -> None:
         """Temporary lifecycle for modules outside the clean Generation protocol."""
@@ -1041,7 +1069,7 @@ class RuntimeModuleRegistry:
                 ) from exc
             raise
 
-    async def _start_clean(self, lease) -> None:
+    async def _start_clean(self, lease, *, publish: bool = True) -> None:
         """Prewarm, publish, then admit a clean immutable Generation graph."""
 
         prewarmed: list[str] = []
@@ -1049,17 +1077,22 @@ class RuntimeModuleRegistry:
         current = None
         published = False
         try:
-            for component_id in self.order:
-                current = component_id
-                if self.states[component_id] != ModuleLifecycleState.PREPARED:
-                    raise ForestError(
-                        "RUNTIME_MODULE_LIFECYCLE_INVALID",
-                        "Runtime module graph is not prepared for prewarming",
-                    )
-                start = getattr(self.instances[component_id], "start", None)
-                if start is not None:
-                    await start()
-                prewarmed.append(component_id)
+            if not self._prewarmed:
+                for component_id in self.order:
+                    current = component_id
+                    if self.states[component_id] != ModuleLifecycleState.PREPARED:
+                        raise ForestError(
+                            "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                            "Runtime module graph is not prepared for prewarming",
+                        )
+                    start = getattr(self.instances[component_id], "start", None)
+                    if start is not None:
+                        await start()
+                    prewarmed.append(component_id)
+                self._prewarmed = True
+
+            if not publish:
+                return
 
             current = None
             await self.generation_authority.publish_graph(
@@ -1145,6 +1178,81 @@ class RuntimeModuleRegistry:
                 ) from exc
             raise
 
+    async def drain_owned_work_for_replacement(self) -> None:
+        """Freeze ingress and drain restartable workers before another graph publishes."""
+
+        if self.generation_authority is None or self.graph_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_DRAIN_UNAVAILABLE",
+                "RuntimeGraph replacement drain requires a clean published graph",
+                409,
+            )
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        async with self._lifecycle_lock:
+            if self._replacement_quiesced:
+                return
+            if any(state != ModuleLifecycleState.ACTIVE for state in self.states.values()):
+                raise ForestError(
+                    "RUNTIME_MODULE_LIFECYCLE_INVALID",
+                    "Only a fully active RuntimeGraph can drain for replacement",
+                    409,
+                )
+            lease = self._lease()
+            await self.generation_authority.freeze_graph_admission(
+                lease,
+                self.graph_identity,
+            )
+            self.contract_router.deactivate()
+            drained: list[str] = []
+            try:
+                for component_id in reversed(self.order):
+                    if component_id == "adapter.onebot":
+                        continue
+                    owned = getattr(self.instances[component_id], "owned_tasks", None)
+                    tasks = tuple(owned()) if owned is not None else ()
+                    if not tasks:
+                        continue
+                    await self._quiesce_only(component_id)
+                    drained.append(component_id)
+                self._replacement_quiesced = tuple(drained)
+            except BaseException:
+                self._replacement_quiesced = tuple(drained)
+                await self._resume_owned_work_locked(lease)
+                raise
+
+    async def resume_owned_work_after_failed_replacement(self) -> None:
+        """Resume a frozen graph when its prepared successor did not publish."""
+
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        async with self._lifecycle_lock:
+            await self._resume_owned_work_locked(self._lease())
+
+    async def _resume_owned_work_locked(self, lease) -> None:
+        await self.generation_authority.resume_graph_admission(
+            lease,
+            self.graph_identity,
+        )
+        pending = set(self._replacement_quiesced)
+        for component_id in self.order:
+            if component_id not in pending:
+                continue
+            activate = self.instances[component_id].activate_generation
+            result = activate()
+            if inspect.isawaitable(result):
+                close = getattr(result, "close", None)
+                if close is not None:
+                    close()
+                raise ForestError(
+                    "RUNTIME_GENERATION_ACTIVATION_INVALID",
+                    "Replacement rollback activation must be local and synchronous",
+                    503,
+                )
+            self._transition(component_id, ModuleLifecycleState.ACTIVE)
+        self._replacement_quiesced = ()
+        self.contract_router.activate()
+
     async def close(self) -> list[Exception]:
         if self._lifecycle_lock is None:
             self._lifecycle_lock = asyncio.Lock()
@@ -1220,6 +1328,10 @@ class RuntimeModuleRegistry:
             return errors
 
     async def _quiesce_and_cleanup(self, component_id):
+        await self._quiesce_only(component_id)
+        await self._cleanup(component_id)
+
+    async def _quiesce_only(self, component_id):
         self._transition(component_id, ModuleLifecycleState.QUIESCING)
         quiesce = getattr(self.instances[component_id], "quiesce", None)
         if quiesce is not None:
@@ -1230,7 +1342,6 @@ class RuntimeModuleRegistry:
                 await self._cleanup(component_id)
                 raise
         self._transition(component_id, ModuleLifecycleState.QUIESCENT)
-        await self._cleanup(component_id)
 
     async def _cleanup(self, component_id):
         close = getattr(self.instances[component_id], "close", None)

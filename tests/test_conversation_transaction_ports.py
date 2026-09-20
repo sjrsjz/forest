@@ -22,6 +22,9 @@ def _request():
     async def next_input():
         return None
 
+    async def before_external_step():
+        return None
+
     return AgentExecutionRequest(
         conversation_id="group/one",
         session_ref="session/one",
@@ -30,6 +33,7 @@ def _request():
         recovery=True,
         context_snapshot=context_snapshot,
         next_model_input=next_input,
+        before_external_step=before_external_step,
     )
 
 

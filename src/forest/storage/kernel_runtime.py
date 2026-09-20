@@ -782,6 +782,62 @@ class KernelRuntimeRepository:
                     (self.store.bot_id, item["component_id"], item["generation_id"]),
                 )
 
+    async def resume_graph_admission(
+        self, lease: HostLease, graph: RuntimeGenerationGraph
+    ) -> None:
+        """Reopen a still-current graph after a replacement aborts before publication."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            saved = await self._graph_in(conn, graph, lock=True)
+            head = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
+                        self._table("runtime_graph_head")
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            if (
+                head is None
+                or head["graph_id"] != graph.graph_id
+                or saved["state"] != "ACTIVE"
+            ):
+                raise ForestError(
+                    "RUNTIME_GRAPH_NOT_CURRENT",
+                    "Only the current active RuntimeGraph can resume admission",
+                    409,
+                )
+            members = await self._members_in(conn, graph, lock=True)
+            if any(item["status"] != "ACTIVE" for item in members):
+                raise ForestError(
+                    "RUNTIME_GENERATION_NOT_READY",
+                    "A graph with retired Generations cannot resume admission",
+                    409,
+                )
+            for item in members:
+                cursor = await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET data_admission=%s,control_admission=%s,"
+                        "route_epoch=route_epoch+1 WHERE bot_id=%s AND component_id=%s "
+                        "AND generation_id=%s"
+                    ).format(self._table("routes")),
+                    (
+                        item["data_admission"],
+                        item["control_admission"],
+                        self.store.bot_id,
+                        item["component_id"],
+                        item["generation_id"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ForestError(
+                        "RUNTIME_GRAPH_ROUTE_CONFLICT",
+                        "RuntimeGraph route changed while admission was frozen",
+                        409,
+                    )
+
     async def retire_graph(
         self, lease: HostLease, graph: RuntimeGenerationGraph
     ) -> int:

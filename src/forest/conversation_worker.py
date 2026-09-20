@@ -40,6 +40,7 @@ class AgentExecutionRequest:
     recovery: bool
     context_snapshot: Callable[[], Awaitable[dict]]
     next_model_input: Callable[[], Awaitable[dict | None]]
+    before_external_step: Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -317,6 +318,10 @@ class ConversationWorker:
                             return selection
                         return None
 
+                async def before_external_step() -> None:
+                    if not self._admission.is_set() or self._closing:
+                        raise _WorkerQuiescing
+
                 request = AgentExecutionRequest(
                     conversation_id=conversation_id,
                     session_ref=session_ref,
@@ -325,6 +330,7 @@ class ConversationWorker:
                     recovery=recovery,
                     context_snapshot=lambda: self.scheduler.context_snapshot(actor),
                     next_model_input=next_model_input,
+                    before_external_step=before_external_step,
                 )
                 try:
                     completion = await self.agent.execute(request)

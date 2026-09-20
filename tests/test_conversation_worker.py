@@ -433,3 +433,47 @@ async def test_quiesce_releases_actor_waiting_for_session_input():
     assert scheduler.actors == set()
     assert worker.failures == {}
     await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_quiesce_stops_before_the_next_external_agent_step():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/existing",),
+            )
+        }
+    )
+
+    class BoundaryAgent:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.crossed = False
+
+        async def execute(self, request):
+            self.entered.set()
+            await self.release.wait()
+            await request.before_external_step()
+            self.crossed = True
+            return _reply(request.run_ref, "trigger/existing")
+
+    agent = BoundaryAgent()
+    worker = _worker(scheduler, agent, "generation/reload-drain")
+    worker.start()
+    worker.activate()
+    await asyncio.wait_for(agent.entered.wait(), timeout=1)
+
+    draining = asyncio.create_task(worker.quiesce())
+    await asyncio.sleep(0)
+    assert not draining.done()
+    agent.release.set()
+    await asyncio.wait_for(draining, timeout=1)
+
+    assert agent.crossed is False
+    assert scheduler.appends == []
+    assert scheduler.actors == set()
+    assert worker.failures == {}
+    await worker.close()

@@ -576,6 +576,13 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
             generation_id=graph_v2.generations["example.consumer"],
         )
     assert draining == graph_v2
+    await repository.resume_graph_admission(renewed, graph_v2)
+    resumed_route = await repository.verify_active_generation(
+        component_id="example.consumer",
+        generation_id=graph_v2.generations["example.consumer"],
+    )
+    assert resumed_route.route_epoch == active_route.route_epoch + 2
+    await repository.freeze_graph_admission(renewed, graph_v2)
 
     retired_revision = await repository.retire_graph(renewed, graph_v2)
     assert retired_revision > graph_v2.graph_revision
@@ -777,6 +784,7 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
             self.fail_activate = fail_activate
             self.module_configuration = configuration
             self.identity = None
+            self.task = None
 
         async def prepare_generation(self, context):
             events.append(("prepare", context.component_id))
@@ -809,6 +817,7 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         async def start(self):
             assert self.identity is not None
             events.append(("start", "kernel.runtime"))
+            self.task = asyncio.create_task(asyncio.Event().wait())
 
         async def bind_generation(self, identity):
             self.identity = identity
@@ -826,6 +835,12 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
 
         async def close(self):
             events.append(("close", "kernel.runtime"))
+            if self.task is not None:
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+
+        def owned_tasks(self):
+            return (self.task,) if self.task is not None else ()
 
     kernel = SimpleNamespace(_authority=lambda **_kwargs: lease)
     runtime = SimpleNamespace(
@@ -843,6 +858,14 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         storage=runtime_storage,
     )
     registry = RuntimeModuleRegistry(runtime, (descriptor,))
+    await registry.prewarm()
+    assert registry.states["kernel.runtime"] == ModuleLifecycleState.PREPARED
+    with pytest.raises(ForestError) as caught:
+        await repository.verify_active_generation(
+            component_id="kernel.runtime",
+            generation_id=registry.graph_identity.generations["kernel.runtime"],
+        )
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
     await registry.start()
     route = await repository.verify_active_generation(
         component_id="kernel.runtime",
@@ -851,6 +874,16 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     assert route.graph_id == registry.graph_identity.graph_id
     assert registry.graph_identity is not None
     assert registry.generation_bindings["kernel.runtime"].config_revision == 1
+    await registry.drain_owned_work_for_replacement()
+    assert registry.states["kernel.runtime"] == ModuleLifecycleState.QUIESCENT
+    with pytest.raises(ForestError) as caught:
+        await repository.verify_active_generation(
+            component_id="kernel.runtime",
+            generation_id=registry.graph_identity.generations["kernel.runtime"],
+        )
+    assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    await registry.resume_owned_work_after_failed_replacement()
+    assert registry.states["kernel.runtime"] == ModuleLifecycleState.ACTIVE
     assert await registry.close() == []
     assert events == [
         ("prepare", "kernel.runtime"),
@@ -860,6 +893,8 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
             registry.graph_identity.generations["kernel.runtime"],
         ),
         ("start", "kernel.runtime"),
+        ("activate", "kernel.runtime"),
+        ("quiesce", "kernel.runtime"),
         ("activate", "kernel.runtime"),
         ("quiesce", "kernel.runtime"),
         ("close", "kernel.runtime"),

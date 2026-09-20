@@ -577,11 +577,36 @@ class CleanBotHost:
                 raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
             previous = self.registry
             candidate, _adapter = await self._assemble_registry()
+            previous_drained = False
             try:
+                await candidate.prewarm()
+                await previous.drain_owned_work_for_replacement()
+                previous_drained = True
                 await candidate.start()
-            except BaseException:
-                await candidate.close()
-                raise
+            except BaseException as replacement_error:
+                cleanup_error = None
+                try:
+                    cleanup_errors = await candidate.close()
+                    if cleanup_errors:
+                        cleanup_error = cleanup_errors[0]
+                except BaseException as exc:
+                    cleanup_error = exc
+                if previous_drained:
+                    try:
+                        await previous.resume_owned_work_after_failed_replacement()
+                    except BaseException as resume_error:
+                        raise ForestError(
+                            "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED",
+                            "Candidate publication failed and the previous graph could not resume",
+                            503,
+                        ) from resume_error
+                if cleanup_error is not None:
+                    raise ForestError(
+                        "RUNTIME_GRAPH_REPLACEMENT_CLEANUP_FAILED",
+                        "Candidate publication failed and its resources did not close cleanly",
+                        503,
+                    ) from cleanup_error
+                raise replacement_error
             self.registry = candidate
             errors = await previous.close()
             if errors:

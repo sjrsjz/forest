@@ -242,6 +242,7 @@ class DurableSingleAgentExecution:
                     current_media = await self.media.resolve_context(snapshot)
                     recalled_media = {} if recalled is None else recalled.media
                     combined_media = {**current_media, **recalled_media}
+                    await request.before_external_step()
                     result = await self.model.execute(
                         owner,
                         step,
@@ -329,6 +330,7 @@ class DurableSingleAgentExecution:
                             route.execution,
                         )
                     else:
+                        await request.before_external_step()
                         result = await self.tools.execute(
                             owner,
                             route.binding,
