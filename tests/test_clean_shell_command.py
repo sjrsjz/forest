@@ -11,8 +11,9 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.errors import ForestError
-from forest.runtime_modules import official_storage_bundle
+from forest.runtime_modules import RuntimeShellCommandContribution, official_storage_bundle
 from forest.shell_command_parser import ShellCommandParser
 from forest.shell_gate import CoreShellGate
 from forest.storage.adapter_onebot_authority import (
@@ -41,8 +42,9 @@ FENCE = "sha256:" + "4" * 64
 
 
 def test_core_maintenance_parser_requires_explicit_positive_epoch():
-    paused = ShellCommandParser.parse("core pause --expect-maintenance 7")
-    resumed = ShellCommandParser.parse("core resume --expect-maintenance=8")
+    parser = ShellCommandParser(None, RUNTIME_SHELL_COMMANDS)
+    paused = parser.parse("core pause --expect-maintenance 7")
+    resumed = parser.parse("core resume --expect-maintenance=8")
     assert (paused.command_id, paused.document["arguments"]) == (
         "core.pause",
         {"expected_maintenance_epoch": 7},
@@ -51,14 +53,15 @@ def test_core_maintenance_parser_requires_explicit_positive_epoch():
         "core.resume",
         {"expected_maintenance_epoch": 8},
     )
-    assert ShellCommandParser.parse("core pause").command_id == "core.pause"
-    assert ShellCommandParser.parse(
-        "core resume --expect-maintenance 0"
-    ).document["arguments"] == {"error_code": "SHELL_COMMAND_NOT_FOUND"}
+    assert parser.parse("core pause").command_id == "core.pause"
+    assert parser.parse("core resume --expect-maintenance 0").document["arguments"] == {
+        "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
 
 
 def test_module_list_parser_is_exact_and_argument_free():
-    parsed = ShellCommandParser.parse("module list")
+    parser = ShellCommandParser(None, RUNTIME_SHELL_COMMANDS)
+    parsed = parser.parse("module list")
     assert parsed.command_id == "module.list"
     assert parsed.command_version == 1
     assert parsed.document == {
@@ -66,9 +69,45 @@ def test_module_list_parser_is_exact_and_argument_free():
         "command_id": "module.list",
         "arguments": {},
     }
-    assert ShellCommandParser.parse("module list extra").document["arguments"] == {
+    assert parser.parse("module list extra").document["arguments"] == {
         "error_code": "SHELL_COMMAND_NOT_FOUND"
     }
+
+
+def test_parser_consumes_module_contribution_without_hardcoded_command_branch():
+    contribution = RuntimeShellCommandContribution(
+        "plugin.echo",
+        3,
+        "plugin.echo.execute",
+        2,
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "protocol": {"const": "forest.shell.arguments/1"},
+                "command_id": {"const": "plugin.echo"},
+                "arguments": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string", "minLength": 1}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["protocol", "command_id", "arguments"],
+            "additionalProperties": False,
+        },
+        "plugin.echo",
+        "BOT",
+        "P1",
+        ("plugin.echo",),
+    )
+    parser = ShellCommandParser(None, (contribution,))
+
+    parsed = parser.parse('plugin echo --message "hello forest"')
+
+    assert parsed.command_id == "plugin.echo"
+    assert parsed.command_version == 3
+    assert parsed.document["arguments"] == {"message": "hello forest"}
 
 
 async def _parse(*, command_text, command_id, command_version, argument_schema_digest, arguments):

@@ -10,6 +10,7 @@ from forest.runtime_modules import (
     RuntimeArtifactIdentity,
     RuntimeModuleDescriptor,
     RuntimeModuleRegistry,
+    RuntimeShellCommandContribution,
 )
 
 _ARTIFACT = RuntimeArtifactIdentity(
@@ -45,6 +46,34 @@ def _runtime():
         scope_kind="bot",
         generation_authority=None,
         bot=SimpleNamespace(store=None),
+    )
+
+
+def _command(service_id: str) -> RuntimeShellCommandContribution:
+    return RuntimeShellCommandContribution(
+        "module.inspect",
+        1,
+        service_id,
+        1,
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "protocol": {"const": "forest.shell.arguments/1"},
+                "command_id": {"const": "module.inspect"},
+                "arguments": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["protocol", "command_id", "arguments"],
+            "additionalProperties": False,
+        },
+        "module.inspect",
+        "BOT",
+        "P1",
+        ("runtime.status.read",),
     )
 
 
@@ -106,3 +135,26 @@ def test_agent_tool_declaration_must_match_its_directory_name():
                 "parameters": {"type": "object"},
             },
         )
+
+
+def test_runtime_graph_rejects_ambiguous_shell_command_directory():
+    descriptors = (
+        RuntimeModuleDescriptor(
+            "module.a",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+            shell_commands=(_command("module.inspect-a"),),
+        ),
+        RuntimeModuleDescriptor(
+            "module.b",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+            shell_commands=(_command("module.inspect-b"),),
+        ),
+    )
+
+    with pytest.raises(ForestError) as caught:
+        RuntimeModuleRegistry(_runtime(), descriptors)
+    assert caught.value.code == "RUNTIME_SHELL_COMMAND_CONFLICT"

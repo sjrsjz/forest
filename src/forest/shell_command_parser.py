@@ -6,67 +6,12 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+from jsonschema import Draft202012Validator
+
 from forest.errors import ForestError
-from forest.packages import digest_json
 from forest.storage.ingress_unit_of_work import ShellIngressCommand
 from forest.storage.payload_authority import PayloadSource
 from forest.storage.shell_command_authority import ShellPayloadRef
-
-STATUS_ARGUMENT_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-        "protocol": {"const": "forest.shell.arguments/1"},
-        "command_id": {"const": "core.status"},
-        "arguments": {"type": "object", "maxProperties": 0},
-    },
-    "required": ["protocol", "command_id", "arguments"],
-    "additionalProperties": False,
-}
-STATUS_ARGUMENT_SCHEMA_DIGEST = digest_json(STATUS_ARGUMENT_SCHEMA)
-MODULE_LIST_ARGUMENT_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-        "protocol": {"const": "forest.shell.arguments/1"},
-        "command_id": {"const": "module.list"},
-        "arguments": {"type": "object", "maxProperties": 0},
-    },
-    "required": ["protocol", "command_id", "arguments"],
-    "additionalProperties": False,
-}
-MODULE_LIST_ARGUMENT_SCHEMA_DIGEST = digest_json(MODULE_LIST_ARGUMENT_SCHEMA)
-
-
-def _maintenance_schema(command_id: str) -> dict:
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "protocol": {"const": "forest.shell.arguments/1"},
-            "command_id": {"const": command_id},
-            "arguments": {
-                "type": "object",
-                "properties": {
-                    "expected_maintenance_epoch": {"type": "integer", "minimum": 1}
-                },
-                "required": ["expected_maintenance_epoch"],
-                "additionalProperties": False,
-            },
-        },
-        "required": ["protocol", "command_id", "arguments"],
-        "additionalProperties": False,
-    }
-
-
-PAUSE_ARGUMENT_SCHEMA_DIGEST = digest_json(_maintenance_schema("core.pause"))
-RESUME_ARGUMENT_SCHEMA_DIGEST = digest_json(_maintenance_schema("core.resume"))
-_SCHEMA_DIGESTS = {
-    "core.status": STATUS_ARGUMENT_SCHEMA_DIGEST,
-    "core.pause": PAUSE_ARGUMENT_SCHEMA_DIGEST,
-    "core.resume": RESUME_ARGUMENT_SCHEMA_DIGEST,
-    "module.list": MODULE_LIST_ARGUMENT_SCHEMA_DIGEST,
-}
 
 
 def _stable(kind: str, value: str) -> str:
@@ -136,77 +81,95 @@ class ParsedShellCommand:
 
 
 class ShellCommandParser:
-    def __init__(self, payloads) -> None:
+    def __init__(self, payloads, commands=()) -> None:
         self.payloads = payloads
+        self.commands = tuple(commands)
+        self._by_words = {
+            tuple(item.command_id.split(".")): item for item in self.commands
+        }
+        if len(self._by_words) != len(self.commands):
+            raise ValueError("Shell command syntax identities repeat")
 
     @staticmethod
-    def parse(command_text: str) -> ParsedShellCommand:
-        try:
-            tokens = _tokenize(command_text)
-        except ForestError as exc:
-            return ParsedShellCommand(
-                "shell.invalid",
-                1,
-                {
-                    "protocol": "forest.shell.arguments/1",
-                    "command_id": "shell.invalid",
-                    "arguments": {"error_code": exc.code},
-                },
-            )
-        if tokens == ("core", "status"):
-            return ParsedShellCommand(
-                "core.status",
-                1,
-                {
-                    "protocol": "forest.shell.arguments/1",
-                    "command_id": "core.status",
-                    "arguments": {},
-                },
-            )
-        if tokens == ("module", "list"):
-            return ParsedShellCommand(
-                "module.list",
-                1,
-                {
-                    "protocol": "forest.shell.arguments/1",
-                    "command_id": "module.list",
-                    "arguments": {},
-                },
-            )
-        if len(tokens) in {3, 4} and tokens[:2] in {
-            ("core", "pause"),
-            ("core", "resume"),
-        }:
-            value = None
-            if len(tokens) == 3 and tokens[2].startswith("--expect-maintenance="):
-                value = tokens[2].partition("=")[2]
-            elif len(tokens) == 4 and tokens[2] == "--expect-maintenance":
-                value = tokens[3]
-            parsed_epoch = int(value) if value is not None and value.isdecimal() else 0
-            if 0 < parsed_epoch <= 9_223_372_036_854_775_807:
-                command_id = "core." + tokens[1]
-                return ParsedShellCommand(
-                    command_id,
-                    1,
-                    {
-                        "protocol": "forest.shell.arguments/1",
-                        "command_id": command_id,
-                        "arguments": {"expected_maintenance_epoch": parsed_epoch},
-                    },
-                )
-        command_id = "shell.invalid"
-        if tokens:
-            candidate = ".".join(tokens[:2]).lower()
-            if candidate and len(candidate.encode("utf-8")) <= 128:
-                command_id = candidate
+    def _invalid(command_id: str, error_code: str) -> ParsedShellCommand:
         return ParsedShellCommand(
             command_id,
             1,
             {
                 "protocol": "forest.shell.arguments/1",
                 "command_id": command_id,
-                "arguments": {"error_code": "SHELL_COMMAND_NOT_FOUND"},
+                "arguments": {"error_code": error_code},
             },
+        )
+
+    @staticmethod
+    def _coerce(raw: str | None, schema: dict):
+        kind = schema.get("type")
+        if kind == "boolean":
+            if raw is None:
+                return True
+            if raw in {"true", "false"}:
+                return raw == "true"
+            raise ValueError
+        if raw is None:
+            raise ValueError
+        if kind == "integer":
+            if not raw.isdecimal():
+                raise ValueError
+            return int(raw)
+        if kind == "string":
+            return raw
+        raise ValueError
+
+    def parse(self, command_text: str) -> ParsedShellCommand:
+        try:
+            tokens = _tokenize(command_text)
+        except ForestError as exc:
+            return self._invalid("shell.invalid", exc.code)
+        matches = [
+            (words, contribution)
+            for words, contribution in self._by_words.items()
+            if tokens[: len(words)] == words
+        ]
+        if not matches:
+            candidate = ".".join(tokens[:2]).lower() if tokens else "shell.invalid"
+            command_id = candidate if 0 < len(candidate.encode("utf-8")) <= 128 else "shell.invalid"
+            return self._invalid(command_id, "SHELL_COMMAND_NOT_FOUND")
+        words, contribution = max(matches, key=lambda item: len(item[0]))
+        argument_schema = contribution.argument_schema["properties"]["arguments"]
+        properties = argument_schema.get("properties", {})
+        option_names = {
+            name.replace("_", "-"): name for name in properties
+        } | dict(contribution.option_aliases)
+        arguments = {}
+        remaining = list(tokens[len(words) :])
+        try:
+            while remaining:
+                option = remaining.pop(0)
+                if not option.startswith("--") or option == "--":
+                    raise ValueError
+                key, separator, raw = option[2:].partition("=")
+                name = option_names.get(key)
+                if name not in properties or name in arguments:
+                    raise ValueError
+                if not separator and properties[name].get("type") != "boolean":
+                    if not remaining:
+                        raise ValueError
+                    raw = remaining.pop(0)
+                arguments[name] = self._coerce(raw if separator or raw else None, properties[name])
+        except ValueError:
+            return self._invalid(contribution.command_id, "SHELL_COMMAND_NOT_FOUND")
+        document = {
+            "protocol": "forest.shell.arguments/1",
+            "command_id": contribution.command_id,
+            "arguments": arguments,
+        }
+        if not Draft202012Validator(contribution.argument_schema).is_valid(document):
+            return self._invalid(contribution.command_id, "SHELL_COMMAND_NOT_FOUND")
+        return ParsedShellCommand(
+            contribution.command_id,
+            contribution.command_version,
+            document,
         )
 
     async def persist(
@@ -274,7 +237,12 @@ class ShellCommandParser:
     ) -> bool:
         if (
             command_version != 1
-            or _SCHEMA_DIGESTS.get(command_id) != argument_schema_digest
+            or not any(
+                item.command_id == command_id
+                and item.command_version == command_version
+                and item.argument_schema_digest == argument_schema_digest
+                for item in self.commands
+            )
         ):
             return False
         parsed = self.parse(command_text)

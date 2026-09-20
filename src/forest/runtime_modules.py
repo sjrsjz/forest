@@ -243,6 +243,97 @@ class RuntimeAgentToolContribution:
         }
 
 
+@dataclass(frozen=True)
+class RuntimeShellCommandContribution:
+    """One command route, syntax contract and executor service owned by a module."""
+
+    command_id: str
+    command_version: int
+    service_id: str
+    service_version: int
+    argument_schema: dict
+    management_operation_id: str
+    target_scope: str
+    service_class: str
+    required_capabilities: tuple[str, ...]
+    option_aliases: tuple[tuple[str, str], ...] = ()
+    output_policy: str = "SHORT"
+    timeout_seconds: int = 10
+
+    def __post_init__(self) -> None:
+        properties = (
+            self.argument_schema.get("properties", {})
+            if isinstance(self.argument_schema, dict)
+            else {}
+        )
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.command_id)
+            or type(self.command_version) is not int
+            or self.command_version < 1
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.service_id)
+            or type(self.service_version) is not int
+            or self.service_version < 1
+            or properties.get("protocol", {}).get("const")
+            != "forest.shell.arguments/1"
+            or properties.get("command_id", {}).get("const") != self.command_id
+            or not isinstance(properties.get("arguments"), dict)
+            or not re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,255}", self.management_operation_id
+            )
+            or self.target_scope not in {"CONVERSATION", "BINDING", "BOT", "DEPLOYMENT"}
+            or self.service_class not in {"P0", "P1"}
+            or not self.required_capabilities
+            or len(self.required_capabilities) != len(set(self.required_capabilities))
+            or any(
+                not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,199}", item)
+                for item in self.required_capabilities
+            )
+            or len(self.option_aliases) != len(set(self.option_aliases))
+            or any(
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", alias)
+                or target not in properties["arguments"].get("properties", {})
+                for alias, target in self.option_aliases
+            )
+            or self.output_policy not in {"SHORT", "ARTIFACT", "SILENT"}
+            or type(self.timeout_seconds) is not int
+            or not 1 <= self.timeout_seconds <= 900
+        ):
+            raise ValueError("Runtime Shell command contribution is invalid")
+        digest_json(self.argument_schema)
+
+    @property
+    def argument_schema_digest(self) -> str:
+        return digest_json(self.argument_schema)
+
+    @property
+    def required_capabilities_digest(self) -> str:
+        return digest_json(
+            {
+                "protocol": "forest.management-capabilities/1",
+                "capabilities": list(self.required_capabilities),
+            }
+        )
+
+    def as_fact(self) -> dict:
+        return {
+            "protocol": "forest.shell-command-contribution/1",
+            "command_id": self.command_id,
+            "command_version": self.command_version,
+            "service_id": self.service_id,
+            "service_version": self.service_version,
+            "argument_schema": self.argument_schema,
+            "argument_schema_digest": self.argument_schema_digest,
+            "management_operation_id": self.management_operation_id,
+            "target_scope": self.target_scope,
+            "service_class": self.service_class,
+            "required_capabilities": list(self.required_capabilities),
+            "required_capabilities_digest": self.required_capabilities_digest,
+            "option_aliases": [list(item) for item in self.option_aliases],
+            "output_policy": self.output_policy,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+
 def configuration_management_contribution(
     label: str = "配置",
 ) -> RuntimeManagementContribution:
@@ -329,6 +420,7 @@ class RuntimeModuleDescriptor:
     factory_protocol: str = "forest.legacy-module-factory/1"
     kernel_services: tuple[RuntimeKernelServiceSpec, ...] = ()
     agent_tools: tuple[RuntimeAgentToolContribution, ...] = ()
+    shell_commands: tuple[RuntimeShellCommandContribution, ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -352,6 +444,11 @@ class RuntimeModuleDescriptor:
             set(tool_services)
         ):
             raise ValueError("Runtime Agent tool contribution identities must be unique")
+        command_keys = [
+            (item.command_id, item.command_version) for item in self.shell_commands
+        ]
+        if len(command_keys) != len(set(command_keys)):
+            raise ValueError("Runtime Shell command contribution identities must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -448,6 +545,7 @@ class RuntimeModuleRegistry:
             "factory_protocol": descriptor.factory_protocol,
             "kernel_services": [item.as_fact() for item in descriptor.kernel_services],
             "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
+            "shell_commands": [item.as_fact() for item in descriptor.shell_commands],
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 
@@ -619,6 +717,17 @@ class RuntimeModuleRegistry:
             raise ForestError(
                 "RUNTIME_AGENT_TOOL_CONFLICT",
                 "Runtime Agent tool names and services must be graph-unique",
+                409,
+            )
+        command_keys = [
+            (command.command_id, command.command_version)
+            for descriptor in self.descriptors
+            for command in descriptor.shell_commands
+        ]
+        if len(command_keys) != len(set(command_keys)):
+            raise ForestError(
+                "RUNTIME_SHELL_COMMAND_CONFLICT",
+                "Runtime Shell command identities must be graph-unique",
                 409,
             )
         for descriptor in self.descriptors:

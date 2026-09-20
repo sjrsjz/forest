@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.errors import ForestError
 from forest.packages import digest_json
@@ -103,8 +104,7 @@ _MODULES = {
             "kernel.uow.shell.binding-fence",
             "kernel.uow.shell.route-fence",
             "kernel.uow.shell.authorization.consume",
-            "kernel.runtime.status",
-            "kernel.runtime.maintenance",
+            "shell.core-runtime.execute",
             "agent.tool.runtime-status",
         ),
         "capabilities": (
@@ -335,12 +335,21 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         ("kernel.runtime", "kernel.payload"),
                         runtime_status_tool_service,
                     ),
+                    RuntimeKernelServiceSpec(
+                        "shell.core-runtime.execute",
+                        1,
+                        ("kernel.runtime",),
+                        runtime_shell_service,
+                    ),
                 )
                 if component_id == "kernel.runtime"
                 else ()
             ),
             agent_tools=(
                 (RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()
+            ),
+            shell_commands=(
+                RUNTIME_SHELL_COMMANDS if component_id == "kernel.runtime" else ()
             ),
         )
         for component_id, definition in _MODULES.items()

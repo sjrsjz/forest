@@ -23,6 +23,7 @@ from forest.agent_tool_executor import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
@@ -447,6 +448,18 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         memory_runtime = registry.get("memory.graph")
         delivery_runtime = registry.get("delivery")
         shell_runtime = registry.get("shell.command")
+        runtime_descriptor = next(
+            item for item in kernel.descriptors if item.component_id == "kernel.runtime"
+        )
+        assert runtime_descriptor.shell_commands == RUNTIME_SHELL_COMMANDS
+        assert shell.descriptor.shell_commands == ()
+        assert set(shell_runtime.command_routes) == {
+            (item.command_id, item.command_version) for item in RUNTIME_SHELL_COMMANDS
+        }
+        assert all(
+            service.route.provider_component_id == "kernel.runtime"
+            for _, _, service in shell_runtime.command_routes.values()
+        )
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
         )
@@ -455,9 +468,6 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert provider_runtime.active is True
         assert agent_runtime.execution is not None
         assert set(agent_runtime.execution.routes) == {"runtime_status"}
-        runtime_descriptor = next(
-            item for item in kernel.descriptors if item.component_id == "kernel.runtime"
-        )
         assert runtime_descriptor.agent_tools == (RUNTIME_STATUS_TOOL,)
         assert agent.descriptor.agent_tools == ()
         assert agent.descriptor.kernel_services == ()

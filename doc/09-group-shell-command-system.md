@@ -51,23 +51,26 @@ Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycl
 其他命令由模块描述符注册：
 
 ```text
-CommandSpec {
-  command_id, command_version, tokens, aliases,
-  argument_schema_digest, management_operation_id,
+RuntimeShellCommandContribution {
+  command_id, command_version,
+  service_id, service_version,
+  argument_schema, management_operation_id,
   required_capabilities, target_scope,
-  service_class, output_policy, timeout
+  service_class, option_aliases, output_policy, timeout
 }
 ```
 
 示例：Agent 模块注册 `run list/inspect/cancel`，Memory 模块注册 `memory sources/query/forget-*`，Conversation 模块注册 `context inspect/compact/reset`，Job 模块注册 `jobs list/run/cancel`。控制台和 Shell 都从同一 management operation catalog 发现这些动作；控制台不会因此出现硬编码 Agent/Memory 顶层页面。
 
-模块命令 registry 是 RouteGraph 的一部分。新 Generation 发布时一次切换，之后接纳的命令使用新 schema；已接纳请求继续绑定原 Generation 和参数载荷，除非该模块明确声明、宿主验证且管理员允许兼容 takeover。Forest 未发布基线不保留开发期 `shell-gate-v2…v12`、版本专用 Python registry 或旧 writer-generation 分派器。
+`RuntimeModuleDescriptor.shell_commands` 是唯一命令目录。命令词由 `command_id` 的点分段确定，参数名和类型来自完整 Draft 2020-12 schema，CLI 风格别名只能显式映射到 schema 中已声明的属性。RuntimeGraph 构建时拒绝重复 `(command_id, command_version)`；Contract Router 只向 `shell.command` 暴露贡献目录，并为每项解析由贡献模块准确 Generation 提供的类型化服务句柄。Shell 不按命令 ID 导入模块，也不含模块命令分支。
+
+模块命令 registry 是 RouteGraph 的一部分。发布事务把命令 schema 摘要、能力摘要、operation、服务等级和准确 owner Generation 写入权威 route。新 Generation 发布时一次切换，之后接纳的命令使用新 schema；已接纳请求继续绑定原 Generation 和参数载荷，执行时同时复核冻结 owner 和服务句柄 provider，除非该模块明确声明、宿主验证且管理员允许兼容 takeover。Forest 未发布基线不保留开发期 `shell-gate-v2…v12`、版本专用 Python registry 或旧 writer-generation 分派器。
 
 ## 4. 解析规则
 
 只允许去除 Adapter 已验证的开头 Bot mention 和前导空白，再匹配大小写敏感的完整 `#forest` token。引用、转发、代码块、图片 OCR、LLM 输出和附件说明不能成为可执行入口；`#forestX` 不是前缀。
 
-解析器支持空白分词、单双引号、`--key value`、`--key=value` 和 `--` 结束选项。单引号逐字保留；双引号只解码 `\\` 与 `\"`。未闭合引号、重复单值选项、未知选项、额外位置参数和超长字段均拒绝。
+解析器支持空白分词、单双引号、`--key value` 与 `--key=value`。布尔参数可用 `--flag` 或 `--flag=true|false`。单引号逐字保留；双引号只解码 `\\` 与 `\"`。未闭合引号、重复单值选项、未知选项、位置参数和超长字段均拒绝。首版不提供 `--` 结束选项，因为命令协议没有自由位置参数。
 
 `;`、`|`、`&&`、重定向、`$VAR`、反引号和 `$()` 没有 shell 语义，不展开也不连接命令。跨消息续行、交互 stdin 和从聊天上传任意脚本不属于协议。帮助文本由实际参数 schema 生成，不能维护另一套手写 grammar。
 

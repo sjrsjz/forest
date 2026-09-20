@@ -8,16 +8,11 @@ import json
 from dataclasses import dataclass
 
 from forest.errors import ForestError
-from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
-from forest.shell_command_parser import (
-    MODULE_LIST_ARGUMENT_SCHEMA_DIGEST,
-    PAUSE_ARGUMENT_SCHEMA_DIGEST,
-    RESUME_ARGUMENT_SCHEMA_DIGEST,
-    STATUS_ARGUMENT_SCHEMA_DIGEST,
-    ShellCommandParser,
-    direct_shell_text,
-    ingress_command,
+from forest.shell_command_parser import ShellCommandParser, direct_shell_text, ingress_command
+from forest.shell_command_protocol import (
+    ShellCommandExecutionRequest,
+    ShellCommandExecutionResult,
 )
 from forest.shell_gate import CoreShellGate
 from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
@@ -34,14 +29,6 @@ _STATE_CONTRACT = {
     "properties": {},
     "additionalProperties": False,
 }
-_STATUS_CAPABILITIES_DIGEST = digest_json(
-    {"protocol": "forest.management-capabilities/1", "capabilities": ["runtime.status.read"]}
-)
-_MAINTENANCE_CAPABILITIES_DIGEST = digest_json(
-    {"protocol": "forest.management-capabilities/1", "capabilities": ["runtime.maintenance"]}
-)
-
-
 def _stable(kind: str, *parts: object) -> str:
     body = "\0".join(str(part) for part in parts).encode("utf-8")
     return f"shell:{kind}:{hashlib.sha256(body).hexdigest()}"
@@ -58,8 +45,6 @@ class CleanShellRuntime:
         "protocol": "forest.runtime-services/1",
         "services": [{"service_id": "shell.ingress.inspect", "version": 1}],
         "requires": [
-            {"service_id": "kernel.runtime.status", "version": 1},
-            {"service_id": "kernel.runtime.maintenance", "version": 1},
             {"service_id": "kernel.uow.shell.result", "version": 1},
             {"service_id": "kernel.uow.shell.binding-fence", "version": 1},
             {"service_id": "kernel.uow.shell.route-fence", "version": 1},
@@ -79,8 +64,7 @@ class CleanShellRuntime:
         authorization,
         module_configuration,
         grants,
-        status,
-        maintenance,
+        command_routes,
         result_commit,
         generation_admission_verifier,
         generation_member_verifier,
@@ -92,8 +76,34 @@ class CleanShellRuntime:
         self.authorization = authorization
         self.module_configuration = module_configuration
         self.grants = grants
-        self.status = status
-        self.maintenance = maintenance
+        command_routes = tuple(command_routes)
+        self.command_routes = {
+            (contribution.command_id, contribution.command_version): (
+                owner_component_id,
+                contribution,
+                service,
+            )
+            for owner_component_id, contribution, service in command_routes
+        }
+        if len(self.command_routes) != len(command_routes):
+            raise ValueError("Shell command route identities repeat")
+        command_requirements = tuple(
+            dict.fromkeys(
+                (contribution.service_id, contribution.service_version)
+                for _, contribution, _ in self.command_routes.values()
+            )
+        )
+        self.runtime_contract = {
+            **type(self).runtime_contract,
+            "services": [dict(item) for item in type(self).runtime_contract["services"]],
+            "requires": [
+                *(dict(item) for item in type(self).runtime_contract["requires"]),
+                *(
+                    {"service_id": service_id, "version": version}
+                    for service_id, version in command_requirements
+                ),
+            ],
+        }
         self.result_commit = result_commit
         self.generation_admission_verifier = generation_admission_verifier
         self.generation_member_verifier = generation_member_verifier
@@ -210,66 +220,38 @@ class CleanShellRuntime:
             ),
             _connection=conn,
         )
-        route = self.status.route
         registry_revision = await self.repository.registry_revision_in(conn)
+        routes = []
+        for owner_component_id, contribution, service in self.command_routes.values():
+            route = service.route
+            if route.provider_component_id != owner_component_id:
+                raise ForestError(
+                    "SHELL_ROUTE_INVALID",
+                    "Shell command resolved outside its contributor Generation",
+                    503,
+                )
+            routes.append(
+                ShellCommandRoute(
+                    command_id=contribution.command_id,
+                    command_version=contribution.command_version,
+                    owner_component_id=route.provider_component_id,
+                    owner_generation_id=route.provider_generation_id,
+                    argument_schema_digest=contribution.argument_schema_digest,
+                    management_operation_id=contribution.management_operation_id,
+                    target_scope=contribution.target_scope,
+                    service_class=contribution.service_class,
+                    required_capabilities_digest=(
+                        contribution.required_capabilities_digest
+                    ),
+                    output_policy=contribution.output_policy,
+                    timeout_seconds=contribution.timeout_seconds,
+                )
+            )
         await self.repository.publish_registry(
             operation_id="shell-registry:" + identity.activation_id,
             expected_revision=registry_revision,
             graph_digest=identity.graph_digest,
-            routes=(
-                ShellCommandRoute(
-                    command_id="core.status",
-                    command_version=1,
-                    owner_component_id=route.provider_component_id,
-                    owner_generation_id=route.provider_generation_id,
-                    argument_schema_digest=STATUS_ARGUMENT_SCHEMA_DIGEST,
-                    management_operation_id="runtime.status",
-                    target_scope="BOT",
-                    service_class="P0",
-                    required_capabilities_digest=_STATUS_CAPABILITIES_DIGEST,
-                    output_policy="SHORT",
-                    timeout_seconds=10,
-                ),
-                ShellCommandRoute(
-                    command_id="core.pause",
-                    command_version=1,
-                    owner_component_id=route.provider_component_id,
-                    owner_generation_id=route.provider_generation_id,
-                    argument_schema_digest=PAUSE_ARGUMENT_SCHEMA_DIGEST,
-                    management_operation_id="runtime.maintenance",
-                    target_scope="BOT",
-                    service_class="P0",
-                    required_capabilities_digest=_MAINTENANCE_CAPABILITIES_DIGEST,
-                    output_policy="SHORT",
-                    timeout_seconds=10,
-                ),
-                ShellCommandRoute(
-                    command_id="core.resume",
-                    command_version=1,
-                    owner_component_id=route.provider_component_id,
-                    owner_generation_id=route.provider_generation_id,
-                    argument_schema_digest=RESUME_ARGUMENT_SCHEMA_DIGEST,
-                    management_operation_id="runtime.maintenance",
-                    target_scope="BOT",
-                    service_class="P0",
-                    required_capabilities_digest=_MAINTENANCE_CAPABILITIES_DIGEST,
-                    output_policy="SHORT",
-                    timeout_seconds=10,
-                ),
-                ShellCommandRoute(
-                    command_id="module.list",
-                    command_version=1,
-                    owner_component_id=route.provider_component_id,
-                    owner_generation_id=route.provider_generation_id,
-                    argument_schema_digest=MODULE_LIST_ARGUMENT_SCHEMA_DIGEST,
-                    management_operation_id="runtime.status",
-                    target_scope="BOT",
-                    service_class="P1",
-                    required_capabilities_digest=_STATUS_CAPABILITIES_DIGEST,
-                    output_policy="SHORT",
-                    timeout_seconds=10,
-                ),
-            ),
+            routes=tuple(routes),
             _connection=conn,
         )
 
@@ -489,24 +471,21 @@ class CleanShellRuntime:
                 return kind, conversation_ref[len(prefix) :]
         raise ForestError("SHELL_RESULT_ROUTE_INVALID", "Shell conversation route is invalid", 409)
 
-    async def _maintenance_epoch(self, claim) -> int:
+    async def _arguments(self, claim) -> dict:
         try:
             body = json.loads((await self.payloads.read_bytes(claim.arguments.payload_id)))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ForestError(
-                "SHELL_ARGUMENTS_INVALID", "Shell maintenance arguments are invalid", 422
+                "SHELL_ARGUMENTS_INVALID", "Shell arguments are invalid", 422
             ) from exc
         arguments = body.get("arguments") if isinstance(body, dict) else None
         if (
             not isinstance(arguments, dict)
-            or set(arguments) != {"expected_maintenance_epoch"}
-            or type(arguments["expected_maintenance_epoch"]) is not int
-            or arguments["expected_maintenance_epoch"] <= 0
+            or body.get("protocol") != "forest.shell.arguments/1"
+            or body.get("command_id") != claim.command_id
         ):
-            raise ForestError(
-                "SHELL_ARGUMENTS_INVALID", "Shell maintenance arguments are invalid", 422
-            )
-        return arguments["expected_maintenance_epoch"]
+            raise ForestError("SHELL_ARGUMENTS_INVALID", "Shell arguments are invalid", 422)
+        return arguments
 
     async def _execute(self, claim) -> None:
         invoke_operation = _stable("authorize-invoke", claim.request_id, claim.owner_epoch)
@@ -521,38 +500,34 @@ class CleanShellRuntime:
             authorization_operation_id=receipt.operation_id,
         )
         await self.repository.start(claim)
-        if claim.command_id == "core.status":
-            status = await self.status()
-            member_failures = [item for item in status["members"] if item["status"] != "ACTIVE"]
-            text = (
-                f"Forest {status['bot_id']}：{status['status']} / {status['graph_state']}；"
-                f"Graph r{status['graph_revision']}，{len(status['members'])} 个模块；"
-                f"DATA={'open' if status['data_admission'] else 'closed'}，"
-                f"CONTROL={'open' if status['control_admission'] else 'closed'}"
-            )
-            if member_failures:
-                text += f"；异常模块 {len(member_failures)} 个"
-        elif claim.command_id == "module.list":
-            status = await self.status()
-            members = status["members"]
-            text = "Forest RuntimeGraph 模块：\n" + "\n".join(
-                f"{item['component_id']} {item['status']} "
-                f"r{item['config_revision']} {item['generation_id']}"
-                for item in members
-            )
-        elif claim.command_id in {"core.pause", "core.resume"}:
-            data_admission = claim.command_id == "core.resume"
-            changed = await self.maintenance(
-                expected_maintenance_epoch=await self._maintenance_epoch(claim),
-                data_admission=data_admission,
-            )
-            text = (
-                f"Forest DATA admission 已{'恢复' if data_admission else '暂停'}；"
-                f"maintenance_epoch={changed['maintenance_epoch']}"
-            )
-        else:
+        route = self.command_routes.get((claim.command_id, claim.command_version))
+        if route is None:
             raise ForestError("SHELL_ROUTE_UNSUPPORTED", "Shell route is unsupported", 409)
-        shell_result, delivery_result = await self._payload(claim, text)
+        owner_component_id, _contribution, service = route
+        frozen = service.route
+        if (
+            frozen.provider_component_id != owner_component_id
+            or claim.owner_component_id != frozen.provider_component_id
+            or claim.owner_generation_id != frozen.provider_generation_id
+        ):
+            raise ForestError("SHELL_ROUTE_STALE", "Shell command route is stale", 409)
+        result = await service(
+            ShellCommandExecutionRequest(
+                claim.command_id,
+                claim.command_version,
+                await self._arguments(claim),
+                claim.request_id,
+                claim.principal_ref,
+                claim.conversation_ref,
+            )
+        )
+        if type(result) is not ShellCommandExecutionResult:
+            raise ForestError(
+                "SHELL_EXECUTION_RESULT_INVALID",
+                "Shell command service returned an invalid result",
+                502,
+            )
+        shell_result, delivery_result = await self._payload(claim, result.text)
         final_operation = _stable("authorize-result", claim.request_id, claim.owner_epoch)
         final_receipt = await self.authorization.issue(
             claim,

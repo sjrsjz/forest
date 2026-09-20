@@ -39,23 +39,6 @@ def default_shell_configuration() -> dict:
     }
 
 
-def _runtime_status(context):
-    return context.participant("kernel.runtime").service.status
-
-
-def _runtime_maintenance(context):
-    runtime = context.participant("kernel.runtime").service
-
-    async def set_data_admission(*, expected_maintenance_epoch, data_admission):
-        return await runtime.set_data_admission(
-            context.host_lease,
-            expected_maintenance_epoch=expected_maintenance_epoch,
-            data_admission=data_admission,
-        )
-
-    return set_data_admission
-
-
 def _binding_fence(context):
     return context.participant("adapter.onebot").verify_transport_fence_in
 
@@ -160,9 +143,13 @@ async def bootstrap_clean_shell(
         expected_policy_revision=policy_revision,
     )
     gate = CoreShellGate(store.bot_id)
-    parser = ShellCommandParser(kernel.payload)
 
     def factory(_runtime, contracts):
+        command_routes = contracts.shell_commands()
+        parser = ShellCommandParser(
+            kernel.payload,
+            tuple(contribution for _, contribution, _ in command_routes),
+        )
         repository = ShellCommandRepository(
             store,
             namespace=storage.spec.namespace,
@@ -192,12 +179,7 @@ async def bootstrap_clean_shell(
             authorization=authorization,
             module_configuration=configuration,
             grants=grants,
-            status=contracts.service(
-                "kernel.runtime.status", 1, admission_lane="CONTROL", owned_work=True
-            ),
-            maintenance=contracts.service(
-                "kernel.runtime.maintenance", 1, admission_lane="CONTROL", owned_work=True
-            ),
+            command_routes=command_routes,
             result_commit=contracts.service(
                 "kernel.uow.shell.result", 1, admission_lane="CONTROL", owned_work=True
             ),
@@ -222,15 +204,6 @@ async def bootstrap_clean_shell(
         work_notify_order=0,
         factory_protocol="forest.contract-module-factory/1",
         kernel_services=(
-            RuntimeKernelServiceSpec(
-                "kernel.runtime.status", 1, ("kernel.runtime",), _runtime_status
-            ),
-            RuntimeKernelServiceSpec(
-                "kernel.runtime.maintenance",
-                1,
-                ("kernel.runtime",),
-                _runtime_maintenance,
-            ),
             RuntimeKernelServiceSpec(
                 "kernel.uow.shell.binding-fence",
                 1,
