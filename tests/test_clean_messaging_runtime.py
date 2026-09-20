@@ -18,7 +18,9 @@ from forest.agent_model_executor import (
 )
 from forest.agent_tool_executor import (
     DurableAgentToolExecutor,
+    ToolAuthorizationRequest,
     ToolAuthorizationResult,
+    ToolDispatchRequest,
     ToolDispatchResult,
 )
 from forest.clean_agent_module import bootstrap_clean_agent
@@ -429,6 +431,58 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert conversation_runtime.active is True
         assert agent_runtime.active is True
         assert provider_runtime.active is True
+        assert agent_runtime.execution is not None
+        assert set(agent_runtime.execution.routes) == {"runtime_status"}
+        runtime_tool = agent_runtime.execution.routes["runtime_status"]
+        assert runtime_tool.binding.component_id == "kernel.runtime"
+        assert runtime_tool.binding.generation_id == registry.graph_identity.generations[
+            "kernel.runtime"
+        ]
+        assert runtime_tool.binding.approval_required is False
+        assert runtime_tool.binding.supports_query is False
+        tool_request = ToolAuthorizationRequest(
+            tool_call_id="tool-call:runtime-status:integration",
+            effect_operation_ref="tool-effect:runtime-status:integration",
+            producer_component_id="agent.runtime",
+            producer_generation_id=agent_runtime.generation_identity.generation_id,
+            executor_component_id=runtime_tool.binding.component_id,
+            executor_generation_id=runtime_tool.binding.generation_id,
+            service_id=runtime_tool.binding.service_id,
+            binding_digest=runtime_tool.binding.binding_digest,
+            authority_trigger_ref="trigger:runtime-status:integration",
+            authority_principal_ref="qq:42",
+            arguments={},
+            input_digest="sha256:" + "6" * 64,
+        )
+        authorization = await runtime_tool.authorization.authorize(
+            tool_request,
+            approval_required=runtime_tool.binding.approval_required,
+        )
+        assert authorization.status == "AUTHORIZED"
+
+        async def permit_runtime_tool(_conn, *, effect_observation_ref):
+            assert effect_observation_ref.startswith("effect-attempt:agent-tool:")
+
+        runtime_tool_result = await runtime_tool.execution.dispatch(
+            ToolDispatchRequest(
+                tool_request,
+                authorization.authorization_ticket_id,
+                authorization.approval_ref,
+            ),
+            permit_in=permit_runtime_tool,
+        )
+        assert runtime_tool_result.status == "SUCCEEDED"
+        assert runtime_tool_result.result is not None
+        runtime_tool_body = json.loads(
+            await kernel.payload.read_bytes(runtime_tool_result.result.payload_id)
+        )
+        assert runtime_tool_body["protocol"] == "forest.runtime-status-tool-result/1"
+        assert runtime_tool_body["graph_id"] == registry.graph_identity.graph_id
+        assert {item["component_id"] for item in runtime_tool_body["members"]} == set(
+            registry.graph_identity.generations
+        )
+        replayed_tool_result = await runtime_tool.execution.query(tool_request)
+        assert replayed_tool_result == runtime_tool_result
         assert memory_runtime.active is True
         assert memory_runtime.profile.embedding.model == "Qwen/Qwen3-VL-Embedding-8B"
         assert memory_runtime.profile.embedding.dimensions == 4096
@@ -1000,6 +1054,33 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert shell_message["trigger_decision"] == "CONTROL_COMMAND"
         assert shell_message["route_ref"].startswith("shell:request:")
 
+        module_list_body = json.dumps(
+            {
+                "time": 1700000002,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 94,
+                "group_id": 933179609,
+                "user_id": 42,
+                "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
+                "message": [{"type": "text", "data": {"text": "#forest module list"}}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        await clients[0].emit(module_list_body)
+        for _ in range(300):
+            if len(clients[0].sends) >= 5:
+                break
+            await asyncio.sleep(0.05)
+        module_list_text = clients[0].sends[4][0].wire_body.decode("utf-8")
+        assert "Forest RuntimeGraph 模块" in module_list_text
+        assert "kernel.runtime ACTIVE" in module_list_text
+        assert "agent.runtime ACTIVE" in module_list_text
+        assert "shell.command ACTIVE" in module_list_text
+        assert len(model_clients[0].requests) == model_request_count
+
         ordinary_while_paused = json.dumps(
             {
                 "time": 1700000003,
@@ -1047,11 +1128,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         ).encode()
         await clients[0].emit(denied_body)
         for _ in range(300):
-            if len(clients[0].sends) >= 5:
+            if len(clients[0].sends) >= 6:
                 break
             await asyncio.sleep(0.05)
-        assert len(clients[0].sends) == 5
-        assert "已拒绝" in clients[0].sends[4][0].wire_body.decode("utf-8")
+        assert len(clients[0].sends) == 6
+        assert "已拒绝" in clients[0].sends[5][0].wire_body.decode("utf-8")
         assert len(model_clients[0].requests) == model_request_count
         async with store.pool.connection() as conn:
             denied = await (
@@ -1096,13 +1177,13 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         ).encode()
         await clients[0].emit(resume_body)
         for _ in range(300):
-            if len(clients[0].sends) >= 6:
+            if len(clients[0].sends) >= 7:
                 break
             await asyncio.sleep(0.05)
         restored = await kernel.runtime.status()
         assert restored["maintenance_epoch"] == 3
         assert restored["data_admission"] is True
-        assert "已恢复" in clients[0].sends[5][0].wire_body.decode("utf-8")
+        assert "已恢复" in clients[0].sends[6][0].wire_body.decode("utf-8")
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True

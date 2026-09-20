@@ -103,6 +103,7 @@ _MODULES = {
             "kernel.uow.shell.authorization.consume",
             "kernel.runtime.status",
             "kernel.runtime.maintenance",
+            "agent.tool.runtime-status",
         ),
         "capabilities": (
             "runtime.graph.publish",

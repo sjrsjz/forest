@@ -24,6 +24,18 @@ STATUS_ARGUMENT_SCHEMA = {
     "additionalProperties": False,
 }
 STATUS_ARGUMENT_SCHEMA_DIGEST = digest_json(STATUS_ARGUMENT_SCHEMA)
+MODULE_LIST_ARGUMENT_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "protocol": {"const": "forest.shell.arguments/1"},
+        "command_id": {"const": "module.list"},
+        "arguments": {"type": "object", "maxProperties": 0},
+    },
+    "required": ["protocol", "command_id", "arguments"],
+    "additionalProperties": False,
+}
+MODULE_LIST_ARGUMENT_SCHEMA_DIGEST = digest_json(MODULE_LIST_ARGUMENT_SCHEMA)
 
 
 def _maintenance_schema(command_id: str) -> dict:
@@ -53,6 +65,7 @@ _SCHEMA_DIGESTS = {
     "core.status": STATUS_ARGUMENT_SCHEMA_DIGEST,
     "core.pause": PAUSE_ARGUMENT_SCHEMA_DIGEST,
     "core.resume": RESUME_ARGUMENT_SCHEMA_DIGEST,
+    "module.list": MODULE_LIST_ARGUMENT_SCHEMA_DIGEST,
 }
 
 
@@ -147,6 +160,16 @@ class ShellCommandParser:
                 {
                     "protocol": "forest.shell.arguments/1",
                     "command_id": "core.status",
+                    "arguments": {},
+                },
+            )
+        if tokens == ("module", "list"):
+            return ParsedShellCommand(
+                "module.list",
+                1,
+                {
+                    "protocol": "forest.shell.arguments/1",
+                    "command_id": "module.list",
                     "arguments": {},
                 },
             )

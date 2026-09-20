@@ -254,6 +254,21 @@ class KernelRuntimeRepository:
                 admission_lane=admission_lane,
             )
 
+    async def verify_generation_member(
+        self,
+        *,
+        component_id: str,
+        generation_id: str,
+    ) -> RuntimeGenerationGraph:
+        """Verify owned draining work against the current graph membership."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.verify_generation_member_in(
+                conn,
+                component_id=component_id,
+                generation_id=generation_id,
+            )
+
     async def verify_active_generation_in(
         self,
         conn,

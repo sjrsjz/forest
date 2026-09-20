@@ -57,6 +57,20 @@ def test_core_maintenance_parser_requires_explicit_positive_epoch():
     ).document["arguments"] == {"error_code": "SHELL_COMMAND_NOT_FOUND"}
 
 
+def test_module_list_parser_is_exact_and_argument_free():
+    parsed = ShellCommandParser.parse("module list")
+    assert parsed.command_id == "module.list"
+    assert parsed.command_version == 1
+    assert parsed.document == {
+        "protocol": "forest.shell.arguments/1",
+        "command_id": "module.list",
+        "arguments": {},
+    }
+    assert ShellCommandParser.parse("module list extra").document["arguments"] == {
+        "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
+
+
 async def _parse(*, command_text, command_id, command_version, argument_schema_digest, arguments):
     expected = {
         "core cancel": "core.cancel",

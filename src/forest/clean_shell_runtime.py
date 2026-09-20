@@ -11,6 +11,7 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.shell_command_parser import (
+    MODULE_LIST_ARGUMENT_SCHEMA_DIGEST,
     PAUSE_ARGUMENT_SCHEMA_DIGEST,
     RESUME_ARGUMENT_SCHEMA_DIGEST,
     STATUS_ARGUMENT_SCHEMA_DIGEST,
@@ -252,6 +253,19 @@ class CleanShellRuntime:
                     target_scope="BOT",
                     service_class="P0",
                     required_capabilities_digest=_MAINTENANCE_CAPABILITIES_DIGEST,
+                    output_policy="SHORT",
+                    timeout_seconds=10,
+                ),
+                ShellCommandRoute(
+                    command_id="module.list",
+                    command_version=1,
+                    owner_component_id=route.provider_component_id,
+                    owner_generation_id=route.provider_generation_id,
+                    argument_schema_digest=MODULE_LIST_ARGUMENT_SCHEMA_DIGEST,
+                    management_operation_id="runtime.status",
+                    target_scope="BOT",
+                    service_class="P1",
+                    required_capabilities_digest=_STATUS_CAPABILITIES_DIGEST,
                     output_policy="SHORT",
                     timeout_seconds=10,
                 ),
@@ -518,6 +532,14 @@ class CleanShellRuntime:
             )
             if member_failures:
                 text += f"；异常模块 {len(member_failures)} 个"
+        elif claim.command_id == "module.list":
+            status = await self.status()
+            members = status["members"]
+            text = "Forest RuntimeGraph 模块：\n" + "\n".join(
+                f"{item['component_id']} {item['status']} "
+                f"r{item['config_revision']} {item['generation_id']}"
+                for item in members
+            )
         elif claim.command_id in {"core.pause", "core.resume"}:
             data_admission = claim.command_id == "core.resume"
             changed = await self.maintenance(

@@ -68,6 +68,7 @@ class CleanAgentRuntime:
             {"service_id": "provider.model.dispatch", "version": 1},
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "media.context.resolve", "version": 1},
+            {"service_id": "agent.tool.runtime-status", "version": 1},
         ],
     }
     state_schema = 1
@@ -94,6 +95,7 @@ class CleanAgentRuntime:
         provider=None,
         memory=None,
         media=None,
+        tool_route_factories=(),
     ):
         self.repository = repository
         self.module_configuration = module_configuration
@@ -102,6 +104,9 @@ class CleanAgentRuntime:
         self.provider = provider
         self.memory = memory
         self.media = media
+        self.tool_route_factories = tuple(tool_route_factories)
+        if any(not callable(factory) for factory in self.tool_route_factories):
+            raise ValueError("Agent tool route factories must be callable")
         self.generation_verifier = generation_verifier
         self.generation_member_verifier = generation_member_verifier
         self.generation_identity: BoundGenerationIdentity | None = None
@@ -249,6 +254,7 @@ class CleanAgentRuntime:
                 503,
             )
         if self.provider is not None and self.memory is not None and self.media is not None:
+            tool_routes = tuple(factory() for factory in self.tool_route_factories)
             self.execution = DurableSingleAgentExecution(
                 agent=self,
                 provider=self.provider,
@@ -256,6 +262,7 @@ class CleanAgentRuntime:
                 media=self.media,
                 payloads=self.payloads,
                 owner_id=("agent-execution/" + self.generation_identity.generation_id)[-256:],
+                tool_routes=tool_routes,
             )
 
     def activate_generation(self) -> None:
