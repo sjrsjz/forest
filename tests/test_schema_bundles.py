@@ -1266,6 +1266,100 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
 
 
 @pytest.mark.postgres
+async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent(
+    clean_authority,
+):
+    store, installer = clean_authority
+    core = await bootstrap_clean_kernel(store, installer)
+    lease = await core.runtime.claim_host("host-reload", "inc-reload")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    current = RuntimeModuleRegistry(host, core.descriptors)
+    await current.start()
+    graph = current.graph_identity
+
+    requested = await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="reload/one",
+        expected_graph_revision=graph.graph_revision,
+        requested_by="qq:42",
+    )
+    assert requested["state"] == "QUEUED"
+    assert await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="reload/one",
+        expected_graph_revision=graph.graph_revision,
+        requested_by="qq:42",
+    ) == requested
+    with pytest.raises(ForestError) as caught:
+        await core.runtime.request_graph_replacement(
+            lease,
+            operation_id="reload/one",
+            expected_graph_revision=graph.graph_revision,
+            requested_by="qq:other",
+        )
+    assert caught.value.code == "RUNTIME_REPLACEMENT_CONFLICT"
+
+    claim = await core.runtime.claim_graph_replacement(lease)
+    assert claim["operation_id"] == "reload/one"
+    assert claim["state"] == "RUNNING"
+    assert claim["attempt_count"] == 1
+    assert await core.runtime.claim_graph_replacement(lease) is None
+
+    candidate = RuntimeModuleRegistry(
+        host,
+        core.descriptors,
+        activation_id=claim["activation_id"],
+    )
+    await candidate.start()
+    settled = await core.runtime.finish_graph_replacement(
+        lease,
+        operation_id="reload/one",
+        graph_id=candidate.graph_identity.graph_id,
+        graph_revision=candidate.graph_identity.graph_revision,
+    )
+    assert settled["state"] == "SUCCEEDED"
+    assert await core.runtime.finish_graph_replacement(
+        lease,
+        operation_id="reload/one",
+        graph_id=candidate.graph_identity.graph_id,
+        graph_revision=candidate.graph_identity.graph_revision,
+    ) == settled
+    assert (await core.runtime.graph_replacement("reload/one"))["state"] == "SUCCEEDED"
+
+    await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="reload/two",
+        expected_graph_revision=candidate.graph_identity.graph_revision,
+        requested_by="qq:42",
+    )
+    left, right = await asyncio.gather(
+        core.runtime.claim_graph_replacement(lease),
+        core.runtime.claim_graph_replacement(lease),
+    )
+    claims = [item for item in (left, right) if item is not None]
+    assert len(claims) == 1
+    failed = await core.runtime.fail_graph_replacement(
+        lease,
+        operation_id="reload/two",
+        error_code="TEST_REPLACEMENT_FAILED",
+    )
+    assert failed["state"] == "FAILED"
+    assert await core.runtime.fail_graph_replacement(
+        lease,
+        operation_id="reload/two",
+        error_code="TEST_REPLACEMENT_FAILED",
+    ) == failed
+    assert await candidate.close() == []
+    assert await current.close() == []
+
+
+@pytest.mark.postgres
 async def test_clean_kernel_authorization_fences_exact_tickets_and_revocation(
     clean_authority,
 ):

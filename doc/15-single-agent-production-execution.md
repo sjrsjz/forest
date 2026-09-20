@@ -103,6 +103,8 @@ CorePrompt 是 `agent.runtime` 包内版本化协议，随 Agent spec 和 parser
 
 Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模型/工具 handoff 临界区并到达 checkpoint。不能通过取消协程把已 handoff 的外部调用伪装成未执行；结果必须由 Provider/Effect/Delivery 账本决定。
 
+群聊 `core reload` 不在 Shell Worker 内同步调用图替换。`kernel.runtime` 先以 operation、请求主体和 expected graph revision 写入持久请求；宿主监督循环另行领取并把稳定 activation ID 交给候选图。这样旧 Shell 可以先提交回执，再进入正常的消费者优先排空。宿主在发布后、完成请求前崩溃时，恢复器只依据同一 activation ID 的 RuntimeGraph 事实收敛成功；只有 PREPARED 的旧宿主候选不会跨 HostLease 冒充可继续发布的图。
+
 ## 7. 实现拒绝项
 
 - 新增聊天业务 `contract.router`，或让内核 Contract Router 理解 Prompt、模板、群策略和 Agent 选择；

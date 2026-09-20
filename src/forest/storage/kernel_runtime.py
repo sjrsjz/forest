@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg import sql
 
@@ -43,7 +43,7 @@ class KernelRuntimeRepository:
                     sql.SQL(
                         "SELECT s.status,s.maintenance_epoch,s.policy_revision,"
                         "s.data_admission,s.control_admission,h.graph_id,h.graph_revision,"
-                        "g.graph_digest,g.state AS graph_state,h.published_at FROM {} s "
+                        "g.graph_digest,g.activation_id,g.state AS graph_state,h.published_at FROM {} s "
                         "JOIN {} h ON h.bot_id=s.bot_id LEFT JOIN {} g ON g.bot_id=h.bot_id "
                         "AND g.graph_id=h.graph_id WHERE s.bot_id=%s"
                     ).format(
@@ -75,12 +75,322 @@ class KernelRuntimeRepository:
                     )
                 ).fetchall()
                 members = tuple(dict(row) for row in rows)
+            replacement = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT operation_id,requested_by,expected_graph_revision,activation_id,"
+                        "state,attempt_count,result_graph_id,result_graph_revision,error_code,"
+                        "created_at,updated_at FROM {} WHERE bot_id=%s "
+                        "ORDER BY created_at DESC,operation_id DESC LIMIT 1"
+                    ).format(self._table("graph_replacement_requests")),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
         return {
             "protocol": "forest.runtime-status/1",
             "bot_id": self.store.bot_id,
             **dict(runtime),
             "members": members,
+            "latest_replacement": dict(replacement) if replacement is not None else None,
         }
+
+    async def request_graph_replacement(
+        self,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        expected_graph_revision: int,
+        requested_by: str,
+    ) -> dict:
+        """Persist one graph-wide reload request without draining the calling Shell worker."""
+
+        for value, field in ((operation_id, "operation_id"), (requested_by, "requested_by")):
+            if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
+                raise ForestError(
+                    "RUNTIME_REPLACEMENT_INPUT_INVALID", f"Invalid {field}", 422
+                )
+        if type(expected_graph_revision) is not int or expected_graph_revision <= 0:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid expected graph revision", 422
+            )
+        input_digest = digest_json(
+            {
+                "expected_graph_revision": expected_graph_revision,
+                "requested_by": requested_by,
+            }
+        )
+        activation_id = str(
+            uuid5(NAMESPACE_URL, f"forest:{self.store.bot_id}:reload:{operation_id}")
+        )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"forest.kernel.runtime/reload/{self.store.bot_id}/{operation_id}",),
+            )
+            replay = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s").format(
+                        self._table("graph_replacement_requests")
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "RUNTIME_REPLACEMENT_CONFLICT",
+                        "Graph replacement operation input differs",
+                        409,
+                    )
+                return dict(replay)
+            head = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
+                        self._table("runtime_graph_head")
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            if head is None or head["graph_revision"] != expected_graph_revision:
+                raise ForestError(
+                    "RUNTIME_GRAPH_REVISION_CONFLICT",
+                    "RuntimeGraph revision changed",
+                    409,
+                    details={
+                        "graph_revision": None if head is None else head["graph_revision"]
+                    },
+                )
+            saved = await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,operation_id,input_digest,requested_by,"
+                        "expected_graph_revision,activation_id) VALUES (%s,%s,%s,%s,%s,%s) "
+                        "RETURNING *"
+                    ).format(self._table("graph_replacement_requests")),
+                    (
+                        self.store.bot_id,
+                        operation_id,
+                        input_digest,
+                        requested_by,
+                        expected_graph_revision,
+                        activation_id,
+                    ),
+                )
+            ).fetchone()
+            return dict(saved)
+
+    async def claim_graph_replacement(
+        self,
+        lease: HostLease,
+        *,
+        lease_seconds: int = 120,
+    ) -> dict | None:
+        if type(lease_seconds) is not int or not 10 <= lease_seconds <= 600:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid replacement lease", 422
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND (state='QUEUED' OR "
+                        "(state='RUNNING' AND lease_until<=clock_timestamp())) "
+                        "ORDER BY created_at,operation_id FOR UPDATE SKIP LOCKED LIMIT 1"
+                    ).format(self._table("graph_replacement_requests")),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            saved = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='RUNNING',owner_host_id=%s,owner_incarnation=%s,"
+                        "owner_epoch=%s,lease_until=clock_timestamp()+make_interval(secs => %s),"
+                        "attempt_count=attempt_count+1,updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND operation_id=%s RETURNING *"
+                    ).format(self._table("graph_replacement_requests")),
+                    (
+                        lease.host_id,
+                        lease.incarnation,
+                        lease.owner_epoch,
+                        lease_seconds,
+                        self.store.bot_id,
+                        row["operation_id"],
+                    ),
+                )
+            ).fetchone()
+            return dict(saved)
+
+    async def finish_graph_replacement(
+        self,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        graph_id: str,
+        graph_revision: int,
+    ) -> dict:
+        return await self._settle_graph_replacement(
+            lease,
+            operation_id=operation_id,
+            state="SUCCEEDED",
+            graph_id=graph_id,
+            graph_revision=graph_revision,
+        )
+
+    async def fail_graph_replacement(
+        self,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        error_code: str,
+    ) -> dict:
+        if not isinstance(error_code, str) or not 1 <= len(error_code.encode()) <= 128:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid replacement error", 422
+            )
+        return await self._settle_graph_replacement(
+            lease,
+            operation_id=operation_id,
+            state="FAILED",
+            error_code=error_code,
+        )
+
+    async def _settle_graph_replacement(
+        self,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        state: str,
+        graph_id: str | None = None,
+        graph_revision: int | None = None,
+        error_code: str | None = None,
+    ) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._identity_in(conn)
+            await self._host_in(conn, lease)
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s FOR UPDATE").format(
+                        self._table("graph_replacement_requests")
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError(
+                    "RUNTIME_REPLACEMENT_NOT_FOUND", "Graph replacement does not exist", 404
+                )
+            if row["state"] == state:
+                expected = (
+                    graph_id,
+                    graph_revision,
+                    error_code,
+                )
+                actual = (
+                    row["result_graph_id"],
+                    row["result_graph_revision"],
+                    row["error_code"],
+                )
+                if actual != expected:
+                    raise ForestError(
+                        "RUNTIME_REPLACEMENT_CONFLICT",
+                        "Graph replacement terminal result differs",
+                        409,
+                    )
+                return dict(row)
+            if (
+                row["state"] != "RUNNING"
+                or row["owner_host_id"] != lease.host_id
+                or row["owner_incarnation"] != lease.incarnation
+                or row["owner_epoch"] != lease.owner_epoch
+            ):
+                raise ForestError(
+                    "STALE_RUNTIME_REPLACEMENT",
+                    "Graph replacement ownership changed",
+                    409,
+                )
+            if state == "SUCCEEDED":
+                graph = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT graph_id,graph_revision,activation_id,state FROM {} "
+                            "WHERE bot_id=%s AND graph_id=%s"
+                        ).format(self._table("runtime_graphs")),
+                        (self.store.bot_id, graph_id),
+                    )
+                ).fetchone()
+                if (
+                    graph is None
+                    or graph["graph_revision"] != graph_revision
+                    or graph["activation_id"] != row["activation_id"]
+                    or graph["state"] not in {"ACTIVE", "RETIRED", "STOPPED"}
+                ):
+                    raise ForestError(
+                        "RUNTIME_REPLACEMENT_RESULT_INVALID",
+                        "Replacement graph evidence is invalid",
+                        409,
+                    )
+            saved = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state=%s,result_graph_id=%s,result_graph_revision=%s,"
+                        "error_code=%s,lease_until=clock_timestamp(),updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND operation_id=%s RETURNING *"
+                    ).format(self._table("graph_replacement_requests")),
+                    (
+                        state,
+                        graph_id,
+                        graph_revision,
+                        error_code,
+                        self.store.bot_id,
+                        operation_id,
+                    ),
+                )
+            ).fetchone()
+            return dict(saved)
+
+    async def graph_replacement(self, operation_id: str) -> dict:
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id.encode()) <= 256:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid operation_id", 422
+            )
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s").format(
+                        self._table("graph_replacement_requests")
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError(
+                    "RUNTIME_REPLACEMENT_NOT_FOUND", "Graph replacement does not exist", 404
+                )
+            return dict(row)
+
+    async def graph_for_activation(self, activation_id: str) -> dict | None:
+        try:
+            UUID(activation_id)
+        except (TypeError, ValueError):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid activation_id", 422
+            ) from None
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND activation_id=%s").format(
+                        self._table("runtime_graphs")
+                    ),
+                    (self.store.bot_id, activation_id),
+                )
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     async def set_data_admission(
         self,

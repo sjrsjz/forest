@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from psycopg import sql
 from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS, execute_agent_shell
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS, execute_memory_shell
-from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
+from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.errors import ForestError
 from forest.runtime_modules import RuntimeShellCommandContribution, official_storage_bundle
 from forest.shell_command_parser import ShellCommandParser
@@ -62,6 +63,51 @@ def test_core_maintenance_parser_requires_explicit_positive_epoch():
     assert parser.parse("core resume --expect-maintenance 0").document["arguments"] == {
         "error_code": "SHELL_COMMAND_NOT_FOUND"
     }
+
+
+def test_core_reload_parser_requires_exact_graph_revision():
+    parser = ShellCommandParser(None, RUNTIME_SHELL_COMMANDS)
+    parsed = parser.parse("core reload --expect-graph 17")
+    assert parsed.document["arguments"] == {"expected_graph_revision": 17}
+    assert parser.parse("core reload").document["arguments"] == {
+        "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
+
+
+@pytest.mark.asyncio
+async def test_core_reload_shell_only_persists_supervisor_request():
+    class Runtime:
+        async def request_graph_replacement(self, lease, **values):
+            assert lease == "host-lease/one"
+            assert values == {
+                "operation_id": "shell-reload:request/reload",
+                "expected_graph_revision": 17,
+                "requested_by": "qq:42",
+            }
+            return {
+                **values,
+                "state": "QUEUED",
+                "activation_id": "00000000-0000-0000-0000-000000000017",
+            }
+
+    context = SimpleNamespace(
+        host_lease="host-lease/one",
+        participant=lambda component_id: SimpleNamespace(service=Runtime())
+        if component_id == "kernel.runtime"
+        else None,
+    )
+    execute = runtime_shell_service(context)
+    result = await execute(
+        ShellCommandExecutionRequest(
+            "core.reload",
+            1,
+            {"expected_graph_revision": 17},
+            "request/reload",
+            "qq:42",
+            "onebot:group:933179609",
+        )
+    )
+    assert "reload QUEUED" in result.text
 
 
 def test_module_list_parser_is_exact_and_argument_free():

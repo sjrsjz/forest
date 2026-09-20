@@ -304,6 +304,46 @@ CREATE TABLE runtime_graph_head (
     UNIQUE (bot_id, graph_revision)
 );
 
+CREATE TABLE graph_replacement_requests (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
+    activation_id text NOT NULL,
+    state text NOT NULL DEFAULT 'QUEUED'
+        CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED')),
+    owner_host_id text,
+    owner_incarnation text,
+    owner_epoch bigint,
+    lease_until timestamptz NOT NULL DEFAULT '1970-01-01 UTC',
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    result_graph_id text,
+    result_graph_revision bigint CHECK (result_graph_revision IS NULL OR result_graph_revision > 0),
+    error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,activation_id),
+    FOREIGN KEY (bot_id,result_graph_id) REFERENCES runtime_graphs(bot_id,graph_id),
+    CHECK ((owner_host_id IS NULL) = (owner_incarnation IS NULL)),
+    CHECK ((owner_host_id IS NULL) = (owner_epoch IS NULL)),
+    CHECK (
+        (state='QUEUED' AND owner_host_id IS NULL AND attempt_count=0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
+        OR (state='RUNNING' AND owner_host_id IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
+        OR (state='SUCCEEDED' AND owner_host_id IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NOT NULL AND result_graph_revision IS NOT NULL
+            AND error_code IS NULL)
+        OR (state='FAILED' AND owner_host_id IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL
+            AND error_code IS NOT NULL)
+    )
+);
+CREATE INDEX graph_replacement_recent
+    ON graph_replacement_requests(bot_id,created_at DESC,operation_id DESC);
+
 CREATE FUNCTION reject_fact_mutation() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
@@ -375,6 +415,35 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION graph_replacement_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Forest graph replacement cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF ROW(
+        OLD.bot_id, OLD.operation_id, OLD.input_digest, OLD.requested_by,
+        OLD.expected_graph_revision, OLD.activation_id, OLD.created_at
+    ) IS DISTINCT FROM ROW(
+        NEW.bot_id, NEW.operation_id, NEW.input_digest, NEW.requested_by,
+        NEW.expected_graph_revision, NEW.activation_id, NEW.created_at
+    ) THEN
+        RAISE EXCEPTION 'Forest graph replacement identity is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.state IN ('SUCCEEDED','FAILED') THEN
+        RAISE EXCEPTION 'Forest graph replacement terminal state is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF NOT (
+        (OLD.state='QUEUED' AND NEW.state='RUNNING')
+        OR (OLD.state='RUNNING' AND NEW.state IN ('RUNNING','SUCCEEDED','FAILED'))
+    ) THEN
+        RAISE EXCEPTION 'Illegal graph replacement transition' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TRIGGER host_incarnations_immutable BEFORE UPDATE OR DELETE ON host_incarnations
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER generation_identity BEFORE UPDATE ON generations
@@ -383,6 +452,8 @@ CREATE TRIGGER call_identity BEFORE UPDATE ON calls
     FOR EACH ROW EXECUTE FUNCTION call_identity_guard();
 CREATE TRIGGER runtime_graph_identity BEFORE UPDATE ON runtime_graphs
     FOR EACH ROW EXECUTE FUNCTION runtime_graph_identity_guard();
+CREATE TRIGGER graph_replacement_transition BEFORE UPDATE OR DELETE ON graph_replacement_requests
+    FOR EACH ROW EXECUTE FUNCTION graph_replacement_guard();
 CREATE TRIGGER state_steps_immutable BEFORE UPDATE OR DELETE ON state_steps
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER state_revisions_immutable BEFORE UPDATE OR DELETE ON state_revisions

@@ -256,6 +256,7 @@ class CleanBotHost:
         self.registry: RuntimeModuleRegistry | None = None
         self._lease = None
         self._renewal_task: asyncio.Task | None = None
+        self._replacement_task: asyncio.Task | None = None
         self._replacement_lock: asyncio.Lock | None = None
         self._closing = False
         self._host_id = f"forest:{settings.bot_id}"
@@ -393,7 +394,9 @@ class CleanBotHost:
                     error_code="HOST_RESTARTED",
                 )
 
-    async def _assemble_registry(self) -> tuple[RuntimeModuleRegistry, object]:
+    async def _assemble_registry(
+        self, activation_id: str | None = None
+    ) -> tuple[RuntimeModuleRegistry, object]:
         capabilities = ModelCapabilities(
             deployment_id=self.settings.model_deployment_id,
             model=self.settings.model,
@@ -550,7 +553,10 @@ class CleanBotHost:
             + messaging.descriptors
             + (delivery.descriptor,)
         )
-        return RuntimeModuleRegistry(self, descriptors), messaging.adapter
+        return (
+            RuntimeModuleRegistry(self, descriptors, activation_id=activation_id),
+            messaging.adapter,
+        )
 
     async def start(self) -> None:
         await self.store.open()
@@ -570,6 +576,10 @@ class CleanBotHost:
             )
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
+            )
+            self._replacement_task = asyncio.create_task(
+                self._run_graph_replacements(),
+                name=f"bot-graph-replacement:{self.settings.bot_id}",
             )
         except BaseException:
             await self.close()
@@ -598,7 +608,12 @@ class CleanBotHost:
         registry.notify_work()
         return resumed
 
-    async def replace_runtime_graph(self) -> RuntimeModuleRegistry:
+    async def replace_runtime_graph(
+        self,
+        *,
+        activation_id: str | None = None,
+        expected_graph_revision: int | None = None,
+    ) -> RuntimeModuleRegistry:
         """Prewarm a candidate, drain the current graph, then publish and resume it."""
 
         lock = self._replacement_lock
@@ -608,7 +623,20 @@ class CleanBotHost:
             if self.registry is None or self._closing:
                 raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
             previous = self.registry
-            candidate, _adapter = await self._assemble_registry()
+            if (
+                expected_graph_revision is not None
+                and previous.graph_identity.graph_revision != expected_graph_revision
+            ):
+                raise ForestError(
+                    "RUNTIME_GRAPH_REVISION_CONFLICT",
+                    "RuntimeGraph revision changed before replacement",
+                    409,
+                )
+            candidate, _adapter = (
+                await self._assemble_registry()
+                if activation_id is None
+                else await self._assemble_registry(activation_id)
+            )
             previous_drained = False
             try:
                 await candidate.prewarm()
@@ -651,6 +679,81 @@ class CleanBotHost:
                 )
             return candidate
 
+    async def _run_graph_replacements(self) -> None:
+        while not self._closing:
+            request = await self._kernel.runtime.claim_graph_replacement(
+                self._authority(), lease_seconds=120
+            )
+            if request is None:
+                await asyncio.sleep(0.5)
+                continue
+            try:
+                await self._execute_graph_replacement(request)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                evidence = await self._kernel.runtime.graph_for_activation(
+                    request["activation_id"]
+                )
+                status = await self._kernel.runtime.status()
+                if (
+                    evidence is not None
+                    and evidence["state"] in {"ACTIVE", "RETIRED", "STOPPED"}
+                    and status["graph_revision"] >= evidence["graph_revision"]
+                ):
+                    await self._kernel.runtime.finish_graph_replacement(
+                        self._authority(),
+                        operation_id=request["operation_id"],
+                        graph_id=evidence["graph_id"],
+                        graph_revision=evidence["graph_revision"],
+                    )
+                    continue
+                error_code = (
+                    exc.code
+                    if isinstance(exc, ForestError)
+                    else "RUNTIME_GRAPH_REPLACEMENT_FAILED"
+                )
+                await self._kernel.runtime.fail_graph_replacement(
+                    self._authority(),
+                    operation_id=request["operation_id"],
+                    error_code=error_code,
+                )
+
+    async def _execute_graph_replacement(self, request: dict) -> None:
+        status = await self._kernel.runtime.status()
+        if status["graph_revision"] != request["expected_graph_revision"]:
+            evidence = await self._kernel.runtime.graph_for_activation(
+                request["activation_id"]
+            )
+            if evidence is not None and evidence["state"] in {
+                "ACTIVE",
+                "RETIRED",
+                "STOPPED",
+            }:
+                await self._kernel.runtime.finish_graph_replacement(
+                    self._authority(),
+                    operation_id=request["operation_id"],
+                    graph_id=evidence["graph_id"],
+                    graph_revision=evidence["graph_revision"],
+                )
+                return
+            await self._kernel.runtime.fail_graph_replacement(
+                self._authority(),
+                operation_id=request["operation_id"],
+                error_code="RUNTIME_GRAPH_REVISION_CONFLICT",
+            )
+            return
+        registry = await self.replace_runtime_graph(
+            activation_id=request["activation_id"],
+            expected_graph_revision=request["expected_graph_revision"],
+        )
+        await self._kernel.runtime.finish_graph_replacement(
+            self._authority(),
+            operation_id=request["operation_id"],
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+        )
+
     async def _renew_lease(self) -> None:
         while True:
             await asyncio.sleep(10)
@@ -667,6 +770,10 @@ class CleanBotHost:
     async def _close_locked(self) -> None:
         self._closing = True
         failure = None
+        replacement, self._replacement_task = self._replacement_task, None
+        if replacement is not None:
+            replacement.cancel()
+            await asyncio.gather(replacement, return_exceptions=True)
         task, self._renewal_task = self._renewal_task, None
         if task is not None:
             task.cancel()
@@ -759,15 +866,23 @@ async def run_clean_bot(settings: CleanBotSettings) -> None:
             os.replace(temporary, target)
         print(json.dumps(status, ensure_ascii=False), flush=True)
         stop_task = asyncio.create_task(stop.wait(), name=f"host-stop:{settings.bot_id}")
-        if management_task is None:
-            await stop_task
-        else:
-            done, _pending = await asyncio.wait(
-                (stop_task, management_task), return_when=asyncio.FIRST_COMPLETED
+        supervised = tuple(
+            task
+            for task in (
+                stop_task,
+                management_task,
+                host._renewal_task,
+                host._replacement_task,
             )
-            if management_task in done and not stop.is_set():
-                await management_task
-                raise RuntimeError("Management HTTP server stopped unexpectedly")
+            if task is not None
+        )
+        done, _pending = await asyncio.wait(
+            supervised, return_when=asyncio.FIRST_COMPLETED
+        )
+        if not stop.is_set():
+            failed = next(task for task in supervised if task in done)
+            await failed
+            raise RuntimeError(f"Bot supervisor task stopped unexpectedly: {failed.get_name()}")
     finally:
         try:
             if stop_task is not None and not stop_task.done():

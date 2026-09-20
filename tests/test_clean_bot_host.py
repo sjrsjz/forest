@@ -6,6 +6,7 @@ import json
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -210,6 +211,63 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
         "publish-candidate",
         "resume-runs",
         "close-previous",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_durable_reload_worker_executes_exact_revision_and_settles_request():
+    events = []
+
+    class Runtime:
+        async def status(self):
+            return {"graph_revision": 7}
+
+        async def finish_graph_replacement(self, lease, **values):
+            events.append(("finish", lease, values))
+
+        async def graph_for_activation(self, _activation_id):
+            return None
+
+    host = object.__new__(CleanBotHost)
+    host._kernel = SimpleNamespace(runtime=Runtime())
+    host._lease = "lease/one"
+    host._closing = False
+
+    async def replace_runtime_graph(**values):
+        events.append(("replace", values))
+        return SimpleNamespace(
+            graph_identity=SimpleNamespace(
+                graph_id="graph/eight",
+                graph_revision=8,
+            )
+        )
+
+    host.replace_runtime_graph = replace_runtime_graph
+    await host._execute_graph_replacement(
+        {
+            "operation_id": "reload/one",
+            "activation_id": "00000000-0000-0000-0000-000000000008",
+            "expected_graph_revision": 7,
+        }
+    )
+
+    assert events == [
+        (
+            "replace",
+            {
+                "activation_id": "00000000-0000-0000-0000-000000000008",
+                "expected_graph_revision": 7,
+            },
+        ),
+        (
+            "finish",
+            "lease/one",
+            {
+                "operation_id": "reload/one",
+                "graph_id": "graph/eight",
+                "graph_revision": 8,
+            },
+        ),
     ]
 
 

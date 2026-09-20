@@ -21,7 +21,7 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from forest.errors import ForestError
 from forest.packages import digest_json
@@ -495,7 +495,13 @@ _TRANSITIONS = {
 class RuntimeModuleRegistry:
     """Build and supervise modules from an acyclic descriptor graph."""
 
-    def __init__(self, runtime, descriptors: tuple[RuntimeModuleDescriptor, ...]):
+    def __init__(
+        self,
+        runtime,
+        descriptors: tuple[RuntimeModuleDescriptor, ...],
+        *,
+        activation_id: str | None = None,
+    ):
         self.runtime = runtime
         self.descriptors = tuple(descriptors)
         self.instances: dict[str, Any] = {}
@@ -513,7 +519,13 @@ class RuntimeModuleRegistry:
         self._replacement_operation_id: str | None = None
         self._generation_identities_bound = False
         self.graph_identity = None
-        self.activation_id = str(uuid4())
+        self.activation_id = str(uuid4()) if activation_id is None else activation_id
+        try:
+            UUID(self.activation_id)
+        except (TypeError, ValueError):
+            raise ForestError(
+                "RUNTIME_ACTIVATION_ID_INVALID", "Runtime activation identity is invalid", 422
+            ) from None
         component_ids = {descriptor.component_id for descriptor in self.descriptors}
         dynamic_requires = {component_id: set() for component_id in component_ids}
         if "agent.runtime" in component_ids:

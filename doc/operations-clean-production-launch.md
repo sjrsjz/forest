@@ -77,7 +77,7 @@ Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `f
 
 ## 尚未接入本图的能力
 
-- `shell.command` 的取消、重载、任务处理与审计查询命令；
+- `shell.command` 的受控任务处理命令；取消、审计查询和持久 RuntimeGraph 重载请求已经进入当前图；
 - 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
 - 多 Bot provisioning 与每 Bot 独立数据库/全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。

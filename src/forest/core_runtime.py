@@ -106,6 +106,7 @@ _MODULES = {
             "runtime.graph.retire",
             "runtime.call.admit",
             "runtime.state.publish",
+            "runtime.graph.reload",
             "kernel.uow.conversation.final-reply",
             "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
@@ -124,6 +125,7 @@ _MODULES = {
             "runtime.graph.retire",
             "runtime.call.admit",
             "runtime.state.publish",
+            "runtime.graph.reload",
         ),
     },
 }

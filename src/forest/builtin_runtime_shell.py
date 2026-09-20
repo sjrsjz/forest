@@ -53,6 +53,31 @@ def _maintenance_schema(command_id: str) -> dict:
     }
 
 
+def _reload_schema() -> dict:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "protocol": {"const": "forest.shell.arguments/1"},
+            "command_id": {"const": "core.reload"},
+            "arguments": {
+                "type": "object",
+                "properties": {
+                    "expected_graph_revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9_223_372_036_854_775_807,
+                    }
+                },
+                "required": ["expected_graph_revision"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["protocol", "command_id", "arguments"],
+        "additionalProperties": False,
+    }
+
+
 RUNTIME_SHELL_COMMANDS = (
     RuntimeShellCommandContribution(
         "core.status",
@@ -100,6 +125,18 @@ RUNTIME_SHELL_COMMANDS = (
         "P1",
         ("runtime.status.read",),
     ),
+    RuntimeShellCommandContribution(
+        "core.reload",
+        1,
+        "shell.core-runtime.execute",
+        1,
+        _reload_schema(),
+        "runtime.graph.reload",
+        "BOT",
+        "P1",
+        ("runtime.graph.reload",),
+        (("expect-graph", "expected_graph_revision"),),
+    ),
 )
 
 
@@ -122,6 +159,14 @@ def runtime_shell_service(context):
             )
             if member_failures:
                 text += f"；异常模块 {len(member_failures)} 个"
+            replacement = status.get("latest_replacement")
+            if replacement is not None:
+                text += (
+                    f"；最近重载={replacement['state']}"
+                    f" operation={replacement['operation_id']}"
+                )
+                if replacement.get("error_code"):
+                    text += f" error={replacement['error_code']}"
             return ShellCommandExecutionResult(text)
         if request.command_id == "module.list":
             status = await runtime.status()
@@ -132,6 +177,23 @@ def runtime_shell_service(context):
                     f"r{item['config_revision']} {item['generation_id']}"
                     for item in status["members"]
                 )
+            )
+        if request.command_id == "core.reload":
+            if set(request.arguments) != {"expected_graph_revision"} or type(
+                request.arguments["expected_graph_revision"]
+            ) is not int:
+                raise ForestError(
+                    "SHELL_ARGUMENTS_INVALID", "Shell reload arguments are invalid", 422
+                )
+            saved = await runtime.request_graph_replacement(
+                context.host_lease,
+                operation_id="shell-reload:" + request.request_id,
+                expected_graph_revision=request.arguments["expected_graph_revision"],
+                requested_by=request.principal_ref,
+            )
+            return ShellCommandExecutionResult(
+                f"Forest RuntimeGraph reload {saved['state']}: "
+                f"operation={saved['operation_id']} activation={saved['activation_id']}"
             )
         if request.command_id in {"core.pause", "core.resume"}:
             if set(request.arguments) != {"expected_maintenance_epoch"} or type(
