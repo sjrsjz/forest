@@ -68,6 +68,8 @@ RuntimeShellCommandContribution {
 
 模块命令 registry 是 RouteGraph 的一部分。发布事务把命令 schema 摘要、能力摘要、operation、服务等级和准确 owner Generation 写入权威 route。新 Generation 发布时一次切换，之后接纳的命令使用新 schema；已接纳请求继续绑定原 Generation 和参数载荷，执行时同时复核冻结 owner 和服务句柄 provider，除非该模块明确声明、宿主验证且管理员允许兼容 takeover。Forest 未发布基线不保留开发期 `shell-gate-v2…v12`、版本专用 Python registry 或旧 writer-generation 分派器。
 
+命令贡献还会形成生命周期依赖：`shell.command` 必须在所有命令提供者之后启动，并在它们之前停止接纳和排空；Agent 工具目录同理使 `agent.runtime` 依赖工具提供者。该依赖进入 Generation 描述事实与拓扑排序，贡献者反向依赖 Shell 时会作为环在图构建期拒绝。这样旧图热替换时，Shell 已领取的命令不会遇到先被 quiesce 的提供者。
+
 ## 4. 解析规则
 
 只允许去除 Adapter 已验证的开头 Bot mention 和前导空白，再匹配大小写敏感的完整 `#forest` token。引用、转发、代码块、图片 OCR、LLM 输出和附件说明不能成为可执行入口；`#forestX` 不是前缀。

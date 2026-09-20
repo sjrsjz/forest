@@ -509,6 +509,24 @@ class RuntimeModuleRegistry:
         self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4())
+        component_ids = {descriptor.component_id for descriptor in self.descriptors}
+        dynamic_requires = {component_id: set() for component_id in component_ids}
+        if "agent.runtime" in component_ids:
+            dynamic_requires["agent.runtime"].update(
+                descriptor.component_id
+                for descriptor in self.descriptors
+                if descriptor.agent_tools and descriptor.component_id != "agent.runtime"
+            )
+        if "shell.command" in component_ids:
+            dynamic_requires["shell.command"].update(
+                descriptor.component_id
+                for descriptor in self.descriptors
+                if descriptor.shell_commands and descriptor.component_id != "shell.command"
+            )
+        self._dynamic_requires = {
+            component_id: tuple(sorted(required))
+            for component_id, required in dynamic_requires.items()
+        }
         self.contract_router = RuntimeContractRouter(self)
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
         self.generation_authority = getattr(runtime, "generation_authority", None)
@@ -523,13 +541,20 @@ class RuntimeModuleRegistry:
             self.graph_store = RuntimeModuleGraphStore(store)
         self._build()
 
+    def _effective_requires(self, descriptor: RuntimeModuleDescriptor) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                (*descriptor.requires, *self._dynamic_requires[descriptor.component_id])
+            )
+        )
+
     def _descriptor_fact(self, descriptor: RuntimeModuleDescriptor) -> dict:
         instance = self.instances.get(descriptor.component_id)
         contract = getattr(instance, "management_contract", None)
         fact = {
             "protocol": "forest.runtime-module/1",
             "component_id": descriptor.component_id,
-            "requires": list(descriptor.requires),
+            "requires": list(self._effective_requires(descriptor)),
             "factory_ref": descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__,
             "artifact": descriptor.artifact.as_fact(),
             "management_contributions": [
@@ -588,7 +613,7 @@ class RuntimeModuleRegistry:
         context = PreparedGenerationContext(
             activation_id=self.activation_id,
             component_id=descriptor.component_id,
-            requires=descriptor.requires,
+            requires=self._effective_requires(descriptor),
             package_id=descriptor.artifact.package_id,
             package_version=descriptor.artifact.package_version,
             package_digest=descriptor.artifact.package_digest,
@@ -762,7 +787,10 @@ class RuntimeModuleRegistry:
                 (
                     item
                     for item in remaining.values()
-                    if all(required in resolved for required in item.requires)
+                    if all(
+                        required in resolved
+                        for required in self._effective_requires(item)
+                    )
                 ),
                 key=lambda item: item.component_id,
             )
@@ -1252,7 +1280,7 @@ class RuntimeModuleRegistry:
         return [
             {
                 "component_id": descriptor.component_id,
-                "requires": list(descriptor.requires),
+                "requires": list(self._effective_requires(descriptor)),
                 "state": self.states[descriptor.component_id],
                 "artifact": descriptor.artifact.as_fact(),
                 "graph_id": self.graph_identity.graph_id

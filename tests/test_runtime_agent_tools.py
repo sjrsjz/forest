@@ -158,3 +158,57 @@ def test_runtime_graph_rejects_ambiguous_shell_command_directory():
     with pytest.raises(ForestError) as caught:
         RuntimeModuleRegistry(_runtime(), descriptors)
     assert caught.value.code == "RUNTIME_SHELL_COMMAND_CONFLICT"
+
+
+def test_contribution_consumers_follow_provider_lifecycle_order():
+    descriptors = (
+        RuntimeModuleDescriptor(
+            "agent.runtime",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+        ),
+        RuntimeModuleDescriptor(
+            "shell.command",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+        ),
+        RuntimeModuleDescriptor(
+            "module.provider",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+            agent_tools=(_tool("inspect", "module.inspect"),),
+            shell_commands=(_command("module.shell-inspect"),),
+        ),
+    )
+
+    registry = RuntimeModuleRegistry(_runtime(), descriptors)
+
+    assert registry.order.index("module.provider") < registry.order.index("agent.runtime")
+    assert registry.order.index("module.provider") < registry.order.index("shell.command")
+    assert registry.describe()[0]["requires"] == ["module.provider"]
+    assert registry.describe()[1]["requires"] == ["module.provider"]
+
+
+def test_dynamic_command_dependency_participates_in_cycle_rejection():
+    descriptors = (
+        RuntimeModuleDescriptor(
+            "shell.command",
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+        ),
+        RuntimeModuleDescriptor(
+            "module.provider",
+            ("shell.command",),
+            lambda *_: object(),
+            _ARTIFACT,
+            shell_commands=(_command("module.shell-inspect"),),
+        ),
+    )
+
+    with pytest.raises(ForestError) as caught:
+        RuntimeModuleRegistry(_runtime(), descriptors)
+    assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
