@@ -155,6 +155,21 @@ class DeploymentSecretAuthority:
         row = await self._current(secret_ref)
         return self._metadata(row)
 
+    async def list_metadata(self, *, limit: int = 200) -> tuple[SecretMetadata, ...]:
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ForestError("SECRET_INPUT_INVALID", "Secret list limit is invalid", 422)
+        async with self.store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT s.*,s.current_version AS version,v.key_id "
+                    "FROM forest_deployment.secret_slots s "
+                    "JOIN forest_deployment.secret_versions v ON v.secret_ref=s.secret_ref "
+                    "AND v.version=s.current_version ORDER BY s.created_at,s.secret_ref LIMIT %s",
+                    (limit,),
+                )
+            ).fetchall()
+        return tuple(self._metadata(row) for row in rows)
+
     async def resolve(self, secret_ref: str) -> bytes:
         row = await self._current(secret_ref)
         key = await self._key(row["key_id"])

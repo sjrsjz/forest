@@ -9,9 +9,12 @@ from uuid import uuid4
 import psycopg
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
+from forest.deployment_management import deployment_management_components
+from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
@@ -709,6 +712,79 @@ async def test_official_provisioner_materializes_module_authorities_without_star
         assert target_name.startswith("forest_bot_supply_") and len(target_name) == 50
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(target_name)))
         await admin.close()
+
+
+@pytest.mark.postgres
+async def test_deployment_webui_discovers_components_and_keeps_secrets_write_only(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    bootstrap_profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    supervisor = SimpleNamespace(notify=lambda: None)
+    app = create_deployment_management_app(
+        deployment_id="deployment/test",
+        components=deployment_management_components(
+            catalog=repository,
+            secrets=secrets,
+            storage_profiles=storage_profiles,
+            bootstrap_profiles=bootstrap_profiles,
+            jobs=jobs,
+            supervisor=supervisor,
+        ),
+        access_token="deployment-management-test-token",
+    )
+    headers = {"x-forest-management-token": "deployment-management-test-token"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://forest.test"
+    ) as client:
+        assert (await client.get("/management/v1/runtime")).status_code == 401
+        runtime = await client.get("/management/v1/runtime", headers=headers)
+        assert runtime.status_code == 200
+        body = runtime.json()
+        assert body["runtime"]["graph_state"] == "CONTROL_PLANE"
+        assert {item["component_id"] for item in body["modules"]} == {
+            "deployment.catalog",
+            "deployment.secrets",
+            "deployment.provisioning",
+        }
+        assert (
+            await client.get("/static/deployment-provisioning.js")
+        ).status_code == 200
+        saved = await client.post(
+            "/management/v1/modules/deployment.secrets/actions/secret.put",
+            headers={**headers, "idempotency-key": "secret-web-1"},
+            json={
+                "secret_ref": "secret://web/test",
+                "purpose": "test.credential",
+                "plaintext": "never-return-this",
+                "expected_revision": 0,
+            },
+        )
+        assert saved.status_code == 200
+        assert "never-return-this" not in saved.text
+        listed = await client.post(
+            "/management/v1/modules/deployment.secrets/queries/secrets.list",
+            headers=headers,
+            json={},
+        )
+        assert listed.status_code == 200
+        assert listed.json()["items"][0]["secret_ref"] == "secret://web/test"
+        assert "never-return-this" not in listed.text
+        schemas = await client.post(
+            "/management/v1/modules/deployment.provisioning/queries/provisioning.schemas",
+            headers=headers,
+            json={},
+        )
+        assert schemas.status_code == 200
+        assert len(schemas.json()["schema_digests"]) == 6
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

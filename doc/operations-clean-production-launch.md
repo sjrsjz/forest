@@ -84,19 +84,22 @@ FOREST_DEPLOYMENT_DSN=postgresql://...
 FOREST_DEPLOYMENT_ID=forest/default
 FOREST_DEPLOYMENT_ACTIVE_KEY_ID=master/default/1
 FOREST_DEPLOYMENT_MASTER_KEY_FILE=/run/secrets/deployment_master_key
+FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE=/run/secrets/deployment_management_token
+FOREST_DEPLOYMENT_MANAGEMENT_HOST=127.0.0.1
+FOREST_DEPLOYMENT_MANAGEMENT_PORT=8081
 FOREST_SUPERVISOR_POLL_SECONDS=1
 FOREST_SUPERVISOR_MAX_STARTING=2
 ```
 
 主密钥文件只包含一个 Base64 值，解码后必须恰好为 32 字节。当前入口使用该 key ID 解密部署 Secret authority，并从 READY Bot 固化的 storage/bootstrap profile 构造各自 `CleanBotHost`；profile 中只保存 Secret 引用，凭据不会写入 Bot catalog。供应时只安装模块 authority 和 revision 1，不启动 Agent、Provider 或 OneBot 网络资源；供应 Job 成功发布 READY 后，Supervisor 才依据 runtime intent 启停 Bot。
 
-当前 deployment scope WebUI 尚未接入，因此该入口只能消费已经由 authority API 创建的 Secret、storage profile、bootstrap profile 与供应 Job。主密钥多版本 keyring、Web 身份/授权和 Supervisor Compose 编排仍是发布前缺口。
+Supervisor 同时启动 deployment scope WebUI。页面从三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建 storage/bootstrap profile、加入供应队列并切换 READY Bot 的 runtime intent。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权、主密钥多版本 keyring、跨 Bot 模块工作区路由和 Supervisor Compose 编排仍是发布前缺口。
 
 ## 尚未接入本图的能力
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
 - 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
-- 多 Bot 的 deployment scope 管理贡献、Secret/Web 身份控制面和 Supervisor 容器编排；正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
+- 多 Bot 的完整 Web 身份/细粒度授权、跨 Bot 模块工作区路由和 Supervisor 容器编排；deployment scope 管理贡献、Secret UI、正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。

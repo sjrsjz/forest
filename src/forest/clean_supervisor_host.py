@@ -13,6 +13,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
+from forest.deployment_management import deployment_management_components
+from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
@@ -43,6 +45,9 @@ class CleanSupervisorSettings:
     master_key: bytes
     poll_seconds: float = 1.0
     max_starting: int = 2
+    management_token: str = ""
+    management_host: str = "127.0.0.1"
+    management_port: int = 8081
 
     @classmethod
     def from_environment(cls) -> "CleanSupervisorSettings":
@@ -62,16 +67,36 @@ class CleanSupervisorSettings:
                 "Deployment master key must decode to 32 bytes",
                 422,
             )
+        token_path = Path(_required("FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE"))
+        try:
+            management_token = token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            raise ForestError(
+                "SUPERVISOR_MANAGEMENT_TOKEN_INVALID",
+                "Deployment management token file is unavailable",
+                422,
+            ) from None
+        if not 16 <= len(management_token) <= 4096:
+            raise ForestError(
+                "SUPERVISOR_MANAGEMENT_TOKEN_INVALID",
+                "Deployment management token length is invalid",
+                422,
+            )
         try:
             poll_seconds = float(os.environ.get("FOREST_SUPERVISOR_POLL_SECONDS", "1"))
             max_starting = int(os.environ.get("FOREST_SUPERVISOR_MAX_STARTING", "2"))
+            management_port = int(os.environ.get("FOREST_DEPLOYMENT_MANAGEMENT_PORT", "8081"))
         except ValueError:
             raise ForestError(
                 "SUPERVISOR_CONFIGURATION_INVALID",
                 "Supervisor concurrency or poll interval is invalid",
                 422,
             ) from None
-        if not 0.05 <= poll_seconds <= 30 or not 1 <= max_starting <= 32:
+        if (
+            not 0.05 <= poll_seconds <= 30
+            or not 1 <= max_starting <= 32
+            or not 1 <= management_port <= 65535
+        ):
             raise ForestError(
                 "SUPERVISOR_CONFIGURATION_INVALID",
                 "Supervisor concurrency or poll interval is outside its bound",
@@ -84,6 +109,9 @@ class CleanSupervisorSettings:
             master_key=key,
             poll_seconds=poll_seconds,
             max_starting=max_starting,
+            management_token=management_token,
+            management_host=os.environ.get("FOREST_DEPLOYMENT_MANAGEMENT_HOST", "127.0.0.1"),
+            management_port=management_port,
         )
 
 
@@ -125,6 +153,8 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
         provisioning_executor=executor,
     )
     stop = asyncio.Event()
+    management_server = None
+    management_task = None
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -134,6 +164,38 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
     stop_task = None
     try:
         await supervisor.start()
+        import uvicorn
+
+        management_server = uvicorn.Server(
+            uvicorn.Config(
+                create_deployment_management_app(
+                    deployment_id=settings.deployment_id,
+                    components=deployment_management_components(
+                        catalog=catalog,
+                        secrets=secrets,
+                        storage_profiles=storage_profiles,
+                        bootstrap_profiles=bootstrap_profiles,
+                        jobs=jobs,
+                        supervisor=supervisor,
+                    ),
+                    access_token=settings.management_token,
+                ),
+                host=settings.management_host,
+                port=settings.management_port,
+                access_log=False,
+                proxy_headers=False,
+                limit_concurrency=64,
+            )
+        )
+        management_server.install_signal_handlers = lambda: None
+        management_task = asyncio.create_task(
+            management_server.serve(), name="deployment-management-web"
+        )
+        while not management_server.started:
+            if management_task.done():
+                await management_task
+                raise RuntimeError("Deployment management server stopped during startup")
+            await asyncio.sleep(0.01)
         print(
             json.dumps(
                 {
@@ -146,7 +208,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
             flush=True,
         )
         stop_task = asyncio.create_task(stop.wait(), name="deployment-supervisor-stop")
-        tasks = (stop_task, *supervisor.owned_tasks())
+        tasks = (stop_task, management_task, *supervisor.owned_tasks())
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if not stop.is_set():
             failed = next(task for task in tasks if task in done)
@@ -156,5 +218,9 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
         if stop_task is not None and not stop_task.done():
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
+        if management_server is not None:
+            management_server.should_exit = True
+        if management_task is not None:
+            await asyncio.gather(management_task, return_exceptions=True)
         await supervisor.close()
         await store.close()
