@@ -356,6 +356,27 @@ class ConversationWorker:
                 try:
                     completion = await self.agent.execute(request)
                 except ForestError as exc:
+                    if exc.code == "AGENT_RUN_CANCELLED":
+                        reason_code = (
+                            exc.details.get("reason_code")
+                            if isinstance(exc.details, dict)
+                            and isinstance(exc.details.get("reason_code"), str)
+                            else "AGENT_RUN_CANCELLED"
+                        )
+                        await self.scheduler.cancel_run(
+                            actor,
+                            operation_id=_operation(
+                                "cancelled",
+                                conversation_id,
+                                actor.epoch,
+                                session_ref,
+                                run_ref,
+                            ),
+                            session_ref=session_ref,
+                            run_ref=run_ref,
+                            reason_code=reason_code,
+                        )
+                        return
                     if exc.code == "AGENT_PROTOCOL_FAILED":
                         await self.scheduler.fail_run(
                             actor,

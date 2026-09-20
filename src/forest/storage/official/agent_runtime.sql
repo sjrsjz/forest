@@ -120,6 +120,20 @@ CREATE UNIQUE INDEX one_unfinished_agent_run
 CREATE INDEX agent_run_recovery_idx
     ON agent_runs(bot_id,state,owner_expires_at,updated_at);
 
+CREATE TABLE run_cancel_requests (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    run_id text NOT NULL,
+    expected_checkpoint_seq bigint NOT NULL CHECK (expected_checkpoint_seq >= 0),
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    reason_code text NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 128),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,run_id),
+    FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id)
+);
+
 CREATE TABLE session_close_operations (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -546,6 +560,8 @@ CREATE TRIGGER run_inputs_immutable BEFORE UPDATE OR DELETE ON run_inputs
 CREATE TRIGGER run_input_triggers_immutable BEFORE UPDATE OR DELETE ON run_input_triggers
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
 CREATE TRIGGER run_checkpoints_immutable BEFORE UPDATE OR DELETE ON run_checkpoints
+    FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
+CREATE TRIGGER run_cancel_requests_immutable BEFORE UPDATE OR DELETE ON run_cancel_requests
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
 CREATE TRIGGER model_turns_immutable BEFORE UPDATE OR DELETE ON model_turns
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();

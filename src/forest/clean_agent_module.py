@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from forest.agent_execution import FrozenToolRoute
 from forest.agent_model_executor import AgentToolBinding
 from forest.agent_tool_executor import ToolDispatchResult
+from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS
 from forest.clean_agent_management import CleanAgentManagementContract
 from forest.clean_agent_runtime import CleanAgentRuntime
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
@@ -79,6 +81,15 @@ class _RoutedToolService:
             error_code="TOOL_RESULT_UNQUERYABLE_AFTER_RESTART",
             observation_ref="runtime-status:unqueryable",
         )
+
+
+def _cancel_wake(context):
+    conversation = context.participant("conversation.scheduler")
+
+    async def wake(**values):
+        return await conversation.wake_cancel_request(**values)
+
+    return wake
 
 
 async def bootstrap_clean_agent(
@@ -249,6 +260,11 @@ async def bootstrap_clean_agent(
             media=_RoutedMedia(
                 contracts.service("media.context.resolve", 1, owned_work=True),
             ),
+            cancel_wake=contracts.service(
+                "kernel.uow.agent.cancel-wake",
+                1,
+                admission_lane="CONTROL",
+            ),
             tool_route_factories=tuple(tool_route_factories),
             tool_requirements=tuple(tool_requirements),
             generation_verifier=kernel.runtime.verify_active_generation_in,
@@ -288,5 +304,14 @@ async def bootstrap_clean_agent(
         ),
         storage=storage,
         factory_protocol="forest.contract-module-factory/1",
+        kernel_services=(
+            RuntimeKernelServiceSpec(
+                "kernel.uow.agent.cancel-wake",
+                1,
+                ("conversation.scheduler",),
+                _cancel_wake,
+            ),
+        ),
+        shell_commands=AGENT_SHELL_COMMANDS,
     )
     return CleanAgentModule(repository, descriptor, configuration, grants)

@@ -200,6 +200,84 @@ class DurableSingleAgentExecution:
             reload_resume_phase=resume_phase,
         )
 
+    async def _apply_requested_cancel(self, owner, recovery: dict | None = None) -> bool:
+        recovery = recovery or await self.agent.load_recovery(owner.run_id)
+        cancellation = recovery.get("cancel_request")
+        if cancellation is None:
+            return False
+        phase = recovery["state"]
+        if phase in {"MODEL_PENDING", "BLOCKED_UNKNOWN", "RELOAD_WAIT"}:
+            return False
+        if phase in {"COMPLETED", "FAILED", "CANCELLED"}:
+            return phase == "CANCELLED"
+        if phase in {"WAIT_TOOL", "WAIT_APPROVAL"}:
+            tool = recovery.get("current_tool")
+            if tool is None:
+                raise ForestError(
+                    "AGENT_HISTORY_INCOMPLETE",
+                    "Agent cancellation found no current tool",
+                    500,
+                )
+            if tool["state"] in {"DISPATCHING", "UNKNOWN"}:
+                return False
+            await self.agent.observe_tool(
+                owner,
+                observation_operation_id=_stable(
+                    "tool-cancel", tool["tool_call_id"], cancellation["operation_id"]
+                ),
+                tool_call_id=tool["tool_call_id"],
+                observed_state="CANCELLED",
+                evidence_kind="AUTHORIZATION",
+                effect_observation_ref=cancellation["operation_id"],
+                error_code=cancellation["reason_code"],
+            )
+            recovery = await self.agent.load_recovery(owner.run_id)
+            phase = recovery["state"]
+        checkpoint_id = _stable(
+            "checkpoint-cancel", owner.run_id, cancellation["operation_id"]
+        )
+        epoch = await self.payloads.epoch()
+        saved = await self.payloads.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            media_type="application/json",
+            content=json.dumps(
+                {
+                    "phase": "CANCELLED",
+                    "operation_id": cancellation["operation_id"],
+                    "reason_code": cancellation["reason_code"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            expected_deletion_epoch=epoch,
+        )
+        await self.agent.transition(
+            owner,
+            checkpoint_id=checkpoint_id,
+            expected_phase=phase,
+            target_phase="CANCELLED",
+            state=AgentPayloadRef(
+                saved.payload_id,
+                saved.content_digest,
+                "agent.runtime",
+                "checkpoint.state",
+                checkpoint_id,
+            ),
+            error_code=cancellation["reason_code"],
+        )
+        return True
+
+    @staticmethod
+    def _cancelled(run: dict) -> ForestError:
+        return ForestError(
+            "AGENT_RUN_CANCELLED",
+            "Agent Run was cancelled by a durable management request",
+            409,
+            details={"run_id": run["run_id"], "reason_code": run.get("error_code")},
+        )
+
     async def _with_protocol_repair(self, recovery: dict, snapshot: dict) -> tuple[dict, str]:
         failure = recovery.get("current_protocol_failure")
         if (
@@ -245,7 +323,9 @@ class DurableSingleAgentExecution:
         run = await self._load_or_start(request)
         if run["state"] == "COMPLETED":
             return self._completion(run, already_committed=True)
-        if run["state"] in {"FAILED", "CANCELLED"}:
+        if run["state"] == "CANCELLED":
+            raise self._cancelled(run)
+        if run["state"] == "FAILED":
             raise ForestError(
                 run.get("error_code") or f"AGENT_RUN_{run['state']}",
                 f"Agent Run is already {run['state'].lower()}",
@@ -263,6 +343,8 @@ class DurableSingleAgentExecution:
             while True:
                 recovery = await self.agent.load_recovery(request.run_ref)
                 state = recovery["state"]
+                if await self._apply_requested_cancel(owner, recovery):
+                    raise self._cancelled(await self.agent.load(request.run_ref))
                 if state == "COMPLETED":
                     return self._completion(recovery, already_committed=True)
                 if state == "FINAL_READY":
@@ -494,6 +576,12 @@ class DurableSingleAgentExecution:
                 409,
                 details={"operation_id": exc.operation_id},
             ) from exc
+        except ForestError as exc:
+            if exc.code != "AGENT_CANCEL_REQUESTED":
+                raise
+            if not await self._apply_requested_cancel(owner):
+                raise
+            raise self._cancelled(await self.agent.load(request.run_ref)) from exc
         finally:
             try:
                 await self.agent.release_run(owner)

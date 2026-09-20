@@ -185,6 +185,7 @@ async def test_clean_agent_runtime_freezes_core_prompt_and_converges_start(
         b"memory_graph",
     ):
         assert forbidden not in lowered
+    assert b"run_cancel_requests" in lowered
     assert CORE_PROMPT
     assert CORE_PROMPT_SHA256.startswith("sha256:")
 
@@ -221,6 +222,204 @@ async def test_clean_agent_runtime_freezes_core_prompt_and_converges_start(
             )
         ).fetchall()
         assert "core_prompt" not in {row["column_name"] for row in columns}
+
+
+@pytest.mark.postgres
+async def test_cancel_request_is_checkpoint_cas_idempotent_and_unique_per_run(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+
+    request = dict(
+        operation_id="cancel/one",
+        run_id="run/one",
+        expected_checkpoint_seq=0,
+        requested_by="qq:3244658766",
+        reason_code="ADMIN_REQUESTED",
+    )
+    saved = await agent.request_cancel(**request)
+    assert await agent.request_cancel(**request) == saved
+    assert saved["conversation_ref"] == "group/one"
+    assert (await agent.load("run/one"))["cancel_request"]["operation_id"] == "cancel/one"
+
+    with pytest.raises(ForestError) as caught:
+        await agent.request_cancel(**{**request, "reason_code": "DIFFERENT"})
+    assert caught.value.code == "AGENT_CANCEL_CONFLICT"
+
+    with pytest.raises(ForestError) as caught:
+        await agent.request_cancel(**{**request, "operation_id": "cancel/two"})
+    assert caught.value.code == "AGENT_CANCEL_ALREADY_REQUESTED"
+
+
+@pytest.mark.postgres
+async def test_cancel_request_fences_a_prepared_model_attempt_before_handoff(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/cancel-fence")
+    projection = await _payload(
+        payloads,
+        owner_kind="model.projection",
+        owner_id="request/cancel-fence",
+        body=b'{"messages":[]}',
+        source_id="run/one",
+    )
+    plan = ModelRequestPlan(
+        request_id="request/cancel-fence",
+        request_kind="PRIMARY",
+        provider_component_id="provider.test",
+        provider_generation_id="generation/provider/1",
+        provider_profile_ref="profile/test",
+        model_ref="model/test",
+        instruction_channel="SYSTEM",
+        capability_digest="sha256:" + "a" * 64,
+        projection=projection,
+        projected_content_digest=projection.digest,
+        source_manifest_digest="sha256:" + "b" * 64,
+        output_token_budget=1024,
+    )
+    await agent.prepare_model_request(owner, plan)
+    wire = await _payload(
+        payloads,
+        owner_kind="model.wire",
+        owner_id="attempt/cancel-fence",
+        body=b'{"wire":"exact"}',
+        source_id="run/one",
+        owner_component_id="provider.test",
+    )
+    await agent.prepare_model_attempt(
+        owner,
+        request_id=plan.request_id,
+        attempt_id="attempt/cancel-fence",
+        effect_operation_ref="effect/model/cancel-fence",
+        wire=wire,
+    )
+    await agent.request_cancel(
+        operation_id="cancel/fence",
+        run_id="run/one",
+        expected_checkpoint_seq=0,
+        requested_by="qq:3244658766",
+        reason_code="ADMIN_REQUESTED",
+    )
+
+    with pytest.raises(ForestError) as caught:
+        await agent.mark_model_handoff(
+            owner,
+            request_id=plan.request_id,
+            attempt_id="attempt/cancel-fence",
+        )
+    assert caught.value.code == "AGENT_CANCEL_REQUESTED"
+    loaded = await agent.load("run/one")
+    assert loaded["state"] == "PREPARING_MODEL"
+
+
+@pytest.mark.postgres
+async def test_execution_converges_a_safe_cancel_request_to_terminal_state(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/cancel-apply")
+    await agent.request_cancel(
+        operation_id="cancel/apply",
+        run_id="run/one",
+        expected_checkpoint_seq=0,
+        requested_by="qq:3244658766",
+        reason_code="ADMIN_REQUESTED",
+    )
+    execution = DurableSingleAgentExecution(
+        agent=agent,
+        provider=object(),
+        memory=object(),
+        media=object(),
+        payloads=payloads,
+        owner_id="worker/cancel-apply",
+    )
+
+    assert await execution._apply_requested_cancel(owner) is True
+    loaded = await agent.load("run/one")
+    assert loaded["state"] == "CANCELLED"
+    assert loaded["error_code"] == "ADMIN_REQUESTED"
+    assert loaded["session"]["state"] == "CANCELLED"
+
+
+@pytest.mark.postgres
+async def test_cancel_and_model_handoff_race_has_one_durable_order(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/cancel-race")
+    projection = await _payload(
+        payloads,
+        owner_kind="model.projection",
+        owner_id="request/cancel-race",
+        body=b'{"messages":[]}',
+        source_id="run/one",
+    )
+    plan = ModelRequestPlan(
+        request_id="request/cancel-race",
+        request_kind="PRIMARY",
+        provider_component_id="provider.test",
+        provider_generation_id="generation/provider/1",
+        provider_profile_ref="profile/test",
+        model_ref="model/test",
+        instruction_channel="SYSTEM",
+        capability_digest="sha256:" + "a" * 64,
+        projection=projection,
+        projected_content_digest=projection.digest,
+        source_manifest_digest="sha256:" + "b" * 64,
+        output_token_budget=1024,
+    )
+    await agent.prepare_model_request(owner, plan)
+    wire = await _payload(
+        payloads,
+        owner_kind="model.wire",
+        owner_id="attempt/cancel-race",
+        body=b'{"wire":"exact"}',
+        source_id="run/one",
+        owner_component_id="provider.test",
+    )
+    await agent.prepare_model_attempt(
+        owner,
+        request_id=plan.request_id,
+        attempt_id="attempt/cancel-race",
+        effect_operation_ref="effect/model/cancel-race",
+        wire=wire,
+    )
+
+    cancellation, handoff = await asyncio.gather(
+        agent.request_cancel(
+            operation_id="cancel/race",
+            run_id="run/one",
+            expected_checkpoint_seq=0,
+            requested_by="qq:3244658766",
+            reason_code="ADMIN_REQUESTED",
+        ),
+        agent.mark_model_handoff(
+            owner,
+            request_id=plan.request_id,
+            attempt_id="attempt/cancel-race",
+        ),
+        return_exceptions=True,
+    )
+
+    assert not isinstance(cancellation, BaseException)
+    loaded = await agent.load("run/one")
+    assert loaded["cancel_request"]["operation_id"] == "cancel/race"
+    if isinstance(handoff, BaseException):
+        assert isinstance(handoff, ForestError)
+        assert handoff.code == "AGENT_CANCEL_REQUESTED"
+        assert loaded["state"] == "PREPARING_MODEL"
+    else:
+        assert handoff["state"] == "DISPATCHING"
+        assert loaded["state"] == "MODEL_PENDING"
 
 
 @pytest.mark.postgres

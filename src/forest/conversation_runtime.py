@@ -266,6 +266,17 @@ class CleanConversationSchedulerRuntime:
             self.notify()
         return result
 
+    async def wake_cancel_request(self, conversation_id: str, **values):
+        result = await self._repository_call(
+            "wake_cancel_request",
+            conversation_id=conversation_id,
+            admission_lane="CONTROL",
+            **values,
+        )
+        if result["resumed"]:
+            self.notify()
+        return result
+
     async def select_input(self, actor, operation_id: str, **values):
         if self.input_selection_port is None:
             raise ForestError(
@@ -322,6 +333,14 @@ class CleanConversationSchedulerRuntime:
     async def fail_run(self, actor, **values):
         return await self._repository_call(
             "fail_run_in",
+            actor=actor,
+            owned_work=True,
+            **values,
+        )
+
+    async def cancel_run(self, actor, **values):
+        return await self._repository_call(
+            "cancel_run_in",
             actor=actor,
             owned_work=True,
             **values,

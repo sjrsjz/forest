@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 
 from forest.agent_execution import DurableSingleAgentExecution
+from forest.builtin_agent_shell import execute_agent_shell
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.storage.agent_runtime_authority import AgentPayloadRef
@@ -62,12 +63,14 @@ class CleanAgentRuntime:
             {"service_id": "agent.run.advance", "version": 1},
             {"service_id": "agent.model.observe", "version": 1},
             {"service_id": "agent.tool.observe", "version": 1},
+            {"service_id": "shell.agent.execute", "version": 1},
         ],
         "requires": [
             {"service_id": "provider.model.project", "version": 1},
             {"service_id": "provider.model.dispatch", "version": 1},
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "media.context.resolve", "version": 1},
+            {"service_id": "kernel.uow.agent.cancel-wake", "version": 1},
         ],
     }
     state_schema = 1
@@ -80,6 +83,7 @@ class CleanAgentRuntime:
             ("agent.run.advance", 1): self.transition,
             ("agent.model.observe", 1): self.observe_model,
             ("agent.tool.observe", 1): self.observe_tool,
+            ("shell.agent.execute", 1): self.execute_shell_command,
         }
 
     def __init__(
@@ -94,6 +98,7 @@ class CleanAgentRuntime:
         provider=None,
         memory=None,
         media=None,
+        cancel_wake=None,
         tool_route_factories=(),
         tool_requirements=(),
     ):
@@ -104,6 +109,7 @@ class CleanAgentRuntime:
         self.provider = provider
         self.memory = memory
         self.media = media
+        self.cancel_wake = cancel_wake
         self.tool_route_factories = tuple(tool_route_factories)
         if any(not callable(factory) for factory in self.tool_route_factories):
             raise ValueError("Agent tool route factories must be callable")
@@ -305,6 +311,9 @@ class CleanAgentRuntime:
             )
         return await self.execution.execute(request)
 
+    async def execute_shell_command(self, request):
+        return await execute_agent_shell(self, request)
+
     async def prepare_finalization(
         self, *, run_id: str, reply_ref: str
     ) -> PreparedAgentFinalization:
@@ -505,6 +514,32 @@ class CleanAgentRuntime:
     async def transition_in(self, conn, owner, **values):
         await self._verify_member_in(conn)
         return await self.repository.transition(owner, _connection=conn, **values)
+
+    async def request_cancel(self, **values):
+        saved = await self._call(
+            "request_cancel",
+            admission_lane="CONTROL",
+            **values,
+        )
+        if self.cancel_wake is None:
+            raise ForestError(
+                "AGENT_CANCEL_WAKE_UNAVAILABLE",
+                "Agent cancellation wake coordinator is unavailable",
+                503,
+            )
+        await self.cancel_wake(
+            conversation_id=saved["conversation_ref"],
+            run_ref=saved["run_id"],
+            cancellation_operation_id=saved["operation_id"],
+        )
+        return saved
+
+    async def cancel_request(self, run_id: str):
+        return await self._call(
+            "cancel_request",
+            run_id=run_id,
+            owned_work=True,
+        )
 
     async def resume_reload_wait(self, operation_id: str):
         resumed = await self._call(

@@ -115,6 +115,7 @@ _MODULES = {
             "kernel.uow.shell.binding-fence",
             "kernel.uow.shell.route-fence",
             "kernel.uow.shell.authorization.consume",
+            "kernel.uow.agent.cancel-wake",
             "shell.core-runtime.execute",
             "agent.tool.runtime-status",
         ),

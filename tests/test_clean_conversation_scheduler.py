@@ -434,6 +434,57 @@ async def test_terminal_run_failure_settles_exact_claims_and_releases_lane(
 
 
 @pytest.mark.postgres
+async def test_terminal_run_cancellation_settles_exact_claims_and_releases_lane(
+    clean_scheduler,
+):
+    store, storage, payloads, scheduler = clean_scheduler
+    conversation = "group/protocol-cancelled"
+    await _admit(scheduler, payloads, conversation, 1, "user/a")
+    await _classify(scheduler, conversation, 1, "TRIGGER", "user/a")
+    actor = await scheduler.acquire_actor(conversation, "worker/protocol-cancelled")
+    selected = await scheduler.select_input(
+        actor,
+        "select/protocol-cancelled",
+        boundary="IDLE",
+        session_ref="session/protocol-cancelled",
+        run_ref="run/protocol-cancelled",
+    )
+    assert selected["trigger_ids"] == ["trigger/group/protocol-cancelled/1"]
+    cancelled = await scheduler.cancel_run(
+        actor,
+        operation_id="cancel/protocol-cancelled",
+        session_ref="session/protocol-cancelled",
+        run_ref="run/protocol-cancelled",
+        reason_code="ADMIN_REQUESTED",
+    )
+    assert cancelled == ("trigger/group/protocol-cancelled/1",)
+    assert await scheduler.cancel_run(
+        actor,
+        operation_id="cancel/protocol-cancelled",
+        session_ref="session/protocol-cancelled",
+        run_ref="run/protocol-cancelled",
+        reason_code="ADMIN_REQUESTED",
+    ) == cancelled
+    assert (await scheduler.execution_state(actor))["active"] is False
+    async with store.pool.connection() as conn:
+        trigger = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT status,claimed_session_ref,claimed_run_ref,terminal_reason_code "
+                    "FROM {}.conversation_triggers WHERE bot_id=%s AND trigger_id=%s"
+                ).format(sql.Identifier(storage.spec.namespace)),
+                (store.bot_id, cancelled[0]),
+            )
+        ).fetchone()
+    assert dict(trigger) == {
+        "status": "CANCELLED",
+        "claimed_session_ref": "session/protocol-cancelled",
+        "claimed_run_ref": "run/protocol-cancelled",
+        "terminal_reason_code": "ADMIN_REQUESTED",
+    }
+
+
+@pytest.mark.postgres
 async def test_active_session_is_a_recovery_candidate_even_without_new_mail(
     clean_scheduler,
 ):

@@ -55,8 +55,9 @@
 4. Agent 用 Scheduler 返回的冻结 Context view 构造模型 snapshot。每个单元保留 `conversation_id`、平台、`channel_kind/channel_ref`、Binding、事件、作者快照和受管 payload 来源；不能从显示名或消息正文推断身份。
 5. Agent 调用冻结的 Provider contract。FunctionCall 只进入同一 Run 的顺序工具步骤；工具通过当前 RuntimeGraph 的模块贡献目录解析准确 executor Generation，不创建另一 Agent。
 6. 工具完成或明确失败后，状态机回到同一 Run 的下一次模型调用；`DISPATCHING` 结果丢失时只查询原 effect，无法查询则进入 `BLOCKED_UNKNOWN`。
-7. 终止 ModelTurn 产生 `FinalCandidate`。Scheduler 生成 `ReplyCommitPlan` 并调用内核 UnitOfWork；内核解析三 participant，原子提交 Agent Run `COMPLETED`、正式 `REPLY`、trigger `ANSWERED` 与 CHAT SendIntent。
-8. Scheduler 在 `SESSION_END` 边界选择后继：有新 trigger 就在同一 Session 建立唯一后继 Run；没有 trigger 就静默排空普通尾部并关闭 Session。
+7. 管理取消先写入绑定 `run_id`、期望 checkpoint、主体和原因的不可变 intent。模型/工具的最终 handoff 事务与 intent 检查共享 Run 锁，因此并发只可能确定地落为“取消阻止本次交接”或“交接已发生、先观察再取消”。取消 checkpoint 关闭 Agent Session；Conversation 侧再以幂等终态事实取消准确 trigger 并释放 lane，崩溃恢复不得将其误报为失败或重新回答。
+8. 终止 ModelTurn 产生 `FinalCandidate`。Scheduler 生成 `ReplyCommitPlan` 并调用内核 UnitOfWork；内核解析三 participant，原子提交 Agent Run `COMPLETED`、正式 `REPLY`、trigger `ANSWERED` 与 CHAT SendIntent。
+9. Scheduler 在 `SESSION_END` 边界选择后继：有新 trigger 就在同一 Session 建立唯一后继 Run；没有 trigger 就静默排空普通尾部并关闭 Session。
 
 “Agent 正在工作时有新触发”只改变下一次模型调用的输入版本，不启动并发响应；模型流和未闭合工具组中途不修改请求。Agent 完成且没有新 trigger 时，静默排空剩余普通消息，不额外调用模型。
 

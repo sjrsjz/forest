@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS, execute_agent_shell
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS, execute_memory_shell
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
@@ -154,6 +155,87 @@ def test_audit_tail_parser_is_derived_from_kernel_audit_schema():
     }
     assert parser.parse("audit tail --limit 11").document["arguments"] == {
         "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
+
+
+def test_agent_run_commands_are_derived_from_agent_owned_schemas():
+    parser = ShellCommandParser(None, AGENT_SHELL_COMMANDS)
+
+    inspected = parser.parse("run inspect --run-id run/42")
+    cancelled = parser.parse(
+        "run cancel --run-id run/42 --expect-checkpoint 7 --reason ADMIN_REQUESTED"
+    )
+
+    assert inspected.document["arguments"] == {"run_id": "run/42"}
+    assert cancelled.document["arguments"] == {
+        "run_id": "run/42",
+        "expected_checkpoint_seq": 7,
+        "reason_code": "ADMIN_REQUESTED",
+    }
+    assert parser.parse("run cancel --run-id run/42").document["arguments"] == {
+        "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_run_shell_uses_agent_runtime_control_port():
+    class Runtime:
+        def __init__(self):
+            self.cancel = None
+
+        async def load(self, run_id):
+            assert run_id == "run/42"
+            return {
+                "run_id": run_id,
+                "state": "PREPARING_MODEL",
+                "checkpoint_seq": 7,
+                "input_revision": 2,
+                "session_id": "session/42",
+                "session": {"conversation_ref": "onebot:group:933179609"},
+                "cancel_request": None,
+            }
+
+        async def request_cancel(self, **values):
+            self.cancel = values
+            return {
+                "run_id": values["run_id"],
+                "expected_checkpoint_seq": values["expected_checkpoint_seq"],
+                "operation_id": values["operation_id"],
+            }
+
+    runtime = Runtime()
+    inspected = await execute_agent_shell(
+        runtime,
+        ShellCommandExecutionRequest(
+            "run.inspect",
+            1,
+            {"run_id": "run/42"},
+            "request/inspect",
+            "qq:3244658766",
+            "onebot:group:933179609",
+        ),
+    )
+    cancelled = await execute_agent_shell(
+        runtime,
+        ShellCommandExecutionRequest(
+            "run.cancel",
+            1,
+            {"run_id": "run/42", "expected_checkpoint_seq": 7},
+            "request/cancel",
+            "qq:3244658766",
+            "onebot:group:933179609",
+        ),
+    )
+
+    assert "state=PREPARING_MODEL checkpoint=7" in inspected.text
+    assert "conversation=onebot:group:933179609 cancel=none" in inspected.text
+    assert "cancellation accepted" in cancelled.text
+    assert runtime.cancel == {
+        "operation_id": "shell-cancel:request/cancel",
+        "run_id": "run/42",
+        "expected_checkpoint_seq": 7,
+        "requested_by": "qq:3244658766",
+        "reason_code": "ADMIN_REQUESTED",
     }
 
 

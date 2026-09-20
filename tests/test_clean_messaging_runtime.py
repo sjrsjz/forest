@@ -23,6 +23,7 @@ from forest.agent_tool_executor import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
@@ -460,6 +461,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             (item.command_id, item.command_version)
             for item in (
                 *RUNTIME_SHELL_COMMANDS,
+                *AGENT_SHELL_COMMANDS,
                 *AUDIT_SHELL_COMMANDS,
                 *MEMORY_SHELL_COMMANDS,
             )
@@ -481,7 +483,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert set(agent_runtime.execution.routes) == {"runtime_status"}
         assert runtime_descriptor.agent_tools == (RUNTIME_STATUS_TOOL,)
         assert agent.descriptor.agent_tools == ()
-        assert agent.descriptor.kernel_services == ()
+        assert [item.service_id for item in agent.descriptor.kernel_services] == [
+            "kernel.uow.agent.cancel-wake"
+        ]
         runtime_tool = agent_runtime.execution.routes["runtime_status"]
         assert runtime_tool.binding.component_id == "kernel.runtime"
         assert runtime_tool.binding.generation_id == registry.graph_identity.generations[

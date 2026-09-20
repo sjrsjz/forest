@@ -94,6 +94,8 @@ RuntimeShellCommandContribution {
 
 优先级只决定可运行工作领取顺序，不改变历史顺序、权限、锁序或目标资源所有权。P0 可以登记取消意图，不能在另一个事务持锁或网络调用中间抢夺对象。最终效果仍由目标模块在安全点检查 cancellation/revision/fence。
 
+Agent Run 取消采用持久两阶段协议。`run cancel` 只以 `run_id + expected_checkpoint_seq` 向 `agent.runtime` 登记不可变取消意图；并发请求由 Run 行锁和唯一目标约束确定唯一胜者，旧 checkpoint 请求直接冲突。Agent 在模型或工具交接事务内再次检查该意图：若取消先提交，则不得把新外部调用推进到 `DISPATCHING`；若外部交接先提交，则保留真实结果并在观察结果后的下一个安全边界取消，不能伪称请求从未发生。`MODEL_PENDING`、已 `DISPATCHING` 的工具以及 `BLOCKED_UNKNOWN` 不能直接改写为已取消。Agent 写入 `CANCELLED` checkpoint 后，Conversation Worker 以独立幂等终态操作把该 Run 已领取的 trigger 标记为 `CANCELLED` 并释放 lane；两步间崩溃时，恢复 Worker 从持久 Agent 终态继续完成 Conversation 收敛。
+
 每个 Bot、Binding、主体和命令定义都有待处理上限与令牌桶；P0、普通 CONTROL 和拒绝回执使用相互隔离的极小容量，防止普通查询耗尽救援入口。超限得到固定、脱敏、可去重结果，不转给 Agent。资格缓存只用于接入保护，最终授权始终读权威状态。
 
 ## 6. 持久请求状态机

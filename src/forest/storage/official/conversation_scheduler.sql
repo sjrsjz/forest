@@ -426,14 +426,15 @@ CREATE INDEX lane_wakeup_idx ON conversation_lanes(
     bot_id,resume_not_before,mailbox_revision,conversation_id
 );
 
-CREATE TABLE trigger_failures (
+CREATE TABLE trigger_terminal_operations (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     conversation_id text NOT NULL,
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
-    failed_session_ref text NOT NULL
-        CHECK (octet_length(failed_session_ref) BETWEEN 1 AND 256),
-    failed_run_ref text NOT NULL CHECK (octet_length(failed_run_ref) BETWEEN 1 AND 256),
+    terminal_session_ref text NOT NULL
+        CHECK (octet_length(terminal_session_ref) BETWEEN 1 AND 256),
+    terminal_run_ref text NOT NULL CHECK (octet_length(terminal_run_ref) BETWEEN 1 AND 256),
+    resulting_status text NOT NULL CHECK (resulting_status IN ('FAILED','CANCELLED')),
     reason_code text NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 128),
     actor_owner_id text NOT NULL CHECK (octet_length(actor_owner_id) BETWEEN 1 AND 256),
     actor_epoch bigint NOT NULL CHECK (actor_epoch > 0),
@@ -444,7 +445,7 @@ CREATE TABLE trigger_failures (
         REFERENCES conversation_lanes(bot_id, conversation_id)
 );
 
-CREATE TABLE trigger_failure_items (
+CREATE TABLE trigger_terminal_items (
     bot_id text NOT NULL,
     operation_id text NOT NULL,
     item_index integer NOT NULL CHECK (item_index >= 0),
@@ -452,7 +453,7 @@ CREATE TABLE trigger_failure_items (
     PRIMARY KEY (bot_id, operation_id, item_index),
     UNIQUE (bot_id, operation_id, trigger_id),
     FOREIGN KEY (bot_id, operation_id)
-        REFERENCES trigger_failures(bot_id, operation_id),
+        REFERENCES trigger_terminal_operations(bot_id, operation_id),
     FOREIGN KEY (bot_id, trigger_id)
         REFERENCES conversation_triggers(bot_id, trigger_id)
 );
@@ -537,9 +538,9 @@ CREATE TRIGGER trigger_requeues_immutable BEFORE UPDATE OR DELETE ON trigger_req
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER trigger_requeue_items_immutable BEFORE UPDATE OR DELETE ON trigger_requeue_items
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
-CREATE TRIGGER trigger_failures_immutable BEFORE UPDATE OR DELETE ON trigger_failures
+CREATE TRIGGER trigger_terminal_operations_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_operations
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
-CREATE TRIGGER trigger_failure_items_immutable BEFORE UPDATE OR DELETE ON trigger_failure_items
+CREATE TRIGGER trigger_terminal_items_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_items
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_units_immutable BEFORE UPDATE OR DELETE ON context_units
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();

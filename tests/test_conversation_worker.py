@@ -70,6 +70,7 @@ class FakeScheduler:
         self.selections: list[tuple[str, str, str | None, str | None]] = []
         self.deferrals: list[tuple[str, float, str, str | None]] = []
         self.failed_runs: list[dict] = []
+        self.cancelled_runs: list[dict] = []
 
     async def claimable_conversations(self, *, limit):
         return tuple(self.lanes)[:limit]
@@ -149,6 +150,11 @@ class FakeScheduler:
 
     async def fail_run(self, actor, **values):
         self.failed_runs.append({"conversation_id": actor.conversation_id, **values})
+        self.lanes[actor.conversation_id].active = None
+        return self.lanes[actor.conversation_id].claimed
+
+    async def cancel_run(self, actor, **values):
+        self.cancelled_runs.append({"conversation_id": actor.conversation_id, **values})
         self.lanes[actor.conversation_id].active = None
         return self.lanes[actor.conversation_id].claimed
 
@@ -402,6 +408,41 @@ async def test_terminal_protocol_failure_settles_claimed_triggers_and_releases_l
     assert failure["session_ref"] == "session/existing"
     assert failure["run_ref"] == "run/existing"
     assert failure["reason_code"] == "AGENT_PROTOCOL_FAILED"
+    assert scheduler.lanes["group/a"].active is None
+    assert scheduler.actors == set()
+    assert scheduler.appends == []
+
+
+@pytest.mark.asyncio
+async def test_agent_cancellation_settles_claimed_triggers_and_releases_lane():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/one", "trigger/two"),
+            )
+        }
+    )
+
+    class CancelledAgent:
+        async def execute(self, _request):
+            raise ForestError(
+                "AGENT_RUN_CANCELLED",
+                "Agent Run was cancelled",
+                409,
+                details={"reason_code": "ADMIN_REQUESTED"},
+            )
+
+    worker = _worker(scheduler, CancelledAgent(), "generation/cancelled")
+    await worker.run_once("group/a")
+
+    assert len(scheduler.cancelled_runs) == 1
+    cancellation = scheduler.cancelled_runs[0]
+    assert cancellation["conversation_id"] == "group/a"
+    assert cancellation["session_ref"] == "session/existing"
+    assert cancellation["run_ref"] == "run/existing"
+    assert cancellation["reason_code"] == "ADMIN_REQUESTED"
     assert scheduler.lanes["group/a"].active is None
     assert scheduler.actors == set()
     assert scheduler.appends == []

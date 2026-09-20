@@ -366,12 +366,165 @@ class AgentRuntimeRepository:
                 (self.store.bot_id, run_id),
             )
         ).fetchall()
+        cancellation = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND run_id=%s"
+                ).format(self._table("run_cancel_requests")),
+                (self.store.bot_id, run_id),
+            )
+        ).fetchone()
         return {
             **run_values,
             "session": dict(session),
             "inputs": [dict(item) for item in inputs],
             "triggers": [dict(item) for item in trigger_rows],
+            "cancel_request": dict(cancellation) if cancellation is not None else None,
         }
+
+    async def request_cancel(
+        self,
+        *,
+        operation_id: str,
+        run_id: str,
+        expected_checkpoint_seq: int,
+        requested_by: str,
+        reason_code: str,
+        _connection=None,
+    ) -> dict:
+        for value, field, limit in (
+            (operation_id, "operation_id", 256),
+            (run_id, "run_id", 256),
+            (requested_by, "requested_by", 256),
+            (reason_code, "reason_code", 128),
+        ):
+            _bounded(value, field, limit)
+        if type(expected_checkpoint_seq) is not int or expected_checkpoint_seq < 0:
+            raise ForestError(
+                "AGENT_RUNTIME_INPUT_INVALID", "Invalid expected_checkpoint_seq", 422
+            )
+        input_digest = _digest(
+            {
+                "run_id": run_id,
+                "expected_checkpoint_seq": expected_checkpoint_seq,
+                "requested_by": requested_by,
+                "reason_code": reason_code,
+            }
+        )
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "cancel:" + operation_id)
+            replay = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s"
+                    ).format(self._table("run_cancel_requests")),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "AGENT_CANCEL_CONFLICT", "Cancel operation input differs", 409
+                    )
+                return await self._cancel_projection(conn, replay)
+            run = await self._run(conn, run_id, update=True)
+            if run["checkpoint_seq"] != expected_checkpoint_seq:
+                raise ForestError(
+                    "AGENT_CHECKPOINT_CONFLICT",
+                    "Agent Run checkpoint changed",
+                    409,
+                    details={"checkpoint_seq": run["checkpoint_seq"], "state": run["state"]},
+                )
+            if run["state"] in _TERMINAL_RUN:
+                raise ForestError(
+                    "AGENT_CANCEL_TERMINAL",
+                    "Agent Run is already terminal",
+                    409,
+                    details={"checkpoint_seq": run["checkpoint_seq"], "state": run["state"]},
+                )
+            existing = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND run_id=%s").format(
+                        self._table("run_cancel_requests")
+                    ),
+                    (self.store.bot_id, run_id),
+                )
+            ).fetchone()
+            if existing is not None:
+                raise ForestError(
+                    "AGENT_CANCEL_ALREADY_REQUESTED",
+                    "Agent Run already has a cancellation request",
+                    409,
+                    details={"operation_id": existing["operation_id"]},
+                )
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,operation_id,input_digest,run_id,"
+                        "expected_checkpoint_seq,requested_by,reason_code) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+                    ).format(self._table("run_cancel_requests")),
+                    (
+                        self.store.bot_id,
+                        operation_id,
+                        input_digest,
+                        run_id,
+                        expected_checkpoint_seq,
+                        requested_by,
+                        reason_code,
+                    ),
+                )
+            ).fetchone()
+            return await self._cancel_projection(conn, row)
+
+    async def _cancel_projection(self, conn, row) -> dict:
+        session = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT s.conversation_ref FROM {} r JOIN {} s ON "
+                    "s.bot_id=r.bot_id AND s.session_id=r.session_id "
+                    "WHERE r.bot_id=%s AND r.run_id=%s"
+                ).format(
+                    self._table("agent_runs"),
+                    self._table("agent_sessions"),
+                ),
+                (self.store.bot_id, row["run_id"]),
+            )
+        ).fetchone()
+        if session is None:  # pragma: no cover - protected by owned foreign keys
+            raise ForestError("AGENT_RUN_NOT_FOUND", "Agent Run does not exist", 404)
+        return {**dict(row), "conversation_ref": session["conversation_ref"]}
+
+    async def cancel_request(self, run_id: str, *, _connection=None) -> dict | None:
+        _bounded(run_id, "run_id", 256)
+        async with self._transaction(_connection) as conn:
+            await self._run(conn, run_id)
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND run_id=%s").format(
+                        self._table("run_cancel_requests")
+                    ),
+                    (self.store.bot_id, run_id),
+                )
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    async def _reject_cancelled_handoff(self, conn, run_id: str) -> None:
+        cancellation = await (
+            await conn.execute(
+                sql.SQL("SELECT operation_id,reason_code FROM {} WHERE bot_id=%s AND run_id=%s").format(
+                    self._table("run_cancel_requests")
+                ),
+                (self.store.bot_id, run_id),
+            )
+        ).fetchone()
+        if cancellation is not None:
+            raise ForestError(
+                "AGENT_CANCEL_REQUESTED",
+                "Agent Run cancellation won the external handoff race",
+                409,
+                details=dict(cancellation),
+            )
 
     async def start_run(
         self,
@@ -1083,6 +1236,7 @@ class AgentRuntimeRepository:
         _bounded(attempt_id, "attempt_id", 256)
         async with self._transaction(_connection) as conn:
             run = await self._guard_owner(conn, owner)
+            await self._reject_cancelled_handoff(conn, owner.run_id)
             request = await (
                 await conn.execute(
                     sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND request_id=%s FOR UPDATE").format(
@@ -1952,6 +2106,8 @@ class AgentRuntimeRepository:
             if result is not None:
                 await self._verify_payload(conn, result)
             run = await self._guard_owner(conn, owner)
+            if observed_state == "DISPATCHING":
+                await self._reject_cancelled_handoff(conn, owner.run_id)
             tool = await (
                 await conn.execute(
                     sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND tool_call_id=%s FOR UPDATE").format(

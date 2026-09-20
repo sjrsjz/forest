@@ -835,6 +835,40 @@ class ConversationSchedulerRepository:
     async def resume_deferred_in(self, conn, conversation_id: str, **values) -> dict:
         return await self.resume_deferred(conversation_id, _connection=conn, **values)
 
+    async def wake_cancel_request(
+        self,
+        conversation_id: str,
+        *,
+        run_ref: str,
+        cancellation_operation_id: str,
+        _connection=None,
+    ) -> dict:
+        """Wake one exact active Run after its durable cancellation intent commits."""
+
+        _bounded(conversation_id, "conversation_id", 256)
+        _bounded(run_ref, "run_ref", 256)
+        _bounded(cancellation_operation_id, "cancellation_operation_id", 256)
+        async with self._transaction(_connection) as conn:
+            lane = await self._lane(conn, conversation_id, update=True)
+            if lane["active_run_ref"] != run_ref:
+                return {**dict(lane), "resumed": False}
+            resumed = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET resume_not_before=NULL,resume_reason_code=NULL,"
+                        "resume_reason_ref=NULL,mailbox_revision=mailbox_revision+1,"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s "
+                        "AND active_run_ref=%s RETURNING *"
+                    ).format(self._table("conversation_lanes")),
+                    (self.store.bot_id, conversation_id, run_ref),
+                )
+            ).fetchone()
+            return {
+                **dict(resumed),
+                "resumed": True,
+                "cancellation_operation_id": cancellation_operation_id,
+            }
+
     async def claimable_conversations(self, *, limit: int = 64, _connection=None) -> tuple[str, ...]:
         """Return bounded wake candidates; actor acquisition remains the ownership point."""
 
@@ -1736,22 +1770,27 @@ class ConversationSchedulerRepository:
     async def requeue_run_in(self, conn, actor: ConversationActor, **values):
         return await self.requeue_run(actor, _connection=conn, **values)
 
-    async def fail_run(
+    async def terminal_run(
         self,
         actor: ConversationActor,
         *,
         operation_id: str,
         session_ref: str,
         run_ref: str,
+        resulting_status: str,
         reason_code: str,
         _connection=None,
     ) -> tuple[str, ...]:
-        """Terminally settle one failed Run's claimed triggers and release its lane."""
+        """Terminally settle one Run's claimed triggers and release its lane."""
 
         _bounded(operation_id, "operation_id", 256)
         _bounded(session_ref, "session_ref", 256)
         _bounded(run_ref, "run_ref", 256)
         _bounded(reason_code, "reason_code", 128)
+        if resulting_status not in {"FAILED", "CANCELLED"}:
+            raise ForestError(
+                "CONVERSATION_INPUT_INVALID", "Invalid terminal trigger status", 422
+            )
         if type(actor) is not ConversationActor:
             raise ForestError("STALE_CONVERSATION_ACTOR", "Invalid conversation actor", 409)
         input_digest = _digest(
@@ -1761,6 +1800,7 @@ class ConversationSchedulerRepository:
                 "actor_epoch": actor.epoch,
                 "session_ref": session_ref,
                 "run_ref": run_ref,
+                "resulting_status": resulting_status,
                 "reason_code": reason_code,
             }
         )
@@ -1771,15 +1811,15 @@ class ConversationSchedulerRepository:
                 await conn.execute(
                     sql.SQL(
                         "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s"
-                    ).format(self._table("trigger_failures")),
+                    ).format(self._table("trigger_terminal_operations")),
                     (self.store.bot_id, operation_id),
                 )
             ).fetchone()
             if replay is not None:
                 if replay["input_digest"] != input_digest:
                     raise ForestError(
-                        "TRIGGER_FAILURE_CONFLICT",
-                        "Trigger failure operation input differs",
+                        "TRIGGER_TERMINAL_CONFLICT",
+                        "Trigger terminal operation input differs",
                         409,
                     )
                 rows = await (
@@ -1787,7 +1827,7 @@ class ConversationSchedulerRepository:
                         sql.SQL(
                             "SELECT trigger_id FROM {} WHERE bot_id=%s AND operation_id=%s "
                             "ORDER BY item_index"
-                        ).format(self._table("trigger_failure_items")),
+                        ).format(self._table("trigger_terminal_items")),
                         (self.store.bot_id, operation_id),
                     )
                 ).fetchall()
@@ -1797,7 +1837,7 @@ class ConversationSchedulerRepository:
                 or lane["active_run_ref"] != run_ref
             ):
                 raise ForestError(
-                    "CONVERSATION_SESSION_CONFLICT", "Failed Session or Run fence differs", 409
+                    "CONVERSATION_SESSION_CONFLICT", "Terminal Session or Run fence differs", 409
                 )
             triggers = await (
                 await conn.execute(
@@ -1811,14 +1851,15 @@ class ConversationSchedulerRepository:
             ).fetchall()
             if not triggers:
                 raise ForestError(
-                    "TRIGGER_FAILURE_EMPTY", "The failed Run owns no claimed trigger", 409
+                    "TRIGGER_TERMINAL_EMPTY", "The terminal Run owns no claimed trigger", 409
                 )
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,operation_id,conversation_id,input_digest,"
-                    "failed_session_ref,failed_run_ref,reason_code,actor_owner_id,"
-                    "actor_epoch,trigger_count) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-                ).format(self._table("trigger_failures")),
+                    "terminal_session_ref,terminal_run_ref,resulting_status,reason_code,"
+                    "actor_owner_id,actor_epoch,trigger_count) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                ).format(self._table("trigger_terminal_operations")),
                 (
                     self.store.bot_id,
                     operation_id,
@@ -1826,6 +1867,7 @@ class ConversationSchedulerRepository:
                     input_digest,
                     session_ref,
                     run_ref,
+                    resulting_status,
                     reason_code,
                     actor.owner_id,
                     actor.epoch,
@@ -1837,16 +1879,21 @@ class ConversationSchedulerRepository:
                     sql.SQL(
                         "INSERT INTO {}(bot_id,operation_id,item_index,trigger_id) "
                         "VALUES (%s,%s,%s,%s)"
-                    ).format(self._table("trigger_failure_items")),
+                    ).format(self._table("trigger_terminal_items")),
                     (self.store.bot_id, operation_id, index, trigger["trigger_id"]),
                 )
                 await conn.execute(
                     sql.SQL(
-                        "UPDATE {} SET status='FAILED',terminal_reason_code=%s,"
+                        "UPDATE {} SET status=%s,terminal_reason_code=%s,"
                         "updated_at=clock_timestamp() WHERE bot_id=%s AND trigger_id=%s "
                         "AND status='CLAIMED'"
                     ).format(self._table("conversation_triggers")),
-                    (reason_code, self.store.bot_id, trigger["trigger_id"]),
+                    (
+                        resulting_status,
+                        reason_code,
+                        self.store.bot_id,
+                        trigger["trigger_id"],
+                    ),
                 )
             await conn.execute(
                 sql.SQL(
@@ -1859,8 +1906,21 @@ class ConversationSchedulerRepository:
             )
             return tuple(trigger["trigger_id"] for trigger in triggers)
 
+    async def fail_run(self, actor: ConversationActor, **values):
+        return await self.terminal_run(
+            actor, resulting_status="FAILED", **values
+        )
+
     async def fail_run_in(self, conn, actor: ConversationActor, **values):
         return await self.fail_run(actor, _connection=conn, **values)
+
+    async def cancel_run(self, actor: ConversationActor, **values):
+        return await self.terminal_run(
+            actor, resulting_status="CANCELLED", **values
+        )
+
+    async def cancel_run_in(self, conn, actor: ConversationActor, **values):
+        return await self.cancel_run(actor, _connection=conn, **values)
 
     async def verify_input_batch_occurrence_in(
         self,
