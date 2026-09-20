@@ -20,7 +20,7 @@ APP_GID = 10001
 POSTGRES_GID = 70
 APPLICATION_SECRET_NAMES = {
     "deployment_management_token",
-    "deployment_master_key",
+    "deployment_master_keyring",
 }
 
 

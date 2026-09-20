@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import json
 import os
 import signal
@@ -16,6 +14,7 @@ from uuid import uuid4
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
+from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
@@ -83,8 +82,7 @@ def _deployment_dsn() -> str:
 class CleanSupervisorSettings:
     deployment_id: str
     dsn: str = field(repr=False)
-    active_key_id: str
-    master_key: bytes = field(repr=False)
+    master_keyring: DeploymentMasterKeyring = field(repr=False)
     poll_seconds: float = 1.0
     max_starting: int = 2
     management_token: str = field(default="", repr=False)
@@ -93,22 +91,9 @@ class CleanSupervisorSettings:
 
     @classmethod
     def from_environment(cls) -> "CleanSupervisorSettings":
-        key_path = Path(_required("FOREST_DEPLOYMENT_MASTER_KEY_FILE"))
-        try:
-            encoded = key_path.read_bytes().strip()
-            key = base64.b64decode(encoded, validate=True)
-        except (OSError, ValueError, binascii.Error):
-            raise ForestError(
-                "SUPERVISOR_MASTER_KEY_INVALID",
-                "Deployment master key file must contain one base64 value",
-                422,
-            ) from None
-        if len(key) != 32:
-            raise ForestError(
-                "SUPERVISOR_MASTER_KEY_INVALID",
-                "Deployment master key must decode to 32 bytes",
-                422,
-            )
+        keyring = DeploymentMasterKeyring.read(
+            Path(_required("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE"))
+        )
         token_path = Path(_required("FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE"))
         try:
             management_token = token_path.read_text(encoding="utf-8").strip()
@@ -147,8 +132,7 @@ class CleanSupervisorSettings:
         return cls(
             deployment_id=os.environ.get("FOREST_DEPLOYMENT_ID", "forest/default"),
             dsn=_deployment_dsn(),
-            active_key_id=os.environ.get("FOREST_DEPLOYMENT_ACTIVE_KEY_ID", "master/default/1"),
-            master_key=key,
+            master_keyring=keyring,
             poll_seconds=poll_seconds,
             max_starting=max_starting,
             management_token=management_token,
@@ -163,10 +147,8 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
     incarnation = "incarnation/" + str(uuid4())
     secrets = DeploymentSecretAuthority(
         store,
-        active_key_id=settings.active_key_id,
-        key_resolver=lambda key_id: (
-            settings.master_key if key_id == settings.active_key_id else None
-        ),
+        active_key_id=settings.master_keyring.active_key_id,
+        key_resolver=settings.master_keyring.resolve,
     )
     catalog = DeploymentCatalogRepository(store)
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)

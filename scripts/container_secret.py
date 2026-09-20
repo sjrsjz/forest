@@ -15,7 +15,7 @@ APP_GID = 10001
 MAX_SECRET_BYTES = 65536
 SECRET_NAMES = {
     "deployment_management_token",
-    "deployment_master_key",
+    "deployment_master_keyring",
 }
 
 

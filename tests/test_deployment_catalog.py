@@ -328,6 +328,53 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
 
 
 @pytest.mark.postgres
+async def test_deployment_secret_keyring_rotates_writes_and_retains_old_decryption(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    old_key = bytes(range(32))
+    new_key = bytes(reversed(range(32)))
+    old = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver={"master/test/1": old_key}.get,
+    )
+    first = await old.put(
+        operation_id="secret/keyring/old",
+        secret_ref="secret://keyring/old",
+        purpose="test.credential",
+        plaintext=b"old-key-secret",
+        expected_revision=0,
+    )
+    rotated_keys = {"master/test/1": old_key, "master/test/2": new_key}
+    rotated = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/2",
+        key_resolver=rotated_keys.get,
+    )
+    assert await rotated.resolve(first.secret_ref) == b"old-key-secret"
+    second = await rotated.put(
+        operation_id="secret/keyring/new",
+        secret_ref="secret://keyring/new",
+        purpose="test.credential",
+        plaintext=b"new-key-secret",
+        expected_revision=0,
+    )
+    assert second.key_id == "master/test/2"
+    assert await rotated.resolve(second.secret_ref) == b"new-key-secret"
+
+    missing_old = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/2",
+        key_resolver={"master/test/2": new_key}.get,
+    )
+    with pytest.raises(ForestError) as unavailable:
+        await missing_old.resolve(first.secret_ref)
+    assert unavailable.value.code == "SECRET_MASTER_KEY_UNAVAILABLE"
+
+
+@pytest.mark.postgres
 async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_only(
     deployment_catalog,
 ):

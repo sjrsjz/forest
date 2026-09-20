@@ -225,6 +225,15 @@ Bot 运行工作区的剩余固定页面必须拆成两个 authority，不能整
 
 这两个 authority 也规定了群聊 Shell 的归属：Bot 整体的 pause/resume 只能调用 `kernel.runtime`；某个可安装组件的 validate/enable/disable/reload 只能调用 `component.worker-host`。Shell、WebUI 和 CLI 只是同一类型化 operation 的入口，不各自实现维护或组件生命周期。历史文档中的 `kernel.lifecycle`、`kernel.events`、`kernel.jobs` 和 `audit.bot` 不是目标模块 ID；相应资源分别归 `component.worker-host`、`routing.graph` 与 `kernel.audit`，后续代码不得据这些旧名称建立新模块或兼容路由。
 
+### 部署 Secret 主密钥生命周期
+
+Secret 密文版本固化创建时的 `key_id`，Supervisor 从受保护的
+`forest.deployment-master-keyring/1` 文件一次性加载有界 keyring。keyring 明确指定 active key；新写入
+只使用 active key，读取严格按密文版本的 key ID 解析。轮换必须先原子安装同时包含所有仍被引用旧 key
+和新 active key 的完整 keyring，再重启进程；缺少历史 key 时返回 unavailable，绝不拿 active key
+试解或静默重加密。文件拒绝重复 JSON key、未知字段、非规范 Base64、非 32 字节 key、重复 key
+material、缺失 active 引用和超过上限的 key 数，且 key material 不进入环境变量、repr、API 或日志。
+
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。

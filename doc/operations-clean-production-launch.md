@@ -38,7 +38,7 @@ Compose 先启动只具本地卷权限、无网络的初始化器，再从标准
 
 ```sh
 docker compose run --rm initialize
-python -c 'import base64,secrets,sys;sys.stdout.write(base64.b64encode(secrets.token_bytes(32)).decode())' | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_master_key secret
+python -c 'import base64,json,secrets,sys; kid="master/default/1"; sys.stdout.write(json.dumps({"protocol":"forest.deployment-master-keyring/1","active_key_id":kid,"keys":{kid:base64.b64encode(secrets.token_bytes(32)).decode()}},separators=(",",":")))' | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_master_keyring secret
 printf '%s' "$DEPLOYMENT_MANAGEMENT_TOKEN" | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_management_token secret
 ```
 
@@ -83,7 +83,7 @@ Compose 只编排 `initialize`、`postgres` 和 `supervisor`，镜像默认命�
 FOREST_DEPLOYMENT_DSN=postgresql://...
 FOREST_DEPLOYMENT_ID=forest/default
 FOREST_DEPLOYMENT_ACTIVE_KEY_ID=master/default/1
-FOREST_DEPLOYMENT_MASTER_KEY_FILE=/run/secrets/deployment_master_key
+FOREST_DEPLOYMENT_MASTER_KEYRING_FILE=/run/secrets/deployment_master_keyring
 FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE=/run/secrets/deployment_management_token
 FOREST_DEPLOYMENT_MANAGEMENT_HOST=127.0.0.1
 FOREST_DEPLOYMENT_MANAGEMENT_PORT=8081
@@ -91,16 +91,16 @@ FOREST_SUPERVISOR_POLL_SECONDS=1
 FOREST_SUPERVISOR_MAX_STARTING=2
 ```
 
-主密钥文件只包含一个 Base64 值，解码后必须恰好为 32 字节。当前入口使用该 key ID 解密部署 Secret authority，并从 READY Bot 固化的 storage/bootstrap profile 构造各自 `CleanBotHost`；profile 中只保存 Secret 引用，凭据不会写入 Bot catalog。供应时只安装模块 authority 和 revision 1，不启动 Agent、Provider 或 OneBot 网络资源；供应 Job 成功发布 READY 后，Supervisor 才依据 runtime intent 启停 Bot。
+主密钥 keyring 是单行、可打印 ASCII JSON，协议固定为 `forest.deployment-master-keyring/1`；包含 `active_key_id` 和最多 32 个 `key_id → Base64(32 bytes)` 条目。active key 只加密新 Secret 版本，历史密文按自身保存的 key ID 解密，因此轮换时必须提交“全部仍被引用的旧 key + 新 key”，再把 active 指向新 key 并重启 Supervisor。不得在确认没有密文引用前删除旧 key。keyring、数据库口令和管理 token 都不进入环境变量、日志或对象 repr。Supervisor 从 READY Bot 固化的 storage/bootstrap profile 构造各自 `CleanBotHost`；profile 中只保存 Secret 引用，凭据不会写入 Bot catalog。供应时只安装模块 authority 和 revision 1，不启动 Agent、Provider 或 OneBot 网络资源；供应 Job 成功发布 READY 后，Supervisor 才依据 runtime intent 启停 Bot。
 
 Compose 中无需设置 `FOREST_DEPLOYMENT_DSN`：Supervisor 从 `/run/forest-secrets/postgres_password` 构造只指向 `forest_deployment` 的 DSN。显式 DSN 仅供非 Compose 部署。默认 `docker compose up -d` 启动 `initialize`、`postgres` 和 `supervisor`；Compose 中不存在绕过部署控制面的单 Bot 服务。
 
-Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 的三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建只暴露引用的本地 PostgreSQL storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。页面不再接收整份组件 JSON 或客户端 schema digest。Bot 进入 ONLINE 后，壳层作用域选择器会通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不把 Agent、Memory、OneBot 或 Job 页面拷贝到 deployment 后台。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权和主密钥多版本 keyring 仍是发布前缺口。
+Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 的三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建只暴露引用的本地 PostgreSQL storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。页面不再接收整份组件 JSON 或客户端 schema digest。Bot 进入 ONLINE 后，壳层作用域选择器会通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不把 Agent、Memory、OneBot 或 Job 页面拷贝到 deployment 后台。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权仍是发布前缺口。
 
 ## 尚未接入本图的能力
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
-- 完整 Web 身份/细粒度授权、主密钥多版本 keyring 和跨 Bot 模块工作区路由；Supervisor 默认 Compose 编排、deployment scope 管理贡献、Secret UI、本地 PostgreSQL 动态分配、正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
+- 完整 Web 身份/细粒度授权；Supervisor 默认 Compose 编排、deployment/Bot scope 管理贡献、Secret UI、主密钥多版本 keyring、本地 PostgreSQL 动态分配、正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。
