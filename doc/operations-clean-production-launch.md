@@ -75,11 +75,28 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 Compose 默认命令已经切到 `forest bot`，PostgreSQL 默认数据库为 `forest_bot`。容器在 `/data/runtime-status.json` 发布不含凭据的当前图身份，Docker 健康检查只接受已成功发布的图。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
+## 多 Bot Supervisor 入口
+
+`forest supervisor` 使用独立部署数据库运行持久供应 Worker 与多 Bot 生命周期协调器。最小进程配置为：
+
+```text
+FOREST_DEPLOYMENT_DSN=postgresql://...
+FOREST_DEPLOYMENT_ID=forest/default
+FOREST_DEPLOYMENT_ACTIVE_KEY_ID=master/default/1
+FOREST_DEPLOYMENT_MASTER_KEY_FILE=/run/secrets/deployment_master_key
+FOREST_SUPERVISOR_POLL_SECONDS=1
+FOREST_SUPERVISOR_MAX_STARTING=2
+```
+
+主密钥文件只包含一个 Base64 值，解码后必须恰好为 32 字节。当前入口使用该 key ID 解密部署 Secret authority，并从 READY Bot 固化的 storage/bootstrap profile 构造各自 `CleanBotHost`；profile 中只保存 Secret 引用，凭据不会写入 Bot catalog。供应时只安装模块 authority 和 revision 1，不启动 Agent、Provider 或 OneBot 网络资源；供应 Job 成功发布 READY 后，Supervisor 才依据 runtime intent 启停 Bot。
+
+当前 deployment scope WebUI 尚未接入，因此该入口只能消费已经由 authority API 创建的 Secret、storage profile、bootstrap profile 与供应 Job。主密钥多版本 keyring、Web 身份/授权和 Supervisor Compose 编排仍是发布前缺口。
+
 ## 尚未接入本图的能力
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
 - 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
-- 多 Bot 的正式 provisioner、deployment scope 管理贡献和 Supervisor 入口；独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
+- 多 Bot 的 deployment scope 管理贡献、Secret/Web 身份控制面和 Supervisor 容器编排；正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。

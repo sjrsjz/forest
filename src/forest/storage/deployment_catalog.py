@@ -14,6 +14,7 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 
 _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
+_DIGEST = re.compile(r"sha256:[a-f0-9]{64}\Z")
 
 
 def _bounded(value: object, field: str, limit: int) -> str:
@@ -175,6 +176,8 @@ class DeploymentCatalogRepository:
         bot_id: str,
         display_name: str,
         storage_profile_ref: str,
+        bootstrap_profile_ref: str,
+        bootstrap_manifest_digest: str,
         storage_generation: int = 1,
     ) -> dict:
         for value, field, limit in (
@@ -182,16 +185,22 @@ class DeploymentCatalogRepository:
             (bot_id, "bot_id", 128),
             (display_name, "display_name", 256),
             (storage_profile_ref, "storage_profile_ref", 512),
+            (bootstrap_profile_ref, "bootstrap_profile_ref", 512),
+            (bootstrap_manifest_digest, "bootstrap_manifest_digest", 71),
         ):
             _bounded(value, field, limit)
         if type(storage_generation) is not int or storage_generation < 1:
             raise ForestError("DEPLOYMENT_INPUT_INVALID", "Storage generation is invalid", 422)
+        if _DIGEST.fullmatch(bootstrap_manifest_digest) is None:
+            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Bootstrap digest is invalid", 422)
         input_digest = digest_json(
             {
                 "bot_id": bot_id,
                 "display_name": display_name,
                 "storage_profile_ref": storage_profile_ref,
                 "storage_generation": storage_generation,
+                "bootstrap_profile_ref": bootstrap_profile_ref,
+                "bootstrap_manifest_digest": bootstrap_manifest_digest,
             }
         )
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -218,6 +227,20 @@ class DeploymentCatalogRepository:
                     "Storage profile belongs to another Bot or generation",
                     409,
                 )
+            bootstrap = await (
+                await conn.execute(
+                    "SELECT manifest_digest FROM forest_deployment.bootstrap_profiles "
+                    "WHERE profile_ref=%s AND bot_id=%s AND storage_profile_ref=%s "
+                    "AND storage_generation=%s FOR SHARE",
+                    (bootstrap_profile_ref, bot_id, storage_profile_ref, storage_generation),
+                )
+            ).fetchone()
+            if bootstrap is None or bootstrap["manifest_digest"] != bootstrap_manifest_digest:
+                raise ForestError(
+                    "BOOTSTRAP_PROFILE_SCOPE_MISMATCH",
+                    "Bootstrap profile differs from the ready Bot identity",
+                    409,
+                )
             existing = await (
                 await conn.execute(
                     "SELECT 1 FROM forest_deployment.bots WHERE bot_id=%s FOR UPDATE",
@@ -228,8 +251,16 @@ class DeploymentCatalogRepository:
                 raise ForestError("BOT_IDENTITY_EXISTS", "Bot identity cannot be reused", 409)
             await conn.execute(
                 "INSERT INTO forest_deployment.bots(bot_id,display_name,supply_state,"
-                "storage_profile_ref,storage_generation) VALUES (%s,%s,'READY',%s,%s)",
-                (bot_id, display_name, storage_profile_ref, storage_generation),
+                "storage_profile_ref,storage_generation,bootstrap_profile_ref,"
+                "bootstrap_manifest_digest) VALUES (%s,%s,'READY',%s,%s,%s,%s)",
+                (
+                    bot_id,
+                    display_name,
+                    storage_profile_ref,
+                    storage_generation,
+                    bootstrap_profile_ref,
+                    bootstrap_manifest_digest,
+                ),
             )
             await conn.execute(
                 "INSERT INTO forest_deployment.runtime_intents(bot_id,desired_state) "

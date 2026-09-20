@@ -16,6 +16,28 @@ from forest.runtime_modules import (
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.module_configuration import ModuleConfigurationRepository
 
+TRIGGER_POLICY_CONFIGURATION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "protocol",
+        "allowed_group_ids",
+        "group_trigger_mode",
+        "private_enabled",
+    ],
+    "properties": {
+        "protocol": {"const": "forest.conversation.trigger-policy/1"},
+        "allowed_group_ids": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[0-9]+$"},
+            "uniqueItems": True,
+        },
+        "group_trigger_mode": {"enum": ["MENTION", "ALL", "DISABLED"]},
+        "private_enabled": {"type": "boolean"},
+    },
+    "additionalProperties": False,
+}
+
 
 def default_trigger_policy_configuration() -> dict:
     return {
@@ -58,31 +80,10 @@ async def bootstrap_clean_trigger_policy(
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
-    schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "required": [
-            "protocol",
-            "allowed_group_ids",
-            "group_trigger_mode",
-            "private_enabled",
-        ],
-        "properties": {
-            "protocol": {"const": "forest.conversation.trigger-policy/1"},
-            "allowed_group_ids": {
-                "type": "array",
-                "items": {"type": "string", "pattern": "^[0-9]+$"},
-                "uniqueItems": True,
-            },
-            "group_trigger_mode": {"enum": ["MENTION", "ALL", "DISABLED"]},
-            "private_enabled": {"type": "boolean"},
-        },
-        "additionalProperties": False,
-    }
     await configuration.ensure_initialized(
         operation_id="bootstrap:conversation.trigger-policy:configuration",
         value=initial_configuration or default_trigger_policy_configuration(),
-        validation_digest=digest_json(schema),
+        validation_digest=digest_json(TRIGGER_POLICY_CONFIGURATION_SCHEMA),
     )
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(
@@ -99,7 +100,7 @@ async def bootstrap_clean_trigger_policy(
         )
         runtime.management_contract = CleanModuleConfigurationContract(
             configuration,
-            schema=schema,
+            schema=TRIGGER_POLICY_CONFIGURATION_SCHEMA,
             validator=ConversationTriggerPolicyRuntime._parse_configuration,
         )
         return runtime

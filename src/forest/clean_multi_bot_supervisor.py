@@ -35,6 +35,7 @@ class CleanMultiBotSupervisor:
         incarnation: str | None = None,
         poll_seconds: float = 1.0,
         max_starting: int = 2,
+        provisioning_executor=None,
     ) -> None:
         if not 0.05 <= poll_seconds <= 30:
             raise ValueError("poll_seconds is outside its bound")
@@ -48,6 +49,7 @@ class CleanMultiBotSupervisor:
         self.incarnation = incarnation or "incarnation/" + str(uuid4())
         self.poll_seconds = poll_seconds
         self._start_slots = asyncio.Semaphore(max_starting)
+        self.provisioning_executor = provisioning_executor
         self.lease = None
         self.failure: str | None = None
         self._closing = False
@@ -55,6 +57,7 @@ class CleanMultiBotSupervisor:
         self._runners: dict[str, _BotRunner] = {}
         self._renewal_task: asyncio.Task | None = None
         self._reconcile_task: asyncio.Task | None = None
+        self._provisioning_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         if self.lease is not None or self._renewal_task is not None:
@@ -71,6 +74,10 @@ class CleanMultiBotSupervisor:
         self._reconcile_task = asyncio.create_task(
             self._reconcile(), name="deployment-supervisor/" + self.incarnation
         )
+        if self.provisioning_executor is not None:
+            self._provisioning_task = asyncio.create_task(
+                self._provision(), name="deployment-provisioning/" + self.incarnation
+            )
         self._wake.set()
 
     def notify(self) -> None:
@@ -79,7 +86,7 @@ class CleanMultiBotSupervisor:
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
         return tuple(
             task
-            for task in (self._renewal_task, self._reconcile_task)
+            for task in (self._renewal_task, self._reconcile_task, self._provisioning_task)
             if task is not None
         ) + tuple(runner.task for runner in self._runners.values())
 
@@ -92,7 +99,7 @@ class CleanMultiBotSupervisor:
         if runners:
             await asyncio.gather(*(runner.task for runner in runners), return_exceptions=True)
         self._runners.clear()
-        for name in ("_reconcile_task", "_renewal_task"):
+        for name in ("_provisioning_task", "_reconcile_task", "_renewal_task"):
             task = getattr(self, name)
             setattr(self, name, None)
             if task is not None:
@@ -124,6 +131,35 @@ class CleanMultiBotSupervisor:
             raise
         except Exception:
             self.failure = "DEPLOYMENT_SUPERVISOR_RENEWAL_FAILED"
+            self._closing = True
+            for runner in self._runners.values():
+                runner.stop.set()
+            self._wake.set()
+            raise
+
+    async def _provision(self) -> None:
+        try:
+            while not self._closing:
+                result = await self.provisioning_executor.run_once(self.lease)
+                if result is not None:
+                    self._wake.set()
+                    continue
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=self.poll_seconds)
+                except TimeoutError:
+                    pass
+                self._wake.clear()
+        except asyncio.CancelledError:
+            raise
+        except ForestError as exc:
+            self.failure = exc.code
+            self._closing = True
+            for runner in self._runners.values():
+                runner.stop.set()
+            self._wake.set()
+            raise
+        except Exception:
+            self.failure = "DEPLOYMENT_PROVISIONING_WORKER_FAILED"
             self._closing = True
             for runner in self._runners.values():
                 runner.stop.set()

@@ -19,6 +19,28 @@ from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.embedding_provider_authority import EmbeddingProviderRepository
 from forest.storage.module_configuration import ModuleConfigurationRepository
 
+EMBEDDING_CONFIGURATION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "protocol",
+        "endpoint",
+        "credential_ref",
+        "timeout_seconds",
+        "max_connections",
+        "profile",
+    ],
+    "properties": {
+        "protocol": {"const": "forest.embedding.multimodal/1"},
+        "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300},
+        "max_connections": {"type": "integer", "minimum": 1, "maximum": 32},
+        "profile": {"type": "object"},
+    },
+    "additionalProperties": False,
+}
+
 
 def default_embedding_configuration() -> dict:
     return {
@@ -71,27 +93,6 @@ async def bootstrap_clean_embedding(
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
-    schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "required": [
-            "protocol",
-            "endpoint",
-            "credential_ref",
-            "timeout_seconds",
-            "max_connections",
-            "profile",
-        ],
-        "properties": {
-            "protocol": {"const": "forest.embedding.multimodal/1"},
-            "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
-            "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
-            "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300},
-            "max_connections": {"type": "integer", "minimum": 1, "maximum": 32},
-            "profile": {"type": "object"},
-        },
-        "additionalProperties": False,
-    }
     try:
         await configuration.desired()
     except ForestError as exc:
@@ -100,7 +101,7 @@ async def bootstrap_clean_embedding(
         await configuration.initialize(
             operation_id="bootstrap:embedding.multimodal:configuration",
             value=initial_configuration or default_embedding_configuration(),
-            validation_digest=digest_json(schema),
+            validation_digest=digest_json(EMBEDDING_CONFIGURATION_SCHEMA),
         )
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(
@@ -133,7 +134,7 @@ async def bootstrap_clean_embedding(
         runtime = CleanMultimodalEmbeddingRuntime(**values)
         runtime.management_contract = CleanModuleConfigurationContract(
             configuration,
-            schema=schema,
+            schema=EMBEDDING_CONFIGURATION_SCHEMA,
             validator=validate_configuration,
         )
         return runtime

@@ -17,6 +17,28 @@ from forest.runtime_modules import (
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.module_configuration import ModuleConfigurationRepository
 
+PROVIDER_CONFIGURATION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "protocol",
+        "base_url",
+        "credential_ref",
+        "timeout_seconds",
+        "max_connections",
+        "capabilities",
+    ],
+    "properties": {
+        "protocol": {"const": "forest.provider.chat-completions/1"},
+        "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
+        "max_connections": {"type": "integer", "minimum": 1, "maximum": 128},
+        "capabilities": {"type": "object"},
+    },
+    "additionalProperties": False,
+}
+
 
 def default_provider_configuration() -> dict:
     return {
@@ -67,31 +89,10 @@ async def bootstrap_clean_provider(
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
-    schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "required": [
-            "protocol",
-            "base_url",
-            "credential_ref",
-            "timeout_seconds",
-            "max_connections",
-            "capabilities",
-        ],
-        "properties": {
-            "protocol": {"const": "forest.provider.chat-completions/1"},
-            "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
-            "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
-            "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
-            "max_connections": {"type": "integer", "minimum": 1, "maximum": 128},
-            "capabilities": {"type": "object"},
-        },
-        "additionalProperties": False,
-    }
     await configuration.ensure_initialized(
         operation_id="bootstrap:provider.chat-completions:configuration",
         value=initial_configuration or default_provider_configuration(),
-        validation_digest=digest_json(schema),
+        validation_digest=digest_json(PROVIDER_CONFIGURATION_SCHEMA),
     )
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(
@@ -115,7 +116,7 @@ async def bootstrap_clean_provider(
         runtime = CleanChatCompletionsProviderRuntime(**values)
         runtime.management_contract = CleanModuleConfigurationContract(
             configuration,
-            schema=schema,
+            schema=PROVIDER_CONFIGURATION_SCHEMA,
             validator=CleanChatCompletionsProviderRuntime._parse_configuration,
         )
         return runtime

@@ -88,6 +88,8 @@ class DeploymentProvisioningExecutor:
                 bot_id=claim.bot_id,
                 display_name=claim.display_name,
                 storage_profile_ref=claim.storage_profile_ref,
+                bootstrap_profile_ref=claim.bootstrap_profile_ref,
+                bootstrap_manifest_digest=claim.bootstrap_manifest_digest,
                 storage_generation=claim.storage_generation,
             )
             return await self.jobs.succeed(supervisor_lease, claim)

@@ -40,7 +40,8 @@ CREATE TABLE forest_deployment.bootstrap_profiles (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY (storage_profile_ref,bot_id,storage_generation)
         REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation),
-    UNIQUE (profile_ref,bot_id,storage_profile_ref,storage_generation)
+    UNIQUE (profile_ref,bot_id,storage_profile_ref,storage_generation),
+    UNIQUE (profile_ref,bot_id,storage_profile_ref,storage_generation,manifest_digest)
 );
 
 CREATE TABLE forest_deployment.bootstrap_profile_components (
@@ -113,11 +114,23 @@ CREATE TABLE forest_deployment.bots (
     supply_state text NOT NULL CHECK (supply_state IN ('READY','DELETING','DELETED')),
     storage_profile_ref text NOT NULL CHECK (octet_length(storage_profile_ref) BETWEEN 1 AND 512),
     storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    bootstrap_profile_ref text NOT NULL CHECK (
+        octet_length(bootstrap_profile_ref) BETWEEN 1 AND 512
+    ),
+    bootstrap_manifest_digest text NOT NULL CHECK (
+        bootstrap_manifest_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY (storage_profile_ref,bot_id,storage_generation)
-        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation)
+        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation),
+    FOREIGN KEY (
+        bootstrap_profile_ref,bot_id,storage_profile_ref,storage_generation,
+        bootstrap_manifest_digest
+    ) REFERENCES forest_deployment.bootstrap_profiles(
+        profile_ref,bot_id,storage_profile_ref,storage_generation,manifest_digest
+    )
 );
 
 CREATE TABLE forest_deployment.runtime_intents (
@@ -263,7 +276,13 @@ BEGIN
     IF TG_OP = ''DELETE'' THEN
         RAISE EXCEPTION ''bot identity cannot be deleted'';
     END IF;
-    IF ROW(NEW.bot_id,NEW.created_at) IS DISTINCT FROM ROW(OLD.bot_id,OLD.created_at) THEN
+    IF ROW(
+        NEW.bot_id,NEW.storage_profile_ref,NEW.storage_generation,NEW.bootstrap_profile_ref,
+        NEW.bootstrap_manifest_digest,NEW.created_at
+    ) IS DISTINCT FROM ROW(
+        OLD.bot_id,OLD.storage_profile_ref,OLD.storage_generation,OLD.bootstrap_profile_ref,
+        OLD.bootstrap_manifest_digest,OLD.created_at
+    ) THEN
         RAISE EXCEPTION ''bot identity is immutable'';
     END IF;
     IF OLD.supply_state = ''DELETED'' THEN

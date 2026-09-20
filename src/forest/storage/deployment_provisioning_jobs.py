@@ -239,8 +239,15 @@ class DeploymentProvisioningJobAuthority:
             bot = await (
                 await conn.execute(
                     "SELECT 1 FROM forest_deployment.bots WHERE bot_id=%s AND supply_state='READY' "
-                    "AND storage_profile_ref=%s AND storage_generation=%s FOR SHARE",
-                    (claim.bot_id, claim.storage_profile_ref, claim.storage_generation),
+                    "AND storage_profile_ref=%s AND storage_generation=%s "
+                    "AND bootstrap_profile_ref=%s AND bootstrap_manifest_digest=%s FOR SHARE",
+                    (
+                        claim.bot_id,
+                        claim.storage_profile_ref,
+                        claim.storage_generation,
+                        claim.bootstrap_profile_ref,
+                        claim.bootstrap_manifest_digest,
+                    ),
                 )
             ).fetchone()
             if bot is None:

@@ -23,6 +23,22 @@ from forest.storage.control_unit_of_work import ShellControlResultUnitOfWork
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.shell_command_authority import ShellCommandRepository
 
+SHELL_CONFIGURATION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "protocol": {"const": "forest.shell.command/1"},
+        "binding_ref": {"type": "string"},
+        "administrator_principals": {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": True,
+        },
+    },
+    "required": ["protocol", "binding_ref", "administrator_principals"],
+    "additionalProperties": False,
+}
+
 
 @dataclass(frozen=True)
 class CleanShellModule:
@@ -124,25 +140,10 @@ async def bootstrap_clean_shell(
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
-    schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "protocol": {"const": "forest.shell.command/1"},
-            "binding_ref": {"type": "string"},
-            "administrator_principals": {
-                "type": "array",
-                "items": {"type": "string"},
-                "uniqueItems": True,
-            },
-        },
-        "required": ["protocol", "binding_ref", "administrator_principals"],
-        "additionalProperties": False,
-    }
     await configuration.ensure_initialized(
         operation_id="bootstrap:shell.command:configuration",
         value=initial_configuration or default_shell_configuration(),
-        validation_digest=digest_json(schema),
+        validation_digest=digest_json(SHELL_CONFIGURATION_SCHEMA),
     )
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(
@@ -197,7 +198,7 @@ async def bootstrap_clean_shell(
         )
         runtime.management_contract = CleanModuleConfigurationContract(
             configuration,
-            schema=schema,
+            schema=SHELL_CONFIGURATION_SCHEMA,
             validator=CleanShellRuntime._parse_profile,
         )
         return runtime

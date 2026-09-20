@@ -44,6 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("bot", help="启动一个干净的微内核 Bot RuntimeGraph")
+    sub.add_parser("supervisor", help="启动部署级多 Bot 供应与运行协调器")
 
     plugin = sub.add_parser("plugin", help="构建或验证 Python 模块制品")
     actions = plugin.add_subparsers(dest="plugin_command", required=True)
@@ -81,6 +82,14 @@ def main() -> None:
             from forest.clean_bot_host import CleanBotSettings, run_clean_bot
 
             asyncio.run(run_clean_bot(CleanBotSettings.from_environment()))
+            return
+        if args.command == "supervisor":
+            from forest.clean_supervisor_host import (
+                CleanSupervisorSettings,
+                run_clean_supervisor,
+            )
+
+            asyncio.run(run_clean_supervisor(CleanSupervisorSettings.from_environment()))
             return
         asyncio.run(run_plugin_command(args))
     except ForestError as exc:

@@ -14,6 +14,15 @@ from psycopg import sql
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.errors import ForestError
+from forest.models import ModelCapabilities
+from forest.official_bot_provisioning import (
+    OfficialBotCatalogSettingsResolver,
+    OfficialBotProvisioner,
+    OfficialBotSettingsResolver,
+    official_bootstrap_schema_digests,
+)
+from forest.schema_bundles import module_schema_namespace
+from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
@@ -80,6 +89,8 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
 
     alpha_profile = await _storage_profile(repository, "bot/alpha", "alpha")
     beta_profile = await _storage_profile(repository, "bot/beta", "beta")
+    alpha_bootstrap = await _bootstrap_profile(repository, alpha_profile, "alpha")
+    beta_bootstrap = await _bootstrap_profile(repository, beta_profile, "beta")
     secrets = DeploymentSecretAuthority(
         repository.store,
         active_key_id="master/test/1",
@@ -106,6 +117,8 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
             bot_id="bot/other",
             display_name="Other",
             storage_profile_ref=alpha_profile.profile_ref,
+            bootstrap_profile_ref=alpha_bootstrap.profile_ref,
+            bootstrap_manifest_digest=alpha_bootstrap.manifest_digest,
         )
     assert caught.value.code == "STORAGE_PROFILE_SCOPE_MISMATCH"
 
@@ -114,18 +127,24 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
         bot_id="bot/alpha",
         display_name="Alpha",
         storage_profile_ref=alpha_profile.profile_ref,
+        bootstrap_profile_ref=alpha_bootstrap.profile_ref,
+        bootstrap_manifest_digest=alpha_bootstrap.manifest_digest,
     )
     replay = await repository.register_ready(
         operation_id="provision/alpha",
         bot_id="bot/alpha",
         display_name="Alpha",
         storage_profile_ref=alpha_profile.profile_ref,
+        bootstrap_profile_ref=alpha_bootstrap.profile_ref,
+        bootstrap_manifest_digest=alpha_bootstrap.manifest_digest,
     )
     beta = await repository.register_ready(
         operation_id="provision/beta",
         bot_id="bot/beta",
         display_name="Beta",
         storage_profile_ref=beta_profile.profile_ref,
+        bootstrap_profile_ref=beta_bootstrap.profile_ref,
+        bootstrap_manifest_digest=beta_bootstrap.manifest_digest,
     )
     assert replay == alpha
     assert alpha["desired_state"] == beta["desired_state"] == "OFFLINE"
@@ -183,11 +202,14 @@ async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catal
     repository = deployment_catalog
     await repository.initialize()
     profile = await _storage_profile(repository, "bot/failing", "failing")
+    bootstrap = await _bootstrap_profile(repository, profile, "failing")
     bot = await repository.register_ready(
         operation_id="provision/failing",
         bot_id="bot/failing",
         display_name="Failing",
         storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
     )
     await repository.set_desired(
         operation_id="runtime/failing/online",
@@ -443,6 +465,8 @@ async def test_provisioning_job_claim_renew_retry_and_success_are_fenced(deploym
         bot_id="bot/jobs",
         display_name="Jobs",
         storage_profile_ref=storage.profile_ref,
+        bootstrap_profile_ref=profile.profile_ref,
+        bootstrap_manifest_digest=profile.manifest_digest,
         storage_generation=storage.storage_generation,
     )
     succeeded = await jobs.succeed(supervisor, second)
@@ -502,6 +526,191 @@ async def test_provisioning_executor_resolves_frozen_inputs_before_ready_publica
     assert await executor.run_once(supervisor) is None
 
 
+@pytest.mark.postgres
+async def test_official_provisioner_materializes_module_authorities_without_starting_graph(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    root_dsn = os.environ["FOREST_TEST_DSN"]
+    target_name = "forest_bot_supply_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(root_dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_name)))
+    parsed = urlsplit(root_dsn)
+    target_dsn = urlunsplit((parsed.scheme, parsed.netloc, "/" + target_name, "", ""))
+    key = bytes(range(32))
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: key,
+    )
+    try:
+        values = {
+            "secret://official/storage": ("storage.postgresql.dsn", target_dsn),
+            "secret://official/model": ("provider.chat-completions.credential", "model-key"),
+            "secret://official/embedding": ("embedding.multimodal.credential", "embed-key"),
+            "secret://official/onebot": ("adapter.onebot.access-token", "onebot-token"),
+        }
+        for index, (secret_ref, (purpose, plaintext)) in enumerate(values.items(), 1):
+            await secrets.put(
+                operation_id=f"secret/official/{index}",
+                secret_ref=secret_ref,
+                purpose=purpose,
+                plaintext=plaintext.encode(),
+                expected_revision=0,
+            )
+        storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+        storage = await storage_profiles.create(
+            operation_id="storage-profile/official/create",
+            profile_ref="storage-profile/official/1",
+            bot_id="bot/official",
+            storage_generation=1,
+            dsn_secret_ref="secret://official/storage",
+        )
+        capabilities = ModelCapabilities(
+            deployment_id="provider.chat-completions/test",
+            model="test-model",
+            capability_revision="test/1",
+            input_modalities=("text", "image"),
+            context_limit=32768,
+            max_output_tokens=2048,
+        )
+        components = {
+            "provider.chat-completions": {
+                "protocol": "forest.provider.chat-completions/1",
+                "base_url": "https://model.example/v1",
+                "credential_ref": "secret://official/model",
+                "timeout_seconds": 30,
+                "max_connections": 3,
+                "capabilities": capabilities.as_dict(),
+            },
+            "embedding.multimodal": {
+                "protocol": "forest.embedding.multimodal/1",
+                "endpoint": "https://embedding.example/v1/embeddings",
+                "credential_ref": "secret://official/embedding",
+                "timeout_seconds": 20,
+                "max_connections": 2,
+                "profile": {
+                    "deployment_id": "embedding.multimodal/test",
+                    "model_revision": "test/1",
+                    "model": "Qwen/Qwen3-VL-Embedding-8B",
+                    "dimensions": 4096,
+                },
+            },
+            "conversation.trigger-policy": {
+                "protocol": "forest.conversation.trigger-policy/1",
+                "allowed_group_ids": ["933179609"],
+                "group_trigger_mode": "MENTION",
+                "private_enabled": True,
+            },
+            "shell.command": {
+                "protocol": "forest.shell.command/1",
+                "binding_ref": "binding/main",
+                "administrator_principals": ["qq:10001"],
+            },
+            "agent.runtime": {
+                "protocol": "forest.agent.runtime.bootstrap/1",
+                "preset_system": ["你是测试 Bot。"],
+            },
+            "adapter.onebot": {
+                "protocol": "forest.adapter.onebot.bootstrap/1",
+                "binding_id": "binding/main",
+                "self_id": "123456789",
+                "websocket_url": "ws://127.0.0.1:3001/",
+                "access_token_ref": "secret://official/onebot",
+            },
+        }
+        bootstrap_profiles = DeploymentBootstrapProfileAuthority(
+            repository.store, secrets=secrets
+        )
+        bootstrap = await bootstrap_profiles.create(
+            operation_id="bootstrap-profile/official/create",
+            profile_ref="bootstrap-profile/official/1",
+            bot_id="bot/official",
+            storage_profile_ref=storage.profile_ref,
+            storage_generation=storage.storage_generation,
+            components=components,
+            schema_digests=official_bootstrap_schema_digests(),
+        )
+        jobs = DeploymentProvisioningJobAuthority(repository.store)
+        await jobs.enqueue(
+            operation_id="provisioning/official/enqueue",
+            job_id="provisioning/official/1",
+            bot_id="bot/official",
+            display_name="Official",
+            storage_profile_ref=storage.profile_ref,
+            storage_generation=storage.storage_generation,
+            bootstrap_profile_ref=bootstrap.profile_ref,
+        )
+        resolver = OfficialBotSettingsResolver(secrets=secrets)
+        executor = DeploymentProvisioningExecutor(
+            jobs=jobs,
+            catalog=repository,
+            storage_profiles=storage_profiles,
+            bootstrap_profiles=bootstrap_profiles,
+            provisioner=OfficialBotProvisioner(settings_resolver=resolver),
+            worker_id="worker/official",
+        )
+        supervisor = CleanMultiBotSupervisor(
+            repository,
+            storage_profiles=storage_profiles,
+            settings_resolver=OfficialBotCatalogSettingsResolver(
+                bootstrap_profiles=bootstrap_profiles,
+                settings_resolver=resolver,
+            ),
+            host_id="host/official",
+            incarnation="incarnation/official",
+            poll_seconds=0.05,
+            provisioning_executor=executor,
+        )
+        await supervisor.start()
+        try:
+            async def provisioned():
+                return (await jobs.inspect("provisioning/official/1"))["state"] == "SUCCEEDED"
+
+            await _eventually(provisioned, timeout=10)
+        finally:
+            await supervisor.close()
+        bot = await repository.inspect("bot/official")
+        assert bot["bootstrap_profile_ref"] == bootstrap.profile_ref
+        assert bot["bootstrap_manifest_digest"] == bootstrap.manifest_digest
+
+        target = CleanBotStore(target_dsn, "bot/official")
+        await target.open()
+        try:
+            async with target.pool.connection() as conn:
+                bundles = await (
+                    await conn.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
+                ).fetchone()
+                assert bundles["count"] == 16
+                runtime_namespace = module_schema_namespace("forest.kernel.runtime")
+                graph = await (
+                    await conn.execute(
+                        sql.SQL("SELECT count(*) AS count FROM {}.runtime_graph_head").format(
+                            sql.Identifier(runtime_namespace)
+                        )
+                    )
+                ).fetchone()
+                assert graph["count"] == 0
+                provider_namespace = module_schema_namespace(
+                    "forest.provider.chat-completions"
+                )
+                head = await (
+                    await conn.execute(
+                        sql.SQL("SELECT * FROM {}.module_configuration_heads").format(
+                            sql.Identifier(provider_namespace)
+                        )
+                    )
+                ).fetchone()
+                assert head["desired_revision"] == head["effective_revision"] == 1
+        finally:
+            await target.close()
+    finally:
+        assert target_name.startswith("forest_bot_supply_") and len(target_name) == 50
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(target_name)))
+        await admin.close()
+
+
 async def _eventually(assertion, *, timeout: float = 3) -> None:
     async def wait() -> None:
         while True:
@@ -520,11 +729,14 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
     bots = []
     for name in ("alpha", "beta"):
         profile = await _storage_profile(repository, f"bot/{name}", name)
+        bootstrap = await _bootstrap_profile(repository, profile, name)
         bot = await repository.register_ready(
             operation_id=f"provision/{name}",
             bot_id=f"bot/{name}",
             display_name=name.title(),
             storage_profile_ref=profile.profile_ref,
+            bootstrap_profile_ref=bootstrap.profile_ref,
+            bootstrap_manifest_digest=bootstrap.manifest_digest,
         )
         bots.append(
             await repository.set_desired(
@@ -606,11 +818,14 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
     await repository.initialize()
     for name in ("healthy", "broken"):
         profile = await _storage_profile(repository, f"bot/{name}", name)
+        bootstrap = await _bootstrap_profile(repository, profile, name)
         bot = await repository.register_ready(
             operation_id=f"provision/{name}",
             bot_id=f"bot/{name}",
             display_name=name.title(),
             storage_profile_ref=profile.profile_ref,
+            bootstrap_profile_ref=bootstrap.profile_ref,
+            bootstrap_manifest_digest=bootstrap.manifest_digest,
         )
         await repository.set_desired(
             operation_id=f"runtime/{name}/online",

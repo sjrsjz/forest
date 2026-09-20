@@ -150,6 +150,15 @@ class CleanBotSettings:
     private_enabled: bool
     shell_administrator_ids: tuple[str, ...]
     agent_system_prompt: str
+    model_credential_ref: str = "secret://provider.chat-completions/main/1"
+    embedding_credential_ref: str = "secret://embedding.multimodal/main/1"
+    onebot_secret_ref: str = "secret://onebot/main/1"
+    agent_preset_system: tuple[str, ...] = ()
+    model_timeout_seconds: float = 120
+    model_max_connections: int = 8
+    embedding_timeout_seconds: float = 60
+    embedding_max_connections: int = 4
+    model_capabilities: ModelCapabilities | None = None
 
     @classmethod
     def from_environment(cls) -> "CleanBotSettings":
@@ -373,7 +382,7 @@ class CleanBotHost:
                 receive_enabled=True,
                 transport="FORWARD_WEBSOCKET",
                 config=config,
-                secret_ref="secret://onebot/main/1",
+                secret_ref=self.settings.onebot_secret_ref,
                 secret_digest="sha256:"
                 + hashlib.sha256(self.settings.onebot_access_token.encode()).hexdigest(),
                 actor_principal_ref="bootstrap/local",
@@ -398,7 +407,7 @@ class CleanBotHost:
     async def _assemble_registry(
         self, activation_id: str | None = None
     ) -> tuple[RuntimeModuleRegistry, object]:
-        capabilities = ModelCapabilities(
+        capabilities = self.settings.model_capabilities or ModelCapabilities(
             deployment_id=self.settings.model_deployment_id,
             model=self.settings.model,
             capability_revision="operator-declared/1",
@@ -415,15 +424,15 @@ class CleanBotHost:
             kernel=self._kernel,
             credential_resolver=lambda secret_ref, _revision: (
                 self.settings.model_api_key
-                if secret_ref == "secret://provider.chat-completions/main/1"
+                if secret_ref == self.settings.model_credential_ref
                 else None
             ),
             initial_configuration={
                 "protocol": "forest.provider.chat-completions/1",
                 "base_url": self.settings.model_base_url,
-                "credential_ref": "secret://provider.chat-completions/main/1",
-                "timeout_seconds": 120,
-                "max_connections": 8,
+                "credential_ref": self.settings.model_credential_ref,
+                "timeout_seconds": self.settings.model_timeout_seconds,
+                "max_connections": self.settings.model_max_connections,
                 "capabilities": capabilities.as_dict(),
             },
             **provider_options,
@@ -439,7 +448,7 @@ class CleanBotHost:
             embedding_options["client_factory"] = self._embedding_client_factory
 
         async def resolve_embedding_secret(secret_ref, _revision):
-            if secret_ref != "secret://embedding.multimodal/main/1":
+            if secret_ref != self.settings.embedding_credential_ref:
                 raise ForestError(
                     "EMBEDDING_CREDENTIAL_UNAVAILABLE",
                     "Embedding credential reference differs",
@@ -455,9 +464,9 @@ class CleanBotHost:
             initial_configuration={
                 "protocol": "forest.embedding.multimodal/1",
                 "endpoint": self.settings.embedding_endpoint,
-                "credential_ref": "secret://embedding.multimodal/main/1",
-                "timeout_seconds": 60,
-                "max_connections": 4,
+                "credential_ref": self.settings.embedding_credential_ref,
+                "timeout_seconds": self.settings.embedding_timeout_seconds,
+                "max_connections": self.settings.embedding_max_connections,
                 "profile": embedding_profile,
             },
             **embedding_options,
@@ -491,9 +500,14 @@ class CleanBotHost:
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            preset_system=(self.settings.agent_system_prompt,)
-            if self.settings.agent_system_prompt
-            else (),
+            preset_system=(
+                self.settings.agent_preset_system
+                or (
+                    (self.settings.agent_system_prompt,)
+                    if self.settings.agent_system_prompt
+                    else ()
+                )
+            ),
         )
         trigger = await bootstrap_clean_trigger_policy(
             self.store,
@@ -517,7 +531,7 @@ class CleanBotHost:
         )
 
         async def resolve_onebot_secret(*, secret_ref, expected_digest):
-            if secret_ref != "secret://onebot/main/1" or expected_digest != token_digest:
+            if secret_ref != self.settings.onebot_secret_ref or expected_digest != token_digest:
                 raise ForestError("BINDING_SECRET_INVALID", "OneBot secret reference differs", 409)
             return {"access_token": self.settings.onebot_access_token}
 
@@ -596,6 +610,20 @@ class CleanBotHost:
         except BaseException:
             await self.close()
             raise
+
+    async def provision(self) -> tuple[str, ...]:
+        """Install module authorities and revision-one configuration without starting I/O."""
+
+        if self.registry is not None or self._lease is not None:
+            raise ForestError("BOT_HOST_ALREADY_ACTIVE", "Active Bot host cannot provision", 409)
+        await self.store.open()
+        try:
+            self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
+            registry, adapter = await self._assemble_registry()
+            await self._configure_binding(adapter)
+            return tuple(descriptor.component_id for descriptor in registry.descriptors)
+        finally:
+            await self.store.close()
 
     @staticmethod
     async def _resume_reload_waits(
