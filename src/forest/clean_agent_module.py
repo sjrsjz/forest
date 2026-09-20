@@ -117,26 +117,6 @@ async def bootstrap_clean_agent(
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
-    preset_owner_id = "preset:default:1"
-    epoch = await kernel.payload.epoch()
-    preset = await kernel.payload.put_bytes(
-        owner_component_id="agent.runtime",
-        owner_kind="preset.context",
-        owner_id=preset_owner_id,
-        media_type="application/json",
-        content=json.dumps(
-            {"system": list(preset_system)}, ensure_ascii=False, separators=(",", ":")
-        ).encode(),
-        sources=(
-            PayloadSource(
-                "agent.runtime",
-                "DEFAULT_PRESET",
-                preset_owner_id,
-                1,
-            ),
-        ),
-        expected_deletion_epoch=epoch,
-    )
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -162,24 +142,49 @@ async def bootstrap_clean_agent(
         ],
         "additionalProperties": False,
     }
-    await configuration.initialize(
-        operation_id="bootstrap:agent.runtime:configuration",
-        value={
-            "protocol": "forest.agent.runtime/1",
-            "agent_spec_revision": "forest.agent.default/1",
-            "preset_revision": "preset:default/1",
-            "preset": {
-                "payload_id": preset.payload_id,
-                "digest": preset.content_digest,
-                "owner_id": preset_owner_id,
+    try:
+        await configuration.desired()
+    except ForestError as exc:
+        if exc.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+            raise
+        preset_owner_id = "preset:default:1"
+        epoch = await kernel.payload.epoch()
+        preset = await kernel.payload.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="preset.context",
+            owner_id=preset_owner_id,
+            media_type="application/json",
+            content=json.dumps(
+                {"system": list(preset_system)}, ensure_ascii=False, separators=(",", ":")
+            ).encode(),
+            sources=(
+                PayloadSource(
+                    "agent.runtime",
+                    "DEFAULT_PRESET",
+                    preset_owner_id,
+                    1,
+                ),
+            ),
+            expected_deletion_epoch=epoch,
+        )
+        await configuration.initialize(
+            operation_id="bootstrap:agent.runtime:configuration",
+            value={
+                "protocol": "forest.agent.runtime/1",
+                "agent_spec_revision": "forest.agent.default/1",
+                "preset_revision": "preset:default/1",
+                "preset": {
+                    "payload_id": preset.payload_id,
+                    "digest": preset.content_digest,
+                    "owner_id": preset_owner_id,
+                },
+                "run_timeout_seconds": 300,
+                "max_steps": 32,
+                "output_tokens": 1024,
+                "stream": False,
             },
-            "run_timeout_seconds": 300,
-            "max_steps": 32,
-            "output_tokens": 1024,
-            "stream": False,
-        },
-        validation_digest=digest_json(schema),
-    )
+            validation_digest=digest_json(schema),
+        )
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(
         grantee_kind="component",
