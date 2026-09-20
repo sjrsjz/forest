@@ -140,6 +140,7 @@ class DeploymentCatalogRepository:
             "web_sessions",
             "web_login_throttles",
             "web_authority_receipts",
+            "audit_records",
             "bots",
             "runtime_intents",
             "runtime_observations",

@@ -101,6 +101,49 @@ CREATE TABLE forest_deployment.web_authority_receipts (
     CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '30 seconds')
 );
 
+CREATE TABLE forest_deployment.audit_records (
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    audit_id text NOT NULL CHECK (
+        octet_length(audit_id) BETWEEN 1 AND 128
+        AND audit_id ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]*$'
+    ),
+    action text NOT NULL CHECK (
+        octet_length(action) BETWEEN 1 AND 200
+        AND action ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]*$'
+    ),
+    severity text NOT NULL CHECK (severity IN ('INFO','WARNING','ERROR','SECURITY')),
+    producer_component_id text NOT NULL CHECK (
+        octet_length(producer_component_id) BETWEEN 1 AND 128
+    ),
+    producer_generation_id text NOT NULL CHECK (
+        octet_length(producer_generation_id) BETWEEN 1 AND 256
+    ),
+    origin_kind text NOT NULL CHECK (origin_kind='web.management'),
+    actor_kind text NOT NULL CHECK (actor_kind='web.subject'),
+    actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 128),
+    resource_kind text NOT NULL CHECK (resource_kind='deployment.component'),
+    resource_id text NOT NULL CHECK (octet_length(resource_id) BETWEEN 1 AND 128),
+    operation_kind text NOT NULL CHECK (operation_kind='web.action'),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    receipt_ticket_id text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (deployment_id,audit_id),
+    UNIQUE (deployment_id,operation_id),
+    FOREIGN KEY (deployment_id,receipt_ticket_id)
+        REFERENCES forest_deployment.web_authority_receipts(deployment_id,ticket_id)
+);
+
+CREATE INDEX deployment_audit_time_idx
+    ON forest_deployment.audit_records(deployment_id,created_at DESC,audit_id DESC);
+CREATE INDEX deployment_audit_action_idx
+    ON forest_deployment.audit_records(deployment_id,action,created_at DESC,audit_id DESC);
+CREATE INDEX deployment_audit_producer_idx
+    ON forest_deployment.audit_records(
+        deployment_id,producer_component_id,created_at DESC,audit_id DESC
+    );
+CREATE INDEX deployment_audit_actor_idx
+    ON forest_deployment.audit_records(deployment_id,actor_kind,actor_id,created_at DESC);
+
 CREATE INDEX web_login_throttles_expiry_idx
     ON forest_deployment.web_login_throttles(updated_at);
 
@@ -306,6 +349,10 @@ CREATE TRIGGER web_account_operation_immutable
 
 CREATE TRIGGER web_authority_receipt_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.web_authority_receipts
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_audit_record_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.audit_records
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE TRIGGER deployment_secret_version_immutable

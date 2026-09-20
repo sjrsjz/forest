@@ -29,6 +29,7 @@ from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.clean_deployment_store import CleanDeploymentStore
+from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
@@ -803,6 +804,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         new_target_dsn=lambda _bot_id: allocated_dsn,
         validate_target=lambda _bot_id, _target_dsn: None,
     )
+    deployment_audit = DeploymentAuditRepository(repository.store)
     app = create_deployment_management_app(
         deployment_id="deployment/test",
         components=deployment_management_components(
@@ -812,12 +814,14 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             bootstrap_profiles=bootstrap_profiles,
             jobs=jobs,
             supervisor=supervisor,
+            audit=deployment_audit,
             bootstrap_contributions=official_bootstrap_contributions(),
             database_allocator=allocator,
             web_identity=web_identity,
         ),
         identity_authority=web_identity,
         deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
+        deployment_audit=deployment_audit,
         allowed_origin="http://forest.test",
     )
     async with AsyncClient(
@@ -841,6 +845,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "deployment.secrets",
             "deployment.provisioning",
             "deployment.accounts",
+            "deployment.audit",
         }
         assert (await client.get("/static/deployment-provisioning.js")).status_code == 200
         shell_script = (await client.get("/static/app.js")).text
@@ -1014,6 +1019,27 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 "storage.create-local",
             ),
         ]
+        audit_page = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.audit/queries/audit.records.query",
+            headers=headers,
+            json={"limit": 10},
+        )
+        assert audit_page.status_code == 200
+        audit_records = audit_page.json()["records"]
+        assert {item["action"] for item in audit_records} == {
+            "secret.put",
+            "storage.create-local",
+            "bootstrap.create",
+        }
+        assert {item["producer_component_id"] for item in audit_records} == {
+            "deployment.secrets",
+            "deployment.provisioning",
+        }
+        assert {item["actor_id"] for item in audit_records} == {
+            "web-subject/8c6976e5b5410415bde908bd4dee15df"
+        }
+        assert all(item["origin_kind"] == "web.management" for item in audit_records)
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

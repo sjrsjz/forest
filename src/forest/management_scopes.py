@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import secrets
 from contextlib import asynccontextmanager
@@ -24,12 +25,14 @@ class DeploymentManagementGateway:
         components: tuple,
         ticket_authority=None,
         web_receipts=None,
+        audit=None,
     ) -> None:
         self.deployment_id = deployment_id
         self.components = components
         self.registry = {component.component_id: component for component in components}
         self.ticket_authority = ticket_authority
         self.web_receipts = web_receipts
+        self.audit = audit
         self._operation_lock = asyncio.Lock()
 
     def authorization_target(self, component_id: str) -> tuple[str, int]:
@@ -197,7 +200,7 @@ class DeploymentManagementGateway:
         input_digest: str,
         plan_digest: str | None,
     ) -> dict:
-        if self.ticket_authority is None or self.web_receipts is None:
+        if self.ticket_authority is None or self.web_receipts is None or self.audit is None:
             raise ForestError(
                 "WEB_AUTHORITY_TRANSACTION_REQUIRED",
                 "Deployment Web authority receipt storage is unavailable",
@@ -217,7 +220,9 @@ class DeploymentManagementGateway:
             plan_digest=plan_digest,
             required_role="ADMIN",
         )
-        return await self.web_receipts.accept_in(conn, ticket=ticket)
+        receipt = await self.web_receipts.accept_in(conn, ticket=ticket)
+        await self.audit.append_web_action_in(conn, ticket=ticket, receipt=receipt)
+        return receipt
 
     def _contract(self, component_id: str):
         component = self.registry.get(component_id)
@@ -471,13 +476,19 @@ class _AuthorizedGateway:
 
     async def module_query(self, component_id: str, query_id: str, body: dict):
         ticket, operation_id = await self._ticket(component_id, query_id, body)
-        return await self.gateway.module_query(
+        result = await self.gateway.module_query(
             component_id,
             query_id,
             body,
             authorization=ticket,
             operation_id=operation_id,
         )
+        validator = getattr(self.ticket_authority, "session_validator", None)
+        if callable(validator):
+            checked = validator(self.session)
+            if inspect.isawaitable(checked):
+                await checked
+        return result
 
     async def module_action(self, component_id: str, action_id: str, **values):
         self._write()
