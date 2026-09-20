@@ -39,7 +39,8 @@ CREATE TABLE forest_deployment.bootstrap_profiles (
     manifest_digest text NOT NULL CHECK (manifest_digest ~ '^sha256:[a-f0-9]{64}$'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY (storage_profile_ref,bot_id,storage_generation)
-        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation)
+        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation),
+    UNIQUE (profile_ref,bot_id,storage_profile_ref,storage_generation)
 );
 
 CREATE TABLE forest_deployment.bootstrap_profile_components (
@@ -55,6 +56,54 @@ CREATE TABLE forest_deployment.bootstrap_profile_operations (
     operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     profile_ref text NOT NULL REFERENCES forest_deployment.bootstrap_profiles(profile_ref),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE forest_deployment.provisioning_jobs (
+    job_id text PRIMARY KEY CHECK (octet_length(job_id) BETWEEN 1 AND 256),
+    bot_id text NOT NULL UNIQUE CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
+    display_name text NOT NULL CHECK (octet_length(display_name) BETWEEN 1 AND 256),
+    storage_profile_ref text NOT NULL,
+    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    bootstrap_profile_ref text NOT NULL,
+    bootstrap_manifest_digest text NOT NULL CHECK (
+        bootstrap_manifest_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    state text NOT NULL CHECK (
+        state IN ('QUEUED','RUNNING','RETRY_WAIT','SUCCEEDED','FAILED','CANCELLED')
+    ),
+    attempt_no integer NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
+    max_attempts integer NOT NULL CHECK (max_attempts BETWEEN 1 AND 20),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    lease_owner text,
+    lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
+    lease_expires_at timestamptz,
+    retry_not_before timestamptz,
+    last_error_code text CHECK (
+        last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'
+    ),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz,
+    FOREIGN KEY (storage_profile_ref,bot_id,storage_generation)
+        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation),
+    FOREIGN KEY (bootstrap_profile_ref,bot_id,storage_profile_ref,storage_generation)
+        REFERENCES forest_deployment.bootstrap_profiles(
+            profile_ref,bot_id,storage_profile_ref,storage_generation
+        ),
+    CHECK ((state='RUNNING') = (lease_owner IS NOT NULL)),
+    CHECK ((state='RUNNING') = (lease_expires_at IS NOT NULL)),
+    CHECK ((state='RETRY_WAIT') = (retry_not_before IS NOT NULL)),
+    CHECK ((state IN ('SUCCEEDED','FAILED','CANCELLED')) = (completed_at IS NOT NULL)),
+    CHECK (state NOT IN ('SUCCEEDED','FAILED','CANCELLED') OR lease_owner IS NULL)
+);
+
+CREATE TABLE forest_deployment.provisioning_operations (
+    operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    operation_kind text NOT NULL CHECK (operation_kind IN ('ENQUEUE','CANCEL')),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    job_id text NOT NULL REFERENCES forest_deployment.provisioning_jobs(job_id),
+    resulting_revision bigint NOT NULL CHECK (resulting_revision > 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -130,6 +179,8 @@ CREATE TABLE forest_deployment.secret_versions (
 CREATE INDEX bots_supply_idx ON forest_deployment.bots(supply_state,created_at,bot_id);
 CREATE INDEX observations_retry_idx
     ON forest_deployment.runtime_observations(observed_state,retry_not_before,bot_id);
+CREATE INDEX provisioning_claim_idx
+    ON forest_deployment.provisioning_jobs(state,retry_not_before,created_at,job_id);
 
 INSERT INTO forest_deployment.supervisor_lease(singleton) VALUES (true);
 
@@ -170,6 +221,42 @@ CREATE TRIGGER deployment_bootstrap_component_immutable
 CREATE TRIGGER deployment_bootstrap_operation_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.bootstrap_profile_operations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_provisioning_operation_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.provisioning_operations
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE FUNCTION forest_deployment.guard_provisioning_job_change() RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''DELETE'' OR ROW(
+        NEW.job_id,NEW.bot_id,NEW.display_name,NEW.storage_profile_ref,NEW.storage_generation,
+        NEW.bootstrap_profile_ref,NEW.bootstrap_manifest_digest,NEW.max_attempts,NEW.created_at
+    ) IS DISTINCT FROM ROW(
+        OLD.job_id,OLD.bot_id,OLD.display_name,OLD.storage_profile_ref,OLD.storage_generation,
+        OLD.bootstrap_profile_ref,OLD.bootstrap_manifest_digest,OLD.max_attempts,OLD.created_at
+    ) THEN
+        RAISE EXCEPTION ''provisioning job identity is immutable'';
+    END IF;
+    IF ROW(
+        NEW.state,NEW.attempt_no,NEW.lease_owner,NEW.lease_epoch,NEW.retry_not_before,
+        NEW.last_error_code,NEW.completed_at
+    ) IS NOT DISTINCT FROM ROW(
+        OLD.state,OLD.attempt_no,OLD.lease_owner,OLD.lease_epoch,OLD.retry_not_before,
+        OLD.last_error_code,OLD.completed_at
+    ) THEN
+        IF NEW.revision <> OLD.revision THEN
+            RAISE EXCEPTION ''provisioning lease renewal cannot advance revision'';
+        END IF;
+    ELSIF NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION ''provisioning job revision must advance once'';
+    END IF;
+    RETURN NEW;
+END;
+';
+
+CREATE TRIGGER provisioning_job_change_guard
+    BEFORE UPDATE OR DELETE ON forest_deployment.provisioning_jobs
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_provisioning_job_change();
 
 CREATE FUNCTION forest_deployment.guard_bot_change() RETURNS trigger LANGUAGE plpgsql AS '
 BEGIN

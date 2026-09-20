@@ -12,10 +12,12 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
+from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.errors import ForestError
 from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 
@@ -364,6 +366,140 @@ async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_on
             schema_digests={"provider.chat-completions": "sha256:" + "f" * 64},
         )
     assert caught.value.code == "BOOTSTRAP_SECRET_PLAINTEXT_FORBIDDEN"
+
+
+async def _bootstrap_profile(repository, storage, name: str):
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
+    return await profiles.create(
+        operation_id=f"bootstrap-profile/{name}/create",
+        profile_ref=f"bootstrap-profile/{name}/1",
+        bot_id=storage.bot_id,
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        components={"conversation.trigger-policy": {"allowed_group_ids": ["933179609"]}},
+        schema_digests={"conversation.trigger-policy": "sha256:" + "a" * 64},
+    )
+
+
+@pytest.mark.postgres
+async def test_provisioning_job_claim_renew_retry_and_success_are_fenced(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/jobs", "jobs")
+    profile = await _bootstrap_profile(repository, storage, "jobs")
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    queued = await jobs.enqueue(
+        operation_id="provisioning/jobs/enqueue",
+        job_id="provisioning/jobs/1",
+        bot_id="bot/jobs",
+        display_name="Jobs",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        bootstrap_profile_ref=profile.profile_ref,
+        max_attempts=2,
+    )
+    replay = await jobs.enqueue(
+        operation_id="provisioning/jobs/enqueue",
+        job_id="provisioning/jobs/1",
+        bot_id="bot/jobs",
+        display_name="Jobs",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        bootstrap_profile_ref=profile.profile_ref,
+        max_attempts=2,
+    )
+    assert queued["job_id"] == replay["job_id"]
+    supervisor = await repository.claim_supervisor("host/jobs", "incarnation/jobs")
+    first, duplicate = await asyncio.gather(
+        jobs.claim(supervisor, worker_id="worker/one"),
+        jobs.claim(supervisor, worker_id="worker/two"),
+    )
+    claim = first or duplicate
+    assert claim is not None
+    assert (first is None) != (duplicate is None)
+    revision = (await jobs.inspect(claim.job_id))["revision"]
+    renewed = await jobs.renew(supervisor, claim)
+    assert renewed.lease_epoch == claim.lease_epoch
+    assert (await jobs.inspect(claim.job_id))["revision"] == revision
+    waiting = await jobs.fail(
+        supervisor,
+        renewed,
+        error_code="EXPECTED_PROVISIONING_FAILURE",
+        retry_seconds=1,
+    )
+    assert waiting["state"] == "RETRY_WAIT"
+    await asyncio.sleep(1.05)
+    second = await jobs.claim(supervisor, worker_id="worker/two")
+    assert second is not None
+    assert second.attempt_no == 2
+    assert second.lease_epoch == claim.lease_epoch + 1
+    await repository.register_ready(
+        operation_id="provision-ready/provisioning/jobs/1",
+        bot_id="bot/jobs",
+        display_name="Jobs",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+    )
+    succeeded = await jobs.succeed(supervisor, second)
+    assert succeeded["state"] == "SUCCEEDED"
+    with pytest.raises(ForestError) as caught:
+        await jobs.fail(supervisor, claim, error_code="STALE_TEST")
+    assert caught.value.code == "STALE_PROVISIONING_CLAIM"
+
+
+@pytest.mark.postgres
+async def test_provisioning_executor_resolves_frozen_inputs_before_ready_publication(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/executor", "executor")
+    profile = await _bootstrap_profile(repository, storage, "executor")
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    bootstrap_profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    await jobs.enqueue(
+        operation_id="provisioning/executor/enqueue",
+        job_id="provisioning/executor/1",
+        bot_id="bot/executor",
+        display_name="Executor",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        bootstrap_profile_ref=profile.profile_ref,
+    )
+    calls = []
+
+    async def provisioner(*, claim, storage, profile):
+        calls.append((claim, storage, profile))
+        assert storage.dsn.endswith("/forest_executor")
+        assert profile.manifest_digest == claim.bootstrap_manifest_digest
+
+    executor = DeploymentProvisioningExecutor(
+        jobs=jobs,
+        catalog=repository,
+        storage_profiles=storage_profiles,
+        bootstrap_profiles=bootstrap_profiles,
+        provisioner=provisioner,
+        worker_id="worker/executor",
+    )
+    supervisor = await repository.claim_supervisor("host/executor", "incarnation/executor")
+    result = await executor.run_once(supervisor)
+    assert result["state"] == "SUCCEEDED"
+    assert len(calls) == 1
+    bot = await repository.inspect("bot/executor")
+    assert bot["supply_state"] == "READY"
+    assert bot["desired_state"] == "OFFLINE"
+    assert await executor.run_once(supervisor) is None
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

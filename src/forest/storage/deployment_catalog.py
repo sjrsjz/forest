@@ -144,6 +144,8 @@ class DeploymentCatalogRepository:
             "bootstrap_profiles",
             "bootstrap_profile_components",
             "bootstrap_profile_operations",
+            "provisioning_jobs",
+            "provisioning_operations",
         }
         functions = await (
             await conn.execute(
@@ -158,6 +160,7 @@ class DeploymentCatalogRepository:
             "guard_bot_change",
             "guard_revisioned_change",
             "guard_secret_slot_change",
+            "guard_provisioning_job_change",
         }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",
