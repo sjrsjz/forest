@@ -105,6 +105,10 @@ class ShellCommandParser:
     @staticmethod
     def _coerce(raw: str | None, schema: dict):
         kind = schema.get("type")
+        if kind is None and isinstance(schema.get("enum"), list) and all(
+            isinstance(item, str) for item in schema["enum"]
+        ):
+            kind = "string"
         if kind == "boolean":
             if raw is None:
                 return True

@@ -23,6 +23,7 @@ from forest.agent_tool_executor import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
 from forest.clean_agent_module import bootstrap_clean_agent
@@ -39,6 +40,7 @@ from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
+from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
     AgentInputBatch,
@@ -454,12 +456,16 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert runtime_descriptor.shell_commands == RUNTIME_SHELL_COMMANDS
         assert shell.descriptor.shell_commands == ()
         assert set(shell_runtime.command_routes) == {
-            (item.command_id, item.command_version) for item in RUNTIME_SHELL_COMMANDS
+            (item.command_id, item.command_version)
+            for item in (*RUNTIME_SHELL_COMMANDS, *MEMORY_SHELL_COMMANDS)
         }
-        assert all(
-            service.route.provider_component_id == "kernel.runtime"
-            for _, _, service in shell_runtime.command_routes.values()
-        )
+        for owner, _contribution, service in shell_runtime.command_routes.values():
+            assert service.route.provider_component_id == owner
+        assert {
+            service.route.provider_component_id
+            for key, (_, _, service) in shell_runtime.command_routes.items()
+            if key[0].startswith("memory.")
+        } == {"memory.graph"}
         assert adapter_runtime.generation_identity.generation_id == (
             registry.graph_identity.generations["adapter.onebot"]
         )
@@ -673,6 +679,19 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert remembered["items"][0]["external_group_id"] == "933179609"
         assert remembered["items"][0]["author_subject_ref"] == "qq:42"
         assert remembered["items"][0]["parts"][0]["part_kind"] == "TEXT"
+        _, _, memory_sources_service = shell_runtime.command_routes[("memory.sources", 1)]
+        memory_sources_result = await memory_sources_service(
+            ShellCommandExecutionRequest(
+                "memory.sources",
+                1,
+                {"trunk_id": trunks[0]["trunk_id"], "limit": 10},
+                "shell-request:test-memory-sources",
+                "qq:42",
+                "onebot:group:933179609",
+            )
+        )
+        assert "群 933179609" in memory_sources_result.text
+        assert "qq:42" in memory_sources_result.text
         async with store.pool.connection() as conn:
             facet = await (
                 await conn.execute(

@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
+from forest.builtin_memory_shell import execute_memory_shell
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.memory_embedding_service import CleanMemoryEmbeddingService
@@ -53,6 +54,7 @@ class CleanMemoryRuntime:
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "memory.source.capture", "version": 1},
             {"service_id": "memory.source.unavailable", "version": 1},
+            {"service_id": "shell.memory.inspect", "version": 1},
         ],
         "requires": [{"service_id": "embedding.encode", "version": 1}],
     }
@@ -95,7 +97,11 @@ class CleanMemoryRuntime:
             ("memory.recall", 1): self.recall,
             ("memory.source.capture", 1): self.capture_ingress_source,
             ("memory.source.unavailable", 1): self.mark_source_unavailable,
+            ("shell.memory.inspect", 1): self.execute_shell_command,
         }
+
+    async def execute_shell_command(self, request):
+        return await execute_memory_shell(self, request)
 
     @staticmethod
     def _profile(value: object) -> FrozenMemoryProfile:

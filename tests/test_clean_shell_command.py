@@ -11,10 +11,12 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
+from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS, execute_memory_shell
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.errors import ForestError
 from forest.runtime_modules import RuntimeShellCommandContribution, official_storage_bundle
 from forest.shell_command_parser import ShellCommandParser
+from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.shell_gate import CoreShellGate
 from forest.storage.adapter_onebot_authority import (
     OneBotAdapterRepository,
@@ -108,6 +110,74 @@ def test_parser_consumes_module_contribution_without_hardcoded_command_branch():
     assert parsed.command_id == "plugin.echo"
     assert parsed.command_version == 3
     assert parsed.document["arguments"] == {"message": "hello forest"}
+
+
+def test_memory_commands_are_derived_from_memory_owned_schemas():
+    parser = ShellCommandParser(None, MEMORY_SHELL_COMMANDS)
+
+    sources = parser.parse(
+        "memory sources --trunk-id trunk/933179609 --modality IMAGE --limit 7"
+    )
+    relations = parser.parse(
+        "memory relations --endpoint-kind SOURCE_UNIT --endpoint-id unit/42"
+    )
+
+    assert sources.document["arguments"] == {
+        "trunk_id": "trunk/933179609",
+        "modality": "IMAGE",
+        "limit": 7,
+    }
+    assert relations.document["arguments"] == {
+        "endpoint_kind": "SOURCE_UNIT",
+        "endpoint_id": "unit/42",
+    }
+    assert parser.parse("memory sources --limit 11").document["arguments"] == {
+        "error_code": "SHELL_COMMAND_NOT_FOUND"
+    }
+
+
+@pytest.mark.asyncio
+async def test_memory_relation_shell_output_names_evidence_groups():
+    class Repository:
+        async def query_relations(self, **arguments):
+            assert arguments == {
+                "endpoint_kind": "SOURCE_UNIT",
+                "endpoint_id": "unit/a",
+                "limit": 2,
+            }
+            return {
+                "items": [
+                    {
+                        "relation_id": "relation/a-b",
+                        "relation_kind": "ASSOCIATES_WITH",
+                        "left_kind": "SOURCE_UNIT",
+                        "left_id": "unit/a",
+                        "right_kind": "SOURCE_UNIT",
+                        "right_id": "unit/b",
+                        "evidence": [
+                            {"external_group_id": "933179609"},
+                            {"external_group_id": "200000001"},
+                        ],
+                    }
+                ],
+                "has_more": False,
+            }
+
+    memory = type("Memory", (), {"repository": Repository()})()
+    result = await execute_memory_shell(
+        memory,
+        ShellCommandExecutionRequest(
+            "memory.relations",
+            1,
+            {"endpoint_kind": "SOURCE_UNIT", "endpoint_id": "unit/a", "limit": 2},
+            "request/relations",
+            "qq:42",
+            "onebot:group:933179609",
+        ),
+    )
+
+    assert "relation/a-b ASSOCIATES_WITH" in result.text
+    assert "来源群 200000001,933179609" in result.text
 
 
 async def _parse(*, command_text, command_id, command_version, argument_schema_digest, arguments):

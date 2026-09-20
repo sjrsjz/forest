@@ -62,6 +62,8 @@ RuntimeShellCommandContribution {
 
 示例：Agent 模块注册 `run list/inspect/cancel`，Memory 模块注册 `memory sources/query/forget-*`，Conversation 模块注册 `context inspect/compact/reset`，Job 模块注册 `jobs list/run/cancel`。控制台和 Shell 都从同一 management operation catalog 发现这些动作；控制台不会因此出现硬编码 Agent/Memory 顶层页面。
 
+当前 `memory.graph` 已作为首个非内核命令贡献者提供 `memory trunks`、`memory sources` 和 `memory relations`。群聊输出只给最多十项的短投影；来源项明确标注作者、模态和来源群，关系项明确标注证据来自哪些群。需要稳定游标、组合筛选或展开完整证据时，回执引导管理员进入同一模块的 WebUI 查询面，不能在群里倾倒大页数据。
+
 `RuntimeModuleDescriptor.shell_commands` 是唯一命令目录。命令词由 `command_id` 的点分段确定，参数名和类型来自完整 Draft 2020-12 schema，CLI 风格别名只能显式映射到 schema 中已声明的属性。RuntimeGraph 构建时拒绝重复 `(command_id, command_version)`；Contract Router 只向 `shell.command` 暴露贡献目录，并为每项解析由贡献模块准确 Generation 提供的类型化服务句柄。Shell 不按命令 ID 导入模块，也不含模块命令分支。
 
 模块命令 registry 是 RouteGraph 的一部分。发布事务把命令 schema 摘要、能力摘要、operation、服务等级和准确 owner Generation 写入权威 route。新 Generation 发布时一次切换，之后接纳的命令使用新 schema；已接纳请求继续绑定原 Generation 和参数载荷，执行时同时复核冻结 owner 和服务句柄 provider，除非该模块明确声明、宿主验证且管理员允许兼容 takeover。Forest 未发布基线不保留开发期 `shell-gate-v2…v12`、版本专用 Python registry 或旧 writer-generation 分派器。

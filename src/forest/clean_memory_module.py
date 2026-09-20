@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
 from forest.clean_management_contract import CleanMemoryManagementContract
 from forest.clean_memory_runtime import CleanMemoryRuntime
 from forest.embeddings import SILICONFLOW_VL_MODEL
@@ -210,5 +211,6 @@ async def bootstrap_clean_memory(
         wakes_on_work=True,
         work_notify_order=20,
         factory_protocol="forest.contract-module-factory/1",
+        shell_commands=MEMORY_SHELL_COMMANDS,
     )
     return CleanMemoryModule(repository, retrieval, descriptor, configuration, grants)
