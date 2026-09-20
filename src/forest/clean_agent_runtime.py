@@ -525,3 +525,15 @@ class CleanAgentRuntime:
         return await self._call(
             "recoverable_runs", limit=limit, owned_work=True
         )
+
+    async def approval_context(self, approval_ref: str):
+        return await self._call(
+            "approval_context", approval_ref=approval_ref, owned_work=True
+        )
+
+    async def approval_context_in(self, conn, approval_ref: str):
+        await self._verify_member_in(conn)
+        return await self.repository.approval_context(
+            approval_ref,
+            _connection=conn,
+        )

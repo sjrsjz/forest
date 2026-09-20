@@ -691,7 +691,7 @@ class ConversationSchedulerRepository:
             expires = lane["database_now"] + timedelta(seconds=lease_seconds)
             await conn.execute(
                 sql.SQL("UPDATE {} SET actor_owner_id=%s,actor_epoch=%s,actor_expires_at=%s,"
-                        "resume_not_before=NULL,resume_reason_code=NULL,"
+                        "resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,"
                         "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s").format(
                     self._table("conversation_lanes")
                 ),
@@ -760,6 +760,7 @@ class ConversationSchedulerRepository:
         *,
         delay_seconds: float,
         reason_code: str,
+        reason_ref: str | None = None,
         _connection=None,
     ) -> dict:
         if (
@@ -769,6 +770,7 @@ class ConversationSchedulerRepository:
         ):
             raise ForestError("CONVERSATION_INPUT_INVALID", "Invalid defer delay", 422)
         _bounded(reason_code, "reason_code", 128)
+        _bounded(reason_ref, "reason_ref", 256, optional=True)
         async with self._transaction(_connection) as conn:
             lane = await self._guard_actor(conn, actor)
             if lane["active_session_ref"] is None:
@@ -781,12 +783,13 @@ class ConversationSchedulerRepository:
                 await conn.execute(
                     sql.SQL(
                         "UPDATE {} SET resume_not_before=clock_timestamp()+(%s * interval '1 second'),"
-                        "resume_reason_code=%s,updated_at=clock_timestamp() "
+                        "resume_reason_code=%s,resume_reason_ref=%s,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND conversation_id=%s RETURNING *"
                     ).format(self._table("conversation_lanes")),
                     (
                         float(delay_seconds),
                         reason_code,
+                        reason_ref,
                         self.store.bot_id,
                         actor.conversation_id,
                     ),
@@ -796,6 +799,41 @@ class ConversationSchedulerRepository:
 
     async def defer_actor_in(self, conn, actor: ConversationActor, **values) -> dict:
         return await self.defer_actor(actor, _connection=conn, **values)
+
+    async def resume_deferred(
+        self,
+        conversation_id: str,
+        *,
+        reason_code: str,
+        reason_ref: str,
+        _connection=None,
+    ) -> dict:
+        _bounded(conversation_id, "conversation_id", 256)
+        _bounded(reason_code, "reason_code", 128)
+        _bounded(reason_ref, "reason_ref", 256)
+        async with self._transaction(_connection) as conn:
+            lane = await self._lane(conn, conversation_id, update=True)
+            matched = (
+                lane["resume_reason_code"] == reason_code
+                and lane["resume_reason_ref"] == reason_ref
+            )
+            if not matched:
+                return {**dict(lane), "resumed": False}
+            resumed = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET resume_not_before=NULL,resume_reason_code=NULL,"
+                        "resume_reason_ref=NULL,mailbox_revision=mailbox_revision+1,"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s "
+                        "RETURNING *"
+                    ).format(self._table("conversation_lanes")),
+                    (self.store.bot_id, conversation_id),
+                )
+            ).fetchone()
+            return {**dict(resumed), "resumed": True}
+
+    async def resume_deferred_in(self, conn, conversation_id: str, **values) -> dict:
+        return await self.resume_deferred(conversation_id, _connection=conn, **values)
 
     async def claimable_conversations(self, *, limit: int = 64, _connection=None) -> tuple[str, ...]:
         """Return bounded wake candidates; actor acquisition remains the ownership point."""
@@ -1153,7 +1191,7 @@ class ConversationSchedulerRepository:
             if boundary == "SESSION_END" and status == "IDLE":
                 await conn.execute(
                     sql.SQL("UPDATE {} SET active_session_ref=NULL,active_run_ref=NULL,"
-                            "resume_not_before=NULL,resume_reason_code=NULL,"
+                            "resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,"
                             "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
                             "WHERE bot_id=%s AND conversation_id=%s").format(
                         self._table("conversation_lanes")
@@ -1332,7 +1370,7 @@ class ConversationSchedulerRepository:
         await conn.execute(
             sql.SQL("UPDATE {} SET context_applied_seq=%s,context_revision=%s,"
                     "active_session_ref=%s,active_run_ref=%s,mailbox_revision=mailbox_revision+1,"
-                    "resume_not_before=NULL,resume_reason_code=NULL,"
+                    "resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,"
                     "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s").format(
                 self._table("conversation_lanes")
             ),
@@ -1686,7 +1724,7 @@ class ConversationSchedulerRepository:
                 )
             await conn.execute(
                 sql.SQL("UPDATE {} SET active_session_ref=NULL,active_run_ref=NULL,"
-                        "resume_not_before=NULL,resume_reason_code=NULL,"
+                        "resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,"
                         "mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND conversation_id=%s").format(
                     self._table("conversation_lanes")

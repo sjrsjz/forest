@@ -2245,3 +2245,32 @@ class AgentRuntimeRepository:
                 )
             ).fetchall()
             return tuple(dict(row) for row in rows)
+
+    async def approval_context(self, approval_ref: str, *, _connection=None) -> dict:
+        """Resolve one approval to its immutable Agent Session and Conversation."""
+
+        _bounded(approval_ref, "approval_ref", 256)
+        async with self._transaction(_connection) as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT t.approval_ref,t.tool_call_id,t.state AS tool_state,"
+                        "r.run_id,r.state AS run_state,s.session_id,s.conversation_ref "
+                        "FROM {} t JOIN {} r ON r.bot_id=t.bot_id AND r.run_id=t.run_id "
+                        "JOIN {} s ON s.bot_id=r.bot_id AND s.session_id=r.session_id "
+                        "WHERE t.bot_id=%s AND t.approval_ref=%s"
+                    ).format(
+                        self._table("tool_calls"),
+                        self._table("agent_runs"),
+                        self._table("agent_sessions"),
+                    ),
+                    (self.store.bot_id, approval_ref),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError(
+                    "AGENT_APPROVAL_NOT_FOUND",
+                    "Approval is not attached to an Agent tool call",
+                    404,
+                )
+            return dict(row)

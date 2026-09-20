@@ -435,8 +435,10 @@ async def test_waiting_external_decision_defers_recovery_candidate_durably(
         actor,
         delay_seconds=0.2,
         reason_code="AGENT_WAITING_APPROVAL",
+        reason_ref="approval/deferred",
     )
     assert deferred["resume_reason_code"] == "AGENT_WAITING_APPROVAL"
+    assert deferred["resume_reason_ref"] == "approval/deferred"
     await scheduler.release_actor(actor)
 
     assert conversation not in await scheduler.claimable_conversations()
@@ -450,6 +452,48 @@ async def test_waiting_external_decision_defers_recovery_candidate_durably(
     state = await scheduler.execution_state(resumed)
     assert state["active"] is True
     await scheduler.release_actor(resumed)
+
+
+@pytest.mark.postgres
+async def test_external_decision_resumes_only_its_exact_durable_blocker(clean_scheduler):
+    _store, _storage, payloads, scheduler = clean_scheduler
+    conversation = "group/approval-wake"
+    await _admit(scheduler, payloads, conversation, 1, "user/a")
+    await _classify(scheduler, conversation, 1, "TRIGGER", "user/a")
+    actor = await scheduler.acquire_actor(conversation, "worker/waiting")
+    await scheduler.select_input(
+        actor,
+        "select/approval-wake/initial",
+        boundary="IDLE",
+        session_ref="session/approval-wake",
+        run_ref="run/approval-wake",
+    )
+    await scheduler.defer_actor(
+        actor,
+        delay_seconds=300,
+        reason_code="AGENT_WAITING_APPROVAL",
+        reason_ref="approval/right",
+    )
+    await scheduler.release_actor(actor)
+
+    wrong = await scheduler.resume_deferred(
+        conversation,
+        reason_code="AGENT_WAITING_APPROVAL",
+        reason_ref="approval/wrong",
+    )
+    assert wrong["resumed"] is False
+    assert conversation not in await scheduler.claimable_conversations()
+
+    resumed = await scheduler.resume_deferred(
+        conversation,
+        reason_code="AGENT_WAITING_APPROVAL",
+        reason_ref="approval/right",
+    )
+    assert resumed["resumed"] is True
+    assert resumed["resume_not_before"] is None
+    assert resumed["resume_reason_code"] is None
+    assert resumed["resume_reason_ref"] is None
+    assert conversation in await scheduler.claimable_conversations()
 
 
 @pytest.mark.postgres

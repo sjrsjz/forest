@@ -27,6 +27,9 @@ CREATE TABLE conversation_lanes (
     resume_reason_code text CHECK (
         resume_reason_code IS NULL OR octet_length(resume_reason_code) BETWEEN 1 AND 128
     ),
+    resume_reason_ref text CHECK (
+        resume_reason_ref IS NULL OR octet_length(resume_reason_ref) BETWEEN 1 AND 256
+    ),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, conversation_id),
@@ -39,6 +42,7 @@ CREATE TABLE conversation_lanes (
     ),
     CHECK (active_run_ref IS NULL OR active_session_ref IS NOT NULL),
     CHECK ((resume_not_before IS NULL) = (resume_reason_code IS NULL)),
+    CHECK (resume_reason_ref IS NULL OR resume_reason_code IS NOT NULL),
     CHECK (resume_not_before IS NULL OR active_session_ref IS NOT NULL)
 );
 

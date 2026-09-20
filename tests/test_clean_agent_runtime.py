@@ -910,6 +910,10 @@ async def test_function_call_binds_to_a_claimed_trigger_principal_without_child_
     )
     assert waiting["accepted"] is True
     assert (await agent.load("run/one"))["state"] == "WAIT_APPROVAL"
+    approval_context = await agent.approval_context("approval/tool-call/one")
+    assert approval_context["conversation_ref"] == "group/one"
+    assert approval_context["run_id"] == "run/one"
+    assert approval_context["tool_call_id"] == "tool-call/one"
     dispatching = await agent.observe_tool(
         owner,
         observation_operation_id="tool-observe/dispatching",

@@ -277,6 +277,23 @@ class CleanBotHost:
         if self.registry is not None:
             self.registry.notify_work()
 
+    async def _approval_decided(self, decision: dict) -> None:
+        if decision.get("request_kind") != "agent.tool" or self.registry is None:
+            return
+        try:
+            agent = self.registry.get("agent.runtime")
+            conversation = self.registry.get("conversation.scheduler")
+            context = await agent.approval_context(decision["approval_id"])
+            await conversation.resume_deferred(
+                context["conversation_ref"],
+                reason_code="AGENT_WAITING_APPROVAL",
+                reason_ref=decision["approval_id"],
+            )
+        except (KeyError, ForestError):
+            # The durable retry deadline covers graph replacement and process
+            # loss; this callback is only the low-latency wake path.
+            return
+
     async def _json_payload(self, *, owner_kind: str, owner_id: str, value: dict):
         epoch = await self._kernel.payload.epoch()
         saved = await self._kernel.payload.put_bytes(
@@ -539,6 +556,9 @@ class CleanBotHost:
             await self._reconcile_abandoned_clients(adapter)
             await registry.start()
             self.registry = registry
+            self._kernel.authorization.register_approval_decision_listener(
+                self._approval_decided
+            )
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
             )

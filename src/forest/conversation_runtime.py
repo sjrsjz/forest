@@ -28,6 +28,7 @@ class CleanConversationSchedulerRuntime:
             {"service_id": "kernel.uow.conversation.select-input", "version": 1},
             {"service_id": "kernel.uow.conversation.final-reply", "version": 1},
             {"service_id": "kernel.uow.conversation.session-handoff", "version": 1},
+            {"service_id": "kernel.uow.conversation.defer-approval", "version": 1},
         ],
     }
     state_schema = 1
@@ -45,6 +46,7 @@ class CleanConversationSchedulerRuntime:
         input_selection_port=None,
         completion_port=None,
         session_decision_port=None,
+        approval_wait_port=None,
         graph_admission=None,
     ):
         self.repository = repository
@@ -56,6 +58,7 @@ class CleanConversationSchedulerRuntime:
         self.input_selection_port = input_selection_port
         self.completion_port = completion_port
         self.session_decision_port = session_decision_port
+        self.approval_wait_port = approval_wait_port
         self.graph_admission = graph_admission
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
@@ -117,6 +120,7 @@ class CleanConversationSchedulerRuntime:
                 self.input_selection_port,
                 self.completion_port,
                 self.session_decision_port,
+                self.approval_wait_port,
                 self.graph_admission,
             )
         ):
@@ -126,6 +130,7 @@ class CleanConversationSchedulerRuntime:
             self.agent_execution,
             self.completion_port,
             self.session_decision_port,
+            approval_wait=self.approval_wait_port,
             owner_id=(
                 "conversation-worker/" + self.generation_identity.generation_id
             )[-256:],
@@ -245,6 +250,17 @@ class CleanConversationSchedulerRuntime:
             owned_work=True,
             **values,
         )
+
+    async def resume_deferred(self, conversation_id: str, **values):
+        result = await self._repository_call(
+            "resume_deferred_in",
+            conversation_id=conversation_id,
+            admission_lane="CONTROL",
+            **values,
+        )
+        if result["resumed"]:
+            self.notify()
+        return result
 
     async def select_input(self, actor, operation_id: str, **values):
         if self.input_selection_port is None:

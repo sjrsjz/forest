@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -81,6 +82,7 @@ class KernelAuthorizationRepository:
     def __init__(self, store, *, namespace: str | None = None) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.kernel.authorization")
+        self._approval_decision_listeners = []
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
@@ -713,20 +715,30 @@ class KernelAuthorizationRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.request_approval_in(conn, **values)
 
-    async def approval(self, approval_id: str) -> dict:
+    def register_approval_decision_listener(self, listener) -> None:
+        if not callable(listener):
+            raise TypeError("Approval decision listener must be callable")
+        if listener not in self._approval_decision_listeners:
+            self._approval_decision_listeners.append(listener)
+
+    async def approval_in(self, conn, approval_id: str, *, update: bool = False) -> dict:
         _bounded(approval_id, "approval_id", 256)
-        async with self.store.pool.connection() as conn, conn.transaction():
-            row = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND approval_id=%s").format(
-                        self._table("approvals")
-                    ),
-                    (self.store.bot_id, approval_id),
-                )
-            ).fetchone()
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND approval_id=%s {}").format(
+                    self._table("approvals"),
+                    sql.SQL("FOR UPDATE" if update else "FOR SHARE"),
+                ),
+                (self.store.bot_id, approval_id),
+            )
+        ).fetchone()
         if row is None:
             raise ForestError("APPROVAL_NOT_FOUND", "Approval is unavailable", 404)
         return dict(row)
+
+    async def approval(self, approval_id: str) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.approval_in(conn, approval_id)
 
     async def decide_approval_in(
         self,
@@ -845,7 +857,17 @@ class KernelAuthorizationRepository:
 
     async def decide_approval(self, **values) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
-            return await self.decide_approval_in(conn, **values)
+            decided = await self.decide_approval_in(conn, **values)
+        for listener in tuple(self._approval_decision_listeners):
+            try:
+                notified = listener(decided)
+                if inspect.isawaitable(notified):
+                    await notified
+            except Exception:
+                # The durable decision is authoritative. A listener is only an
+                # acceleration hint; the Conversation deadline remains recovery.
+                continue
+        return decided
 
     async def consume_approval_in(
         self,

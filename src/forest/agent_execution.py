@@ -340,6 +340,7 @@ class DurableSingleAgentExecution:
                             "AGENT_WAITING_APPROVAL",
                             "Agent tool call is waiting for approval",
                             409,
+                            details={"approval_ref": result.approval_ref},
                         )
                     if result.status == "UNKNOWN":
                         raise ForestError(

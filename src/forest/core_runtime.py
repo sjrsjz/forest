@@ -99,6 +99,7 @@ _MODULES = {
             "kernel.uow.conversation.final-reply",
             "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
+            "kernel.uow.conversation.defer-approval",
             "kernel.uow.onebot.ingress",
             "kernel.uow.shell.result",
             "kernel.uow.shell.binding-fence",

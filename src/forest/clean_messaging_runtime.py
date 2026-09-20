@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.adapter_onebot_runtime import CleanOneBotRuntime
+from forest.approval_wait_uow import ApprovalWaitUnitOfWork
 from forest.clean_onebot_management import CleanOneBotManagementContract
 from forest.conversation_reply_planner import DurableFinalReplyPlanner
 from forest.conversation_runtime import CleanConversationSchedulerRuntime
@@ -103,6 +104,14 @@ class _RoutedSessionDecision:
         return await self._decide(**values)
 
 
+class _RoutedApprovalWait:
+    def __init__(self, defer) -> None:
+        self._defer = defer
+
+    async def defer(self, actor, **values):
+        return await self._defer(actor, **values)
+
+
 class _RoutedIngress:
     def __init__(self, data_admit, control_admit, on_change=None) -> None:
         self._data_admit = data_admit
@@ -178,6 +187,16 @@ def _build_input_selection(context):
         deletion_epoch_guard=memory.deletion_epoch_in,
     )
     return port.select_input
+
+
+def _build_approval_wait(context):
+    port = ApprovalWaitUnitOfWork(
+        context.store,
+        authorization=context.participant("kernel.authorization").service,
+        agent=context.participant("agent.runtime"),
+        conversation=context.participant("conversation.scheduler"),
+    )
+    return port.defer
 
 
 def _build_onebot_ingress(context):
@@ -295,6 +314,9 @@ async def bootstrap_clean_messaging(
             session_decision_port=_RoutedSessionDecision(
                 contracts.service("kernel.uow.conversation.session-handoff", 1, owned_work=True)
             ),
+            approval_wait_port=_RoutedApprovalWait(
+                contracts.service("kernel.uow.conversation.defer-approval", 1, owned_work=True)
+            ),
             graph_admission=contracts.graph_admission,
         )
 
@@ -380,6 +402,16 @@ async def bootstrap_clean_messaging(
                         1,
                         ("agent.runtime", "conversation.scheduler", "memory.graph"),
                         _build_session_handoff,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "kernel.uow.conversation.defer-approval",
+                        1,
+                        (
+                            "kernel.authorization",
+                            "agent.runtime",
+                            "conversation.scheduler",
+                        ),
+                        _build_approval_wait,
                     ),
                 )
                 if component_id == "conversation.scheduler"

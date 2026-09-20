@@ -67,7 +67,7 @@ class FakeScheduler:
         self.actors: set[str] = set()
         self.appends: list[dict] = []
         self.selections: list[tuple[str, str, str | None, str | None]] = []
-        self.deferrals: list[tuple[str, float, str]] = []
+        self.deferrals: list[tuple[str, float, str, str | None]] = []
 
     async def claimable_conversations(self, *, limit):
         return tuple(self.lanes)[:limit]
@@ -103,9 +103,18 @@ class FakeScheduler:
     async def release_actor(self, actor):
         self.actors.remove(actor.conversation_id)
 
-    async def defer_actor(self, actor, *, delay_seconds, reason_code):
+    async def defer_actor(self, actor, *, delay_seconds, reason_code, reason_ref=None):
         assert actor.conversation_id in self.actors
-        self.deferrals.append((actor.conversation_id, delay_seconds, reason_code))
+        self.deferrals.append((actor.conversation_id, delay_seconds, reason_code, reason_ref))
+
+    async def defer(self, actor, *, approval_ref, delay_seconds):
+        await self.defer_actor(
+            actor,
+            delay_seconds=delay_seconds,
+            reason_code="AGENT_WAITING_APPROVAL",
+            reason_ref=approval_ref,
+        )
+        return {"deferred": True, "approval_state": "PENDING"}
 
     async def select_input(
         self,
@@ -187,6 +196,7 @@ def _worker(scheduler, agent, owner_id):
         agent,
         FakeCompletionPort(scheduler),
         FakeSessionDecisionPort(scheduler),
+        approval_wait=scheduler,
         owner_id=owner_id,
     )
 
@@ -343,16 +353,62 @@ async def test_waiting_approval_defers_durable_lane_without_worker_failure_loop(
                 "AGENT_WAITING_APPROVAL",
                 "Agent tool call is waiting for approval",
                 409,
+                details={"approval_ref": "approval/tool/waiting"},
             )
 
     worker = _worker(scheduler, WaitingAgent(), "generation/waiting")
     await worker.run_once("group/a")
 
     assert scheduler.deferrals == [
-        ("group/a", 1.0, "AGENT_WAITING_APPROVAL")
+        ("group/a", 1.0, "AGENT_WAITING_APPROVAL", "approval/tool/waiting")
     ]
     assert scheduler.actors == set()
     assert scheduler.appends == []
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_before_deferral_resumes_same_owned_run_immediately():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/existing",),
+            )
+        }
+    )
+
+    class DecidedApprovalWait:
+        async def defer(self, _actor, *, approval_ref, delay_seconds):
+            assert approval_ref == "approval/tool/decided"
+            assert delay_seconds == 1.0
+            return {"deferred": False, "approval_state": "APPROVED"}
+
+    class RacingAgent:
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                raise ForestError(
+                    "AGENT_WAITING_APPROVAL",
+                    "Agent tool call is waiting for approval",
+                    409,
+                    details={"approval_ref": "approval/tool/decided"},
+                )
+            assert request.recovery is True
+            assert request.initial_batch is None
+            return _reply(request.run_ref, "trigger/existing")
+
+    agent = RacingAgent()
+    worker = _worker(scheduler, agent, "generation/racing")
+    worker.approval_wait = DecidedApprovalWait()
+    await worker.run_once("group/a")
+
+    assert agent.calls == 2
+    assert scheduler.deferrals == []
+    assert scheduler.appends[0]["answer_trigger_ids"] == ("trigger/existing",)
 
 
 @pytest.mark.asyncio

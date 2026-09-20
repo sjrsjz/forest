@@ -417,6 +417,8 @@ CREATE TABLE tool_observations (
 CREATE INDEX model_request_state_idx ON model_requests(bot_id,state,updated_at);
 CREATE INDEX model_attempt_state_idx ON model_transport_attempts(bot_id,state,settled_at);
 CREATE INDEX tool_call_state_idx ON tool_calls(bot_id,state,updated_at);
+CREATE UNIQUE INDEX tool_call_approval_ref_idx ON tool_calls(bot_id,approval_ref)
+    WHERE approval_ref IS NOT NULL;
 
 CREATE FUNCTION guard_agent_session() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$

@@ -76,6 +76,16 @@ class SessionDecisionPort(Protocol):
     ) -> dict: ...
 
 
+class ApprovalWaitPort(Protocol):
+    async def defer(
+        self,
+        actor: ConversationActor,
+        *,
+        approval_ref: str,
+        delay_seconds: float,
+    ) -> dict: ...
+
+
 class ConversationWorker:
     """Poll durable lanes, serialize each group, and run groups in parallel."""
 
@@ -86,6 +96,7 @@ class ConversationWorker:
         completion: ConversationCompletionPort,
         session_decision: SessionDecisionPort,
         *,
+        approval_wait: ApprovalWaitPort,
         owner_id: str,
         poll_interval: float = 0.1,
         approval_poll_interval: float = 1.0,
@@ -110,6 +121,7 @@ class ConversationWorker:
         self.agent = agent
         self.completion = completion
         self.session_decision = session_decision
+        self.approval_wait = approval_wait
         self.owner_id = owner_id
         self.poll_interval = poll_interval
         self.approval_poll_interval = approval_poll_interval
@@ -319,12 +331,30 @@ class ConversationWorker:
                 except ForestError as exc:
                     if exc.code != "AGENT_WAITING_APPROVAL":
                         raise
-                    await self.scheduler.defer_actor(
-                        actor,
-                        delay_seconds=self.approval_poll_interval,
-                        reason_code="AGENT_WAITING_APPROVAL",
+                    approval_ref = (
+                        exc.details.get("approval_ref")
+                        if isinstance(exc.details, dict)
+                        else None
                     )
-                    return
+                    if not isinstance(approval_ref, str):
+                        raise ForestError(
+                            "AGENT_APPROVAL_REFERENCE_MISSING",
+                            "Agent approval wait omitted its durable reference",
+                            500,
+                        ) from exc
+                    wait = await self.approval_wait.defer(
+                        actor,
+                        approval_ref=approval_ref,
+                        delay_seconds=self.approval_poll_interval,
+                    )
+                    if wait["deferred"]:
+                        return
+                    # The decision committed before this worker could install
+                    # its blocker. Resume the same durable run while the actor
+                    # is still owned instead of waiting for another poll.
+                    recovery = True
+                    batch = None
+                    continue
                 if type(completion) is not AgentExecutionCompletion:
                     raise ForestError(
                         "AGENT_EXECUTION_RESULT_INVALID",
