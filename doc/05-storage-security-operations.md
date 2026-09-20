@@ -299,6 +299,12 @@ Web 管理主体来自服务端验证的本地账户或显式接入的身份提�
 
 部署库 Web 会话与独立 Bot 的授权不具有跨库原子性。首版采用用途限定的 `WebAuthorityTicket`：可信管理网关在部署库验证未撤销会话后签发，绑定 `ticket_id, issuer/key_revision, web_subject_ref, session_ref/session_revision, target_scope, target_operation_ref, action_key, input_digest, plan_digest, issued_at, expires_at`。票据只在后端传递，初始最大有效期 30 秒；目标在自己的最终许可事务中验证签名、期限、精确目标/输入/计划和当前 Bot policy/fences，再把票据依据记入原操作或配置修订。`target_operation_ref` 预分配且由请求稳定派生，同票重放只能恢复原操作，不得创建新效果；票据不能替代 Bot 授权，也不让普通 Worker 持有长效 Web 登录权限。
 
+目标库不能先单独插入一条“验票成功”记录再调用业务 repository。每个管理写 authority 必须提供接收调用方连接的 `*_in(conn)` 入口，由目标 UoW 在同一事务内依次锁定当前 policy revision、当前 RuntimeGraph/Generation fence 和业务资源，验证票据，写入 `web_authority_receipt`，再提交配置修订、取消意图、Binding 变更或持久 Job 接纳。收据至少保存 ticket digest（不保存原始签名）、主体与 Session revision、精确 scope/component/Generation、policy revision、operation/action、输入/plan 摘要和接纳时间；业务事实保存该收据引用。任一参与者失败时收据与业务写入一起回滚，因此“有收据”准确表示目标事务已经接纳，而不是网关曾经检查过。
+
+`target_operation_ref` 是业务幂等身份，`ticket_id` 是一次短票尝试。票据过期后允许为同一 operation 签发新 ticket attempt，但目标事务只允许它恢复或完成摘要完全相同的操作；不同主体、目标、action、input 或 plan 使用相同 operation 时返回冲突。并发 ticket attempts 由 operation advisory lock 与业务唯一约束收敛，只能有一个权威业务结果。读取类请求不预写接纳收据，但每次分页、流式增量和媒体物化都重新验签并执行当前可见性查询。
+
+HTTP 返回丢失不改变目标事实：客户端以 `target_operation_ref` 查询原结果。若目标事务尚未提交，网关超时只能报告 `UNKNOWN`，不能写“成功”审计，也不能换 operation 重试；若业务已提交，查询恢复同一收据和结果。部署库可以另存请求尝试与观察结果用于关联，但它不是 Bot 操作是否生效的权威，且不得通过部署侧状态覆盖目标库结果。
+
 退出、锁定账户或撤销会话以部署库提交为边界，立即停止签发新票据和建立新订阅。已签发但尚未提交的票据存在上述至多 30 秒许可窗口，界面和审计如实记录；尚未取得目标许可的排队请求在到期后取得新票据，失效会话不能续票。目标已持久许可并接纳的操作按原固定委派、当前 Bot policy 和生命周期/效果协议继续或恢复，不要求浏览器持续在线，也不能沿旧委派扩大计划；后续副作用仍重验当前目标权限。已进入派发的请求继续沿用原账本的撤销与 UNKNOWN 边界，关闭网页或退出登录不等于取消它。需要停止目标 Bot 权限时，管理服务逐 Bot 提交当前主体授权撤销/暂停屏障，并逐项报告完成；目标事务提交之后旧票据也因当前 policy 失效而不能通过。不把全局退出登录宣称为所有独立库的同时撤权。
 
 只读列表、事件订阅、图片下载和导出同样绑定主体/目标与当前可见性；每次翻页、重连、增量发送前验证会话，目标读取按当前 Bot policy 过滤。旧游标、签名地址或客户端缓存不获得新的读取权。已发出的受限短效地址有显式有效期和在途边界；受管代理下载可逐请求校验。身份映射修订属于目标授权依赖，撤销后不能靠历史 Web↔QQ 映射继续批准或扩大数据范围。
