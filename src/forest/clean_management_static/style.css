@@ -8,6 +8,7 @@ button { cursor:pointer; }
 .login-layer { min-height:100dvh; display:grid; place-items:center; padding:24px; background:radial-gradient(circle at 50% 0,#173428 0,#08110e 46%); }
 .login-card { width:min(380px,100%); display:grid; gap:14px; padding:26px; border:1px solid #29473a; border-radius:16px; background:#0e1c17; box-shadow:0 18px 80px #0008; }
 .login-card h1,.login-card p { margin:0; }.login-card p{color:#8fa69b}.login-card output{min-height:20px;color:#ff9b91}
+.login-card label { display:grid; gap:6px; color:#a9bfb4; font-size:12px; }
 input, textarea { width:100%; color:#e8f4ee; background:#091510; border:1px solid #355547; border-radius:8px; padding:9px 11px; }
 select { color:#dbe9e2; background:#0d1a15; border:1px solid #355547; border-radius:7px; padding:6px 28px 6px 9px; }
 button { color:#07100c; background:#79dbae; border:0; border-radius:8px; padding:9px 14px; font-weight:700; }

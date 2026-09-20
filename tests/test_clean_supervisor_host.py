@@ -12,7 +12,7 @@ from forest.errors import ForestError
 
 def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, monkeypatch):
     master = tmp_path / "keyring"
-    token = tmp_path / "token"
+    web_bootstrap = tmp_path / "web-bootstrap"
     password = tmp_path / "postgres"
     master.write_text(
         json.dumps(
@@ -28,11 +28,23 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
         ),
         encoding="ascii",
     )
-    token.write_text("deployment-management-token", encoding="utf-8")
+    web_bootstrap.write_text(
+        json.dumps(
+            {
+                "protocol": "forest.deployment-web-bootstrap/1",
+                "username": "admin",
+                "display_name": "Administrator",
+                "password": "deployment-web-password",
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
     password.write_text("database-password", encoding="utf-8")
     monkeypatch.delenv("FOREST_DEPLOYMENT_DSN", raising=False)
     monkeypatch.setenv("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE", str(master))
-    monkeypatch.setenv("FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE", str(token))
+    monkeypatch.setenv("FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE", str(web_bootstrap))
+    monkeypatch.setenv("FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN", "http://127.0.0.1:8080")
     monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE", str(password))
     monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_HOST", "postgres")
     settings = CleanSupervisorSettings.from_environment()
@@ -41,7 +53,7 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     )
     rendered = repr(settings)
     assert "database-password" not in rendered
-    assert "deployment-management-token" not in rendered
+    assert "deployment-web-password" not in rendered
     assert repr(bytes(range(32))) not in rendered
     assert settings.master_keyring.active_key_id == "master/test/2"
     assert settings.master_keyring.resolve("master/test/1") == b"a" * 32

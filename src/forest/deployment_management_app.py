@@ -1,14 +1,15 @@
-"""Generic module-contributed Web gateway across registered management scopes."""
+"""Session-authenticated module-contributed deployment management gateway."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
+from datetime import datetime, timezone
 from importlib.resources import files
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict
 
 from forest.clean_management_app import ConfigurationApplyInput, ConfigurationPlanInput
 from forest.errors import ForestError
@@ -19,13 +20,35 @@ from forest.management_scopes import (
     ManagementScopeRegistry,
 )
 
+_SESSION_COOKIE = "forest_management_session"
+_CSRF_COOKIE = "forest_management_csrf"
+
+
+class LoginInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: str
+    password: str
+
 
 def create_deployment_management_app(
-    *, deployment_id: str, components: tuple, access_token: str, bot_supervisor=None
+    *,
+    deployment_id: str,
+    components: tuple,
+    identity_authority,
+    allowed_origin: str,
+    bot_supervisor=None,
 ) -> FastAPI:
-    if not isinstance(access_token, str) or not 16 <= len(access_token) <= 4096:
-        raise ValueError("Management access token must contain at least 16 characters")
-    token_digest = hashlib.sha256(access_token.encode()).digest()
+    parsed_origin = urlsplit(allowed_origin)
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or not parsed_origin.netloc
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+    ):
+        raise ValueError("Management origin must be an exact HTTP origin")
+    allowed_origin = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+    secure_cookie = parsed_origin.scheme == "https"
     deployment_gateway = DeploymentManagementGateway(
         deployment_id=deployment_id,
         components=components,
@@ -37,12 +60,7 @@ def create_deployment_management_app(
         )
     ]
     if bot_supervisor is not None:
-        providers.append(
-            BotManagementScopeProvider(
-                supervisor=bot_supervisor,
-                access_token=access_token,
-            )
-        )
+        providers.append(BotManagementScopeProvider(supervisor=bot_supervisor))
     scopes = ManagementScopeRegistry(tuple(providers))
     static = files("forest").joinpath("clean_management_static")
     app = FastAPI(title="Forest Deployment Console", docs_url=None, redoc_url=None)
@@ -70,13 +88,29 @@ def create_deployment_management_app(
             status_code=exc.status,
         )
 
-    def authorize(token: str | None) -> None:
-        if token is None or not hmac.compare_digest(
-            hashlib.sha256(token.encode()).digest(), token_digest
-        ):
+    def same_origin(request: Request) -> None:
+        if request.headers.get("origin") != allowed_origin:
+            raise ForestError("MANAGEMENT_ORIGIN_DENIED", "Request origin is invalid", 403)
+
+    async def authenticated(
+        request: Request, *, csrf: bool = False, admin: bool = False
+    ):
+        token = request.cookies.get(_SESSION_COOKIE)
+        if token is None:
             raise ForestError(
-                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Management token is invalid", 401
+                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Web session is required", 401
             )
+        session = await identity_authority.authenticate(token)
+        if csrf:
+            same_origin(request)
+            session.verify_csrf(request.headers.get("x-forest-csrf"))
+        if admin and session.subject.role != "ADMIN":
+            raise ForestError(
+                "MANAGEMENT_AUTHORIZATION_DENIED",
+                "Administrator role is required",
+                403,
+            )
+        return session
 
     async def runtime_projection(gateway) -> dict:
         result = await gateway.runtime()
@@ -86,19 +120,71 @@ def create_deployment_management_app(
     async def index():
         return FileResponse(str(static.joinpath("index.html")))
 
+    @app.post("/management/v1/auth/login")
+    async def login(request: Request, body: LoginInput):
+        same_origin(request)
+        session = await identity_authority.login(
+            username=body.username, password=body.password
+        )
+        response = JSONResponse(
+            {
+                "subject": session.subject.as_dict(),
+                "session_ref": session.session_ref,
+                "expires_at": session.expires_at.isoformat(),
+            }
+        )
+        lifetime = max(
+            0,
+            int((session.expires_at - datetime.now(timezone.utc)).total_seconds()),
+        )
+        response.set_cookie(
+            _SESSION_COOKIE,
+            session.session_token,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/management/",
+            max_age=lifetime,
+        )
+        response.set_cookie(
+            _CSRF_COOKIE,
+            session.csrf_token,
+            httponly=False,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/",
+            max_age=lifetime,
+        )
+        return response
+
+    @app.get("/management/v1/auth/session")
+    async def current_session(request: Request):
+        session = await authenticated(request)
+        return {
+            "subject": session.subject.as_dict(),
+            "session_ref": session.session_ref,
+            "expires_at": session.expires_at.isoformat(),
+        }
+
+    @app.post("/management/v1/auth/logout")
+    async def logout(request: Request):
+        session = await authenticated(request, csrf=True)
+        await identity_authority.logout(request.cookies[_SESSION_COOKIE])
+        response = JSONResponse({"session_ref": session.session_ref, "revoked": True})
+        response.delete_cookie(_SESSION_COOKIE, path="/management/")
+        response.delete_cookie(_CSRF_COOKIE, path="/")
+        return response
+
     @app.get("/management/v1/runtime")
-    async def runtime(x_forest_management_token: str | None = Header(default=None)):
-        authorize(x_forest_management_token)
-        return await runtime_projection(deployment_gateway)
+    async def runtime(request: Request):
+        session = await authenticated(request)
+        async with scopes.gateway("deployment", "deployment", session.subject) as gateway:
+            return await runtime_projection(gateway)
 
     @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/runtime")
-    async def scoped_runtime(
-        scope_kind: str,
-        scope_id: str,
-        x_forest_management_token: str | None = Header(default=None),
-    ):
-        authorize(x_forest_management_token)
-        async with scopes.gateway(scope_kind, scope_id) as gateway:
+    async def scoped_runtime(scope_kind: str, scope_id: str, request: Request):
+        session = await authenticated(request)
+        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
             return await runtime_projection(gateway)
 
     @app.get(
@@ -106,13 +192,10 @@ def create_deployment_management_app(
         "{component_id}/configuration"
     )
     async def scoped_configuration(
-        scope_kind: str,
-        scope_id: str,
-        component_id: str,
-        x_forest_management_token: str | None = Header(default=None),
+        scope_kind: str, scope_id: str, component_id: str, request: Request
     ):
-        authorize(x_forest_management_token)
-        async with scopes.gateway(scope_kind, scope_id) as gateway:
+        session = await authenticated(request)
+        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
             return await gateway.read_configuration(component_id)
 
     @app.post(
@@ -124,15 +207,14 @@ def create_deployment_management_app(
         scope_id: str,
         component_id: str,
         body: ConfigurationPlanInput,
-        x_forest_management_token: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None),
+        request: Request,
     ):
-        authorize(x_forest_management_token)
-        async with scopes.gateway(scope_kind, scope_id) as gateway:
+        session = await authenticated(request, csrf=True, admin=True)
+        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
             return await gateway.plan_configuration(
                 component_id,
                 body=body,
-                idempotency_key=idempotency_key,
+                idempotency_key=request.headers.get("idempotency-key"),
             )
 
     @app.post(
@@ -144,15 +226,14 @@ def create_deployment_management_app(
         scope_id: str,
         component_id: str,
         body: ConfigurationApplyInput,
-        x_forest_management_token: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None),
+        request: Request,
     ):
-        authorize(x_forest_management_token)
-        async with scopes.gateway(scope_kind, scope_id) as gateway:
+        session = await authenticated(request, csrf=True, admin=True)
+        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
             return await gateway.apply_configuration(
                 component_id,
                 body=body,
-                idempotency_key=idempotency_key,
+                idempotency_key=request.headers.get("idempotency-key"),
             )
 
     @app.post(
@@ -165,10 +246,10 @@ def create_deployment_management_app(
         component_id: str,
         query_id: str,
         body: dict,
-        x_forest_management_token: str | None = Header(default=None),
+        request: Request,
     ):
-        authorize(x_forest_management_token)
-        async with scopes.gateway(scope_kind, scope_id) as gateway:
+        session = await authenticated(request, csrf=True)
+        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
             return await gateway.module_query(component_id, query_id, body)
 
     @app.post(
@@ -181,16 +262,15 @@ def create_deployment_management_app(
         component_id: str,
         action_id: str,
         body: dict,
-        x_forest_management_token: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None),
+        request: Request,
     ):
-        authorize(x_forest_management_token)
-        async with scopes.gateway(scope_kind, scope_id) as gateway:
+        session = await authenticated(request, csrf=True, admin=True)
+        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
             return await gateway.module_action(
                 component_id,
                 action_id,
                 body=body,
-                idempotency_key=idempotency_key,
+                idempotency_key=request.headers.get("idempotency-key"),
             )
 
     return app

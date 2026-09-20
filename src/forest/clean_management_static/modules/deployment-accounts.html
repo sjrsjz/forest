@@ -1,0 +1,19 @@
+<section class="accounts-pane contribution-view">
+  <header><div><small>DEPLOYMENT AUTHORITY</small><h2>管理账号与会话</h2></div><button data-refresh>刷新</button></header>
+  <form data-create class="account-create">
+    <label>用户名<input name="username" required minlength="3" maxlength="64" pattern="[a-z][a-z0-9._-]{2,63}"></label>
+    <label>显示名<input name="display_name" required maxlength="128"></label>
+    <label>初始密码<input name="password" type="password" autocomplete="new-password" required minlength="12"></label>
+    <label>角色<select name="role"><option value="AUDITOR">AUDITOR</option><option value="ADMIN">ADMIN</option></select></label>
+    <button>创建账号</button>
+  </form>
+  <p class="muted">ADMIN 可修改配置和执行动作；AUDITOR 只读。停用账号、改密或撤销会话会立即使相关会话失效。</p>
+  <div data-list class="account-list"></div>
+  <dialog data-password-dialog>
+    <form data-password-form>
+      <h3>修改 <span data-password-user></span> 的密码</h3>
+      <input name="password" type="password" autocomplete="new-password" required minlength="12" autofocus>
+      <div class="dialog-actions"><button type="button" data-password-cancel class="quiet">取消</button><button>更新并撤销旧会话</button></div>
+    </form>
+  </dialog>
+</section>

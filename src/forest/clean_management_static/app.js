@@ -1,7 +1,12 @@
-let token = sessionStorage.getItem('forest.management.token') || '';
 let apiBase = '/management/v1';
 let scopes = [];
 const $ = id => document.getElementById(id);
+
+function cookie(name) {
+  const prefix = `${encodeURIComponent(name)}=`;
+  const item = document.cookie.split('; ').find(value => value.startsWith(prefix));
+  return item ? decodeURIComponent(item.slice(prefix.length)) : '';
+}
 
 function scopedPath(path) {
   const prefix = '/management/v1';
@@ -18,11 +23,13 @@ function scopeKey(scope) {
 
 async function api(path, options = {}) {
   const response = await fetch(scopedPath(path), {
-    credentials: 'omit',
+    credentials: 'same-origin',
     ...options,
     headers: {
       'content-type': 'application/json',
-      'x-forest-management-token': token,
+      ...(options.method && options.method !== 'GET'
+        ? {'x-forest-csrf': cookie('forest_management_csrf')}
+        : {}),
       ...(options.headers || {}),
     },
   });
@@ -184,11 +191,17 @@ $('scope-select').onchange = async event => {
 
 $('login-form').onsubmit = async event => {
   event.preventDefault();
-  token = new FormData(event.currentTarget).get('token');
+  const form = new FormData(event.currentTarget);
   apiBase = '/management/v1';
   try {
+    await api('/management/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: form.get('username'),
+        password: form.get('password'),
+      }),
+    });
     await refresh();
-    sessionStorage.setItem('forest.management.token', token);
     $('login').classList.add('hidden');
     $('console').classList.remove('hidden');
     $('login-error').textContent = '';
@@ -197,17 +210,19 @@ $('login-form').onsubmit = async event => {
   }
 };
 
-$('logout').onclick = () => {
-  sessionStorage.removeItem('forest.management.token');
-  location.reload();
+$('logout').onclick = async () => {
+  try {
+    await api('/management/v1/auth/logout', {method: 'POST', body: '{}'});
+  } finally {
+    location.reload();
+  }
 };
 $('back').onclick = showOverview;
 
-if (token) {
-  refresh()
+api('/management/v1/auth/session')
+    .then(() => refresh())
     .then(() => {
       $('login').classList.add('hidden');
       $('console').classList.remove('hidden');
     })
-    .catch(() => sessionStorage.removeItem('forest.management.token'));
-}
+    .catch(() => {});

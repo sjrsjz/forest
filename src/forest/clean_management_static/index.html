@@ -12,9 +12,10 @@
     <form id="login-form" class="login-card">
       <span class="mark">FOREST</span>
       <h1>运行时控制台</h1>
-      <p>输入部署时设置的管理令牌。</p>
-      <input name="token" type="password" autocomplete="current-password" required minlength="16">
-      <button type="submit">进入</button>
+      <p>使用部署级管理账号登录。</p>
+      <label>用户名<input name="username" autocomplete="username" required minlength="3" maxlength="64"></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required minlength="12"></label>
+      <button type="submit">登录</button>
       <output id="login-error"></output>
     </form>
   </div>

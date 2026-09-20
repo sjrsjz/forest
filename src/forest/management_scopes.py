@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 from contextlib import asynccontextmanager
 
 from forest.clean_management_app import CleanManagementGateway
@@ -124,9 +125,9 @@ class DeploymentManagementScopeProvider:
 class BotManagementScopeProvider:
     scope_kind = "bot"
 
-    def __init__(self, *, supervisor, access_token: str) -> None:
+    def __init__(self, *, supervisor) -> None:
         self.supervisor = supervisor
-        self.access_token = access_token
+        self._internal_token = secrets.token_urlsafe(32)
         self._gateways: dict[str, tuple[object, CleanManagementGateway]] = {}
 
     async def list_scopes(self) -> tuple[dict, ...]:
@@ -137,7 +138,7 @@ class BotManagementScopeProvider:
         async with self.supervisor.management_host(scope_id) as host:
             cached = self._gateways.get(scope_id)
             if cached is None or cached[0] is not host:
-                cached = (host, CleanManagementGateway(host, self.access_token))
+                cached = (host, CleanManagementGateway(host, self._internal_token))
                 self._gateways[scope_id] = cached
             yield cached[1]
 
@@ -181,7 +182,7 @@ class ManagementScopeRegistry:
         return result
 
     @asynccontextmanager
-    async def gateway(self, scope_kind: str, scope_id: str):
+    async def gateway(self, scope_kind: str, scope_id: str, principal):
         if (
             not isinstance(scope_kind, str)
             or _SCOPE_KIND.fullmatch(scope_kind) is None
@@ -193,4 +194,43 @@ class ManagementScopeRegistry:
         if provider is None:
             raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404)
         async with provider.gateway(scope_id) as gateway:
-            yield gateway
+            yield _AuthorizedGateway(gateway, principal)
+
+
+class _AuthorizedGateway:
+    """Repeat authorization at the target gateway boundary."""
+
+    def __init__(self, gateway, principal) -> None:
+        if getattr(principal, "role", None) not in {"ADMIN", "AUDITOR"}:
+            raise ForestError("MANAGEMENT_AUTHORIZATION_DENIED", "Role is invalid", 403)
+        self.gateway = gateway
+        self.principal = principal
+
+    def _write(self) -> None:
+        if self.principal.role != "ADMIN":
+            raise ForestError(
+                "MANAGEMENT_AUTHORIZATION_DENIED",
+                "Administrator role is required",
+                403,
+            )
+
+    async def runtime(self):
+        return await self.gateway.runtime()
+
+    async def read_configuration(self, component_id: str):
+        return await self.gateway.read_configuration(component_id)
+
+    async def plan_configuration(self, component_id: str, **values):
+        self._write()
+        return await self.gateway.plan_configuration(component_id, **values)
+
+    async def apply_configuration(self, component_id: str, **values):
+        self._write()
+        return await self.gateway.apply_configuration(component_id, **values)
+
+    async def module_query(self, component_id: str, query_id: str, body: dict):
+        return await self.gateway.module_query(component_id, query_id, body)
+
+    async def module_action(self, component_id: str, action_id: str, **values):
+        self._write()
+        return await self.gateway.module_action(component_id, action_id, **values)

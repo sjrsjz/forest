@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from httpx import ASGITransport, AsyncClient
@@ -11,6 +13,53 @@ from forest.clean_management_contract import (
 )
 from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
+from forest.storage.deployment_web_identity import (
+    AuthenticatedWebSession,
+    WebSession,
+    WebSubject,
+)
+
+
+class _IdentityAuthority:
+    session_token = "s" * 43
+    csrf_token = "c" * 43
+
+    def __init__(self):
+        self.revoked = False
+        self.subject = WebSubject(
+            "web-subject/test", "admin", "Administrator", "ADMIN", True, 1
+        )
+
+    async def login(self, *, username, password):
+        if (username, password) != ("admin", "correct-password"):
+            raise ForestError(
+                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Credentials are invalid", 401
+            )
+        self.revoked = False
+        return WebSession(
+            self.session_token,
+            self.csrf_token,
+            "web-session/test",
+            self.subject,
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+    async def authenticate(self, token):
+        if token != self.session_token or self.revoked:
+            raise ForestError(
+                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Web session is invalid", 401
+            )
+        return AuthenticatedWebSession(
+            hashlib.sha256(token.encode()).hexdigest(),
+            "web-session/test",
+            hashlib.sha256(self.csrf_token.encode()).hexdigest(),
+            self.subject,
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+    async def logout(self, token):
+        if token == self.session_token:
+            self.revoked = True
 
 
 class _Configuration:
@@ -106,23 +155,38 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
     app = create_deployment_management_app(
         deployment_id="deployment/test",
         components=(),
-        access_token="deployment-management-token",
+        identity_authority=(identity := _IdentityAuthority()),
+        allowed_origin="http://forest.test",
         bot_supervisor=Supervisor(),
     )
-    headers = {"x-forest-management-token": "deployment-management-token"}
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://forest.test"
     ) as client:
-        deployment = await client.get("/management/v1/runtime", headers=headers)
+        assert (await client.get("/management/v1/runtime")).status_code == 401
+        assert (
+            await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://evil.test"},
+                json={"username": "admin", "password": "correct-password"},
+            )
+        ).status_code == 403
+        login = await client.post(
+            "/management/v1/auth/login",
+            headers={"origin": "http://forest.test"},
+            json={"username": "admin", "password": "correct-password"},
+        )
+        assert login.status_code == 200
+        headers = {
+            "origin": "http://forest.test",
+            "x-forest-csrf": _IdentityAuthority.csrf_token,
+        }
+        deployment = await client.get("/management/v1/runtime")
         assert [scope["scope_id"] for scope in deployment.json()["scopes"]] == [
             "deployment",
             "bot-scope-test",
         ]
-        assert (
-            await client.get("/management/v1/scopes/bot/bot-scope-test/runtime")
-        ).status_code == 401
         runtime = await client.get(
-            "/management/v1/scopes/bot/bot-scope-test/runtime", headers=headers
+            "/management/v1/scopes/bot/bot-scope-test/runtime"
         )
         assert runtime.json()["runtime"]["bot_id"] == "bot/managed"
         assert [item["component_id"] for item in runtime.json()["modules"]] == [
@@ -131,7 +195,6 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
         configuration = await client.get(
             "/management/v1/scopes/bot/bot-scope-test/modules/"
             "test.component/configuration",
-            headers=headers,
         )
         assert configuration.status_code == 200
         assert configuration.json()["desired"]["value"] == {"enabled": True}
@@ -155,7 +218,27 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
         assert action.json()["action_id"] == "test.action"
         assert action.json()["operation_id"].startswith("web:sha256:")
         assert action.json()["graph_id"] == "graph/managed"
+        identity.subject = WebSubject(
+            identity.subject.subject_id,
+            identity.subject.username,
+            identity.subject.display_name,
+            "AUDITOR",
+            True,
+            2,
+        )
+        denied = await client.post(
+            "/management/v1/scopes/bot/bot-scope-test/modules/"
+            "test.component/actions/test.action",
+            headers={**headers, "idempotency-key": "auditor-action"},
+            json={},
+        )
+        assert denied.status_code == 403
+        assert denied.json()["code"] == "MANAGEMENT_AUTHORIZATION_DENIED"
         missing = await client.get(
-            "/management/v1/scopes/bot/missing/runtime", headers=headers
+            "/management/v1/scopes/bot/missing/runtime"
         )
         assert missing.status_code == 404
+        assert (
+            await client.post("/management/v1/auth/logout", headers=headers)
+        ).status_code == 200
+        assert (await client.get("/management/v1/runtime")).status_code == 401

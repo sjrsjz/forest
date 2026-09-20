@@ -134,6 +134,9 @@ class DeploymentCatalogRepository:
         expected_relations = {
             "deployment_identity",
             "supervisor_lease",
+            "web_accounts",
+            "web_account_operations",
+            "web_sessions",
             "bots",
             "runtime_intents",
             "runtime_observations",
@@ -162,6 +165,8 @@ class DeploymentCatalogRepository:
             "guard_revisioned_change",
             "guard_secret_slot_change",
             "guard_provisioning_job_change",
+            "guard_web_account_change",
+            "guard_web_session_change",
         }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",

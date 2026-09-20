@@ -16,6 +16,7 @@ from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
+from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
@@ -30,6 +31,7 @@ from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 
 
 def _required(name: str) -> str:
@@ -83,32 +85,21 @@ class CleanSupervisorSettings:
     deployment_id: str
     dsn: str = field(repr=False)
     master_keyring: DeploymentMasterKeyring = field(repr=False)
+    web_bootstrap: DeploymentWebBootstrap = field(repr=False)
     poll_seconds: float = 1.0
     max_starting: int = 2
-    management_token: str = field(default="", repr=False)
     management_host: str = "127.0.0.1"
     management_port: int = 8081
+    management_origin: str = "http://127.0.0.1:8081"
 
     @classmethod
     def from_environment(cls) -> "CleanSupervisorSettings":
         keyring = DeploymentMasterKeyring.read(
             Path(_required("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE"))
         )
-        token_path = Path(_required("FOREST_DEPLOYMENT_MANAGEMENT_TOKEN_FILE"))
-        try:
-            management_token = token_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            raise ForestError(
-                "SUPERVISOR_MANAGEMENT_TOKEN_INVALID",
-                "Deployment management token file is unavailable",
-                422,
-            ) from None
-        if not 16 <= len(management_token) <= 4096:
-            raise ForestError(
-                "SUPERVISOR_MANAGEMENT_TOKEN_INVALID",
-                "Deployment management token length is invalid",
-                422,
-            )
+        web_bootstrap = DeploymentWebBootstrap.read(
+            Path(_required("FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE"))
+        )
         try:
             poll_seconds = float(os.environ.get("FOREST_SUPERVISOR_POLL_SECONDS", "1"))
             max_starting = int(os.environ.get("FOREST_SUPERVISOR_MAX_STARTING", "2"))
@@ -133,11 +124,12 @@ class CleanSupervisorSettings:
             deployment_id=os.environ.get("FOREST_DEPLOYMENT_ID", "forest/default"),
             dsn=_deployment_dsn(),
             master_keyring=keyring,
+            web_bootstrap=web_bootstrap,
             poll_seconds=poll_seconds,
             max_starting=max_starting,
-            management_token=management_token,
             management_host=os.environ.get("FOREST_DEPLOYMENT_MANAGEMENT_HOST", "127.0.0.1"),
             management_port=management_port,
+            management_origin=_required("FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN"),
         )
 
 
@@ -151,6 +143,11 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
         key_resolver=settings.master_keyring.resolve,
     )
     catalog = DeploymentCatalogRepository(store)
+    web_identity = DeploymentWebIdentityAuthority(
+        store,
+        active_key_id=settings.master_keyring.active_key_id,
+        key_resolver=settings.master_keyring.resolve,
+    )
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
@@ -192,6 +189,12 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
     stop_task = None
     try:
         await supervisor.start()
+        await web_identity.ensure_bootstrap_admin(
+            operation_id="deployment/web/bootstrap/1",
+            username=settings.web_bootstrap.username,
+            display_name=settings.web_bootstrap.display_name,
+            password=settings.web_bootstrap.password,
+        )
         import uvicorn
 
         management_server = uvicorn.Server(
@@ -207,8 +210,10 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
                         supervisor=supervisor,
                         bootstrap_contributions=official_bootstrap_contributions(),
                         database_allocator=database_allocator,
+                        web_identity=web_identity,
                     ),
-                    access_token=settings.management_token,
+                    identity_authority=web_identity,
+                    allowed_origin=settings.management_origin,
                     bot_supervisor=supervisor,
                 ),
                 host=settings.management_host,

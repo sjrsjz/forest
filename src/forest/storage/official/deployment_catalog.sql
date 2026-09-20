@@ -15,6 +15,51 @@ CREATE TABLE forest_deployment.supervisor_lease (
     expires_at timestamptz NOT NULL DEFAULT '1970-01-01 00:00:00+00'
 );
 
+CREATE TABLE forest_deployment.web_accounts (
+    subject_id text PRIMARY KEY CHECK (octet_length(subject_id) BETWEEN 1 AND 128),
+    username text NOT NULL UNIQUE CHECK (username ~ '^[a-z][a-z0-9._-]{2,63}$'),
+    display_name text NOT NULL CHECK (octet_length(display_name) BETWEEN 1 AND 128),
+    password_hash text NOT NULL CHECK (octet_length(password_hash) BETWEEN 1 AND 256),
+    role text NOT NULL CHECK (role IN ('ADMIN','AUDITOR')),
+    enabled boolean NOT NULL DEFAULT true,
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE forest_deployment.web_account_operations (
+    operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    operation_kind text NOT NULL CHECK (
+        operation_kind IN ('BOOTSTRAP','CREATE','UPDATE','PASSWORD','REVOKE_SESSIONS')
+    ),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    credential_key_id text CHECK (octet_length(credential_key_id) BETWEEN 1 AND 256),
+    subject_id text NOT NULL REFERENCES forest_deployment.web_accounts(subject_id),
+    resulting_revision bigint NOT NULL CHECK (resulting_revision > 0),
+    result jsonb NOT NULL CHECK (jsonb_typeof(result)='object'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK (
+        (operation_kind IN ('BOOTSTRAP','CREATE','PASSWORD')) =
+        (credential_key_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE forest_deployment.web_sessions (
+    session_id_hash text PRIMARY KEY CHECK (session_id_hash ~ '^[a-f0-9]{64}$'),
+    csrf_hash text NOT NULL CHECK (csrf_hash ~ '^[a-f0-9]{64}$'),
+    subject_id text NOT NULL REFERENCES forest_deployment.web_accounts(subject_id),
+    authn_strength text NOT NULL CHECK (authn_strength='PASSWORD'),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at timestamptz NOT NULL,
+    revoked_at timestamptz,
+    CHECK (expires_at > created_at)
+);
+
+CREATE INDEX web_sessions_subject_active_idx
+    ON forest_deployment.web_sessions(subject_id,expires_at)
+    WHERE revoked_at IS NULL;
+
 CREATE TABLE forest_deployment.storage_profiles (
     profile_ref text PRIMARY KEY CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
     bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
@@ -211,6 +256,10 @@ CREATE TRIGGER deployment_operation_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.operations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
+CREATE TRIGGER web_account_operation_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.web_account_operations
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
 CREATE TRIGGER deployment_secret_version_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.secret_versions
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
@@ -335,3 +384,40 @@ END;
 CREATE TRIGGER secret_slot_change_guard
     BEFORE UPDATE OR DELETE ON forest_deployment.secret_slots
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_secret_slot_change();
+
+CREATE FUNCTION forest_deployment.guard_web_account_change() RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''DELETE'' OR ROW(NEW.subject_id,NEW.username,NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.subject_id,OLD.username,OLD.created_at) THEN
+        RAISE EXCEPTION ''web account identity is immutable'';
+    END IF;
+    IF NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION ''web account revision must advance once'';
+    END IF;
+    RETURN NEW;
+END;
+';
+
+CREATE TRIGGER web_account_change_guard
+    BEFORE UPDATE OR DELETE ON forest_deployment.web_accounts
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_web_account_change();
+
+CREATE FUNCTION forest_deployment.guard_web_session_change() RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''DELETE'' OR ROW(NEW.session_id_hash,NEW.csrf_hash,NEW.subject_id,
+       NEW.authn_strength,NEW.created_at,NEW.expires_at)
+       IS DISTINCT FROM ROW(OLD.session_id_hash,OLD.csrf_hash,OLD.subject_id,
+       OLD.authn_strength,OLD.created_at,OLD.expires_at) THEN
+        RAISE EXCEPTION ''web session identity is immutable'';
+    END IF;
+    IF NEW.revision <> OLD.revision + 1 OR OLD.revoked_at IS NOT NULL
+       OR NEW.revoked_at IS NULL THEN
+        RAISE EXCEPTION ''web session may only be revoked once'';
+    END IF;
+    RETURN NEW;
+END;
+';
+
+CREATE TRIGGER web_session_change_guard
+    BEFORE UPDATE OR DELETE ON forest_deployment.web_sessions
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_web_session_change();

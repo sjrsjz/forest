@@ -34,6 +34,7 @@ from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 
 
 @pytest_asyncio.fixture
@@ -784,6 +785,17 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(repository.store)
+    web_identity = DeploymentWebIdentityAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    await web_identity.ensure_bootstrap_admin(
+        operation_id="web/bootstrap/test",
+        username="admin",
+        display_name="Administrator",
+        password="deployment-web-password",
+    )
     supervisor = SimpleNamespace(notify=lambda: None)
     allocated_dsn = "postgresql://forest:hidden-password@postgres/forest_bot_web"
     allocator = SimpleNamespace(
@@ -801,14 +813,23 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             supervisor=supervisor,
             bootstrap_contributions=official_bootstrap_contributions(),
             database_allocator=allocator,
+            web_identity=web_identity,
         ),
-        access_token="deployment-management-test-token",
+        identity_authority=web_identity,
+        allowed_origin="http://forest.test",
     )
-    headers = {"x-forest-management-token": "deployment-management-test-token"}
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://forest.test"
     ) as client:
         assert (await client.get("/management/v1/runtime")).status_code == 401
+        login = await client.post(
+            "/management/v1/auth/login",
+            headers={"origin": "http://forest.test"},
+            json={"username": "admin", "password": "deployment-web-password"},
+        )
+        assert login.status_code == 200
+        csrf = client.cookies["forest_management_csrf"]
+        headers = {"origin": "http://forest.test", "x-forest-csrf": csrf}
         runtime = await client.get("/management/v1/runtime", headers=headers)
         assert runtime.status_code == 200
         body = runtime.json()
@@ -817,6 +838,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "deployment.catalog",
             "deployment.secrets",
             "deployment.provisioning",
+            "deployment.accounts",
         }
         assert (await client.get("/static/deployment-provisioning.js")).status_code == 200
         shell_script = (await client.get("/static/app.js")).text
