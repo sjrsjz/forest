@@ -16,6 +16,7 @@ from forest.errors import ForestError
 from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
+from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 
 
 @pytest_asyncio.fixture
@@ -40,6 +41,31 @@ async def deployment_catalog():
         await admin.close()
 
 
+async def _storage_profile(repository, bot_id: str, name: str):
+    key = bytes(range(32))
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda key_id: key if key_id == "master/test/1" else None,
+    )
+    secret_ref = f"secret://{name}/postgresql-dsn"
+    await secrets.put(
+        operation_id=f"secret/{name}/dsn/1",
+        secret_ref=secret_ref,
+        purpose="storage.postgresql.dsn",
+        plaintext=f"postgresql://forest:secret@db.example/forest_{name}".encode(),
+        expected_revision=0,
+    )
+    profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    return await profiles.create(
+        operation_id=f"storage-profile/{name}/create",
+        profile_ref=f"storage-profile/{name}/1",
+        bot_id=bot_id,
+        storage_generation=1,
+        dsn_secret_ref=secret_ref,
+    )
+
+
 @pytest.mark.postgres
 async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_separate(
     deployment_catalog,
@@ -49,23 +75,54 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
     second_identity = await repository.initialize()
     assert first_identity == second_identity
 
+    alpha_profile = await _storage_profile(repository, "bot/alpha", "alpha")
+    beta_profile = await _storage_profile(repository, "bot/beta", "beta")
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    resolved = await profiles.resolve(
+        profile_ref=alpha_profile.profile_ref,
+        expected_bot_id="bot/alpha",
+        expected_storage_generation=1,
+    )
+    assert resolved.dsn == "postgresql://forest:secret@db.example/forest_alpha"
+    assert "secret" not in repr(resolved)
+    with pytest.raises(ForestError) as caught:
+        await profiles.resolve(
+            profile_ref=alpha_profile.profile_ref,
+            expected_bot_id="bot/beta",
+            expected_storage_generation=1,
+        )
+    assert caught.value.code == "STORAGE_PROFILE_SCOPE_MISMATCH"
+    with pytest.raises(ForestError) as caught:
+        await repository.register_ready(
+            operation_id="provision/profile-mismatch",
+            bot_id="bot/other",
+            display_name="Other",
+            storage_profile_ref=alpha_profile.profile_ref,
+        )
+    assert caught.value.code == "STORAGE_PROFILE_SCOPE_MISMATCH"
+
     alpha = await repository.register_ready(
         operation_id="provision/alpha",
         bot_id="bot/alpha",
         display_name="Alpha",
-        storage_profile_ref="storage-profile/alpha/1",
+        storage_profile_ref=alpha_profile.profile_ref,
     )
     replay = await repository.register_ready(
         operation_id="provision/alpha",
         bot_id="bot/alpha",
         display_name="Alpha",
-        storage_profile_ref="storage-profile/alpha/1",
+        storage_profile_ref=alpha_profile.profile_ref,
     )
     beta = await repository.register_ready(
         operation_id="provision/beta",
         bot_id="bot/beta",
         display_name="Beta",
-        storage_profile_ref="storage-profile/beta/1",
+        storage_profile_ref=beta_profile.profile_ref,
     )
     assert replay == alpha
     assert alpha["desired_state"] == beta["desired_state"] == "OFFLINE"
@@ -122,11 +179,12 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
 async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catalog):
     repository = deployment_catalog
     await repository.initialize()
+    profile = await _storage_profile(repository, "bot/failing", "failing")
     bot = await repository.register_ready(
         operation_id="provision/failing",
         bot_id="bot/failing",
         display_name="Failing",
-        storage_profile_ref="storage-profile/failing/1",
+        storage_profile_ref=profile.profile_ref,
     )
     await repository.set_desired(
         operation_id="runtime/failing/online",
@@ -256,11 +314,12 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
     await repository.initialize()
     bots = []
     for name in ("alpha", "beta"):
+        profile = await _storage_profile(repository, f"bot/{name}", name)
         bot = await repository.register_ready(
             operation_id=f"provision/{name}",
             bot_id=f"bot/{name}",
             display_name=name.title(),
-            storage_profile_ref=f"storage-profile/{name}/1",
+            storage_profile_ref=profile.profile_ref,
         )
         bots.append(
             await repository.set_desired(
@@ -272,6 +331,12 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
         )
 
     instances = {}
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
 
     class FakeHost:
         def __init__(self, settings):
@@ -291,7 +356,10 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
 
     supervisor = CleanMultiBotSupervisor(
         repository,
-        settings_resolver=lambda bot: SimpleNamespace(bot_id=bot["bot_id"]),
+        storage_profiles=storage_profiles,
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn
+        ),
         host_factory=FakeHost,
         host_id="host/test",
         incarnation="incarnation/test",
@@ -332,11 +400,12 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
     repository = deployment_catalog
     await repository.initialize()
     for name in ("healthy", "broken"):
+        profile = await _storage_profile(repository, f"bot/{name}", name)
         bot = await repository.register_ready(
             operation_id=f"provision/{name}",
             bot_id=f"bot/{name}",
             display_name=name.title(),
-            storage_profile_ref=f"storage-profile/{name}/1",
+            storage_profile_ref=profile.profile_ref,
         )
         await repository.set_desired(
             operation_id=f"runtime/{name}/online",
@@ -359,9 +428,19 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
         async def close(self):
             return None
 
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+
     supervisor = CleanMultiBotSupervisor(
         repository,
-        settings_resolver=lambda bot: SimpleNamespace(bot_id=bot["bot_id"]),
+        storage_profiles=storage_profiles,
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn
+        ),
         host_factory=FakeHost,
         host_id="host/fault-test",
         incarnation="incarnation/fault-test",

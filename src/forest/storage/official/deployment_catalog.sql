@@ -15,6 +15,22 @@ CREATE TABLE forest_deployment.supervisor_lease (
     expires_at timestamptz NOT NULL DEFAULT '1970-01-01 00:00:00+00'
 );
 
+CREATE TABLE forest_deployment.storage_profiles (
+    profile_ref text PRIMARY KEY CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
+    bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
+    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    dsn_secret_ref text NOT NULL CHECK (octet_length(dsn_secret_ref) BETWEEN 10 AND 512),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (profile_ref,bot_id,storage_generation)
+);
+
+CREATE TABLE forest_deployment.storage_profile_operations (
+    operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    profile_ref text NOT NULL REFERENCES forest_deployment.storage_profiles(profile_ref),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE forest_deployment.bots (
     bot_id text PRIMARY KEY CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
     display_name text NOT NULL CHECK (octet_length(display_name) BETWEEN 1 AND 256),
@@ -23,7 +39,9 @@ CREATE TABLE forest_deployment.bots (
     storage_generation bigint NOT NULL CHECK (storage_generation > 0),
     revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (storage_profile_ref,bot_id,storage_generation)
+        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation)
 );
 
 CREATE TABLE forest_deployment.runtime_intents (
@@ -104,6 +122,14 @@ CREATE TRIGGER deployment_operation_immutable
 
 CREATE TRIGGER deployment_secret_version_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.secret_versions
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_storage_profile_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.storage_profiles
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_storage_profile_operation_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.storage_profile_operations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE FUNCTION forest_deployment.guard_bot_change() RETURNS trigger LANGUAGE plpgsql AS '

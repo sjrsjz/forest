@@ -28,6 +28,7 @@ class CleanMultiBotSupervisor:
         self,
         catalog,
         *,
+        storage_profiles,
         settings_resolver,
         host_factory=CleanBotHost,
         host_id: str | None = None,
@@ -40,6 +41,7 @@ class CleanMultiBotSupervisor:
         if type(max_starting) is not int or not 1 <= max_starting <= 32:
             raise ValueError("max_starting is outside its bound")
         self.catalog = catalog
+        self.storage_profiles = storage_profiles
         self.settings_resolver = settings_resolver
         self.host_factory = host_factory
         self.host_id = host_id or "deployment-host/" + str(uuid4())
@@ -184,13 +186,21 @@ class CleanMultiBotSupervisor:
                 await self.catalog.observe(
                     self.lease, bot_id=bot_id, observed_state="STARTING"
                 )
-                settings = self.settings_resolver(bot)
+                storage = await self.storage_profiles.resolve(
+                    profile_ref=bot["storage_profile_ref"],
+                    expected_bot_id=bot_id,
+                    expected_storage_generation=bot["storage_generation"],
+                )
+                settings = self.settings_resolver(bot, storage)
                 if inspect.isawaitable(settings):
                     settings = await settings
-                if getattr(settings, "bot_id", None) != bot_id:
+                if (
+                    getattr(settings, "bot_id", None) != bot_id
+                    or getattr(settings, "dsn", None) != storage.dsn
+                ):
                     raise ForestError(
                         "BOT_SETTINGS_SCOPE_MISMATCH",
-                        "Resolved Bot settings belong to another identity",
+                        "Resolved Bot settings differ from the approved storage profile",
                         409,
                     )
                 host = self.host_factory(settings)

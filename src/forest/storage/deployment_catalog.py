@@ -139,6 +139,8 @@ class DeploymentCatalogRepository:
             "operations",
             "secret_slots",
             "secret_versions",
+            "storage_profiles",
+            "storage_profile_operations",
         }
         functions = await (
             await conn.execute(
@@ -190,6 +192,26 @@ class DeploymentCatalogRepository:
             replay = await self._operation(conn, operation_id, input_digest)
             if replay is not None:
                 return await self._bot_in(conn, replay["bot_id"])
+            profile = await (
+                await conn.execute(
+                    "SELECT bot_id,storage_generation FROM forest_deployment.storage_profiles "
+                    "WHERE profile_ref=%s FOR SHARE",
+                    (storage_profile_ref,),
+                )
+            ).fetchone()
+            if profile is None:
+                raise ForestError(
+                    "STORAGE_PROFILE_NOT_FOUND", "Storage profile does not exist", 404
+                )
+            if (
+                profile["bot_id"] != bot_id
+                or profile["storage_generation"] != storage_generation
+            ):
+                raise ForestError(
+                    "STORAGE_PROFILE_SCOPE_MISMATCH",
+                    "Storage profile belongs to another Bot or generation",
+                    409,
+                )
             existing = await (
                 await conn.execute(
                     "SELECT 1 FROM forest_deployment.bots WHERE bot_id=%s FOR UPDATE",
