@@ -23,6 +23,11 @@ from forest.storage.deployment_web_identity import (
 class _IdentityAuthority:
     session_token = "s" * 43
     csrf_token = "c" * 43
+    active_key_id = "master/test/1"
+
+    @staticmethod
+    def key_resolver(key_id):
+        return b"k" * 32 if key_id == "master/test/1" else None
 
     def __init__(self):
         self.revoked = False
@@ -60,10 +65,17 @@ class _IdentityAuthority:
         return AuthenticatedWebSession(
             hashlib.sha256(token.encode()).hexdigest(),
             "web-session/test",
+            1,
             hashlib.sha256(self.csrf_token.encode()).hexdigest(),
             self.subject,
             datetime.now(timezone.utc) + timedelta(hours=1),
         )
+
+    async def revalidate_session(self, session):
+        if self.revoked or session.subject != self.subject:
+            raise ForestError(
+                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Web session changed", 401
+            )
 
     async def logout(self, token):
         if token == self.session_token:
@@ -108,7 +120,11 @@ class _Contract(CleanModuleConfigurationContract):
 class _Registry:
     def __init__(self, module):
         self.module = module
-        self.graph_identity = SimpleNamespace(graph_id="graph/managed", graph_revision=1)
+        self.graph_identity = SimpleNamespace(
+            graph_id="graph/managed",
+            graph_revision=1,
+            generations={"test.component": "generation/test/1"},
+        )
 
     def get(self, component_id):
         if component_id != "test.component":

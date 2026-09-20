@@ -34,10 +34,14 @@ class ConfigurationApplyInput(BaseModel):
 
 
 class CleanManagementGateway:
-    def __init__(self, host, access_token: str) -> None:
+    def __init__(
+        self, host, access_token: str, *, ticket_authority=None, scope_id: str | None = None
+    ) -> None:
         if not isinstance(access_token, str) or not 16 <= len(access_token) <= 4096:
             raise ValueError("Management access token must contain at least 16 characters")
         self.host = host
+        self.ticket_authority = ticket_authority
+        self.scope_id = scope_id or host.settings.bot_id
         self._token_digest = hashlib.sha256(access_token.encode()).digest()
         self._apply_lock = asyncio.Lock()
 
@@ -83,7 +87,63 @@ class CleanManagementGateway:
             }
         )
 
-    async def runtime(self) -> dict:
+    def authorization_target(self, component_id: str) -> tuple[str, int]:
+        registry = self.registry()
+        graph = registry.graph_identity
+        if graph is None:
+            raise ForestError("KERNEL_UNAVAILABLE", "Runtime graph is unavailable", 503)
+        if component_id == "$runtime":
+            return graph.graph_id, graph.graph_revision
+        self.contract(component_id)
+        try:
+            generation_id = graph.generations[component_id]
+        except KeyError:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_FOUND", "Runtime module Generation is unavailable", 503
+            ) from None
+        return generation_id, graph.graph_revision
+
+    async def _authorize(
+        self,
+        ticket,
+        *,
+        component_id: str,
+        operation_id: str | None,
+        action_key: str,
+        input_digest: str,
+        required_role: str,
+        plan_digest: str | None = None,
+    ) -> None:
+        if self.ticket_authority is None:
+            return
+        if ticket is None or operation_id is None:
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
+            )
+        generation_id, graph_revision = self.authorization_target(component_id)
+        await self.ticket_authority.verify(
+            ticket,
+            target_scope_kind="bot",
+            target_scope_id=self.scope_id,
+            target_component_id=component_id,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
+            target_operation_ref=operation_id,
+            action_key=action_key,
+            input_digest=input_digest,
+            plan_digest=plan_digest,
+            required_role=required_role,
+        )
+
+    async def runtime(self, *, authorization=None, operation_id=None) -> dict:
+        await self._authorize(
+            authorization,
+            component_id="$runtime",
+            operation_id=operation_id,
+            action_key="runtime.read",
+            input_digest=digest_json({}),
+            required_role="AUDITOR",
+        )
         registry = self.registry()
         return {
             "protocol": "forest.clean-management-runtime/1",
@@ -91,7 +151,17 @@ class CleanManagementGateway:
             "modules": registry.describe(),
         }
 
-    async def read_configuration(self, component_id: str) -> dict:
+    async def read_configuration(
+        self, component_id: str, *, authorization=None, operation_id=None
+    ) -> dict:
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key="configuration.read",
+            input_digest=digest_json({}),
+            required_role="AUDITOR",
+        )
         return await self.contract(component_id).read()
 
     async def plan_configuration(
@@ -100,11 +170,22 @@ class CleanManagementGateway:
         *,
         body: ConfigurationPlanInput,
         idempotency_key: str | None,
+        authorization=None,
+        operation_id=None,
     ) -> dict:
+        operation_id = operation_id or self.operation_id(
+            component_id, "configuration.plan", idempotency_key
+        )
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key="configuration.plan",
+            input_digest=digest_json(body.model_dump(mode="json")),
+            required_role="ADMIN",
+        )
         return await self.contract(component_id).plan(
-            operation_id=self.operation_id(
-                component_id, "configuration.plan", idempotency_key
-            ),
+            operation_id=operation_id,
             expected_desired_revision=body.expected_desired_revision,
             value=body.value,
         )
@@ -115,9 +196,20 @@ class CleanManagementGateway:
         *,
         body: ConfigurationApplyInput,
         idempotency_key: str | None,
+        authorization=None,
+        operation_id=None,
     ) -> dict:
-        operation_id = self.operation_id(
+        operation_id = operation_id or self.operation_id(
             component_id, "configuration.apply", idempotency_key
+        )
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key="configuration.apply",
+            input_digest=digest_json(body.model_dump(mode="json")),
+            plan_digest=digest_json({"plan_id": body.plan_id}),
+            required_role="ADMIN",
         )
         async with self._apply_lock:
             contract = self.contract(component_id)
@@ -139,7 +231,23 @@ class CleanManagementGateway:
                 "graph_revision": graph.graph_revision,
             }
 
-    async def module_query(self, component_id: str, query_id: str, body: dict):
+    async def module_query(
+        self,
+        component_id: str,
+        query_id: str,
+        body: dict,
+        *,
+        authorization=None,
+        operation_id=None,
+    ):
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key=query_id,
+            input_digest=digest_json(body),
+            required_role="AUDITOR",
+        )
         contract = self.contract(component_id)
         query = getattr(contract, "query", None)
         if not callable(query):
@@ -155,8 +263,18 @@ class CleanManagementGateway:
         *,
         body: dict,
         idempotency_key: str | None,
+        authorization=None,
+        operation_id=None,
     ) -> dict:
-        operation_id = self.operation_id(component_id, action_id, idempotency_key)
+        operation_id = operation_id or self.operation_id(component_id, action_id, idempotency_key)
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key=action_id,
+            input_digest=digest_json(body),
+            required_role="ADMIN",
+        )
         async with self._apply_lock:
             contract = self.contract(component_id)
             action = getattr(contract, "action", None)

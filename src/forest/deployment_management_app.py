@@ -19,6 +19,7 @@ from forest.management_scopes import (
     DeploymentManagementScopeProvider,
     ManagementScopeRegistry,
 )
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 _SESSION_COOKIE = "forest_management_session"
 _CSRF_COOKIE = "forest_management_csrf"
@@ -49,9 +50,16 @@ def create_deployment_management_app(
         raise ValueError("Management origin must be an exact HTTP origin")
     allowed_origin = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
     secure_cookie = parsed_origin.scheme == "https"
+    ticket_authority = WebAuthorityTicketAuthority(
+        issuer_id=deployment_id,
+        active_key_id=identity_authority.active_key_id,
+        key_resolver=identity_authority.key_resolver,
+        session_validator=identity_authority.revalidate_session,
+    )
     deployment_gateway = DeploymentManagementGateway(
         deployment_id=deployment_id,
         components=components,
+        ticket_authority=ticket_authority,
     )
     providers = [
         DeploymentManagementScopeProvider(
@@ -60,8 +68,13 @@ def create_deployment_management_app(
         )
     ]
     if bot_supervisor is not None:
-        providers.append(BotManagementScopeProvider(supervisor=bot_supervisor))
-    scopes = ManagementScopeRegistry(tuple(providers))
+        providers.append(
+            BotManagementScopeProvider(
+                supervisor=bot_supervisor,
+                ticket_authority=ticket_authority,
+            )
+        )
+    scopes = ManagementScopeRegistry(tuple(providers), ticket_authority=ticket_authority)
     static = files("forest").joinpath("clean_management_static")
     app = FastAPI(title="Forest Deployment Console", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=str(static)), name="static")
@@ -187,13 +200,13 @@ def create_deployment_management_app(
     @app.get("/management/v1/runtime")
     async def runtime(request: Request):
         session = await authenticated(request)
-        async with scopes.gateway("deployment", "deployment", session.subject) as gateway:
+        async with scopes.gateway("deployment", "deployment", session) as gateway:
             return await runtime_projection(gateway)
 
     @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/runtime")
     async def scoped_runtime(scope_kind: str, scope_id: str, request: Request):
         session = await authenticated(request)
-        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await runtime_projection(gateway)
 
     @app.get(
@@ -204,7 +217,7 @@ def create_deployment_management_app(
         scope_kind: str, scope_id: str, component_id: str, request: Request
     ):
         session = await authenticated(request)
-        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await gateway.read_configuration(component_id)
 
     @app.post(
@@ -219,7 +232,7 @@ def create_deployment_management_app(
         request: Request,
     ):
         session = await authenticated(request, csrf=True, admin=True)
-        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await gateway.plan_configuration(
                 component_id,
                 body=body,
@@ -238,7 +251,7 @@ def create_deployment_management_app(
         request: Request,
     ):
         session = await authenticated(request, csrf=True, admin=True)
-        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await gateway.apply_configuration(
                 component_id,
                 body=body,
@@ -258,7 +271,7 @@ def create_deployment_management_app(
         request: Request,
     ):
         session = await authenticated(request, csrf=True)
-        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await gateway.module_query(component_id, query_id, body)
 
     @app.post(
@@ -274,7 +287,7 @@ def create_deployment_management_app(
         request: Request,
     ):
         session = await authenticated(request, csrf=True, admin=True)
-        async with scopes.gateway(scope_kind, scope_id, session.subject) as gateway:
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await gateway.module_action(
                 component_id,
                 action_id,

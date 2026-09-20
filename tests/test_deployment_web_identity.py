@@ -83,6 +83,9 @@ async def test_web_identity_bootstrap_login_csrf_and_revocation(deployment_catal
 
     await authority.logout(session.session_token)
     await authority.logout(session.session_token)
+    with pytest.raises(ForestError) as ticket_revalidation:
+        await authority.revalidate_session(authenticated)
+    assert ticket_revalidation.value.code == "MANAGEMENT_AUTHENTICATION_REQUIRED"
     with pytest.raises(ForestError) as revoked:
         await authority.authenticate(session.session_token)
     assert revoked.value.code == "MANAGEMENT_AUTHENTICATION_REQUIRED"

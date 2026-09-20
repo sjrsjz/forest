@@ -81,6 +81,7 @@ class WebSession:
 class AuthenticatedWebSession:
     session_id_hash: str
     session_ref: str
+    session_revision: int
     csrf_hash: str
     subject: WebSubject
     expires_at: datetime
@@ -613,6 +614,22 @@ class DeploymentWebIdentityAuthority:
 
     async def authenticate(self, session_token: str) -> AuthenticatedWebSession:
         session_hash = _token_digest(session_token)
+        return await self._authenticated_session(session_hash)
+
+    async def revalidate_session(self, session: AuthenticatedWebSession) -> None:
+        if not isinstance(session, AuthenticatedWebSession):
+            raise ForestError(
+                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Web session is invalid", 401
+            )
+        current = await self._authenticated_session(session.session_id_hash)
+        if current != session:
+            raise ForestError(
+                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Web session changed", 401
+            )
+
+    async def _authenticated_session(
+        self, session_hash: str
+    ) -> AuthenticatedWebSession:
         async with self.store.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -644,6 +661,7 @@ class DeploymentWebIdentityAuthority:
         return AuthenticatedWebSession(
             session_hash,
             "web-session/" + session_hash[:32],
+            row["revision"],
             row["csrf_hash"],
             subject,
             row["expires_at"],

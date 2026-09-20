@@ -100,7 +100,7 @@ Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 动态
 ## 尚未接入本图的能力
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
-- 浏览器首次安装配对流程、目标 Bot 短票据和按模块 operation 的细粒度策略、持久登录限速及完整部署审计；当前已落地持久 ADMIN/AUDITOR 账号、scrypt 凭据、可撤销会话、CSRF/Origin、最后管理员保护与账号管理模块贡献；
+- 浏览器首次安装配对流程、目标最终许可事务中的票据依据、可配置 Bot operation policy 及完整部署审计；当前已落地持久 ADMIN/AUDITOR 账号、scrypt 凭据、可撤销会话、CSRF/Origin、最后管理员保护、账号管理模块贡献、持久登录限速，以及绑定 Session/目标 Generation/operation/输入摘要并由目标网关验签的 30 秒 `WebAuthorityTicket`；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。
