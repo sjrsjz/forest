@@ -172,9 +172,20 @@ class ConversationWorker:
                 await self.graph_admission.wait()
             if self._closing:
                 return
-            candidates = await self.scheduler.claimable_conversations(
-                limit=self.candidate_limit
-            )
+            try:
+                candidates = await self.scheduler.claimable_conversations(
+                    limit=self.candidate_limit
+                )
+            except ForestError as exc:
+                if exc.code != "RUNTIME_GENERATION_NOT_ACTIVE":
+                    raise
+                # Runtime-wide DATA maintenance closes the persistent route
+                # without retiring this process-local Generation. Keep the
+                # poller alive so it can resume from durable work when DATA
+                # admission reopens; graph retirement clears graph_admission
+                # and fences the same retry path.
+                await self._wait_for_wake()
+                continue
             for conversation_id in candidates:
                 if not self._admission.is_set() or self._closing:
                     break

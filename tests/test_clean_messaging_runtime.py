@@ -83,12 +83,33 @@ class FakeModelClient:
         self.closed = False
         self.permitted = False
         self.requests = []
+        self.runtime_status_once = False
 
     async def dispatch(self, prepared, *, permitcheck):
         await permitcheck(prepared)
         self.permitted = True
         self.requests.append(prepared)
-        if "tool" in prepared.request_id:
+        if self.runtime_status_once and prepared.manifest["run_id"] not in {
+            "agent/run/test",
+            "agent/run/tool",
+        }:
+            self.runtime_status_once = False
+            authority_trigger_id = prepared.manifest["trigger_ids"][-1]
+            text = (
+                '<valid_agent_protocol_content_block block_type="ModelTurn">'
+                '<payload><blocks><block block_type="FunctionCall">'
+                '<function name="runtime_status"><arguments encoding="json">'
+                + json.dumps(
+                    {
+                        "authority_trigger_id": authority_trigger_id,
+                        "arguments": {},
+                    },
+                    separators=(",", ":"),
+                )
+                + '</arguments></function></block></blocks></payload>'
+                '</valid_agent_protocol_content_block>'
+            )
+        elif "tool" in prepared.request_id:
             text = (
                 '<valid_agent_protocol_content_block block_type="ModelTurn">'
                 '<payload><blocks><block block_type="FunctionCall">'
@@ -439,7 +460,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "kernel.runtime"
         ]
         assert runtime_tool.binding.approval_required is False
-        assert runtime_tool.binding.supports_query is False
+        assert runtime_tool.binding.supports_query is True
         tool_request = ToolAuthorizationRequest(
             tool_call_id="tool-call:runtime-status:integration",
             effect_operation_ref="tool-effect:runtime-status:integration",
@@ -588,6 +609,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             },
             separators=(",", ":"),
         ).encode()
+        model_clients[0].runtime_status_once = True
         await clients[0].emit(body)
         async with store.pool.connection() as conn:
             inbox = await (
@@ -924,10 +946,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert recovered["current_tool"] is None
 
         conversation_runtime.notify()
-        for _ in range(2000):
+        for _ in range(500):
             if len(clients[0].sends) >= 2:
                 break
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
         assert conversation_runtime.worker is not None
         assert conversation_runtime.worker.failures == {}, "".join(
             traceback.format_exception(
@@ -935,6 +957,13 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             )
         )
         assert len(clients[0].sends) == 2
+        automatic_tool_requests = [
+            item
+            for item in model_clients[0].requests
+            if item.manifest["run_id"] not in {"agent/run/test", "agent/run/tool"}
+        ]
+        assert len(automatic_tool_requests) == 2
+        assert automatic_tool_requests[0].manifest["tool_names"] == ["runtime_status"]
         assert any(
             request.manifest.get("memory_evidence") is not None
             for request in model_clients[0].requests
@@ -956,6 +985,25 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert lane["active_session_ref"] is None
         assert lane["active_run_ref"] is None
         assert lane["context_revision"] >= 2
+        async with store.pool.connection() as conn:
+            automatic_tool = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT state,tool_name,authority_principal_ref,result_payload_id "
+                        "FROM {}.tool_calls WHERE bot_id=%s AND tool_name='runtime_status' "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ).format(sql.Identifier(agent_runtime.repository.namespace)),
+                    (store.bot_id,),
+                )
+            ).fetchone()
+        assert automatic_tool["state"] == "SUCCEEDED"
+        assert automatic_tool["tool_name"] == "runtime_status"
+        assert automatic_tool["authority_principal_ref"] == "qq:42"
+        automatic_tool_result = json.loads(
+            await kernel.payload.read_bytes(automatic_tool["result_payload_id"])
+        )
+        assert automatic_tool_result["graph_id"] == registry.graph_identity.graph_id
+        assert automatic_tool_result["protocol"] == "forest.runtime-status-tool-result/1"
 
         pause_body = json.dumps(
             {
@@ -1184,6 +1232,57 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert restored["maintenance_epoch"] == 3
         assert restored["data_admission"] is True
         assert "已恢复" in clients[0].sends[6][0].wire_body.decode("utf-8")
+
+        resumed_request_count = len(model_clients[0].requests)
+        resumed_body = json.dumps(
+            {
+                "time": 1700000005,
+                "self_id": 123456789,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 95,
+                "group_id": 933179609,
+                "user_id": 42,
+                "sender": {"user_id": 42, "nickname": "Alice", "role": "member"},
+                "message": [
+                    {"type": "at", "data": {"qq": "123456789"}},
+                    {"type": "text", "data": {"text": " after resume"}},
+                ],
+            },
+            separators=(",", ":"),
+        ).encode()
+        await clients[0].emit(resumed_body)
+        conversation_runtime.notify()
+        for _ in range(500):
+            if len(clients[0].sends) >= 8:
+                break
+            await asyncio.sleep(0.05)
+        assert conversation_runtime.worker.failures == {}, "".join(
+            traceback.format_exception(
+                next(iter(conversation_runtime.worker.failures.values()))
+            )
+        )
+        assert len(clients[0].sends) == 8
+        assert b"ok" in clients[0].sends[7][0].wire_body
+        assert len(model_clients[0].requests) == resumed_request_count + 1
+        async with store.pool.connection() as conn:
+            resumed_trigger = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT t.status FROM {}.conversation_triggers t "
+                        "JOIN {}.inbox_messages i ON i.bot_id=t.bot_id "
+                        "AND i.conversation_id=t.conversation_id AND i.event_id=t.event_id "
+                        "WHERE t.bot_id=%s AND i.platform_message_ref=%s"
+                    ).format(
+                        sql.Identifier(messaging.conversation.namespace),
+                        sql.Identifier(messaging.conversation.namespace),
+                    ),
+                    (store.bot_id, "95"),
+                )
+            ).fetchone()
+        assert resumed_trigger["status"] == "ANSWERED"
+
     finally:
         assert await registry.close() == []
     assert clients[0].closed is True

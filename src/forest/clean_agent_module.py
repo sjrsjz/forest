@@ -308,7 +308,7 @@ async def bootstrap_clean_agent(
                 route.service_id,
                 _RUNTIME_STATUS_TOOL_CONTRACT_DIGEST,
                 approval_required=False,
-                supports_query=False,
+                supports_query=True,
             )
             return FrozenToolRoute(
                 _RUNTIME_STATUS_TOOL_DECLARATION,
