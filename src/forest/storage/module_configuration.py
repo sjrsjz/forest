@@ -43,6 +43,26 @@ class ModuleConfigurationRepository:
     def _table(self, name: str):
         return sql.Identifier(self.namespace, name)
 
+    async def ensure_initialized(
+        self,
+        *,
+        operation_id: str,
+        value: object,
+        validation_digest: str,
+    ) -> EffectiveModuleConfiguration:
+        """Create revision one only for an uninitialized module authority."""
+
+        try:
+            return await self.desired()
+        except ForestError as exc:
+            if exc.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+                raise
+        return await self.initialize(
+            operation_id=operation_id,
+            value=value,
+            validation_digest=validation_digest,
+        )
+
     async def initialize(
         self,
         *,

@@ -79,7 +79,7 @@ async def bootstrap_clean_trigger_policy(
         },
         "additionalProperties": False,
     }
-    await configuration.initialize(
+    await configuration.ensure_initialized(
         operation_id="bootstrap:conversation.trigger-policy:configuration",
         value=initial_configuration or default_trigger_policy_configuration(),
         validation_digest=digest_json(schema),

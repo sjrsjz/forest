@@ -202,7 +202,7 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         "required": ["protocol"],
         "additionalProperties": False,
     }
-    await configuration.initialize(
+    await configuration.ensure_initialized(
         operation_id="bootstrap:delivery:configuration",
         value={"protocol": "forest.delivery/1"},
         validation_digest=digest_json(schema),

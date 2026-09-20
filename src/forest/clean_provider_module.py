@@ -85,7 +85,7 @@ async def bootstrap_clean_provider(
         },
         "additionalProperties": False,
     }
-    await configuration.initialize(
+    await configuration.ensure_initialized(
         operation_id="bootstrap:provider.chat-completions:configuration",
         value=initial_configuration or default_provider_configuration(),
         validation_digest=digest_json(schema),

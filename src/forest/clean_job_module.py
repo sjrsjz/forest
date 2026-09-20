@@ -55,7 +55,7 @@ async def bootstrap_clean_job(store, installer, *, kernel) -> CleanJobModule:
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
     )
-    await configuration.initialize(
+    await configuration.ensure_initialized(
         operation_id="bootstrap:job.scheduler:configuration",
         value={"protocol": "forest.job.scheduler/1"},
         validation_digest=digest_json(_SCHEMA),

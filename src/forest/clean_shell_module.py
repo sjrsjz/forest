@@ -139,7 +139,7 @@ async def bootstrap_clean_shell(
         "required": ["protocol", "binding_ref", "administrator_principals"],
         "additionalProperties": False,
     }
-    await configuration.initialize(
+    await configuration.ensure_initialized(
         operation_id="bootstrap:shell.command:configuration",
         value=initial_configuration or default_shell_configuration(),
         validation_digest=digest_json(schema),

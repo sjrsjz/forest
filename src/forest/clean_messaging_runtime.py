@@ -259,7 +259,7 @@ async def bootstrap_clean_messaging(
             "required": ["protocol"],
             "additionalProperties": False,
         }
-        await configuration.initialize(
+        await configuration.ensure_initialized(
             operation_id=f"bootstrap:{component_id}:configuration",
             value={"protocol": f"forest.{component_id}/1"},
             validation_digest=digest_json(schema),
