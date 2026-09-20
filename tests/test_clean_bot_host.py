@@ -153,7 +153,8 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
     events = []
 
     class Previous:
-        async def drain_owned_work_for_replacement(self):
+        async def drain_owned_work_for_replacement(self, operation_id):
+            assert operation_id == "replacement/one"
             events.append("drain-previous")
 
         async def close(self):
@@ -161,6 +162,8 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
             return []
 
     class Candidate:
+        activation_id = "replacement/one"
+
         async def prewarm(self):
             events.append("prewarm-candidate")
 
@@ -170,6 +173,18 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
         async def close(self):
             events.append("close-candidate")
             return []
+
+        def get(self, component_id):
+            assert component_id == "agent.runtime"
+            return self
+
+        async def resume_reload_wait(self, operation_id):
+            assert operation_id == self.activation_id
+            events.append("resume-runs")
+            return ()
+
+        def notify_work(self):
+            events.append("notify-work")
 
     previous = Previous()
     candidate = Candidate()
@@ -192,6 +207,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
         "prewarm-candidate",
         "drain-previous",
         "publish-candidate",
+        "resume-runs",
         "close-previous",
     ]
 
@@ -201,13 +217,16 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     events = []
 
     class Previous:
-        async def drain_owned_work_for_replacement(self):
+        async def drain_owned_work_for_replacement(self, operation_id):
+            assert operation_id == "replacement/failing"
             events.append("drain-previous")
 
         async def resume_owned_work_after_failed_replacement(self):
             events.append("resume-previous")
 
     class Candidate:
+        activation_id = "replacement/failing"
+
         async def prewarm(self):
             events.append("prewarm-candidate")
 
@@ -240,6 +259,56 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
         "publish-candidate",
         "close-candidate",
         "resume-previous",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reload_recovery_releases_agent_and_exact_conversation_blocker():
+    calls = []
+
+    class Agent:
+        async def resume_reload_wait(self, operation_id):
+            calls.append(("agent", operation_id))
+            return (
+                {
+                    "run_id": "run/one",
+                    "conversation_ref": "group/one",
+                    "reload_operation_id": operation_id,
+                },
+            )
+
+    class Conversation:
+        async def resume_deferred(self, conversation_id, **values):
+            calls.append(("conversation", conversation_id, values))
+            return {"resumed": True}
+
+    class Registry:
+        def get(self, component_id):
+            return {
+                "agent.runtime": Agent(),
+                "conversation.scheduler": Conversation(),
+            }[component_id]
+
+        def notify_work(self):
+            calls.append(("notify",))
+
+    resumed = await CleanBotHost._resume_reload_waits(
+        Registry(),
+        "replacement/one",
+    )
+
+    assert resumed[0]["run_id"] == "run/one"
+    assert calls == [
+        ("agent", "replacement/one"),
+        (
+            "conversation",
+            "group/one",
+            {
+                "reason_code": "AGENT_RELOAD_WAIT",
+                "reason_ref": "replacement/one",
+            },
+        ),
+        ("notify",),
     ]
 
 

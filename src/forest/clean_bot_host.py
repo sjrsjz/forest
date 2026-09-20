@@ -556,6 +556,7 @@ class CleanBotHost:
             await self._reconcile_abandoned_clients(adapter)
             await registry.start()
             self.registry = registry
+            await self._resume_reload_waits(registry)
             self._kernel.authorization.register_approval_decision_listener(
                 self._approval_decided
             )
@@ -566,8 +567,31 @@ class CleanBotHost:
             await self.close()
             raise
 
+    @staticmethod
+    async def _resume_reload_waits(
+        registry: RuntimeModuleRegistry,
+        operation_id: str | None = None,
+    ) -> tuple[dict, ...]:
+        agent = registry.get("agent.runtime")
+        resumed = (
+            await agent.recover_reload_waits()
+            if operation_id is None
+            else await agent.resume_reload_wait(operation_id)
+        )
+        if not resumed:
+            return ()
+        conversation = registry.get("conversation.scheduler")
+        for run in resumed:
+            await conversation.resume_deferred(
+                run["conversation_ref"],
+                reason_code="AGENT_RELOAD_WAIT",
+                reason_ref=run["reload_operation_id"],
+            )
+        registry.notify_work()
+        return resumed
+
     async def replace_runtime_graph(self) -> RuntimeModuleRegistry:
-        """Publish a candidate graph, then drain the superseded graph."""
+        """Prewarm a candidate, drain the current graph, then publish and resume it."""
 
         lock = self._replacement_lock
         if lock is None or self.registry is None or self._closing:
@@ -580,9 +604,10 @@ class CleanBotHost:
             previous_drained = False
             try:
                 await candidate.prewarm()
-                await previous.drain_owned_work_for_replacement()
+                await previous.drain_owned_work_for_replacement(candidate.activation_id)
                 previous_drained = True
                 await candidate.start()
+                await self._resume_reload_waits(candidate, candidate.activation_id)
             except BaseException as replacement_error:
                 cleanup_error = None
                 try:

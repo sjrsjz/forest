@@ -160,6 +160,10 @@ class CleanConversationSchedulerRuntime:
         if self.worker is not None:
             self.worker.wake()
 
+    def begin_replacement(self, operation_id: str) -> None:
+        if self.worker is not None:
+            self.worker.begin_replacement(operation_id)
+
     async def _verify(self, conn, *, admission_lane: str) -> None:
         if not self.active or self.generation_identity is None:
             raise ForestError(

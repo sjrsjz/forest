@@ -308,6 +308,73 @@ async def test_run_owner_checkpoint_safe_boundary_and_new_input_are_monotonic(
 
 
 @pytest.mark.postgres
+async def test_reload_wait_is_bound_to_one_lifecycle_operation_and_resume_phase(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, agent = clean_agent_runtime
+    values, _config, _preset = await _start(agent, payloads)
+    await agent.start_run(**values)
+    owner = await agent.acquire_run("run/one", "worker/reload")
+    state = await _payload(
+        payloads,
+        owner_kind="checkpoint.state",
+        owner_id="checkpoint/reload",
+        body=b'{"phase":"RELOAD_WAIT","operation_id":"replacement/one"}',
+        source_id="run/one",
+    )
+    checkpoint = await agent.transition(
+        owner,
+        checkpoint_id="checkpoint/reload",
+        expected_phase="PREPARING_MODEL",
+        target_phase="RELOAD_WAIT",
+        state=state,
+        reload_operation_id="replacement/one",
+        reload_resume_phase="PREPARING_MODEL",
+    )
+    assert checkpoint["phase"] == "RELOAD_WAIT"
+    parked = await agent.load("run/one")
+    assert parked["reload_operation_id"] == "replacement/one"
+    assert parked["reload_resume_phase"] == "PREPARING_MODEL"
+    await agent.release_run(owner)
+
+    assert await agent.resume_reload_wait("replacement/wrong") == ()
+    assert (await agent.load("run/one"))["state"] == "RELOAD_WAIT"
+    exact = await agent.resume_reload_wait("replacement/one")
+    assert [(item["run_id"], item["conversation_ref"]) for item in exact] == [
+        ("run/one", "group/one")
+    ]
+    resumed = await agent.load("run/one")
+    assert resumed["state"] == "PREPARING_MODEL"
+    assert resumed["reload_operation_id"] is None
+    assert resumed["reload_resume_phase"] is None
+    assert await agent.resume_reload_wait("replacement/one") == ()
+
+    recovery_owner = await agent.acquire_run("run/one", "worker/recovery")
+    recovery_state = await _payload(
+        payloads,
+        owner_kind="checkpoint.state",
+        owner_id="checkpoint/reload-abandoned",
+        body=b'{"phase":"RELOAD_WAIT","operation_id":"replacement/abandoned"}',
+        source_id="run/one",
+    )
+    await agent.transition(
+        recovery_owner,
+        checkpoint_id="checkpoint/reload-abandoned",
+        expected_phase="PREPARING_MODEL",
+        target_phase="RELOAD_WAIT",
+        state=recovery_state,
+        reload_operation_id="replacement/abandoned",
+        reload_resume_phase="PREPARING_MODEL",
+    )
+    await agent.release_run(recovery_owner)
+    recovered = await agent.recover_reload_waits()
+    assert [item["reload_operation_id"] for item in recovered] == [
+        "replacement/abandoned"
+    ]
+    assert (await agent.load("run/one"))["state"] == "PREPARING_MODEL"
+
+
+@pytest.mark.postgres
 async def test_final_candidate_is_fenced_and_session_closes_only_after_drain_decision(
     clean_agent_runtime,
 ):

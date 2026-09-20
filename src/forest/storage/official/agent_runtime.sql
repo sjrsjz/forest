@@ -77,6 +77,13 @@ CREATE TABLE agent_runs (
     owner_expires_at timestamptz,
     current_model_request_id text,
     current_tool_call_id text,
+    reload_operation_id text CHECK (
+        reload_operation_id IS NULL OR octet_length(reload_operation_id) BETWEEN 1 AND 256
+    ),
+    reload_resume_phase text CHECK (
+        reload_resume_phase IS NULL
+        OR reload_resume_phase IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL')
+    ),
     final_candidate_payload_id text,
     final_candidate_payload_digest text CHECK (
         final_candidate_payload_digest IS NULL
@@ -95,6 +102,10 @@ CREATE TABLE agent_runs (
     ),
     CHECK (
         (final_candidate_payload_id IS NULL) = (final_candidate_payload_digest IS NULL)
+    ),
+    CHECK (
+        (state='RELOAD_WAIT') = (reload_operation_id IS NOT NULL)
+        AND (reload_operation_id IS NULL) = (reload_resume_phase IS NULL)
     ),
     CHECK (
         (state IN ('COMPLETED','FAILED','CANCELLED') AND terminal_at IS NOT NULL)

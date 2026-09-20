@@ -22,6 +22,12 @@ class _WorkerQuiescing(Exception):
     pass
 
 
+class AgentReloadRequested(Exception):
+    def __init__(self, operation_id: str) -> None:
+        super().__init__(operation_id)
+        self.operation_id = operation_id
+
+
 def _ref(kind: str) -> str:
     return f"{kind}:{secrets.token_hex(16)}"
 
@@ -133,6 +139,7 @@ class ConversationWorker:
         self._admission = asyncio.Event()
         self._poll_wake = asyncio.Event()
         self._input_wake = asyncio.Event()
+        self._replacement_operation_id: str | None = None
         self._closing = False
         self._poll_task: asyncio.Task | None = None
         self._conversation_tasks: dict[str, asyncio.Task] = {}
@@ -150,6 +157,16 @@ class ConversationWorker:
     def wake(self) -> None:
         self._poll_wake.set()
         self._input_wake.set()
+
+    def begin_replacement(self, operation_id: str) -> None:
+        if not operation_id or len(operation_id.encode("utf-8")) > 256:
+            raise ValueError("replacement operation_id must be bounded and non-empty")
+        if (
+            self._replacement_operation_id is not None
+            and self._replacement_operation_id != operation_id
+        ):
+            raise RuntimeError("conversation worker already belongs to another replacement")
+        self._replacement_operation_id = operation_id
 
     async def quiesce(self) -> None:
         self._admission.clear()
@@ -255,6 +272,8 @@ class ConversationWorker:
             pass
         self._input_wake.clear()
         if not self._admission.is_set() or self._closing:
+            if self._replacement_operation_id is not None and not self._closing:
+                raise AgentReloadRequested(self._replacement_operation_id)
             raise _WorkerQuiescing
 
     async def run_once(self, conversation_id: str) -> None:
@@ -320,6 +339,8 @@ class ConversationWorker:
 
                 async def before_external_step() -> None:
                     if not self._admission.is_set() or self._closing:
+                        if self._replacement_operation_id is not None and not self._closing:
+                            raise AgentReloadRequested(self._replacement_operation_id)
                         raise _WorkerQuiescing
 
                 request = AgentExecutionRequest(
@@ -335,6 +356,25 @@ class ConversationWorker:
                 try:
                     completion = await self.agent.execute(request)
                 except ForestError as exc:
+                    if exc.code == "AGENT_RELOAD_WAIT":
+                        operation_id = (
+                            exc.details.get("operation_id")
+                            if isinstance(exc.details, dict)
+                            else None
+                        )
+                        if not isinstance(operation_id, str):
+                            raise ForestError(
+                                "AGENT_RELOAD_OPERATION_MISSING",
+                                "Agent reload wait omitted its lifecycle operation",
+                                500,
+                            ) from exc
+                        await self.scheduler.defer_actor(
+                            actor,
+                            delay_seconds=300,
+                            reason_code="AGENT_RELOAD_WAIT",
+                            reason_ref=operation_id,
+                        )
+                        return
                     if exc.code != "AGENT_WAITING_APPROVAL":
                         raise
                     approval_ref = (

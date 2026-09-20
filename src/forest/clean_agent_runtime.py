@@ -501,6 +501,17 @@ class CleanAgentRuntime:
         await self._verify_member_in(conn)
         return await self.repository.transition(owner, _connection=conn, **values)
 
+    async def resume_reload_wait(self, operation_id: str):
+        resumed = await self._call(
+            "resume_reload_wait",
+            operation_id=operation_id,
+            owned_work=True,
+        )
+        return resumed
+
+    async def recover_reload_waits(self):
+        return await self._call("recover_reload_waits", owned_work=True)
+
     async def close_session(self, **values):
         return await self._call("close_session", owned_work=True, **values)
 

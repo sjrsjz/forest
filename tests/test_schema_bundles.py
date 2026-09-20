@@ -874,7 +874,7 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
     assert route.graph_id == registry.graph_identity.graph_id
     assert registry.graph_identity is not None
     assert registry.generation_bindings["kernel.runtime"].config_revision == 1
-    await registry.drain_owned_work_for_replacement()
+    await registry.drain_owned_work_for_replacement("replacement/test")
     assert registry.states["kernel.runtime"] == ModuleLifecycleState.QUIESCENT
     with pytest.raises(ForestError) as caught:
         await repository.verify_active_generation(

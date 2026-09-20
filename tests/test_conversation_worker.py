@@ -8,6 +8,7 @@ import pytest
 
 from forest.conversation_worker import (
     AgentExecutionCompletion,
+    AgentReloadRequested,
     ConversationWorker,
 )
 from forest.errors import ForestError
@@ -456,7 +457,16 @@ async def test_quiesce_stops_before_the_next_external_agent_step():
         async def execute(self, request):
             self.entered.set()
             await self.release.wait()
-            await request.before_external_step()
+            try:
+                await request.before_external_step()
+            except AgentReloadRequested as exc:
+                assert exc.operation_id == "replacement/test"
+                raise ForestError(
+                    "AGENT_RELOAD_WAIT",
+                    "parked",
+                    409,
+                    details={"operation_id": exc.operation_id},
+                ) from exc
             self.crossed = True
             return _reply(request.run_ref, "trigger/existing")
 
@@ -466,6 +476,7 @@ async def test_quiesce_stops_before_the_next_external_agent_step():
     worker.activate()
     await asyncio.wait_for(agent.entered.wait(), timeout=1)
 
+    worker.begin_replacement("replacement/test")
     draining = asyncio.create_task(worker.quiesce())
     await asyncio.sleep(0)
     assert not draining.done()
@@ -474,6 +485,9 @@ async def test_quiesce_stops_before_the_next_external_agent_step():
 
     assert agent.crossed is False
     assert scheduler.appends == []
+    assert scheduler.deferrals == [
+        ("group/a", 300, "AGENT_RELOAD_WAIT", "replacement/test")
+    ]
     assert scheduler.actors == set()
     assert worker.failures == {}
     await worker.close()

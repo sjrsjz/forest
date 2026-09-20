@@ -1869,6 +1869,8 @@ class AgentRuntimeRepository:
         state: AgentPayloadRef,
         error_code: str | None = None,
         final_candidate: AgentPayloadRef | None = None,
+        reload_operation_id: str | None = None,
+        reload_resume_phase: str | None = None,
         _connection=None,
     ) -> dict:
         _bounded(checkpoint_id, "checkpoint_id", 256)
@@ -1895,6 +1897,22 @@ class AgentRuntimeRepository:
             raise ForestError(
                 "AGENT_RUNTIME_INPUT_INVALID", "Final candidate only belongs to FINAL_READY", 422
             )
+        _bounded(reload_operation_id, "reload_operation_id", 256, optional=True)
+        if target_phase == "RELOAD_WAIT":
+            if reload_operation_id is None or reload_resume_phase != expected_phase or (
+                expected_phase not in {"PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"}
+            ):
+                raise ForestError(
+                    "AGENT_RUNTIME_INPUT_INVALID",
+                    "RELOAD_WAIT must preserve its exact resumable phase and operation",
+                    422,
+                )
+        elif reload_operation_id is not None or reload_resume_phase is not None:
+            raise ForestError(
+                "AGENT_RUNTIME_INPUT_INVALID",
+                "Reload metadata only belongs to RELOAD_WAIT",
+                422,
+            )
         input_digest = _digest(
             {
                 "run_id": owner.run_id,
@@ -1905,6 +1923,8 @@ class AgentRuntimeRepository:
                 "state": state.canonical(),
                 "error_code": error_code,
                 "final_candidate": final_candidate.canonical() if final_candidate else None,
+                "reload_operation_id": reload_operation_id,
+                "reload_resume_phase": reload_resume_phase,
             }
         )
         async with self._transaction(_connection) as conn:
@@ -1985,6 +2005,7 @@ class AgentRuntimeRepository:
             )
             await conn.execute(
                 sql.SQL("UPDATE {} SET state=%s,checkpoint_seq=%s,error_code=%s,"
+                        "reload_operation_id=%s,reload_resume_phase=%s,"
                         "final_candidate_payload_id=%s,final_candidate_payload_digest=%s,"
                         "terminal_at=%s,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND run_id=%s").format(self._table("agent_runs")),
@@ -1992,6 +2013,8 @@ class AgentRuntimeRepository:
                     target_phase,
                     sequence,
                     error_code,
+                    reload_operation_id,
+                    reload_resume_phase,
                     final_payload_id,
                     final_payload_digest,
                     terminal_at,
@@ -2018,6 +2041,85 @@ class AgentRuntimeRepository:
                     ),
                 )
             return dict(row)
+
+    async def resume_reload_wait(
+        self,
+        operation_id: str,
+        *,
+        _connection=None,
+    ) -> tuple[dict, ...]:
+        """CAS only Runs parked by one exact lifecycle replacement operation."""
+
+        _bounded(operation_id, "operation_id", 256)
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "reload-resume:" + operation_id)
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT r.run_id,r.reload_operation_id,r.reload_resume_phase,"
+                        "s.conversation_ref FROM {} r JOIN {} s ON s.bot_id=r.bot_id "
+                        "AND s.session_id=r.session_id WHERE r.bot_id=%s "
+                        "AND r.state='RELOAD_WAIT' AND r.reload_operation_id=%s "
+                        "ORDER BY r.run_id FOR UPDATE OF r"
+                    ).format(
+                        self._table("agent_runs"),
+                        self._table("agent_sessions"),
+                    ),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchall()
+            for row in rows:
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state=%s,reload_operation_id=NULL,"
+                        "reload_resume_phase=NULL,updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND run_id=%s AND state='RELOAD_WAIT' "
+                        "AND reload_operation_id=%s"
+                    ).format(self._table("agent_runs")),
+                    (
+                        row["reload_resume_phase"],
+                        self.store.bot_id,
+                        row["run_id"],
+                        operation_id,
+                    ),
+                )
+            return tuple(dict(row) for row in rows)
+
+    async def recover_reload_waits(self, *, _connection=None) -> tuple[dict, ...]:
+        """Release reload waits abandoned by a prior host incarnation."""
+
+        async with self._transaction(_connection) as conn:
+            await self._lock(conn, "reload-recover:all")
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT r.run_id,r.reload_operation_id,r.reload_resume_phase,"
+                        "s.conversation_ref FROM {} r JOIN {} s ON s.bot_id=r.bot_id "
+                        "AND s.session_id=r.session_id WHERE r.bot_id=%s "
+                        "AND r.state='RELOAD_WAIT' ORDER BY r.run_id FOR UPDATE OF r"
+                    ).format(
+                        self._table("agent_runs"),
+                        self._table("agent_sessions"),
+                    ),
+                    (self.store.bot_id,),
+                )
+            ).fetchall()
+            for row in rows:
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state=%s,reload_operation_id=NULL,"
+                        "reload_resume_phase=NULL,updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND run_id=%s AND state='RELOAD_WAIT' "
+                        "AND reload_operation_id=%s"
+                    ).format(self._table("agent_runs")),
+                    (
+                        row["reload_resume_phase"],
+                        self.store.bot_id,
+                        row["run_id"],
+                        row["reload_operation_id"],
+                    ),
+                )
+            return tuple(dict(row) for row in rows)
 
     async def close_session(
         self,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -16,9 +17,11 @@ from forest.agent_tool_executor import DurableAgentToolExecutor
 from forest.conversation_worker import (
     AgentExecutionCompletion,
     AgentExecutionRequest,
+    AgentReloadRequested,
 )
 from forest.errors import ForestError
 from forest.session_handoff_uow import agent_input_from_selection
+from forest.storage.agent_runtime_authority import AgentPayloadRef
 from forest.storage.conversation_scheduler import (
     SchedulerContextFact,
     SchedulerPayloadRef,
@@ -68,6 +71,7 @@ class DurableSingleAgentExecution:
         self.tools = DurableAgentToolExecutor(agent=agent, payloads=payloads)
         self.memory = memory
         self.media = media
+        self.payloads = payloads
         self.projector = ConversationContextProjector(
             bot_id=agent.bot_id,
             payloads=payloads,
@@ -152,6 +156,49 @@ class DurableSingleAgentExecution:
                 503,
             )
         return route
+
+    async def _park_for_reload(self, owner, operation_id: str) -> None:
+        recovery = await self.agent.load_recovery(owner.run_id)
+        resume_phase = recovery["state"]
+        if resume_phase not in {"PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"}:
+            raise ForestError(
+                "AGENT_RELOAD_BOUNDARY_INVALID",
+                f"Agent Run cannot enter RELOAD_WAIT from {resume_phase}",
+                409,
+            )
+        checkpoint_id = _stable("checkpoint-reload", owner.run_id, operation_id)
+        epoch = await self.payloads.epoch()
+        saved = await self.payloads.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            media_type="application/json",
+            content=json.dumps(
+                {
+                    "phase": "RELOAD_WAIT",
+                    "operation_id": operation_id,
+                    "resume_phase": resume_phase,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            expected_deletion_epoch=epoch,
+        )
+        await self.agent.transition(
+            owner,
+            checkpoint_id=checkpoint_id,
+            expected_phase=resume_phase,
+            target_phase="RELOAD_WAIT",
+            state=AgentPayloadRef(
+                saved.payload_id,
+                saved.content_digest,
+                "agent.runtime",
+                "checkpoint.state",
+                checkpoint_id,
+            ),
+            reload_operation_id=operation_id,
+            reload_resume_phase=resume_phase,
+        )
 
     async def execute(self, request: AgentExecutionRequest) -> AgentExecutionCompletion:
         if type(request) is not AgentExecutionRequest:
@@ -367,6 +414,14 @@ class DurableSingleAgentExecution:
                     f"Agent Run cannot execute from {state}",
                     409,
                 )
+        except AgentReloadRequested as exc:
+            await self._park_for_reload(owner, exc.operation_id)
+            raise ForestError(
+                "AGENT_RELOAD_WAIT",
+                "Agent Run is parked for RuntimeGraph replacement",
+                409,
+                details={"operation_id": exc.operation_id},
+            ) from exc
         finally:
             try:
                 await self.agent.release_run(owner)

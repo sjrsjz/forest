@@ -510,6 +510,7 @@ class RuntimeModuleRegistry:
         self._prewarmed = False
         self._contract_routes_sealed = False
         self._replacement_quiesced: tuple[str, ...] = ()
+        self._replacement_operation_id: str | None = None
         self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4())
@@ -1178,9 +1179,15 @@ class RuntimeModuleRegistry:
                 ) from exc
             raise
 
-    async def drain_owned_work_for_replacement(self) -> None:
+    async def drain_owned_work_for_replacement(self, operation_id: str) -> None:
         """Freeze ingress and drain restartable workers before another graph publishes."""
 
+        if not operation_id or len(operation_id.encode("utf-8")) > 256:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_OPERATION_INVALID",
+                "Replacement operation identity is invalid",
+                422,
+            )
         if self.generation_authority is None or self.graph_identity is None:
             raise ForestError(
                 "RUNTIME_GENERATION_DRAIN_UNAVAILABLE",
@@ -1191,6 +1198,12 @@ class RuntimeModuleRegistry:
             self._lifecycle_lock = asyncio.Lock()
         async with self._lifecycle_lock:
             if self._replacement_quiesced:
+                if self._replacement_operation_id != operation_id:
+                    raise ForestError(
+                        "RUNTIME_REPLACEMENT_OPERATION_CONFLICT",
+                        "RuntimeGraph is already draining for another replacement",
+                        409,
+                    )
                 return
             if any(state != ModuleLifecycleState.ACTIVE for state in self.states.values()):
                 raise ForestError(
@@ -1204,6 +1217,7 @@ class RuntimeModuleRegistry:
                 self.graph_identity,
             )
             self.contract_router.deactivate()
+            self._replacement_operation_id = operation_id
             drained: list[str] = []
             try:
                 for component_id in reversed(self.order):
@@ -1213,6 +1227,15 @@ class RuntimeModuleRegistry:
                     tasks = tuple(owned()) if owned is not None else ()
                     if not tasks:
                         continue
+                    begin_replacement = getattr(
+                        self.instances[component_id],
+                        "begin_replacement",
+                        None,
+                    )
+                    if begin_replacement is not None:
+                        result = begin_replacement(operation_id)
+                        if inspect.isawaitable(result):
+                            await result
                     await self._quiesce_only(component_id)
                     drained.append(component_id)
                 self._replacement_quiesced = tuple(drained)
@@ -1230,6 +1253,11 @@ class RuntimeModuleRegistry:
             await self._resume_owned_work_locked(self._lease())
 
     async def _resume_owned_work_locked(self, lease) -> None:
+        operation_id = self._replacement_operation_id
+        agent = self.instances.get("agent.runtime")
+        resumed_runs = ()
+        if operation_id is not None and agent is not None:
+            resumed_runs = await agent.resume_reload_wait(operation_id)
         await self.generation_authority.resume_graph_admission(
             lease,
             self.graph_identity,
@@ -1251,7 +1279,18 @@ class RuntimeModuleRegistry:
                 )
             self._transition(component_id, ModuleLifecycleState.ACTIVE)
         self._replacement_quiesced = ()
+        self._replacement_operation_id = None
         self.contract_router.activate()
+        conversation = self.instances.get("conversation.scheduler")
+        if operation_id is not None and conversation is not None:
+            for run in resumed_runs:
+                await conversation.resume_deferred(
+                    run["conversation_ref"],
+                    reason_code="AGENT_RELOAD_WAIT",
+                    reason_ref=operation_id,
+                )
+            if resumed_runs:
+                self.notify_work()
 
     async def close(self) -> list[Exception]:
         if self._lifecycle_lock is None:
