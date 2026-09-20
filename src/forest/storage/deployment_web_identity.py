@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import hmac
 import inspect
+import math
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
@@ -19,6 +20,9 @@ from forest.security import hash_password, random_token, verify_password
 _USERNAME = re.compile(r"[a-z][a-z0-9._-]{2,63}\Z")
 _ROLE = {"ADMIN", "AUDITOR"}
 _FAKE_HASH = "scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$" + "A" * 43 + "="
+_LOGIN_WINDOW_SECONDS = 900
+_LOGIN_BLOCK_SECONDS = 900
+_LOGIN_LIMITS = {"IDENTITY": 8, "PEER": 20}
 
 
 def _text(value: object, field: str, maximum: int) -> str:
@@ -457,60 +461,154 @@ class DeploymentWebIdentityAuthority:
             return subject
 
     async def login(
-        self, *, username: str, password: str, ttl_seconds: int = 28_800
+        self,
+        *,
+        username: str,
+        password: str,
+        peer_id: str = "unspecified",
+        ttl_seconds: int = 28_800,
     ) -> WebSession:
         username = _username(username)
+        peer_id = _text(peer_id, "peer_id", 256)
         if type(ttl_seconds) is not int or not 300 <= ttl_seconds <= 86_400:
             raise ForestError("WEB_IDENTITY_INPUT_INVALID", "Session TTL is invalid", 422)
-        async with self.store.pool.connection() as conn:
-            row = await (
-                await conn.execute(
-                    "SELECT * FROM forest_deployment.web_accounts WHERE username=%s",
-                    (username,),
-                )
-            ).fetchone()
-        encoded = row["password_hash"] if row is not None else _FAKE_HASH
-        verified = await asyncio.to_thread(verify_password, password, encoded)
-        if row is None or not verified or not row["enabled"]:
-            raise ForestError(
-                "MANAGEMENT_AUTHENTICATION_REQUIRED", "Credentials are invalid", 401
-            )
-        session_token = random_token()
-        csrf_token = random_token()
-        session_hash = _token_digest(session_token)
-        csrf_hash = _token_digest(csrf_token)
+        buckets = await self._login_buckets(username, peer_id)
+        rejection = None
+        result = None
         async with self.store.pool.connection() as conn, conn.transaction():
-            current = await (
+            await conn.execute(
+                "DELETE FROM forest_deployment.web_login_throttles "
+                "WHERE updated_at < clock_timestamp() - interval '1 day' "
+                "AND (blocked_until IS NULL OR blocked_until <= clock_timestamp())"
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            for bucket_key, bucket_kind in buckets:
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.web_accounts "
-                    "WHERE subject_id=%s FOR UPDATE",
-                    (row["subject_id"],),
+                    "INSERT INTO forest_deployment.web_login_throttles("
+                    "bucket_key,bucket_kind,key_id) VALUES (%s,%s,%s) "
+                    "ON CONFLICT (bucket_key) DO NOTHING",
+                    (bucket_key, bucket_kind, self.active_key_id),
                 )
-            ).fetchone()
-            if (
-                current is None
-                or not current["enabled"]
-                or current["revision"] != row["revision"]
-                or current["password_hash"] != row["password_hash"]
-            ):
-                raise ForestError(
-                    "MANAGEMENT_AUTHENTICATION_REQUIRED", "Credentials are invalid", 401
-                )
-            saved = await (
+            rows = await (
                 await conn.execute(
-                    "INSERT INTO forest_deployment.web_sessions("
-                    "session_id_hash,csrf_hash,subject_id,authn_strength,expires_at) "
-                    "VALUES (%s,%s,%s,'PASSWORD',clock_timestamp()+(%s * interval '1 second')) "
-                    "RETURNING *",
-                    (session_hash, csrf_hash, row["subject_id"], ttl_seconds),
+                    "SELECT * FROM forest_deployment.web_login_throttles "
+                    "WHERE bucket_key=ANY(%s) ORDER BY bucket_key FOR UPDATE",
+                    ([item[0] for item in buckets],),
                 )
-            ).fetchone()
-        return WebSession(
-            session_token,
-            csrf_token,
-            "web-session/" + session_hash[:32],
-            self._subject(current),
-            saved["expires_at"],
+            ).fetchall()
+            now = (
+                await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
+            )["value"]
+            normalized = []
+            for row in rows:
+                if (now - row["window_started_at"]).total_seconds() >= _LOGIN_WINDOW_SECONDS:
+                    row = await (
+                        await conn.execute(
+                            "UPDATE forest_deployment.web_login_throttles SET "
+                            "failure_count=0,window_started_at=%s,blocked_until=NULL,"
+                            "revision=revision+1,updated_at=%s WHERE bucket_key=%s RETURNING *",
+                            (now, now, row["bucket_key"]),
+                        )
+                    ).fetchone()
+                normalized.append(row)
+            blocked = [
+                row for row in normalized
+                if row["blocked_until"] is not None and row["blocked_until"] > now
+            ]
+            if blocked:
+                retry_after = max(
+                    1,
+                    math.ceil(max((row["blocked_until"] - now).total_seconds() for row in blocked)),
+                )
+                rejection = ForestError(
+                    "MANAGEMENT_LOGIN_RATE_LIMITED",
+                    "Login attempts are temporarily limited",
+                    429,
+                    details={"retry_after_seconds": retry_after},
+                )
+            else:
+                row = await (
+                    await conn.execute(
+                        "SELECT * FROM forest_deployment.web_accounts "
+                        "WHERE username=%s FOR UPDATE",
+                        (username,),
+                    )
+                ).fetchone()
+                encoded = row["password_hash"] if row is not None else _FAKE_HASH
+                verified = await asyncio.to_thread(verify_password, password, encoded)
+                if row is None or not verified or not row["enabled"]:
+                    for throttle in normalized:
+                        failures = throttle["failure_count"] + 1
+                        limit = _LOGIN_LIMITS[throttle["bucket_kind"]]
+                        blocked_until = now + timedelta(seconds=_LOGIN_BLOCK_SECONDS)
+                        await conn.execute(
+                            "UPDATE forest_deployment.web_login_throttles SET "
+                            "failure_count=%s,blocked_until=%s,revision=revision+1,updated_at=%s "
+                            "WHERE bucket_key=%s",
+                            (
+                                failures,
+                                blocked_until if failures >= limit else None,
+                                now,
+                                throttle["bucket_key"],
+                            ),
+                        )
+                    rejection = ForestError(
+                        "MANAGEMENT_AUTHENTICATION_REQUIRED", "Credentials are invalid", 401
+                    )
+                else:
+                    session_token = random_token()
+                    csrf_token = random_token()
+                    session_hash = _token_digest(session_token)
+                    csrf_hash = _token_digest(csrf_token)
+                    saved = await (
+                        await conn.execute(
+                            "INSERT INTO forest_deployment.web_sessions("
+                            "session_id_hash,csrf_hash,subject_id,authn_strength,expires_at) "
+                            "VALUES (%s,%s,%s,'PASSWORD',"
+                            "clock_timestamp()+(%s * interval '1 second')) RETURNING *",
+                            (session_hash, csrf_hash, row["subject_id"], ttl_seconds),
+                        )
+                    ).fetchone()
+                    await conn.execute(
+                        "DELETE FROM forest_deployment.web_login_throttles "
+                        "WHERE bucket_key=ANY(%s)",
+                        ([item[0] for item in buckets],),
+                    )
+                    result = WebSession(
+                        session_token,
+                        csrf_token,
+                        "web-session/" + session_hash[:32],
+                        self._subject(row),
+                        saved["expires_at"],
+                    )
+        if rejection is not None:
+            raise rejection
+        if result is None:
+            raise AssertionError("Login transaction completed without a result")
+        return result
+
+    async def _login_buckets(self, username: str, peer_id: str) -> tuple[tuple[str, str], ...]:
+        key = self.key_resolver(self.active_key_id)
+        if inspect.isawaitable(key):
+            key = await key
+        if not isinstance(key, bytes) or len(key) != 32:
+            raise ForestError(
+                "WEB_CREDENTIAL_KEY_UNAVAILABLE",
+                "Web credential fingerprint key is unavailable",
+                503,
+            )
+        prefix = b"forest.web-login-throttle/1\0" + self.store.deployment_id.encode() + b"\0"
+        values = (("identity", "IDENTITY", username), ("peer", "PEER", peer_id))
+        return tuple(
+            (
+                kind + ":" + hmac.new(
+                    key,
+                    prefix + kind.encode() + b"\0" + value.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest(),
+                bucket_kind,
+            )
+            for kind, bucket_kind, value in values
         )
 
     async def authenticate(self, session_token: str) -> AuthenticatedWebSession:

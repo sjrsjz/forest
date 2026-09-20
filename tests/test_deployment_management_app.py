@@ -30,7 +30,15 @@ class _IdentityAuthority:
             "web-subject/test", "admin", "Administrator", "ADMIN", True, 1
         )
 
-    async def login(self, *, username, password):
+    async def login(self, *, username, password, peer_id):
+        assert peer_id == "127.0.0.1"
+        if username == "limited":
+            raise ForestError(
+                "MANAGEMENT_LOGIN_RATE_LIMITED",
+                "Login attempts are temporarily limited",
+                429,
+                details={"retry_after_seconds": 37},
+            )
         if (username, password) != ("admin", "correct-password"):
             raise ForestError(
                 "MANAGEMENT_AUTHENTICATION_REQUIRED", "Credentials are invalid", 401
@@ -170,6 +178,13 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
                 json={"username": "admin", "password": "correct-password"},
             )
         ).status_code == 403
+        limited = await client.post(
+            "/management/v1/auth/login",
+            headers={"origin": "http://forest.test"},
+            json={"username": "limited", "password": "incorrect-password"},
+        )
+        assert limited.status_code == 429
+        assert limited.headers["retry-after"] == "37"
         login = await client.post(
             "/management/v1/auth/login",
             headers={"origin": "http://forest.test"},

@@ -83,9 +83,15 @@ def create_deployment_management_app(
 
     @app.exception_handler(ForestError)
     async def forest_error(_request: Request, exc: ForestError):
+        headers = None
+        if exc.code == "MANAGEMENT_LOGIN_RATE_LIMITED":
+            retry_after = exc.details.get("retry_after_seconds")
+            if isinstance(retry_after, int) and retry_after > 0:
+                headers = {"retry-after": str(retry_after)}
         return JSONResponse(
             {"code": exc.code, "message": exc.message, "details": exc.details},
             status_code=exc.status,
+            headers=headers,
         )
 
     def same_origin(request: Request) -> None:
@@ -123,8 +129,11 @@ def create_deployment_management_app(
     @app.post("/management/v1/auth/login")
     async def login(request: Request, body: LoginInput):
         same_origin(request)
+        peer_id = request.client.host if request.client is not None else "unknown"
         session = await identity_authority.login(
-            username=body.username, password=body.password
+            username=body.username,
+            password=body.password,
+            peer_id=peer_id,
         )
         response = JSONResponse(
             {

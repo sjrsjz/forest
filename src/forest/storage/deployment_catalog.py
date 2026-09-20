@@ -137,6 +137,7 @@ class DeploymentCatalogRepository:
             "web_accounts",
             "web_account_operations",
             "web_sessions",
+            "web_login_throttles",
             "bots",
             "runtime_intents",
             "runtime_observations",

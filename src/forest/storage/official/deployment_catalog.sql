@@ -60,6 +60,23 @@ CREATE INDEX web_sessions_subject_active_idx
     ON forest_deployment.web_sessions(subject_id,expires_at)
     WHERE revoked_at IS NULL;
 
+CREATE TABLE forest_deployment.web_login_throttles (
+    bucket_key text PRIMARY KEY CHECK (
+        bucket_key ~ '^(identity|peer):[a-f0-9]{64}$'
+    ),
+    bucket_kind text NOT NULL CHECK (bucket_kind IN ('IDENTITY','PEER')),
+    key_id text NOT NULL CHECK (octet_length(key_id) BETWEEN 1 AND 256),
+    failure_count integer NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 100000),
+    window_started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    blocked_until timestamptz,
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK (blocked_until IS NULL OR blocked_until >= window_started_at)
+);
+
+CREATE INDEX web_login_throttles_expiry_idx
+    ON forest_deployment.web_login_throttles(updated_at);
+
 CREATE TABLE forest_deployment.storage_profiles (
     profile_ref text PRIMARY KEY CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
     bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),

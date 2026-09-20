@@ -237,3 +237,69 @@ async def test_credential_operation_replay_uses_recorded_key_after_rotation(
             password="different-password-1",
         )
     assert conflict.value.code == "WEB_ACCOUNT_OPERATION_CONFLICT"
+
+
+@pytest.mark.postgres
+async def test_login_failures_converge_into_persistent_identity_throttle(
+    deployment_catalog,
+):
+    await deployment_catalog.initialize()
+    authority = _authority(deployment_catalog)
+    await authority.ensure_bootstrap_admin(
+        operation_id="web/bootstrap/admin",
+        username="admin",
+        display_name="Administrator",
+        password="bootstrap-password-1",
+    )
+
+    async def reject_once(index: int) -> str:
+        try:
+            await authority.login(
+                username="admin",
+                password=f"incorrect-password-{index}",
+                peer_id="192.0.2.10",
+            )
+        except ForestError as exc:
+            return exc.code
+        raise AssertionError("Invalid credentials created a session")
+
+    assert await asyncio.gather(*(reject_once(index) for index in range(8))) == [
+        "MANAGEMENT_AUTHENTICATION_REQUIRED"
+    ] * 8
+
+    restarted = _authority(deployment_catalog)
+    with pytest.raises(ForestError) as limited:
+        await restarted.login(
+            username="admin",
+            password="bootstrap-password-1",
+            peer_id="192.0.2.11",
+        )
+    assert limited.value.code == "MANAGEMENT_LOGIN_RATE_LIMITED"
+    assert 1 <= limited.value.details["retry_after_seconds"] <= 900
+
+    async with deployment_catalog.store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT bucket_kind,failure_count,blocked_until "
+                "FROM forest_deployment.web_login_throttles ORDER BY bucket_kind"
+            )
+        ).fetchall()
+    assert sorted((row["bucket_kind"], row["failure_count"]) for row in rows) == [
+        ("IDENTITY", 8),
+        ("PEER", 0),
+        ("PEER", 8),
+    ]
+    assert rows[0]["blocked_until"] is not None
+
+    async with deployment_catalog.store.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE forest_deployment.web_login_throttles SET "
+            "window_started_at=clock_timestamp()-interval '16 minutes',"
+            "blocked_until=clock_timestamp()-interval '1 second',revision=revision+1"
+        )
+    session = await restarted.login(
+        username="admin",
+        password="bootstrap-password-1",
+        peer_id="192.0.2.11",
+    )
+    assert session.subject.username == "admin"
