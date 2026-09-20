@@ -15,6 +15,7 @@ from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
 from forest.errors import ForestError
 from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 
 
 @pytest_asyncio.fixture
@@ -164,6 +165,78 @@ async def test_deployment_catalog_rejects_unknown_schema_objects(deployment_cata
     with pytest.raises(ForestError) as caught:
         await repository.initialize()
     assert caught.value.code == "DEPLOYMENT_SCHEMA_TAMPERED"
+
+
+@pytest.mark.postgres
+async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    key = bytes(range(32))
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda key_id: key if key_id == "master/test/1" else None,
+    )
+    first = await secrets.put(
+        operation_id="secret/model/1",
+        secret_ref="secret://bot/alpha/model-api/1",
+        purpose="provider.chat-completions.credential",
+        plaintext=b"model-secret-value",
+        expected_revision=0,
+    )
+    replay = await secrets.put(
+        operation_id="secret/model/1",
+        secret_ref="secret://bot/alpha/model-api/1",
+        purpose="provider.chat-completions.credential",
+        plaintext=b"model-secret-value",
+        expected_revision=0,
+    )
+    assert replay == first
+    assert first.version == first.revision == 1
+    assert not hasattr(first, "plaintext")
+    assert await secrets.resolve_text(first.secret_ref) == "model-secret-value"
+
+    second = await secrets.put(
+        operation_id="secret/model/2",
+        secret_ref=first.secret_ref,
+        purpose=first.purpose,
+        plaintext=b"rotated-model-secret",
+        expected_revision=first.revision,
+    )
+    assert second.version == second.revision == 2
+    assert await secrets.resolve(second.secret_ref) == b"rotated-model-secret"
+    with pytest.raises(ForestError) as caught:
+        await secrets.put(
+            operation_id="secret/model/stale",
+            secret_ref=first.secret_ref,
+            purpose=first.purpose,
+            plaintext=b"stale-write",
+            expected_revision=first.revision,
+        )
+    assert caught.value.code == "SECRET_REVISION_CONFLICT"
+
+    async with repository.store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT ciphertext FROM forest_deployment.secret_versions "
+                "WHERE secret_ref=%s ORDER BY version",
+                (first.secret_ref,),
+            )
+        ).fetchall()
+    ciphertext = b"".join(bytes(row["ciphertext"]) for row in rows)
+    assert b"model-secret-value" not in ciphertext
+    assert b"rotated-model-secret" not in ciphertext
+
+    wrong = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"x" * 32,
+    )
+    with pytest.raises(ForestError) as caught:
+        await wrong.resolve(first.secret_ref)
+    assert caught.value.code == "SECRET_DECRYPTION_FAILED"
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

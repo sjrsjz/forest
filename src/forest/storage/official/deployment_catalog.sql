@@ -60,6 +60,28 @@ CREATE TABLE forest_deployment.operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TABLE forest_deployment.secret_slots (
+    secret_ref text PRIMARY KEY CHECK (octet_length(secret_ref) BETWEEN 10 AND 512),
+    purpose text NOT NULL CHECK (octet_length(purpose) BETWEEN 1 AND 256),
+    current_version integer NOT NULL CHECK (current_version > 0),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE forest_deployment.secret_versions (
+    secret_ref text NOT NULL REFERENCES forest_deployment.secret_slots(secret_ref),
+    version integer NOT NULL CHECK (version > 0),
+    operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    key_id text NOT NULL CHECK (octet_length(key_id) BETWEEN 1 AND 256),
+    nonce bytea NOT NULL CHECK (octet_length(nonce)=12),
+    ciphertext bytea NOT NULL CHECK (octet_length(ciphertext) BETWEEN 17 AND 65552),
+    plaintext_digest text NOT NULL CHECK (plaintext_digest ~ '^sha256:[a-f0-9]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (secret_ref,version)
+);
+
 CREATE INDEX bots_supply_idx ON forest_deployment.bots(supply_state,created_at,bot_id);
 CREATE INDEX observations_retry_idx
     ON forest_deployment.runtime_observations(observed_state,retry_not_before,bot_id);
@@ -78,6 +100,10 @@ CREATE TRIGGER deployment_identity_immutable
 
 CREATE TRIGGER deployment_operation_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.operations
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_secret_version_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.secret_versions
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE FUNCTION forest_deployment.guard_bot_change() RETURNS trigger LANGUAGE plpgsql AS '
@@ -121,3 +147,20 @@ CREATE TRIGGER runtime_intent_change_guard
 CREATE TRIGGER runtime_observation_change_guard
     BEFORE UPDATE OR DELETE ON forest_deployment.runtime_observations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_revisioned_change();
+
+CREATE FUNCTION forest_deployment.guard_secret_slot_change() RETURNS trigger LANGUAGE plpgsql AS '
+BEGIN
+    IF TG_OP = ''DELETE'' OR ROW(NEW.secret_ref,NEW.purpose,NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.secret_ref,OLD.purpose,OLD.created_at) THEN
+        RAISE EXCEPTION ''secret slot identity is immutable'';
+    END IF;
+    IF NEW.revision <> OLD.revision + 1 OR NEW.current_version <> OLD.current_version + 1 THEN
+        RAISE EXCEPTION ''secret slot version must advance once'';
+    END IF;
+    RETURN NEW;
+END;
+';
+
+CREATE TRIGGER secret_slot_change_guard
+    BEFORE UPDATE OR DELETE ON forest_deployment.secret_slots
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_secret_slot_change();

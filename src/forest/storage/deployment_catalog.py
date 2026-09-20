@@ -137,6 +137,8 @@ class DeploymentCatalogRepository:
             "runtime_intents",
             "runtime_observations",
             "operations",
+            "secret_slots",
+            "secret_versions",
         }
         functions = await (
             await conn.execute(
@@ -146,7 +148,12 @@ class DeploymentCatalogRepository:
         ).fetchall()
         if {row["relname"] for row in relations} != expected_relations or {
             row["proname"] for row in functions
-        } != {"reject_identity_change", "guard_bot_change", "guard_revisioned_change"}:
+        } != {
+            "reject_identity_change",
+            "guard_bot_change",
+            "guard_revisioned_change",
+            "guard_secret_slot_change",
+        }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",
                 "Deployment catalog contains missing or unknown objects",
