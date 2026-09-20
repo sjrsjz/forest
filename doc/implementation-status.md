@@ -109,7 +109,7 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 
 1. 扩展模块贡献式 Shell 命令：描述符目录、通用 schema 解析、准确贡献 Generation 路由，以及 `core.status`、`core.pause/resume`、`module.list` 已进入生产路径；`memory.graph` 已独立贡献主干、来源和关系的有界查询，短回执明确标注来源群。目录贡献者现在自动进入 Shell/Agent 的生命周期依赖与 Generation 描述，图构建会拒绝动态依赖环，旧图按消费者先排空、提供者后退出的顺序关闭。仍需接入取消、重载和任务处理命令，并补齐审计查询投影。
 2. 扩展模块贡献式工具目录的实际工具集合，并补齐审批决定的即时通知、REPAIR_READY 与 RELOAD_WAIT 的生产恢复；`WAIT_APPROVAL` 已用持久恢复期限替代失败热循环，即使进程重启也会恢复同一 Run，尚需让批准控制事务直接提前唤醒该期限。目录发现、全图冲突拒绝、贡献者所有权核对和动态 Agent service requirements 已落地，`runtime_status` 已贯通真实模型 FunctionCall、准确 Generation 绑定、授权票据、Effect handoff、工具所有结果载荷、下一轮模型输入及查询重放。PARSING 和 SAFE_BOUNDARY 也支持确定性自动重放。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；旧 Bot 组合根和旧业务 `contract.router` 已删除。
-3. 为多模态 Memory 做十万至百万来源的筛选、稳定分页、关系展开、图片负载和资源上限测试。
+3. 继续把多模态 Memory 的规模验证从十万来源扩到百万来源，并补图片字节负载、并发查询和资源上限测试。十万来源的组合筛选、快照稳定分页、两端点关系展开及逐证据群/主干标注已经由真实 PostgreSQL 执行计划测试覆盖；基线索引与公共查询的复合游标顺序一致。
 4. 继续扩展模块贡献式管理协议与紧凑 WebUI 壳：当前切片已经从 Registry 动态发现贡献，并提供配置 plan/apply、Generation 热替换、Memory 的主干/来源/关系有界查询、`agent.runtime` 自有的 PresetContext/CorePrompt 工作区，以及 `adapter.onebot` 自有的 Binding 状态/fence/端点工作区；旧固定业务 DOM、专用 API 和旧大页面已经删除，仍需补独立监督、Secret authority UI 与完整 Web 身份/授权。
 5. 继续把多 Bot provisioning 和恢复控制面切到干净宿主；单 Bot `forest bot`、HostLease 续租/释放、遗留 OneBot 客户端结算和 Docker 默认入口已经切到最小 bootstrap + bundle + 冻结 RuntimeGraph。
 6. 补充 OneBot 热替换的长连接抖动、候选 publication 后进程崩溃和持续流量压力验证；正常热替换现已验证候选 BUFFERING、RuntimeGraph/Binding 原子换代、旧客户端 fence、旧图排空，以及新宿主对遗留客户端的失败结算。
@@ -130,7 +130,8 @@ Repository 测试证明各自权威状态机；生产启动链是否切换只按
 - `adapter.onebot` 管理贡献：Binding 的账号、连接状态、desired/effective revision、binding/connection epoch、当前 client fence 与端点配置由 Adapter authority 投影；修改先生成有期限的原生 Binding plan，再由 Adapter apply，候选连接在 BUFFERING 中验证账号后随 RuntimeGraph 原子换代。应用回执丢失后用同一幂等键重放不会再替换图。访问令牌不回显；在 Secret authority UI 落地前仅允许沿用现有 secret 引用与 transport。
 - 干净生产存储入口：真实 PostgreSQL 下 `CleanBotStore` 从空库完成 kernel baseline、15 个模块 bundle、运行图多次热替换和重启；定向导入探针确认生产宿主不加载旧 `BotStore` 或 26 代迁移 helper。干净运行图组合仍为 `236 passed`。
 - 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest-goal:config-cutover` 构建成功，容器内 `forest --help` 只暴露 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能从已安装脚本启动错误架构。插件 scaffold/declaration 组合为 `35 passed, 2 skipped`。
-- 旧管理栈切除：`src/forest/management`、旧 Bot 默认模块图与组合根、旧业务 `contract.router`、固定页面/API 测试、兼容迁移测试及历史夹具已物理删除；`RuntimeModuleRegistry` 必须显式接收 Generation 描述符，不再存在旧图 fallback。裁剪后的权威套件在真实 PostgreSQL 下为 `491 passed, 4 skipped`，Ruff、Python 编译、管理端 JavaScript 语法和干净导入边界均通过。该基线包含模块贡献式 Agent 工具目录、模块贡献式 Shell 命令目录及其派生生命周期依赖、Memory 主干/来源/关系群聊查询、`module.list` 群聊控制命令及 `runtime_status` 的真实模型调用、RuntimeGraph、授权、Effect、结果载荷、下一轮模型输入和查询重放集成验证；Conversation poller 在 DATA 维护态关闭期间保持存活，恢复后可继续领取持久 trigger，`WAIT_APPROVAL` 也不会形成 actor 高频失败循环。
+- 旧管理栈切除：`src/forest/management`、旧 Bot 默认模块图与组合根、旧业务 `contract.router`、固定页面/API 测试、兼容迁移测试及历史夹具已物理删除；`RuntimeModuleRegistry` 必须显式接收 Generation 描述符，不再存在旧图 fallback。裁剪后的权威套件在真实 PostgreSQL 下为 `492 passed, 4 skipped`，Ruff、Python 编译、管理端 JavaScript 语法和干净导入边界均通过。该基线包含模块贡献式 Agent 工具目录、模块贡献式 Shell 命令目录及其派生生命周期依赖、Memory 主干/来源/关系群聊查询、`module.list` 群聊控制命令及 `runtime_status` 的真实模型调用、RuntimeGraph、授权、Effect、结果载荷、下一轮模型输入和查询重放集成验证；Conversation poller 在 DATA 维护态关闭期间保持存活，恢复后可继续领取持久 trigger，`WAIT_APPROVAL` 也不会形成 actor 高频失败循环。
+- Memory 十万来源规模基线：单个真实 PostgreSQL 测试库写入 `100,000` 个来源单元及内容部件、`20,000` 个关系贡献和证据，验证主干/作者/模态/类型组合筛选、消息与关系的快照复合游标续页、无重复页、每条关系证据的群号与主干标注。`EXPLAIN (FORMAT JSON)` 证明来源查询不对 `source_units` 做顺序扫描，关系查询同时使用左右端点索引；定向用例约 `18s`。
 - 最近一次无 PostgreSQL 全套证据为 `755 passed, 36 skipped, 1197 deselected`；它包含大量旧实现测试，只用于回归发现，不能作为目标架构完成证明。
 
 测试数字只对应相应提交和命令。真实 QQ、长时间连接、完整 Docker 进程验收、百万级记忆以及多 Bot/WebUI 控制面 cutover 尚未完成。

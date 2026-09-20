@@ -610,19 +610,22 @@ CREATE INDEX source_units_browse_idx ON source_units(
     bot_id,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
 CREATE INDEX source_units_trunk_idx ON source_units(
-    bot_id,trunk_id,source_order_seq,source_unit_id
+    bot_id,trunk_id,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
 CREATE INDEX source_units_author_idx ON source_units(
-    bot_id,author_subject_ref,occurred_at DESC,source_unit_id DESC
+    bot_id,author_subject_ref,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
 CREATE INDEX source_units_modality_idx ON source_units(
-    bot_id,modality,occurred_at DESC,source_unit_id DESC
+    bot_id,modality,eligibility_state,occurred_at DESC,source_unit_id DESC
+);
+CREATE INDEX source_units_kind_idx ON source_units(
+    bot_id,unit_kind,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
 CREATE INDEX relation_left_idx ON relation_contributions(
-    bot_id,left_kind,left_id,active,relation_id
+    bot_id,left_kind,left_id,active,relation_id,contribution_id
 );
 CREATE INDEX relation_right_idx ON relation_contributions(
-    bot_id,right_kind,right_id,active,relation_id
+    bot_id,right_kind,right_id,active,relation_id,contribution_id
 );
 CREATE INDEX embedding_facets_work_idx ON embedding_facets(
     bot_id,state,purpose,created_at,facet_id

@@ -528,6 +528,196 @@ async def test_source_keyset_snapshot_excludes_late_qualification(clean_memory_g
 
 
 @pytest.mark.postgres
+async def test_memory_browse_and_relation_plans_scale_to_100k_sources(clean_memory_graph):
+    store, _storage, _payloads, memory, _forget, _batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    for number in range(20):
+        await _register(memory, f"bulk-{number:02d}")
+
+    namespace = sql.Identifier(memory.namespace)
+    digest = "sha256:" + "b" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.source_units("
+                "bot_id,source_unit_id,capture_operation_id,input_digest,source_id,trunk_id,"
+                "source_order_seq,source_revision,unit_kind,modality,part_count,"
+                "content_manifest_digest,author_subject_ref,author_payload_id,"
+                "author_payload_digest,author_owner_component_id,author_owner_kind,"
+                "author_owner_id,accepted_deletion_epoch,eligibility_state,"
+                "eligibility_revision,eligible_at,occurred_at,accepted_at) "
+                "SELECT %s,'bulk/unit/'||g,'bulk/capture/'||g,%s,"
+                "'source/group/bulk-'||lpad(((g-1)%%20)::text,2,'0'),"
+                "'trunk/bulk-'||lpad(((g-1)%%20)::text,2,'0'),"
+                "((g-1)/20)+1,1,'GROUP_MESSAGE',CASE WHEN g%%10=0 THEN 'IMAGE' ELSE 'TEXT' END,"
+                "1,%s,'principal/'||lpad((g%%100)::text,2,'0'),'bulk/author/'||g,%s,"
+                "'conversation.scheduler','author.snapshot','bulk/author/'||g,0,'ELIGIBLE',1,"
+                "TIMESTAMPTZ '2026-01-01 00:00:00+00',"
+                "TIMESTAMPTZ '2025-01-01 00:00:00+00'+g*INTERVAL '1 millisecond',"
+                "TIMESTAMPTZ '2026-01-01 00:00:00+00' "
+                "FROM generate_series(1,100000) AS series(g)"
+            ).format(namespace),
+            (store.bot_id, digest, digest, digest),
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.source_parts("
+                "bot_id,source_unit_id,part_id,part_index,part_kind,media_type,payload_id,"
+                "payload_digest,payload_owner_component_id,payload_owner_kind,payload_owner_id,"
+                "byte_length) SELECT %s,'bulk/unit/'||g,'part/text',0,'TEXT','text/plain',"
+                "'bulk/payload/'||g,%s,'conversation.scheduler','context.part',"
+                "'bulk/unit/'||g||'/part/text',16 FROM generate_series(1,100000) AS series(g)"
+            ).format(namespace),
+            (store.bot_id, digest),
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.relation_contributions("
+                "bot_id,contribution_id,operation_id,input_digest,relation_id,relation_kind,"
+                "left_kind,left_id,right_kind,right_id,origin_kind,weight_micros,"
+                "admitted_deletion_epoch,active,created_at) SELECT %s,"
+                "'bulk/contribution/'||lpad(g::text,8,'0'),'bulk/relation-op/'||g,%s,"
+                "'bulk/relation/'||lpad(g::text,8,'0'),'ASSOCIATES_WITH',"
+                "CASE WHEN g%%200=1 THEN 'SOURCE_UNIT' ELSE 'ENTITY' END,"
+                "CASE WHEN g%%200=0 THEN 'topic/scale' WHEN g%%200=1 THEN 'bulk/unit/'||g "
+                "ELSE 'topic/'||g END,"
+                "CASE WHEN g%%200=1 THEN 'ENTITY' ELSE 'SOURCE_UNIT' END,"
+                "CASE WHEN g%%200=1 THEN 'topic/scale' ELSE 'bulk/unit/'||g END,"
+                "'RULE',500000,0,true,TIMESTAMPTZ '2026-01-01 00:00:00+00' "
+                "FROM generate_series(1,20000) AS series(g)"
+            ).format(namespace),
+            (store.bot_id, digest),
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.relation_evidence("
+                "bot_id,contribution_id,evidence_index,source_unit_id,source_revision,part_id) "
+                "SELECT %s,'bulk/contribution/'||lpad(g::text,8,'0'),0,"
+                "'bulk/unit/'||g,1,'part/text' FROM generate_series(1,20000) AS series(g)"
+            ).format(namespace),
+            (store.bot_id,),
+        )
+        await conn.execute(sql.SQL("ANALYZE {}.source_units").format(namespace))
+        await conn.execute(sql.SQL("ANALYZE {}.relation_contributions").format(namespace))
+        await conn.execute(sql.SQL("ANALYZE {}.relation_evidence").format(namespace))
+
+        source_plan_row = await (
+            await conn.execute(
+                sql.SQL(
+                    "EXPLAIN (FORMAT JSON) SELECT u.* FROM {}.source_units u "
+                    "JOIN {}.memory_sources s ON s.bot_id=u.bot_id AND s.source_id=u.source_id "
+                    "WHERE u.bot_id=%s AND u.eligibility_state='ELIGIBLE' "
+                    "AND u.accepted_at<=%s AND u.eligible_at<=%s AND u.trunk_id=%s "
+                    "AND u.author_subject_ref=%s AND u.modality=%s AND u.unit_kind=%s "
+                    "ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT 51"
+                ).format(namespace, namespace),
+                (
+                    store.bot_id,
+                    datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    "trunk/bulk-02",
+                    "principal/43",
+                    "TEXT",
+                    "GROUP_MESSAGE",
+                ),
+            )
+        ).fetchone()
+        relation_plan_row = await (
+            await conn.execute(
+                sql.SQL(
+                    "EXPLAIN (FORMAT JSON) SELECT c.* FROM {}.relation_contributions c "
+                    "WHERE c.bot_id=%s AND ((c.left_kind=%s AND c.left_id=%s) OR "
+                    "(c.right_kind=%s AND c.right_id=%s)) AND c.active=true "
+                    "AND c.created_at<=%s AND NOT EXISTS (SELECT 1 FROM {}.relation_evidence e0 "
+                    "JOIN {}.source_units u0 ON u0.bot_id=e0.bot_id "
+                    "AND u0.source_unit_id=e0.source_unit_id WHERE e0.bot_id=c.bot_id "
+                    "AND e0.contribution_id=c.contribution_id "
+                    "AND u0.eligibility_state<>'ELIGIBLE') "
+                    "ORDER BY c.relation_id,c.contribution_id LIMIT 41"
+                ).format(namespace, namespace, namespace),
+                (
+                    store.bot_id,
+                    "ENTITY",
+                    "topic/scale",
+                    "ENTITY",
+                    "topic/scale",
+                    datetime(2026, 2, 1, tzinfo=timezone.utc),
+                ),
+            )
+        ).fetchone()
+
+    def plan_nodes(plan):
+        yield plan
+        for child in plan.get("Plans", ()):
+            yield from plan_nodes(child)
+
+    source_nodes = tuple(plan_nodes(source_plan_row["QUERY PLAN"][0]["Plan"]))
+    assert not any(
+        node.get("Node Type") == "Seq Scan" and node.get("Relation Name") == "source_units"
+        for node in source_nodes
+    )
+    assert any(
+        node.get("Index Name")
+        in {"source_units_trunk_idx", "source_units_author_idx", "source_units_modality_idx"}
+        for node in source_nodes
+    )
+    relation_nodes = tuple(plan_nodes(relation_plan_row["QUERY PLAN"][0]["Plan"]))
+    relation_indexes = {node.get("Index Name") for node in relation_nodes}
+    assert {"relation_left_idx", "relation_right_idx"} <= relation_indexes
+
+    first = await memory.query_sources(
+        limit=50,
+        trunk_id="trunk/bulk-02",
+        author_subject_ref="principal/43",
+        modality="TEXT",
+        unit_kind="GROUP_MESSAGE",
+    )
+    second = await memory.query_sources(
+        limit=50,
+        trunk_id="trunk/bulk-02",
+        author_subject_ref="principal/43",
+        modality="TEXT",
+        unit_kind="GROUP_MESSAGE",
+        snapshot_accepted_at=first["snapshot_accepted_at"],
+        after_occurred_at=first["next_cursor"]["occurred_at"],
+        after_source_unit_id=first["next_cursor"]["source_unit_id"],
+    )
+    first_ids = [item["source_unit_id"] for item in first["items"]]
+    second_ids = [item["source_unit_id"] for item in second["items"]]
+    assert len(first_ids) == len(second_ids) == 50
+    assert set(first_ids).isdisjoint(second_ids)
+    assert all(item["external_group_id"] == "group-bulk-02" for item in first["items"])
+    assert all(item["author_subject_ref"] == "principal/43" for item in first["items"])
+    assert all(item["parts"][0]["part_kind"] == "TEXT" for item in first["items"])
+
+    relations = await memory.query_relations(
+        endpoint_kind="ENTITY",
+        endpoint_id="topic/scale",
+        limit=40,
+    )
+    assert relations["has_more"] is True
+    assert len(relations["items"]) == 40
+    assert all(
+        item["evidence"][0]["external_group_id"].startswith("group-bulk-")
+        and item["evidence"][0]["trunk_id"].startswith("trunk/bulk-")
+        for item in relations["items"]
+    )
+    relation_cursor = relations["next_cursor"]
+    later_relations = await memory.query_relations(
+        endpoint_kind="ENTITY",
+        endpoint_id="topic/scale",
+        limit=40,
+        snapshot_created_at=relations["snapshot_created_at"],
+        after_relation_id=relation_cursor["relation_id"],
+        after_contribution_id=relation_cursor["contribution_id"],
+    )
+    assert len(later_relations["items"]) == 40
+    assert {item["contribution_id"] for item in relations["items"]}.isdisjoint(
+        item["contribution_id"] for item in later_relations["items"]
+    )
+
+
+@pytest.mark.postgres
 async def test_cross_trunk_relations_use_composite_cursor_and_source_labels(clean_memory_graph):
     store, _storage, payloads, memory, forget, batches, _scheduler = clean_memory_graph
     await _initialize(memory)
