@@ -102,10 +102,10 @@ Compose 中无需设置 `FOREST_DEPLOYMENT_DSN`：Supervisor 从 `/run/forest-se
 
 Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、创建只暴露引用的本地 PostgreSQL storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
 
-## 尚未接入本图的能力
+## 仍需补齐的能力
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
-- 浏览器首次安装配对流程、目标最终许可事务中的票据依据、可配置 Bot operation policy 及完整部署审计；当前已落地持久 ADMIN/AUDITOR 账号、scrypt 凭据、可撤销会话、CSRF/Origin、最后管理员保护、账号管理模块贡献、持久登录限速，以及绑定 Session/目标 Generation/operation/输入摘要并由目标网关验签的 30 秒 `WebAuthorityTicket`；
-- OneBot 热替换排空、长连接抖动和真实群低频验收。
+- OneBot 长连接抖动、候选发布后进程崩溃及持续流量压力验证；
+- 许可群中的低频消息、图片和排队行为需由真人触发完成最终验收，自动验收不得主动向群发送消息。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。
