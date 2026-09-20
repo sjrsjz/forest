@@ -449,7 +449,6 @@ async def test_clean_delivery_schema_has_no_adapter_socket_context_or_inline_bod
     _store, storage, *_rest = clean_delivery
     lowered = storage["delivery"].baseline.lower()
     for forbidden in (
-        b"jsonb",
         b"access_token",
         b"webhook_secret",
         b"socket",
@@ -460,6 +459,9 @@ async def test_clean_delivery_schema_has_no_adapter_socket_context_or_inline_bod
         assert forbidden not in lowered
     assert b"delivery_lanes" in lowered
     assert b"delivery_observations" in lowered
+    assert b"evidence_details jsonb" in lowered
+    assert b"send_intents_unknown_page_idx" in lowered
+    assert b"send_intents_unknown_filter_idx" in lowered
 
 
 @pytest.mark.postgres
@@ -1069,6 +1071,93 @@ async def test_control_priority_and_unknown_chat_block_only_its_lane(clean_deliv
     )
     second = await delivery.claim(operation_id="claim/chat-two", worker_id="worker/chat")
     assert second.intent_id == "intent/chat-two"
+
+
+@pytest.mark.postgres
+async def test_unknown_query_and_reconciliation_evidence_commit_atomically(clean_delivery):
+    store, storage, payloads, authorization, _effects, _scheduler, adapter, delivery, grant = (
+        clean_delivery
+    )
+    await _active_binding(payloads, adapter)
+    await _create_intent(payloads, delivery, suffix="managed", part_id="part/managed/1")
+    claim = await delivery.claim(operation_id="claim/managed", worker_id="worker/managed")
+    await _prepare(payloads, authorization, delivery, grant, claim, "managed")
+    await delivery.observe(
+        observation_operation_id="delivery-observe/managed/unknown",
+        effect_observation_operation_id="effect-observe/managed/unknown",
+        attempt_id="attempt/managed",
+        observed_status="UNKNOWN",
+        evidence_kind="EXECUTOR",
+        error_code="RECEIPT_LOST",
+    )
+
+    page = await delivery.query_unknown(lane_kind="CHAT", channel_ref="933179609")
+    assert page["has_more"] is False
+    assert [item["intent_id"] for item in page["items"]] == ["intent/managed"]
+    assert page["items"][0]["effect_operation_ref"] == "effect/managed"
+    detail = await delivery.inspect_unknown("intent/managed")
+    assert detail["part"]["part_operation_id"] == "part/managed/1"
+    assert detail["attempt"]["attempt_id"] == "attempt/managed"
+    assert detail["observations"][0]["observed_status"] == "UNKNOWN"
+
+    async def reject_authorization(conn, **values):
+        current = await (
+            await conn.execute(
+                sql.SQL("SELECT state FROM {}.send_intents WHERE bot_id=%s AND intent_id=%s").format(
+                    sql.Identifier(storage["delivery"].spec.namespace)
+                ),
+                (store.bot_id, "intent/managed"),
+            )
+        ).fetchone()
+        assert current["state"] == "UNKNOWN"
+        assert values["action_key"] == "delivery.unknown.resolve"
+        raise ForestError("WEB_AUTHORITY_DENIED", "Denied by test", 403)
+
+    evidence = {
+        "protocol": "forest.delivery-reconciliation-evidence/1",
+        "source_kind": "PROVIDER_QUERY",
+        "source_ref": "provider-query/managed",
+        "recorded_by": "deployment-web-subject/admin",
+    }
+    with pytest.raises(ForestError) as denied:
+        await delivery.observe(
+            observation_operation_id="web:delivery/managed",
+            effect_observation_operation_id="effect-reconcile/managed",
+            attempt_id="attempt/managed",
+            expected_intent_id="intent/managed",
+            observed_status="SENT",
+            evidence_kind="RECONCILIATION",
+            evidence_details=evidence,
+            authorization=object(),
+            authorization_guard=reject_authorization,
+            authorization_input_digest="sha256:" + "c" * 64,
+        )
+    assert denied.value.code == "WEB_AUTHORITY_DENIED"
+    assert (await delivery.load_intent("intent/managed"))["state"] == "UNKNOWN"
+
+    checked = []
+
+    async def accept_authorization(_conn, **values):
+        checked.append(values)
+
+    resolved = await delivery.observe(
+        observation_operation_id="web:delivery/managed",
+        effect_observation_operation_id="effect-reconcile/managed",
+        attempt_id="attempt/managed",
+        expected_intent_id="intent/managed",
+        observed_status="SENT",
+        evidence_kind="RECONCILIATION",
+        evidence_details=evidence,
+        authorization=object(),
+        authorization_guard=accept_authorization,
+        authorization_input_digest="sha256:" + "c" * 64,
+    )
+    assert resolved["accepted"] is True
+    assert resolved["evidence_details"] == evidence
+    assert checked[0]["component_id"] == "delivery"
+    assert checked[0]["operation_id"] == "web:delivery/managed"
+    assert (await delivery.load_intent("intent/managed"))["state"] == "SENT"
+    assert (await delivery.query_unknown())["items"] == []
 
 
 @pytest.mark.postgres

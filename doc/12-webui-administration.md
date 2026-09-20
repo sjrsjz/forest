@@ -276,6 +276,10 @@ Agent/Provider 模块视图显示不可编辑的完整 `ForestCorePrompt`、prot
 
 ## 11. 备份、恢复与故障处理
 
+Delivery 的发送核对界面由 `delivery` Generation 自身贡献，壳层不持有发送业务字段。工作区支持按 CHAT/CONTROL lane 和准确 channel_ref 筛选，以稳定快照游标浏览长期积累的 UNKNOWN，并在详情中显示 Intent、当前 Part、Attempt、Effect 引用和历次 Observation。页面不读取消息正文，也不提供“跳过”或盲目重试按钮。
+
+管理员提交结论时必须选择 `SENT`、`NOT_APPLIED_RETRY` 或 `NOT_APPLIED_FINAL`，并填写证据类型及可复核引用；模块补充当前 Web 主体形成 `forest.delivery-reconciliation-evidence/1`。`delivery.unknown.resolve` 是 P0 管理动作，票据绑定准确 Bot、Delivery Generation、operation、输入摘要和 policy revision。票据验签/消费、证据保存、Effect 收敛和 Delivery lane 释放位于同一 PostgreSQL 事务中。并发提交相反结论时只有一个 Observation 被接受，失败者看到既有终态并重新读取列表。
+
 备份不是壳层固定页面。deployment scope 的 `deployment.backup` 贡献创建持久 Job，记录各 Bot 的事实快照水位、媒体对象 manifest、配置修订与凭据引用；是否包含向量/图派生索引明确标注，允许从事实重建。部署目录与多个 Bot 独立库不自动具有全局同时刻，保存每库切口及协调状态，恢复时校验引用和账号归属。
 
 密钥/Secret Resolver 备份使用单独受限策略，普通导出不含明文密钥；创建备份时就显示能否恢复凭据。备份文件、图片与导出下载绑定操作者、权限、期限及审计，日志只记录结果引用。

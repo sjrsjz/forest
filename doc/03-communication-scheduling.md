@@ -204,6 +204,8 @@ claim 使用 `delivery_owner_epoch`，只授予准备权。Delivery 在短事务
 
 同群 CHAT 先前 response_seq 处于 DISPATCHING/UNKNOWN 时，阻塞后续 CHAT 回复外发，直到带证据的显式对账把原 attempt 解析为 `SENT` 或 `NOT_APPLIED`；不存在无证据的 skip/继续决议。确认 `NOT_APPLIED` 后才可为同一 part/effect 创建下一 attempt。CONTROL 在同一 command_id 内遵守同样的分片和未知结果规则，其他独立命令的短回执仍可调度。未知状态不持有执行槽或数据库事务；两个通道共享的平台实际串行发送约束仍然有效。
 
+Delivery 模块发布 `delivery.unknown.query`、`delivery.unknown.read` 与 P0 `delivery.unknown.resolve`。查询只返回有界元数据，并以 `(updated_at, intent_id)` 的快照复合游标稳定分页；详情明确展示 `Intent → Part → Attempt → Effect` 与不可变 Observation 历史。处置输入必须绑定当前 `intent_id`、`attempt_id` 和 `SENT | NOT_APPLIED_RETRY | NOT_APPLIED_FINAL` 结论，并提交 `PROVIDER_QUERY | PLATFORM_OBSERVATION | OPERATOR_OBSERVATION` 类型、可复核引用和可选备注。目标 Delivery 事务会再次验证 Web authority ticket，把证据、Effect 观察和整条 Delivery 状态迁移一次提交；授权失败或状态竞争会整体回滚。
+
 ### 9.3 连接所有权
 
 Binding 是持久账号归属，Session 是一次连接，`connection_epoch` 每次接管递增。请求回执按 `(binding_id, connection_epoch, echo)` 定位 Future；重连时旧 Session 的未完成请求进入确定失败或 UNKNOWN，清理 Future 与超时任务。

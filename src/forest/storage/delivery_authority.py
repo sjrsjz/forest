@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.schema_bundles import module_schema_namespace
@@ -863,6 +864,11 @@ class DeliveryRepository:
         evidence_kind: str,
         receipt: DeliveryPayloadRef | None = None,
         error_code: str | None = None,
+        evidence_details: dict | None = None,
+        expected_intent_id: str | None = None,
+        authorization=None,
+        authorization_guard=None,
+        authorization_input_digest: str | None = None,
     ) -> dict:
         for value, field in (
             (observation_operation_id, "observation_operation_id"),
@@ -870,6 +876,7 @@ class DeliveryRepository:
             (attempt_id, "attempt_id"),
         ):
             _bounded(value, field, 256)
+        _bounded(expected_intent_id, "expected_intent_id", 256, optional=True)
         if observed_status not in {
             "SENT",
             "RETRYABLE_NOT_APPLIED",
@@ -879,10 +886,24 @@ class DeliveryRepository:
             raise ForestError("DELIVERY_INPUT_INVALID", "Invalid Delivery observation", 422)
         if evidence_kind not in {"EXECUTOR", "RECONCILIATION"}:
             raise ForestError("DELIVERY_INPUT_INVALID", "Invalid Delivery evidence kind", 422)
+        if evidence_details is not None:
+            if not isinstance(evidence_details, dict) or not 1 <= len(_canonical(evidence_details)) <= 8192:
+                raise ForestError("DELIVERY_INPUT_INVALID", "Invalid reconciliation evidence", 422)
+            if evidence_kind != "RECONCILIATION":
+                raise ForestError(
+                    "DELIVERY_INPUT_INVALID", "Only reconciliation can attach evidence details", 422
+                )
         _bounded(error_code, "error_code", 128, optional=True)
         if observed_status == "SENT":
-            if receipt is None or error_code is not None:
-                raise ForestError("DELIVERY_INPUT_INVALID", "SENT needs only a receipt", 422)
+            if (
+                (receipt is None and evidence_details is None)
+                or error_code is not None
+            ):
+                raise ForestError(
+                    "DELIVERY_INPUT_INVALID",
+                    "SENT needs a provider receipt or reconciliation evidence",
+                    422,
+                )
         elif error_code is None:
             raise ForestError("DELIVERY_INPUT_INVALID", "Non-success needs an error code", 422)
         if receipt is not None:
@@ -900,9 +921,25 @@ class DeliveryRepository:
                 "evidence_kind": evidence_kind,
                 "receipt": receipt.canonical() if receipt else None,
                 "error_code": error_code,
+                "evidence_details": evidence_details,
+                "expected_intent_id": expected_intent_id,
             }
         )
         async with self.store.pool.connection() as conn, conn.transaction():
+            if authorization_guard is not None:
+                if authorization is None or authorization_input_digest is None:
+                    raise ForestError(
+                        "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
+                    )
+                await authorization_guard(
+                    conn,
+                    ticket=authorization,
+                    component_id="delivery",
+                    operation_id=observation_operation_id,
+                    action_key="delivery.unknown.resolve",
+                    input_digest=authorization_input_digest,
+                    plan_digest=None,
+                )
             await self._lock(conn, "observation:" + observation_operation_id)
             replay = await (
                 await conn.execute(
@@ -929,6 +966,12 @@ class DeliveryRepository:
             ).fetchone()
             if attempt is None:
                 raise ForestError("DELIVERY_ATTEMPT_NOT_FOUND", "Transport attempt does not exist", 404)
+            if expected_intent_id is not None and attempt["intent_id"] != expected_intent_id:
+                raise ForestError(
+                    "DELIVERY_ATTEMPT_CONFLICT",
+                    "Transport attempt does not belong to the expected SendIntent",
+                    409,
+                )
             intent = await (
                 await conn.execute(
                     sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND intent_id=%s FOR UPDATE").format(
@@ -1019,9 +1062,9 @@ class DeliveryRepository:
                     sql.SQL(
                         "INSERT INTO {}(bot_id,observation_operation_id,"
                         "effect_observation_operation_id,attempt_id,input_digest,evidence_kind,"
-                        "observed_status,receipt_payload_id,receipt_payload_digest,error_code,"
-                        "accepted,previous_state,resulting_state,conflict_code) VALUES "
-                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+                        "observed_status,receipt_payload_id,receipt_payload_digest,evidence_details,"
+                        "error_code,accepted,previous_state,resulting_state,conflict_code) VALUES "
+                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
                     ).format(self._table("delivery_observations")),
                     (
                         self.store.bot_id,
@@ -1033,6 +1076,7 @@ class DeliveryRepository:
                         observed_status,
                         receipt.payload_id if receipt else None,
                         receipt.digest if receipt else None,
+                        Jsonb(evidence_details) if evidence_details is not None else None,
                         error_code,
                         accepted,
                         previous,
@@ -1471,3 +1515,135 @@ class DeliveryRepository:
             if row is None:
                 raise ForestError("DELIVERY_INTENT_NOT_FOUND", "SendIntent does not exist", 404)
             return dict(row)
+
+    async def query_unknown(
+        self,
+        *,
+        lane_kind: str | None = None,
+        channel_ref: str | None = None,
+        snapshot_updated_at: datetime | None = None,
+        before_updated_at: datetime | None = None,
+        before_intent_id: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        if lane_kind is not None and lane_kind not in {"CHAT", "CONTROL"}:
+            raise ForestError("DELIVERY_INPUT_INVALID", "Invalid Delivery lane", 422)
+        _bounded(channel_ref, "channel_ref", 256, optional=True)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ForestError("DELIVERY_INPUT_INVALID", "Invalid Delivery query limit", 422)
+        if (before_updated_at is None) != (before_intent_id is None):
+            raise ForestError("DELIVERY_INPUT_INVALID", "Delivery cursor is incomplete", 422)
+        if snapshot_updated_at is not None:
+            snapshot_updated_at = _timestamp(snapshot_updated_at, "snapshot_updated_at")
+        if before_updated_at is not None:
+            before_updated_at = _timestamp(before_updated_at, "before_updated_at")
+            _bounded(before_intent_id, "before_intent_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            if snapshot_updated_at is None:
+                snapshot_updated_at = (
+                    await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
+                )["value"]
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT i.intent_id,i.binding_ref,i.lane_kind,i.ordering_key,"
+                        "i.lane_sequence,i.conversation_ref,i.channel_kind,i.channel_ref,"
+                        "i.cause_component_id,i.cause_kind,i.cause_id,i.current_part_index,"
+                        "i.error_code,i.created_at,i.updated_at,p.part_operation_id,"
+                        "p.effect_operation_ref,p.semantic_digest,p.state AS part_state,"
+                        "p.current_attempt_id,a.state AS attempt_state,a.transport_action,"
+                        "a.binding_epoch,a.connection_epoch,a.adapter_generation_id,"
+                        "a.prepared_at,a.started_at,a.settled_at "
+                        "FROM {} i JOIN {} p ON p.bot_id=i.bot_id AND p.intent_id=i.intent_id "
+                        "AND p.part_index=i.current_part_index JOIN {} a ON a.bot_id=p.bot_id "
+                        "AND a.attempt_id=p.current_attempt_id WHERE i.bot_id=%s "
+                        "AND i.state='UNKNOWN' AND i.updated_at<=%s "
+                        "AND (%s::text IS NULL OR i.lane_kind=%s) "
+                        "AND (%s::text IS NULL OR i.channel_ref=%s) "
+                        "AND (%s::timestamptz IS NULL OR (i.updated_at,i.intent_id)<(%s,%s)) "
+                        "ORDER BY i.updated_at DESC,i.intent_id DESC LIMIT %s"
+                    ).format(
+                        self._table("send_intents"),
+                        self._table("send_parts"),
+                        self._table("transport_attempts"),
+                    ),
+                    (
+                        self.store.bot_id,
+                        snapshot_updated_at,
+                        lane_kind,
+                        lane_kind,
+                        channel_ref,
+                        channel_ref,
+                        before_updated_at,
+                        before_updated_at,
+                        before_intent_id,
+                        limit + 1,
+                    ),
+                )
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [dict(row) for row in rows[:limit]]
+        cursor = None
+        if has_more and items:
+            cursor = {
+                "before_updated_at": items[-1]["updated_at"],
+                "before_intent_id": items[-1]["intent_id"],
+            }
+        return {
+            "items": items,
+            "snapshot_updated_at": snapshot_updated_at,
+            "next_cursor": cursor,
+            "has_more": has_more,
+        }
+
+    async def inspect_unknown(self, intent_id: str) -> dict:
+        _bounded(intent_id, "intent_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            intent = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND intent_id=%s").format(
+                        self._table("send_intents")
+                    ),
+                    (self.store.bot_id, intent_id),
+                )
+            ).fetchone()
+            if intent is None:
+                raise ForestError("DELIVERY_INTENT_NOT_FOUND", "SendIntent does not exist", 404)
+            if intent["state"] != "UNKNOWN":
+                raise ForestError(
+                    "DELIVERY_INTENT_NOT_UNKNOWN", "SendIntent no longer needs reconciliation", 409
+                )
+            part = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND intent_id=%s AND part_index=%s"
+                    ).format(self._table("send_parts")),
+                    (self.store.bot_id, intent_id, intent["current_part_index"]),
+                )
+            ).fetchone()
+            attempt = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND attempt_id=%s").format(
+                        self._table("transport_attempts")
+                    ),
+                    (self.store.bot_id, part["current_attempt_id"]),
+                )
+            ).fetchone()
+            observations = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT observation_operation_id,effect_observation_operation_id,"
+                        "attempt_id,evidence_kind,observed_status,evidence_details,error_code,"
+                        "accepted,previous_state,resulting_state,conflict_code,observed_at "
+                        "FROM {} WHERE bot_id=%s AND attempt_id=%s "
+                        "ORDER BY observed_at,observation_operation_id"
+                    ).format(self._table("delivery_observations")),
+                    (self.store.bot_id, part["current_attempt_id"]),
+                )
+            ).fetchall()
+        return {
+            "intent": dict(intent),
+            "part": dict(part),
+            "attempt": dict(attempt),
+            "observations": [dict(row) for row in observations],
+        }

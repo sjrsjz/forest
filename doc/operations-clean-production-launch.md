@@ -76,6 +76,8 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 新宿主取得租约后会把数据库中遗留的 OneBot 当前客户端结算为 `FAILED/HOST_RESTARTED`，再建立新客户端。该行为只用于进程已失去的本地连接资源；发送结果不确定性仍按 Delivery 的 `UNKNOWN` 规则处理，不能把未知发送自动重试成重复消息。
 
+若 Delivery 工作区出现 UNKNOWN，先从平台或 Provider 查询原发送 attempt，再进入 Bot 作用域的“发送结果核对”。选中记录后核对 Intent、Part、Attempt 与 Effect 引用，提交结论、证据类型和外部查询引用。确认未发送并重新排队会唤醒 Delivery Worker；确认已发送或最终未发送会终结原链。不要通过新建消息、重启 Bot 或修改数据库解除阻塞。
+
 Compose 只编排 `initialize`、`postgres` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化只创建 `forest_deployment`；供应器为每个 Bot 按 Bot ID 派生稳定库名和无特权 login role，为该 role 生成随机口令，只允许在同一批准集群创建，并复核 role flags 与数据库 owner。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
 ## 多 Bot Supervisor 入口

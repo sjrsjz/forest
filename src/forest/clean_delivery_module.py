@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from forest.clean_delivery_management import CleanDeliveryManagementContract
 from forest.delivery_authorization import DeliveryAuthorizationPort
 from forest.delivery_worker import CleanDeliveryWorker
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.runtime_modules import (
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -154,6 +157,23 @@ class CleanDeliveryRuntime:
         )
         return await self.repository.create_intent_in(conn, **values)
 
+    async def query_unknown(self, **values):
+        return await self.repository.query_unknown(**values)
+
+    async def inspect_unknown(self, intent_id: str):
+        return await self.repository.inspect_unknown(intent_id)
+
+    async def resolve_unknown(self, **values):
+        return await self.repository.observe(
+            evidence_kind="RECONCILIATION",
+            expected_intent_id=values.pop("intent_id"),
+            **values,
+        )
+
+    def notify(self) -> None:
+        if self.worker is not None:
+            self.worker.wake()
+
 
 @dataclass(frozen=True)
 class CleanDeliveryModule:
@@ -234,7 +254,7 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
     )
 
     def factory(_runtime, contracts):
-        return CleanDeliveryRuntime(
+        runtime = CleanDeliveryRuntime(
             repository=repository,
             authorization=authorization,
             adapter=_RoutedAdapterDelivery(
@@ -246,6 +266,12 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
             grants=grants,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
         )
+        runtime.management_contract = CleanDeliveryManagementContract(
+            configuration,
+            runtime=runtime,
+            schema=schema,
+        )
+        return runtime
 
     descriptor = RuntimeModuleDescriptor(
         "delivery",
@@ -258,6 +284,19 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         ),
         factory,
         official_artifact("bot"),
+        management=(
+            RuntimeManagementContribution(
+                "delivery-reconciliation",
+                "发送结果核对",
+                ("bot",),
+                "/static/modules/clean-delivery.html",
+                "/static/clean-delivery.js",
+                style="/static/modules/clean-delivery.css",
+                group="operations",
+                order=5,
+            ),
+            configuration_management_contribution("发送配置"),
+        ),
         storage=storage,
     )
     return CleanDeliveryModule(repository, authorization, descriptor, configuration, grants)

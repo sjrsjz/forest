@@ -977,6 +977,10 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         ).status_code == 200
                         assert (await web.get("/static/modules/clean-jobs.html")).status_code == 200
                         assert (await web.get("/static/clean-jobs.js")).status_code == 200
+                        assert (
+                            await web.get("/static/modules/clean-delivery.html")
+                        ).status_code == 200
+                        assert (await web.get("/static/clean-delivery.js")).status_code == 200
                         assert index.headers["x-frame-options"] == "DENY"
                         assert "default-src 'none'" in index.headers["content-security-policy"]
                         unauthorized = await web.get("/management/v1/runtime")
@@ -1066,6 +1070,25 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             item["query_id"]
                             for item in job_view["management_contract"]["queries"]
                         } == {"jobs.types", "jobs.query", "jobs.read"}
+                        delivery_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "delivery"
+                        )
+                        assert [
+                            item["contribution_id"]
+                            for item in delivery_view["management_contributions"]
+                        ] == ["delivery-reconciliation", "configuration"]
+                        assert {
+                            item["query_id"]
+                            for item in delivery_view["management_contract"]["queries"]
+                        } == {"delivery.unknown.query", "delivery.unknown.read"}
+                        assert delivery_view["management_contract"]["actions"] == [
+                            {
+                                "action_id": "delivery.unknown.resolve",
+                                "priority": "P0",
+                            }
+                        ]
                         job_types = await web.post(
                             "/management/v1/modules/job.scheduler/queries/jobs.types",
                             headers=headers,

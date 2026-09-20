@@ -224,6 +224,9 @@ CREATE TABLE delivery_observations (
     receipt_payload_digest text CHECK (
         receipt_payload_digest IS NULL OR receipt_payload_digest ~ '^sha256:[a-f0-9]{64}$'
     ),
+    evidence_details jsonb CHECK (
+        evidence_details IS NULL OR jsonb_typeof(evidence_details)='object'
+    ),
     error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
     accepted boolean NOT NULL,
     previous_state text NOT NULL CHECK (
@@ -270,6 +273,12 @@ CREATE TABLE intent_cancellations (
 CREATE INDEX send_intents_queue_idx ON send_intents(
     bot_id,lane_kind,state,created_at,intent_id
 );
+CREATE INDEX send_intents_unknown_page_idx ON send_intents(
+    bot_id,updated_at DESC,intent_id DESC
+) WHERE state='UNKNOWN';
+CREATE INDEX send_intents_unknown_filter_idx ON send_intents(
+    bot_id,lane_kind,channel_ref,updated_at DESC,intent_id DESC
+) WHERE state='UNKNOWN';
 CREATE INDEX send_parts_queue_idx ON send_parts(bot_id,state,owner_expires_at);
 CREATE INDEX transport_attempts_state_idx ON transport_attempts(bot_id,state,settled_at);
 
