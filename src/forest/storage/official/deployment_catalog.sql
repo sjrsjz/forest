@@ -74,6 +74,33 @@ CREATE TABLE forest_deployment.web_login_throttles (
     CHECK (blocked_until IS NULL OR blocked_until >= window_started_at)
 );
 
+CREATE TABLE forest_deployment.web_authority_receipts (
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    ticket_id text NOT NULL CHECK (octet_length(ticket_id) BETWEEN 1 AND 256),
+    ticket_digest text NOT NULL CHECK (ticket_digest ~ '^sha256:[a-f0-9]{64}$'),
+    issuer_id text NOT NULL CHECK (octet_length(issuer_id) BETWEEN 1 AND 128),
+    key_id text NOT NULL CHECK (octet_length(key_id) BETWEEN 1 AND 256),
+    web_subject_ref text NOT NULL CHECK (octet_length(web_subject_ref) BETWEEN 1 AND 128),
+    web_role text NOT NULL CHECK (web_role IN ('ADMIN','AUDITOR')),
+    session_ref text NOT NULL CHECK (octet_length(session_ref) BETWEEN 1 AND 128),
+    session_revision bigint NOT NULL CHECK (session_revision > 0),
+    target_scope_kind text NOT NULL CHECK (target_scope_kind='deployment'),
+    target_scope_id text NOT NULL CHECK (target_scope_id='deployment'),
+    target_component_id text NOT NULL CHECK (octet_length(target_component_id) BETWEEN 1 AND 128),
+    target_generation_id text NOT NULL CHECK (octet_length(target_generation_id) BETWEEN 1 AND 256),
+    target_graph_revision bigint NOT NULL CHECK (target_graph_revision=1),
+    target_operation_ref text NOT NULL CHECK (octet_length(target_operation_ref) BETWEEN 1 AND 256),
+    action_key text NOT NULL CHECK (octet_length(action_key) BETWEEN 1 AND 200),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    plan_digest text CHECK (plan_digest IS NULL OR plan_digest ~ '^sha256:[a-f0-9]{64}$'),
+    issued_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (deployment_id,ticket_id),
+    UNIQUE (deployment_id,target_operation_ref),
+    CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '30 seconds')
+);
+
 CREATE INDEX web_login_throttles_expiry_idx
     ON forest_deployment.web_login_throttles(updated_at);
 
@@ -275,6 +302,10 @@ CREATE TRIGGER deployment_operation_immutable
 
 CREATE TRIGGER web_account_operation_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.web_account_operations
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER web_authority_receipt_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.web_authority_receipts
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE TRIGGER deployment_secret_version_immutable

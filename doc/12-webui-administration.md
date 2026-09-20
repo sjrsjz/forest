@@ -158,6 +158,8 @@ WebUI 写请求先在部署库记录可信会话主体、请求 ID、幂等键�
 
 按 05 的 `WebAuthorityTicket` 固定受信管理主体、会话修订、目标、action、input_digest、plan_digest、预分配 `target_operation_ref` 和短效期限。目标最终事务核验签名、到期、票据用途、当前 Bot policy 与业务 fence；同票只可接纳/恢复该固定操作，不能换目标或参数。目标许可前到期必须获得新票，不能把浏览器一直在线作为持久操作的续命条件。
 
+deployment 模块动作的票据指向贡献模块自身的固定代际，不使用统一控制面代际冒充模块 Generation。每个写 authority 在业务事实所在事务内重验并接纳不可变收据；失败的业务事务不得留下“已授权但未发生”的成功假象。多步骤 provisioning 动作沿用一个顶层 operation 与收据身份，各子步骤必须可按自身稳定 operation 重放和收敛。
+
 目标以由入口请求和目标稳定派生的子操作 ID 幂等接纳，CAS 检查预期 revision、资源 lease/fence、schema 和计划。配置是不可交换命令，WebUI 不享有高于 Shell 的覆盖权。事务按 05 锁序处理，提交事实/outbox 后才等待外部动作。
 
 批准与执行许可同驻目标库。Bot 的 `approval_ref={bot_id,approval_id}` 沿用原形式，部署级采用显式 `authority_scope` 分支。Web 来源使用 `origin_ref={kind:web,management_request_id,web_subject_ref,session_ref}`，不伪造群 sender、conversation_id、command_id、ReplyRoute 或群输入。批准绑定主体、入口请求、目标、计划、schema、版本及期限；确认只消费此固定批准。

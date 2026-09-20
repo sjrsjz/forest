@@ -31,6 +31,7 @@ from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 
 
@@ -148,6 +149,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
         active_key_id=settings.master_keyring.active_key_id,
         key_resolver=settings.master_keyring.resolve,
     )
+    web_receipts = DeploymentWebAuthorityRepository(store)
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
@@ -213,6 +215,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
                         web_identity=web_identity,
                     ),
                     identity_authority=web_identity,
+                    deployment_web_receipts=web_receipts,
                     allowed_origin=settings.management_origin,
                     bot_supervisor=supervisor,
                 ),

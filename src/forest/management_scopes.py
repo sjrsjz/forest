@@ -8,6 +8,7 @@ import secrets
 from contextlib import asynccontextmanager
 
 from forest.clean_management_app import CleanManagementGateway
+from forest.deployment_action_authorization import DeploymentActionAuthorization
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -16,17 +17,26 @@ _SCOPE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
 
 class DeploymentManagementGateway:
-    def __init__(self, *, deployment_id: str, components: tuple, ticket_authority=None) -> None:
+    def __init__(
+        self,
+        *,
+        deployment_id: str,
+        components: tuple,
+        ticket_authority=None,
+        web_receipts=None,
+    ) -> None:
         self.deployment_id = deployment_id
         self.components = components
         self.registry = {component.component_id: component for component in components}
         self.ticket_authority = ticket_authority
+        self.web_receipts = web_receipts
         self._operation_lock = asyncio.Lock()
 
     def authorization_target(self, component_id: str) -> tuple[str, int]:
-        if component_id != "$runtime":
-            self._contract(component_id)
-        return "deployment/control-plane/1", 1
+        if component_id == "$runtime":
+            return "deployment/control-plane/1", 1
+        self._contract(component_id)
+        return "deployment/" + component_id + "/1", 1
 
     async def _authorize(self, ticket, **expected) -> None:
         if self.ticket_authority is None:
@@ -61,13 +71,14 @@ class DeploymentManagementGateway:
         }
 
     async def read_configuration(self, component_id: str, *, authorization=None, operation_id=None):
+        generation_id, graph_revision = self.authorization_target(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
             target_scope_id="deployment",
             target_component_id=component_id,
-            target_generation_id="deployment/control-plane/1",
-            target_graph_revision=1,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key="configuration.read",
             input_digest=digest_json({}),
@@ -78,13 +89,14 @@ class DeploymentManagementGateway:
     async def plan_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values
     ):
+        generation_id, graph_revision = self.authorization_target(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
             target_scope_id="deployment",
             target_component_id=component_id,
-            target_generation_id="deployment/control-plane/1",
-            target_graph_revision=1,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key="configuration.plan",
             input_digest=digest_json(_values["body"].model_dump(mode="json")),
@@ -96,13 +108,14 @@ class DeploymentManagementGateway:
         self, component_id: str, *, authorization=None, operation_id=None, **_values
     ):
         body = _values["body"]
+        generation_id, graph_revision = self.authorization_target(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
             target_scope_id="deployment",
             target_component_id=component_id,
-            target_generation_id="deployment/control-plane/1",
-            target_graph_revision=1,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key="configuration.apply",
             input_digest=digest_json(body.model_dump(mode="json")),
@@ -114,13 +127,14 @@ class DeploymentManagementGateway:
     async def module_query(
         self, component_id: str, query_id: str, body: dict, *, authorization=None, operation_id=None
     ):
+        generation_id, graph_revision = self.authorization_target(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
             target_scope_id="deployment",
             target_component_id=component_id,
-            target_generation_id="deployment/control-plane/1",
-            target_graph_revision=1,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key=query_id,
             input_digest=digest_json(body),
@@ -139,16 +153,18 @@ class DeploymentManagementGateway:
         operation_id=None,
     ):
         operation_id = operation_id or self.operation_id(component_id, action_id, idempotency_key)
+        generation_id, graph_revision = self.authorization_target(component_id)
+        input_digest = digest_json(body)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
             target_scope_id="deployment",
             target_component_id=component_id,
-            target_generation_id="deployment/control-plane/1",
-            target_graph_revision=1,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key=action_id,
-            input_digest=digest_json(body),
+            input_digest=input_digest,
             required_role="ADMIN",
         )
         async with self._operation_lock:
@@ -156,7 +172,52 @@ class DeploymentManagementGateway:
                 action_id,
                 operation_id=operation_id,
                 payload=body,
+                authorization=(
+                    DeploymentActionAuthorization(
+                        authorization,
+                        self._authorize_mutation_in,
+                        component_id,
+                        action_id,
+                        input_digest,
+                        operation_id,
+                    )
+                    if self.ticket_authority is not None
+                    else None
+                ),
             )
+
+    async def _authorize_mutation_in(
+        self,
+        conn,
+        *,
+        ticket,
+        component_id: str,
+        operation_id: str,
+        action_key: str,
+        input_digest: str,
+        plan_digest: str | None,
+    ) -> dict:
+        if self.ticket_authority is None or self.web_receipts is None:
+            raise ForestError(
+                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                "Deployment Web authority receipt storage is unavailable",
+                503,
+            )
+        generation_id, graph_revision = self.authorization_target(component_id)
+        await self.ticket_authority.verify(
+            ticket,
+            target_scope_kind="deployment",
+            target_scope_id="deployment",
+            target_component_id=component_id,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
+            target_operation_ref=operation_id,
+            action_key=action_key,
+            input_digest=input_digest,
+            plan_digest=plan_digest,
+            required_role="ADMIN",
+        )
+        return await self.web_receipts.accept_in(conn, ticket=ticket)
 
     def _contract(self, component_id: str):
         component = self.registry.get(component_id)

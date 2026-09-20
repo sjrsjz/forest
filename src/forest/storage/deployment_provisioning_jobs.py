@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
+from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.deployment_catalog import DeploymentSupervisorLease
@@ -58,6 +59,7 @@ class DeploymentProvisioningJobAuthority:
         storage_generation: int,
         bootstrap_profile_ref: str,
         max_attempts: int = 5,
+        authorization=None,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -86,6 +88,9 @@ class DeploymentProvisioningJobAuthority:
         }
         input_digest = digest_json(request)
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.deployment.provisioning-operation/{operation_id}",),
@@ -301,6 +306,7 @@ class DeploymentProvisioningJobAuthority:
         operation_id: str,
         job_id: str,
         expected_revision: int,
+        authorization=None,
     ) -> dict:
         _text(operation_id, "operation_id", 256)
         _text(job_id, "job_id", 256)
@@ -308,6 +314,9 @@ class DeploymentProvisioningJobAuthority:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Job revision is invalid", 422)
         input_digest = digest_json([job_id, expected_revision])
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.deployment.provisioning-operation/{operation_id}",),

@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -57,6 +58,7 @@ class DeploymentBootstrapProfileAuthority:
         storage_generation: int,
         components: dict[str, dict],
         schema_digests: dict[str, str],
+        authorization=None,
     ) -> BootstrapProfile:
         self._text(operation_id, "operation_id", 256)
         self._text(bot_id, "bot_id", 128)
@@ -114,6 +116,9 @@ class DeploymentBootstrapProfileAuthority:
         )
         input_digest = digest_json([profile_ref, manifest_digest])
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.deployment.bootstrap-profile/{profile_ref}",),

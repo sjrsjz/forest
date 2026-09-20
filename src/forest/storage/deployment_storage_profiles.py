@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -55,6 +56,7 @@ class DeploymentStorageProfileAuthority:
         bot_id: str,
         storage_generation: int,
         dsn_secret_ref: str,
+        authorization=None,
     ) -> StorageProfileMetadata:
         _bounded(operation_id, "operation_id", 256)
         _bounded(bot_id, "bot_id", 128)
@@ -78,6 +80,9 @@ class DeploymentStorageProfileAuthority:
             }
         )
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.deployment.storage-profile/{profile_ref}",),

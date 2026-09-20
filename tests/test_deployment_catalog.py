@@ -34,6 +34,7 @@ from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 
 
@@ -816,6 +817,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             web_identity=web_identity,
         ),
         identity_authority=web_identity,
+        deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
         allowed_origin="http://forest.test",
     )
     async with AsyncClient(
@@ -859,6 +861,19 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert saved.status_code == 200
         assert "never-return-this" not in saved.text
+        rejected_secret = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.secrets/actions/secret.put",
+            headers={**headers, "idempotency-key": "secret-web-rejected"},
+            json={
+                "secret_ref": "secret://web/rejected",
+                "purpose": "test.credential",
+                "plaintext": "must-rollback",
+                "expected_revision": 1,
+            },
+        )
+        assert rejected_secret.status_code == 409
+        assert rejected_secret.json()["code"] == "SECRET_REVISION_CONFLICT"
         listed = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
             "deployment.secrets/queries/secrets.list",
@@ -972,6 +987,33 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             },
         )
         assert client_digest_injection.status_code == 422
+        async with repository.store.pool.connection() as conn:
+            receipts = await (
+                await conn.execute(
+                    "SELECT target_component_id,target_generation_id,action_key "
+                    "FROM forest_deployment.web_authority_receipts ORDER BY action_key"
+                )
+            ).fetchall()
+        assert [
+            (row["target_component_id"], row["target_generation_id"], row["action_key"])
+            for row in receipts
+        ] == [
+            (
+                "deployment.provisioning",
+                "deployment/deployment.provisioning/1",
+                "bootstrap.create",
+            ),
+            (
+                "deployment.secrets",
+                "deployment/deployment.secrets/1",
+                "secret.put",
+            ),
+            (
+                "deployment.provisioning",
+                "deployment/deployment.provisioning/1",
+                "storage.create-local",
+            ),
+        ]
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

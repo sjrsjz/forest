@@ -299,6 +299,8 @@ Web 管理主体来自服务端验证的本地账户或显式接入的身份提�
 
 部署库 Web 会话与独立 Bot 的授权不具有跨库原子性。首版采用用途限定的 `WebAuthorityTicket`：可信管理网关在部署库验证未撤销会话后签发，绑定 `ticket_id, issuer/key_revision, web_subject_ref, session_ref/session_revision, target_scope, target_operation_ref, action_key, input_digest, plan_digest, issued_at, expires_at`。票据只在后端传递，初始最大有效期 30 秒；目标在自己的最终许可事务中验证签名、期限、精确目标/输入/计划和当前 Bot policy/fences，再把票据依据记入原操作或配置修订。`target_operation_ref` 预分配且由请求稳定派生，同票重放只能恢复原操作，不得创建新效果；票据不能替代 Bot 授权，也不让普通 Worker 持有长效 Web 登录权限。
 
+deployment scope 的写动作同样不能只在 HTTP 壳验票。票据必须绑定贡献该动作的准确 `deployment/<component_id>/1` 代际；`deployment/control-plane/1` 只表示 `$runtime`。Catalog、Secret、Account、Storage Profile、Bootstrap Profile 与 Provisioning Job authority 在各自业务事务内重新验票，并以 `target_operation_ref` 为唯一语义操作写入 `forest_deployment.web_authority_receipts`。业务 CAS、引用或输入校验失败时收据随事务回滚；幂等重放只能接纳相同 scope、组件、代际、action、输入和计划。由多个可重放子事务组成的动作使用同一个顶层收据身份，不为子步骤伪造新的 Web 操作。
+
 Bot Web operation policy 是 `kernel.authorization` Generation 的版本化模块配置，不放在 deployment 会话库，也不由 Web 壳硬编码。规则只精确匹配 `target_component_id + action_key`，并以启用状态、允许角色子集和可选稳定 Web 主体集合收窄既有角色门禁；不使用通配符、优先级或先后覆盖。未命中规则沿用安全角色模板，规则不能把写操作开放给原本无权的角色。读操作在目标网关读取当前 effective policy；写操作在业务事务内再次读取同一配置。策略 plan/apply 通过配置 revision CAS 和 RuntimeGraph publication 生效，因而策略换代同时使旧 graph revision 的短票失效。
 
 目标库不能先单独插入一条“验票成功”记录再调用业务 repository。每个管理写 authority 必须提供接收调用方连接的 `*_in(conn)` 入口，由目标 UoW 在同一事务内依次锁定当前 policy revision、当前 RuntimeGraph/Generation fence 和业务资源，验证票据，写入 `web_authority_receipt`，再提交配置修订、取消意图、Binding 变更或持久 Job 接纳。收据至少保存 ticket digest（不保存原始签名）、主体与 Session revision、精确 scope/component/Generation、policy revision、operation/action、输入/plan 摘要和接纳时间；业务事实保存该收据引用。任一参与者失败时收据与业务写入一起回滚，因此“有收据”准确表示目标事务已经接纳，而不是网关曾经检查过。

@@ -42,11 +42,15 @@ class DeploymentCatalogManagement:
             raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
         return {"items": list(await self.catalog.list_bots())}
 
-    async def action(self, action_id: str, *, operation_id: str, payload: dict):
+    async def action(
+        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
+    ):
         if action_id != "bot.set-desired":
             raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
         values = _fields(payload, {"bot_id", "desired_state", "expected_revision"})
-        saved = await self.catalog.set_desired(operation_id=operation_id, **values)
+        saved = await self.catalog.set_desired(
+            operation_id=operation_id, authorization=authorization, **values
+        )
         self.supervisor.notify()
         return saved
 
@@ -62,7 +66,9 @@ class DeploymentSecretManagement:
         rows = await self.secrets.list_metadata(limit=values.get("limit", 200))
         return {"items": [asdict(row) for row in rows]}
 
-    async def action(self, action_id: str, *, operation_id: str, payload: dict):
+    async def action(
+        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
+    ):
         if action_id != "secret.put":
             raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
         values = _fields(payload, {"secret_ref", "purpose", "plaintext", "expected_revision"})
@@ -72,6 +78,7 @@ class DeploymentSecretManagement:
         saved = await self.secrets.put(
             operation_id=operation_id,
             plaintext=plaintext.encode(),
+            authorization=authorization,
             **values,
         )
         return asdict(saved)
@@ -86,11 +93,15 @@ class DeploymentAccountManagement:
             raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
         return {"items": list(await self.identity.list_accounts())}
 
-    async def action(self, action_id: str, *, operation_id: str, payload: dict):
+    async def action(
+        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
+    ):
         if action_id == "account.create":
             values = _fields(payload, {"username", "display_name", "password", "role"})
             return (
-                await self.identity.create_account(operation_id=operation_id, **values)
+                await self.identity.create_account(
+                    operation_id=operation_id, authorization=authorization, **values
+                )
             ).as_dict()
         if action_id == "account.update":
             values = _fields(
@@ -98,17 +109,23 @@ class DeploymentAccountManagement:
                 {"subject_id", "display_name", "role", "enabled", "expected_revision"},
             )
             return (
-                await self.identity.update_account(operation_id=operation_id, **values)
+                await self.identity.update_account(
+                    operation_id=operation_id, authorization=authorization, **values
+                )
             ).as_dict()
         if action_id == "account.password":
             values = _fields(payload, {"subject_id", "password", "expected_revision"})
             return (
-                await self.identity.change_password(operation_id=operation_id, **values)
+                await self.identity.change_password(
+                    operation_id=operation_id, authorization=authorization, **values
+                )
             ).as_dict()
         if action_id == "account.sessions.revoke":
             values = _fields(payload, {"subject_id", "expected_revision"})
             return (
-                await self.identity.revoke_sessions(operation_id=operation_id, **values)
+                await self.identity.revoke_sessions(
+                    operation_id=operation_id, authorization=authorization, **values
+                )
             ).as_dict()
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
 
@@ -148,7 +165,9 @@ class DeploymentProvisioningManagement:
             }
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
 
-    async def action(self, action_id: str, *, operation_id: str, payload: dict):
+    async def action(
+        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
+    ):
         if action_id == "storage.create-local":
             if self.database_allocator is None:
                 raise ForestError(
@@ -172,6 +191,7 @@ class DeploymentProvisioningManagement:
                     purpose="storage.postgresql.dsn",
                     plaintext=target_dsn.encode(),
                     expected_revision=0,
+                    authorization=authorization,
                 )
             else:
                 if secret.purpose != "storage.postgresql.dsn":
@@ -184,6 +204,7 @@ class DeploymentProvisioningManagement:
                 self.database_allocator.validate_target(values["bot_id"], target_dsn)
             saved = await self.storage_profiles.create(
                 operation_id=operation_id + "/profile",
+                authorization=authorization,
                 **values,
             )
             return asdict(saved)
@@ -192,7 +213,11 @@ class DeploymentProvisioningManagement:
                 payload,
                 {"profile_ref", "bot_id", "storage_generation", "dsn_secret_ref"},
             )
-            return asdict(await self.storage_profiles.create(operation_id=operation_id, **values))
+            return asdict(
+                await self.storage_profiles.create(
+                    operation_id=operation_id, authorization=authorization, **values
+                )
+            )
         if action_id == "bootstrap.create":
             values = _fields(
                 payload,
@@ -210,6 +235,7 @@ class DeploymentProvisioningManagement:
             saved = await self.bootstrap_profiles.create(
                 operation_id=operation_id,
                 schema_digests=self.bootstrap_registry.schema_digests(),
+                authorization=authorization,
                 **values,
             )
             return {
@@ -230,12 +256,16 @@ class DeploymentProvisioningManagement:
                 },
                 {"max_attempts"},
             )
-            saved = await self.jobs.enqueue(operation_id=operation_id, **values)
+            saved = await self.jobs.enqueue(
+                operation_id=operation_id, authorization=authorization, **values
+            )
             self.supervisor.notify()
             return saved
         if action_id == "provisioning.cancel":
             values = _fields(payload, {"job_id", "expected_revision"})
-            return await self.jobs.cancel(operation_id=operation_id, **values)
+            return await self.jobs.cancel(
+                operation_id=operation_id, authorization=authorization, **values
+            )
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
 
 

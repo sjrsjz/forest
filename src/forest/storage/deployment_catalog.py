@@ -10,6 +10,7 @@ from importlib.resources import files
 
 import psycopg
 
+from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -138,6 +139,7 @@ class DeploymentCatalogRepository:
             "web_account_operations",
             "web_sessions",
             "web_login_throttles",
+            "web_authority_receipts",
             "bots",
             "runtime_intents",
             "runtime_observations",
@@ -283,6 +285,7 @@ class DeploymentCatalogRepository:
         bot_id: str,
         desired_state: str,
         expected_revision: int,
+        authorization=None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         _bounded(bot_id, "bot_id", 128)
@@ -296,6 +299,9 @@ class DeploymentCatalogRepository:
             }
         )
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             replay = await self._operation(conn, operation_id, input_digest)
             if replay is not None:
                 return await self._bot_in(conn, replay["bot_id"])

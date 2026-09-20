@@ -38,6 +38,7 @@ def create_deployment_management_app(
     identity_authority,
     allowed_origin: str,
     bot_supervisor=None,
+    deployment_web_receipts=None,
 ) -> FastAPI:
     parsed_origin = urlsplit(allowed_origin)
     if (
@@ -60,6 +61,7 @@ def create_deployment_management_app(
         deployment_id=deployment_id,
         components=components,
         ticket_authority=ticket_authority,
+        web_receipts=deployment_web_receipts,
     )
     providers = [
         DeploymentManagementScopeProvider(

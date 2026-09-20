@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
+from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.security import hash_password, random_token, verify_password
@@ -127,6 +128,7 @@ class DeploymentWebIdentityAuthority:
         display_name: str,
         password: str,
         role: str,
+        authorization=None,
     ) -> WebSubject:
         return await self._create_account(
             operation_id=operation_id,
@@ -136,6 +138,7 @@ class DeploymentWebIdentityAuthority:
             password=password,
             role=role,
             require_empty=False,
+            authorization=authorization,
         )
 
     async def _create_account(
@@ -148,6 +151,7 @@ class DeploymentWebIdentityAuthority:
         password: str,
         role: str,
         require_empty: bool,
+        authorization=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         username = _username(username)
@@ -156,6 +160,9 @@ class DeploymentWebIdentityAuthority:
         password_hash = await asyncio.to_thread(hash_password, password)
         subject_id = "web-subject/" + hashlib.sha256(username.encode()).hexdigest()[:32]
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 ("forest.deployment.web-accounts",),
@@ -240,6 +247,7 @@ class DeploymentWebIdentityAuthority:
         role: str,
         enabled: bool,
         expected_revision: int,
+        authorization=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         subject_id = _text(subject_id, "subject_id", 128)
@@ -251,6 +259,9 @@ class DeploymentWebIdentityAuthority:
             [subject_id, display_name, role, enabled, expected_revision]
         )
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 ("forest.deployment.web-accounts",),
@@ -331,6 +342,7 @@ class DeploymentWebIdentityAuthority:
         subject_id: str,
         password: str,
         expected_revision: int,
+        authorization=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         subject_id = _text(subject_id, "subject_id", 128)
@@ -338,6 +350,9 @@ class DeploymentWebIdentityAuthority:
             raise ForestError("WEB_IDENTITY_INPUT_INVALID", "Account revision is invalid", 422)
         password_hash = await asyncio.to_thread(hash_password, password)
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 ("forest.deployment.web-accounts",),
@@ -414,6 +429,7 @@ class DeploymentWebIdentityAuthority:
         operation_id: str,
         subject_id: str,
         expected_revision: int,
+        authorization=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         subject_id = _text(subject_id, "subject_id", 128)
@@ -421,6 +437,9 @@ class DeploymentWebIdentityAuthority:
             raise ForestError("WEB_IDENTITY_INPUT_INVALID", "Account revision is invalid", 422)
         input_digest = digest_json([subject_id, expected_revision])
         async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 ("forest.deployment.web-accounts",),
