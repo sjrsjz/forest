@@ -90,6 +90,7 @@ class CleanChatCompletionsProviderRuntime:
         if not isinstance(value, dict) or set(value) != {
             "protocol",
             "base_url",
+            "credential_ref",
             "timeout_seconds",
             "max_connections",
             "capabilities",
@@ -102,6 +103,10 @@ class CleanChatCompletionsProviderRuntime:
         if value["protocol"] != "forest.provider.chat-completions/1":
             raise ForestError(
                 "PROVIDER_CONFIGURATION_INVALID", "Provider protocol is unsupported", 422
+            )
+        if not isinstance(value["credential_ref"], str) or not value["credential_ref"]:
+            raise ForestError(
+                "PROVIDER_CONFIGURATION_INVALID", "Provider credential reference is invalid", 422
             )
         capabilities = value["capabilities"]
         if not isinstance(capabilities, dict):
@@ -177,6 +182,7 @@ class CleanChatCompletionsProviderRuntime:
             )
         credential = await _call(
             self.credential_resolver,
+            self.configuration["credential_ref"],
             self.configuration_revision,
         )
         if not isinstance(credential, str):

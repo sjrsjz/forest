@@ -22,6 +22,7 @@ def default_provider_configuration() -> dict:
     return {
         "protocol": "forest.provider.chat-completions/1",
         "base_url": "http://127.0.0.1:8000/v1",
+        "credential_ref": "secret://provider.chat-completions/default",
         "timeout_seconds": 120,
         "max_connections": 8,
         "capabilities": ModelCapabilities(
@@ -72,6 +73,7 @@ async def bootstrap_clean_provider(
         "required": [
             "protocol",
             "base_url",
+            "credential_ref",
             "timeout_seconds",
             "max_connections",
             "capabilities",
@@ -79,6 +81,7 @@ async def bootstrap_clean_provider(
         "properties": {
             "protocol": {"const": "forest.provider.chat-completions/1"},
             "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+            "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
             "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
             "max_connections": {"type": "integer", "minimum": 1, "maximum": 128},
             "capabilities": {"type": "object"},

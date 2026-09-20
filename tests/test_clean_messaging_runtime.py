@@ -305,7 +305,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         store,
         installer,
         kernel=kernel,
-        credential_resolver=lambda _revision: "test-model-key",
+        credential_resolver=lambda _secret_ref, _revision: "test-model-key",
         client_factory=create_model_client,
     )
     embedding = await bootstrap_clean_embedding(

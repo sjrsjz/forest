@@ -413,10 +413,15 @@ class CleanBotHost:
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            credential_resolver=lambda _revision: self.settings.model_api_key,
+            credential_resolver=lambda secret_ref, _revision: (
+                self.settings.model_api_key
+                if secret_ref == "secret://provider.chat-completions/main/1"
+                else None
+            ),
             initial_configuration={
                 "protocol": "forest.provider.chat-completions/1",
                 "base_url": self.settings.model_base_url,
+                "credential_ref": "secret://provider.chat-completions/main/1",
                 "timeout_seconds": 120,
                 "max_connections": 8,
                 "capabilities": capabilities.as_dict(),
