@@ -146,6 +146,5 @@ async def bootstrap_clean_embedding(
         official_artifact("bot"),
         management=(configuration_management_contribution("多模态嵌入"),),
         storage=storage,
-        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanEmbeddingModule(repository, descriptor, configuration, grants)

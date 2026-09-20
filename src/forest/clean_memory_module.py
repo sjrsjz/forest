@@ -210,7 +210,6 @@ async def bootstrap_clean_memory(
         storage=storage,
         wakes_on_work=True,
         work_notify_order=20,
-        factory_protocol="forest.contract-module-factory/1",
         shell_commands=MEMORY_SHELL_COMMANDS,
     )
     return CleanMemoryModule(repository, retrieval, descriptor, configuration, grants)

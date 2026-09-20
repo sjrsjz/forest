@@ -112,6 +112,5 @@ async def bootstrap_clean_trigger_policy(
         official_artifact("bot"),
         management=(configuration_management_contribution("群聊触发策略"),),
         storage=storage,
-        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanTriggerPolicyModule(descriptor, configuration, grants)

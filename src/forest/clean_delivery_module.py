@@ -259,6 +259,5 @@ async def bootstrap_clean_delivery(store, installer, *, kernel, adapter) -> Clea
         factory,
         official_artifact("bot"),
         storage=storage,
-        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanDeliveryModule(repository, authorization, descriptor, configuration, grants)

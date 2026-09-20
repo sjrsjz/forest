@@ -212,7 +212,6 @@ async def bootstrap_clean_shell(
         storage=storage,
         wakes_on_work=True,
         work_notify_order=0,
-        factory_protocol="forest.contract-module-factory/1",
         kernel_services=(
             RuntimeKernelServiceSpec(
                 "kernel.uow.shell.binding-fence",

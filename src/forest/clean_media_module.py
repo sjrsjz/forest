@@ -153,6 +153,5 @@ async def bootstrap_clean_media(
         storage=storage,
         wakes_on_work=True,
         work_notify_order=15,
-        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanMediaModule(repository, descriptor, configuration, grants)

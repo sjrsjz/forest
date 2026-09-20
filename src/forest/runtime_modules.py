@@ -471,7 +471,6 @@ class RuntimeModuleDescriptor:
     storage: RuntimeStorageBundle | None = None
     wakes_on_work: bool = False
     work_notify_order: int = 100
-    factory_protocol: str = "forest.legacy-module-factory/1"
     kernel_services: tuple[RuntimeKernelServiceSpec, ...] = ()
     agent_tools: tuple[RuntimeAgentToolContribution, ...] = ()
     shell_commands: tuple[RuntimeShellCommandContribution, ...] = ()
@@ -485,11 +484,6 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime work notification declaration must be boolean")
         if type(self.work_notify_order) is not int or not 0 <= self.work_notify_order <= 10_000:
             raise ValueError("Runtime work notification order is invalid")
-        if self.factory_protocol not in {
-            "forest.legacy-module-factory/1",
-            "forest.contract-module-factory/1",
-        }:
-            raise ValueError("Runtime module factory protocol is invalid")
         service_keys = [(item.service_id, item.version) for item in self.kernel_services]
         if len(service_keys) != len(set(service_keys)):
             raise ValueError("Kernel service contribution identities must be unique")
@@ -611,15 +605,6 @@ class RuntimeModuleRegistry:
         self.contract_router = RuntimeContractRouter(self)
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
         self.generation_authority = getattr(runtime, "generation_authority", None)
-        store = getattr(getattr(runtime, "bot", None), "store", None)
-        if self.generation_authority is not None:
-            self.graph_store = self.generation_authority
-        elif store is None:
-            self.graph_store = None
-        else:
-            from forest.storage.runtime_graph import RuntimeModuleGraphStore
-
-            self.graph_store = RuntimeModuleGraphStore(store)
         self._build()
 
     def _effective_requires(self, descriptor: RuntimeModuleDescriptor) -> tuple[str, ...]:
@@ -648,16 +633,12 @@ class RuntimeModuleRegistry:
             "storage": descriptor.storage.as_fact() if descriptor.storage is not None else None,
             "wakes_on_work": descriptor.wakes_on_work,
             "work_notify_order": descriptor.work_notify_order,
-            "factory_protocol": descriptor.factory_protocol,
             "kernel_services": [item.as_fact() for item in descriptor.kernel_services],
             "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
             "shell_commands": [item.as_fact() for item in descriptor.shell_commands],
             "job_types": [item.as_fact() for item in descriptor.job_types],
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
-
-    def _descriptor_facts(self) -> list[dict]:
-        return [self._descriptor_fact(descriptor) for descriptor in self.descriptors]
 
     async def _prepare_generation_binding(
         self, descriptor: RuntimeModuleDescriptor, instance: Any
@@ -779,7 +760,7 @@ class RuntimeModuleRegistry:
         }
 
     async def _record_current_states(self, lease, *, failure_code=None):
-        if self.graph_store is None or self.graph_identity is None:
+        if self.generation_authority is None or self.graph_identity is None:
             return
         states = {}
         for component_id, state in self.states.items():
@@ -793,7 +774,7 @@ class RuntimeModuleRegistry:
                 states[component_id] = ("ACTIVE", None)
             else:
                 states[component_id] = ("PREPARED", None)
-        await self.graph_store.record_states(lease, self.graph_identity, states)
+        await self.generation_authority.record_states(lease, self.graph_identity, states)
 
     def _transition(self, component_id, state):
         current = self.states[component_id]
@@ -939,11 +920,7 @@ class RuntimeModuleRegistry:
             )
             try:
                 await self._install_storage(descriptor)
-                dependencies = (
-                    self.contract_router.context(component_id)
-                    if descriptor.factory_protocol == "forest.contract-module-factory/1"
-                    else self.instances
-                )
+                dependencies = self.contract_router.context(component_id)
                 instance = descriptor.factory(self.runtime, dependencies)
                 self.instances[component_id] = instance
                 self.contract_router.register(component_id, instance)
@@ -994,22 +971,22 @@ class RuntimeModuleRegistry:
     async def _prepare_graph(self):
         lease = None
         try:
+            if self.generation_authority is None:
+                raise ForestError(
+                    "RUNTIME_GENERATION_AUTHORITY_REQUIRED",
+                    "Runtime module lifecycle requires a Generation authority",
+                    503,
+                )
             await self._prepare_modules()
-            if self.graph_store is not None:
-                lease = self._lease()
-                if self.graph_identity is None:
-                    if self.generation_authority is not None:
-                        self.graph_identity = await self.generation_authority.prepare_graph(
-                            lease,
-                            [self.generation_bindings[item] for item in self.order],
-                            self.activation_id,
-                        )
-                    else:
-                        self.graph_identity = await self.graph_store.prepare(
-                            lease, self._descriptor_facts(), self.activation_id
-                        )
+            lease = self._lease()
+            if self.graph_identity is None:
+                self.graph_identity = await self.generation_authority.prepare_graph(
+                    lease,
+                    [self.generation_bindings[item] for item in self.order],
+                    self.activation_id,
+                )
             await self._bind_generation_identities()
-            if self.generation_authority is not None and not self._contract_routes_sealed:
+            if not self._contract_routes_sealed:
                 for descriptor in self.descriptors:
                     for spec in descriptor.kernel_services:
                         if descriptor.artifact.trust_level != "official":
@@ -1073,10 +1050,7 @@ class RuntimeModuleRegistry:
             if all(self.states[item] == ModuleLifecycleState.ACTIVE for item in self.order):
                 return
             lease = await self._prepare_graph()
-            if self.generation_authority is not None:
-                await self._start_clean(lease)
-                return
-            await self._start_legacy(lease)
+            await self._start_clean(lease)
 
     async def prewarm(self) -> None:
         """Construct clean Generation resources without publishing their routes."""
@@ -1100,73 +1074,6 @@ class RuntimeModuleRegistry:
                 return
             lease = await self._prepare_graph()
             await self._start_clean(lease, publish=False)
-
-    async def _start_legacy(self, lease) -> None:
-        """Temporary lifecycle for modules outside the clean Generation protocol."""
-
-        started = []
-        current = None
-        try:
-            for component_id in self.order:
-                current = component_id
-                if self.states[component_id] != ModuleLifecycleState.PREPARED:
-                    raise ForestError(
-                        "RUNTIME_MODULE_LIFECYCLE_INVALID",
-                        "Runtime module graph is not prepared for activation",
-                    )
-                instance = self.instances[component_id]
-                start = getattr(instance, "start", None)
-                if start is not None:
-                    await start()
-                self._transition(component_id, ModuleLifecycleState.ACTIVE)
-                started.append(component_id)
-            if self.graph_store is not None:
-                await self.graph_store.publish(lease, self.graph_identity)
-        except BaseException as exc:
-            failure_code = (
-                exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
-            )
-            rollback_errors = []
-            if (
-                self.graph_store is not None
-                and current is not None
-                and self.states[current]
-                in {
-                    ModuleLifecycleState.PREPARED,
-                    ModuleLifecycleState.ACTIVE,
-                }
-            ):
-                try:
-                    await self.graph_store.record_states(
-                        lease,
-                        self.graph_identity,
-                        {current: ("FAILED", failure_code)},
-                    )
-                except Exception as rollback_error:
-                    rollback_errors.append(rollback_error)
-            if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
-                self._transition(current, ModuleLifecycleState.FAILED)
-                try:
-                    await self._cleanup(current)
-                except Exception as rollback_error:
-                    rollback_errors.append(rollback_error)
-            for component_id in reversed(started):
-                try:
-                    await self._quiesce_and_cleanup(component_id)
-                except Exception as rollback_error:
-                    rollback_errors.append(rollback_error)
-            try:
-                await self._record_current_states(lease, failure_code=failure_code)
-            except Exception as rollback_error:
-                rollback_errors.append(rollback_error)
-            if rollback_errors:
-                raise ForestError(
-                    "RUNTIME_MODULE_START_ROLLBACK_FAILED",
-                    "Runtime module startup failed and resources remain owned",
-                    503,
-                    details={"start_error": failure_code, "cleanup_errors": len(rollback_errors)},
-                ) from exc
-            raise
 
     async def _start_clean(self, lease, *, publish: bool = True) -> None:
         """Prewarm, publish, then admit a clean immutable Generation graph."""
@@ -1239,7 +1146,7 @@ class RuntimeModuleRegistry:
             if current is not None and self.states[current] == ModuleLifecycleState.PREPARED:
                 self._transition(current, ModuleLifecycleState.FAILED)
                 try:
-                    await self.graph_store.record_states(
+                    await self.generation_authority.record_states(
                         lease,
                         self.graph_identity,
                         {current: ("FAILED", failure_code)},
@@ -1398,19 +1305,15 @@ class RuntimeModuleRegistry:
                 return []
             lease = None
             superseded = False
-            if self.graph_store is not None and self.graph_identity is not None:
+            if self.generation_authority is not None and self.graph_identity is not None:
                 try:
                     lease = self._lease(allow_closing=True)
-                    if self.generation_authority is not None:
-                        await self.generation_authority.freeze_graph_admission(
-                            lease, self.graph_identity
-                        )
-                    else:
-                        await self.graph_store.retire(lease, self.graph_identity)
+                    await self.generation_authority.freeze_graph_admission(
+                        lease, self.graph_identity
+                    )
                 except ForestError as exc:
                     if (
-                        self.generation_authority is not None
-                        and exc.code == "RUNTIME_GRAPH_NOT_CURRENT"
+                        exc.code == "RUNTIME_GRAPH_NOT_CURRENT"
                     ):
                         # A newer graph published under the same HostLease has
                         # already fenced this graph from new work. Keep the
@@ -1445,7 +1348,7 @@ class RuntimeModuleRegistry:
                 except Exception as exc:
                     errors.append(exc)
             if lease is not None:
-                if self.generation_authority is not None and not superseded:
+                if not superseded:
                     try:
                         await self.generation_authority.retire_graph(lease, self.graph_identity)
                     except ForestError as exc:

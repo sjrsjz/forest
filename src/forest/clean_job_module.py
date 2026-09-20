@@ -115,7 +115,6 @@ async def bootstrap_clean_job(store, installer, *, kernel) -> CleanJobModule:
         storage=storage,
         wakes_on_work=True,
         work_notify_order=30,
-        factory_protocol="forest.contract-module-factory/1",
         shell_commands=JOB_SHELL_COMMANDS,
     )
     return CleanJobModule(repository, descriptor, configuration, grants)

@@ -128,6 +128,5 @@ async def bootstrap_clean_provider(
         official_artifact("bot"),
         management=(configuration_management_contribution("模型 Provider"),),
         storage=storage,
-        factory_protocol="forest.contract-module-factory/1",
     )
     return CleanProviderModule(descriptor, configuration, grants)

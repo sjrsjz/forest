@@ -309,7 +309,6 @@ async def bootstrap_clean_agent(
             ),
         ),
         storage=storage,
-        factory_protocol="forest.contract-module-factory/1",
         kernel_services=(
             RuntimeKernelServiceSpec(
                 "kernel.uow.agent.cancel-wake",

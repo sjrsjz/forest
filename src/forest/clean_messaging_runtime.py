@@ -378,11 +378,6 @@ async def bootstrap_clean_messaging(
             storage=bundles[component_id],
             wakes_on_work=component_id == "conversation.scheduler",
             work_notify_order=10 if component_id == "conversation.scheduler" else 100,
-            factory_protocol=(
-                "forest.contract-module-factory/1"
-                if component_id in {"conversation.scheduler", "adapter.onebot"}
-                else "forest.legacy-module-factory/1"
-            ),
             kernel_services=(
                 (
                     RuntimeKernelServiceSpec(
