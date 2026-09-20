@@ -21,10 +21,6 @@ POSTGRES_GID = 70
 APPLICATION_SECRET_NAMES = {
     "deployment_management_token",
     "deployment_master_key",
-    "model_api_key",
-    "embedding_api_key",
-    "management_token",
-    "onebot_access_token",
 }
 
 
@@ -41,18 +37,6 @@ def directory_info(path: Path) -> os.stat_result:
     if not stat.S_ISDIR(info.st_mode):
         raise RuntimeError("A deployment volume is not a regular directory")
     return info
-
-
-def prepare_data(path: Path) -> None:
-    info = directory_info(path)
-    if info.st_uid not in {0, APP_UID}:
-        raise RuntimeError("Application data belongs to another service account")
-    if info.st_uid == 0 and any(path.iterdir()):
-        raise RuntimeError("Refusing to take ownership of a nonempty foreign data volume")
-    # Never recursively chown user files, backups, or a mounted foreign tree.
-    os.chown(path, APP_UID, APP_GID)
-    os.chmod(path, 0o700)
-    fsync_directory(path)
 
 
 def prepare_secrets(path: Path) -> None:
@@ -93,9 +77,7 @@ def prepare_secrets(path: Path) -> None:
                     "Existing database credential is invalid; restore recovery material"
                 )
         else:
-            if Path("/var/lib/forest-postgres/pgdata/PG_VERSION").exists() or any(
-                Path("/data").iterdir()
-            ):
+            if Path("/var/lib/forest-postgres/pgdata/PG_VERSION").exists():
                 raise RuntimeError(
                     "Database credential is missing for an existing deployment; restore protected recovery material"
                 )
@@ -144,14 +126,13 @@ def main() -> None:
             raise RuntimeError(
                 "Volume initialization must run through the dedicated installer service"
             )
-        prepare_data(Path("/data"))
         prepare_secrets(Path("/run/forest-secrets"))
     except (OSError, RuntimeError) as exc:
         # OSError text can expose paths, but no credential is used in a path.
         # No configuration, credential content, or environment is dumped here.
         print(f"Forest volume initialization failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
-    print("Forest data and protected database credential are ready.")
+    print("Forest protected deployment credentials are ready.")
 
 
 if __name__ == "__main__":

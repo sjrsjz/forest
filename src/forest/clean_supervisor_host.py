@@ -23,6 +23,7 @@ from forest.official_bot_provisioning import (
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
 )
+from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
@@ -171,12 +172,16 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
     settings_resolver = OfficialBotSettingsResolver(secrets=secrets)
+    database_allocator = LocalPostgresDatabaseAllocator(settings.dsn)
     executor = DeploymentProvisioningExecutor(
         jobs=jobs,
         catalog=catalog,
         storage_profiles=storage_profiles,
         bootstrap_profiles=bootstrap_profiles,
-        provisioner=OfficialBotProvisioner(settings_resolver=settings_resolver),
+        provisioner=OfficialBotProvisioner(
+            settings_resolver=settings_resolver,
+            database_allocator=database_allocator,
+        ),
         worker_id="deployment-provisioner/" + incarnation,
     )
     supervisor = CleanMultiBotSupervisor(
@@ -217,6 +222,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
                         bootstrap_profiles=bootstrap_profiles,
                         jobs=jobs,
                         supervisor=supervisor,
+                        database_allocator=database_allocator,
                     ),
                     access_token=settings.management_token,
                 ),

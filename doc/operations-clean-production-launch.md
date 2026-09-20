@@ -32,19 +32,17 @@ FOREST_ONEBOT_ACCESS_TOKEN=...
 FOREST_ALLOWED_GROUP_IDS=933179609
 ```
 
-模型、Embedding 和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE`、`FOREST_EMBEDDING_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。Compose 强制使用专用 secret volume，不再把三类凭据放进容器环境。先启动只具本地卷权限、无网络的初始化器，再从标准输入逐项安装凭据：
+直接运行 `forest bot` 时，模型、Embedding 和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE`、`FOREST_EMBEDDING_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。这是显式诊断路径，当前 Compose 不再包含单 Bot 服务。
+
+Compose 先启动只具本地卷权限、无网络的初始化器，再从标准输入安装两个部署根凭据：
 
 ```sh
 docker compose run --rm initialize
-printf '%s' "$MODEL_API_KEY" | docker compose run --rm -T -e FOREST_SECRET_NAME=model_api_key secret
-printf '%s' "$EMBEDDING_API_KEY" | docker compose run --rm -T -e FOREST_SECRET_NAME=embedding_api_key secret
-printf '%s' "$ONEBOT_ACCESS_TOKEN" | docker compose run --rm -T -e FOREST_SECRET_NAME=onebot_access_token secret
-printf '%s' "$MANAGEMENT_TOKEN" | docker compose run --rm -T -e FOREST_SECRET_NAME=management_token secret
 python -c 'import base64,secrets,sys;sys.stdout.write(base64.b64encode(secrets.token_bytes(32)).decode())' | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_master_key secret
 printf '%s' "$DEPLOYMENT_MANAGEMENT_TOKEN" | docker compose run --rm -T -e FOREST_SECRET_NAME=deployment_management_token secret
 ```
 
-安装器只接受固定 allowlist 中的名称和单行可打印 ASCII 值；它会移除 Windows PowerShell 管道可能添加的单个 UTF-8 BOM，随后执行原子替换并把文件收敛为应用 UID 独占的 `0400`。它不会打印凭据。Compose 同样使用该受保护卷构造部署/Bot DSN，因此不要求把数据库口令放入环境。单 Bot profile 的可选项包括：
+安装器只接受上述两个 allowlist 名称和单行可打印 ASCII 值；它会移除 Windows PowerShell 管道可能添加的单个 UTF-8 BOM，随后执行原子替换并把文件收敛为应用 UID 独占的 `0400`。它不会打印凭据。Compose 使用同一受保护卷中的 PostgreSQL 口令构造部署 DSN；模型、Embedding 与 OneBot 凭据通过 deployment WebUI/API 写入加密 Secret authority，只在准确 Bot 供应与启动边界解析。显式诊断入口的可选项包括：
 
 ```text
 FOREST_BOT_ID=forest-main
@@ -67,7 +65,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `media.capture` 独占 OneBot 临时图片定位符、下载客户端、重试租约和受管图片资产。Adapter 在 ingress 事务里只向 Conversation 发布稳定 `media_ref`，并登记异步捕获任务；签名 URL 不进入规范 Context。Worker 完成有界下载和图片解码验证后，通过 `memory.source.capture/1` 发布保持原段顺序的图文来源。Agent 在下一次模型调用前从 `media.context.resolve/1` 取得当前 Context 的不可变像素快照；text-only Provider 仍只在该次投影中省略图片。
 
-当前环境变量承担首次 bootstrap 与无 WebUI 时的真实链路验收。设置 `FOREST_MANAGEMENT_TOKEN`（至少 16 字符）后，宿主同时启动首个干净管理面切片；默认监听 `127.0.0.1:8080`，容器内监听地址由 Compose 固定为 `0.0.0.0`，宿主端口仍只绑定 loopback。`FOREST_MANAGEMENT_HOST` 与 `FOREST_MANAGEMENT_PORT` 可调整监听。当前页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询、Agent PresetContext/CorePrompt、带会话/状态/游标的 Run 查询、Run/ModelTurn/ToolStep 详情与 checkpoint CAS 取消、Job 类型发现/筛选/运行/取消，以及 OneBot Binding 状态、fence 与端点变更；token 只保存在浏览器 `sessionStorage`。Binding 密钥不回显，当前页面只沿用 bootstrap secret 引用，不能更换访问令牌或 transport。该切片还不是最终独立 Supervisor/Web 身份控制面。环境变量不能演变为壳层专用 Bot 表单。
+直接 `forest bot` 时，环境变量只承担无 WebUI 的显式链路诊断。设置 `FOREST_MANAGEMENT_TOKEN`（至少 16 字符）后，该 Bot 宿主可启动自己的模块管理面；页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询、Agent PresetContext/CorePrompt、Run/Tool/Job 控制以及 OneBot Binding 管理。生产 Compose 的部署控制面监听 `127.0.0.1:8080`（容器内 `8081`），token 只保存在浏览器 `sessionStorage`。
 
 ## 生命周期与恢复
 
@@ -75,7 +73,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 新宿主取得租约后会把数据库中遗留的 OneBot 当前客户端结算为 `FAILED/HOST_RESTARTED`，再建立新客户端。该行为只用于进程已失去的本地连接资源；发送结果不确定性仍按 Delivery 的 `UNKNOWN` 规则处理，不能把未知发送自动重试成重复消息。
 
-Compose 默认服务已经切到 `forest supervisor`，PostgreSQL 首次初始化同时创建独立的 `forest_deployment` 与 `forest_bot` 数据库；旧 `forest bot` 服务只在 `single-bot` profile 中保留用于链路诊断。单 Bot 容器仍在 `/data/runtime-status.json` 发布不含凭据的当前图身份；Supervisor 的健康检查只探测 loopback 管理监听，不读取管理 token。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
+Compose 只编排 `initialize`、`postgres` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化只创建 `forest_deployment`；供应器为每个 Bot 按 Bot ID 派生稳定库名和无特权 login role，为该 role 生成随机口令，只允许在同一批准集群创建，并复核 role flags 与数据库 owner。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取管理 token。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
 ## 多 Bot Supervisor 入口
 
@@ -95,15 +93,14 @@ FOREST_SUPERVISOR_MAX_STARTING=2
 
 主密钥文件只包含一个 Base64 值，解码后必须恰好为 32 字节。当前入口使用该 key ID 解密部署 Secret authority，并从 READY Bot 固化的 storage/bootstrap profile 构造各自 `CleanBotHost`；profile 中只保存 Secret 引用，凭据不会写入 Bot catalog。供应时只安装模块 authority 和 revision 1，不启动 Agent、Provider 或 OneBot 网络资源；供应 Job 成功发布 READY 后，Supervisor 才依据 runtime intent 启停 Bot。
 
-Compose 中无需设置 `FOREST_DEPLOYMENT_DSN`：Supervisor 从 `/run/forest-secrets/postgres_password` 构造只指向 `forest_deployment` 的 DSN。显式 DSN 仅供非 Compose 部署。默认 `docker compose up -d` 启动 `initialize`、`postgres` 和 `supervisor`；旧单 Bot 入口需显式使用 `--profile single-bot`。
+Compose 中无需设置 `FOREST_DEPLOYMENT_DSN`：Supervisor 从 `/run/forest-secrets/postgres_password` 构造只指向 `forest_deployment` 的 DSN。显式 DSN 仅供非 Compose 部署。默认 `docker compose up -d` 启动 `initialize`、`postgres` 和 `supervisor`；Compose 中不存在绕过部署控制面的单 Bot 服务。
 
-Supervisor 同时启动 deployment scope WebUI。页面从三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建 storage/bootstrap profile、加入供应队列并切换 READY Bot 的 runtime intent。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权、主密钥多版本 keyring、跨 Bot 模块工作区路由和 Supervisor Compose 编排仍是发布前缺口。
+Supervisor 同时启动 deployment scope WebUI。页面从三个控制面组件动态发现 Bot 目录、Secret 和 Provisioning 工作区；可以写入不回显的版本化 Secret、创建只暴露引用的本地 PostgreSQL storage profile、创建 bootstrap profile、加入供应队列并切换 READY Bot 的 runtime intent。管理 token 仍是部署级共享 token，完整 Web 身份/细粒度授权、主密钥多版本 keyring 和跨 Bot 模块工作区路由仍是发布前缺口。
 
 ## 尚未接入本图的能力
 
 - 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
-- 模块贡献式管理协议的独立监督、Secret authority UI 与完整 Web 身份/授权；
-- 多 Bot 的动态 PostgreSQL 数据库分配、完整 Web 身份/细粒度授权和跨 Bot 模块工作区路由；Supervisor 默认 Compose 编排、deployment scope 管理贡献、Secret UI、正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
+- 完整 Web 身份/细粒度授权、主密钥多版本 keyring 和跨 Bot 模块工作区路由；Supervisor 默认 Compose 编排、deployment scope 管理贡献、Secret UI、本地 PostgreSQL 动态分配、正式 provisioner、`forest supervisor` 入口、独立部署目录、不可变组件级 bootstrap profile、持久供应 Job 与带 fence 的多宿主协调器已经落地，每个 Bot 仍使用独立存储引用与全局 Memory 域；
 - OneBot 热替换排空、长连接抖动和真实群低频验收。
 
 上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。

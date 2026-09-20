@@ -16,10 +16,6 @@ MAX_SECRET_BYTES = 65536
 SECRET_NAMES = {
     "deployment_management_token",
     "deployment_master_key",
-    "model_api_key",
-    "embedding_api_key",
-    "management_token",
-    "onebot_access_token",
 }
 
 

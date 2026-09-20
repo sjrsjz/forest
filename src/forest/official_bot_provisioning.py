@@ -231,9 +231,12 @@ class OfficialBotCatalogSettingsResolver:
 class OfficialBotProvisioner:
     """Materialize official module authorities without starting the runtime graph."""
 
-    def __init__(self, *, settings_resolver, host_factory=CleanBotHost) -> None:
+    def __init__(
+        self, *, settings_resolver, host_factory=CleanBotHost, database_allocator=None
+    ) -> None:
         self.settings_resolver = settings_resolver
         self.host_factory = host_factory
+        self.database_allocator = database_allocator
 
     async def __call__(self, *, claim, storage, profile) -> None:
         if claim.bot_id != profile.bot_id or claim.bot_id != storage.bot_id:
@@ -243,6 +246,11 @@ class OfficialBotProvisioner:
                 409,
             )
         settings = await self.settings_resolver.resolve(profile=profile, storage=storage)
+        if self.database_allocator is not None:
+            await self.database_allocator.ensure_database(
+                bot_id=claim.bot_id,
+                target_dsn=storage.dsn,
+            )
         host = self.host_factory(settings)
         components = await host.provision()
         if set(components) != {

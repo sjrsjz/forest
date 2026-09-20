@@ -31,13 +31,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    HOME=/tmp \
-    FOREST_DATA_DIR=/data
+    HOME=/tmp
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/src /app/src
 USER 10001:10001
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "from pathlib import Path; import sys; sys.exit(0 if Path('/data/runtime-status.json').is_file() else 1)"]
-CMD ["python", "-m", "forest", "bot"]
+    CMD ["python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8081),2); s.close()"]
+CMD ["python", "-m", "forest", "supervisor"]

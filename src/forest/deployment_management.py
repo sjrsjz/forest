@@ -78,11 +78,22 @@ class DeploymentSecretManagement:
 
 
 class DeploymentProvisioningManagement:
-    def __init__(self, *, storage_profiles, bootstrap_profiles, jobs, supervisor) -> None:
+    def __init__(
+        self,
+        *,
+        secrets,
+        storage_profiles,
+        bootstrap_profiles,
+        jobs,
+        supervisor,
+        database_allocator=None,
+    ) -> None:
+        self.secrets = secrets
         self.storage_profiles = storage_profiles
         self.bootstrap_profiles = bootstrap_profiles
         self.jobs = jobs
         self.supervisor = supervisor
+        self.database_allocator = database_allocator
 
     async def query(self, query_id: str, payload: dict):
         if query_id == "provisioning.jobs.list":
@@ -95,6 +106,44 @@ class DeploymentProvisioningManagement:
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
 
     async def action(self, action_id: str, *, operation_id: str, payload: dict):
+        if action_id == "storage.create-local":
+            if self.database_allocator is None:
+                raise ForestError(
+                    "STORAGE_ALLOCATION_UNAVAILABLE",
+                    "Local PostgreSQL allocation is unavailable",
+                    409,
+                )
+            values = _fields(
+                payload,
+                {"profile_ref", "bot_id", "storage_generation", "dsn_secret_ref"},
+            )
+            try:
+                secret = await self.secrets.metadata(values["dsn_secret_ref"])
+            except ForestError as exc:
+                if exc.code != "SECRET_NOT_FOUND":
+                    raise
+                target_dsn = self.database_allocator.new_target_dsn(values["bot_id"])
+                await self.secrets.put(
+                    operation_id=operation_id + "/dsn",
+                    secret_ref=values["dsn_secret_ref"],
+                    purpose="storage.postgresql.dsn",
+                    plaintext=target_dsn.encode(),
+                    expected_revision=0,
+                )
+            else:
+                if secret.purpose != "storage.postgresql.dsn":
+                    raise ForestError(
+                        "STORAGE_PROFILE_SECRET_PURPOSE_INVALID",
+                        "Storage profile requires a PostgreSQL DSN secret",
+                        409,
+                    )
+                target_dsn = await self.secrets.resolve_text(values["dsn_secret_ref"])
+                self.database_allocator.validate_target(values["bot_id"], target_dsn)
+            saved = await self.storage_profiles.create(
+                operation_id=operation_id + "/profile",
+                **values,
+            )
+            return asdict(saved)
         if action_id == "storage.create":
             values = _fields(
                 payload,
@@ -141,7 +190,16 @@ class DeploymentProvisioningManagement:
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
 
 
-def deployment_management_components(*, catalog, secrets, storage_profiles, bootstrap_profiles, jobs, supervisor):
+def deployment_management_components(
+    *,
+    catalog,
+    secrets,
+    storage_profiles,
+    bootstrap_profiles,
+    jobs,
+    supervisor,
+    database_allocator=None,
+):
     def contribution(identity: str, label: str, order: int) -> tuple[RuntimeManagementContribution, ...]:
         return (
             RuntimeManagementContribution(
@@ -170,10 +228,12 @@ def deployment_management_components(*, catalog, secrets, storage_profiles, boot
         DeploymentManagementComponent(
             "deployment.provisioning",
             DeploymentProvisioningManagement(
+                secrets=secrets,
                 storage_profiles=storage_profiles,
                 bootstrap_profiles=bootstrap_profiles,
                 jobs=jobs,
                 supervisor=supervisor,
+                database_allocator=database_allocator,
             ),
             contribution("deployment-provisioning", "Bot 供应", 30),
         ),

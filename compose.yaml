@@ -14,7 +14,6 @@ services:
     security_opt: [no-new-privileges:true]
     volumes:
       - ./scripts/container_init.py:/opt/forest/container_init.py:ro
-      - forest_data:/data
       - forest_secrets:/run/forest-secrets
       - postgres_data:/var/lib/forest-postgres:ro
 
@@ -50,7 +49,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - forest_secrets:/run/forest-secrets:ro
-      - ./scripts/postgres_init.sql:/docker-entrypoint-initdb.d/10-forest-databases.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forest -d forest_deployment"]
       interval: 5s
@@ -100,56 +98,6 @@ services:
       start_period: 15s
       retries: 3
 
-  forest:
-    profiles: [single-bot]
-    build: .
-    image: forest:local
-    restart: unless-stopped
-    init: true
-    depends_on:
-      initialize:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    environment:
-      FOREST_DATABASE_PASSWORD_FILE: /run/forest-secrets/postgres_password
-      FOREST_DATABASE_HOST: postgres
-      FOREST_DATABASE_NAME: forest_bot
-      FOREST_BOT_ID: ${FOREST_BOT_ID:-forest-main}
-      FOREST_MODEL_BASE_URL: ${FOREST_MODEL_BASE_URL:-}
-      FOREST_MODEL_API_KEY_FILE: /run/forest-secrets/model_api_key
-      FOREST_MODEL_NAME: ${FOREST_MODEL_NAME:-}
-      FOREST_MODEL_INPUT_MODALITIES: ${FOREST_MODEL_INPUT_MODALITIES:-text}
-      FOREST_EMBEDDING_ENDPOINT: ${FOREST_EMBEDDING_ENDPOINT:-}
-      FOREST_EMBEDDING_API_KEY_FILE: /run/forest-secrets/embedding_api_key
-      FOREST_EMBEDDING_DEPLOYMENT_ID: ${FOREST_EMBEDDING_DEPLOYMENT_ID:-embedding.multimodal/qiyu-vl/default}
-      FOREST_EMBEDDING_MODEL_REVISION: ${FOREST_EMBEDDING_MODEL_REVISION:-operator-declared/1}
-      FOREST_EMBEDDING_MODEL: ${FOREST_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-8B}
-      FOREST_EMBEDDING_DIMENSIONS: ${FOREST_EMBEDDING_DIMENSIONS:-4096}
-      FOREST_ONEBOT_SELF_ID: ${FOREST_ONEBOT_SELF_ID:-}
-      FOREST_ONEBOT_WEBSOCKET_URL: ${FOREST_ONEBOT_WEBSOCKET_URL:-}
-      FOREST_ONEBOT_ACCESS_TOKEN_FILE: /run/forest-secrets/onebot_access_token
-      FOREST_ALLOWED_GROUP_IDS: ${FOREST_ALLOWED_GROUP_IDS:-933179609}
-      FOREST_GROUP_TRIGGER_MODE: ${FOREST_GROUP_TRIGGER_MODE:-MENTION}
-      FOREST_AGENT_SYSTEM_PROMPT: ${FOREST_AGENT_SYSTEM_PROMPT:-}
-      FOREST_RUNTIME_STATUS_FILE: /data/runtime-status.json
-      FOREST_DATA_DIR: /data
-      FOREST_MANAGEMENT_TOKEN_FILE: /run/forest-secrets/management_token
-      FOREST_MANAGEMENT_HOST: 0.0.0.0
-      FOREST_MANAGEMENT_PORT: 8080
-    ports:
-      - "127.0.0.1:${FOREST_MANAGEMENT_PORT:-8080}:8080"
-    volumes:
-      - forest_data:/data
-      - forest_secrets:/run/forest-secrets:ro
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=32m
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    stop_grace_period: 30s
-
 volumes:
   postgres_data:
-  forest_data:
   forest_secrets:

@@ -24,6 +24,7 @@ from forest.official_bot_provisioning import (
     OfficialBotSettingsResolver,
     official_bootstrap_schema_digests,
 )
+from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.clean_deployment_store import CleanDeploymentStore
@@ -536,11 +537,14 @@ async def test_official_provisioner_materializes_module_authorities_without_star
     repository = deployment_catalog
     await repository.initialize()
     root_dsn = os.environ["FOREST_TEST_DSN"]
-    target_name = "forest_bot_supply_" + uuid4().hex
+    allocator = LocalPostgresDatabaseAllocator(root_dsn)
+    target_name = allocator.database_name("bot/official")
+    target_role = allocator.role_name("bot/official")
+    target_dsn = allocator.new_target_dsn("bot/official")
     admin = await psycopg.AsyncConnection.connect(root_dsn, autocommit=True)
-    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_name)))
-    parsed = urlsplit(root_dsn)
-    target_dsn = urlunsplit((parsed.scheme, parsed.netloc, "/" + target_name, "", ""))
+    await admin.execute(
+        sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(target_name))
+    )
     key = bytes(range(32))
     secrets = DeploymentSecretAuthority(
         repository.store,
@@ -651,7 +655,10 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             catalog=repository,
             storage_profiles=storage_profiles,
             bootstrap_profiles=bootstrap_profiles,
-            provisioner=OfficialBotProvisioner(settings_resolver=resolver),
+            provisioner=OfficialBotProvisioner(
+                settings_resolver=resolver,
+                database_allocator=allocator,
+            ),
             worker_id="worker/official",
         )
         supervisor = CleanMultiBotSupervisor(
@@ -709,8 +716,9 @@ async def test_official_provisioner_materializes_module_authorities_without_star
         finally:
             await target.close()
     finally:
-        assert target_name.startswith("forest_bot_supply_") and len(target_name) == 50
+        assert target_name.startswith("forest_bot_") and len(target_name) == 35
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(target_name)))
+        await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(target_role)))
         await admin.close()
 
 
@@ -729,6 +737,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(repository.store)
     supervisor = SimpleNamespace(notify=lambda: None)
+    allocated_dsn = "postgresql://forest:hidden-password@postgres/forest_bot_web"
+    allocator = SimpleNamespace(
+        new_target_dsn=lambda _bot_id: allocated_dsn,
+        validate_target=lambda _bot_id, _target_dsn: None,
+    )
     app = create_deployment_management_app(
         deployment_id="deployment/test",
         components=deployment_management_components(
@@ -738,6 +751,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             bootstrap_profiles=bootstrap_profiles,
             jobs=jobs,
             supervisor=supervisor,
+            database_allocator=allocator,
         ),
         access_token="deployment-management-test-token",
     )
@@ -778,6 +792,36 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert listed.status_code == 200
         assert listed.json()["items"][0]["secret_ref"] == "secret://web/test"
         assert "never-return-this" not in listed.text
+        storage = await client.post(
+            "/management/v1/modules/deployment.provisioning/actions/storage.create-local",
+            headers={**headers, "idempotency-key": "storage-web-1"},
+            json={
+                "profile_ref": "storage-profile/web/1",
+                "bot_id": "bot/web",
+                "storage_generation": 1,
+                "dsn_secret_ref": "secret://web/storage",
+            },
+        )
+        assert storage.status_code == 200
+        assert storage.json() == {
+            "profile_ref": "storage-profile/web/1",
+            "bot_id": "bot/web",
+            "storage_generation": 1,
+            "dsn_secret_ref": "secret://web/storage",
+        }
+        assert "hidden-password" not in storage.text
+        assert await secrets.resolve_text("secret://web/storage") == allocated_dsn
+        replayed_storage = await client.post(
+            "/management/v1/modules/deployment.provisioning/actions/storage.create-local",
+            headers={**headers, "idempotency-key": "storage-web-1"},
+            json={
+                "profile_ref": "storage-profile/web/1",
+                "bot_id": "bot/web",
+                "storage_generation": 1,
+                "dsn_secret_ref": "secret://web/storage",
+            },
+        )
+        assert replayed_storage.json() == storage.json()
         schemas = await client.post(
             "/management/v1/modules/deployment.provisioning/queries/provisioning.schemas",
             headers=headers,
