@@ -33,3 +33,15 @@
 - 部署镜像 `forest:local` 对应 manifest `sha256:98cd18bc39b6782d8f9fa4e8ec6a03d770ec7751fa90602c083d635161335d48`，Supervisor 为 `running/healthy`。
 
 本次自动诊断和修复没有主动向 QQ 发送测试消息。失败的历史触发保留为可审计终态，不在数据库中篡改为待处理；下一次真人 mention 用于验证 4096 token 下的完整 PRIMARY/REPAIR/Delivery 链。
+
+## 真人触发验收结果
+
+修复部署后，真人再次在许可群 mention Bot。新消息以 ingress sequence 19 接纳并创建独立 Session/Run；最终状态如下：
+
+- Conversation trigger：`ANSWERED`；lane 的活动 Session/Run 均已清空，`context_applied_seq=19`。
+- Agent Run：`COMPLETED`，`next_step_seq=3`，执行一次 PRIMARY 和唯一一次 REPAIR；两次 TransportAttempt 均为一次成功，没有重试。
+- PRIMARY：16.680 秒，prompt 13,211 token，completion 4,096 token，`finish_reason=length`，可见正文 0 字节。
+- REPAIR：14.998 秒，prompt 13,306 token，completion 2,845 token，`finish_reason=stop`，候选正文 885 字节。
+- Delivery SendIntent：`SENT`，单 part；真人在 QQ 群确认收到回复。
+
+端到端结果正确，但总 Run 耗时 118.769 秒，其中 Memory query 从注册到冻结占 86.299 秒。QUERY embedding 的两个 facet 实际在约 1.34 秒内已经 READY，因此延迟位于 4096 维 DOCUMENT 向量排序阶段。当前 baseline 使用 PostgreSQL `real[]` 和逐元素 SQL `memory_vector_dot` 做全量精确排序；它在当前仅约 663 个 facet 的真实数据上已不满足交互延迟要求，也不能作为十万级完整向量召回的最终实现。该项必须改为可索引的向量检索后再宣告 Memory 性能验收完成。
