@@ -33,4 +33,4 @@ button.quiet { color:#bad0c5; background:#13251e; border:1px solid #315144; }
 .contribution-root { min-height:0; flex:1; overflow:hidden; padding:12px; }
 .contribution-view { height:100%; min-height:0; overflow:auto; }
 .notice { position:absolute; z-index:4; top:24px; right:24px; max-width:520px; padding:10px 14px; border:1px solid #77504b; border-radius:8px; background:#321b19; color:#ffc8c1; }
-@media (max-width:780px){.console{grid-template:54px 44px minmax(0,1fr)/1fr}.sidebar{border-right:0;border-bottom:1px solid #223a30}.sidebar-title{display:none}#module-nav{display:flex;overflow-x:auto;padding:4px}.workspace{grid-row:3}.module-row{grid-template-columns:1fr 90px}.module-row code{display:none}.runtime-line code{display:none}}
+@media (max-width:780px){.console{grid-template:54px 44px minmax(0,1fr)/1fr}.sidebar{border-right:0;border-bottom:1px solid #223a30}.sidebar-title{display:none}#module-nav{display:flex;overflow-x:auto;padding:4px}#module-nav button{flex:0 0 auto;width:auto;max-width:220px}.workspace{grid-row:3}.module-row{grid-template-columns:1fr 90px}.module-row code{display:none}.runtime-line code{display:none}}
