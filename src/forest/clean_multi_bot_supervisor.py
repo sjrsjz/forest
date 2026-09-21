@@ -325,7 +325,26 @@ class CleanMultiBotSupervisor:
             if not runner.stop.is_set():
                 runner.host = host
                 runner.management_accepting = True
-            await runner.stop.wait()
+            stop_task = asyncio.create_task(
+                runner.stop.wait(), name="bot-stop-wait/" + bot_id
+            )
+            supervision_task = getattr(host, "_supervision_task", None)
+            if supervision_task is None:
+                await stop_task
+            else:
+                done, _pending = await asyncio.wait(
+                    (stop_task, supervision_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if supervision_task in done and not runner.stop.is_set():
+                    stop_task.cancel()
+                    await asyncio.gather(stop_task, return_exceptions=True)
+                    await supervision_task
+                    raise ForestError(
+                        "BOT_RUNTIME_SUPERVISION_STOPPED",
+                        "Bot runtime supervision stopped unexpectedly",
+                        503,
+                    )
             runner.management_accepting = False
             runner.host = None
             async with runner.management_condition:

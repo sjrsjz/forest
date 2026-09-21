@@ -276,6 +276,8 @@ snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source
 
 所有资源注册到 `ResourceRegistry`，记录 owner、类型、数量/字节、创建点、关闭方法、超时和最终状态。`tasks.spawn_owned` 必须保存任务引用、观察异常、继承取消和 deadline。Worker 内 TaskGroup 之外的长任务必须登记为 Job 或组件后台任务。
 
+Bot 宿主必须持续监督当前 RuntimeGraph 报告的全部 owned task、HostLease 续租任务和图替换任务。任一仍属于当前图的任务取消、异常或无异常提前返回，都使该 Bot 宿主失败；多 Bot Supervisor 将准确错误码写入该 Bot 的 `FAILED` 观测并关闭其管理准入，不影响其他 Bot。热替换期间只在 replacement lock 两侧比较任务所有权：已经属于旧图的完成任务不得误伤新图，候选发布后新图任务立即进入监督集合。宿主关闭会先撤销监督，再按反向依赖排空模块，避免把预期取消误报为运行故障。
+
 Python 的 TaskGroup 在退出上下文时等待组内任务，裸 create_task 也需要保留强引用；SDK 在此基础上增加持久所有者与卸载协议，不能把 TaskGroup 本身当成崩溃恢复机制。基础行为见[Python asyncio 官方文档](https://docs.python.org/3.11/library/asyncio-task.html#task-groups)。
 
 关闭顺序：禁止新增资源 → 取消/排空子任务 → 停止订阅和计时器 → 关闭流和客户端 → 终止子进程 → 删除临时文件 → 释放句柄与租约。关闭每项有上限；超时仍需回收进程并报告未清理资源。

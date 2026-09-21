@@ -1249,3 +1249,78 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
         assert broken["retry_not_before"] is not None
     finally:
         await supervisor.close()
+
+
+@pytest.mark.postgres
+async def test_multi_bot_supervisor_marks_runtime_owned_task_failure(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    profile = await _storage_profile(repository, "bot/runtime-failure", "runtime-failure")
+    bootstrap = await _bootstrap_profile(repository, profile, "runtime-failure")
+    bot = await repository.register_ready(
+        operation_id="provision/runtime-failure",
+        bot_id="bot/runtime-failure",
+        display_name="Runtime Failure",
+        storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
+    )
+    await repository.set_desired(
+        operation_id="runtime/runtime-failure/online",
+        bot_id=bot["bot_id"],
+        desired_state="ONLINE",
+        expected_revision=bot["intent_revision"],
+    )
+
+    class FakeHost:
+        def __init__(self, settings):
+            self.settings = settings
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/" + settings.bot_id)
+            )
+            self._supervision_task = None
+
+        async def start(self):
+            async def fail():
+                await asyncio.sleep(0)
+                raise ForestError(
+                    "MEMORY_OWNED_TASK_FAILED",
+                    "Expected runtime-owned task failure",
+                    503,
+                )
+
+            self._supervision_task = asyncio.create_task(fail())
+
+        async def close(self):
+            if self._supervision_task is not None:
+                await asyncio.gather(self._supervision_task, return_exceptions=True)
+
+    secrets = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    supervisor = CleanMultiBotSupervisor(
+        repository,
+        storage_profiles=storage_profiles,
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn
+        ),
+        host_factory=FakeHost,
+        host_id="host/runtime-failure-test",
+        incarnation="incarnation/runtime-failure-test",
+        poll_seconds=0.05,
+    )
+    await supervisor.start()
+    try:
+        async def failed():
+            current = await repository.inspect("bot/runtime-failure")
+            return current["observed_state"] == "FAILED"
+
+        await _eventually(failed)
+        current = await repository.inspect("bot/runtime-failure")
+        assert current["error_code"] == "MEMORY_OWNED_TASK_FAILED"
+        assert supervisor.failure is None
+    finally:
+        await supervisor.close()

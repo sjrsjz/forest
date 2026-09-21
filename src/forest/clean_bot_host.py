@@ -267,6 +267,7 @@ class CleanBotHost:
         self._lease = None
         self._renewal_task: asyncio.Task | None = None
         self._replacement_task: asyncio.Task | None = None
+        self._supervision_task: asyncio.Task | None = None
         self._replacement_lock: asyncio.Lock | None = None
         self._closing = False
         self._host_id = f"forest:{settings.bot_id}"
@@ -607,6 +608,10 @@ class CleanBotHost:
                 self._run_graph_replacements(),
                 name=f"bot-graph-replacement:{self.settings.bot_id}",
             )
+            self._supervision_task = asyncio.create_task(
+                self._supervise_owned_tasks(),
+                name=f"bot-runtime-supervision:{self.settings.bot_id}",
+            )
         except BaseException:
             await self.close()
             raise
@@ -799,6 +804,74 @@ class CleanBotHost:
             await asyncio.sleep(10)
             self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
 
+    async def _supervise_owned_tasks(self) -> None:
+        """Fail the Bot host when a task still owned by its active graph stops."""
+
+        while not self._closing:
+            lock = self._replacement_lock
+            if lock is None:
+                raise ForestError(
+                    "RUNTIME_SUPERVISION_UNAVAILABLE",
+                    "Bot runtime supervision has no replacement lock",
+                    503,
+                )
+            async with lock:
+                registry = self.registry
+                watched = tuple(
+                    task
+                    for task in (
+                        self._renewal_task,
+                        self._replacement_task,
+                        *(registry.tasks() if registry is not None else ()),
+                    )
+                    if task is not None
+                )
+            if not watched:
+                raise ForestError(
+                    "RUNTIME_SUPERVISION_EMPTY",
+                    "Active Bot runtime owns no supervised tasks",
+                    503,
+                )
+            done, _pending = await asyncio.wait(
+                watched,
+                timeout=0.5,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                continue
+            async with lock:
+                if self._closing:
+                    return
+                registry = self.registry
+                current = {
+                    task
+                    for task in (
+                        self._renewal_task,
+                        self._replacement_task,
+                        *(registry.tasks() if registry is not None else ()),
+                    )
+                    if task is not None
+                }
+            failed = next((task for task in done if task in current), None)
+            if failed is None:
+                continue
+            if failed.cancelled():
+                raise ForestError(
+                    "RUNTIME_OWNED_TASK_CANCELLED",
+                    "An active runtime-owned task was cancelled",
+                    503,
+                    details={"task": failed.get_name()},
+                )
+            failure = failed.exception()
+            if failure is not None:
+                raise failure
+            raise ForestError(
+                "RUNTIME_OWNED_TASK_STOPPED",
+                "An active runtime-owned task stopped unexpectedly",
+                503,
+                details={"task": failed.get_name()},
+            )
+
     async def close(self) -> None:
         lock = self._replacement_lock
         if lock is None:
@@ -810,6 +883,10 @@ class CleanBotHost:
     async def _close_locked(self) -> None:
         self._closing = True
         failure = None
+        supervision, self._supervision_task = self._supervision_task, None
+        if supervision is not None:
+            supervision.cancel()
+            await asyncio.gather(supervision, return_exceptions=True)
         replacement, self._replacement_task = self._replacement_task, None
         if replacement is not None:
             replacement.cancel()
@@ -913,6 +990,7 @@ async def run_clean_bot(settings: CleanBotSettings) -> None:
                 management_task,
                 host._renewal_task,
                 host._replacement_task,
+                host._supervision_task,
             )
             if task is not None
         )

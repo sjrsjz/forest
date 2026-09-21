@@ -107,6 +107,75 @@ class FakeWebSocketClient:
 
 
 @pytest.mark.asyncio
+async def test_bot_host_supervision_propagates_current_module_task_failure():
+    async def fail():
+        await asyncio.sleep(0)
+        raise ForestError("MEMORY_WORKER_TEST_FAILED", "expected worker failure", 503)
+
+    async def keep_running():
+        await asyncio.Event().wait()
+
+    failed = asyncio.create_task(fail(), name="memory-owned-test")
+    renewal = asyncio.create_task(keep_running(), name="renewal-test")
+    replacement = asyncio.create_task(keep_running(), name="replacement-test")
+    host = object.__new__(CleanBotHost)
+    host._closing = False
+    host._replacement_lock = asyncio.Lock()
+    host._renewal_task = renewal
+    host._replacement_task = replacement
+    host.registry = SimpleNamespace(tasks=lambda: (failed,))
+    try:
+        with pytest.raises(ForestError) as caught:
+            await host._supervise_owned_tasks()
+        assert caught.value.code == "MEMORY_WORKER_TEST_FAILED"
+    finally:
+        renewal.cancel()
+        replacement.cancel()
+        await asyncio.gather(renewal, replacement, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bot_host_supervision_ignores_tasks_from_superseded_graph():
+    old_release = asyncio.Event()
+    new_release = asyncio.Event()
+
+    async def wait_for(event):
+        await event.wait()
+
+    old_task = asyncio.create_task(wait_for(old_release), name="old-graph-worker")
+    new_task = asyncio.create_task(wait_for(new_release), name="new-graph-worker")
+    renewal = asyncio.create_task(wait_for(new_release), name="renewal-test")
+    replacement = asyncio.create_task(wait_for(new_release), name="replacement-test")
+    host = object.__new__(CleanBotHost)
+    host._closing = False
+    host._replacement_lock = asyncio.Lock()
+    host._renewal_task = renewal
+    host._replacement_task = replacement
+    host.registry = SimpleNamespace(tasks=lambda: (old_task,))
+    supervision = asyncio.create_task(host._supervise_owned_tasks())
+    try:
+        await asyncio.sleep(0)
+        async with host._replacement_lock:
+            host.registry = SimpleNamespace(tasks=lambda: (new_task,))
+            old_release.set()
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+        assert not supervision.done()
+    finally:
+        host._closing = True
+        for task in (supervision, new_task, renewal, replacement):
+            task.cancel()
+        await asyncio.gather(
+            supervision,
+            old_task,
+            new_task,
+            renewal,
+            replacement,
+            return_exceptions=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_approval_decision_wakes_only_its_exact_conversation_blocker():
     class FakeAgent:
         async def approval_context(self, approval_ref):
