@@ -207,6 +207,8 @@ async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_ch
 
 
 class _Contract(CleanModuleConfigurationContract):
+    transaction = object()
+
     async def query(self, query_id, payload):
         return {"query_id": query_id, "payload": payload}
 
@@ -219,6 +221,18 @@ class _Contract(CleanModuleConfigurationContract):
         authorization=None,
         authorization_guard=None,
     ):
+        if authorization_guard is not None:
+            await authorization_guard(
+                self.transaction,
+                ticket=authorization,
+                component_id="test.component",
+                operation_id=operation_id,
+                action_key=action_id,
+                input_digest="sha256:" + hashlib.sha256(
+                    b'{"enabled":false}'
+                ).hexdigest(),
+                plan_digest=None,
+            )
         return CleanManagementActionResult(
             {"action_id": action_id, "operation_id": operation_id, "payload": payload}
         )
@@ -296,11 +310,42 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
         _Configuration(),
         schema={"type": "object", "properties": {"enabled": {"type": "boolean"}}},
     )
+    accepted_receipts = []
+    audit_records = []
+
+    class RuntimeAuthority:
+        async def verify_active_generation_in(
+            self, conn, *, component_id, generation_id, admission_lane
+        ):
+            assert conn is _Contract.transaction
+            assert (component_id, generation_id, admission_lane) == (
+                "test.component",
+                "generation/test/1",
+                "CONTROL",
+            )
+            return SimpleNamespace(graph_revision=1)
+
+    class AuthorizationAuthority:
+        async def accept_web_authority_ticket_in(self, conn, *, ticket):
+            assert conn is _Contract.transaction
+            receipt = {"ticket_id": ticket.ticket_id}
+            accepted_receipts.append(receipt)
+            return receipt
+
+    class AuditAuthority:
+        async def append_in(self, conn, envelope):
+            assert conn is _Contract.transaction
+            audit_records.append(envelope)
+            return {"audit_id": envelope.audit_id}
+
     host = SimpleNamespace(
         settings=SimpleNamespace(bot_id="bot/managed"),
         generation_authority=_GenerationAuthority(),
         _kernel=SimpleNamespace(
-            configurations={"kernel.authorization": _PolicyConfiguration()}
+            configurations={"kernel.authorization": _PolicyConfiguration()},
+            runtime=RuntimeAuthority(),
+            authorization=AuthorizationAuthority(),
+            audit=AuditAuthority(),
         ),
     )
     host.registry = _Registry(SimpleNamespace(management_contract=contract))
@@ -407,6 +452,27 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
         assert action.json()["action_id"] == "test.action"
         assert action.json()["operation_id"].startswith("web:sha256:")
         assert action.json()["graph_id"] == "graph/managed"
+        assert len(accepted_receipts) == 1
+        assert len(audit_records) == 1
+        audit = audit_records[0]
+        assert audit.action == "test.action"
+        assert audit.severity == "SECURITY"
+        assert audit.producer_component_id == "test.component"
+        assert audit.producer_generation_id == "generation/test/1"
+        assert audit.origin_kind == "web.management"
+        assert (audit.actor_kind, audit.actor_id) == (
+            "web.subject",
+            "web-subject/test",
+        )
+        assert (audit.resource_kind, audit.resource_id) == (
+            "bot.component",
+            "test.component",
+        )
+        assert (audit.operation_kind, audit.operation_id) == (
+            "web.action",
+            action.json()["operation_id"],
+        )
+        assert audit.call_id == accepted_receipts[0]["ticket_id"]
         identity.subject = WebSubject(
             identity.subject.subject_id,
             identity.subject.username,

@@ -19,6 +19,7 @@ from forest.clean_management_contract import (
 )
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.storage.kernel_audit import AuditEnvelope
 from forest.web_operation_policy import authorize_web_operation
 
 
@@ -223,9 +224,38 @@ class CleanManagementGateway:
             action_key=action_key,
             conn=conn,
         )
-        return await self.host._kernel.authorization.accept_web_authority_ticket_in(
+        receipt = await self.host._kernel.authorization.accept_web_authority_ticket_in(
             conn, ticket=ticket
         )
+        audit = getattr(self.host._kernel, "audit", None)
+        if audit is None:
+            raise ForestError(
+                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                "Bot Web audit authority is unavailable",
+                503,
+            )
+        audit_id = "audit:web:" + hashlib.sha256(
+            (self.host.settings.bot_id + "\0" + operation_id).encode()
+        ).hexdigest()
+        await audit.append_in(
+            conn,
+            AuditEnvelope(
+                audit_id=audit_id,
+                action=action_key,
+                severity="SECURITY",
+                producer_component_id=component_id,
+                producer_generation_id=ticket.target_generation_id,
+                origin_kind="web.management",
+                actor_kind="web.subject",
+                actor_id=ticket.web_subject_ref,
+                resource_kind="bot.component",
+                resource_id=component_id,
+                operation_kind="web.action",
+                operation_id=operation_id,
+                call_id=receipt["ticket_id"],
+            ),
+        )
+        return receipt
 
     async def runtime(self, *, authorization=None, operation_id=None) -> dict:
         await self._authorize(
