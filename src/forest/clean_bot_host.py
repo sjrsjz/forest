@@ -20,6 +20,7 @@ from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
+from forest.clean_process_executor_module import bootstrap_clean_process_executor
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
@@ -526,6 +527,11 @@ class CleanBotHost:
             self.schema_bundle_installer,
             kernel=self._kernel,
         )
+        process_executor = await bootstrap_clean_process_executor(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+        )
 
         token_digest = (
             "sha256:" + hashlib.sha256(self.settings.onebot_access_token.encode()).hexdigest()
@@ -574,6 +580,7 @@ class CleanBotHost:
                 media.descriptor,
                 agent.descriptor,
                 trigger.descriptor,
+                process_executor.descriptor,
                 jobs.descriptor,
                 shell.descriptor,
             )

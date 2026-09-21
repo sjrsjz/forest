@@ -26,6 +26,7 @@
 | `memory.graph` | source/trunk、payload/media 引用、capture、graph、embedding、retrieval evidence、记忆资格与 suppression 引用 | Payload 正文与 Bot deletion clock、Agent 执行所有权、平台发送状态 |
 | `shell.command` | 按 Binding/群/主体生效的管理员策略、规范命令请求、资格/接纳事实、claim、类型化参数与回执引用、当前命令 registry | 平台连接、Inbox/Context、任意管理 API 地址或 Web 管理员会话 |
 | `scheduler.jobs` | Job 定义、occurrence、lease 与触发结果引用 | 第二条 Agent 执行链或独立模型配置 |
+| `process.executor` | 仅有标准模块配置账本；执行结果引用由 Job 持有，stdout/stderr 正文由 Payload 持有 | Job lease/状态、任意 shell 文本、请求方覆盖的路径或环境、输出正文副本 |
 | `delivery` | SendIntent、part、attempt、resolution 与因果引用 | Adapter 私有 socket、Agent 历史副本 |
 
 模块表放入由 bundle 分配的独占 PostgreSQL schema。模块运行角色只拥有该 schema 的 DML 权限和明确批准的内核函数；第三方 Worker 不获得数据库连接。官方受信模块也必须经自己的 Repository 访问，不能借同进程身份跨模块 join。跨模块原子流程使用内核主持的类型化 transaction participant 或 outbox/effect 协议；不能靠某模块直接更新另一模块的表来“方便地”完成事务。

@@ -1,0 +1,2 @@
+-- Process Executor owns no business rows. Durable task state belongs to
+-- job.scheduler and stdout/stderr bodies belong to kernel.payload.

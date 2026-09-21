@@ -4,12 +4,12 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 16 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 17 个成员：
 
 - `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
 - `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`media.capture`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`；
-- `adapter.onebot`、`delivery`、`job.scheduler`、`shell.command`。
+- `adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command`。
 
 OneBot 消息进入后，Adapter 只做协议校验、身份归一化和载荷落库。`conversation.trigger-policy` 根据冻结配置给出 `TRIGGER` 或 `NO_TRIGGER`；内核 OneBot ingress UoW 在同一事务中提交平台事件、Conversation Inbox、群主干 Memory 来源与分类结果。Scheduler 因此不再依赖测试或管理端手工补写触发记录。
 
@@ -104,7 +104,6 @@ Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 动态
 
 ## 仍需补齐的能力
 
-- 受控原生 `ExecutionProfile` 的隔离执行后端；模块贡献式持久任务、群聊命令和 Web 工作区已经进入当前图；
 - OneBot 长连接抖动、候选发布后进程崩溃及持续流量压力验证；真实实例的正常 Generation 热替换与 Supervisor 重启恢复已经通过；
 - 许可群中的低频消息、图片和排队行为需由真人触发完成最终验收，自动验收不得主动向群发送消息。
 

@@ -66,6 +66,8 @@ RuntimeShellCommandContribution {
 
 当前 `job.scheduler` 提供 `jobs list/inspect/run/cancel`，但不拥有具体任务语义。执行模块通过 `RuntimeJobTypeContribution` 声明稳定任务类型、版本、输入 schema、服务、超时、最大尝试和并发上限；Scheduler 在 claim 时冻结准确 provider Generation，并以持久 lease/token 拒绝旧 Worker 的迟到结果。热替换先排空旧 Scheduler 已领取任务，新 Generation 才继续领取排队任务。`jobs cancel` 使用调用者看到的 job revision：排队任务直接终结，运行中任务只登记可观察的取消意图，由执行器在安全点响应；已经产生的真实结果不能被改写成“从未执行”。首个内置类型为只读 `runtime.health-snapshot`。
 
+官方 `process.executor` 是普通执行模块，通过同一目录贡献 `native.execute`，不向 Shell 暴露命令行解释器。其 Generation 配置保存部署方预登记的 ExecutionProfile：固定可执行文件绝对路径与 SHA-256、参数 JSON Schema 到 argv 的逐项映射、固定工作目录与环境、执行身份、网络策略及资源上限。调用方只能给出 profile ID 和 schema 参数；路径、环境和 argv 结构不能随请求覆盖。执行器启动前复验常规文件、权限和摘要，使用无 shell 的 `execve`；请求取消或墙钟超时时对整个进程组先 TERM 后 KILL。stdout/stderr 持续排水并按 profile 上限保存为 `kernel.payload`，群回执只展示任务状态和 artifact 引用。Linux 的网络拒绝策略使用 seccomp；平台不支持请求的隔离时拒绝激活该配置，绝不回退为不受控执行。
+
 `kernel.audit` 贡献 `audit tail`，允许按 `action`、`producer_component_id`、`origin_kind`、资源二元组、操作二元组和 `before` 游标筛选，单页最多十项。回执只投影时间、级别、动作、生产者、主体、资源、操作和稳定 audit ID，不读取详情载荷正文。查询句柄必须由当前 `kernel.audit` Generation 提供；Shell 结果、CONTROL SendIntent 与对应不可变审计 envelope 在同一 UnitOfWork 中提交，任一参与者失败时整体回滚。
 
 `RuntimeModuleDescriptor.shell_commands` 是唯一命令目录。命令词由 `command_id` 的点分段确定，参数名和类型来自完整 Draft 2020-12 schema，CLI 风格别名只能显式映射到 schema 中已声明的属性。RuntimeGraph 构建时拒绝重复 `(command_id, command_version)`；Contract Router 只向 `shell.command` 暴露贡献目录，并为每项解析由贡献模块准确 Generation 提供的类型化服务句柄。Shell 不按命令 ID 导入模块，也不含模块命令分支。

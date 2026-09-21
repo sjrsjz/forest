@@ -55,6 +55,7 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 | `agent.runtime` | Session/Run、CorePrompt 协议、ModelTurn、工具步骤、模型 attempt 与 checkpoint |
 | `memory.graph` | Bot 全局记忆、群主干、来源、图关系、召回、遗忘与派生索引资格 |
 | `shell.command` | 管理员策略、命令注册、控制请求、优先级资格与结果 |
+| `process.executor` | 预登记 ExecutionProfile、固定 argv 投影、子进程隔离、资源限制与输出工件 |
 | `delivery` | CHAT/CONTROL lane、SendIntent、part、attempt、UNKNOWN 与对账 |
 | `provider.*` / `embedding.*` / `media.*` / `tool.*` | 对应外部能力、客户端、预算、工件和执行观察 |
 | `routing.graph` / `command.router` / `message.router` | 冻结路由、业务命令/消息处理策略、dispatch trace 与相关持久工作 |

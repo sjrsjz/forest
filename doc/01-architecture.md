@@ -123,6 +123,7 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | `tool.*` | 受权工具请求 → 有类型结果 | 工具执行账本；外部操作结果 | 按幂等分类恢复、对账或失败 |
 | `memory.*` | 存储、召回、整理、遗忘 | Bot 全局事实库；索引为派生数据 | 降级至授权后的事实检索；不切换其他 Bot 库 |
 | `scheduler.jobs` | 定时/事件触发 → 持久 Job/Run | job 表与 lease | 恢复后按 misfire 策略处理 |
+| `process.executor` | profile ID 与类型化参数 → 原生进程结果和输出工件 | 固定路径/摘要、argv 模板、UID/GID、环境、网络与资源策略；任务状态仍归 `job.scheduler` | 隔离能力、身份、摘要或目录权限不满足时拒绝 Generation；取消按进程组收敛 |
 | `renderer.*` | 类型化文档 → 媒体引用 | 临时资源、媒体对象引用 | 返回明确失败或文本备选 |
 | `delivery` | SendIntent → effect permit → Adapter transport attempt → 结算 | lane、intent、part、claim、attempt、observation 与 resolution；不拥有 socket 或 Context | 平台限流、重连、UNKNOWN 只按证据对账 |
 | `management.web` 与控制台宿主 | 模块注册投影、沙箱 UI 消息、HTTP查询与事件订阅 → 类型化控制操作 | 账号会话、配置修订与请求关联按05划定权威；复用既有执行账本 | 官方首版必需；不硬编码 Agent/Memory 业务语义；UI/API故障不影响已接纳操作和其他业务，CLI/可用Shell仍可维护 |

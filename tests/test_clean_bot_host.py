@@ -510,6 +510,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "media.capture",
                     "agent.runtime",
                     "conversation.trigger-policy",
+                    "process.executor",
                     "job.scheduler",
                     "shell.command",
                     "conversation.scheduler",
@@ -1165,7 +1166,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         )
                         assert job_types.status_code == 200
                         assert [item["job_type"] for item in job_types.json()["items"]] == [
-                            "runtime.health-snapshot"
+                            "native.execute",
+                            "runtime.health-snapshot",
                         ]
                         web_job = await web.post(
                             "/management/v1/modules/job.scheduler/actions/jobs.run",

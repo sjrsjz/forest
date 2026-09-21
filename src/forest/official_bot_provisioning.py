@@ -368,6 +368,7 @@ class OfficialBotProvisioner:
             "conversation.scheduler",
             "adapter.onebot",
             "delivery",
+            "process.executor",
             "job.scheduler",
             "shell.command",
         }:
