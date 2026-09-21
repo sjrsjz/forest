@@ -218,6 +218,33 @@ async def test_official_bundle_profile_is_persisted_and_part_of_identity(clean_a
             )
 
 
+def test_official_storage_identity_is_independent_from_runtime_distribution():
+    runtime_artifact = official_artifact("bot")
+    first = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    repeated = official_storage_bundle(
+        "kernel.runtime",
+        "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1",
+        "storage/official/kernel_runtime.sql",
+    )
+    another = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+
+    assert first.package_digest == repeated.package_digest
+    assert first.package_digest != runtime_artifact.package_digest
+    assert first.package_digest != another.package_digest
+    assert first.as_fact()["package_digest"] == first.package_digest
+
+
 @pytest.mark.postgres
 async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean_authority):
     store, installer = clean_authority
@@ -466,6 +493,7 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
         runtime_storage.spec.schema_version,
         runtime_storage.spec.namespace,
         runtime_storage.spec.baseline_sha256,
+        runtime_storage.package_digest,
         runtime_storage.spec.repository_contract,
         runtime_storage.execution_profile,
     )
@@ -680,6 +708,7 @@ async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_au
         "1.0.0",
         "forest_m_missing",
         "a" * 64,
+        "sha256:" + "a" * 64,
         "missing/1",
         "official",
     )
@@ -1136,6 +1165,7 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
         runtime_storage.spec.schema_version,
         runtime_storage.spec.namespace,
         runtime_storage.spec.baseline_sha256,
+        runtime_storage.package_digest,
         runtime_storage.spec.repository_contract,
         runtime_storage.execution_profile,
     )

@@ -11,6 +11,7 @@ class RuntimeStorageBinding:
     schema_version: str
     namespace: str
     baseline_sha256: str
+    package_digest: str
     repository_contract: str
     execution_profile: str
 
@@ -20,6 +21,7 @@ class RuntimeStorageBinding:
             "schema_version": self.schema_version,
             "namespace": self.namespace,
             "baseline_sha256": self.baseline_sha256,
+            "package_digest": self.package_digest,
             "repository_contract": self.repository_contract,
             "execution_profile": self.execution_profile,
         }

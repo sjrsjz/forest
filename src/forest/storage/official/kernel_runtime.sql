@@ -246,6 +246,9 @@ CREATE TABLE runtime_graph_modules (
     storage_schema_version text,
     storage_namespace text,
     storage_baseline_sha256 text,
+    storage_package_digest text CHECK (
+        storage_package_digest IS NULL OR storage_package_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     storage_repository_contract text,
     storage_execution_profile text CHECK (
         storage_execution_profile IS NULL
@@ -258,10 +261,11 @@ CREATE TABLE runtime_graph_modules (
     CHECK (
         (storage_schema_id IS NULL AND storage_schema_version IS NULL
             AND storage_namespace IS NULL AND storage_baseline_sha256 IS NULL
-            AND storage_repository_contract IS NULL AND storage_execution_profile IS NULL)
+            AND storage_package_digest IS NULL AND storage_repository_contract IS NULL
+            AND storage_execution_profile IS NULL)
         OR (storage_schema_id IS NOT NULL AND storage_schema_version IS NOT NULL
             AND storage_namespace IS NOT NULL AND storage_baseline_sha256 IS NOT NULL
-            AND storage_repository_contract IS NOT NULL
+            AND storage_package_digest IS NOT NULL AND storage_repository_contract IS NOT NULL
             AND storage_execution_profile IS NOT NULL)
     )
 );

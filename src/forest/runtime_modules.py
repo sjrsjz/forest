@@ -440,12 +440,17 @@ def official_storage_bundle(
     repository_contract: str,
     resource: str,
 ) -> RuntimeStorageBundle:
-    """Bind one packaged official baseline to the complete distribution identity."""
+    """Bind one official baseline to a storage-only content identity.
+
+    Runtime code and trusted management assets belong to the Generation artifact
+    digest.  The schema ledger must only change when this module's baseline or
+    storage contract changes; otherwise an unrelated UI edit would make an
+    unchanged database look incompatible.
+    """
 
     common = files("forest").joinpath("storage/official/module_configuration.sql").read_bytes()
     owned = files("forest").joinpath(resource).read_bytes()
     baseline = common + b"\n" + owned
-    artifact = official_artifact("bot")
     spec = StorageBundleSpec(
         component_id=component_id,
         schema_id=schema_id,
@@ -453,10 +458,19 @@ def official_storage_bundle(
         baseline_sha256=hashlib.sha256(baseline).hexdigest(),
         repository_contract=repository_contract,
     )
+    storage_digest = digest_json(
+        {
+            "protocol": "forest.official-storage-bundle/1",
+            "package_id": "forest",
+            "component_id": component_id,
+            "schema": spec.as_fact(),
+            "execution_profile": "official",
+        }
+    )
     return RuntimeStorageBundle(
         spec,
         baseline,
-        artifact.package_digest,
+        storage_digest,
         execution_profile="official",
     )
 
@@ -667,6 +681,7 @@ class RuntimeModuleRegistry:
                 descriptor.storage.spec.schema_version,
                 descriptor.storage.spec.namespace,
                 descriptor.storage.spec.baseline_sha256,
+                descriptor.storage.package_digest,
                 descriptor.storage.spec.repository_contract,
                 descriptor.storage.execution_profile,
             )
@@ -853,7 +868,11 @@ class RuntimeModuleRegistry:
                     descriptor.storage is not None
                     and (
                         descriptor.storage.spec.component_id != identity
-                        or descriptor.storage.package_digest != descriptor.artifact.package_digest
+                        or (
+                            descriptor.storage.execution_profile != "official"
+                            and descriptor.storage.package_digest
+                            != descriptor.artifact.package_digest
+                        )
                         or (
                             descriptor.storage.execution_profile == "official"
                             and descriptor.artifact.trust_level != "official"

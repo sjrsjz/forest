@@ -837,9 +837,9 @@ class KernelRuntimeRepository:
                         "package_version,package_digest,driver,trust_level,descriptor_digest,"
                         "route_contract_digest,management_contract_digest,management_ui_digest,"
                         "data_admission,control_admission,storage_schema_id,storage_schema_version,"
-                        "storage_namespace,storage_baseline_sha256,storage_repository_contract,"
-                        "storage_execution_profile) VALUES "
-                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                        "storage_namespace,storage_baseline_sha256,storage_package_digest,"
+                        "storage_repository_contract,storage_execution_profile) VALUES "
+                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
                     ).format(self._table("runtime_graph_modules")),
                     (
                         self.store.bot_id,
@@ -861,6 +861,7 @@ class KernelRuntimeRepository:
                         storage.schema_version if storage else None,
                         storage.namespace if storage else None,
                         storage.baseline_sha256 if storage else None,
+                        storage.package_digest if storage else None,
                         storage.repository_contract if storage else None,
                         storage.execution_profile if storage else None,
                     ),
@@ -1313,7 +1314,7 @@ class KernelRuntimeRepository:
             "schema_version": storage.schema_version,
             "namespace": storage.namespace,
             "baseline_sha256": storage.baseline_sha256,
-            "package_digest": binding.package_digest,
+            "package_digest": storage.package_digest,
             "repository_contract": storage.repository_contract,
             "execution_profile": storage.execution_profile,
             "state": "READY",
@@ -1552,6 +1553,7 @@ class KernelRuntimeRepository:
                     )
                 )
                 or not _RAW_DIGEST.fullmatch(storage.baseline_sha256)
+                or not _DIGEST.fullmatch(storage.package_digest)
                 or storage.execution_profile not in {"declarative", "official"}
             )
             if (
