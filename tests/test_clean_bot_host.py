@@ -1048,6 +1048,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert (await web.get("/static/modules/clean-jobs.html")).status_code == 200
                         assert (await web.get("/static/clean-jobs.js")).status_code == 200
                         assert (
+                            await web.get("/static/modules/clean-process-executor.html")
+                        ).status_code == 200
+                        assert (
+                            await web.get("/static/clean-process-executor.js")
+                        ).status_code == 200
+                        assert (
+                            await web.get("/static/modules/clean-process-executor.css")
+                        ).status_code == 200
+                        assert (
                             await web.get("/static/modules/clean-delivery.html")
                         ).status_code == 200
                         assert (await web.get("/static/clean-delivery.js")).status_code == 200
@@ -1070,6 +1079,32 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert embedding_view["management_contributions"][0][
                             "contribution_id"
                         ] == "configuration"
+                        executor_view = next(
+                            item
+                            for item in runtime_view.json()["modules"]
+                            if item["component_id"] == "process.executor"
+                        )
+                        assert executor_view["management_contributions"] == [
+                            {
+                                "protocol": "forest.management-contribution/1",
+                                "contribution_id": "configuration",
+                                "label": "受控进程执行",
+                                "scope_kinds": ["bot"],
+                                "group": "configuration",
+                                "order": 10,
+                                "surface": {
+                                    "kind": "trusted-module",
+                                    "protocol": "forest.trusted-management-view/1",
+                                    "template": (
+                                        "/static/modules/clean-process-executor.html"
+                                    ),
+                                    "module": "/static/clean-process-executor.js",
+                                    "style": (
+                                        "/static/modules/clean-process-executor.css"
+                                    ),
+                                },
+                            }
+                        ]
                         agent_view = next(
                             item
                             for item in runtime_view.json()["modules"]

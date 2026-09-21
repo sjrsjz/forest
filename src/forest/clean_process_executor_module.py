@@ -9,8 +9,8 @@ from forest.packages import digest_json
 from forest.process_executor_runtime import ProcessExecutorRuntime
 from forest.runtime_modules import (
     RuntimeJobTypeContribution,
+    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
-    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -211,7 +211,18 @@ async def bootstrap_clean_process_executor(store, installer, *, kernel):
         ("kernel.runtime", "kernel.payload", "kernel.authorization"),
         factory,
         official_artifact("bot"),
-        management=(configuration_management_contribution("受控进程执行"),),
+        management=(
+            RuntimeManagementContribution(
+                "configuration",
+                "受控进程执行",
+                ("bot",),
+                "/static/modules/clean-process-executor.html",
+                "/static/clean-process-executor.js",
+                style="/static/modules/clean-process-executor.css",
+                group="configuration",
+                order=10,
+            ),
+        ),
         storage=storage,
         job_types=(NATIVE_EXECUTE_JOB,),
     )

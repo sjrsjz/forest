@@ -1,0 +1,56 @@
+<div class="contribution-view executor-workbench">
+  <header class="executor-head">
+    <div><strong>ExecutionProfile</strong><p id="executor-state">读取模块配置…</p></div>
+    <div class="executor-actions">
+      <button id="executor-template" class="quiet" type="button">新增诊断模板</button>
+      <button id="executor-add" class="quiet" type="button">新增 Profile</button>
+      <button id="executor-apply" type="button">预览并应用</button>
+    </div>
+  </header>
+  <div class="executor-body">
+    <aside class="executor-sidebar">
+      <div class="executor-sidebar-head"><span>已配置 Profile</span><strong id="executor-count">0</strong></div>
+      <div id="executor-list" class="executor-list"></div>
+    </aside>
+    <main class="executor-editor">
+      <div id="executor-empty" class="executor-empty">选择或新增一个 ExecutionProfile。</div>
+      <div id="executor-form" class="executor-form hidden">
+        <section>
+          <h3>身份与可执行文件</h3>
+          <div class="executor-fields executor-fields-wide">
+            <label>Profile ID<input id="executor-id" maxlength="64" autocomplete="off"></label>
+            <label>可执行文件绝对路径<input id="executor-path" maxlength="4096" autocomplete="off"></label>
+            <label class="span-all">SHA-256<input id="executor-sha" maxlength="71" autocomplete="off"></label>
+            <label>工作目录<input id="executor-workdir" maxlength="4096" autocomplete="off"></label>
+            <label>网络策略<select id="executor-network"><option value="deny">deny</option><option value="inherit">inherit</option></select></label>
+            <label>UID<input id="executor-uid" type="number" min="0" step="1"></label>
+            <label>GID<input id="executor-gid" type="number" min="0" step="1"></label>
+            <label class="executor-check span-all"><input id="executor-posix" type="checkbox">必须匹配声明身份并启用 POSIX limits</label>
+          </div>
+        </section>
+        <section>
+          <h3>参数投影</h3>
+          <div class="executor-json-grid">
+            <label>arguments_schema<textarea id="executor-arguments-schema" spellcheck="false"></textarea></label>
+            <label>argv 模板<textarea id="executor-argv" spellcheck="false"></textarea></label>
+            <label>固定环境变量<textarea id="executor-environment" spellcheck="false"></textarea></label>
+          </div>
+        </section>
+        <section>
+          <h3>资源上限</h3>
+          <div class="executor-fields executor-limits">
+            <label>CPU 秒<input id="executor-cpu" type="number" min="1" max="3600" step="1"></label>
+            <label>内存字节<input id="executor-memory" type="number" min="16777216" max="68719476736" step="1"></label>
+            <label>墙钟秒<input id="executor-wall" type="number" min="1" max="3600" step="1"></label>
+            <label>输出字节<input id="executor-output" type="number" min="1024" max="33554432" step="1"></label>
+            <label>打开文件数<input id="executor-files" type="number" min="8" max="4096" step="1"></label>
+            <label>进程数<input id="executor-processes" type="number" min="1" max="1024" step="1"></label>
+            <label>终止宽限秒<input id="executor-grace" type="number" min="1" max="60" step="1"></label>
+          </div>
+        </section>
+        <footer><button id="executor-remove" class="danger" type="button">删除当前 Profile</button></footer>
+      </div>
+    </main>
+  </div>
+  <details class="executor-contract"><summary>配置契约</summary><pre id="executor-contract"></pre></details>
+</div>
