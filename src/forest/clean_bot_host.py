@@ -18,7 +18,7 @@ from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
 from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_media_module import bootstrap_clean_media
-from forest.clean_memory_module import bootstrap_clean_memory
+from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_process_executor_module import bootstrap_clean_process_executor
 from forest.clean_provider_module import bootstrap_clean_provider
@@ -539,21 +539,13 @@ class CleanBotHost:
             token_resolver=resolve_vector_index_token,
             **vector_index_options,
         )
+        memory_configuration = default_memory_configuration()
+        memory_configuration["embedding"] = embedding_profile
         memory = await bootstrap_clean_memory(
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.memory.graph/1",
-                "embedding": embedding_profile,
-                "fusion_policy_revision": "independent-facets/1",
-                "embedding_budget": {
-                    "policy_revision": "daily-cost-cap/1",
-                    "daily_request_limit": 1000,
-                    "daily_token_limit": 10000000,
-                    "reservation_tokens": 32768,
-                },
-            },
+            initial_configuration=memory_configuration,
         )
         media_options = {}
         if self._media_client_factory is not None:

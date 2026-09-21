@@ -1,7 +1,8 @@
-"""Atomic final reply commit across Agent, Conversation, and Delivery authorities."""
+"""Atomic final reply commit across Agent, Conversation, Delivery, and Memory."""
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from dataclasses import dataclass
 
@@ -37,6 +38,7 @@ class FinalReplyPlan:
     channel_ref: str
     delivery_generation_id: str
     parts: tuple
+    association_input_batch_refs: tuple[str, ...] = ()
 
 
 class FinalReplyUnitOfWork:
@@ -54,19 +56,24 @@ class FinalReplyUnitOfWork:
         agent_participant,
         conversation_participant,
         delivery_participant,
+        memory_participant=None,
         generation_member_verifier,
         participants: tuple[RuntimeParticipant, ...],
     ) -> None:
         expected = {"agent.runtime", "conversation.scheduler", "delivery"}
+        if memory_participant is not None:
+            expected.add("memory.graph")
         actual = {item.component_id for item in participants}
-        if len(participants) != 3 or actual != expected:
-            raise ValueError("final reply requires exact Agent, Conversation, and Delivery participants")
+        if len(participants) != len(expected) or actual != expected:
+            names = ", ".join(sorted(expected))
+            raise ValueError(f"final reply requires exact participants: {names}")
         if generation_member_verifier is None:
             raise ValueError("final reply Generation verifier is required")
         self.store = store
         self.agent_participant = agent_participant
         self.conversation_participant = conversation_participant
         self.delivery_participant = delivery_participant
+        self.memory_participant = memory_participant
         self.generation_member_verifier = generation_member_verifier
         self.participants = tuple(sorted(participants, key=lambda item: item.component_id))
         self._generation_ids = {
@@ -135,8 +142,26 @@ class FinalReplyUnitOfWork:
                 reply_ref=plan.reply_ref,
                 parts=plan.parts,
             )
+            association_result = None
+            if self.memory_participant is not None and plan.association_input_batch_refs:
+                event_refs = await self.conversation_participant.answered_trigger_events_in(
+                    conn,
+                    trigger_ids=plan.answered_trigger_ids,
+                )
+                deletion_epoch = await self.memory_participant.deletion_epoch_in(conn)
+                association_result = await self.memory_participant.record_reply_associations_in(
+                    conn,
+                    operation_id="reply-association:"
+                    + hashlib.sha256(plan.run_ref.encode("utf-8")).hexdigest(),
+                    reply_ref=plan.reply_ref,
+                    conversation_ref=actor.conversation_id,
+                    trigger_event_refs=event_refs,
+                    input_batch_refs=plan.association_input_batch_refs,
+                    expected_deletion_epoch=deletion_epoch,
+                )
             return {
                 "agent": agent_result,
                 "context": context_result,
                 "delivery": delivery_result,
+                "memory_associations": association_result,
             }

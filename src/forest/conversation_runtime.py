@@ -407,6 +407,14 @@ class CleanConversationSchedulerRuntime:
         await self._verify_member(conn)
         return await self.repository.verify_input_batch_occurrence_in(conn, **values)
 
+    async def verify_context_archive_occurrence_in(self, conn, **values):
+        await self._verify_member(conn)
+        return await self.repository.verify_context_archive_occurrence_in(conn, **values)
+
+    async def answered_trigger_events_in(self, conn, **values):
+        await self._verify_member(conn)
+        return await self.repository.answered_trigger_events_in(conn, **values)
+
     async def requeue_run(self, actor, **values):
         return await self._repository_call(
             "requeue_run_in",

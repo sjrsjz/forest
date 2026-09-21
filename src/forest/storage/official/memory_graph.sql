@@ -168,7 +168,7 @@ CREATE TABLE source_occurrences (
     ),
     context_revision bigint CHECK (context_revision IS NULL OR context_revision > 0),
     eligibility_state text NOT NULL DEFAULT 'REGISTERED' CHECK (
-        eligibility_state IN ('REGISTERED','ELIGIBLE','SUPPRESSED')
+        eligibility_state IN ('REGISTERED','ADMITTED','ELIGIBLE','SUPPRESSED')
     ),
     observed_at timestamptz NOT NULL,
     qualified_at timestamptz,
@@ -177,7 +177,10 @@ CREATE TABLE source_occurrences (
     UNIQUE (bot_id,conversation_ref,event_ref),
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
     CHECK ((input_batch_ref IS NULL) = (context_revision IS NULL)),
-    CHECK ((eligibility_state='ELIGIBLE') = (input_batch_ref IS NOT NULL))
+    CHECK (
+        (eligibility_state IN ('ADMITTED','ELIGIBLE') AND input_batch_ref IS NOT NULL)
+        OR (eligibility_state IN ('REGISTERED','SUPPRESSED') AND input_batch_ref IS NULL)
+    )
 );
 
 CREATE TABLE capture_operations (
@@ -201,7 +204,7 @@ CREATE TABLE eligibility_operations (
     occurrence_id text NOT NULL,
     input_batch_ref text NOT NULL CHECK (octet_length(input_batch_ref) BETWEEN 1 AND 256),
     context_revision bigint NOT NULL CHECK (context_revision > 0),
-    resulting_eligibility_revision bigint NOT NULL CHECK (resulting_eligibility_revision > 0),
+    resulting_eligibility_revision bigint NOT NULL CHECK (resulting_eligibility_revision >= 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,operation_id),
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
@@ -235,6 +238,55 @@ CREATE TABLE pending_input_events (
         OR (state='UNAVAILABLE' AND source_unit_id IS NULL AND occurrence_id IS NULL
             AND error_code IS NOT NULL AND resolved_at IS NOT NULL)
     ),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)
+);
+
+CREATE TABLE pending_archive_events (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    conversation_ref text NOT NULL CHECK (octet_length(conversation_ref) BETWEEN 1 AND 256),
+    event_ref text NOT NULL CHECK (octet_length(event_ref) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    compaction_ref text NOT NULL CHECK (octet_length(compaction_ref) BETWEEN 1 AND 256),
+    input_batch_ref text NOT NULL CHECK (octet_length(input_batch_ref) BETWEEN 1 AND 256),
+    context_revision bigint NOT NULL CHECK (context_revision > 0),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    state text NOT NULL DEFAULT 'PENDING_CAPTURE' CHECK (
+        state IN ('PENDING_CAPTURE','RESOLVED','UNAVAILABLE')
+    ),
+    source_unit_id text,
+    occurrence_id text,
+    error_code text,
+    resolved_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,conversation_ref,event_ref),
+    UNIQUE (bot_id,operation_id,event_ref),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id),
+    CHECK (
+        (state='PENDING_CAPTURE' AND source_unit_id IS NULL AND occurrence_id IS NULL
+            AND error_code IS NULL AND resolved_at IS NULL)
+        OR (state='RESOLVED' AND source_unit_id IS NOT NULL AND occurrence_id IS NOT NULL
+            AND error_code IS NULL AND resolved_at IS NOT NULL)
+        OR (state='UNAVAILABLE' AND source_unit_id IS NULL AND occurrence_id IS NULL
+            AND error_code IS NOT NULL AND resolved_at IS NOT NULL)
+    )
+);
+
+CREATE TABLE archive_qualification_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    compaction_ref text NOT NULL CHECK (octet_length(compaction_ref) BETWEEN 1 AND 256),
+    conversation_ref text NOT NULL CHECK (octet_length(conversation_ref) BETWEEN 1 AND 256),
+    event_ref text NOT NULL CHECK (octet_length(event_ref) BETWEEN 1 AND 256),
+    source_unit_id text NOT NULL,
+    occurrence_id text NOT NULL,
+    resulting_eligibility_revision bigint NOT NULL CHECK (resulting_eligibility_revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id,event_ref),
+    UNIQUE (bot_id,compaction_ref,event_ref),
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
     FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)
 );
@@ -558,9 +610,23 @@ CREATE TABLE retrieval_bundles (
     index_snapshot_at timestamptz NOT NULL,
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
     result_limit integer NOT NULL CHECK (result_limit BETWEEN 1 AND 256),
+    seed_limit integer NOT NULL CHECK (seed_limit BETWEEN 1 AND 256),
     candidate_limit_per_facet integer NOT NULL CHECK (
         candidate_limit_per_facet BETWEEN 1 AND 256
     ),
+    min_similarity real NOT NULL CHECK (min_similarity BETWEEN -1 AND 1),
+    min_graph_relevance real NOT NULL CHECK (
+        min_graph_relevance > 0 AND min_graph_relevance <= 1
+    ),
+    sequence_weight real NOT NULL CHECK (sequence_weight > 0 AND sequence_weight <= 1),
+    association_weight real NOT NULL CHECK (
+        association_weight > 0 AND association_weight <= 1
+    ),
+    max_association_edges_per_node integer NOT NULL CHECK (
+        max_association_edges_per_node BETWEEN 1 AND 4096
+    ),
+    sampling_seed text NOT NULL CHECK (octet_length(sampling_seed) BETWEEN 1 AND 256),
+    seed_count integer NOT NULL CHECK (seed_count BETWEEN 0 AND seed_limit),
     result_count integer NOT NULL CHECK (result_count BETWEEN 0 AND 256),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,bundle_id),
@@ -576,10 +642,75 @@ CREATE TABLE retrieval_items (
     source_unit_id text NOT NULL,
     source_revision bigint NOT NULL CHECK (source_revision > 0),
     rank_micros bigint NOT NULL CHECK (rank_micros >= 0),
+    activation_micros bigint NOT NULL CHECK (
+        activation_micros > 0 AND activation_micros <= 1000000
+    ),
+    is_seed boolean NOT NULL,
+    path_parent_source_unit_id text,
+    path_edge_id text,
     PRIMARY KEY (bot_id,bundle_id,item_index),
     UNIQUE (bot_id,bundle_id,source_unit_id),
     FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
-    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    CHECK ((path_parent_source_unit_id IS NULL) = (path_edge_id IS NULL)),
+    CHECK (is_seed OR path_parent_source_unit_id IS NOT NULL)
+);
+
+CREATE TABLE retrieval_projections (
+    bot_id text NOT NULL,
+    bundle_id text NOT NULL,
+    projection_digest text NOT NULL CHECK (projection_digest ~ '^sha256:[a-f0-9]{64}$'),
+    projected_count integer NOT NULL CHECK (projected_count BETWEEN 0 AND 256),
+    projected_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,bundle_id),
+    FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id)
+);
+
+CREATE TABLE retrieval_relations (
+    bot_id text NOT NULL,
+    bundle_id text NOT NULL,
+    relation_index integer NOT NULL CHECK (relation_index BETWEEN 0 AND 65535),
+    edge_id text NOT NULL CHECK (octet_length(edge_id) BETWEEN 1 AND 256),
+    relation_kind text NOT NULL CHECK (relation_kind IN ('SEQUENCE','ASSOCIATED')),
+    source_unit_id text NOT NULL,
+    target_unit_id text NOT NULL,
+    weight_micros bigint NOT NULL CHECK (weight_micros BETWEEN 1 AND 1000000),
+    contribution_id text,
+    PRIMARY KEY (bot_id,bundle_id,relation_index),
+    UNIQUE (bot_id,bundle_id,edge_id,source_unit_id,target_unit_id),
+    FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,target_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    CHECK (source_unit_id<>target_unit_id),
+    CHECK ((relation_kind='ASSOCIATED') = (contribution_id IS NOT NULL))
+);
+
+CREATE TABLE association_journal (
+    bot_id text NOT NULL,
+    journal_id text NOT NULL CHECK (octet_length(journal_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    reply_ref text NOT NULL CHECK (octet_length(reply_ref) BETWEEN 1 AND 512),
+    bundle_id text NOT NULL,
+    trigger_source_unit_id text NOT NULL,
+    seed_source_unit_id text NOT NULL,
+    seed_rank_micros bigint NOT NULL CHECK (seed_rank_micros >= 0),
+    state text NOT NULL DEFAULT 'PENDING_ARCHIVE' CHECK (
+        state IN ('PENDING_ARCHIVE','PROMOTED','SUPPRESSED')
+    ),
+    contribution_id text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    promoted_at timestamptz,
+    PRIMARY KEY (bot_id,journal_id),
+    UNIQUE (bot_id,operation_id,bundle_id,trigger_source_unit_id,seed_source_unit_id),
+    FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
+    FOREIGN KEY (bot_id,trigger_source_unit_id)
+        REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,seed_source_unit_id)
+        REFERENCES source_units(bot_id,source_unit_id),
+    CHECK (trigger_source_unit_id<>seed_source_unit_id),
+    CHECK ((state='PROMOTED') = (contribution_id IS NOT NULL)),
+    CHECK ((state='PROMOTED') = (promoted_at IS NOT NULL))
 );
 
 CREATE TABLE retrieval_matches (
@@ -729,7 +860,9 @@ BEGIN
            OLD.conversation_ref,OLD.event_ref,OLD.ingress_seq,OLD.observed_at) THEN
         RAISE EXCEPTION 'Memory occurrence identity is immutable' USING ERRCODE='55000';
     END IF;
-    IF OLD.eligibility_state='REGISTERED' AND NEW.eligibility_state IN ('ELIGIBLE','SUPPRESSED')
+    IF OLD.eligibility_state='REGISTERED' AND NEW.eligibility_state IN ('ADMITTED','ELIGIBLE','SUPPRESSED')
+       THEN RETURN NEW; END IF;
+    IF OLD.eligibility_state='ADMITTED' AND NEW.eligibility_state IN ('ELIGIBLE','SUPPRESSED')
        THEN RETURN NEW; END IF;
     IF OLD.eligibility_state='ELIGIBLE' AND NEW.eligibility_state='SUPPRESSED'
        THEN RETURN NEW; END IF;
@@ -909,6 +1042,8 @@ CREATE TRIGGER facet_preparation_operations_immutable
 CREATE TRIGGER retrieval_bundles_immutable BEFORE UPDATE OR DELETE ON retrieval_bundles
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_items_immutable BEFORE UPDATE OR DELETE ON retrieval_items
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER retrieval_projections_immutable BEFORE UPDATE OR DELETE ON retrieval_projections
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_matches_immutable BEFORE UPDATE OR DELETE ON retrieval_matches
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();

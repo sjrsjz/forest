@@ -8,13 +8,16 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
+from forest.agent_tool_executor import ToolDispatchResult
 from forest.builtin_memory_shell import execute_memory_shell
+from forest.builtin_memory_tool import MEMORY_EXACT_RECALL_TOOL
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.memory_embedding_service import CleanMemoryEmbeddingService
 from forest.models import MediaSnapshot
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
+from forest.storage.agent_runtime_authority import AgentPayloadRef
 from forest.storage.memory_embedding_budget import MemoryEmbeddingBudgetRepository
 from forest.storage.payload_authority import PayloadSource
 
@@ -34,6 +37,16 @@ class FrozenMemoryProfile:
     daily_request_limit: int
     daily_token_limit: int
     reservation_tokens: int
+    retrieval_policy_revision: str
+    seed_limit: int
+    candidate_limit_per_facet: int
+    min_similarity: float
+    min_graph_relevance: float
+    max_graph_nodes: int
+    max_association_edges_per_node: int
+    max_retrieval_chars: int
+    sequence_weight: float
+    association_weight: float
 
 
 @dataclass(frozen=True)
@@ -52,6 +65,7 @@ class CleanMemoryRuntime:
             {"service_id": "memory.graph.sources.query", "version": 1},
             {"service_id": "memory.graph.relations.query", "version": 1},
             {"service_id": "memory.recall", "version": 1},
+            {"service_id": MEMORY_EXACT_RECALL_TOOL.service_id, "version": 1},
             {"service_id": "memory.source.capture", "version": 1},
             {"service_id": "memory.source.unavailable", "version": 1},
             {"service_id": "shell.memory.inspect", "version": 1},
@@ -102,6 +116,7 @@ class CleanMemoryRuntime:
             ("memory.graph.sources.query", 1): self.query_sources,
             ("memory.graph.relations.query", 1): self.query_relations,
             ("memory.recall", 1): self.recall,
+            (MEMORY_EXACT_RECALL_TOOL.service_id, 1): self.execute_exact_recall_tool,
             ("memory.source.capture", 1): self.capture_ingress_source,
             ("memory.source.unavailable", 1): self.mark_source_unavailable,
             ("shell.memory.inspect", 1): self.execute_shell_command,
@@ -118,6 +133,7 @@ class CleanMemoryRuntime:
                 "protocol",
                 "embedding",
                 "fusion_policy_revision",
+                "retrieval",
                 "embedding_budget",
             }
             or value.get("protocol") != "forest.memory.graph/1"
@@ -140,6 +156,7 @@ class CleanMemoryRuntime:
                 "MEMORY_CONFIGURATION_INVALID", "Embedding profile is invalid", 500
             ) from exc
         fusion = value.get("fusion_policy_revision")
+        retrieval = value.get("retrieval")
         budget = value.get("embedding_budget")
         if (
             not isinstance(fusion, str)
@@ -163,6 +180,45 @@ class CleanMemoryRuntime:
             raise ForestError(
                 "MEMORY_CONFIGURATION_INVALID", "Memory fusion configuration is invalid", 500
             )
+        if (
+            not isinstance(retrieval, dict)
+            or set(retrieval) != {
+                "policy_revision",
+                "seed_limit",
+                "candidate_limit_per_facet",
+                "min_similarity",
+                "min_graph_relevance",
+                "max_graph_nodes",
+                "max_association_edges_per_node",
+                "max_retrieval_chars",
+                "sequence_weight",
+                "association_weight",
+            }
+            or not isinstance(retrieval["policy_revision"], str)
+            or not retrieval["policy_revision"]
+            or type(retrieval["seed_limit"]) is not int
+            or not 1 <= retrieval["seed_limit"] <= 256
+            or type(retrieval["candidate_limit_per_facet"]) is not int
+            or not 1 <= retrieval["candidate_limit_per_facet"] <= 256
+            or type(retrieval["min_similarity"]) not in {int, float}
+            or not -1.0 <= retrieval["min_similarity"] <= 1.0
+            or type(retrieval["min_graph_relevance"]) not in {int, float}
+            or not 0.0 < retrieval["min_graph_relevance"] <= 1.0
+            or type(retrieval["max_graph_nodes"]) is not int
+            or not 1 <= retrieval["max_graph_nodes"] <= 256
+            or retrieval["max_graph_nodes"] < retrieval["seed_limit"]
+            or type(retrieval["max_association_edges_per_node"]) is not int
+            or not 1 <= retrieval["max_association_edges_per_node"] <= 4096
+            or type(retrieval["max_retrieval_chars"]) is not int
+            or not 1 <= retrieval["max_retrieval_chars"] <= 10_000_000
+            or type(retrieval["sequence_weight"]) not in {int, float}
+            or not 0.0 < retrieval["sequence_weight"] <= 1.0
+            or type(retrieval["association_weight"]) not in {int, float}
+            or not 0.0 < retrieval["association_weight"] <= 1.0
+        ):
+            raise ForestError(
+                "MEMORY_CONFIGURATION_INVALID", "Memory retrieval configuration is invalid", 500
+            )
         return FrozenMemoryProfile(
             profile,
             fusion,
@@ -170,6 +226,16 @@ class CleanMemoryRuntime:
             budget["daily_request_limit"],
             budget["daily_token_limit"],
             budget["reservation_tokens"],
+            retrieval["policy_revision"],
+            retrieval["seed_limit"],
+            retrieval["candidate_limit_per_facet"],
+            float(retrieval["min_similarity"]),
+            float(retrieval["min_graph_relevance"]),
+            retrieval["max_graph_nodes"],
+            retrieval["max_association_edges_per_node"],
+            retrieval["max_retrieval_chars"],
+            float(retrieval["sequence_weight"]),
+            float(retrieval["association_weight"]),
         )
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
@@ -304,6 +370,137 @@ class CleanMemoryRuntime:
         await self._admit()
         return await self.repository.query_relations(**filters)
 
+    async def execute_exact_recall_tool(self, request):
+        """Return exact archived units as an idempotent Agent tool result."""
+
+        if (
+            request.executor_component_id != "memory.graph"
+            or request.service_id != MEMORY_EXACT_RECALL_TOOL.service_id
+            or not isinstance(request.arguments, dict)
+            or set(request.arguments) != {"source_unit_ids"}
+        ):
+            return ToolDispatchResult("FAILED", error_code="MEMORY_EXACT_RECALL_INPUT_INVALID")
+        source_unit_ids = request.arguments["source_unit_ids"]
+        if (
+            not isinstance(source_unit_ids, list)
+            or not 1 <= len(source_unit_ids) <= 8
+            or any(not isinstance(item, str) or not item for item in source_unit_ids)
+            or len(set(source_unit_ids)) != len(source_unit_ids)
+        ):
+            return ToolDispatchResult("FAILED", error_code="MEMORY_EXACT_RECALL_INPUT_INVALID")
+        try:
+            await self._admit()
+            epoch = await self.payloads.epoch()
+            exact = await self.retrieval.read_exact_sources(
+                tuple(source_unit_ids),
+                expected_deletion_epoch=epoch,
+            )
+            evidence = []
+            parents = []
+            sources = []
+            for item in exact["evidence"]:
+                parts = []
+                for part in item["parts"]:
+                    content = await self._read_payload_at_epoch(part["payload_id"], epoch)
+                    parents.append(part["payload_id"])
+                    if part["part_kind"] == "TEXT":
+                        parts.append(
+                            {
+                                "part_id": part["part_id"],
+                                "type": "text",
+                                "text": content.decode("utf-8"),
+                            }
+                        )
+                    else:
+                        parts.append(
+                            {
+                                "part_id": part["part_id"],
+                                "type": "image",
+                                "media_ref": part["payload_id"],
+                                "media_type": part["media_type"],
+                                "width": part["width"],
+                                "height": part["height"],
+                            }
+                        )
+                if item["source_kind"] == "GROUP":
+                    channel_kind = "group"
+                    channel_id = item["external_group_id"]
+                    source_id = f"onebot:group:{channel_id}"
+                elif item["source_kind"] == "DIRECT":
+                    channel_kind = "private"
+                    channel_id = item["source_id"]
+                    source_id = item["source_id"]
+                else:
+                    channel_kind = "system"
+                    channel_id = item["source_id"]
+                    source_id = item["source_id"]
+                source = {
+                    "source_id": source_id,
+                    "source_kind": item["source_kind"],
+                    "platform": item["platform"],
+                    "realm_id": item["realm_id"],
+                    "channel_kind": channel_kind,
+                    "channel_id": channel_id,
+                    "identity_schema": 1,
+                }
+                if item["source_kind"] == "GROUP":
+                    source["group_source_id"] = source_id
+                evidence.append(
+                    {
+                        "source_unit_id": item["source_unit_id"],
+                        "source_revision": item["source_revision"],
+                        "trunk_id": item["trunk_id"],
+                        "source": source,
+                        "author": {
+                            "principal_ref": item["author_subject_ref"],
+                            "identity_origin": "memory_verified",
+                        },
+                        "occurred_at": item["occurred_at"],
+                        "parts": parts,
+                    }
+                )
+                sources.append(
+                    PayloadSource(
+                        "memory.graph",
+                        "exact-recall.evidence",
+                        item["source_unit_id"],
+                        item["source_revision"],
+                        source_trunk_id=item["trunk_id"],
+                        author_subject_id=item["author_subject_ref"],
+                        occurred_at=item["occurred_at"],
+                    )
+                )
+            projection = {
+                "protocol": "forest.memory-exact-recall-result/1",
+                "retrieval_method": "exact_source_unit_id",
+                "deletion_epoch": epoch,
+                "evidence": evidence,
+            }
+            saved = await self.payloads.put_bytes(
+                owner_component_id="memory.graph",
+                owner_kind="tool.result",
+                owner_id=request.tool_call_id,
+                media_type="application/json",
+                content=self._canonical(projection),
+                sources=tuple(sources),
+                parents=tuple(parents),
+                expected_deletion_epoch=epoch,
+            )
+        except (ForestError, UnicodeDecodeError) as exc:
+            error_code = exc.code if isinstance(exc, ForestError) else "MEMORY_TEXT_INVALID"
+            return ToolDispatchResult("FAILED", error_code=error_code)
+        return ToolDispatchResult(
+            "SUCCEEDED",
+            result=AgentPayloadRef(
+                saved.payload_id,
+                saved.content_digest,
+                "memory.graph",
+                "tool.result",
+                request.tool_call_id,
+            ),
+            observation_ref="memory-exact-recall:" + request.tool_call_id,
+        )
+
     @staticmethod
     def _canonical(value: object) -> bytes:
         def default(item):
@@ -341,14 +538,19 @@ class CleanMemoryRuntime:
         media = {}
         parents = []
         sources = []
+        used_chars = 0
+        truncated = False
         for item in bundle["evidence"]:
             parts = []
+            item_media = {}
+            item_parents = []
+            item_chars = 0
             for part in item["parts"]:
                 content = await self._read_payload_at_epoch(
                     part["payload_id"],
                     bundle["accepted_deletion_epoch"],
                 )
-                parents.append(part["payload_id"])
+                item_parents.append(part["payload_id"])
                 if part["part_kind"] == "TEXT":
                     try:
                         text = content.decode("utf-8")
@@ -359,6 +561,7 @@ class CleanMemoryRuntime:
                     parts.append(
                         {"part_id": part["part_id"], "type": "text", "text": text}
                     )
+                    item_chars += len(text)
                 else:
                     media_ref = part["payload_id"]
                     parts.append(
@@ -381,8 +584,16 @@ class CleanMemoryRuntime:
                         part["width"],
                         part["height"],
                     )
-                    media[(item["source_unit_id"], part["part_id"])] = snapshot
-                    media[media_ref] = snapshot
+                    item_media[(item["source_unit_id"], part["part_id"])] = snapshot
+                    item_media[media_ref] = snapshot
+                    item_chars += len("[image]")
+            separator = 2 if rows else 0
+            if rows and used_chars + separator + item_chars > self.profile.max_retrieval_chars:
+                truncated = True
+                break
+            used_chars += separator + item_chars
+            parents.extend(item_parents)
+            media.update(item_media)
             if item["source_kind"] == "GROUP":
                 source_id = f"onebot:group:{item['external_group_id']}"
                 channel_kind = "group"
@@ -422,6 +633,9 @@ class CleanMemoryRuntime:
                     "unit_id": "evidence:" + item["source_unit_id"],
                     "source_unit_id": item["source_unit_id"],
                     "source_revision": item["source_revision"],
+                    "is_direct_seed": item["is_direct_seed"],
+                    "vector_fusion_score": item["rank_micros"] / 1_000_000_000_000,
+                    "graph_relevance": item["graph_relevance"],
                     "source": source,
                     "author": {
                         "principal_ref": item["author_subject_ref"],
@@ -430,6 +644,27 @@ class CleanMemoryRuntime:
                     "parts": parts,
                 }
             )
+        included_ids = {row["source_unit_id"] for row in rows}
+        relations = [
+            {
+                "edge_id": relation["edge_id"],
+                "relation": relation["relation_kind"].lower(),
+                "source_ref": "evidence:" + relation["source_unit_id"],
+                "target_ref": "evidence:" + relation["target_unit_id"],
+                "weight": relation["weight"],
+                "contribution_id": relation["contribution_id"],
+            }
+            for relation in bundle["relations"]
+            if relation["source_unit_id"] in included_ids
+            and relation["target_unit_id"] in included_ids
+        ]
+        completeness = {
+            **bundle["completeness"],
+            "result_count": len(rows),
+            "retrieval_truncated": truncated or len(rows) < len(bundle["evidence"]),
+            "max_retrieval_chars": self.profile.max_retrieval_chars,
+            "retained_chars": used_chars,
+        }
         projection = {
             "protocol": "forest.memory-evidence/1",
             "bundle_id": bundle["bundle_id"],
@@ -440,9 +675,19 @@ class CleanMemoryRuntime:
             "config_revision": self.configuration_revision,
             "deletion_epoch": bundle["accepted_deletion_epoch"],
             "status": "READY",
-            "completeness": bundle["completeness"],
+            "retrieval_method": "vector_graph_region",
+            "direct_seed_ids": [
+                row["source_unit_id"] for row in rows if row["is_direct_seed"]
+            ],
+            "completeness": completeness,
             "evidence": rows,
+            "relations": relations,
         }
+        await self.retrieval.confirm_bundle_projection(
+            bundle_id=bundle["bundle_id"],
+            source_unit_ids=tuple(row["source_unit_id"] for row in rows),
+            expected_deletion_epoch=bundle["accepted_deletion_epoch"],
+        )
         epoch = await self.payloads.epoch()
         saved = await self.payloads.put_bytes(
             owner_component_id="memory.graph",
@@ -519,7 +764,7 @@ class CleanMemoryRuntime:
                     candidate_sets[facet["facet_id"]] = await self.vector_index.search(
                         query_ref_id=facet["index_ref_id"],
                         space_id=facet["space_id"],
-                        limit=64,
+                        limit=self.profile.candidate_limit_per_facet,
                     )
                 bundle = await self.retrieval.freeze_bundle(
                     operation_id="memory-bundle-freeze:" + identity,
@@ -528,6 +773,16 @@ class CleanMemoryRuntime:
                     expected_deletion_epoch=epoch,
                     index_snapshot_at=search_plan["snapshot_at"],
                     candidate_sets=candidate_sets,
+                    seed_limit=self.profile.seed_limit,
+                    candidate_limit_per_facet=self.profile.candidate_limit_per_facet,
+                    min_similarity=self.profile.min_similarity,
+                    min_graph_relevance=self.profile.min_graph_relevance,
+                    max_graph_nodes=self.profile.max_graph_nodes,
+                    max_association_edges_per_node=(
+                        self.profile.max_association_edges_per_node
+                    ),
+                    sequence_weight=self.profile.sequence_weight,
+                    association_weight=self.profile.association_weight,
                 )
         except TimeoutError:
             return None
@@ -615,7 +870,11 @@ class CleanMemoryRuntime:
 
     async def qualify_input_batch_in(self, conn, **values):
         await self._admit_in(conn, owned_work=True)
-        qualifications = await self.repository.qualify_input_batch_in(conn, **values)
+        return await self.repository.qualify_input_batch_in(conn, **values)
+
+    async def qualify_archive_in(self, conn, **values):
+        await self._admit_in(conn, owned_work=True)
+        qualifications = await self.repository.qualify_archive_in(conn, **values)
         expected_epoch = values["expected_deletion_epoch"]
         for item in qualifications:
             source_unit_id = item.get("source_unit_id")
@@ -627,6 +886,10 @@ class CleanMemoryRuntime:
                 expected_deletion_epoch=expected_epoch,
             )
         return qualifications
+
+    async def record_reply_associations_in(self, conn, **values):
+        await self._admit_in(conn, owned_work=True)
+        return await self.repository.record_reply_associations_in(conn, **values)
 
     async def register_source_in(self, conn, **values):
         admission_lane = values.pop("admission_lane", "DATA")

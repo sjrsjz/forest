@@ -830,6 +830,13 @@ class MemoryGraphRepository:
                 conversation_ref=occurrence.conversation_ref,
                 event_ref=occurrence.event_ref,
             )
+            await self._resolve_pending_archive_in(
+                conn,
+                source_unit_id=source_unit_id,
+                occurrence_id=occurrence.occurrence_id,
+                conversation_ref=occurrence.conversation_ref,
+                event_ref=occurrence.event_ref,
+            )
             unit = await (
                 await conn.execute(
                     sql.SQL("SELECT source_order_seq,trunk_id,modality,eligibility_state "
@@ -922,7 +929,7 @@ class MemoryGraphRepository:
                     event_ref=occurrence["event_ref"],
                     context_revision=context_revision,
                 )
-            if occurrence["eligibility_state"] == "ELIGIBLE":
+            if occurrence["eligibility_state"] in {"ADMITTED", "ELIGIBLE"}:
                 if (
                     occurrence["input_batch_ref"] != input_batch_ref
                     or occurrence["context_revision"] != context_revision
@@ -932,22 +939,12 @@ class MemoryGraphRepository:
                     )
             else:
                 await conn.execute(
-                    sql.SQL("UPDATE {} SET eligibility_state='ELIGIBLE',input_batch_ref=%s,"
+                    sql.SQL("UPDATE {} SET eligibility_state='ADMITTED',input_batch_ref=%s,"
                             "context_revision=%s,qualified_at=clock_timestamp() WHERE bot_id=%s "
                             "AND occurrence_id=%s").format(self._table("source_occurrences")),
                     (input_batch_ref, context_revision, self.store.bot_id, occurrence_id),
                 )
             revision = unit["eligibility_revision"]
-            if unit["eligibility_state"] == "REGISTERED":
-                revision += 1
-                await conn.execute(
-                    sql.SQL("UPDATE {} SET eligibility_state='ELIGIBLE',eligibility_revision=%s,"
-                            "eligible_at=clock_timestamp(),updated_at=clock_timestamp() "
-                            "WHERE bot_id=%s AND source_unit_id=%s").format(
-                        self._table("source_units")
-                    ),
-                    (revision, self.store.bot_id, source_unit_id),
-                )
             return dict(
                 await (
                     await conn.execute(
@@ -1095,6 +1092,536 @@ class MemoryGraphRepository:
             )
         return tuple(results)
 
+    async def _qualify_archived_occurrence_in(
+        self,
+        conn,
+        *,
+        operation_id: str,
+        compaction_ref: str,
+        conversation_ref: str,
+        event_ref: str,
+        source_unit_id: str,
+        occurrence_id: str,
+        input_batch_ref: str,
+        context_revision: int,
+        expected_deletion_epoch: int,
+    ) -> dict:
+        input_digest = _digest(
+            [
+                compaction_ref,
+                conversation_ref,
+                event_ref,
+                source_unit_id,
+                occurrence_id,
+                input_batch_ref,
+                context_revision,
+                expected_deletion_epoch,
+            ]
+        )
+        await self._lock(conn, "archive-qualification:" + operation_id + ":" + event_ref)
+        replay = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s AND event_ref=%s"
+                ).format(self._table("archive_qualification_operations")),
+                (self.store.bot_id, operation_id, event_ref),
+            )
+        ).fetchone()
+        if replay is not None:
+            if replay["input_digest"] != input_digest:
+                raise ForestError(
+                    "MEMORY_ARCHIVE_CONFLICT", "Archive qualification differs", 409
+                )
+            return dict(replay)
+        await self._epoch(conn, expected=expected_deletion_epoch)
+        unit = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND source_unit_id=%s FOR UPDATE"
+                ).format(self._table("source_units")),
+                (self.store.bot_id, source_unit_id),
+            )
+        ).fetchone()
+        occurrence = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND occurrence_id=%s FOR UPDATE"
+                ).format(self._table("source_occurrences")),
+                (self.store.bot_id, occurrence_id),
+            )
+        ).fetchone()
+        if unit is None or occurrence is None or occurrence["source_unit_id"] != source_unit_id:
+            raise ForestError("MEMORY_SOURCE_NOT_FOUND", "Archived source is unavailable", 404)
+        if (
+            unit["eligibility_state"] == "SUPPRESSED"
+            or occurrence["eligibility_state"] == "SUPPRESSED"
+        ):
+            raise ForestError("MEMORY_SOURCE_SUPPRESSED", "Archived source was removed", 409)
+        if occurrence["conversation_ref"] != conversation_ref or occurrence["event_ref"] != event_ref:
+            raise ForestError("MEMORY_ARCHIVE_CONFLICT", "Archive occurrence identity differs", 409)
+        if occurrence["eligibility_state"] in {"ADMITTED", "ELIGIBLE"} and (
+            occurrence["input_batch_ref"] != input_batch_ref
+            or occurrence["context_revision"] != context_revision
+        ):
+            raise ForestError("MEMORY_ARCHIVE_CONFLICT", "Archive input lineage differs", 409)
+        if occurrence["eligibility_state"] != "ELIGIBLE":
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET eligibility_state='ELIGIBLE',input_batch_ref=%s,"
+                    "context_revision=%s,qualified_at=clock_timestamp() WHERE bot_id=%s "
+                    "AND occurrence_id=%s"
+                ).format(self._table("source_occurrences")),
+                (input_batch_ref, context_revision, self.store.bot_id, occurrence_id),
+            )
+        revision = unit["eligibility_revision"]
+        if unit["eligibility_state"] == "REGISTERED":
+            revision += 1
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET eligibility_state='ELIGIBLE',eligibility_revision=%s,"
+                    "eligible_at=clock_timestamp(),updated_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND source_unit_id=%s"
+                ).format(self._table("source_units")),
+                (revision, self.store.bot_id, source_unit_id),
+            )
+        qualification = dict(
+            await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,operation_id,input_digest,compaction_ref,"
+                        "conversation_ref,event_ref,source_unit_id,occurrence_id,"
+                        "resulting_eligibility_revision) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                        "RETURNING *"
+                    ).format(self._table("archive_qualification_operations")),
+                    (
+                        self.store.bot_id,
+                        operation_id,
+                        input_digest,
+                        compaction_ref,
+                        conversation_ref,
+                        event_ref,
+                        source_unit_id,
+                        occurrence_id,
+                        revision,
+                    ),
+                )
+            ).fetchone()
+        )
+        await self._promote_association_journal_in(
+            conn,
+            trigger_source_unit_id=source_unit_id,
+            expected_deletion_epoch=expected_deletion_epoch,
+        )
+        return qualification
+
+    async def qualify_archive_in(
+        self,
+        conn,
+        *,
+        operation_id: str,
+        compaction_ref: str,
+        conversation_ref: str,
+        event_refs,
+        expected_deletion_epoch: int,
+        archive_verifier,
+    ) -> tuple[dict, ...]:
+        """Publish only reliably archived input sources to the long-term graph."""
+
+        for value, field in (
+            (operation_id, "operation_id"),
+            (compaction_ref, "compaction_ref"),
+            (conversation_ref, "conversation_ref"),
+        ):
+            _bounded(value, field, 256)
+        events = tuple(event_refs)
+        if len(events) > 100000 or len(set(events)) != len(events):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid archive event set", 422)
+        results = []
+        for event_ref in events:
+            _bounded(event_ref, "event_ref", 256)
+            proof = await _call(
+                archive_verifier,
+                conn,
+                conversation_ref=conversation_ref,
+                compaction_ref=compaction_ref,
+                event_ref=event_ref,
+            )
+            if not isinstance(proof, dict):
+                raise ForestError(
+                    "MEMORY_ARCHIVE_AUTHORITY_INVALID", "Archive proof is invalid", 500
+                )
+            input_batch_ref = proof.get("input_batch_ref")
+            context_revision = proof.get("context_revision")
+            _bounded(input_batch_ref, "input_batch_ref", 256)
+            if type(context_revision) is not int or context_revision <= 0:
+                raise ForestError(
+                    "MEMORY_ARCHIVE_AUTHORITY_INVALID", "Archive lineage is invalid", 500
+                )
+            await self._lock(conn, "event-eligibility:" + _digest([conversation_ref, event_ref]))
+            occurrence = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT occurrence_id,source_unit_id FROM {} WHERE bot_id=%s "
+                        "AND conversation_ref=%s AND event_ref=%s"
+                    ).format(self._table("source_occurrences")),
+                    (self.store.bot_id, conversation_ref, event_ref),
+                )
+            ).fetchone()
+            if occurrence is None:
+                pending_digest = _digest(
+                    [
+                        compaction_ref,
+                        conversation_ref,
+                        event_ref,
+                        input_batch_ref,
+                        context_revision,
+                        expected_deletion_epoch,
+                    ]
+                )
+                pending = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,conversation_ref,event_ref,operation_id,"
+                            "input_digest,compaction_ref,input_batch_ref,context_revision,"
+                            "accepted_deletion_epoch) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                            "ON CONFLICT (bot_id,conversation_ref,event_ref) DO NOTHING RETURNING *"
+                        ).format(self._table("pending_archive_events")),
+                        (
+                            self.store.bot_id,
+                            conversation_ref,
+                            event_ref,
+                            operation_id,
+                            pending_digest,
+                            compaction_ref,
+                            input_batch_ref,
+                            context_revision,
+                            expected_deletion_epoch,
+                        ),
+                    )
+                ).fetchone()
+                if pending is None:
+                    pending = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s "
+                                "AND event_ref=%s"
+                            ).format(self._table("pending_archive_events")),
+                            (self.store.bot_id, conversation_ref, event_ref),
+                        )
+                    ).fetchone()
+                if pending["input_digest"] != pending_digest:
+                    raise ForestError("MEMORY_ARCHIVE_CONFLICT", "Pending archive differs", 409)
+                results.append(dict(pending))
+                continue
+            results.append(
+                await self._qualify_archived_occurrence_in(
+                    conn,
+                    operation_id=operation_id,
+                    compaction_ref=compaction_ref,
+                    conversation_ref=conversation_ref,
+                    event_ref=event_ref,
+                    source_unit_id=occurrence["source_unit_id"],
+                    occurrence_id=occurrence["occurrence_id"],
+                    input_batch_ref=input_batch_ref,
+                    context_revision=context_revision,
+                    expected_deletion_epoch=expected_deletion_epoch,
+                )
+            )
+        return tuple(results)
+
+    async def _resolve_pending_archive_in(
+        self,
+        conn,
+        *,
+        source_unit_id: str,
+        occurrence_id: str,
+        conversation_ref: str,
+        event_ref: str,
+    ) -> dict | None:
+        pending = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s AND event_ref=%s "
+                    "FOR UPDATE"
+                ).format(self._table("pending_archive_events")),
+                (self.store.bot_id, conversation_ref, event_ref),
+            )
+        ).fetchone()
+        if pending is None or pending["state"] == "RESOLVED":
+            return None if pending is None else dict(pending)
+        if pending["state"] == "UNAVAILABLE":
+            return dict(pending)
+        result = await self._qualify_archived_occurrence_in(
+            conn,
+            operation_id=pending["operation_id"],
+            compaction_ref=pending["compaction_ref"],
+            conversation_ref=conversation_ref,
+            event_ref=event_ref,
+            source_unit_id=source_unit_id,
+            occurrence_id=occurrence_id,
+            input_batch_ref=pending["input_batch_ref"],
+            context_revision=pending["context_revision"],
+            expected_deletion_epoch=pending["accepted_deletion_epoch"],
+        )
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {} SET state='RESOLVED',source_unit_id=%s,occurrence_id=%s,"
+                "resolved_at=clock_timestamp() WHERE bot_id=%s AND conversation_ref=%s "
+                "AND event_ref=%s"
+            ).format(self._table("pending_archive_events")),
+            (source_unit_id, occurrence_id, self.store.bot_id, conversation_ref, event_ref),
+        )
+        return result
+
+    async def _promote_association_journal_in(
+        self,
+        conn,
+        *,
+        trigger_source_unit_id: str,
+        expected_deletion_epoch: int,
+    ) -> int:
+        """Promote deferred direct-seed learning once its trigger is archived."""
+
+        journals = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND trigger_source_unit_id=%s "
+                    "AND state='PENDING_ARCHIVE' ORDER BY journal_id FOR UPDATE"
+                ).format(self._table("association_journal")),
+                (self.store.bot_id, trigger_source_unit_id),
+            )
+        ).fetchall()
+        promoted = 0
+        for journal in journals:
+            seed_id = journal["seed_source_unit_id"]
+            endpoints = sorted((trigger_source_unit_id, seed_id))
+            existing = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT contribution_id FROM {} WHERE bot_id=%s AND active "
+                        "AND relation_kind='ASSOCIATES_WITH' AND left_kind='SOURCE_UNIT' "
+                        "AND right_kind='SOURCE_UNIT' AND left_id=%s AND right_id=%s "
+                        "AND relation_key='retrieval-learning/v1' ORDER BY created_at LIMIT 1"
+                    ).format(self._table("relation_contributions")),
+                    (self.store.bot_id, endpoints[0], endpoints[1]),
+                )
+            ).fetchone()
+            contribution_id = (
+                existing["contribution_id"]
+                if existing is not None
+                else "association:"
+                + hashlib.sha256(
+                    _canonical([self.store.bot_id, "retrieval-learning/v1", *endpoints])
+                ).hexdigest()
+            )
+            if existing is None:
+                units = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT source_unit_id,source_revision FROM {} WHERE bot_id=%s "
+                            "AND source_unit_id=ANY(%s) AND eligibility_state='ELIGIBLE' "
+                            "ORDER BY source_unit_id"
+                        ).format(self._table("source_units")),
+                        (self.store.bot_id, endpoints),
+                    )
+                ).fetchall()
+                if [row["source_unit_id"] for row in units] != endpoints:
+                    continue
+                part_rows = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT DISTINCT ON (source_unit_id) source_unit_id,part_id "
+                            "FROM {} WHERE bot_id=%s AND source_unit_id=ANY(%s) "
+                            "ORDER BY source_unit_id,part_index,part_id"
+                        ).format(self._table("source_parts")),
+                        (self.store.bot_id, endpoints),
+                    )
+                ).fetchall()
+                if [row["source_unit_id"] for row in part_rows] != endpoints:
+                    continue
+                relation_id = "relation:" + hashlib.sha256(
+                    _canonical(
+                        [
+                            self.store.bot_id,
+                            "ASSOCIATES_WITH",
+                            "SOURCE_UNIT",
+                            endpoints[0],
+                            "SOURCE_UNIT",
+                            endpoints[1],
+                            "retrieval-learning/v1",
+                        ]
+                    )
+                ).hexdigest()
+                relation_input = _digest(
+                    {
+                        "journal_id": journal["journal_id"],
+                        "relation_id": relation_id,
+                        "endpoints": endpoints,
+                        "deletion_epoch": expected_deletion_epoch,
+                    }
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,contribution_id,operation_id,input_digest,"
+                        "relation_id,relation_kind,left_kind,left_id,right_kind,right_id,"
+                        "relation_key,origin_kind,weight_micros,admitted_deletion_epoch) "
+                        "VALUES (%s,%s,%s,%s,%s,'ASSOCIATES_WITH','SOURCE_UNIT',%s,"
+                        "'SOURCE_UNIT',%s,'retrieval-learning/v1','VECTOR',1000000,%s)"
+                    ).format(self._table("relation_contributions")),
+                    (
+                        self.store.bot_id,
+                        contribution_id,
+                        "promote:" + journal["journal_id"],
+                        relation_input,
+                        relation_id,
+                        endpoints[0],
+                        endpoints[1],
+                        expected_deletion_epoch,
+                    ),
+                )
+                revision_by_id = {
+                    row["source_unit_id"]: row["source_revision"] for row in units
+                }
+                for evidence_index, part in enumerate(part_rows):
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,contribution_id,evidence_index,source_unit_id,"
+                            "source_revision,part_id) VALUES (%s,%s,%s,%s,%s,%s)"
+                        ).format(self._table("relation_evidence")),
+                        (
+                            self.store.bot_id,
+                            contribution_id,
+                            evidence_index,
+                            part["source_unit_id"],
+                            revision_by_id[part["source_unit_id"]],
+                            part["part_id"],
+                        ),
+                    )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='PROMOTED',contribution_id=%s,"
+                    "promoted_at=clock_timestamp() WHERE bot_id=%s AND journal_id=%s"
+                ).format(self._table("association_journal")),
+                (contribution_id, self.store.bot_id, journal["journal_id"]),
+            )
+            promoted += 1
+        return promoted
+
+    async def record_reply_associations_in(
+        self,
+        conn,
+        *,
+        operation_id: str,
+        reply_ref: str,
+        conversation_ref: str,
+        trigger_event_refs,
+        input_batch_refs,
+        expected_deletion_epoch: int,
+    ) -> dict:
+        """Journal direct retrieval seeds after the visible reply commits."""
+
+        for value, field, limit in (
+            (operation_id, "operation_id", 256),
+            (reply_ref, "reply_ref", 512),
+            (conversation_ref, "conversation_ref", 256),
+        ):
+            _bounded(value, field, limit)
+        events = tuple(sorted(set(trigger_event_refs)))
+        batches = tuple(sorted(set(input_batch_refs)))
+        if not events or not batches:
+            return {"journaled": 0, "promoted": 0}
+        await self._epoch(conn, expected=expected_deletion_epoch)
+        triggers = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT o.event_ref,o.source_unit_id,u.eligibility_state FROM {} o "
+                    "JOIN {} u ON u.bot_id=o.bot_id AND u.source_unit_id=o.source_unit_id "
+                    "WHERE o.bot_id=%s AND o.conversation_ref=%s AND o.event_ref=ANY(%s) "
+                    "ORDER BY o.event_ref"
+                ).format(self._table("source_occurrences"), self._table("source_units")),
+                (self.store.bot_id, conversation_ref, list(events)),
+            )
+        ).fetchall()
+        if {row["event_ref"] for row in triggers} != set(events):
+            raise ForestError(
+                "MEMORY_ASSOCIATION_TRIGGER_UNAVAILABLE",
+                "An answered trigger has no Memory source",
+                409,
+            )
+        seeds = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT b.bundle_id,i.source_unit_id,i.rank_micros FROM {} b JOIN {} q "
+                    "ON q.bot_id=b.bot_id AND q.query_id=b.query_id JOIN {} p "
+                    "ON p.bot_id=b.bot_id AND p.bundle_id=b.bundle_id JOIN {} i "
+                    "ON i.bot_id=b.bot_id AND i.bundle_id=b.bundle_id WHERE b.bot_id=%s "
+                    "AND q.input_batch_ref=ANY(%s) AND i.item_index<p.projected_count "
+                    "AND i.is_seed ORDER BY b.created_at,i.item_index"
+                ).format(
+                    self._table("retrieval_bundles"),
+                    self._table("memory_queries"),
+                    self._table("retrieval_projections"),
+                    self._table("retrieval_items"),
+                ),
+                (self.store.bot_id, list(batches)),
+            )
+        ).fetchall()
+        journaled = 0
+        promoted = 0
+        for trigger in triggers:
+            for seed in seeds:
+                if trigger["source_unit_id"] == seed["source_unit_id"]:
+                    continue
+                journal_id = "association-journal:" + hashlib.sha256(
+                    _canonical(
+                        [
+                            self.store.bot_id,
+                            reply_ref,
+                            seed["bundle_id"],
+                            trigger["source_unit_id"],
+                            seed["source_unit_id"],
+                        ]
+                    )
+                ).hexdigest()
+                input_digest = _digest(
+                    [
+                        reply_ref,
+                        seed["bundle_id"],
+                        trigger["source_unit_id"],
+                        seed["source_unit_id"],
+                        seed["rank_micros"],
+                    ]
+                )
+                inserted = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,journal_id,operation_id,input_digest,"
+                            "reply_ref,bundle_id,trigger_source_unit_id,seed_source_unit_id,"
+                            "seed_rank_micros) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                            "ON CONFLICT (bot_id,journal_id) DO NOTHING RETURNING journal_id"
+                        ).format(self._table("association_journal")),
+                        (
+                            self.store.bot_id,
+                            journal_id,
+                            operation_id,
+                            input_digest,
+                            reply_ref,
+                            seed["bundle_id"],
+                            trigger["source_unit_id"],
+                            seed["source_unit_id"],
+                            seed["rank_micros"],
+                        ),
+                    )
+                ).fetchone()
+                journaled += inserted is not None
+            if trigger["eligibility_state"] == "ELIGIBLE":
+                promoted += await self._promote_association_journal_in(
+                    conn,
+                    trigger_source_unit_id=trigger["source_unit_id"],
+                    expected_deletion_epoch=expected_deletion_epoch,
+                )
+        return {"journaled": journaled, "promoted": promoted}
+
     async def _resolve_pending_input_in(
         self,
         conn,
@@ -1165,39 +1692,48 @@ class MemoryGraphRepository:
                 conn,
                 "event-eligibility:" + _digest([conversation_ref, event_ref]),
             )
-            pending = await (
-                await conn.execute(
-                    sql.SQL(
-                        "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s "
-                        "AND event_ref=%s FOR UPDATE"
-                    ).format(self._table("pending_input_events")),
-                    (self.store.bot_id, conversation_ref, event_ref),
-                )
-            ).fetchone()
-            if pending is None:
+            rows = []
+            for table_name in ("pending_input_events", "pending_archive_events"):
+                row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT * FROM {} WHERE bot_id=%s AND conversation_ref=%s "
+                            "AND event_ref=%s FOR UPDATE"
+                        ).format(self._table(table_name)),
+                        (self.store.bot_id, conversation_ref, event_ref),
+                    )
+                ).fetchone()
+                if row is not None:
+                    rows.append((table_name, row))
+            if not rows:
                 return None
-            if pending["state"] == "UNAVAILABLE":
-                if pending["error_code"] != error_code:
+            for _table_name, pending in rows:
+                if pending["state"] == "UNAVAILABLE" and pending["error_code"] != error_code:
                     raise ForestError(
                         "MEMORY_ELIGIBILITY_CONFLICT",
                         "Unavailable Memory reason differs",
                         409,
                     )
-                return dict(pending)
-            if pending["state"] != "PENDING_CAPTURE":
-                return dict(pending)
-            return dict(
-                await (
-                    await conn.execute(
-                        sql.SQL(
-                            "UPDATE {} SET state='UNAVAILABLE',error_code=%s,"
-                            "resolved_at=clock_timestamp() WHERE bot_id=%s "
-                            "AND conversation_ref=%s AND event_ref=%s RETURNING *"
-                        ).format(self._table("pending_input_events")),
-                        (error_code, self.store.bot_id, conversation_ref, event_ref),
+            resolved = []
+            for table_name, pending in rows:
+                if pending["state"] != "PENDING_CAPTURE":
+                    resolved.append(dict(pending))
+                    continue
+                resolved.append(
+                    dict(
+                        await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "UPDATE {} SET state='UNAVAILABLE',error_code=%s,"
+                                    "resolved_at=clock_timestamp() WHERE bot_id=%s "
+                                    "AND conversation_ref=%s AND event_ref=%s RETURNING *"
+                                ).format(self._table(table_name)),
+                                (error_code, self.store.bot_id, conversation_ref, event_ref),
+                            )
+                        ).fetchone()
                     )
-                ).fetchone()
-            )
+                )
+            return resolved[0]
 
     async def suppress_sources_in(
         self,
@@ -1315,6 +1851,18 @@ class MemoryGraphRepository:
                     "WHERE bot_id=%s AND source_unit_id=%s AND state<>'SUPPRESSED'"
                 ).format(self._table("embedding_facets")),
                 (self.store.bot_id, row["source_unit_id"]),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='SUPPRESSED' WHERE bot_id=%s "
+                    "AND state='PENDING_ARCHIVE' AND "
+                    "(trigger_source_unit_id=%s OR seed_source_unit_id=%s)"
+                ).format(self._table("association_journal")),
+                (
+                    self.store.bot_id,
+                    row["source_unit_id"],
+                    row["source_unit_id"],
+                ),
             )
         return {"source_unit_ids": list(ids), "deletion_epoch": deletion_epoch, "duplicate": False}
 

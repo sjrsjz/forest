@@ -28,6 +28,7 @@ from forest.runtime_modules import official_storage_bundle
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
 from forest.storage.conversation_scheduler import (
+    ContextViewPolicy,
     ConversationSchedulerRepository,
     SchedulerPayloadRef,
 )
@@ -310,6 +311,38 @@ async def _unit_values(
     }
 
 
+async def _archive_event(
+    memory,
+    payloads,
+    *,
+    suffix: str,
+    occurrence: MemoryOccurrence,
+    input_batch_ref: str,
+    context_revision: int,
+):
+    async def verify(_conn, **values):
+        assert values == {
+            "conversation_ref": occurrence.conversation_ref,
+            "compaction_ref": f"compaction/{suffix}",
+            "event_ref": occurrence.event_ref,
+        }
+        return {
+            "input_batch_ref": input_batch_ref,
+            "context_revision": context_revision,
+        }
+
+    async with memory.store.pool.connection() as conn, conn.transaction():
+        return await memory.qualify_archive_in(
+            conn,
+            operation_id=f"archive/{suffix}",
+            compaction_ref=f"compaction/{suffix}",
+            conversation_ref=occurrence.conversation_ref,
+            event_refs=(occurrence.event_ref,),
+            expected_deletion_epoch=await payloads.epoch_in(conn),
+            archive_verifier=verify,
+        )
+
+
 @pytest.mark.postgres
 async def test_memory_domain_and_source_identity_are_lifecycle_bound(clean_memory_graph):
     store, storage, _payloads, memory, _forget, _batches, _scheduler = clean_memory_graph
@@ -419,6 +452,17 @@ async def test_multimodal_source_is_hidden_until_committed_input_batch(clean_mem
         context_revision=7,
         expected_deletion_epoch=await payloads.epoch(),
     )
+    assert (await memory.query_sources())[
+        "items"
+    ] == [], "active InputBatch content must not enter long-term retrieval"
+    await _archive_event(
+        memory,
+        payloads,
+        suffix="mixed",
+        occurrence=occurrence,
+        input_batch_ref="batch/mixed",
+        context_revision=7,
+    )
     page = await memory.query_sources(trunk_id="trunk/a")
     assert len(page["items"]) == 1
     item = page["items"][0]
@@ -493,6 +537,14 @@ async def test_source_keyset_snapshot_excludes_late_qualification(clean_memory_g
             context_revision=1,
             expected_deletion_epoch=await payloads.epoch(),
         )
+        await _archive_event(
+            memory,
+            payloads,
+            suffix=f"page-{number}",
+            occurrence=occurrence,
+            input_batch_ref=f"batch/page/{number}",
+            context_revision=1,
+        )
         values.append(item)
 
     first = await memory.query_sources(limit=1, trunk_id="trunk/a")
@@ -513,6 +565,14 @@ async def test_source_keyset_snapshot_excludes_late_qualification(clean_memory_g
         input_batch_ref="batch/page/late",
         context_revision=1,
         expected_deletion_epoch=await payloads.epoch(),
+    )
+    await _archive_event(
+        memory,
+        payloads,
+        suffix="page-late",
+        occurrence=occurrence,
+        input_batch_ref="batch/page/late",
+        context_revision=1,
     )
 
     cursor = first["next_cursor"]
@@ -739,6 +799,14 @@ async def test_cross_trunk_relations_use_composite_cursor_and_source_labels(clea
             context_revision=1,
             expected_deletion_epoch=await payloads.epoch(),
         )
+        await _archive_event(
+            memory,
+            payloads,
+            suffix=suffix,
+            occurrence=occurrence,
+            input_batch_ref=f"batch/{suffix}",
+            context_revision=1,
+        )
     evidence = (
         MemoryEvidenceRef("unit/left", 1, "part/text"),
         MemoryEvidenceRef("unit/right", 1, "part/text"),
@@ -862,6 +930,14 @@ async def test_eligibility_participant_rolls_back_with_caller_transaction(clean_
         context_revision=3,
         expected_deletion_epoch=await payloads.epoch(),
     )
+    await _archive_event(
+        memory,
+        payloads,
+        suffix="rollback",
+        occurrence=occurrence,
+        input_batch_ref="batch/rollback",
+        context_revision=3,
+    )
     assert len((await memory.query_sources())["items"]) == 1
 
 
@@ -883,6 +959,14 @@ async def test_forget_unit_of_work_rolls_back_payload_revocation_on_memory_failu
         input_batch_ref="batch/forget-rollback",
         context_revision=1,
         expected_deletion_epoch=0,
+    )
+    await _archive_event(
+        memory,
+        payloads,
+        suffix="forget-rollback",
+        occurrence=occurrence,
+        input_batch_ref="batch/forget-rollback",
+        context_revision=1,
     )
     original_suppress = memory.suppress_sources_in
 
@@ -920,6 +1004,7 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
     store, _storage, payloads, memory, _forget, _batches, scheduler = clean_memory_graph
     await _initialize(memory)
     await _register(memory, "a")
+    scheduler.context_view_policy = ContextViewPolicy(2, 1, "test-archive-window/1")
     actual_memory = MemoryGraphRepository(
         store,
         namespace=memory.namespace,
@@ -1010,9 +1095,7 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
     first = await unit_of_work.select_input(actor, "selection/uow/1", boundary="IDLE")
     assert first["kind"] == "SILENT_DRAIN"
     assert first["memory_qualified_count"] == 1
-    assert [item["source_unit_id"] for item in (await memory.query_sources())["items"]] == [
-        "unit/uow-1"
-    ]
+    assert (await memory.query_sources())["items"] == []
 
     missing = await admit(2, capture=False)
     second = await unit_of_work.select_input(actor, "selection/uow/2", boundary="IDLE")
@@ -1023,11 +1106,8 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
     assert snapshot["context_applied_seq"] == 2
 
     late = await actual_memory.capture_source_unit(operation_id="capture/uow-2", **missing)
-    assert late["eligibility_state"] == "ELIGIBLE"
-    assert {item["source_unit_id"] for item in (await memory.query_sources())["items"]} == {
-        "unit/uow-1",
-        "unit/uow-2",
-    }
+    assert late["eligibility_state"] == "REGISTERED"
+    assert (await memory.query_sources())["items"] == []
 
     racing = await admit(3, capture=False)
     selection, _capture = await asyncio.gather(
@@ -1035,10 +1115,15 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
         actual_memory.capture_source_unit(operation_id="capture/uow-3", **racing),
     )
     assert selection["memory_qualified_count"] + selection["memory_pending_count"] == 1
+    assert (await memory.query_sources())["items"] == []
+
+    await admit(4, capture=True)
+    archived = await unit_of_work.select_input(actor, "selection/uow/4", boundary="IDLE")
+    assert archived["memory_archived_count"] == 2
+    assert archived["memory_archive_pending_count"] == 0
     assert {item["source_unit_id"] for item in (await memory.query_sources())["items"]} == {
         "unit/uow-1",
         "unit/uow-2",
-        "unit/uow-3",
     }
     async with store.pool.connection() as conn:
         unresolved = await (
@@ -1072,6 +1157,14 @@ async def _capture_and_qualify(
         input_batch_ref=batch,
         context_revision=context_revision,
         expected_deletion_epoch=await payloads.epoch(),
+    )
+    await _archive_event(
+        memory,
+        payloads,
+        suffix=suffix,
+        occurrence=occurrence,
+        input_batch_ref=batch,
+        context_revision=context_revision,
     )
     return batch
 
@@ -1256,6 +1349,260 @@ async def test_text_query_retrieves_image_with_explicit_cross_trunk_source(clean
     assert deletion["index_ref_id"] == query["facets"][0]["facet_id"]
     assert deletion["deletion_epoch"] == 0
     await retrieval.settle_index_deletion(deletion["index_ref_id"])
+
+
+@pytest.mark.postgres
+async def test_graph_expansion_caps_high_degree_associations_before_cross_trunk_spread(
+    clean_memory_graph,
+):
+    _store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    for suffix in ("query", "seed", "n0", "n1", "n2", "n3", "n4"):
+        await _register(memory, suffix)
+    query_source = await _unit_values(
+        payloads, source_suffix="query", unit_suffix="fanout-query"
+    )
+    seed_source = await _unit_values(
+        payloads, source_suffix="seed", unit_suffix="fanout-seed"
+    )
+    query_batch = await _capture_and_qualify(
+        memory, payloads, batches, query_source, suffix="fanout-query"
+    )
+    await _capture_and_qualify(
+        memory, payloads, batches, seed_source, suffix="fanout-seed"
+    )
+    for index in range(5):
+        neighbor = await _unit_values(
+            payloads,
+            source_suffix=f"n{index}",
+            unit_suffix=f"fanout-n{index}",
+        )
+        await _capture_and_qualify(
+            memory, payloads, batches, neighbor, suffix=f"fanout-n{index}"
+        )
+        await memory.add_relation(
+            operation_id=f"relation/fanout/{index}",
+            contribution_id=f"contribution/fanout/{index}",
+            relation_kind="ASSOCIATES_WITH",
+            left_kind="SOURCE_UNIT",
+            left_id="unit/fanout-seed",
+            right_kind="SOURCE_UNIT",
+            right_id=f"unit/fanout-n{index}",
+            evidence=(
+                MemoryEvidenceRef("unit/fanout-seed", 1, "part/text"),
+                MemoryEvidenceRef(f"unit/fanout-n{index}", 1, "part/text"),
+            ),
+            expected_deletion_epoch=0,
+            origin_kind="MANUAL",
+            weight_micros=900_000,
+        )
+
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    document = await retrieval.prepare_source_facets(
+        operation_id="facets/fanout-seed",
+        source_unit_id="unit/fanout-seed",
+        expected_deletion_epoch=0,
+    )
+    query = await retrieval.register_query(
+        operation_id="query/register/fanout",
+        query_id="query/fanout",
+        current_source_id="source/group/query",
+        input_batch_ref=query_batch,
+        context_revision=1,
+        parts=(
+            RetrievalQueryPart(
+                "unit/fanout-query",
+                1,
+                query_source["occurrence"].occurrence_id,
+                "part/text",
+            ),
+        ),
+        expected_deletion_epoch=0,
+    )
+    await _embed(payloads, retrieval, document["facets"][0], _vector(0), suffix="fanout-doc")
+    await _embed(payloads, retrieval, query["facets"][0], _vector(0), suffix="fanout-query")
+    bundle = await _freeze_bundle(
+        retrieval,
+        operation_id="bundle/freeze/fanout",
+        bundle_id="bundle/fanout",
+        query_id="query/fanout",
+        expected_deletion_epoch=0,
+        seed_limit=1,
+        max_graph_nodes=8,
+        max_association_edges_per_node=2,
+    )
+    assert bundle["direct_seed_ids"] == ["unit/fanout-seed"]
+    assert len(bundle["evidence"]) == 3
+    assert sum(not item["is_direct_seed"] for item in bundle["evidence"]) == 2
+    assert len(bundle["relations"]) == 2
+    assert {item["external_group_id"] for item in bundle["evidence"][1:]} <= {
+        "group-n0",
+        "group-n1",
+        "group-n2",
+        "group-n3",
+        "group-n4",
+    }
+    assert all(item["graph_relevance"] == 0.9 for item in bundle["evidence"][1:])
+
+
+@pytest.mark.postgres
+async def test_successful_reply_journals_only_projected_direct_seeds_until_trigger_archive(
+    clean_memory_graph,
+):
+    _store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "trigger")
+    await _register(memory, "seed")
+    trigger = await _unit_values(
+        payloads, source_suffix="trigger", unit_suffix="journal-trigger"
+    )
+    seed = await _unit_values(payloads, source_suffix="seed", unit_suffix="journal-seed")
+    await memory.capture_source_unit(operation_id="capture/journal-trigger", **trigger)
+    occurrence = trigger["occurrence"]
+    batch = "batch/journal-trigger"
+    batches.add((batch, occurrence.conversation_ref, occurrence.event_ref, 1))
+    await memory.qualify_occurrence(
+        operation_id="eligibility/journal-trigger",
+        source_unit_id=trigger["source_unit_id"],
+        occurrence_id=occurrence.occurrence_id,
+        input_batch_ref=batch,
+        context_revision=1,
+        expected_deletion_epoch=0,
+    )
+    await _capture_and_qualify(memory, payloads, batches, seed, suffix="journal-seed")
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    document = await retrieval.prepare_source_facets(
+        operation_id="facets/journal-seed",
+        source_unit_id="unit/journal-seed",
+        expected_deletion_epoch=0,
+    )
+    query = await retrieval.register_query(
+        operation_id="query/register/journal",
+        query_id="query/journal",
+        current_source_id="source/group/trigger",
+        input_batch_ref=batch,
+        context_revision=1,
+        parts=(
+            RetrievalQueryPart(
+                "unit/journal-trigger",
+                1,
+                occurrence.occurrence_id,
+                "part/text",
+            ),
+        ),
+        expected_deletion_epoch=0,
+    )
+    await _embed(payloads, retrieval, document["facets"][0], _vector(0), suffix="journal-doc")
+    await _embed(payloads, retrieval, query["facets"][0], _vector(0), suffix="journal-query")
+    bundle = await _freeze_bundle(
+        retrieval,
+        operation_id="bundle/freeze/journal",
+        bundle_id="bundle/journal",
+        query_id="query/journal",
+        expected_deletion_epoch=0,
+        seed_limit=1,
+    )
+    await retrieval.confirm_bundle_projection(
+        bundle_id=bundle["bundle_id"],
+        source_unit_ids=("unit/journal-seed",),
+        expected_deletion_epoch=0,
+    )
+    async with memory.store.pool.connection() as conn, conn.transaction():
+        recorded = await memory.record_reply_associations_in(
+            conn,
+            operation_id="reply-association/journal",
+            reply_ref="reply/journal",
+            conversation_ref=occurrence.conversation_ref,
+            trigger_event_refs=(occurrence.event_ref,),
+            input_batch_refs=(batch,),
+            expected_deletion_epoch=0,
+        )
+    assert recorded == {"journaled": 1, "promoted": 0}
+    assert (
+        await memory.query_relations(
+            endpoint_kind="SOURCE_UNIT", endpoint_id="unit/journal-trigger"
+        )
+    )["items"] == []
+
+    await _archive_event(
+        memory,
+        payloads,
+        suffix="journal-trigger",
+        occurrence=occurrence,
+        input_batch_ref=batch,
+        context_revision=1,
+    )
+    relations = await memory.query_relations(
+        endpoint_kind="SOURCE_UNIT", endpoint_id="unit/journal-trigger"
+    )
+    assert len(relations["items"]) == 1
+    relation = relations["items"][0]
+    assert relation["relation_kind"] == "ASSOCIATES_WITH"
+    assert relation["origin_kind"] == "VECTOR"
+    assert {relation["left_id"], relation["right_id"]} == {
+        "unit/journal-trigger",
+        "unit/journal-seed",
+    }
+
+
+@pytest.mark.postgres
+async def test_exact_recall_accepts_only_archived_stable_source_ids(clean_memory_graph):
+    _store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "exact")
+    values = await _unit_values(payloads, source_suffix="exact", unit_suffix="exact")
+    await memory.capture_source_unit(operation_id="capture/exact", **values)
+    occurrence = values["occurrence"]
+    batches.add(("batch/exact", occurrence.conversation_ref, occurrence.event_ref, 1))
+    await memory.qualify_occurrence(
+        operation_id="eligibility/exact",
+        source_unit_id=values["source_unit_id"],
+        occurrence_id=occurrence.occurrence_id,
+        input_batch_ref="batch/exact",
+        context_revision=1,
+        expected_deletion_epoch=0,
+    )
+    retrieval = MemoryRetrievalRepository(
+        memory.store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    with pytest.raises(ForestError) as caught:
+        await retrieval.read_exact_sources(
+            (values["source_unit_id"],), expected_deletion_epoch=0
+        )
+    assert caught.value.code == "MEMORY_EVIDENCE_UNAVAILABLE"
+
+    await _archive_event(
+        memory,
+        payloads,
+        suffix="exact",
+        occurrence=occurrence,
+        input_batch_ref="batch/exact",
+        context_revision=1,
+    )
+    exact = await retrieval.read_exact_sources(
+        (values["source_unit_id"],), expected_deletion_epoch=0
+    )
+    assert exact["protocol"] == "forest.memory-exact-region/1"
+    assert [item["source_unit_id"] for item in exact["evidence"]] == [
+        values["source_unit_id"]
+    ]
+    assert exact["evidence"][0]["external_group_id"] == "group-exact"
 
 
 @pytest.mark.postgres

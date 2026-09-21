@@ -188,7 +188,7 @@ Run 状态机不负责释放整个群的响应资格：WAIT_TOOL、WAIT_APPROVAL
 4. 按 `forest-agent-protocol/v1` 将输出解析为一个原子 ModelTurn。协议错误最多进行一次有界修复；合法 FunctionCall 按其具体请求主体校验参数、权限、预算、幂等与目标，提交意图并等待结果或保存 checkpoint。模型不得直接产生可信 ControlProposal；管理控制继续走确定性 Shell/管理服务。
 5. 模型流和工具结果闭合后形成安全边界。完整步骤先保存有序 RunStep/checkpoint；若有新触发，在下一输入批次追加之前或同一事务中 flush 前序尚未发布的完整步骤，再按新切口接入消息。未闭合的工具调用与流之间禁止插入新群消息。
 6. 每次安全边界更新视图并检查裁剪预算；没有新触发时不吸收普通尾部，仅按当前任务决定是否继续调用模型。裁剪不能只在首次创建 Agent 时执行。
-7. 终止 Assistant 先形成持久 `FinalCandidate` checkpoint。协调器随后主持同一 Bot UnitOfWork：`agent.runtime` 关闭准确 Run，`conversation.scheduler` 追加正式 `REPLY` Context、标记实际覆盖 trigger 并分配 CHAT `response_seq`，`delivery` 创建 SendIntent，Memory 只登记自己的整理工作。各 participant 只写自己的 schema，任一失败整体回滚。仅因为队列中有新触发，不丢弃当前已经生成且仍合法的回答；新触发进入后继串行 Run。
+7. 终止 Assistant 先形成持久 `FinalCandidate` checkpoint。协调器随后主持同一 Bot UnitOfWork：`agent.runtime` 关闭准确 Run，`conversation.scheduler` 追加正式 `REPLY` Context、标记实际覆盖 trigger 并分配 CHAT `response_seq`，`delivery` 创建 SendIntent，Memory 为该成功回复登记“触发源 → 已实际投影的直接召回种子”关联日志。各 participant 只写自己的 schema，任一失败整体回滚。触发源尚未归档时日志保持待提升，不得提前把活跃 Context 写入长期图。仅因为队列中有新触发，不丢弃当前已经生成且仍合法的回答；新触发进入后继串行 Run。
 8. Session 调度器再次检查持久队列：有触发则启动后继串行 Run；无触发则不再请求对话模型，静默追加剩余普通消息、归档/裁剪，最后原子检查水位并退出。并发入站或分类完成必须留下待调度工作，不能丢失唤醒。
 
 输入事实、完整模型/工具步骤、最终可见回复采用不同提交边界；ModelTurn 仍整体提交，不逐 token 写 Context。前序完整步骤在后来的用户输入之前发布，来源时间与 commit_seq 各自保留。取消/失败保留已经入库的群消息与工具事实，仅将未完成输出标记为失败分支，不把它们冒充群回复。恢复复用已确认工具结果，也不能重复追加同一 InputBatch。
@@ -311,7 +311,7 @@ MemoryOperation
 
 每个 Bot 具有一个全局记忆图，其中每个群聊恰有一个持久主干根。`group_source_id` 是 `memory_sources` 中 GROUP 来源的稳定 source_id，由 `(bot_id, platform, realm_id, external_group_id, identity_incarnation)` 注册；群名、Binding 连接代际、线程和 ConversationSession 不能创建另一条主干。群内线程与多个执行会话保留 source_conversation_id/thread_id，仍归同一主干。私聊、Bot 自身任务与外部知识使用显式非群来源类型，不冒认当前群。
 
-主干由稳定来源单元构成，`TRUNK_NEXT` 仅连接同 Bot、同 trunk_id 的相邻单元。`source_order_seq` 在来源权威提交时按 source_id 分配，归档任务只引用原位置；同一已接纳来源集合无论分批、重试或乱序归档，都按固定位置重建同一条链。它既不是全 Bot memory_clock，也不是 Context 可见水位；来源时间和模型实际所见次序分别保留。Inbox 登记来源不立即授予长期召回资格，仍须有已提交 InputBatch 与可靠归档。
+主干由稳定来源单元构成，`TRUNK_NEXT` 仅连接同 Bot、同 trunk_id 的相邻已归档单元。`source_order_seq` 在来源权威提交时按 source_id 分配，归档任务只引用原位置；同一已接纳来源集合无论分批、重试或乱序归档，都按固定位置重建同一条链。它既不是全 Bot memory_clock，也不是 Context 可见水位；来源时间和模型实际所见次序分别保留。Inbox 登记只得到 `REGISTERED`，提交 InputBatch 只使 occurrence 得到本轮查询用的 `ADMITTED`；Scheduler 的确定性裁剪 archive 经 Memory 复核后才授予源单元 `ELIGIBLE` 长期召回资格。
 
 不同主干可以通过 `ASSOCIATES_WITH`、证据或矛盾关系连接；语义关联不表示同群、先后发生或因果成立。全局实体可以连接来自多群的断言，但每条断言保留全部来源。群乙召回群甲的节点不会把它复制为群乙主干的原始事件；仅真正发生在群乙的新消息/模型步骤获得群乙的来源位置。图的schema、发布与召回输出详见[10 多主干记忆图](10-multi-trunk-memory-graph.md)。
 
@@ -358,11 +358,11 @@ Bot 全局 `source_revision` 用于快照与水位，可在短事务中分配；
 
 查询支持文本→文本/图片、图片→图片/文本及图文混合。图片查询来自冻结输入内获权的media part或显式工具参数，不要求先由LLM描述图片；对话LLM是文本模型时也能先完成图片召回。查询与结果记录space_id、EmbeddingProfile版本、ordered_parts_digest及source manifest，不同空间只允许按显式策略分别检索再做排名融合。命中内容按typed parts物化，保留源图/原文跨度、逐part作者和群来源；不能将图片命中默认串成纯文本。
 
-当前群本轮尚未纳入 InputBatch 的尾部不能通过 RAG、observer 或摘要刷新旁路进入模型输入。基于当前群消息的自动记忆抽取至少等该来源已进入持久 InputBatch；物化按模型固定 selected_input_end_seq/来源清单过滤同会话的更晚输入及其派生物。其他群的获准共享事实仍按 Bot 全局域检索，不把这一切口过滤变成群级长期记忆库。
+当前群本轮尚未纳入 InputBatch 的尾部不能通过 RAG、observer 或摘要刷新旁路进入模型输入。当前 InputBatch 消息可以作为该轮多模态查询，但只有已经被裁剪归档的来源才能成为长期 DOCUMENT、图节点或自动联想端点；物化按模型固定 selected_input_end_seq/来源清单过滤同会话的更晚输入及其派生物。其他群的获准共享事实仍按 Bot 全局域检索，不把这一切口过滤变成群级长期记忆库。
 
-图检索限制起点数、访问节点数、访问边数、最大跳数、查询次数和整体 deadline，不能只在遍历结束后截断结果。没有向量索引时，可降级到授权后的词法/近期事实检索；返回 completeness 与 index_watermark，避免声称已检索全部新记忆。
+Milvus ANN 只选择直接种子；各查询 facet 的候选经 RRF 排序后取至多 `seed_limit` 个，种子图激活固定为 `1.0`，不把向量相似度与图激活混算。扩散沿时序边和联想边计算最大乘积路径，低于 `min_graph_relevance` 的路径停止，最多物化 `max_graph_nodes` 个节点。某节点合格联想边超过 `max_association_edges_per_node` 时，按查询与边身份派生的伪随机顺序先选至多该数量再扩散；时序边不占该配额。相同查询可重放，不允许从数据库取出全部高出度邻接后才裁剪。
 
-图扩展还限制跨主干跳数和不同来源数，区分顺序边与联想边的权重/用途，并在扩展中检查端点、边和沿途来源权限。EvidenceBundle 明确 current_source 与每项 sources；显示稳定来源群标识、可见名称快照、作者、时间及证据ID。来源标题计入 token 预算，空间不足时减少正文/整项证据，不能只留下无来源文本；多源结论逐 claim 关联来源，不只列一份混合群名。来源包装是Provider的强制渲染契约，不能作为可能被序列化器丢弃的 metadata。具体示例见[10](10-multi-trunk-memory-graph.md)。
+时序边和联想边使用不同版本化权重，并在扩展中检查端点及关系证据仍为 `ELIGIBLE`。EvidenceBundle 明确 current_source 与每项 sources；显示稳定来源群标识、主干、作者、时间、直接种子标志、图激活和前驱边。来源标题计入字符/token预算，空间不足时只保留完整源单元前缀，不能截断成无来源文本；实际投影另写不可变回执，成功回复只学习其中的直接种子。模型已知稳定 `source_unit_id` 时可调用 Memory 贡献的 `memory_recall_exact`，绕过 ANN 精确读取一至八个已归档单元。具体示例见[10](10-multi-trunk-memory-graph.md)。
 
 召回后再为实际LLM做非破坏性ModelInputProjection：文本模型去掉历史、Evidence和工具结果中所有image part及媒体传输字段，保留合法文本、来源与“图片未提供给当前模型”的标记；不把URL/base64或media handle伪装成文本输入。模型只能依据实际收到的文本作答，图像相似度不能被说成已经看懂图中内容。原始多模态Evidence/Context与嵌入查询保持完整，后续视觉模型可在合法边界重新物化图片。
 

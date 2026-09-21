@@ -105,6 +105,10 @@ ActiveRelationBuffer  已提交但端点尚未都归档的关系
 
 裁剪预览识别将离开模型窗口的已提交单元，先写 archive，再写时序图，最后尝试 embedding。向量失败不会删除归档或图节点。检索先取向量 seed，再从旧图按最大乘积路径扩散，最后从 archive 重建完整单元并包装为 `RagMessage`。检索本身不写图；成功 turn 后只提议“触发 UserMessage → 本次保留的直接 seed”，待触发消息也归档后再提升。
 
+`memory/graph.py` 的扩散并不是 PPR：每个直接 seed 的初始激活固定为 `1.0`，候选路径的激活是沿途边权乘积，同一节点只接受比当前值更大的路径；默认时序边权 `0.55`、联想边权 `0.90`、最低激活 `0.05`、最多返回 `32` 个节点。向量相似度负责选择 seed，不与图激活做数值混合。QiYu 还提供按准确 archive ID 读取后再扩散的入口，避免已知记忆身份时重复走 ANN。
+
+QiYu 的 `ActiveRelationBuffer` 也限定了学习语义：一次成功 turn 只记录触发消息到**实际保留的直接 seed**，扩散节点不会反向成为新联想；触发端点未归档时先缓冲，归档后提升为图边。这个约束可以抑制检索结果自我放大，但原实现对高出度节点会枚举全部邻边后再继续扩散，长期运行后单点邻接读取会失控。Forest 保留最大乘积语义，并在每个节点展开前对联想边做有界、查询种子驱动的伪随机抽样；时序边不占该配额。
+
 `VLRetrievalEncoder` 可以将规范文本和每张图片分别嵌入，再对同维向量取等权平均并 L2 归一化。模型投影不会修改历史：支持的媒体保留；不支持的 RAG 媒体移除，音视频可退回 transcript。
 
 QiYu 应用并没有完整启用这条多模态记忆路径。`ApplicationMemoryBridge._query_text()` 只取文本，检索按 `conversation_id` 隔离；其 OpenAI-compatible adapter 只为直接 `UserMessage` 附加真实图片数据。因此“Agentlib 具备 VL 参考实现”不能推导成“QiYu 已有完整多模态、跨会话记忆”。
@@ -211,6 +215,10 @@ Forest adapter 必须冻结并记录实际能力；CorePrompt 使用最高可用
 | 协议 repair | 采用并限制 | 最多一次；保存错误码、候选 digest 和有界诊断，修复反馈受预算 |
 | ArchiveSummary | 不采用 | 不配置、不实现摘要 Provider；裁剪只归档并重建确定性视图 |
 | archive-only memory | 采用 | PostgreSQL 权威操作/归档 + outbox 派生向量/图，带 deletion epoch |
+| ANN 只选择 seed，最大乘积扩散 | 采用 | seed 激活固定 1.0；时序 0.55、联想 0.90；以最低激活和节点数限界 |
+| 高出度邻接全枚举 | 加强 | 每节点只随机选至多配置数量的联想边；查询种子确定抽样以便审计重放 |
+| 成功 turn 学习直接 seed | 采用 | 仅学习已实际投影的直接 seed；不可变 journal 等触发源归档后提升，不累加重试权重 |
+| 精确 archive ID 召回 | 采用 | `memory_recall_exact` 按稳定 source_unit_id 读取已归档完整单元并保留群/作者来源 |
 | 单序列 MemoryGraph | 替换 | 每 Bot 一个全局 memory domain，每群一条 trunk，ASSOCIATED 可跨 trunk |
 | RagMessage | 采用结构思想 | 每个 node 强制模型可见 source bot/group/conversation/user/ingress/time/provenance |
 | VL encoder | 采用接口，替换细节 | 文本+图片 facet、版本化共享空间、可配置融合和按图查询 |

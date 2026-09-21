@@ -138,12 +138,14 @@ def _build_final_reply_commit(context):
     agent = context.participant("agent.runtime")
     conversation = context.participant("conversation.scheduler")
     delivery = context.participant("delivery")
+    memory = context.participant("memory.graph")
     participants = (
         RuntimeParticipant("agent.runtime", agent.generation_identity.generation_id),
         RuntimeParticipant(
             "conversation.scheduler", conversation.generation_identity.generation_id
         ),
         RuntimeParticipant("delivery", delivery.generation_identity.generation_id),
+        RuntimeParticipant("memory.graph", memory.generation_identity.generation_id),
     )
     port = TransactionalConversationCompletionPort(
         unit_of_work=FinalReplyUnitOfWork(
@@ -151,6 +153,7 @@ def _build_final_reply_commit(context):
             agent_participant=agent,
             conversation_participant=conversation,
             delivery_participant=delivery,
+            memory_participant=memory,
             generation_member_verifier=context.generation_member_verifier,
             participants=participants,
         ),
@@ -412,7 +415,12 @@ async def bootstrap_clean_messaging(
                     RuntimeKernelServiceSpec(
                         "kernel.uow.conversation.final-reply",
                         1,
-                        ("agent.runtime", "conversation.scheduler", "delivery"),
+                        (
+                            "agent.runtime",
+                            "conversation.scheduler",
+                            "delivery",
+                            "memory.graph",
+                        ),
                         _build_final_reply_commit,
                     ),
                     RuntimeKernelServiceSpec(

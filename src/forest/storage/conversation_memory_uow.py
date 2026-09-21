@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 
 from forest.errors import ForestError
@@ -69,5 +70,33 @@ class ConversationMemoryInputUnitOfWork:
                     **result,
                     "memory_qualified_count": 0,
                     "memory_pending_count": 0,
+                }
+            archive = result.get("memory_archive")
+            if archive and archive.get("event_refs"):
+                deletion_epoch = await _call(self.deletion_epoch_guard, conn)
+                archived = await self.memory.qualify_archive_in(
+                    conn,
+                    operation_id="archive:"
+                    + hashlib.sha256(operation_id.encode("utf-8")).hexdigest(),
+                    compaction_ref=archive["compaction_ref"],
+                    conversation_ref=actor.conversation_id,
+                    event_refs=archive["event_refs"],
+                    expected_deletion_epoch=deletion_epoch,
+                    archive_verifier=self.scheduler.verify_context_archive_occurrence_in,
+                )
+                result = {
+                    **result,
+                    "memory_archived_count": sum(
+                        item.get("state") != "PENDING_CAPTURE" for item in archived
+                    ),
+                    "memory_archive_pending_count": sum(
+                        item.get("state") == "PENDING_CAPTURE" for item in archived
+                    ),
+                }
+            else:
+                result = {
+                    **result,
+                    "memory_archived_count": 0,
+                    "memory_archive_pending_count": 0,
                 }
             return result

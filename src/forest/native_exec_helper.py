@@ -19,13 +19,15 @@ try:
 except ImportError:  # pragma: no cover - Windows development host
     resource = None
 
+_SECCOMP_LIBRARY = ctypes.util.find_library("seccomp")
+
 
 def seccomp_available() -> bool:
-    return sys.platform.startswith("linux") and ctypes.util.find_library("seccomp") is not None
+    return sys.platform.startswith("linux") and _SECCOMP_LIBRARY is not None
 
 
 def _deny_network() -> None:
-    library_name = ctypes.util.find_library("seccomp")
+    library_name = _SECCOMP_LIBRARY
     if not sys.platform.startswith("linux") or library_name is None:
         raise RuntimeError("network isolation is unavailable")
     library = ctypes.CDLL(library_name, use_errno=True)

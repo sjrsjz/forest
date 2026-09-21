@@ -46,6 +46,10 @@ class DurableFinalReplyPlanner:
             reply_ref=completion.reply_ref,
         )
         try:
+            run = await self.agent.load(request.run_ref)
+            input_batch_refs = tuple(
+                item["input_batch_ref"] for item in run.get("inputs", ())
+            )
             generation = self.delivery.generation_identity
             if generation is None or generation.component_id != "delivery":
                 raise ForestError(
@@ -85,6 +89,7 @@ class DurableFinalReplyPlanner:
                     channel_ref=lane["channel_ref"],
                     delivery_generation_id=generation.generation_id,
                     parts=(part,),
+                    association_input_batch_refs=input_batch_refs,
                 ),
                 release_handle=prepared,
             )

@@ -10,6 +10,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg import sql
+from scripts.rebuild_bot_database import rebuild
 
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
@@ -22,7 +23,6 @@ from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProf
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
-from scripts.rebuild_bot_database import rebuild
 
 
 @pytest.mark.postgres

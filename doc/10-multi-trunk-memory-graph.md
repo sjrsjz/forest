@@ -96,9 +96,9 @@ GROUP_MESSAGE 的 source_unit_id 根据 Bot 和平台去重身份稳定派生；
 
 普通群消息在权威 Inbox 接纳时登记源身份和位置。模型/工具来源在其闭合事实提交时登记。原始消息内容与管理命令的安全投影遵守[09 Shell 历史规则](09-group-shell-command-system.md)：图检索只能取得允许进入模型的投影，不能因原文已归档就向模型公开敏感参数。
 
-源单元注册与语义可检索性是两个状态。Inbox 中仍排队的消息可以已有来源身份和持久载荷，但没有因此获得进入当前 Run 的资格。普通群消息的主干节点和长期索引发布至少等待来源已获已提交 InputBatch 归属、可靠 Archive/来源映射及当前可见性检查；早期注册表不是可检索原文入口。后台抽取也不能先读排队正文再把它包装成全局事实。即使来源已在后来的 InputBatch 中提交，早先模型调用仍按自己冻结的切口过滤。
+源单元注册、当前轮查询资格与长期可检索资格是三个不同状态。完整来源物化后，`source_units` 先成为 `REGISTERED`；Conversation 把 occurrence 提交进准确 InputBatch 后，该 occurrence 成为 `ADMITTED`，只允许作为本轮 QUERY facet 的输入，源单元仍是 `REGISTERED`，不得生成 DOCUMENT facet、进入 Milvus 或充当图节点；只有 Scheduler 已提交的确定性裁剪结果明确把该事件写入 `memory_archive`，Memory 在同一 UnitOfWork 中复核 `compaction_ref/event_ref/InputBatch/context_revision` 后，occurrence 与源单元才成为 `ELIGIBLE`。因此活跃窗口、排队尾部和“已被 Agent 看见但尚未裁剪”的消息都不是长期 RAG 文档。即使来源后来归档，早先模型调用仍按自己冻结的切口和检索包读取，不能回写未来内容。
 
-InputBatch 提交不能同步等待远端图片下载。若选择事务尚未找到完整 source occurrence，Memory 在同一事务写入由 `(conversation_ref,event_ref)` 唯一标识的 `PENDING_CAPTURE` 资格事实，并先用 Conversation authority 证明该事件确属该 InputBatch。媒体物化事务与选择事务对同一事件使用相同锁：来源先到时直接资格化，InputBatch 先到时来源提交后自动解析原待定事实。待定记录本身不可检索，也不能创建文本占位冒充图片；它只保存未来来源可继承的准确 InputBatch、Context revision 和删除 epoch。重放输入不同必须冲突，不能最后写入者覆盖。
+InputBatch 提交不能同步等待远端图片下载。若选择事务尚未找到完整 source occurrence，Memory 写入由 `(conversation_ref,event_ref)` 唯一标识的 `pending_input_events`；裁剪先于完整来源到达时另写 `pending_archive_events`。媒体物化、输入接纳与归档资格对同一事件使用相同锁，来源提交后依次解析两类待定事实，使状态从 `REGISTERED` 收敛为 `ADMITTED`，再收敛为 `ELIGIBLE`。下载确定失败时两类待定事实一并成为 `UNAVAILABLE`。待定记录自身不可检索，也不能创建文本占位冒充图片；重放输入不同必须冲突，不能最后写入者覆盖。
 
 ```text
 MemorySourceUnit
@@ -181,7 +181,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
-一次召回先把查询 facet 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与分数。`memory.graph` 随后在同一冻结可见性时间点回 PostgreSQL批量验证 `READY`、space、来源修订、eligibility、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。ANN 结果只构成图扩展种子，后续按 `max_seed_nodes/max_nodes/max_edges/max_hops/max_distinct_groups/deadline_at` 在权威关系图做有界扩展，最终 EvidenceBundle 始终从事实库物化并逐项附来源群和作者。
+一次召回先把当前 InputBatch 的文本/图片 parts 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与相似度。`memory.graph` 随后在冻结可见性时间点回 PostgreSQL 批量验证 `READY`、space、来源修订、`ELIGIBLE`、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。各查询 facet 的候选用 RRF 只确定直接种子顺序，向量相似度不再与图激活值混成一个分数。直接种子的激活值统一为 `1.0`，再沿同主干前后邻接边和 `ASSOCIATES_WITH` 边执行最大乘积扩散；最终 EvidenceBundle 始终从 PostgreSQL 事实库物化，并逐项附原始群聊、主干、作者和命中路径。
 
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。
 
@@ -232,7 +232,21 @@ MemoryQuery
   max_queries, max_evidence_tokens, deadline_at
 ```
 
-先确定可信 Bot 和当前来源，再检索全局授权候选、按预算扩展图、从事实库物化、过滤不可见/已删除/输入切口之外的来源，最后组装来源明确的证据。每次扩展消耗节点、边、跳数、涉及群数和时间预算；达到任一硬上限即停止扩展，不能遍历整个图后才裁结果。
+先确定可信 Bot 和当前来源，再检索全局授权候选、按预算扩展图、从事实库物化、过滤不可见/已删除/输入切口之外的来源，最后组装来源明确的证据。扩展在读取每个节点时就执行节点总量、最低激活值和单节点联想扇出限制，整个召回还受调用期限约束；不能遍历完整图后才裁结果。
+
+当前官方扩散契约为 `qiyu-graph-region/1`：
+
+1. 最多保留 `seed_limit` 个 ANN 直接种子，每个种子激活值为 `1.0`。
+2. 路径分数是沿途边权乘积；同一节点只保留最大乘积路径。低于 `min_graph_relevance` 的候选不再入队，按激活值从高到低确定性出队，最多物化 `max_graph_nodes` 个节点。
+3. 同主干相邻边使用 `sequence_weight`，联想边使用 `association_weight`。联想贡献自己的业务权重保留为证据元数据，但不能偷偷改变本版本的扩散权重。
+4. 每次展开一个节点时，时序边不占用联想边配额；若合格 `ASSOCIATES_WITH` 边超过 `max_association_edges_per_node`，先按 `(query_id, source_unit_id, relation_id, contribution_id, target_id)` 派生的伪随机顺序选取至多该数量，再进行扩散。相同查询可审计重放，不同查询会得到不同子样本，数据库不得先取全量高出度邻接再在进程内裁剪。
+5. 检索包冻结直接种子、图激活、前驱边、实际进入区域的关系和删除 epoch。模型投影只接受完整源单元前缀；投影确认写独立不可变 `retrieval_projections` 回执，不能原地修改不可变检索项。
+
+默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=32`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
+
+成功回复后的联想学习只使用该轮**实际投影给模型的直接种子**。图扩散带出的节点、因字符预算未投影的节点和失败/取消 Run 均不得产生学习边。FinalReply UnitOfWork 先写不可变 `association_journal`；若触发消息仍在活动 Context，日志保持 `PENDING_ARCHIVE`，待该触发源也通过裁剪归档成为 `ELIGIBLE` 后，才创建一次稳定的无向 `ASSOCIATES_WITH` 贡献。重复召回不累加边权，删除任一端点会抑制尚未提升的日志。
+
+模型从 EvidenceBundle 得到稳定 `source_unit_id` 后，可调用 Memory 模块贡献的 `memory_recall_exact` 工具读取一至八个准确归档单元。精确召回不调用 ANN，也不接受 `REGISTERED/ADMITTED` 活跃消息；结果仍逐项携带来源群、主干、作者和图文 parts，并受当前删除 epoch 与工具授权链约束。
 
 当前群候选可以优先排序，但其他群合法证据不被永久排除。跨主干扩展同时检查节点、边及其必要来源的权限闭包；来源身份本身不可披露的证据不能以删除来源头的方式送入模型。返回的证据和路径仅包含当前请求可以知道的内容。
 

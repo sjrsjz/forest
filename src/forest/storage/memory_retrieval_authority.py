@@ -8,6 +8,7 @@ driver as an authority for source identity or visibility.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import inspect
 import json
 import math
@@ -233,7 +234,14 @@ class MemoryRetrievalRepository:
             raise ForestError("MEMORY_DOMAIN_MISSING", "Memory domain is not initialized", 409)
         return dict(row)
 
-    async def _source_parts_in(self, conn, source_unit_id: str, *, lock=False):
+    async def _source_parts_in(
+        self,
+        conn,
+        source_unit_id: str,
+        *,
+        lock=False,
+        allow_registered: bool = False,
+    ):
         lock_sql = sql.SQL(" FOR SHARE") if lock else sql.SQL("")
         unit = await (
             await conn.execute(
@@ -246,7 +254,8 @@ class MemoryRetrievalRepository:
                 (self.store.bot_id, source_unit_id),
             )
         ).fetchone()
-        if unit is None or unit["eligibility_state"] != "ELIGIBLE":
+        accepted_states = {"ELIGIBLE", "REGISTERED"} if allow_registered else {"ELIGIBLE"}
+        if unit is None or unit["eligibility_state"] not in accepted_states:
             raise ForestError("MEMORY_SOURCE_UNAVAILABLE", "Memory source is not eligible", 409)
         parts = await (
             await conn.execute(
@@ -517,9 +526,9 @@ class MemoryRetrievalRepository:
             raise ForestError("MEMORY_QUERY_SOURCE_MISSING", "Query source part is unavailable", 404)
         if (
             row["source_revision"] != part.source_revision
-            or row["eligibility_state"] != "ELIGIBLE"
+            or row["eligibility_state"] not in {"REGISTERED", "ELIGIBLE"}
             or row["occurrence_source_unit_id"] != part.source_unit_id
-            or row["occurrence_state"] != "ELIGIBLE"
+            or row["occurrence_state"] not in {"ADMITTED", "ELIGIBLE"}
             or row["input_batch_ref"] != input_batch_ref
             or row["context_revision"] != context_revision
         ):
@@ -716,8 +725,8 @@ class MemoryRetrievalRepository:
                         "AND s.source_id=u.source_id JOIN {} p ON p.bot_id=u.bot_id "
                         "AND p.source_unit_id=u.source_unit_id WHERE o.bot_id=%s "
                         "AND o.conversation_ref=%s AND o.input_batch_ref=%s "
-                        "AND o.context_revision=%s AND o.eligibility_state='ELIGIBLE' "
-                        "AND u.eligibility_state='ELIGIBLE' "
+                        "AND o.context_revision=%s AND o.eligibility_state IN ('ADMITTED','ELIGIBLE') "
+                        "AND u.eligibility_state IN ('REGISTERED','ELIGIBLE') "
                         "ORDER BY o.observed_at,o.occurrence_id,p.part_index,p.part_id"
                     ).format(
                         self._table("source_occurrences"),
@@ -816,7 +825,9 @@ class MemoryRetrievalRepository:
             ).fetchone()
             if row is None:
                 raise ForestError("MEMORY_FACET_NOT_FOUND", "Embedding facet does not exist", 404)
-            if row["eligibility_state"] != "ELIGIBLE":
+            if row["eligibility_state"] != "ELIGIBLE" and not (
+                row["purpose"] == "QUERY" and row["eligibility_state"] == "REGISTERED"
+            ):
                 raise ForestError("MEMORY_SOURCE_UNAVAILABLE", "Embedding source is unavailable", 409)
             content = await self._read_payload(conn, row["input_payload_id"], deletion_epoch)
             if _content_digest(content) != row["input_payload_digest"]:
@@ -1002,7 +1013,8 @@ class MemoryRetrievalRepository:
                         "SELECT f.* FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
                         "AND u.source_unit_id=f.source_unit_id "
                         "WHERE f.bot_id=%s AND f.state='PENDING' AND f.purpose=%s "
-                        "AND u.eligibility_state='ELIGIBLE' "
+                        "AND (u.eligibility_state='ELIGIBLE' OR "
+                        "(%s='QUERY' AND u.eligibility_state='REGISTERED')) "
                         "AND u.source_revision=f.source_revision "
                         "ORDER BY f.created_at,f.facet_id LIMIT %s "
                         "FOR UPDATE OF f SKIP LOCKED"
@@ -1010,7 +1022,7 @@ class MemoryRetrievalRepository:
                         self._table("embedding_facets"),
                         self._table("source_units"),
                     ),
-                    (self.store.bot_id, purpose, item_limit),
+                    (self.store.bot_id, purpose, purpose, item_limit),
                 )
             ).fetchall()
             selected_facets = []
@@ -1049,7 +1061,10 @@ class MemoryRetrievalRepository:
             ).fetchone()
             for index, facet in enumerate(facets):
                 unit, _ = await self._source_parts_in(
-                    conn, facet["source_unit_id"], lock=True
+                    conn,
+                    facet["source_unit_id"],
+                    lock=True,
+                    allow_registered=facet["purpose"] == "QUERY",
                 )
                 if unit["source_revision"] != facet["source_revision"]:
                     raise ForestError(
@@ -1143,13 +1158,14 @@ class MemoryRetrievalRepository:
                         "SELECT 1 FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
                         "AND u.source_unit_id=f.source_unit_id WHERE f.bot_id=%s "
                         "AND f.state='PENDING' AND f.purpose=%s "
-                        "AND u.eligibility_state='ELIGIBLE' "
+                        "AND (u.eligibility_state='ELIGIBLE' OR "
+                        "(%s='QUERY' AND u.eligibility_state='REGISTERED')) "
                         "AND u.source_revision=f.source_revision LIMIT 1"
                     ).format(
                         self._table("embedding_facets"),
                         self._table("source_units"),
                     ),
-                    (self.store.bot_id, purpose),
+                    (self.store.bot_id, purpose, purpose),
                 )
             ).fetchone()
         return row is not None
@@ -1300,7 +1316,12 @@ class MemoryRetrievalRepository:
                     "MEMORY_FACET_NOT_DISPATCHABLE", "Embedding facet cannot start an attempt", 409
                 )
             current_deletion_epoch = await self._epoch(conn)
-            unit, _ = await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
+            unit, _ = await self._source_parts_in(
+                conn,
+                facet["source_unit_id"],
+                lock=True,
+                allow_registered=facet["purpose"] == "QUERY",
+            )
             if unit["source_revision"] != facet["source_revision"]:
                 raise ForestError("MEMORY_SOURCE_UNAVAILABLE", "Embedding source changed", 409)
             provisional = EmbeddingPermit(
@@ -1396,7 +1417,12 @@ class MemoryRetrievalRepository:
             ):
                 raise ForestError("MEMORY_STALE_EMBEDDING_PERMIT", "Embedding facet moved", 409)
             await self._epoch(conn, expected=permit.accepted_deletion_epoch)
-            await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
+            await self._source_parts_in(
+                conn,
+                facet["source_unit_id"],
+                lock=True,
+                allow_registered=facet["purpose"] == "QUERY",
+            )
             attempt = await (
                 await conn.execute(
                     sql.SQL(
@@ -1499,7 +1525,12 @@ class MemoryRetrievalRepository:
                         "MEMORY_STALE_EMBEDDING_PERMIT", "Embedding facet moved", 409
                     )
                 await self._epoch(conn, expected=permit.accepted_deletion_epoch)
-                await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
+                await self._source_parts_in(
+                    conn,
+                    facet["source_unit_id"],
+                    lock=True,
+                    allow_registered=facet["purpose"] == "QUERY",
+                )
             if replay:
                 return tuple(dict(by_attempt[permit.attempt_id]) for permit in permits)
             if any(by_attempt[permit.attempt_id]["state"] == "DISPATCHED" for permit in ordered):
@@ -1666,8 +1697,18 @@ class MemoryRetrievalRepository:
                 for source_unit_id in sorted(
                     {by_facet[permit.facet_id]["source_unit_id"] for permit in ordered}
                 ):
+                    source_facets = [
+                        by_facet[permit.facet_id]
+                        for permit in ordered
+                        if by_facet[permit.facet_id]["source_unit_id"] == source_unit_id
+                    ]
                     units[source_unit_id], _ = await self._source_parts_in(
-                        conn, source_unit_id, lock=True
+                        conn,
+                        source_unit_id,
+                        lock=True,
+                        allow_registered=all(
+                            facet["purpose"] == "QUERY" for facet in source_facets
+                        ),
                     )
                 for permit in ordered:
                     facet = by_facet[permit.facet_id]
@@ -1834,7 +1875,12 @@ class MemoryRetrievalRepository:
             stored_vector = None
             if outcome == "SUCCEEDED":
                 await self._epoch(conn, expected=expected_deletion_epoch)
-                unit, _ = await self._source_parts_in(conn, facet["source_unit_id"], lock=True)
+                unit, _ = await self._source_parts_in(
+                    conn,
+                    facet["source_unit_id"],
+                    lock=True,
+                    allow_registered=facet["purpose"] == "QUERY",
+                )
                 if unit["source_revision"] != facet["source_revision"]:
                     raise ForestError("MEMORY_SOURCE_UNAVAILABLE", "Embedding source changed", 409)
                 await self._verify_payload(conn, result)
@@ -2048,6 +2094,173 @@ class MemoryRetrievalRepository:
                 "facets": [dict(row) for row in facets],
             }
 
+    async def _graph_neighbors_in(
+        self,
+        conn,
+        *,
+        source_unit_id: str,
+        sampling_seed: str,
+        sequence_weight: float,
+        association_weight: float,
+        max_association_edges_per_node: int,
+    ) -> tuple[dict, ...]:
+        """Load one node's authorized neighbours with bounded association fan-out."""
+
+        sequence_rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "WITH origin AS (SELECT trunk_id,source_order_seq FROM {} "
+                    "WHERE bot_id=%s AND source_unit_id=%s AND eligibility_state='ELIGIBLE') "
+                    "SELECT u.source_unit_id,u.source_order_seq FROM origin o CROSS JOIN LATERAL ("
+                    "(SELECT n.source_unit_id,n.source_order_seq FROM {} n WHERE n.bot_id=%s "
+                    "AND n.trunk_id=o.trunk_id AND n.eligibility_state='ELIGIBLE' "
+                    "AND n.source_order_seq<o.source_order_seq ORDER BY n.source_order_seq DESC LIMIT 1) "
+                    "UNION ALL "
+                    "(SELECT n.source_unit_id,n.source_order_seq FROM {} n WHERE n.bot_id=%s "
+                    "AND n.trunk_id=o.trunk_id AND n.eligibility_state='ELIGIBLE' "
+                    "AND n.source_order_seq>o.source_order_seq ORDER BY n.source_order_seq LIMIT 1)"
+                    ") u ORDER BY u.source_order_seq"
+                ).format(
+                    self._table("source_units"),
+                    self._table("source_units"),
+                    self._table("source_units"),
+                ),
+                (
+                    self.store.bot_id,
+                    source_unit_id,
+                    self.store.bot_id,
+                    self.store.bot_id,
+                ),
+            )
+        ).fetchall()
+        result = []
+        for row in sequence_rows:
+            target = row["source_unit_id"]
+            pair = sorted((source_unit_id, target))
+            result.append(
+                {
+                    "edge_id": "sequence:"
+                    + hashlib.sha256(_canonical([self.store.bot_id, *pair])).hexdigest(),
+                    "relation_kind": "SEQUENCE",
+                    "source_unit_id": source_unit_id,
+                    "target_unit_id": target,
+                    "weight": sequence_weight,
+                    "contribution_id": None,
+                }
+            )
+
+        association_rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "WITH candidates AS (SELECT c.relation_id,c.contribution_id,c.weight_micros,"
+                    "CASE WHEN c.left_id=%s THEN c.right_id ELSE c.left_id END AS target_unit_id,"
+                    "row_number() OVER (PARTITION BY CASE WHEN c.left_id=%s THEN c.right_id "
+                    "ELSE c.left_id END ORDER BY c.weight_micros DESC,c.contribution_id) AS target_rank "
+                    "FROM {} c WHERE c.bot_id=%s AND c.active AND "
+                    "c.relation_kind='ASSOCIATES_WITH' AND c.left_kind='SOURCE_UNIT' "
+                    "AND c.right_kind='SOURCE_UNIT' AND (c.left_id=%s OR c.right_id=%s) "
+                    "AND NOT EXISTS (SELECT 1 FROM {} e JOIN {} eu ON eu.bot_id=e.bot_id "
+                    "AND eu.source_unit_id=e.source_unit_id WHERE e.bot_id=c.bot_id "
+                    "AND e.contribution_id=c.contribution_id AND eu.eligibility_state<>'ELIGIBLE')) "
+                    "SELECT c.relation_id,c.contribution_id,c.target_unit_id,c.weight_micros "
+                    "FROM candidates c JOIN {} target ON target.bot_id=%s "
+                    "AND target.source_unit_id=c.target_unit_id AND target.eligibility_state='ELIGIBLE' "
+                    "WHERE c.target_rank=1 ORDER BY md5(%s || ':' || c.relation_id || "
+                    "':' || c.contribution_id || ':' || c.target_unit_id) LIMIT %s"
+                ).format(
+                    self._table("relation_contributions"),
+                    self._table("relation_evidence"),
+                    self._table("source_units"),
+                    self._table("source_units"),
+                ),
+                (
+                    source_unit_id,
+                    source_unit_id,
+                    self.store.bot_id,
+                    source_unit_id,
+                    source_unit_id,
+                    self.store.bot_id,
+                    sampling_seed,
+                    max_association_edges_per_node,
+                ),
+            )
+        ).fetchall()
+        result.extend(
+            {
+                "edge_id": row["relation_id"],
+                "relation_kind": "ASSOCIATED",
+                "source_unit_id": source_unit_id,
+                "target_unit_id": row["target_unit_id"],
+                "weight": association_weight,
+                "contribution_id": row["contribution_id"],
+                "contribution_weight_micros": row["weight_micros"],
+            }
+            for row in association_rows
+        )
+        return tuple(result)
+
+    async def _expand_graph_in(
+        self,
+        conn,
+        *,
+        seeds: tuple[str, ...],
+        sampling_seed: str,
+        min_graph_relevance: float,
+        max_graph_nodes: int,
+        max_association_edges_per_node: int,
+        sequence_weight: float,
+        association_weight: float,
+    ) -> tuple[tuple[dict, ...], tuple[dict, ...]]:
+        """Run QiYu-compatible maximum-product expansion over the frozen graph view."""
+
+        relevance = {node_id: 1.0 for node_id in dict.fromkeys(seeds)}
+        predecessor: dict[str, tuple[str, str]] = {}
+        queue = [(-1.0, index, node_id) for index, node_id in enumerate(relevance)]
+        heapq.heapify(queue)
+        finalized = set()
+        encountered_edges: dict[tuple[str, str, str], dict] = {}
+        order = len(queue)
+        while queue and len(finalized) < max_graph_nodes:
+            negative_score, _, source_id = heapq.heappop(queue)
+            source_score = -negative_score
+            if source_id in finalized or source_score < relevance.get(source_id, 0.0):
+                continue
+            finalized.add(source_id)
+            neighbors = await self._graph_neighbors_in(
+                conn,
+                source_unit_id=source_id,
+                sampling_seed=sampling_seed,
+                sequence_weight=sequence_weight,
+                association_weight=association_weight,
+                max_association_edges_per_node=max_association_edges_per_node,
+            )
+            for edge in neighbors:
+                encountered_edges[(edge["edge_id"], source_id, edge["target_unit_id"])] = edge
+                propagated = source_score * edge["weight"]
+                target = edge["target_unit_id"]
+                if propagated < min_graph_relevance or propagated <= relevance.get(target, 0.0):
+                    continue
+                relevance[target] = propagated
+                predecessor[target] = (source_id, edge["edge_id"])
+                order += 1
+                heapq.heappush(queue, (-propagated, order, target))
+        activations = tuple(
+            {
+                "source_unit_id": node_id,
+                "activation": relevance[node_id],
+                "path_parent_source_unit_id": predecessor.get(node_id, (None, None))[0],
+                "path_edge_id": predecessor.get(node_id, (None, None))[1],
+            }
+            for node_id in sorted(finalized, key=lambda item: (-relevance[item], item))
+        )
+        included = {item["source_unit_id"] for item in activations}
+        edges = tuple(
+            edge
+            for edge in encountered_edges.values()
+            if edge["source_unit_id"] in included and edge["target_unit_id"] in included
+        )
+        return activations, edges
+
     async def freeze_bundle(
         self,
         *,
@@ -2055,8 +2268,15 @@ class MemoryRetrievalRepository:
         bundle_id: str,
         query_id: str,
         expected_deletion_epoch: int,
-        result_limit: int = 8,
+        result_limit: int | None = None,
+        seed_limit: int = 4,
         candidate_limit_per_facet: int = 64,
+        min_similarity: float = 0.35,
+        min_graph_relevance: float = 0.05,
+        max_graph_nodes: int = 32,
+        max_association_edges_per_node: int = 32,
+        sequence_weight: float = 0.55,
+        association_weight: float = 0.90,
         index_snapshot_at=None,
         candidate_sets=None,
     ) -> dict:
@@ -2066,19 +2286,50 @@ class MemoryRetrievalRepository:
             (query_id, "query_id"),
         ):
             _bounded(value, field, 256)
-        if type(result_limit) is not int or not 1 <= result_limit <= 256:
-            raise ForestError("MEMORY_INPUT_INVALID", "Invalid retrieval result limit", 422)
+        if result_limit is not None:
+            if type(result_limit) is not int or not 1 <= result_limit <= 256:
+                raise ForestError("MEMORY_INPUT_INVALID", "Invalid retrieval result limit", 422)
+            max_graph_nodes = result_limit
+            seed_limit = min(seed_limit, result_limit)
+        if type(seed_limit) is not int or not 1 <= seed_limit <= 256:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid retrieval seed limit", 422)
+        if type(max_graph_nodes) is not int or not seed_limit <= max_graph_nodes <= 256:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid graph node limit", 422)
         if (
             type(candidate_limit_per_facet) is not int
             or not 1 <= candidate_limit_per_facet <= 256
         ):
             raise ForestError("MEMORY_INPUT_INVALID", "Invalid candidate limit", 422)
+        if type(min_similarity) not in {int, float} or not -1.0 <= min_similarity <= 1.0:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid seed similarity threshold", 422)
+        if (
+            type(min_graph_relevance) not in {int, float}
+            or not 0.0 < min_graph_relevance <= 1.0
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid graph relevance threshold", 422)
+        if (
+            type(max_association_edges_per_node) is not int
+            or not 1 <= max_association_edges_per_node <= 4096
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid association fan-out limit", 422)
+        if any(
+            type(weight) not in {int, float} or not 0.0 < weight <= 1.0
+            for weight in (sequence_weight, association_weight)
+        ):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid graph edge weight", 422)
+        sampling_seed = query_id
         input_digest = _digest(
             {
                 "bundle_id": bundle_id,
                 "query_id": query_id,
-                "result_limit": result_limit,
+                "seed_limit": seed_limit,
                 "candidate_limit_per_facet": candidate_limit_per_facet,
+                "min_similarity": min_similarity,
+                "min_graph_relevance": min_graph_relevance,
+                "max_graph_nodes": max_graph_nodes,
+                "max_association_edges_per_node": max_association_edges_per_node,
+                "sequence_weight": sequence_weight,
+                "association_weight": association_weight,
                 "expected_deletion_epoch": expected_deletion_epoch,
             }
         )
@@ -2156,6 +2407,8 @@ class MemoryRetrievalRepository:
                     score = item.get("score")
                     if type(score) not in {int, float} or not math.isfinite(score):
                         raise ForestError("MEMORY_VECTOR_INDEX_RESPONSE_INVALID", "Candidate score is invalid", 502)
+                    if float(score) < min_similarity:
+                        continue
                     if item["ref_id"] not in external_scores:
                         ordered_refs.append(item["ref_id"])
                         external_scores[item["ref_id"]] = float(score)
@@ -2209,7 +2462,21 @@ class MemoryRetrievalRepository:
                             "source_revision": candidate["source_revision"],
                         }
                     )
-            selected_ids = sorted(scores, key=lambda item: (-scores[item], item))[:result_limit]
+            seed_ids = sorted(scores, key=lambda item: (-scores[item], item))[:seed_limit]
+            activations, graph_edges = await self._expand_graph_in(
+                conn,
+                seeds=tuple(seed_ids),
+                sampling_seed=sampling_seed,
+                min_graph_relevance=float(min_graph_relevance),
+                max_graph_nodes=max_graph_nodes,
+                max_association_edges_per_node=max_association_edges_per_node,
+                sequence_weight=float(sequence_weight),
+                association_weight=float(association_weight),
+            )
+            activated_ids = [item["source_unit_id"] for item in activations]
+            selected_ids = list(
+                dict.fromkeys((*seed_ids, *(item for item in activated_ids if item not in seed_ids)))
+            )
             selected = {}
             if selected_ids:
                 rows = await (
@@ -2226,7 +2493,7 @@ class MemoryRetrievalRepository:
                 selected[source_id]["eligibility_state"] != "ELIGIBLE"
                 or any(
                     match["source_revision"] != selected[source_id]["source_revision"]
-                    for match in matches[source_id]
+                    for match in matches.get(source_id, ())
                 )
                 for source_id in selected_ids
             ):
@@ -2236,9 +2503,11 @@ class MemoryRetrievalRepository:
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,bundle_id,query_id,operation_id,input_digest,"
-                    "index_snapshot_at,accepted_deletion_epoch,result_limit,"
-                    "candidate_limit_per_facet,result_count) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                    "index_snapshot_at,accepted_deletion_epoch,result_limit,seed_limit,"
+                    "candidate_limit_per_facet,min_similarity,min_graph_relevance,"
+                    "sequence_weight,association_weight,max_association_edges_per_node,"
+                    "sampling_seed,seed_count,result_count) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
                 ).format(self._table("retrieval_bundles")),
                 (
                     self.store.bot_id,
@@ -2248,17 +2517,29 @@ class MemoryRetrievalRepository:
                     input_digest,
                     snapshot_at,
                     deletion_epoch,
-                    result_limit,
+                    max_graph_nodes,
+                    seed_limit,
                     candidate_limit_per_facet,
+                    min_similarity,
+                    min_graph_relevance,
+                    sequence_weight,
+                    association_weight,
+                    max_association_edges_per_node,
+                    sampling_seed,
+                    len(seed_ids),
                     len(selected_ids),
                 ),
             )
+            activation_by_id = {item["source_unit_id"]: item for item in activations}
             for item_index, source_unit_id in enumerate(selected_ids):
-                rank_micros = round(scores[source_unit_id] * 1_000_000_000_000)
+                rank_micros = round(scores.get(source_unit_id, 0.0) * 1_000_000_000_000)
+                activation = activation_by_id[source_unit_id]
                 await conn.execute(
                     sql.SQL(
                         "INSERT INTO {}(bot_id,bundle_id,item_index,source_unit_id,"
-                        "source_revision,rank_micros) VALUES (%s,%s,%s,%s,%s,%s)"
+                        "source_revision,rank_micros,activation_micros,is_seed,"
+                        "path_parent_source_unit_id,path_edge_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
                     ).format(self._table("retrieval_items")),
                     (
                         self.store.bot_id,
@@ -2267,10 +2548,14 @@ class MemoryRetrievalRepository:
                         source_unit_id,
                         selected[source_unit_id]["source_revision"],
                         rank_micros,
+                        round(activation["activation"] * 1_000_000),
+                        source_unit_id in seed_ids,
+                        activation["path_parent_source_unit_id"],
+                        activation["path_edge_id"],
                     ),
                 )
                 ordered_matches = sorted(
-                    matches[source_unit_id],
+                    matches.get(source_unit_id, ()),
                     key=lambda item: (
                         item["query_facet_id"],
                         item["candidate_rank"],
@@ -2297,6 +2582,44 @@ class MemoryRetrievalRepository:
                             match["score"],
                         ),
                     )
+            logical_edges = {}
+            for edge in graph_edges:
+                left, right = sorted((edge["source_unit_id"], edge["target_unit_id"]))
+                key = (edge["edge_id"], left, right)
+                logical_edges[key] = {
+                    **edge,
+                    "source_unit_id": left,
+                    "target_unit_id": right,
+                }
+            for relation_index, edge in enumerate(
+                sorted(
+                    logical_edges.values(),
+                    key=lambda item: (
+                        item["relation_kind"],
+                        item["edge_id"],
+                        item["source_unit_id"],
+                        item["target_unit_id"],
+                    ),
+                )
+            ):
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,bundle_id,relation_index,edge_id,relation_kind,"
+                        "source_unit_id,target_unit_id,weight_micros,contribution_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                    ).format(self._table("retrieval_relations")),
+                    (
+                        self.store.bot_id,
+                        bundle_id,
+                        relation_index,
+                        edge["edge_id"],
+                        edge["relation_kind"],
+                        edge["source_unit_id"],
+                        edge["target_unit_id"],
+                        round(edge["weight"] * 1_000_000),
+                        edge["contribution_id"],
+                    ),
+                )
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch) "
@@ -2336,6 +2659,171 @@ class MemoryRetrievalRepository:
         _bounded(bundle_id, "bundle_id", 256)
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self._read_bundle_in(conn, bundle_id, expected_deletion_epoch)
+
+    async def read_exact_sources(
+        self,
+        source_unit_ids,
+        *,
+        expected_deletion_epoch: int,
+    ) -> dict:
+        """Read archived source units by their stable IDs without ANN approximation."""
+
+        ids = tuple(source_unit_ids)
+        if not 1 <= len(ids) <= 8 or len(set(ids)) != len(ids):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid exact Memory source set", 422)
+        for source_unit_id in ids:
+            _bounded(source_unit_id, "source_unit_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            deletion_epoch = await self._epoch(conn, expected=expected_deletion_epoch)
+            rows = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT u.*,s.source_kind,s.platform,s.realm_id,s.external_group_id "
+                        "FROM {} u JOIN {} s ON s.bot_id=u.bot_id AND s.source_id=u.source_id "
+                        "WHERE u.bot_id=%s AND u.source_unit_id=ANY(%s) FOR SHARE OF u"
+                    ).format(self._table("source_units"), self._table("memory_sources")),
+                    (self.store.bot_id, list(ids)),
+                )
+            ).fetchall()
+            by_id = {row["source_unit_id"]: row for row in rows}
+            if set(by_id) != set(ids):
+                raise ForestError("MEMORY_SOURCE_NOT_FOUND", "Exact Memory source is missing", 404)
+            if any(by_id[source_id]["eligibility_state"] != "ELIGIBLE" for source_id in ids):
+                raise ForestError(
+                    "MEMORY_EVIDENCE_UNAVAILABLE",
+                    "Exact Memory source is not archived or was removed",
+                    409,
+                )
+            evidence = []
+            for source_id in ids:
+                row = by_id[source_id]
+                author = MemoryPayloadRef(
+                    row["author_payload_id"],
+                    row["author_payload_digest"],
+                    row["author_owner_component_id"],
+                    row["author_owner_kind"],
+                    row["author_owner_id"],
+                )
+                await self._verify_payload(conn, author)
+                parts = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT * FROM {} WHERE bot_id=%s AND source_unit_id=%s "
+                            "ORDER BY part_index,part_id"
+                        ).format(self._table("source_parts")),
+                        (self.store.bot_id, source_id),
+                    )
+                ).fetchall()
+                part_values = []
+                for part in parts:
+                    await self._verify_payload(conn, self._part_ref(part))
+                    part_values.append(
+                        {
+                            "part_id": part["part_id"],
+                            "part_index": part["part_index"],
+                            "part_kind": part["part_kind"],
+                            "media_type": part["media_type"],
+                            "payload_id": part["payload_id"],
+                            "payload_digest": part["payload_digest"],
+                            "width": part["width"],
+                            "height": part["height"],
+                            "byte_length": part["byte_length"],
+                        }
+                    )
+                evidence.append(
+                    {
+                        "source_unit_id": source_id,
+                        "source_revision": row["source_revision"],
+                        "source_id": row["source_id"],
+                        "source_kind": row["source_kind"],
+                        "trunk_id": row["trunk_id"],
+                        "platform": row["platform"],
+                        "realm_id": row["realm_id"],
+                        "external_group_id": row["external_group_id"],
+                        "author_subject_ref": row["author_subject_ref"],
+                        "occurred_at": row["occurred_at"],
+                        "unit_kind": row["unit_kind"],
+                        "modality": row["modality"],
+                        "parts": part_values,
+                    }
+                )
+            return {
+                "protocol": "forest.memory-exact-region/1",
+                "accepted_deletion_epoch": deletion_epoch,
+                "evidence": evidence,
+            }
+
+    async def confirm_bundle_projection(
+        self,
+        *,
+        bundle_id: str,
+        source_unit_ids,
+        expected_deletion_epoch: int,
+    ) -> dict:
+        """Freeze the exact whole-unit region delivered to the model projector."""
+
+        _bounded(bundle_id, "bundle_id", 256)
+        ids = tuple(source_unit_ids)
+        if len(ids) > 256 or len(set(ids)) != len(ids):
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid projected evidence set", 422)
+        for source_unit_id in ids:
+            _bounded(source_unit_id, "source_unit_id", 256)
+        projection_digest = _digest(list(ids))
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._epoch(conn, expected=expected_deletion_epoch)
+            bundle = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND bundle_id=%s FOR UPDATE").format(
+                        self._table("retrieval_bundles")
+                    ),
+                    (self.store.bot_id, bundle_id),
+                )
+            ).fetchone()
+            if bundle is None:
+                raise ForestError("MEMORY_BUNDLE_NOT_FOUND", "Evidence bundle does not exist", 404)
+            projection = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND bundle_id=%s"
+                    ).format(self._table("retrieval_projections")),
+                    (self.store.bot_id, bundle_id),
+                )
+            ).fetchone()
+            if projection is not None:
+                if (
+                    projection["projection_digest"] != projection_digest
+                    or projection["projected_count"] != len(ids)
+                ):
+                    raise ForestError(
+                        "MEMORY_BUNDLE_PROJECTION_CONFLICT",
+                        "Evidence projection differs from its frozen region",
+                        409,
+                    )
+                return {"bundle_id": bundle_id, "source_unit_ids": list(ids), "duplicate": True}
+            available = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT source_unit_id FROM {} WHERE bot_id=%s AND bundle_id=%s "
+                        "ORDER BY item_index"
+                    ).format(self._table("retrieval_items")),
+                    (self.store.bot_id, bundle_id),
+                )
+            ).fetchall()
+            ordered = [row["source_unit_id"] for row in available]
+            if ids != tuple(ordered[: len(ids)]):
+                raise ForestError(
+                    "MEMORY_BUNDLE_PROJECTION_CONFLICT",
+                    "Projected evidence is not a whole-unit prefix",
+                    409,
+                )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,bundle_id,projection_digest,projected_count) "
+                    "VALUES (%s,%s,%s,%s)"
+                ).format(self._table("retrieval_projections")),
+                (self.store.bot_id, bundle_id, projection_digest, len(ids)),
+            )
+            return {"bundle_id": bundle_id, "source_unit_ids": list(ids), "duplicate": False}
 
     async def _read_bundle_in(self, conn, bundle_id: str, expected_deletion_epoch: int) -> dict:
         deletion_epoch = await self._epoch(conn, expected=expected_deletion_epoch)
@@ -2445,10 +2933,24 @@ class MemoryRetrievalRepository:
                     "unit_kind": row["unit_kind"],
                     "modality": row["modality"],
                     "rank_micros": row["rank_micros"],
+                    "graph_relevance": row["activation_micros"] / 1_000_000,
+                    "is_direct_seed": row["is_seed"],
+                    "path_parent_source_unit_id": row["path_parent_source_unit_id"],
+                    "path_edge_id": row["path_edge_id"],
                     "parts": part_values,
                     "matches": [dict(match) for match in match_rows],
                 }
             )
+        relation_rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT edge_id,relation_kind,source_unit_id,target_unit_id,"
+                    "weight_micros,contribution_id FROM {} WHERE bot_id=%s AND bundle_id=%s "
+                    "ORDER BY relation_index"
+                ).format(self._table("retrieval_relations")),
+                (self.store.bot_id, bundle_id),
+            )
+        ).fetchall()
         return {
             "bundle_id": bundle_id,
             "query_id": bundle["query_id"],
@@ -2459,13 +2961,34 @@ class MemoryRetrievalRepository:
             "index_snapshot_at": bundle["index_snapshot_at"],
             "accepted_deletion_epoch": bundle["accepted_deletion_epoch"],
             "evidence": evidence,
+            "direct_seed_ids": [
+                item["source_unit_id"] for item in evidence if item["is_direct_seed"]
+            ],
+            "relations": [
+                {
+                    **dict(row),
+                    "weight": row["weight_micros"] / 1_000_000,
+                }
+                for row in relation_rows
+            ],
             "completeness": {
                 "query_modalities": sorted({facet["modality"] for facet in query_facets}),
                 "query_facets_ready": sum(facet["state"] == "READY" for facet in query_facets),
                 "query_facet_count": len(query_facets),
                 "result_count": len(evidence),
+                "seed_count": bundle["seed_count"],
+                "seed_limit": bundle["seed_limit"],
                 "candidate_limit_per_facet": bundle["candidate_limit_per_facet"],
+                "min_similarity": bundle["min_similarity"],
+                "min_graph_relevance": bundle["min_graph_relevance"],
+                "sequence_weight": bundle["sequence_weight"],
+                "association_weight": bundle["association_weight"],
+                "max_graph_nodes": bundle["result_limit"],
+                "max_association_edges_per_node": bundle[
+                    "max_association_edges_per_node"
+                ],
+                "association_sampling": "query_seeded_sha256",
                 "exact_projection": True,
-                "ann_index": False,
+                "ann_index": True,
             },
         }

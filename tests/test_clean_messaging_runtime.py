@@ -26,6 +26,7 @@ from forest.agent_tool_executor import (
 from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
+from forest.builtin_memory_tool import MEMORY_EXACT_RECALL_TOOL
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
 from forest.clean_agent_module import bootstrap_clean_agent
@@ -46,7 +47,6 @@ from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
-from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
     AgentInputBatch,
@@ -577,8 +577,12 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert agent_runtime.active is True
         assert provider_runtime.active is True
         assert agent_runtime.execution is not None
-        assert set(agent_runtime.execution.routes) == {"runtime_status"}
+        assert set(agent_runtime.execution.routes) == {
+            "memory_recall_exact",
+            "runtime_status",
+        }
         assert runtime_descriptor.agent_tools == (RUNTIME_STATUS_TOOL,)
+        assert memory.descriptor.agent_tools == (MEMORY_EXACT_RECALL_TOOL,)
         assert agent.descriptor.agent_tools == ()
         assert [item.service_id for item in agent.descriptor.kernel_services] == [
             "kernel.uow.agent.cancel-wake"
@@ -591,6 +595,14 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert runtime_tool.binding.approval_required is False
         assert runtime_tool.binding.supports_query is True
         assert runtime_tool.binding.contract_digest == RUNTIME_STATUS_TOOL.contract_digest
+        memory_tool = agent_runtime.execution.routes["memory_recall_exact"]
+        assert memory_tool.binding.component_id == "memory.graph"
+        assert memory_tool.binding.generation_id == registry.graph_identity.generations[
+            "memory.graph"
+        ]
+        assert memory_tool.binding.approval_required is False
+        assert memory_tool.binding.supports_query is True
+        assert memory_tool.binding.contract_digest == MEMORY_EXACT_RECALL_TOOL.contract_digest
         tool_request = ToolAuthorizationRequest(
             tool_call_id="tool-call:runtime-status:integration",
             effect_operation_ref="tool-effect:runtime-status:integration",
@@ -776,41 +788,18 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "trigger_decision": "TRIGGER",
             "classifier_component_id": "conversation.trigger-policy",
         }
-        for _ in range(500):
-            remembered = await memory_runtime.query_sources()
-            if remembered["items"]:
-                break
-            await asyncio.sleep(0.01)
-        assert len(remembered["items"]) == 1
-        assert remembered["items"][0]["external_group_id"] == "933179609"
-        assert remembered["items"][0]["author_subject_ref"] == "qq:42"
-        assert remembered["items"][0]["parts"][0]["part_kind"] == "TEXT"
-        _, _, memory_sources_service = shell_runtime.command_routes[("memory.sources", 1)]
-        memory_sources_result = await memory_sources_service(
-            ShellCommandExecutionRequest(
-                "memory.sources",
-                1,
-                {"trunk_id": trunks[0]["trunk_id"], "limit": 10},
-                "shell-request:test-memory-sources",
-                "qq:42",
-                "onebot:group:933179609",
-            )
-        )
-        assert "群 933179609" in memory_sources_result.text
-        assert "qq:42" in memory_sources_result.text
+        remembered = await memory_runtime.query_sources()
+        assert remembered["items"] == []
         async with store.pool.connection() as conn:
             facet = await (
                 await conn.execute(
                     sql.SQL(
-                        "SELECT purpose,modality,state FROM {}.embedding_facets"
+                        "SELECT count(*) AS n FROM {}.embedding_facets "
+                        "WHERE purpose='DOCUMENT'"
                     ).format(sql.Identifier(memory.repository.namespace))
                 )
             ).fetchone()
-        assert dict(facet) == {
-            "purpose": "DOCUMENT",
-            "modality": "TEXT",
-            "state": "PENDING",
-        }
+        assert facet["n"] == 0
         assert await conversation_runtime.claimable_conversations() == (
             "onebot:group:933179609",
         )
@@ -1106,7 +1095,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             if item.manifest["run_id"] not in {"agent/run/test", "agent/run/tool"}
         ]
         assert len(automatic_tool_requests) == 2
-        assert automatic_tool_requests[0].manifest["tool_names"] == ["runtime_status"]
+        assert automatic_tool_requests[0].manifest["tool_names"] == [
+            "runtime_status",
+            "memory_recall_exact",
+        ]
         assert any(
             request.manifest.get("memory_evidence") is not None
             for request in model_clients[0].requests

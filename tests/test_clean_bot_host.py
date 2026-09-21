@@ -876,6 +876,28 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         expected_deletion_epoch=epoch,
                         _skip_input_batch_verification=True,
                     )
+
+                    async def verify_test_archive(_conn, **values):
+                        assert values == {
+                            "conversation_ref": "onebot:group:933179609",
+                            "compaction_ref": "test-memory-compaction",
+                            "event_ref": "test-memory-event",
+                        }
+                        return {
+                            "input_batch_ref": "test-input-batch",
+                            "context_revision": 1,
+                        }
+
+                    async with host.store.pool.connection() as conn, conn.transaction():
+                        await memory_runtime.repository.qualify_archive_in(
+                            conn,
+                            operation_id="test-memory-archive",
+                            compaction_ref="test-memory-compaction",
+                            conversation_ref="onebot:group:933179609",
+                            event_refs=("test-memory-event",),
+                            expected_deletion_epoch=epoch,
+                            archive_verifier=verify_test_archive,
+                        )
                     facets = await memory_runtime.retrieval.prepare_source_facets(
                         operation_id="test-memory-facets",
                         source_unit_id="test-memory-unit",
@@ -982,15 +1004,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     recalled_by_unit = {
                         item["source_unit_id"]: item for item in recalled.evidence["evidence"]
                     }
-                    assert set(recalled_by_unit) == {
-                        "test-memory-unit",
-                        capture["source_unit_id"],
-                    }
-                    assert any(
-                        part["type"] == "image"
-                        for part in recalled_by_unit[capture["source_unit_id"]]["parts"]
-                    )
-                    assert recalled.media
+                    assert set(recalled_by_unit) == {"test-memory-unit"}
+                    assert recalled.media == {}
                     assert recalled.evidence["conversation_id"] == ("onebot:group:933179609")
                     recalled_source = recalled_by_unit["test-memory-unit"]["source"]
                     assert recalled_source["group_source_id"] == ("onebot:group:933179609")

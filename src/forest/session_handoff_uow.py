@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from dataclasses import dataclass
 from datetime import datetime
@@ -141,6 +142,42 @@ class SessionHandoffUnitOfWork:
                     **selection,
                     "memory_qualified_count": 0,
                     "memory_pending_count": 0,
+                }
+            archive = selection.get("memory_archive")
+            if (
+                self.memory_participant is not None
+                and archive
+                and archive.get("event_refs")
+            ):
+                deletion_epoch = await self.memory_participant.deletion_epoch_in(conn)
+                archived = await self.memory_participant.qualify_archive_in(
+                    conn,
+                    operation_id="archive:"
+                    + hashlib.sha256(
+                        plan.selection_operation_id.encode("utf-8")
+                    ).hexdigest(),
+                    compaction_ref=archive["compaction_ref"],
+                    conversation_ref=actor.conversation_id,
+                    event_refs=archive["event_refs"],
+                    expected_deletion_epoch=deletion_epoch,
+                    archive_verifier=(
+                        self.conversation_participant.verify_context_archive_occurrence_in
+                    ),
+                )
+                selection = {
+                    **selection,
+                    "memory_archived_count": sum(
+                        item.get("state") != "PENDING_CAPTURE" for item in archived
+                    ),
+                    "memory_archive_pending_count": sum(
+                        item.get("state") == "PENDING_CAPTURE" for item in archived
+                    ),
+                }
+            else:
+                selection = {
+                    **selection,
+                    "memory_archived_count": 0,
+                    "memory_archive_pending_count": 0,
                 }
             if selection.get("kind") == "TRIGGER_INPUT":
                 successor = await self.agent_participant.start_successor_run_in(

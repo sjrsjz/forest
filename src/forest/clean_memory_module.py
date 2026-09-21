@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
+from forest.builtin_memory_tool import MEMORY_EXACT_RECALL_TOOL
 from forest.clean_management_contract import CleanMemoryManagementContract
 from forest.clean_memory_runtime import CleanMemoryRuntime
 from forest.embeddings import SILICONFLOW_VL_MODEL
@@ -33,6 +34,18 @@ def default_memory_configuration() -> dict:
             "dimensions": 4096,
         },
         "fusion_policy_revision": "independent-facets/1",
+        "retrieval": {
+            "policy_revision": "qiyu-graph-region/1",
+            "seed_limit": 4,
+            "candidate_limit_per_facet": 64,
+            "min_similarity": 0.35,
+            "min_graph_relevance": 0.05,
+            "max_graph_nodes": 32,
+            "max_association_edges_per_node": 32,
+            "max_retrieval_chars": 24000,
+            "sequence_weight": 0.55,
+            "association_weight": 0.90,
+        },
         "embedding_budget": {
             "policy_revision": "daily-cost-cap/1",
             "daily_request_limit": 1000,
@@ -102,12 +115,14 @@ async def bootstrap_clean_memory(
             "protocol",
             "embedding",
             "fusion_policy_revision",
+            "retrieval",
             "embedding_budget",
         ],
         "properties": {
             "protocol": {"const": "forest.memory.graph/1"},
             "embedding": {"type": "object"},
             "fusion_policy_revision": {"type": "string", "minLength": 1},
+            "retrieval": {"type": "object"},
             "embedding_budget": {"type": "object"},
         },
         "additionalProperties": False,
@@ -223,6 +238,7 @@ async def bootstrap_clean_memory(
         storage=storage,
         wakes_on_work=True,
         work_notify_order=20,
+        agent_tools=(MEMORY_EXACT_RECALL_TOOL,),
         shell_commands=MEMORY_SHELL_COMMANDS,
     )
     return CleanMemoryModule(repository, retrieval, descriptor, configuration, grants)

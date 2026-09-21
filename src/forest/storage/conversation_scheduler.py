@@ -1046,7 +1046,7 @@ class ConversationSchedulerRepository:
                 (self.store.bot_id, receipt["input_batch_id"]),
             )
         ).fetchall()
-        return {
+        result = {
             **result,
             "status": "BATCH",
             **dict(batch),
@@ -1054,6 +1054,37 @@ class ConversationSchedulerRepository:
             "trigger_ids": [row["trigger_id"] for row in triggers],
             "triggers": [dict(row) for row in triggers],
         }
+        compaction_operation_id = "context-compact:" + hashlib.sha256(
+            _canonical([self.store.bot_id, receipt["operation_id"]])
+        ).hexdigest()
+        compaction = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT compaction_id FROM {} WHERE bot_id=%s AND operation_id=%s"
+                ).format(self._table("context_compactions")),
+                (self.store.bot_id, compaction_operation_id),
+            )
+        ).fetchone()
+        if compaction is not None:
+            archived_events = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT u.event_id FROM {} cu JOIN {} u ON u.bot_id=cu.bot_id "
+                        "AND u.conversation_id=cu.conversation_id AND u.unit_id=cu.unit_id "
+                        "WHERE cu.bot_id=%s AND cu.compaction_id=%s AND u.event_id IS NOT NULL "
+                        "ORDER BY cu.archived_index"
+                    ).format(
+                        self._table("context_compaction_units"),
+                        self._table("context_units"),
+                    ),
+                    (self.store.bot_id, compaction["compaction_id"]),
+                )
+            ).fetchall()
+            result["memory_archive"] = {
+                "compaction_ref": compaction["compaction_id"],
+                "event_refs": tuple(row["event_id"] for row in archived_events),
+            }
+        return result
 
     async def _record_selection(
         self,
@@ -1329,7 +1360,8 @@ class ConversationSchedulerRepository:
                     "AND NOT EXISTS (SELECT 1 FROM {} cu WHERE cu.bot_id=u.bot_id "
                     "AND cu.conversation_id=u.conversation_id AND cu.unit_id=u.unit_id)) "
                     "SELECT a.unit_id,a.context_revision,a.unit_index,a.payload_digest,"
-                    "a.author_payload_digest FROM active a WHERE a.recent_rank>%s "
+                    "a.author_payload_digest,a.event_id,a.input_batch_id FROM active a "
+                    "WHERE a.recent_rank>%s "
                     "AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.bot_id=a.bot_id "
                     "AND t.conversation_id=a.conversation_id AND t.event_id=a.event_id "
                     "AND t.status IN ('PENDING','CLAIMED')) "
@@ -1368,6 +1400,8 @@ class ConversationSchedulerRepository:
                 row["unit_index"],
                 row["payload_digest"],
                 row["author_payload_digest"],
+                row["event_id"],
+                row["input_batch_id"],
             ]
             for row in rows
         ]
@@ -1501,6 +1535,10 @@ class ConversationSchedulerRepository:
         lane["context_view_revision"] = published_view_revision
         lane["context_view_unit_count"] = resulting_count
         lane["context_archived_unit_count"] = cumulative_count
+        lane["_memory_archive"] = {
+            "compaction_ref": compaction_id,
+            "event_refs": tuple(row["event_id"] for row in rows if row["event_id"] is not None),
+        }
         return lane
 
     async def _commit_batch(
@@ -1553,6 +1591,7 @@ class ConversationSchedulerRepository:
             policy=context_view_policy or self.context_view_policy,
             pin_active_session=boundary == "MODEL_SAFE_POINT",
         )
+        memory_archive = lane.pop("_memory_archive", None)
         selected_end = end_seq if end_seq is not None else lane["context_applied_seq"]
         batch_id = "batch:" + hashlib.sha256(
             _canonical([self.store.bot_id, operation_id])
@@ -1682,7 +1721,7 @@ class ConversationSchedulerRepository:
         lane["context_revision"] = context_revision
         lane["context_view_unit_count"] += len(events)
         lane["mailbox_revision"] += 1
-        return await self._record_selection(
+        selection = await self._record_selection(
             conn,
             operation_id=operation_id,
             input_digest=input_digest,
@@ -1693,6 +1732,9 @@ class ConversationSchedulerRepository:
             actor=actor,
             selected_input_end_seq=selected_end,
         )
+        if memory_archive is not None:
+            selection = {**selection, "memory_archive": memory_archive}
+        return selection
 
     async def append_context(
         self,
@@ -2229,6 +2271,61 @@ class ConversationSchedulerRepository:
                 409,
             )
         return dict(row)
+
+    async def verify_context_archive_occurrence_in(
+        self,
+        conn,
+        *,
+        conversation_ref: str,
+        compaction_ref: str,
+        event_ref: str,
+    ) -> dict:
+        """Prove that an input occurrence belongs to one published archive cut."""
+
+        _bounded(conversation_ref, "conversation_ref", 256)
+        _bounded(compaction_ref, "compaction_ref", 256)
+        _bounded(event_ref, "event_ref", 256)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT cu.compaction_id,u.input_batch_id AS input_batch_ref,"
+                    "u.context_revision,u.event_id FROM {} cu JOIN {} u ON u.bot_id=cu.bot_id "
+                    "AND u.conversation_id=cu.conversation_id AND u.unit_id=cu.unit_id "
+                    "WHERE cu.bot_id=%s AND cu.conversation_id=%s AND cu.compaction_id=%s "
+                    "AND u.kind='INPUT' AND u.event_id=%s"
+                ).format(
+                    self._table("context_compaction_units"),
+                    self._table("context_units"),
+                ),
+                (self.store.bot_id, conversation_ref, compaction_ref, event_ref),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError(
+                "CONVERSATION_ARCHIVE_UNAVAILABLE",
+                "Context archive does not contain this occurrence",
+                409,
+            )
+        return dict(row)
+
+    async def answered_trigger_events_in(self, conn, *, trigger_ids) -> tuple[str, ...]:
+        """Resolve the immutable source events behind an answered trigger set."""
+
+        ids = tuple(sorted(set(trigger_ids)))
+        if not ids:
+            return ()
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT trigger_id,event_id FROM {} WHERE bot_id=%s AND trigger_id=ANY(%s) "
+                    "ORDER BY trigger_id"
+                ).format(self._table("conversation_triggers")),
+                (self.store.bot_id, list(ids)),
+            )
+        ).fetchall()
+        if [row["trigger_id"] for row in rows] != list(ids):
+            raise ForestError("TRIGGER_NOT_FOUND", "An answered trigger does not exist", 404)
+        return tuple(row["event_id"] for row in rows)
 
     async def context_snapshot(self, actor: ConversationActor, *, _connection=None) -> dict:
         async with self._transaction(_connection) as conn:
