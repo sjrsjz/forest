@@ -5,6 +5,48 @@ from __future__ import annotations
 from forest.conversation_worker import ConversationWorker
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
+from forest.storage.conversation_scheduler import ContextViewPolicy
+
+CONVERSATION_CONFIGURATION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "protocol": {"const": "forest.conversation.scheduler/1"},
+        "context_view": {
+            "type": "object",
+            "properties": {
+                "high_watermark_units": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 1_000_000,
+                },
+                "retain_units": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 999_999,
+                },
+                "policy_revision": {
+                    "const": "context-view-unit-window-v1",
+                },
+            },
+            "required": ["high_watermark_units", "retain_units", "policy_revision"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["protocol", "context_view"],
+    "additionalProperties": False,
+}
+
+
+def default_conversation_configuration() -> dict:
+    return {
+        "protocol": "forest.conversation.scheduler/1",
+        "context_view": {
+            "high_watermark_units": 512,
+            "retain_units": 256,
+            "policy_revision": "context-view-unit-window-v1",
+        },
+    }
 
 _STATE_CONTRACT = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -63,9 +105,45 @@ class CleanConversationSchedulerRuntime:
         self.generation_identity: BoundGenerationIdentity | None = None
         self.active = False
         self.worker: ConversationWorker | None = None
+        self.context_view_policy: ContextViewPolicy | None = None
+
+    @staticmethod
+    def _parse_configuration(value: object) -> ContextViewPolicy:
+        if not isinstance(value, dict) or value.get("protocol") != "forest.conversation.scheduler/1":
+            raise ForestError(
+                "CONVERSATION_CONFIGURATION_INVALID",
+                "Conversation configuration protocol is invalid",
+                422,
+            )
+        view = value.get("context_view")
+        if not isinstance(view, dict) or set(view) != {
+            "high_watermark_units",
+            "retain_units",
+            "policy_revision",
+        }:
+            raise ForestError(
+                "CONVERSATION_CONFIGURATION_INVALID",
+                "Conversation Context view configuration is invalid",
+                422,
+            )
+        policy = ContextViewPolicy(
+            high_watermark_units=view["high_watermark_units"],
+            retain_units=view["retain_units"],
+            policy_revision=view["policy_revision"],
+        )
+        try:
+            policy.validate()
+        except ForestError as exc:
+            raise ForestError(
+                "CONVERSATION_CONFIGURATION_INVALID",
+                "Conversation Context view configuration is invalid",
+                422,
+            ) from exc
+        return policy
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
-        desired = await self.module_configuration.desired()
+        desired = await self.module_configuration.desired(include_value=True)
+        self.context_view_policy = self._parse_configuration(desired.value)
         return PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,
@@ -311,10 +389,17 @@ class CleanConversationSchedulerRuntime:
 
     async def select_input_in(self, conn, actor, operation_id: str, **values):
         await self._verify_member(conn)
+        if self.context_view_policy is None:
+            raise ForestError(
+                "CONVERSATION_CONFIGURATION_UNAVAILABLE",
+                "Conversation Context view policy is unavailable",
+                503,
+            )
         return await self.repository.select_input_in(
             conn,
             actor,
             operation_id,
+            context_view_policy=self.context_view_policy,
             **values,
         )
 

@@ -14,6 +14,7 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.schema_bundles import module_schema_namespace
+from forest.storage.payload_authority import PayloadSource
 
 _SHA256_RE = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _BOUNDARIES = frozenset({"IDLE", "MODEL_SAFE_POINT", "SESSION_END"})
@@ -98,6 +99,27 @@ class ConversationActor:
 
 
 @dataclass(frozen=True)
+class ContextViewPolicy:
+    """Deterministic local-only policy for the persistent canonical Context view."""
+
+    high_watermark_units: int = 512
+    retain_units: int = 256
+    policy_revision: str = "context-view-unit-window-v1"
+
+    def validate(self) -> None:
+        if (
+            type(self.high_watermark_units) is not int
+            or type(self.retain_units) is not int
+            or not 2 <= self.high_watermark_units <= 1_000_000
+            or not 1 <= self.retain_units < self.high_watermark_units
+        ):
+            raise ForestError(
+                "CONTEXT_VIEW_POLICY_INVALID", "Invalid Context view unit bounds", 422
+            )
+        _bounded(self.policy_revision, "context_view_policy.policy_revision", 256)
+
+
+@dataclass(frozen=True)
 class SchedulerContextFact:
     unit_id: str
     kind: str
@@ -146,10 +168,15 @@ class ConversationSchedulerRepository:
         *,
         namespace: str | None = None,
         payload_verifier: Callable[..., Awaitable[object]] | None = None,
+        payloads=None,
+        context_view_policy: ContextViewPolicy | None = None,
     ) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.conversation.scheduler")
         self.payload_verifier = payload_verifier
+        self.payloads = payloads or getattr(payload_verifier, "__self__", None)
+        self.context_view_policy = context_view_policy or ContextViewPolicy()
+        self.context_view_policy.validate()
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
@@ -1076,6 +1103,7 @@ class ConversationSchedulerRepository:
         session_ref: str | None = None,
         run_ref: str | None = None,
         next_run_ref: str | None = None,
+        context_view_policy: ContextViewPolicy | None = None,
         _connection=None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
@@ -1096,6 +1124,12 @@ class ConversationSchedulerRepository:
             )
         if type(actor) is not ConversationActor:
             raise ForestError("STALE_CONVERSATION_ACTOR", "Invalid conversation actor", 409)
+        policy = context_view_policy or self.context_view_policy
+        if type(policy) is not ContextViewPolicy:
+            raise ForestError(
+                "CONTEXT_VIEW_POLICY_INVALID", "Invalid Context view policy", 422
+            )
+        policy.validate()
         input_digest = _digest(
             {
                 "conversation_id": actor.conversation_id,
@@ -1189,6 +1223,7 @@ class ConversationSchedulerRepository:
                     session_ref=session_ref,
                     run_ref=selected_run_ref,
                     triggers=pending,
+                    context_view_policy=policy,
                 )
             has_gap = lane["classified_through_seq"] < lane["next_ingress_seq"] - 1
             if boundary == "MODEL_SAFE_POINT":
@@ -1220,6 +1255,7 @@ class ConversationSchedulerRepository:
                     run_ref=None,
                     triggers=(),
                     clear_session=boundary == "SESSION_END",
+                    context_view_policy=policy,
                 )
             status = "WAIT_INPUT" if has_gap else "IDLE"
             if boundary == "SESSION_END" and status == "IDLE":
@@ -1254,6 +1290,219 @@ class ConversationSchedulerRepository:
             **values,
         )
 
+    async def _compact_context_view(
+        self,
+        conn,
+        *,
+        lane,
+        actor: ConversationActor,
+        selection_operation_id: str,
+        policy: ContextViewPolicy,
+        pin_active_session: bool,
+    ) -> dict:
+        """Archive an old immutable prefix without generating semantic summaries.
+
+        Original Context rows and payloads remain authoritative.  The compacted
+        view stores an exact membership relation plus a small machine-readable
+        archive reference, so snapshot cost is bounded while provenance remains
+        queryable.
+        """
+
+        policy.validate()
+        lane = dict(lane)
+        active_count = lane["context_view_unit_count"]
+        if active_count <= policy.high_watermark_units:
+            return lane
+        if self.payloads is None:
+            raise ForestError(
+                "PAYLOAD_AUTHORITY_MISSING",
+                "Context compaction payload authority is unavailable",
+                503,
+            )
+        archive_target = active_count - policy.retain_units
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "WITH active AS ("
+                    "SELECT u.*,row_number() OVER (ORDER BY u.context_revision DESC,u.unit_index DESC) "
+                    "AS recent_rank FROM {} u WHERE u.bot_id=%s AND u.conversation_id=%s "
+                    "AND NOT EXISTS (SELECT 1 FROM {} cu WHERE cu.bot_id=u.bot_id "
+                    "AND cu.conversation_id=u.conversation_id AND cu.unit_id=u.unit_id)) "
+                    "SELECT a.unit_id,a.context_revision,a.unit_index,a.payload_digest,"
+                    "a.author_payload_digest FROM active a WHERE a.recent_rank>%s "
+                    "AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.bot_id=a.bot_id "
+                    "AND t.conversation_id=a.conversation_id AND t.event_id=a.event_id "
+                    "AND t.status IN ('PENDING','CLAIMED')) "
+                    "AND (NOT %s OR NOT ("
+                    "EXISTS (SELECT 1 FROM {} b WHERE b.bot_id=a.bot_id "
+                    "AND b.input_batch_id=a.input_batch_id AND b.session_ref=%s) OR "
+                    "EXISTS (SELECT 1 FROM {} op WHERE op.bot_id=a.bot_id "
+                    "AND op.conversation_id=a.conversation_id "
+                    "AND op.context_revision=a.context_revision AND op.session_ref=%s))) "
+                    "ORDER BY a.context_revision,a.unit_index LIMIT %s"
+                ).format(
+                    self._table("context_units"),
+                    self._table("context_compaction_units"),
+                    self._table("conversation_triggers"),
+                    self._table("input_batches"),
+                    self._table("context_append_operations"),
+                ),
+                (
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    policy.retain_units,
+                    pin_active_session,
+                    lane["active_session_ref"],
+                    lane["active_session_ref"],
+                    archive_target,
+                ),
+            )
+        ).fetchall()
+        if not rows:
+            return lane
+
+        source_set = [
+            [
+                row["unit_id"],
+                row["context_revision"],
+                row["unit_index"],
+                row["payload_digest"],
+                row["author_payload_digest"],
+            ]
+            for row in rows
+        ]
+        source_set_digest = _digest(source_set)
+        published_view_revision = lane["context_view_revision"] + 1
+        compaction_operation_id = "context-compact:" + hashlib.sha256(
+            _canonical([self.store.bot_id, selection_operation_id])
+        ).hexdigest()
+        compaction_id = "compaction:" + hashlib.sha256(
+            _canonical(
+                [
+                    self.store.bot_id,
+                    actor.conversation_id,
+                    published_view_revision,
+                    source_set_digest,
+                    policy.policy_revision,
+                ]
+            )
+        ).hexdigest()
+        resulting_count = active_count - len(rows)
+        cumulative_count = lane["context_archived_unit_count"] + len(rows)
+        first_revision = min(row["context_revision"] for row in rows)
+        last_revision = max(row["context_revision"] for row in rows)
+        archive_value = {
+            "protocol": "forest.context-archive-reference/1",
+            "conversation_id": actor.conversation_id,
+            "compaction_id": compaction_id,
+            "published_view_revision": published_view_revision,
+            "policy_revision": policy.policy_revision,
+            "archived_unit_count": len(rows),
+            "cumulative_archived_unit_count": cumulative_count,
+            "source_set_digest": source_set_digest,
+            "coverage": {
+                "first_context_revision": first_revision,
+                "last_context_revision": last_revision,
+            },
+            "authority": "conversation.scheduler/context_compaction_units",
+        }
+        deletion_epoch = await self.payloads.epoch_in(conn)
+        archive = await self.payloads.put_json_in(
+            conn,
+            owner_component_id="conversation.scheduler",
+            owner_kind="context.archive",
+            owner_id=compaction_id,
+            value=archive_value,
+            sources=(
+                PayloadSource(
+                    source_component_id="conversation.scheduler",
+                    source_kind="context.archive",
+                    source_id=compaction_id,
+                    source_revision=published_view_revision,
+                    observation_conversation_id=actor.conversation_id,
+                ),
+            ),
+            expected_deletion_epoch=deletion_epoch,
+        )
+        input_digest = _digest(
+            {
+                "conversation_id": actor.conversation_id,
+                "base_view_revision": lane["context_view_revision"],
+                "published_view_revision": published_view_revision,
+                "source_set_digest": source_set_digest,
+                "policy_revision": policy.policy_revision,
+                "high_watermark_units": policy.high_watermark_units,
+                "retain_units": policy.retain_units,
+            }
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}(bot_id,conversation_id,compaction_id,operation_id,input_digest,"
+                "base_view_revision,published_view_revision,source_set_digest,policy_revision,"
+                "archive_payload_id,archive_payload_digest,archived_unit_count,"
+                "resulting_view_unit_count,cumulative_archived_unit_count,"
+                "first_context_revision,last_context_revision) VALUES "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            ).format(self._table("context_compactions")),
+            (
+                self.store.bot_id,
+                actor.conversation_id,
+                compaction_id,
+                compaction_operation_id,
+                input_digest,
+                lane["context_view_revision"],
+                published_view_revision,
+                source_set_digest,
+                policy.policy_revision,
+                archive.payload_id,
+                archive.content_digest,
+                len(rows),
+                resulting_count,
+                cumulative_count,
+                first_revision,
+                last_revision,
+            ),
+        )
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}(bot_id,conversation_id,compaction_id,archived_index,unit_id,"
+                "context_revision,unit_index,payload_digest,author_payload_digest) "
+                "SELECT %s,%s,%s,x.ordinality-1,x.unit_id,x.context_revision,x.unit_index,"
+                "x.payload_digest,x.author_payload_digest FROM "
+                "unnest(%s::text[],%s::bigint[],%s::integer[],%s::text[],%s::text[]) "
+                "WITH ORDINALITY AS x(unit_id,context_revision,unit_index,payload_digest,"
+                "author_payload_digest,ordinality)"
+            ).format(self._table("context_compaction_units")),
+            (
+                self.store.bot_id,
+                actor.conversation_id,
+                compaction_id,
+                [row["unit_id"] for row in rows],
+                [row["context_revision"] for row in rows],
+                [row["unit_index"] for row in rows],
+                [row["payload_digest"] for row in rows],
+                [row["author_payload_digest"] for row in rows],
+            ),
+        )
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {} SET context_view_revision=%s,context_view_unit_count=%s,"
+                "context_archived_unit_count=%s,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s AND conversation_id=%s"
+            ).format(self._table("conversation_lanes")),
+            (
+                published_view_revision,
+                resulting_count,
+                cumulative_count,
+                self.store.bot_id,
+                actor.conversation_id,
+            ),
+        )
+        lane["context_view_revision"] = published_view_revision
+        lane["context_view_unit_count"] = resulting_count
+        lane["context_archived_unit_count"] = cumulative_count
+        return lane
+
     async def _commit_batch(
         self,
         conn,
@@ -1271,6 +1520,7 @@ class ConversationSchedulerRepository:
         run_ref,
         triggers,
         clear_session=False,
+        context_view_policy: ContextViewPolicy | None = None,
     ) -> dict:
         events = []
         if start_seq is not None:
@@ -1295,6 +1545,14 @@ class ConversationSchedulerRepository:
             raise ForestError(
                 "CONVERSATION_SEQUENCE_CORRUPT", "Recovery claim has no committed Context", 500
             )
+        lane = await self._compact_context_view(
+            conn,
+            lane=lane,
+            actor=actor,
+            selection_operation_id=operation_id,
+            policy=context_view_policy or self.context_view_policy,
+            pin_active_session=boundary == "MODEL_SAFE_POINT",
+        )
         selected_end = end_seq if end_seq is not None else lane["context_applied_seq"]
         batch_id = "batch:" + hashlib.sha256(
             _canonical([self.store.bot_id, operation_id])
@@ -1403,6 +1661,7 @@ class ConversationSchedulerRepository:
         )
         await conn.execute(
             sql.SQL("UPDATE {} SET context_applied_seq=%s,context_revision=%s,"
+                    "context_view_unit_count=context_view_unit_count+%s,"
                     "active_session_ref=%s,active_run_ref=%s,mailbox_revision=mailbox_revision+1,"
                     "resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,"
                     "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s").format(
@@ -1411,6 +1670,7 @@ class ConversationSchedulerRepository:
             (
                 selected_end,
                 context_revision,
+                len(events),
                 next_session,
                 next_run,
                 self.store.bot_id,
@@ -1420,6 +1680,7 @@ class ConversationSchedulerRepository:
         lane = dict(lane)
         lane["context_applied_seq"] = selected_end
         lane["context_revision"] = context_revision
+        lane["context_view_unit_count"] += len(events)
         lane["mailbox_revision"] += 1
         return await self._record_selection(
             conn,
@@ -1629,11 +1890,13 @@ class ConversationSchedulerRepository:
                     (reply_ref, self.store.bot_id, trigger["trigger_id"]),
                 )
             await conn.execute(
-                sql.SQL("UPDATE {} SET context_revision=%s,mailbox_revision=mailbox_revision+1,"
+                sql.SQL("UPDATE {} SET context_revision=%s,"
+                        "context_view_unit_count=context_view_unit_count+%s,"
+                        "mailbox_revision=mailbox_revision+1,"
                         "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s").format(
                     self._table("conversation_lanes")
                 ),
-                (context_revision, self.store.bot_id, actor.conversation_id),
+                (context_revision, len(units), self.store.bot_id, actor.conversation_id),
             )
             return {
                 "operation_id": operation_id,
@@ -1970,15 +2233,75 @@ class ConversationSchedulerRepository:
     async def context_snapshot(self, actor: ConversationActor, *, _connection=None) -> dict:
         async with self._transaction(_connection) as conn:
             lane = await self._guard_actor(conn, actor)
+            compaction = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND conversation_id=%s "
+                        "ORDER BY published_view_revision DESC LIMIT 1"
+                    ).format(self._table("context_compactions")),
+                    (self.store.bot_id, actor.conversation_id),
+                )
+            ).fetchone()
             units = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND conversation_id=%s "
-                            "ORDER BY context_revision,unit_index").format(
-                        self._table("context_units")
+                    sql.SQL(
+                        "SELECT u.* FROM {} u WHERE u.bot_id=%s AND u.conversation_id=%s "
+                        "AND NOT EXISTS (SELECT 1 FROM {} cu WHERE cu.bot_id=u.bot_id "
+                        "AND cu.conversation_id=u.conversation_id AND cu.unit_id=u.unit_id) "
+                        "ORDER BY u.context_revision,u.unit_index"
+                    ).format(
+                        self._table("context_units"),
+                        self._table("context_compaction_units"),
                     ),
                     (self.store.bot_id, actor.conversation_id),
                 )
             ).fetchall()
+            projected_units = [dict(row) for row in units]
+            archive = None
+            if compaction is not None:
+                archive = {
+                    "compaction_id": compaction["compaction_id"],
+                    "published_view_revision": compaction["published_view_revision"],
+                    "source_set_digest": compaction["source_set_digest"],
+                    "policy_revision": compaction["policy_revision"],
+                    "archived_unit_count": compaction["archived_unit_count"],
+                    "cumulative_archived_unit_count": compaction[
+                        "cumulative_archived_unit_count"
+                    ],
+                    "first_context_revision": compaction["first_context_revision"],
+                    "last_context_revision": compaction["last_context_revision"],
+                }
+                projected_units.insert(
+                    0,
+                    {
+                        "bot_id": self.store.bot_id,
+                        "conversation_id": actor.conversation_id,
+                        "unit_id": "archive:" + compaction["compaction_id"].removeprefix(
+                            "compaction:"
+                        ),
+                        "context_revision": compaction["first_context_revision"],
+                        "unit_index": 0,
+                        "kind": "CONTROL",
+                        "source_component_id": "conversation.scheduler",
+                        "source_kind": "context.archive",
+                        "source_id": compaction["compaction_id"],
+                        "input_batch_id": None,
+                        "event_id": None,
+                        "ingress_seq": None,
+                        "payload_id": compaction["archive_payload_id"],
+                        "payload_digest": compaction["archive_payload_digest"],
+                        "payload_owner_component_id": "conversation.scheduler",
+                        "payload_owner_kind": "context.archive",
+                        "payload_owner_id": compaction["compaction_id"],
+                        "author_payload_id": None,
+                        "author_payload_digest": None,
+                        "author_owner_component_id": None,
+                        "author_owner_kind": None,
+                        "author_owner_id": None,
+                        "author_subject_ref": None,
+                        "trigger_decision": None,
+                    },
+                )
             return {
                 "conversation_id": actor.conversation_id,
                 "context_applied_seq": lane["context_applied_seq"],
@@ -1991,7 +2314,10 @@ class ConversationSchedulerRepository:
                 "channel_kind": lane["channel_kind"],
                 "channel_ref": lane["channel_ref"],
                 "thread_ref": lane["thread_ref"],
-                "units": [dict(row) for row in units],
+                "context_view_unit_count": lane["context_view_unit_count"],
+                "context_archived_unit_count": lane["context_archived_unit_count"],
+                "archive": archive,
+                "units": projected_units,
             }
 
     async def context_snapshot_in(self, conn, actor: ConversationActor) -> dict:

@@ -14,6 +14,9 @@ CREATE TABLE conversation_lanes (
     mailbox_revision bigint NOT NULL DEFAULT 0 CHECK (mailbox_revision >= 0),
     context_revision bigint NOT NULL DEFAULT 0 CHECK (context_revision >= 0),
     context_view_revision bigint NOT NULL DEFAULT 0 CHECK (context_view_revision >= 0),
+    context_view_unit_count bigint NOT NULL DEFAULT 0 CHECK (context_view_unit_count >= 0),
+    context_archived_unit_count bigint NOT NULL DEFAULT 0
+        CHECK (context_archived_unit_count >= 0),
     actor_owner_id text CHECK (actor_owner_id IS NULL OR octet_length(actor_owner_id) BETWEEN 1 AND 256),
     actor_epoch bigint NOT NULL DEFAULT 0 CHECK (actor_epoch >= 0),
     actor_expires_at timestamptz,
@@ -406,6 +409,10 @@ CREATE TABLE context_compactions (
     policy_revision text NOT NULL CHECK (octet_length(policy_revision) BETWEEN 1 AND 256),
     archive_payload_id text NOT NULL CHECK (octet_length(archive_payload_id) BETWEEN 1 AND 256),
     archive_payload_digest text NOT NULL CHECK (archive_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    archived_unit_count bigint NOT NULL CHECK (archived_unit_count > 0),
+    resulting_view_unit_count bigint NOT NULL CHECK (resulting_view_unit_count >= 0),
+    cumulative_archived_unit_count bigint NOT NULL
+        CHECK (cumulative_archived_unit_count >= archived_unit_count),
     first_context_revision bigint NOT NULL CHECK (first_context_revision > 0),
     last_context_revision bigint NOT NULL CHECK (last_context_revision >= first_context_revision),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -416,12 +423,34 @@ CREATE TABLE context_compactions (
         REFERENCES conversation_lanes(bot_id, conversation_id)
 );
 
+CREATE TABLE context_compaction_units (
+    bot_id text NOT NULL,
+    conversation_id text NOT NULL,
+    compaction_id text NOT NULL,
+    archived_index bigint NOT NULL CHECK (archived_index >= 0),
+    unit_id text NOT NULL,
+    context_revision bigint NOT NULL CHECK (context_revision > 0),
+    unit_index integer NOT NULL CHECK (unit_index >= 0),
+    payload_digest text NOT NULL CHECK (payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    author_payload_digest text CHECK (
+        author_payload_digest IS NULL OR author_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    PRIMARY KEY (bot_id, compaction_id, archived_index),
+    UNIQUE (bot_id, conversation_id, unit_id),
+    FOREIGN KEY (bot_id, compaction_id)
+        REFERENCES context_compactions(bot_id, compaction_id),
+    FOREIGN KEY (bot_id, conversation_id, unit_id)
+        REFERENCES context_units(bot_id, conversation_id, unit_id)
+);
+
 CREATE INDEX inbox_classification_idx
     ON inbox_messages(bot_id, conversation_id, ingress_seq, classification_state);
 CREATE INDEX trigger_pending_idx
     ON conversation_triggers(bot_id, conversation_id, status, ingress_seq, trigger_id);
 CREATE INDEX context_order_idx
     ON context_units(bot_id, conversation_id, context_revision, unit_index);
+CREATE INDEX context_compaction_order_idx
+    ON context_compaction_units(bot_id,conversation_id,context_revision,unit_index);
 CREATE INDEX lane_wakeup_idx ON conversation_lanes(
     bot_id,resume_not_before,mailbox_revision,conversation_id
 );
@@ -548,4 +577,7 @@ CREATE TRIGGER context_append_operations_immutable
     BEFORE UPDATE OR DELETE ON context_append_operations
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_compactions_immutable BEFORE UPDATE OR DELETE ON context_compactions
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER context_compaction_units_immutable
+    BEFORE UPDATE OR DELETE ON context_compaction_units
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();

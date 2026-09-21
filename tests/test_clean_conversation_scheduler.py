@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
@@ -15,6 +16,7 @@ from forest.errors import ForestError
 from forest.runtime_modules import official_storage_bundle
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.conversation_scheduler import (
+    ContextViewPolicy,
     ConversationSchedulerRepository,
     SchedulerContextFact,
     SchedulerPayloadRef,
@@ -268,6 +270,113 @@ async def test_clean_scheduler_cuts_through_last_trigger_and_silently_drains_tai
     assert (drain["start_seq"], drain["end_seq"]) == (6, 6)
     final = await scheduler.context_snapshot(actor)
     assert [unit["ingress_seq"] for unit in final["units"]] == list(range(1, 7))
+
+
+@pytest.mark.postgres
+async def test_context_view_compaction_is_exact_local_and_keeps_canonical_history(
+    clean_scheduler,
+):
+    store, storage, payloads, scheduler = clean_scheduler
+    conversation = "group/compact"
+    policy = ContextViewPolicy(
+        high_watermark_units=4,
+        retain_units=2,
+        policy_revision="context-view-unit-window-v1",
+    )
+    actor = None
+    last = None
+    for number in range(1, 7):
+        await _admit(scheduler, payloads, conversation, number, f"user/{number % 2}")
+        await _classify(scheduler, conversation, number, "NO_TRIGGER", f"user/{number % 2}")
+        if actor is None:
+            actor = await scheduler.acquire_actor(conversation, "worker/compact")
+        last = await scheduler.select_input(
+            actor,
+            f"select/compact/{number}",
+            boundary="IDLE",
+            context_view_policy=policy,
+        )
+    assert last is not None
+    assert last["context_view_revision"] == 1
+
+    snapshot = await scheduler.context_snapshot(actor)
+    assert snapshot["context_view_revision"] == 1
+    assert snapshot["context_view_unit_count"] == 3
+    assert snapshot["context_archived_unit_count"] == 3
+    assert snapshot["archive"] == {
+        "compaction_id": snapshot["archive"]["compaction_id"],
+        "published_view_revision": 1,
+        "source_set_digest": snapshot["archive"]["source_set_digest"],
+        "policy_revision": "context-view-unit-window-v1",
+        "archived_unit_count": 3,
+        "cumulative_archived_unit_count": 3,
+        "first_context_revision": 1,
+        "last_context_revision": 3,
+    }
+    assert snapshot["units"][0]["kind"] == "CONTROL"
+    assert snapshot["units"][0]["source_kind"] == "context.archive"
+    assert [unit["ingress_seq"] for unit in snapshot["units"][1:]] == [4, 5, 6]
+    assert [unit["author_subject_ref"] for unit in snapshot["units"][1:]] == [
+        "user/0",
+        "user/1",
+        "user/0",
+    ]
+
+    namespace = sql.Identifier(storage.spec.namespace)
+    async with store.pool.connection() as conn:
+        canonical_count = await (
+            await conn.execute(
+                sql.SQL("SELECT count(*) AS value FROM {}.context_units WHERE bot_id=%s "
+                        "AND conversation_id=%s").format(namespace),
+                (store.bot_id, conversation),
+            )
+        ).fetchone()
+        archived = await (
+            await conn.execute(
+                sql.SQL("SELECT unit_id,context_revision,unit_index FROM "
+                        "{}.context_compaction_units WHERE bot_id=%s AND conversation_id=%s "
+                        "ORDER BY archived_index").format(namespace),
+                (store.bot_id, conversation),
+            )
+        ).fetchall()
+        compaction = await (
+            await conn.execute(
+                sql.SQL("SELECT archive_payload_id,archive_payload_digest FROM "
+                        "{}.context_compactions WHERE bot_id=%s AND conversation_id=%s").format(
+                    namespace
+                ),
+                (store.bot_id, conversation),
+            )
+        ).fetchone()
+    assert canonical_count["value"] == 6
+    assert [row["context_revision"] for row in archived] == [1, 2, 3]
+    async with store.pool.connection() as conn, conn.transaction():
+        reference = await payloads.verify_in(
+            conn,
+            payload_id=compaction["archive_payload_id"],
+            digest=compaction["archive_payload_digest"],
+            owner_component_id="conversation.scheduler",
+            owner_kind="context.archive",
+            owner_id=snapshot["archive"]["compaction_id"],
+        )
+        archive_body = json.loads(
+            await payloads.read_bytes_in(
+                conn,
+                reference.payload_id,
+                expected_deletion_epoch=reference.accepted_deletion_epoch,
+            )
+        )
+    assert archive_body["protocol"] == "forest.context-archive-reference/1"
+    assert "summary" not in archive_body
+    assert archive_body["source_set_digest"] == snapshot["archive"]["source_set_digest"]
+
+    replay = await scheduler.select_input(
+        actor,
+        "select/compact/6",
+        boundary="IDLE",
+        context_view_policy=ContextViewPolicy(100, 50),
+    )
+    assert replay == last
 
 
 @pytest.mark.postgres

@@ -475,6 +475,8 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 
 ViewPlan固定有序源集、覆盖范围、基础context_view_revision、context_view_profile_ref、tokenizer/策略版本、预算、必留触发/因果组及deletion epoch。发布时核验所有依赖；老计划晚完成不得覆盖新输入或新视图。若只裁剪已声明前缀，必须证明保留当前完整后缀，且整体预算仍合法，否则重建计划；不能覆盖旧的整段Context快照。相同来源、策略、预算和必留集合得到相同保留/移出语义，不发生LLM工件选择。每请求的模态省略及预算选择另存ModelRequestManifest，不借此发布持久ViewPlan。来源/删除屏障仍遵守[06](06-concurrent-convergence.md)。
 
+当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。活动 Run 的安全点保护其 Session 输入，`PENDING/CLAIMED` trigger 始终受保护；同一新 InputBatch 的所有消息先进入 canonical Context，但只有实际 trigger 是请求预算的硬 pin，普通消息可按正常规则整组移出请求投影。
+
 高流量下合并同会话尚未执行的维护唤醒，维护desired/processed水位；合并只影响本地工作批量，不能遗漏任何来源。采用裁剪高/低水位避免每条消息反复重算，大对象使用缓存token计数与受监督本地计算。系统指令、作者/群来源标题、必留内容和输出预留先计费；超窗时减少普通原文/Evidence项，不能剥掉来源标题凑预算。待答触发必要原文仍放不下就走上述明确失败策略，不自动发摘要请求，也不自动调更昂贵模型。
 
 当前会话的 `context_applied_seq` 是串行前缀消费，不是可交换的消息集合归约；顺序由持久入站和已记录切口确定。不同物理到达时机可能产生不同批次和回复，这是交互调度语义。持久重放必须复用已记录批次、步骤和回复，不重新挑选切口或重新生成已完成回答来追求所谓合流。

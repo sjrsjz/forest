@@ -6,9 +6,14 @@ from dataclasses import dataclass
 
 from forest.adapter_onebot_runtime import CleanOneBotRuntime
 from forest.approval_wait_uow import ApprovalWaitUnitOfWork
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.clean_onebot_management import CleanOneBotManagementContract
 from forest.conversation_reply_planner import DurableFinalReplyPlanner
-from forest.conversation_runtime import CleanConversationSchedulerRuntime
+from forest.conversation_runtime import (
+    CONVERSATION_CONFIGURATION_SCHEMA,
+    CleanConversationSchedulerRuntime,
+    default_conversation_configuration,
+)
 from forest.conversation_transaction_ports import (
     TransactionalConversationCompletionPort,
     TransactionalSessionDecisionPort,
@@ -19,6 +24,7 @@ from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
+    configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
@@ -252,16 +258,24 @@ async def bootstrap_clean_messaging(
         for component_id, bundle in bundles.items()
     }
     for component_id, configuration in configurations.items():
-        schema = {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {"protocol": {"type": "string"}},
-            "required": ["protocol"],
-            "additionalProperties": False,
-        }
+        schema = (
+            CONVERSATION_CONFIGURATION_SCHEMA
+            if component_id == "conversation.scheduler"
+            else {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"protocol": {"type": "string"}},
+                "required": ["protocol"],
+                "additionalProperties": False,
+            }
+        )
         await configuration.ensure_initialized(
             operation_id=f"bootstrap:{component_id}:configuration",
-            value={"protocol": f"forest.{component_id}/1"},
+            value=(
+                default_conversation_configuration()
+                if component_id == "conversation.scheduler"
+                else {"protocol": f"forest.{component_id}/1"}
+            ),
             validation_digest=digest_json(schema),
         )
 
@@ -282,6 +296,7 @@ async def bootstrap_clean_messaging(
         store,
         namespace=bundles["conversation.scheduler"].spec.namespace,
         payload_verifier=kernel.payload.verify_in,
+        payloads=kernel.payload,
     )
     adapter_repository = OneBotAdapterRepository(
         store,
@@ -296,7 +311,7 @@ async def bootstrap_clean_messaging(
         )
 
     def conversation_factory(_runtime, contracts):
-        return CleanConversationSchedulerRuntime(
+        runtime = CleanConversationSchedulerRuntime(
             repository=conversation_repository,
             module_configuration=configurations["conversation.scheduler"],
             grants=grants["conversation.scheduler"],
@@ -319,6 +334,12 @@ async def bootstrap_clean_messaging(
             ),
             graph_admission=contracts.graph_admission,
         )
+        runtime.management_contract = CleanModuleConfigurationContract(
+            configurations["conversation.scheduler"],
+            schema=CONVERSATION_CONFIGURATION_SCHEMA,
+            validator=CleanConversationSchedulerRuntime._parse_configuration,
+        )
+        return runtime
 
     def adapter_factory(_runtime, contracts):
         values = {
@@ -374,6 +395,8 @@ async def bootstrap_clean_messaging(
                 ),
             )
             if component_id == "adapter.onebot"
+            else (configuration_management_contribution("Context View"),)
+            if component_id == "conversation.scheduler"
             else (),
             storage=bundles[component_id],
             wakes_on_work=component_id == "conversation.scheduler",

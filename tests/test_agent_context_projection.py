@@ -134,3 +134,80 @@ async def test_context_projection_retains_lane_author_and_text_only_image_omissi
     assert manifest["omitted_part_refs"] == [
         {"unit_id": "input/one", "part_id": "input/one:1", "reason": "MODEL_IMAGE_UNSUPPORTED"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_only_trigger_records_are_pinned_from_a_streaming_input_batch():
+    bodies = {}
+    units = []
+    for number in range(1, 4):
+        bodies[f"payload/message/{number}"] = json.dumps(
+            {"text": f"message {number}"}
+        ).encode()
+        bodies[f"payload/author/{number}"] = json.dumps(
+            {"display_name": f"User {number}"}
+        ).encode()
+        units.append(
+            {
+                "unit_id": f"input/{number}",
+                "kind": "INPUT",
+                "source_kind": "conversation.input",
+                "source_id": f"event/{number}",
+                "event_id": f"event/{number}",
+                "input_batch_id": "batch/stream",
+                "ingress_seq": number,
+                "payload_id": f"payload/message/{number}",
+                "payload_digest": "sha256:" + str(number) * 64,
+                "payload_owner_component_id": "adapter.onebot",
+                "payload_owner_kind": "onebot.normalized-event",
+                "payload_owner_id": f"event/{number}",
+                "author_payload_id": f"payload/author/{number}",
+                "author_payload_digest": "sha256:" + str(number + 3) * 64,
+                "author_owner_component_id": "adapter.onebot",
+                "author_owner_kind": "onebot.author-snapshot",
+                "author_owner_id": f"event/{number}",
+                "author_subject_ref": f"principal/{number}",
+            }
+        )
+    snapshot = await ConversationContextProjector(
+        bot_id="bot/one",
+        payloads=Payloads(bodies),
+        agent=Agent(),
+    ).project(
+        run={
+            "run_id": "run/one",
+            "session": {"conversation_ref": "conversation/stream"},
+            "input_revision": 1,
+            "context_revision": 1,
+            "context_view_revision": 0,
+            "selected_input_end_seq": 3,
+            "inputs": [{"input_revision": 1, "input_batch_ref": "batch/stream"}],
+            "triggers": [
+                {
+                    "input_revision": 1,
+                    "trigger_ref": "trigger/three",
+                    "principal_ref": "principal/3",
+                    "ingress_seq": 3,
+                }
+            ],
+        },
+        context={
+            "conversation_id": "conversation/stream",
+            "context_applied_seq": 3,
+            "context_revision": 1,
+            "context_view_revision": 0,
+            "binding_ref": "binding/qq",
+            "platform": "onebot-v11",
+            "channel_kind": "GROUP",
+            "channel_ref": "933179609",
+            "thread_ref": None,
+            "units": units,
+        },
+        logical_step_id="step/stream",
+    )
+    assert [unit["unit_id"] for unit in snapshot["units"]] == [
+        "input/1",
+        "input/2",
+        "input/3",
+    ]
+    assert snapshot["required_unit_ids"] == ["input/3"]

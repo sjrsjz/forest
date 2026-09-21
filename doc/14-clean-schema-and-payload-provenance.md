@@ -54,7 +54,7 @@ SendIntent 只保存 cause、目标、顺序和受管 part PayloadRef；最终�
 
 执行观察分为 `SENT`、`RETRYABLE_NOT_APPLIED`、`REJECTED_NOT_APPLIED` 与 `UNKNOWN`：前两种通用效果分别映射为 `SUCCEEDED` 与 `NOT_APPLIED`，拒绝也映射为确定 `NOT_APPLIED`，但 Delivery 将该业务 part 终结为失败而不是自动重试。`UNKNOWN` 只能由 `RECONCILIATION` 证据解析为确定结果；每个晚到或冲突观察都保留，只有一个被接受的状态推进 lane。receipt 正文是 `kernel.payload` 引用，不得以内联 JSONB、异常文本或 Adapter 私有响应对象保存。
 
-`conversation.scheduler` 的干净 bundle 物理拥有 `conversation_lanes`、`inbox_messages`、`conversation_triggers`、`selection_operations`、`input_batches`、`input_batch_events`、`input_batch_triggers`、`trigger_requeues`、`trigger_requeue_items`、`context_units`、`context_append_operations` 与 `context_compactions`。它只对 `forest_kernel.bot_identity` 建立 bootstrap 外键；对 Adapter event、Payload、Agent Session/Run、Delivery reply 和业务路由结果一律保存稳定引用及必要摘要，并通过对应端口复核。正文、作者快照和结构化分类依据只存在于 `kernel.payload`，调度器表不得出现任意 JSONB 正文列。
+`conversation.scheduler` 的干净 bundle 物理拥有 `conversation_lanes`、`inbox_messages`、`conversation_triggers`、`selection_operations`、`input_batches`、`input_batch_events`、`input_batch_triggers`、`trigger_requeues`、`trigger_requeue_items`、`context_units`、`context_append_operations`、`context_compactions` 与 `context_compaction_units`。它只对 `forest_kernel.bot_identity` 建立 bootstrap 外键；对 Adapter event、Payload、Agent Session/Run、Delivery reply 和业务路由结果一律保存稳定引用及必要摘要，并通过对应端口复核。正文、作者快照和结构化分类依据只存在于 `kernel.payload`，调度器表不得出现任意 JSONB 正文列。裁剪成员表只记录稳定单元身份与摘要，归档引用正文仍由 `kernel.payload` 拥有。
 
 非输入 Context 单元只能通过幂等追加 operation 写入。最终 `REPLY` 单元与其回答的 trigger 状态必须在同一调度器事务提交；不存在绕过 Context 单独把 trigger 标为 `ANSWERED` 的 Repository 方法。Delivery 仍只接收 reply/send-intent 引用并独立记录外部送达，不能反向改写 Context 或 trigger。
 

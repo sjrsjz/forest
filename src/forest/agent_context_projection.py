@@ -416,11 +416,19 @@ class ConversationContextProjector:
         required = [
             unit["unit_id"]
             for unit in context_units
-            if unit.get("input_batch_id") in latest_batches
-            or unit.get("ingress_seq") in latest_trigger_seqs
+            if unit.get("ingress_seq") in latest_trigger_seqs
         ]
+        # Every queued message is canonical Context, while only the actual
+        # trigger records are untrimppable at the request budget boundary.
+        # Marking the complete latest batch as required lets a long quiet tail
+        # defeat normal deterministic trimming.
         if not required and context_units:
-            required = [context_units[-1]["unit_id"]]
+            latest = [
+                unit
+                for unit in context_units
+                if unit.get("input_batch_id") in latest_batches
+            ]
+            required = [(latest or context_units)[-1]["unit_id"]]
         conversation = self._source(
             context,
             source_event_id=f"conversation:{context['conversation_id']}",

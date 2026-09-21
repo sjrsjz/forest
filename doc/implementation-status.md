@@ -10,6 +10,7 @@
 - 每群至多一条活动 Agent 响应链；群之间可以并行。新触发在下一次模型调用边界接入截至最后一个触发的连续消息前缀，普通尾部在终止后静默排空。
 - 每个 Bot 只有一个全局记忆域，每个群是一条独立主干；联想可以跨主干，召回必须携带来源群和作者。
 - 裁剪不调用 LLM，也不生成记忆摘要。文本与图片均进入权威载荷、嵌入和检索；text-only Provider 只在单次请求投影中移除图片。
+- `conversation.scheduler` 已实现持久 ContextView 裁剪：lane 维护活动/归档单元计数，高水位时在 Actor 事务内发布不可变 `context_compactions` 与逐单元 `context_compaction_units`，保留原 `context_units`、作者、群来源和多模态 Payload 不变。`context_snapshot()` 只读取活动单元和一个机器可读归档引用；策略由该模块自己的 WebUI 配置贡献管理。当前请求只把实际 trigger 原文设为不可裁剪，触发前的同批普通消息仍进入 canonical Context 并参与正常预算裁剪。
 - VL 嵌入空间与 Bot 生命周期绑定，只允许更换兼容 endpoint 或凭据。
 - WebUI 壳只负责身份、作用域、模块发现和受控工作区；业务页面、schema、查询和动作由准确模块 Generation 贡献。
 - 未发布结构直接删改并重建开发数据库，不新增迁移、兼容读取、双写、旧 API 转发或 fallback。
