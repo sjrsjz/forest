@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from forest.errors import ForestError
 from forest.official_bot_provisioning import (
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
@@ -139,6 +140,11 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
         await target.execute("CREATE TABLE public.pre_rebuild_marker(value integer)")
         await target.close()
+        active_lease = await catalog.claim_supervisor(
+            "host/rebuild-blocker",
+            "incarnation/rebuild-blocker",
+            lease_seconds=300,
+        )
     finally:
         await store.close()
 
@@ -148,6 +154,26 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
     monkeypatch.setenv("FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE", str(web_bootstrap_path))
     monkeypatch.setenv("FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN", "http://127.0.0.1:8081")
     try:
+        with pytest.raises(ForestError) as blocked:
+            await rebuild(
+                bot_id=bot_id,
+                execute=True,
+                confirmation=target_name,
+            )
+        assert blocked.value.code == "DEPLOYMENT_SUPERVISOR_BUSY"
+        target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
+        marker = await (
+            await target.execute("SELECT to_regclass('public.pre_rebuild_marker') AS marker")
+        ).fetchone()
+        assert marker[0] == "pre_rebuild_marker"
+        await target.close()
+        release_store = CleanDeploymentStore(deployment_dsn, "deployment/rebuild-test")
+        await release_store.open()
+        try:
+            await DeploymentCatalogRepository(release_store).release_supervisor(active_lease)
+        finally:
+            await release_store.close()
+
         result = await rebuild(
             bot_id=bot_id,
             execute=True,
