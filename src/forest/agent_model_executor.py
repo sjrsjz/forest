@@ -205,6 +205,7 @@ class DurableAgentModelExecutor:
         feedback_body = {
             "repair_count": 1,
             "error_code": error.code,
+            "validation_reason": error.message,
             "candidate_digest": candidate_digest,
             "feedback": _bounded_excerpt(candidate, feedback_byte_limit),
         }

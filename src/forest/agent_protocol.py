@@ -19,7 +19,7 @@ from forest.errors import ForestError
 
 PROTOCOL_ID = "forest-agent-protocol"
 PROTOCOL_VERSION = 1
-PARSER_REVISION = "forest-model-turn-xml-v1"
+PARSER_REVISION = "forest-model-turn-xml-v1.1"
 
 CORE_PROMPT = """<forest_agent_protocol version="1">
   <identity><![CDATA[
@@ -36,6 +36,8 @@ Media is represented by typed parts. If a part says unavailable or omitted, you 
   ]]></context_contract>
   <output_contract><![CDATA[
 Return exactly one valid_agent_protocol_content_block XML document with block_type="ModelTurn" and nothing before or after it. The root contains exactly one attribute-free payload element. payload contains exactly one attribute-free blocks element. blocks contains one or more block elements.
+
+The container tags must be the literal XML elements <payload> and <blocks>. Never replace them with generic parameter elements such as <parameter name="payload"> or <parameter name="blocks">.
 
 Each block has exactly one block_type attribute: Thinking, Assistant, or FunctionCall. Thinking blocks must precede Assistant blocks. A ModelTurn has at most one FunctionCall, and FunctionCall must be its final block. A turn is terminal only when it contains an Assistant block and no FunctionCall.
 
@@ -64,7 +66,7 @@ Before sending, silently verify one root, valid block order, complete XML, escap
   ]]></preflight>
 </forest_agent_protocol>"""
 
-CORE_PROMPT_SHA256 = "sha256:2cbba60cc76d83e34f27bc3dfaa02f3bc58470993868008ac9c30c2b029d5ba9"
+CORE_PROMPT_SHA256 = "sha256:12e2de79a35becbe0b62687bdb7a26aa7c4eb91134c5ed1770ddc93828891f8c"
 if "sha256:" + hashlib.sha256(CORE_PROMPT.encode("utf-8")).hexdigest() != CORE_PROMPT_SHA256:
     raise RuntimeError("CorePrompt changed without a protocol version and digest update")
 
@@ -206,6 +208,33 @@ def _children(element: ET.Element, tag: str, count: int = 1) -> list[ET.Element]
     return children
 
 
+def _protocol_container(element: ET.Element, name: str) -> ET.Element:
+    """Read one protocol container or the bounded provider ``parameter`` alias.
+
+    Some OpenAI-compatible model deployments render the two named protocol
+    containers as ``<parameter name=\"...\">`` even when the prompt supplies
+    literal XML.  The alias is accepted only for ``payload`` and ``blocks``;
+    all content below it remains subject to the normal strict grammar.
+    """
+    children = list(element)
+    if len(children) != 1:
+        raise _error(
+            "AGENT_PROTOCOL_STRUCTURE",
+            f"{element.tag} requires exactly one {name} container",
+        )
+    child = children[0]
+    if child.tag == name:
+        if child.attrib:
+            raise _error("AGENT_PROTOCOL_ATTRIBUTES", f"{name} cannot have attributes")
+        return child
+    if child.tag == "parameter" and child.attrib == {"name": name}:
+        return child
+    raise _error(
+        "AGENT_PROTOCOL_STRUCTURE",
+        f"{element.tag} requires exactly one {name} container",
+    )
+
+
 def _structural_text(element: ET.Element) -> None:
     if element.text and element.text.strip():
         raise _error("AGENT_PROTOCOL_MIXED_CONTENT", "Protocol structure contains unexpected text")
@@ -294,13 +323,9 @@ def parse_model_turn(
     if root.tag != "valid_agent_protocol_content_block" or root.attrib != {"block_type": "ModelTurn"}:
         raise _error("AGENT_PROTOCOL_ROOT", "Model candidate has the wrong protocol root")
     _structural_text(root)
-    payload = _children(root, "payload")[0]
-    if payload.attrib:
-        raise _error("AGENT_PROTOCOL_ATTRIBUTES", "payload cannot have attributes")
+    payload = _protocol_container(root, "payload")
     _structural_text(payload)
-    blocks_element = _children(payload, "blocks")[0]
-    if blocks_element.attrib:
-        raise _error("AGENT_PROTOCOL_ATTRIBUTES", "blocks cannot have attributes")
+    blocks_element = _protocol_container(payload, "blocks")
     _structural_text(blocks_element)
     elements = list(blocks_element)
     if not elements:

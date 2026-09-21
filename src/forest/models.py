@@ -805,12 +805,15 @@ def prepare_model_request(
     repair = snapshot.get("protocol_repair")
     if repair is not None and (
         not isinstance(repair, dict)
-        or set(repair) != {"repair_count", "error_code", "candidate_digest", "feedback"}
+        or set(repair) != {
+            "repair_count", "error_code", "validation_reason", "candidate_digest", "feedback"
+        }
         or type(repair["repair_count"]) is not int
         or not 1 <= repair["repair_count"] <= 1
         or any(not isinstance(repair[key], str) for key in (
-            "error_code", "candidate_digest", "feedback"
+            "error_code", "validation_reason", "candidate_digest", "feedback"
         ))
+        or len(repair["validation_reason"].encode("utf-8")) > 4096
         or len(repair["feedback"].encode("utf-8")) > 32768
     ):
         raise _error("MODEL_REPAIR_INVALID", "Protocol repair feedback is not a bounded host record")
@@ -841,8 +844,15 @@ def prepare_model_request(
                 "host_control": "forest_protocol_repair",
                 "repair_count": repair["repair_count"],
                 "error_code": repair["error_code"],
+                "validation_reason": repair["validation_reason"],
                 "candidate_digest": repair["candidate_digest"],
-                "instruction": "Return one complete replacement ModelTurn that satisfies CorePrompt.",
+                "instruction": (
+                    "Produce one complete replacement now. Return exactly one "
+                    "<valid_agent_protocol_content_block block_type=\"ModelTurn\"> root and "
+                    "nothing before or after it. Use literal <payload><blocks> containers; never "
+                    "use generic <parameter> wrappers. If requesting a tool, FunctionCall must be "
+                    "the final retained block."
+                ),
                 "invalid_candidate_excerpt": repair["feedback"],
             })
             messages.append({

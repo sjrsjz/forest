@@ -100,6 +100,7 @@ def test_protocol_repair_is_one_host_system_record_over_the_same_frozen_input():
     value["protocol_repair"] = {
         "repair_count": 1,
         "error_code": "AGENT_PROTOCOL_XML",
+        "validation_reason": "Model candidate is not one complete XML document",
         "candidate_digest": "sha256:" + "a" * 64,
         "feedback": "invalid candidate excerpt",
     }
@@ -116,6 +117,7 @@ def test_protocol_repair_is_one_host_system_record_over_the_same_frozen_input():
     assert json.loads(repair_messages[0]["content"])["host_control"] == (
         "forest_protocol_repair"
     )
+    assert "literal <payload><blocks>" in repair_messages[0]["content"]
     assert result.manifest["agent_protocol"]["repair_count"] == 1
     assert result.manifest["trigger_ids"] == value["trigger_ids"]
     assert result.manifest["input_revision"] == value["input_revision"]

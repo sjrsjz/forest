@@ -104,6 +104,8 @@ Media is represented by typed parts. If a part says unavailable or omitted, you 
   <output_contract><![CDATA[
 Return exactly one valid_agent_protocol_content_block XML document with block_type="ModelTurn" and nothing before or after it. The root contains exactly one attribute-free payload element. payload contains exactly one attribute-free blocks element. blocks contains one or more block elements.
 
+The container tags must be the literal XML elements <payload> and <blocks>. Never replace them with generic parameter elements such as <parameter name="payload"> or <parameter name="blocks">.
+
 Each block has exactly one block_type attribute: Thinking, Assistant, or FunctionCall. Thinking blocks must precede Assistant blocks. A ModelTurn has at most one FunctionCall, and FunctionCall must be its final block. A turn is terminal only when it contains an Assistant block and no FunctionCall.
 
 Thinking is concise assistant reasoning for runtime diagnostics. It is never the group reply. Assistant is candidate user-visible content. FunctionCall requests one available tool. After FunctionCall, stop immediately and wait for the host's real FunctionResponse. Never fabricate a tool result.

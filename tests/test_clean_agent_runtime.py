@@ -1402,6 +1402,7 @@ async def test_invalid_model_turn_recovers_one_durable_repair_after_owner_restar
     assert repair_snapshot["protocol_repair"] == {
         "repair_count": 1,
         "error_code": "AGENT_PROTOCOL_XML",
+        "validation_reason": "Model candidate is not one complete XML document",
         "candidate_digest": failure["candidate_digest"],
         "feedback": "not xml",
     }

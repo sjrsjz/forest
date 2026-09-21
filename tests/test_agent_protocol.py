@@ -81,6 +81,40 @@ def test_terminal_and_thinking_only_turns_are_distinct():
     assert pending.thinking_only and not pending.terminal
 
 
+def test_bounded_parameter_alias_from_compatible_provider_is_accepted():
+    candidate = (
+        '<valid_agent_protocol_content_block block_type="ModelTurn">'
+        '<parameter name="payload"><parameter name="blocks">'
+        + thinking()
+        + assistant("done")
+        + "</parameter></parameter></valid_agent_protocol_content_block>"
+    )
+    turn = parse_model_turn(candidate)
+    assert turn.terminal
+    assert turn.assistant_text == "done"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        '<valid_agent_protocol_content_block block_type="ModelTurn">'
+        '<parameter name="other"><parameter name="blocks">'
+        + assistant()
+        + "</parameter></parameter></valid_agent_protocol_content_block>",
+        '<valid_agent_protocol_content_block block_type="ModelTurn">'
+        '<parameter name="payload" extra="model"><parameter name="blocks">'
+        + assistant()
+        + "</parameter></parameter></valid_agent_protocol_content_block>",
+        '<valid_agent_protocol_content_block block_type="ModelTurn">'
+        '<parameter name="payload"><parameter name="other">'
+        + assistant()
+        + "</parameter></parameter></valid_agent_protocol_content_block>",
+    ],
+)
+def test_parameter_alias_does_not_expand_the_protocol_grammar(candidate):
+    fails("AGENT_PROTOCOL_STRUCTURE", candidate)
+
+
 def test_content_after_first_complete_function_call_is_untrusted_tail():
     turn = parse_model_turn(xml(assistant("checking"), call(), assistant("fabricated")))
     assert turn.truncated_after_function_call

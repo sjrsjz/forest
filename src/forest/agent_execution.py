@@ -372,11 +372,19 @@ class DurableSingleAgentExecution:
         if (
             not isinstance(feedback, dict)
             or set(feedback)
-            != {"repair_count", "error_code", "candidate_digest", "feedback"}
+            != {
+                "repair_count",
+                "error_code",
+                "validation_reason",
+                "candidate_digest",
+                "feedback",
+            }
             or feedback.get("repair_count") != recovery.get("repair_count")
             or feedback.get("error_code") != failure.get("error_code")
             or feedback.get("candidate_digest") != failure.get("candidate_digest")
+            or not isinstance(feedback.get("validation_reason"), str)
             or not isinstance(feedback.get("feedback"), str)
+            or len(feedback["validation_reason"].encode("utf-8")) > 4096
             or len(feedback["feedback"].encode("utf-8")) > 32768
         ):
             raise ForestError(
