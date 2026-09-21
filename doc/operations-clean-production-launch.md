@@ -99,6 +99,23 @@ docker run --rm --no-healthcheck --network forest-clean_default `
   --duration-seconds 3600 --interval-seconds 30
 ```
 
+## 受控进程现场验收
+
+`process.executor` 初始配置没有任何 ExecutionProfile。管理员应在 Bot 作用域选择该模块的“受控进程执行”配置贡献，通过通用 plan/apply 表单提交 [diagnostic.echo.json](../examples/process_executor/diagnostic.echo.json)；不要直接修改模块表或 Payload。该示例只适用于当前 `forest:local` 镜像：它冻结 `/usr/local/bin/python3.11` 的 SHA-256、`10001:10001` 身份、`/app` 工作目录、无网络策略和资源上限。镜像变化后必须先在候选镜像中重新计算并核对可执行文件摘要，再发布新配置 revision。
+
+配置热替换完成后，在 `job.scheduler` 工作区创建 `native.execute` Job，输入为：
+
+```json
+{
+  "profile_id": "diagnostic.echo",
+  "arguments": {
+    "value": "forest-live-profile"
+  }
+}
+```
+
+验收应看到 Job 进入 `SUCCEEDED`、退出码为 0，并产生受管 stdout Payload；管理页面只展示摘要、字节数、截断状态和 Payload 引用。再用 `$(touch should-not-run)` 作为 `value` 时，它必须作为普通 argv 原样输出，不能产生 shell 副作用。这个 profile 的网络策略为 `deny`，Generation 若不能安装 seccomp 或不能以声明身份和 POSIX limits 运行，应拒绝激活，不能降级为有网络或无限制执行。
+
 ## 多 Bot Supervisor 入口
 
 `forest supervisor` 使用独立部署数据库运行持久供应 Worker 与多 Bot 生命周期协调器。最小进程配置为：
