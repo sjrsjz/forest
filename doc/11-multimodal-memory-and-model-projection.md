@@ -172,14 +172,17 @@ Worker 使用有界批次、积压阈值、每 Bot 预算和重试退避。媒�
 
 | 所有者 | 拥有 | 禁止拥有 |
 |---|---|---|
-| `memory.graph` | 来源资格、facet、claim/lease、重试时机、索引覆盖、向量发布、召回、删除 epoch | Embedding endpoint、API key、HTTP client、Provider 私有 attempt 表 |
+| `memory.graph` | 来源资格、facet、claim/lease、重试时机、`index_ref_id`、召回、删除 epoch 与索引删除 outbox | Embedding endpoint、Milvus client、向量 collection、Provider 私有 attempt 表 |
 | `embedding.*` | 与 Bot 空间绑定兼容的 endpoint 配置、凭据引用、客户端、请求 manifest、网络 attempt、usage/费用观察、结果载荷 | Memory 来源/主干/可见性表、facet 状态、召回结果或删除决策 |
+| `vector.index` | Milvus endpoint/凭据、Bot 独立 collection 身份、向量的幂等 upsert/delete、按 QUERY ref 执行 ANN 并返回 DOCUMENT ref | 消息正文、作者/群来源、图关系、资格、权限、删除 epoch 和 EvidenceBundle |
 
 `memory.graph` 领取一批 facet 后物化有界 `EmbeddingEncodeRequest`，其中只包含受管 text/image payload 引用、逐项来源摘要、purpose、空间身份、请求 deadline 和稳定 effect identity。它经内核 Contract Router 调用准确 `embedding.encode/1` Generation。Embedding 在实际发送前验证这些引用、实际输入模态、大小和冻结空间，写自己的 transport attempt；它不根据 Memory 表补字段，也不决定某个来源是否有资格进入索引。
 
 Memory 必须在预算预留前完成本地 facet 物化、来源投影与逐项输入校验。空白文本、超过单图限制或其他确定不可编码的部分保留为 `SUPPRESSED` facet，以便管理面解释索引缺口，但不得进入 claim；批次领取还必须限制累计图片字节，不能生成 Provider 必然拒绝的请求。若 claim 已建立而网络交接尚未发生，本地失败必须把整批 attempt 结算为 `NOT_SENT`，并释放或避免建立预算预留。单批异常只能触发有界退避；生命周期 Worker 继续运行并在后续循环执行过期 attempt 与预算恢复，不能让一条消息永久终止整个 Bot 的索引任务。
 
-Embedding 返回 `EmbeddingEncodeObservation`：固定 request/attempt、空间、逐 facet 向量结果载荷、usage 与 `RESPONDED | REJECTED | NOT_SENT | UNKNOWN`。向量字节由 Embedding 以自身 owner 身份发布，Memory 只能引用和读取获准结果。Memory 的结算事务重新验证 claim/lease、当前 RuntimeGraph member、facet/source revision、删除 epoch、空间和结果摘要，再推进 `READY/RETRYABLE_FAILURE/UNKNOWN/SUPPRESSED`。网络调用和向量计算不在该事务内。
+Embedding 返回 `EmbeddingEncodeObservation`：固定 request/attempt、空间、逐 facet 向量结果载荷、usage 与 `RESPONDED | REJECTED | NOT_SENT | UNKNOWN`。向量字节由 Embedding 以自身 owner 身份发布，Memory 只能引用和读取获准结果。Memory 的结算事务重新验证 claim/lease、当前 RuntimeGraph member、facet/source revision、删除 epoch、空间和结果摘要，成功时先推进 `EMBEDDED`。生命周期 Worker 再经冻结的 `vector.index.upsert/1` 以 facet ID 作为稳定 `ref_id` 幂等发布；返回相同 ref 后才把 facet 推进 `READY`。网络调用、向量计算和 Milvus 写入均不在 PostgreSQL 结算事务内。
+
+召回时 QUERY facet 走相同 `EMBEDDED → READY` 路径。`vector.index.search/1` 只接受 QUERY `ref_id`、冻结 `space_id` 与有界 limit，只返回 DOCUMENT `ref_id`、相似度和非权威定位提示。Memory 必须回 PostgreSQL 验证命中 ref 的当前状态、来源修订、可见性和删除屏障，随后才可读取内容和关系。Milvus 不能直接生成 EvidenceBundle，也不能凭其 metadata 判断某群或作者可见。
 
 热替换时，Memory claim 固定准确 Embedding Generation 与契约版本。交接前失败可按相同 facet 创建新 attempt；交接后失去结果必须保持 `UNKNOWN` 并向原 Generation/外部 effect 查询，不能换 endpoint 重发。Embedding endpoint 或凭据轮换会建立新 Generation，但只有声明与 Bot 已冻结 `EmbeddingSpaceIdentity` 完全兼容时才可进入 RuntimeGraph；模型种类、修订、维度、预处理、归一化或对齐语义变化仍必须拒绝。
 

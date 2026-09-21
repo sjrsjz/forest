@@ -22,6 +22,7 @@ class CleanMemoryEmbeddingService:
         retrieval,
         payloads,
         provider,
+        vector_index,
         profile,
         component_id: str,
         generation_id: str,
@@ -45,6 +46,7 @@ class CleanMemoryEmbeddingService:
             retrieval=retrieval,
             payloads=payloads,
             provider=provider,
+            vector_index=vector_index,
             profile=profile,
             component_id=component_id,
             generation_id=generation_id,
@@ -110,7 +112,13 @@ class CleanMemoryEmbeddingService:
                     await self.retrieval.recover_expired_attempts()
                     await self.budget.recover_expired()
                     purpose = None
-                    if await self.retrieval.has_pending_facets(purpose="QUERY"):
+                    if await self.worker.delete_one_index_ref():
+                        outcome = "SUCCESS"
+                    elif await self.worker.publish_one_index_ref("QUERY"):
+                        outcome = "SUCCESS"
+                    elif await self.worker.publish_one_index_ref("DOCUMENT"):
+                        outcome = "SUCCESS"
+                    elif await self.retrieval.has_pending_facets(purpose="QUERY"):
                         purpose = "QUERY"
                     elif await self.retrieval.has_pending_facets(purpose="DOCUMENT"):
                         purpose = "DOCUMENT"

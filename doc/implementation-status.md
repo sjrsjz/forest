@@ -50,7 +50,7 @@
 ### Provider、Agent、Conversation 与 OneBot Messaging 图
 
 > **生产接线状态：** Conversation Worker、单 Agent 执行、Context 投影、Provider 调用、最终回复与 Session 交接已经进入同一干净 RuntimeGraph。Agent→Provider 与 Conversation→Agent 使用冻结到准确图/代际/契约版本的 Contract Router 句柄；Conversation 只调用输入选择、最终回复和 Session 交接三个内核 UoW 服务，Agent、Conversation、Memory、Delivery participant 由内核按声明解析。生产模块不再通过共享模块字典、直接运行实例或 bound participant 完成这条链。PostgreSQL 集成测试已从真实 OneBot 入站事实自动生成回复、原子提交 Context/SendIntent、经 Delivery 发送并静默关闭 Session。
-当前生产 RuntimeGraph 共 17 个成员：五个内核模块，以及 `provider.chat-completions`、`embedding.multimodal`、`memory.graph`、`media.capture`、`agent.runtime`、`conversation.scheduler`、`conversation.trigger-policy`、`adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command` 十二个平级业务模块：
+当前候选 RuntimeGraph 共 18 个成员：五个内核模块，以及 `provider.chat-completions`、`embedding.multimodal`、`vector.index`、`memory.graph`、`media.capture`、`agent.runtime`、`conversation.scheduler`、`conversation.trigger-policy`、`adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command` 十三个平级业务模块：
 - `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
 - text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
 - `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
@@ -71,7 +71,7 @@ Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持�
 
 当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
 
-`memory.graph` 与 `embedding.multimodal` 已作为两个独立成员进入干净 RuntimeGraph。Memory 独占图 schema、facet/claim、预算、向量发布和召回语义；Embedding Provider 独占 profile identity、endpoint/凭据、请求投影、HTTP 客户端、传输尝试和用量/结果载荷。Memory 的生命周期 Worker 只持有冻结的 `embedding.encode/1` 服务句柄，Provider 无法读取 Memory 私有表。Provider `SENT` 与 Memory `DISPATCHED` 在同一事务合流；交接后的崩溃只会恢复为 `UNKNOWN`，不会重复推断发送。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；Bot 首次初始化后 deployment、model revision、模型和维度由 Provider identity 与 Memory domain 双重拒绝变更，endpoint/凭据/连接参数可经配置 plan/apply 和新 Generation 替换。OneBot 文本入站已在 Adapter/Conversation/Memory 三参与者事务中登记来源；IDLE、模型安全点与 Session 结束的 InputBatch 选择会在同一事务提交 Memory eligibility，并为新获资格的来源修订创建幂等 `DOCUMENT` embedding facets。`memory.recall/1` 已把精确 InputBatch 物化为 `QUERY` facet，冻结检索包并逐条标注原始群聊和作者；`agent.runtime` 在同一单 Agent 的下一次模型调用前通过冻结路由消费召回，工具循环复用同一输入修订的查询身份。
+`memory.graph`、`embedding.multimodal` 与 `vector.index` 已作为三个独立成员进入干净 RuntimeGraph。Memory 独占图 schema、facet/claim、预算、稳定 `index_ref_id`、召回语义和删除 outbox；Embedding Provider 独占 profile identity、endpoint/凭据、请求投影、HTTP 客户端、传输尝试和用量/结果载荷；Vector Index 独占 Milvus client、Bot collection 身份与 ANN 查询。Memory 的生命周期 Worker 只持有冻结的 `embedding.encode/1` 和 `vector.index.upsert/search/delete` 服务句柄，其他两个模块均无法读取 Memory 私有表。Embedding 成功先把 facet 结算为 `EMBEDDED`，以相同 ref 幂等发布 Milvus 成功后才转为 `READY`；召回只接收候选 ref，并在 PostgreSQL 快照中重新验证来源、资格、空间与删除状态。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；Bot 首次初始化后模型、维度和向量空间由 Provider/Memory/Vector Index 三重拒绝变更，endpoint/凭据/连接参数可经配置 plan/apply 和新 Generation 替换。`memory.recall/1` 把精确 InputBatch 物化为 `QUERY` facet，经 Milvus 取种子 ref 后冻结检索包并逐条标注原始群聊和作者。
 
 Embedding 批处理现先完成本地分面物化和输入校验，再预留每日预算；交接前失败会将已领取 attempt 明确结算为 `NOT_SENT`，不会遗留 `PREPARED` attempt 或 `RESERVED` 预算。纯空白文本和超过单图上限的图片会保留为可查询的 `SUPPRESSED` facet，不进入 Provider；批次领取同时限制累计图片字节。单批数据、Provider 或存储错误只使 Worker 有界退避并公开最近错误，不再结束模块所属任务，下一轮仍会执行过期 attempt 与预算恢复。
 
@@ -87,13 +87,13 @@ Embedding 批处理现先完成本地分面物化和输入校验，再预留每�
 
 以下模块均有独立官方 baseline、Repository 和定向 PostgreSQL 测试；其生产接线范围以上文逐项说明为准：
 
-- `memory.graph`、`embedding.multimodal` 与 `media.capture`：生命周期 Worker、Bot 级冻结语义空间、每日请求/Token 预算、每群主干、图文来源摄入、InputBatch 资格合流、查询向量、Agent 召回、当前图片投影及跨主干关系查询已进入 RuntimeGraph；
+- `memory.graph`、`embedding.multimodal`、`vector.index` 与 `media.capture`：生命周期 Worker、Bot 级冻结语义空间、Milvus 派生向量索引、稳定 ref、每日请求/Token 预算、每群主干、图文来源摄入、InputBatch 资格合流、Agent 召回、当前图片投影及跨主干关系查询已进入 RuntimeGraph；
 - `delivery`：CHAT/CONTROL lane、顺序、Effect 与 Adapter 双 fence、生命周期 Worker、崩溃恢复与 UNKNOWN 对账；
 - `shell.command`：Binding/群/主体策略、RuntimeGraph 命令注册表、P0/P1 claim、双阶段授权复核、CONTROL 回执和撤权后安全终结；
 - `conversation.scheduler`：连续分类水位、同群 actor lease、安全边界、trigger cut、静默排空和恢复领取。
 - `job.scheduler`：模块任务目录、持久排队、租约/代次 fence、重试、取消意图、结果载荷和有界管理查询。
 
-Repository 测试证明各自权威状态机；生产启动链是否切换只按上文列出的 17 成员 RuntimeGraph 与集成测试判断。
+Repository 测试证明各自权威状态机；生产启动链是否切换只按上文列出的 18 成员 RuntimeGraph 与集成测试判断。
 
 ## 已删除的旧实现
 

@@ -37,8 +37,12 @@ from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
+from forest.clean_vector_index_module import (
+    bootstrap_clean_vector_index,
+    default_vector_index_configuration,
+)
 from forest.core_runtime import bootstrap_clean_kernel
-from forest.embeddings import EmbeddingResult, EmbeddingVector
+from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
@@ -171,6 +175,77 @@ class FakeEmbeddingClient:
 
     async def aclose(self):
         pass
+
+
+class FakeMilvusClient:
+    collections = {}
+
+    class Schema:
+        def __init__(self):
+            self.fields = []
+
+        def add_field(self, name, data_type, **values):
+            self.fields.append({"name": name, "type": data_type, **values})
+
+    class Indexes:
+        def add_index(self, **_values):
+            return None
+
+    def __init__(self, **_values):
+        pass
+
+    async def has_collection(self, *, collection_name):
+        return collection_name in self.collections
+
+    def create_schema(self, **_values):
+        return self.Schema()
+
+    def prepare_index_params(self):
+        return self.Indexes()
+
+    async def create_collection(self, *, collection_name, schema, **_values):
+        vector = next(item for item in schema.fields if item["name"] == "embedding")
+        self.collections[collection_name] = {"dimensions": vector["dim"], "rows": {}}
+
+    async def describe_collection(self, *, collection_name):
+        dimensions = self.collections[collection_name]["dimensions"]
+        return {"fields": [{"name": "embedding", "params": {"dim": dimensions}}]}
+
+    async def upsert(self, *, collection_name, data, **_values):
+        rows = self.collections[collection_name]["rows"]
+        for row in data:
+            rows[row["ref_id"]] = dict(row)
+
+    async def get(self, *, collection_name, ids, output_fields, **_values):
+        rows = self.collections[collection_name]["rows"]
+        return [
+            {field: rows[ref][field] for field in output_fields}
+            for ref in ids
+            if ref in rows
+        ]
+
+    async def search(self, *, collection_name, data, limit, output_fields, **_values):
+        query = data[0]
+        candidates = []
+        for ref_id, row in self.collections[collection_name]["rows"].items():
+            if row["purpose"] != "DOCUMENT":
+                continue
+            score = sum(left * right for left, right in zip(query, row["embedding"], strict=True))
+            candidates.append({
+                "ref_id": ref_id,
+                "distance": score,
+                "entity": {field: row[field] for field in output_fields},
+            })
+        candidates.sort(key=lambda item: (-item["distance"], item["ref_id"]))
+        return [candidates[:limit]]
+
+    async def delete(self, *, collection_name, ids, **_values):
+        rows = self.collections[collection_name]["rows"]
+        for ref_id in ids:
+            rows.pop(ref_id, None)
+
+    async def close(self):
+        return None
 
 
 class FakeToolAuthorization:
@@ -315,6 +390,26 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         credential_resolver=lambda *_args: "test-embedding-key",
         client_factory=FakeEmbeddingClient,
     )
+    embedding_profile = EmbeddingProfile(
+        deployment_id="embedding.multimodal/qiyu-vl/default",
+        model_revision="operator-declared/1",
+        model="Qwen/Qwen3-VL-Embedding-8B",
+        dimensions=4096,
+    )
+    async def resolve_vector_token(*_args):
+        return ""
+
+    vector_index = await bootstrap_clean_vector_index(
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration=default_vector_index_configuration(
+            space_id=embedding_profile.space_id,
+            dimensions=embedding_profile.dimensions,
+        ),
+        token_resolver=resolve_vector_token,
+        client_factory=FakeMilvusClient,
+    )
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     media = await bootstrap_clean_media(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
@@ -416,6 +511,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         + (
             provider.descriptor,
             embedding.descriptor,
+            vector_index.descriptor,
             memory.descriptor,
             media.descriptor,
             agent.descriptor,
@@ -436,6 +532,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "kernel.audit",
             "provider.chat-completions",
             "embedding.multimodal",
+            "vector.index",
             "memory.graph",
             "media.capture",
             "agent.runtime",

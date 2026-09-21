@@ -389,11 +389,11 @@ CREATE TABLE embedding_facets (
     space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
     state text NOT NULL DEFAULT 'PENDING' CHECK (
-        state IN ('PENDING','PREPARED','DISPATCHED','READY','UNKNOWN','FAILED','SUPPRESSED')
+        state IN ('PENDING','PREPARED','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED','SUPPRESSED')
     ),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     current_attempt_id text,
-    vector real[],
+    index_ref_id text CHECK (index_ref_id IS NULL OR octet_length(index_ref_id) BETWEEN 1 AND 256),
     vector_digest text CHECK (vector_digest IS NULL OR vector_digest ~ '^sha256:[a-f0-9]{64}$'),
     result_payload_id text,
     result_payload_digest text CHECK (
@@ -412,12 +412,12 @@ CREATE TABLE embedding_facets (
             AND selector_end_char IS NOT NULL AND selector_start_char < selector_end_char)
         OR (modality='IMAGE' AND selector_start_char IS NULL AND selector_end_char IS NULL)
     ),
-    CHECK ((state='READY') = (vector IS NOT NULL)),
-    CHECK ((state='READY') = (vector_digest IS NOT NULL)),
-    CHECK ((state='READY') = (result_payload_id IS NOT NULL)),
-    CHECK ((state='READY') = (result_payload_digest IS NOT NULL)),
+    CHECK ((state='READY') = (index_ref_id IS NOT NULL)),
+    CHECK ((state IN ('EMBEDDED','READY')) = (vector_digest IS NOT NULL)),
+    CHECK ((state IN ('EMBEDDED','READY')) = (result_payload_id IS NOT NULL)),
+    CHECK ((state IN ('EMBEDDED','READY')) = (result_payload_digest IS NOT NULL)),
     CHECK ((state='READY') = (published_at IS NOT NULL)),
-    CHECK (vector IS NULL OR cardinality(vector) BETWEEN 1 AND 4096)
+    UNIQUE (bot_id,index_ref_id)
 );
 
 CREATE TABLE embedding_attempts (
@@ -612,6 +612,19 @@ CREATE INDEX source_units_browse_idx ON source_units(
 CREATE INDEX source_units_trunk_idx ON source_units(
     bot_id,trunk_id,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
+
+CREATE TABLE vector_index_deletions (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    index_ref_id text NOT NULL CHECK (octet_length(index_ref_id) BETWEEN 1 AND 256),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    source_unit_id text NOT NULL CHECK (octet_length(source_unit_id) BETWEEN 1 AND 256),
+    deletion_epoch bigint NOT NULL CHECK (deletion_epoch >= 0),
+    state text NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING','DELETED')),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    deleted_at timestamptz,
+    PRIMARY KEY (bot_id,index_ref_id),
+    CHECK ((state='DELETED') = (deleted_at IS NOT NULL))
+);
 CREATE INDEX source_units_author_idx ON source_units(
     bot_id,author_subject_ref,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
@@ -641,6 +654,9 @@ CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
 );
 CREATE INDEX embedding_attempts_recovery_idx ON embedding_attempts(
     bot_id,state,deadline_at,attempt_id
+);
+CREATE INDEX vector_index_deletions_work_idx ON vector_index_deletions(
+    bot_id,state,created_at,index_ref_id
 );
 CREATE INDEX embedding_claims_created_idx ON embedding_claims(
     bot_id,purpose,created_at,claim_id
@@ -741,15 +757,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION memory_vector_dot(left_vector real[], right_vector real[])
-RETURNS double precision LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
-    SELECT CASE
-        WHEN cardinality(left_vector) <> cardinality(right_vector) THEN NULL
-        ELSE sum(left_vector[index]::double precision * right_vector[index]::double precision)
-    END
-    FROM generate_subscripts(left_vector, 1) AS value(index)
-$$;
-
 CREATE FUNCTION guard_memory_query() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF ROW(NEW.bot_id,NEW.query_id,NEW.operation_id,NEW.input_digest,
@@ -787,8 +794,9 @@ BEGIN
     IF OLD.state='PENDING' AND NEW.state IN ('PREPARED','SUPPRESSED') THEN RETURN NEW; END IF;
     IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','PENDING','SUPPRESSED') THEN RETURN NEW; END IF;
     IF OLD.state='DISPATCHED' AND NEW.state IN (
-        'READY','UNKNOWN','FAILED','PENDING','SUPPRESSED'
+        'EMBEDDED','UNKNOWN','FAILED','PENDING','SUPPRESSED'
     ) THEN RETURN NEW; END IF;
+    IF OLD.state='EMBEDDED' AND NEW.state IN ('READY','SUPPRESSED') THEN RETURN NEW; END IF;
     IF OLD.state IN ('READY','UNKNOWN','FAILED') AND NEW.state='SUPPRESSED' THEN RETURN NEW; END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid embedding facet transition' USING ERRCODE='55000';
@@ -812,6 +820,23 @@ BEGIN
     ) THEN RETURN NEW; END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid embedding attempt transition' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_vector_index_deletion() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.index_ref_id,NEW.space_id,NEW.source_unit_id,
+           NEW.deletion_epoch,NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.index_ref_id,OLD.space_id,OLD.source_unit_id,
+           OLD.deletion_epoch,OLD.created_at) THEN
+        RAISE EXCEPTION 'Vector index deletion identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='PENDING' AND NEW.state='DELETED' AND NEW.deleted_at IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid vector index deletion transition' USING ERRCODE='55000';
 END;
 $$;
 
@@ -850,6 +875,8 @@ CREATE TRIGGER embedding_facet_guard BEFORE UPDATE OR DELETE ON embedding_facets
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_facet();
 CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_attempts
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
+CREATE TRIGGER vector_index_deletion_guard BEFORE UPDATE OR DELETE ON vector_index_deletions
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_index_deletion();
 CREATE TRIGGER embedding_claims_immutable BEFORE UPDATE OR DELETE ON embedding_claims
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER embedding_claim_items_immutable BEFORE UPDATE OR DELETE ON embedding_claim_items

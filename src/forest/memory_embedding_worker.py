@@ -57,6 +57,7 @@ class MemoryEmbeddingWorker:
         retrieval,
         payloads,
         provider,
+        vector_index,
         profile: EmbeddingProfile,
         component_id: str,
         generation_id: str,
@@ -68,6 +69,7 @@ class MemoryEmbeddingWorker:
         self.retrieval = retrieval
         self.payloads = payloads
         self.provider = provider
+        self.vector_index = vector_index
         self.profile = profile
         self.component_id = component_id
         self.generation_id = generation_id
@@ -162,6 +164,45 @@ class MemoryEmbeddingWorker:
             deadline_at=claim.deadline_at,
             budget_claim=budget_claim,
         )
+
+    async def publish_one_index_ref(self, purpose: str) -> bool:
+        """Idempotently move one persisted embedding into the derived vector index."""
+        facet = await self.retrieval.next_embedded_facet(purpose=purpose)
+        if facet is None:
+            return False
+        ref_id = facet["facet_id"]
+        indexed = await self.vector_index.upsert(
+            ref_id=ref_id,
+            space_id=facet["space_id"],
+            purpose=facet["purpose"],
+            source_unit_id=facet["source_unit_id"],
+            source_revision=facet["source_revision"],
+            modality=facet["modality"],
+            vector=facet["vector"],
+        )
+        if not isinstance(indexed, dict) or indexed.get("ref_id") != ref_id:
+            raise ForestError(
+                "MEMORY_VECTOR_INDEX_RESPONSE_INVALID",
+                "Vector index publication returned another ref",
+                502,
+            )
+        await self.retrieval.publish_index_ref(
+            facet_id=facet["facet_id"],
+            index_ref_id=ref_id,
+            expected_vector_digest=facet["vector_digest"],
+            expected_deletion_epoch=facet["deletion_epoch"],
+        )
+        return True
+
+    async def delete_one_index_ref(self) -> bool:
+        deletion = await self.retrieval.next_index_deletion()
+        if deletion is None:
+            return False
+        await self.vector_index.delete(
+            ref_ids=(deletion["index_ref_id"],), space_id=deletion["space_id"]
+        )
+        await self.retrieval.settle_index_deletion(deletion["index_ref_id"])
+        return True
 
     async def execute_batch(
         self,

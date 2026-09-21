@@ -162,6 +162,27 @@ Context 超预算时先保证待移出单元已有可靠归档和来源映射，
 
 图 head 是投影指针，不取代来源时钟、memory_scope_heads 或事实库 source_revision。物理驱动可用不可变分片 manifest 或 MVCC 版本区间实现快照，不要求每次发布复制整个图；契约是一个查询不能混读版本。
 
+### 5.1 专用向量数据库与引用边界
+
+向量查询不得在 PostgreSQL 中以 `real[]`、逐元素函数或全表扫描实现。官方实现把职责拆成三个平级模块：`embedding.multimodal` 生成文本/图片对齐向量，`vector.index` 独占 Milvus 客户端和 collection，`memory.graph` 独占内容、来源、关系、资格和召回语义。三者只经 RuntimeGraph 中冻结的服务契约通信。
+
+PostgreSQL 保存 `embedding_facets`、稳定 `index_ref_id`、向量摘要、来源修订、发布状态和删除 outbox；Milvus 保存 `ref_id`、`bot_id`、`space_id`、用途、来源修订、模态和向量。Milvus 不保存群消息正文、作者、群号、关系边、权限结论或删除权威。首版 `ref_id` 等于稳定 facet ID，但调用方只依赖其不透明、Bot 内唯一和幂等语义，不能解析字符串获取业务含义。
+
+```text
+PENDING → PREPARED → DISPATCHED → EMBEDDED → READY
+                                      │           │
+                                      └───────────┴→ SUPPRESSED
+
+EMBEDDED：Embedding 结果已持久结算，Milvus 发布尚未确认
+READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已提交
+```
+
+发布顺序是“先写派生索引，后发布权威引用”。进程在两步之间崩溃时，Worker 以同一 `ref_id` 重放 Milvus upsert；重复成功不会产生第二条记忆。抑制或删除先在 PostgreSQL 提交不可见事实并写 `vector_index_deletions`，查询立即回表过滤；后台再按 outbox 删除 Milvus 条目。即使删除暂时失败，旧向量也只能成为被 PostgreSQL 拒绝的无效候选，不能复活正文。
+
+每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
+
+一次召回先把查询 facet 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与分数。`memory.graph` 随后在同一冻结可见性时间点回 PostgreSQL批量验证 `READY`、space、来源修订、eligibility、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。ANN 结果只构成图扩展种子，后续按 `max_seed_nodes/max_nodes/max_edges/max_hops/max_distinct_groups/deadline_at` 在权威关系图做有界扩展，最终 EvidenceBundle 始终从事实库物化并逐项附来源群和作者。
+
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。
 
 高流量下按固定事实修订s0和明确的成员/资格选择器构建快照，coverage记录每主干实际覆盖位置及归档缺口。s0之后的新来源或新归档资格可以留给后继版本，不能要求“建图期间整个Bot零新消息”才能发布；它们不在本次声明的冻结覆盖内。发布仍校验基础graph head CAS、已选来源/端点的当前删除与授权依赖、规则版本和固定覆盖的有效性；更旧覆盖不得覆盖较新已发布版本。若候选声称包含最新输入，则必须满足最新scope head，不能只修改水位标签。不同Worker更新不同主干也发布一个兼容manifest；CAS失败后重用经复核的分片并重建依赖，不能丢掉另一个Worker已发布的主干或跨主干边。

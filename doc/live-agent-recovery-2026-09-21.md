@@ -44,4 +44,6 @@
 - REPAIR：14.998 秒，prompt 13,306 token，completion 2,845 token，`finish_reason=stop`，候选正文 885 字节。
 - Delivery SendIntent：`SENT`，单 part；真人在 QQ 群确认收到回复。
 
-端到端结果正确，但总 Run 耗时 118.769 秒，其中 Memory query 从注册到冻结占 86.299 秒。QUERY embedding 的两个 facet 实际在约 1.34 秒内已经 READY，因此延迟位于 4096 维 DOCUMENT 向量排序阶段。当前 baseline 使用 PostgreSQL `real[]` 和逐元素 SQL `memory_vector_dot` 做全量精确排序；它在当前仅约 663 个 facet 的真实数据上已不满足交互延迟要求，也不能作为十万级完整向量召回的最终实现。该项必须改为可索引的向量检索后再宣告 Memory 性能验收完成。
+端到端结果正确，但总 Run 耗时 118.769 秒，其中 Memory query 从注册到冻结占 86.299 秒。QUERY embedding 的两个 facet 实际在约 1.34 秒内已经完成，因此延迟定位为旧 baseline 的 PostgreSQL `real[]` + `memory_vector_dot` 全量排序；约 663 个 facet 已耗时约 85 秒。
+
+该实现已被删除：当前基线新增平级 `vector.index` Generation，以 Milvus 保存派生向量并执行 ANN；PostgreSQL 只保存内容、来源、关系、facet 状态和稳定 `index_ref_id`。Embedding 成功后先进入 `EMBEDDED`，Milvus 以相同 ref 幂等发布成功才进入 `READY`；召回只接收 Milvus 返回的 ref，随后回 PostgreSQL 复核可见性与来源并物化证据。真实 Milvus 的 upsert/search/delete 往返测试已通过。旧 118.769 秒记录只用于说明事故原因，不能代表新路径的性能验收；仍需在许可群完成新镜像的真实端到端时延采样。

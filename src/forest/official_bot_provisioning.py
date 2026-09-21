@@ -24,7 +24,13 @@ from forest.clean_trigger_policy_module import (
     TRIGGER_POLICY_CONFIGURATION_SCHEMA,
     default_trigger_policy_configuration,
 )
+from forest.clean_vector_index_module import (
+    VECTOR_INDEX_CONFIGURATION_SCHEMA,
+    default_vector_index_configuration,
+)
+from forest.clean_vector_index_runtime import CleanMilvusVectorIndexRuntime
 from forest.conversation_trigger_policy import ConversationTriggerPolicyRuntime
+from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.runtime_modules import RuntimeManagementContribution
 
@@ -66,6 +72,7 @@ ONEBOT_BOOTSTRAP_SCHEMA = {
 OFFICIAL_BOOTSTRAP_SCHEMAS = {
     "provider.chat-completions": PROVIDER_CONFIGURATION_SCHEMA,
     "embedding.multimodal": EMBEDDING_CONFIGURATION_SCHEMA,
+    "vector.index": VECTOR_INDEX_CONFIGURATION_SCHEMA,
     "conversation.trigger-policy": TRIGGER_POLICY_CONFIGURATION_SCHEMA,
     "shell.command": SHELL_CONFIGURATION_SCHEMA,
     "agent.runtime": AGENT_BOOTSTRAP_SCHEMA,
@@ -88,6 +95,8 @@ def _bootstrap_surface(component_id: str, label: str) -> RuntimeManagementContri
 def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContribution, ...]:
     """Return the official install catalog without constructing a Bot runtime graph."""
 
+    default_embedding = default_embedding_configuration()
+    default_embedding_profile = EmbeddingProfile(**default_embedding["profile"])
     values = (
         (
             "provider.chat-completions",
@@ -100,8 +109,18 @@ def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContributi
             "embedding.multimodal",
             "Multimodal Embedding Provider",
             "Bot-lifetime text and image embedding identity and endpoint.",
-            default_embedding_configuration(),
+            default_embedding,
             CleanMultimodalEmbeddingRuntime._parse_configuration,
+        ),
+        (
+            "vector.index",
+            "Milvus Vector Index",
+            "Rebuildable ANN index endpoint bound to the Bot embedding space.",
+            default_vector_index_configuration(
+                space_id=default_embedding_profile.space_id,
+                dimensions=default_embedding_profile.dimensions,
+            ),
+            CleanMilvusVectorIndexRuntime._parse_configuration,
         ),
         (
             "conversation.trigger-policy",
@@ -218,6 +237,18 @@ class OfficialBotSettingsResolver:
         embedding, embedding_profile = CleanMultimodalEmbeddingRuntime._parse_configuration(
             components["embedding.multimodal"].config
         )
+        vector_index = CleanMilvusVectorIndexRuntime._parse_configuration(
+            components["vector.index"].config
+        )
+        if (
+            vector_index["space_id"] != embedding_profile.space_id
+            or vector_index["dimensions"] != embedding_profile.dimensions
+        ):
+            raise ForestError(
+                "OFFICIAL_BOOTSTRAP_VECTOR_SPACE_MISMATCH",
+                "Vector index and embedding spaces differ",
+                409,
+            )
         trigger = ConversationTriggerPolicyRuntime._parse_configuration(
             components["conversation.trigger-policy"].config
         )
@@ -232,12 +263,18 @@ class OfficialBotSettingsResolver:
             )
         self._origin(provider["base_url"], {"http", "https"}, "model base URL")
         self._origin(embedding["endpoint"], {"http", "https"}, "embedding endpoint")
+        self._origin(vector_index["endpoint"], {"http", "https"}, "vector index endpoint")
         self._origin(onebot["websocket_url"], {"ws", "wss"}, "OneBot WebSocket URL")
         model_key = await self._secret(
             provider["credential_ref"], "provider.chat-completions.credential"
         )
         embedding_key = await self._secret(
             embedding["credential_ref"], "embedding.multimodal.credential"
+        )
+        vector_index_token = (
+            await self._secret(vector_index["credential_ref"], "vector.index.credential")
+            if vector_index["credential_ref"]
+            else ""
         )
         onebot_token = await self._secret(
             onebot["access_token_ref"], "adapter.onebot.access-token"
@@ -277,6 +314,10 @@ class OfficialBotSettingsResolver:
             embedding_timeout_seconds=embedding["timeout_seconds"],
             embedding_max_connections=embedding["max_connections"],
             model_capabilities=capabilities,
+            vector_index_endpoint=vector_index["endpoint"],
+            vector_index_token=vector_index_token,
+            vector_index_credential_ref=vector_index["credential_ref"],
+            vector_index_timeout_seconds=vector_index["timeout_seconds"],
         )
 
     async def _secret(self, secret_ref: str, purpose: str) -> str:
@@ -361,6 +402,7 @@ class OfficialBotProvisioner:
             "kernel.audit",
             "provider.chat-completions",
             "embedding.multimodal",
+            "vector.index",
             "memory.graph",
             "media.capture",
             "agent.runtime",

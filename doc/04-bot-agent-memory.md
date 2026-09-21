@@ -18,7 +18,9 @@ Bot 是长期存在的身份、资源、授权、预算和数据作用域记录�
 | 配额/预算模块 | 资源限额、消费账本与预算策略；若首版由 kernel 模块提供也保持独立契约 |
 | `agent.runtime` | PresetContext/persona revision、Session、Run、ModelTurn、ToolStep 与 checkpoint |
 | `provider.*` | 模型 endpoint、凭据引用、能力快照、请求与 attempt |
-| `memory.graph` / `embedding.*` | Bot 全局记忆域、群主干、MemoryStoreProfile 与冻结的嵌入空间身份 |
+| `memory.graph` | Bot 全局记忆域、群主干、来源/关系权威事实、facet 状态、`index_ref_id`、召回包与删除 outbox；不保存可查询向量索引 |
+| `embedding.*` | 多模态 EmbeddingProfile、冻结空间身份、网络请求/回执与用量事实 |
+| `vector.index` | 与 Bot 生命周期绑定的 Milvus collection 身份及派生向量；只通过稳定 `ref_id` 指回 Memory 权威内容 |
 | `adapter.*` | Binding、平台账号、连接代际与平台事件观察 |
 
 任一管理查询若需要“Bot 概览”，只能按已注册 query 合并这些带 owner/revision 的投影；该概览不是写入模型，也不能产生跨模块 `bot.save()`。

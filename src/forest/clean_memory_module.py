@@ -54,6 +54,13 @@ class _RoutedEmbeddingProvider:
         return await self._encode(*args, **values)
 
 
+class _RoutedVectorIndex:
+    def __init__(self, *, upsert, search, delete) -> None:
+        self.upsert = upsert
+        self.search = search
+        self.delete = delete
+
+
 @dataclass(frozen=True)
 class CleanMemoryModule:
     repository: MemoryGraphRepository
@@ -174,6 +181,11 @@ async def bootstrap_clean_memory(
             embedding_provider=_RoutedEmbeddingProvider(
                 contracts.service("embedding.encode", 1, owned_work=True)
             ),
+            vector_index=_RoutedVectorIndex(
+                upsert=contracts.service("vector.index.upsert", 1, owned_work=True),
+                search=contracts.service("vector.index.search", 1, owned_work=True),
+                delete=contracts.service("vector.index.delete", 1, owned_work=True),
+            ),
         )
         runtime.management_contract = CleanMemoryManagementContract(
             configuration,
@@ -191,6 +203,7 @@ async def bootstrap_clean_memory(
             "kernel.authorization",
             "kernel.effect",
             "embedding.multimodal",
+            "vector.index",
         ),
         factory,
         official_artifact("bot"),

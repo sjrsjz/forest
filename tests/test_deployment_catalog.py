@@ -14,9 +14,11 @@ from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
+from forest.clean_vector_index_module import default_vector_index_configuration
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
+from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
 from forest.official_bot_provisioning import (
@@ -656,6 +658,18 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                     "dimensions": 4096,
                 },
             },
+            "vector.index": {
+                **default_vector_index_configuration(
+                    space_id=EmbeddingProfile(
+                        deployment_id="embedding.multimodal/test",
+                        model_revision="test/1",
+                        model="Qwen/Qwen3-VL-Embedding-8B",
+                        dimensions=4096,
+                    ).space_id,
+                    dimensions=4096,
+                ),
+                "endpoint": "http://milvus:19530",
+            },
             "conversation.trigger-policy": {
                 "protocol": "forest.conversation.trigger-policy/1",
                 "allowed_group_ids": ["933179609"],
@@ -744,7 +758,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 bundles = await (
                     await conn.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
                 ).fetchone()
-                assert bundles["count"] == 17
+                assert bundles["count"] == 18
                 runtime_namespace = module_schema_namespace("forest.kernel.runtime")
                 graph = await (
                     await conn.execute(
@@ -940,7 +954,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert bootstrap_catalog.status_code == 200
         catalog_body = bootstrap_catalog.json()
         assert catalog_body["protocol"] == "forest.bootstrap-configuration-catalog/1"
-        assert len(catalog_body["items"]) == 6
+        assert len(catalog_body["items"]) == 7
         assert all(item["surface"]["kind"] == "trusted-module" for item in catalog_body["items"])
         assert all(item["schema_digest"].startswith("sha256:") for item in catalog_body["items"])
         assert (await client.get("/static/bootstrap-component.js")).status_code == 200

@@ -86,6 +86,88 @@ class FakeMediaClient(FakeModelClient):
         return CapturedImage(b"fake-png-bytes", "image/png", 2, 3)
 
 
+class FakeMilvusClient:
+    collections = {}
+
+    class Schema:
+        def __init__(self):
+            self.fields = []
+
+        def add_field(self, name, data_type, **values):
+            self.fields.append({"name": name, "type": data_type, **values})
+
+    class Indexes:
+        def add_index(self, **_values):
+            return None
+
+    def __init__(self, **_values):
+        self.closed = False
+
+    async def has_collection(self, *, collection_name):
+        return collection_name in self.collections
+
+    def create_schema(self, **_values):
+        return self.Schema()
+
+    def prepare_index_params(self):
+        return self.Indexes()
+
+    async def create_collection(self, *, collection_name, schema, **_values):
+        vector = next(item for item in schema.fields if item["name"] == "embedding")
+        self.collections[collection_name] = {
+            "dimensions": vector["dim"],
+            "rows": {},
+        }
+
+    async def describe_collection(self, *, collection_name):
+        collection = self.collections[collection_name]
+        return {
+            "fields": [
+                {"name": "embedding", "params": {"dim": collection["dimensions"]}}
+            ]
+        }
+
+    async def upsert(self, *, collection_name, data, **_values):
+        rows = self.collections[collection_name]["rows"]
+        for row in data:
+            rows[row["ref_id"]] = deepcopy(row)
+        return {"upsert_count": len(data)}
+
+    async def get(self, *, collection_name, ids, output_fields, **_values):
+        rows = self.collections[collection_name]["rows"]
+        return [
+            {field: rows[ref][field] for field in output_fields}
+            for ref in ids
+            if ref in rows
+        ]
+
+    async def search(self, *, collection_name, data, limit, output_fields, **_values):
+        query = data[0]
+        rows = self.collections[collection_name]["rows"]
+        candidates = []
+        for ref_id, row in rows.items():
+            if row["purpose"] != "DOCUMENT":
+                continue
+            score = sum(left * right for left, right in zip(query, row["embedding"], strict=True))
+            candidates.append(
+                {
+                    "ref_id": ref_id,
+                    "distance": score,
+                    "entity": {field: row[field] for field in output_fields},
+                }
+            )
+        candidates.sort(key=lambda item: (-item["distance"], item["ref_id"]))
+        return [candidates[:limit]]
+
+    async def delete(self, *, collection_name, ids, **_values):
+        rows = self.collections[collection_name]["rows"]
+        for ref_id in ids:
+            rows.pop(ref_id, None)
+
+    async def close(self):
+        self.closed = True
+
+
 class FakeWebSocketClient:
     def __init__(self, self_id: str) -> None:
         self.self_id = self_id
@@ -493,6 +575,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 model_client_factory=FakeModelClient,
                 embedding_client_factory=FakeEmbeddingClient,
                 media_client_factory=FakeMediaClient,
+                vector_index_client_factory=FakeMilvusClient,
                 websocket_client_factory=create_websocket,
             )
             await host.start()
@@ -506,6 +589,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "kernel.audit",
                     "provider.chat-completions",
                     "embedding.multimodal",
+                    "vector.index",
                     "memory.graph",
                     "media.capture",
                     "agent.runtime",
@@ -1508,6 +1592,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
             model_client_factory=FakeModelClient,
             embedding_client_factory=FakeEmbeddingClient,
             media_client_factory=FakeMediaClient,
+            vector_index_client_factory=FakeMilvusClient,
             websocket_client_factory=create_websocket,
         )
         with pytest.raises(ForestError) as caught:

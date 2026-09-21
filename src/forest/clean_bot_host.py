@@ -24,7 +24,12 @@ from forest.clean_process_executor_module import bootstrap_clean_process_executo
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
+from forest.clean_vector_index_module import (
+    bootstrap_clean_vector_index,
+    default_vector_index_configuration,
+)
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -75,6 +80,17 @@ def _positive_int(name: str, default: int, minimum: int, maximum: int) -> int:
         value = int(raw)
     except ValueError:
         value = -1
+    if not minimum <= value <= maximum:
+        raise ForestError("BOT_CONFIGURATION_INVALID", f"{name} is outside its bound", 422)
+    return value
+
+
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        value = minimum - 1
     if not minimum <= value <= maximum:
         raise ForestError("BOT_CONFIGURATION_INVALID", f"{name} is outside its bound", 422)
     return value
@@ -160,6 +176,10 @@ class CleanBotSettings:
     embedding_timeout_seconds: float = 60
     embedding_max_connections: int = 4
     model_capabilities: ModelCapabilities | None = None
+    vector_index_endpoint: str = "http://milvus:19530"
+    vector_index_token: str = ""
+    vector_index_credential_ref: str = ""
+    vector_index_timeout_seconds: float = 10
 
     @classmethod
     def from_environment(cls) -> "CleanBotSettings":
@@ -243,6 +263,21 @@ class CleanBotSettings:
             private_enabled=private == "true",
             shell_administrator_ids=shell_administrators,
             agent_system_prompt=os.environ.get("FOREST_AGENT_SYSTEM_PROMPT", ""),
+            vector_index_endpoint=_origin(
+                "FOREST_VECTOR_INDEX_ENDPOINT",
+                os.environ.get("FOREST_VECTOR_INDEX_ENDPOINT", "http://milvus:19530"),
+                {"http", "https"},
+            ),
+            vector_index_token=(
+                _optional_secret("FOREST_VECTOR_INDEX_TOKEN", "FOREST_VECTOR_INDEX_TOKEN_FILE")
+                or ""
+            ),
+            vector_index_credential_ref=os.environ.get(
+                "FOREST_VECTOR_INDEX_CREDENTIAL_REF", ""
+            ),
+            vector_index_timeout_seconds=_bounded_float(
+                "FOREST_VECTOR_INDEX_TIMEOUT_SECONDS", 10, 1, 300
+            ),
         )
 
 
@@ -257,6 +292,7 @@ class CleanBotHost:
         *,
         model_client_factory=None,
         embedding_client_factory=None,
+        vector_index_client_factory=None,
         media_client_factory=None,
         websocket_client_factory=None,
     ) -> None:
@@ -275,6 +311,7 @@ class CleanBotHost:
         self._incarnation = str(uuid4())
         self._model_client_factory = model_client_factory
         self._embedding_client_factory = embedding_client_factory
+        self._vector_index_client_factory = vector_index_client_factory
         self._media_client_factory = media_client_factory
         self._websocket_client_factory = websocket_client_factory
 
@@ -473,6 +510,35 @@ class CleanBotHost:
             },
             **embedding_options,
         )
+
+        async def resolve_vector_index_token(secret_ref, _revision):
+            if secret_ref != self.settings.vector_index_credential_ref:
+                raise ForestError(
+                    "VECTOR_INDEX_CREDENTIAL_UNAVAILABLE",
+                    "Vector index credential reference differs",
+                    409,
+                )
+            return self.settings.vector_index_token
+
+        vector_index_options = {}
+        if self._vector_index_client_factory is not None:
+            vector_index_options["client_factory"] = self._vector_index_client_factory
+        vector_index = await bootstrap_clean_vector_index(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={
+                **default_vector_index_configuration(
+                    space_id=EmbeddingProfile(**embedding_profile).space_id,
+                    dimensions=self.settings.embedding_dimensions,
+                ),
+                "endpoint": self.settings.vector_index_endpoint,
+                "credential_ref": self.settings.vector_index_credential_ref,
+                "timeout_seconds": self.settings.vector_index_timeout_seconds,
+            },
+            token_resolver=resolve_vector_index_token,
+            **vector_index_options,
+        )
         memory = await bootstrap_clean_memory(
             self.store,
             self.schema_bundle_installer,
@@ -576,6 +642,7 @@ class CleanBotHost:
             + (
                 provider.descriptor,
                 embedding.descriptor,
+                vector_index.descriptor,
                 memory.descriptor,
                 media.descriptor,
                 agent.descriptor,

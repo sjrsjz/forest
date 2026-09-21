@@ -72,8 +72,12 @@ flowchart TB
     AG -->|FinalCandidate / checkpoint| BS
     AG <--> MD[Provider / Tool / Renderer 模块]
     AG <--> MM[Memory 模块]
-    MM <--> DA[(Bot A 的事实库与派生索引)]
-    MM <--> DB[(Bot B 的事实库与派生索引)]
+    MM <--> DA[(Bot A PostgreSQL 事实库)]
+    MM --> VIA[vector.index 模块 A]
+    VIA <--> VA[(Bot A Milvus 向量空间)]
+    MM <--> DB[(Bot B PostgreSQL 事实库)]
+    MM --> VIB[vector.index 模块 B]
+    VIB <--> VB[(Bot B Milvus 向量空间)]
     AG -->|ToolIntent| CAP
     BS -->|Reply + SendIntent UoW| DL[Delivery 模块]
     DL -->|Effect permit / handoff| CAP
@@ -81,7 +85,7 @@ flowchart TB
     KS --> CT[(部署目录与各 Bot 运行账本)]
 ```
 
-图中模块之间的箭头均表示经内核路由的契约消息。Memory 模块通过限定作用域的存储接口访问数据，业务 Worker 不获得事实库超级用户连接。图上多个 Memory Worker 可以分别绑定不同 Bot 的存储配置。
+图中模块之间的箭头均表示经内核路由的契约消息。Memory 模块通过限定作用域的存储接口访问 PostgreSQL 权威事实，并通过 `vector.index` 的版本化服务查询派生向量；它不直接持有 Milvus 客户端。Milvus 只保存向量及稳定 `ref_id`，命中后必须回 PostgreSQL 校验来源修订、可见性、删除 epoch 和群/作者信息，再物化正文。业务 Worker 不获得事实库超级用户连接。不同 Bot 使用独立的 PostgreSQL 数据库和向量 collection/namespace。
 
 控制面负责期望状态与变更：安装包、授予能力、配置 Bot、切换代际、停机和审计。数据面负责接收消息、执行服务/Agent、提交事实和发送回复。控制面变更需要 durable operation 记录；文件监视器只提出重载请求，不能自行修改运行对象。
 
@@ -119,6 +123,7 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | `agent.runtime` | 冻结 Run 输入 → checkpoint、ModelTurn、ToolCall、最终候选 | Agent Session、Run、模型请求/观察、轮次、工具与 checkpoint；不拥有 Context、trigger 或 SendIntent | 从安全边界恢复，其他会话继续 |
 | `provider.*` | 实际模型能力快照、规范投影请求 → 规范流事件 | 客户端、限流器与逐请求manifest | 切换实际模型须重做模态投影/预算，不改完整历史；记录真正可见parts |
 | `embedding.*` | text/image/mixed输入 → 对齐空间向量 | 版本化EmbeddingProfile、异步批量任务与工件 | 图片索引失败显式降级/修复，不能用caption假装原生图片嵌入 |
+| `vector.index` | 稳定 `ref_id` + 向量的幂等发布/删除；查询 `ref_id` → ANN 候选引用和分数 | Bot 生命周期绑定的向量空间、Milvus collection 身份、endpoint/凭据配置；不拥有正文、来源、权限或图关系 | 索引不可用时暂停语义召回并继续接纳权威事实；可从 PostgreSQL 引用和嵌入结果重建 |
 | `media.*` | 平台媒体引用 → Bot域受管不可变媒体与派生版本 | MediaAsset、来源关联、载荷引用与获取作业 | 原始来源不丢；限时获取失败保持明确不可用，不永久阻塞分类或控制入口 |
 | `tool.*` | 受权工具请求 → 有类型结果 | 工具执行账本；外部操作结果 | 按幂等分类恢复、对账或失败 |
 | `memory.*` | 存储、召回、整理、遗忘 | Bot 全局事实库；索引为派生数据 | 降级至授权后的事实检索；不切换其他 Bot 库 |
@@ -156,7 +161,8 @@ Deployment
   │    ├─ conversation.scheduler → 群甲 Actor / Context
   │    ├─ agent.runtime → 群甲 Session / Run（若安装）
   │    ├─ conversation.scheduler → 群乙 Actor / Context
-  │    └─ memory.graph → Bot A 全局图与群甲/群乙主干（若安装）
+  │    ├─ memory.graph → Bot A 全局图与群甲/群乙主干（若安装）
+  │    └─ vector.index → Bot A 独立 Milvus collection（若安装 Memory）
   └─ Bot B 作用域：另一组 RuntimeGraph 与模块事实
        └─ 各模块在相同外部群身份下仍使用 Bot B 的独立作用域
 ```

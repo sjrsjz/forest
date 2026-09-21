@@ -56,7 +56,12 @@ class CleanMemoryRuntime:
             {"service_id": "memory.source.unavailable", "version": 1},
             {"service_id": "shell.memory.inspect", "version": 1},
         ],
-        "requires": [{"service_id": "embedding.encode", "version": 1}],
+        "requires": [
+            {"service_id": "embedding.encode", "version": 1},
+            {"service_id": "vector.index.upsert", "version": 1},
+            {"service_id": "vector.index.search", "version": 1},
+            {"service_id": "vector.index.delete", "version": 1},
+        ],
     }
     state_schema = 1
     state_contract = _STATE_CONTRACT
@@ -73,6 +78,7 @@ class CleanMemoryRuntime:
         generation_admission_verifier,
         generation_member_verifier,
         embedding_provider,
+        vector_index,
     ) -> None:
         self.repository = repository
         self.retrieval = retrieval
@@ -83,6 +89,7 @@ class CleanMemoryRuntime:
         self.generation_admission_verifier = generation_admission_verifier
         self.generation_member_verifier = generation_member_verifier
         self.embedding_provider = embedding_provider
+        self.vector_index = vector_index
         self.generation_identity: BoundGenerationIdentity | None = None
         self.profile: FrozenMemoryProfile | None = None
         self.embedding_service: CleanMemoryEmbeddingService | None = None
@@ -235,6 +242,7 @@ class CleanMemoryRuntime:
             retrieval=self.retrieval,
             payloads=self.payloads,
             provider=self.embedding_provider,
+            vector_index=self.vector_index,
             profile=self.profile.embedding,
             component_id="memory.graph",
             generation_id=self.generation_identity.generation_id,
@@ -485,6 +493,15 @@ class CleanMemoryRuntime:
             parts=resolved["parts"],
             expected_deletion_epoch=epoch,
         )
+        if query["state"] == "FROZEN":
+            bundle = await self.retrieval.read_bundle(
+                query["bundle_id"], expected_deletion_epoch=epoch
+            )
+            return await self._render_bundle(
+                bundle,
+                conversation_id=conversation_id,
+                input_cut=input_cut,
+            )
         self.notify()
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -496,14 +513,24 @@ class CleanMemoryRuntime:
                         return None
                     await asyncio.sleep(0.05)
                     query = await self.retrieval.query_view(query_id)
+                search_plan = await self.retrieval.prepare_vector_search(query_id)
+                candidate_sets = {}
+                for facet in search_plan["facets"]:
+                    candidate_sets[facet["facet_id"]] = await self.vector_index.search(
+                        query_ref_id=facet["index_ref_id"],
+                        space_id=facet["space_id"],
+                        limit=64,
+                    )
+                bundle = await self.retrieval.freeze_bundle(
+                    operation_id="memory-bundle-freeze:" + identity,
+                    bundle_id="memory-bundle:" + identity,
+                    query_id=query_id,
+                    expected_deletion_epoch=epoch,
+                    index_snapshot_at=search_plan["snapshot_at"],
+                    candidate_sets=candidate_sets,
+                )
         except TimeoutError:
             return None
-        bundle = await self.retrieval.freeze_bundle(
-            operation_id="memory-bundle-freeze:" + identity,
-            bundle_id="memory-bundle:" + identity,
-            query_id=query_id,
-            expected_deletion_epoch=epoch,
-        )
         return await self._render_bundle(
             bundle,
             conversation_id=conversation_id,

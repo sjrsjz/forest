@@ -1111,7 +1111,7 @@ async def _embed(payloads, retrieval, facet, vector, *, suffix: str):
         ),
         expected_deletion_epoch=permit.accepted_deletion_epoch,
     )
-    return await retrieval.settle_attempt(
+    attempt = await retrieval.settle_attempt(
         permit,
         settlement_operation_id=f"embedding/settle/{suffix}",
         outcome="SUCCEEDED",
@@ -1124,6 +1124,51 @@ async def _embed(payloads, retrieval, facet, vector, *, suffix: str):
             attempt_id,
         ),
         vector=vector,
+    )
+    await retrieval.publish_index_ref(
+        facet_id=facet["facet_id"],
+        index_ref_id=facet["facet_id"],
+        expected_vector_digest=attempt["vector_digest"],
+        expected_deletion_epoch=permit.accepted_deletion_epoch,
+    )
+    indexed = getattr(retrieval, "_test_index_vectors", None)
+    if indexed is None:
+        indexed = {}
+        retrieval._test_index_vectors = indexed
+    indexed[facet["facet_id"]] = (facet["purpose"], tuple(vector))
+    return attempt
+
+
+async def _freeze_bundle(retrieval, **values):
+    query = await retrieval.query_view(values["query_id"])
+    if query["state"] == "FROZEN":
+        return await retrieval.read_bundle(
+            query["bundle_id"],
+            expected_deletion_epoch=values["expected_deletion_epoch"],
+        )
+    plan = await retrieval.prepare_vector_search(values["query_id"])
+    indexed = getattr(retrieval, "_test_index_vectors", {})
+    documents = {
+        ref_id: vector for ref_id, (purpose, vector) in indexed.items() if purpose == "DOCUMENT"
+    }
+    candidate_sets = {}
+    for facet in plan["facets"]:
+        query_vector = indexed[facet["index_ref_id"]][1]
+        ranked = sorted(
+            (
+                {
+                    "ref_id": ref_id,
+                    "score": sum(left * right for left, right in zip(query_vector, vector, strict=True)),
+                }
+                for ref_id, vector in documents.items()
+            ),
+            key=lambda item: (-item["score"], item["ref_id"]),
+        )
+        candidate_sets[facet["facet_id"]] = tuple(ranked)
+    return await retrieval.freeze_bundle(
+        **values,
+        index_snapshot_at=plan["snapshot_at"],
+        candidate_sets=candidate_sets,
     )
 
 
@@ -1188,7 +1233,7 @@ async def test_text_query_retrieves_image_with_explicit_cross_trunk_source(clean
         )
     await _embed(payloads, retrieval, query["facets"][0], _vector(0), suffix="query-text")
 
-    bundle = await retrieval.freeze_bundle(
+    bundle = await _freeze_bundle(retrieval,
         operation_id="bundle/freeze/text-image",
         bundle_id="bundle/text-image",
         query_id="query/text-image",
@@ -1204,6 +1249,13 @@ async def test_text_query_retrieves_image_with_explicit_cross_trunk_source(clean
     assert [part["part_kind"] for part in evidence["parts"]] == ["TEXT", "IMAGE"]
     assert evidence["matches"][0]["query_modality"] == "TEXT"
     assert evidence["matches"][0]["document_modality"] == "IMAGE"
+    query_view = await retrieval.query_view("query/text-image")
+    assert query_view["state"] == "FROZEN"
+    assert {facet["state"] for facet in query_view["facets"]} == {"SUPPRESSED"}
+    deletion = await retrieval.next_index_deletion()
+    assert deletion["index_ref_id"] == query["facets"][0]["facet_id"]
+    assert deletion["deletion_epoch"] == 0
+    await retrieval.settle_index_deletion(deletion["index_ref_id"])
 
 
 @pytest.mark.postgres
@@ -1268,7 +1320,7 @@ async def test_mixed_query_waits_for_image_and_freezes_late_index_results(clean_
         payloads, retrieval, query_by_modality["TEXT"], _vector(1), suffix="mixed-query-text"
     )
     with pytest.raises(ForestError) as caught:
-        await retrieval.freeze_bundle(
+        await _freeze_bundle(retrieval,
             operation_id="bundle/freeze/mixed",
             bundle_id="bundle/mixed",
             query_id="query/mixed",
@@ -1278,7 +1330,7 @@ async def test_mixed_query_waits_for_image_and_freezes_late_index_results(clean_
     await _embed(
         payloads, retrieval, query_by_modality["IMAGE"], _vector(0), suffix="mixed-query-image"
     )
-    bundle = await retrieval.freeze_bundle(
+    bundle = await _freeze_bundle(retrieval,
         operation_id="bundle/freeze/mixed",
         bundle_id="bundle/mixed",
         query_id="query/mixed",
@@ -1292,7 +1344,7 @@ async def test_mixed_query_waits_for_image_and_freezes_late_index_results(clean_
     )
 
     await _embed(payloads, retrieval, late["facets"][0], _vector(0), suffix="late")
-    replay = await retrieval.freeze_bundle(
+    replay = await _freeze_bundle(retrieval,
         operation_id="bundle/freeze/mixed",
         bundle_id="bundle/mixed",
         query_id="query/mixed",
@@ -1351,7 +1403,7 @@ async def test_forget_revokes_bundle_and_scrubs_derived_vectors(clean_memory_gra
         payloads, retrieval, document["facets"][0], _vector(0), suffix="forget-doc"
     )
     await _embed(payloads, retrieval, query["facets"][0], _vector(0), suffix="forget-query")
-    await retrieval.freeze_bundle(
+    await _freeze_bundle(retrieval,
         operation_id="bundle/freeze/forget",
         bundle_id="bundle/forget",
         query_id="query/forget",
@@ -1370,14 +1422,14 @@ async def test_forget_revokes_bundle_and_scrubs_derived_vectors(clean_memory_gra
         facet = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT state,vector,result_payload_id FROM {}.embedding_facets "
+                    "SELECT state,index_ref_id,result_payload_id FROM {}.embedding_facets "
                     "WHERE bot_id=%s AND source_unit_id=%s"
                 ).format(sql.Identifier(memory.namespace)),
                 (store.bot_id, "unit/forget-evidence"),
             )
         ).fetchone()
     assert facet["state"] == "SUPPRESSED"
-    assert facet["vector"] is None
+    assert facet["index_ref_id"] is None
     assert facet["result_payload_id"] is None
     async with store.pool.connection() as conn, conn.transaction():
         with pytest.raises(ForestError) as caught:
@@ -1527,6 +1579,7 @@ async def test_clean_vl_worker_uses_handoff_fence_and_payload_lineage(clean_memo
             retrieval=retrieval,
             payloads=payloads,
             provider=_DirectEmbeddingProvider(store, profile, FakeClient(status)),
+            vector_index=object(),
             profile=profile,
             component_id="embedding.qiyu-vl",
             generation_id="generation/qiyu-vl/1",
@@ -1625,6 +1678,7 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         retrieval=retrieval,
         payloads=payloads,
         provider=_DirectEmbeddingProvider(store, profile, client),
+        vector_index=object(),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
@@ -1672,8 +1726,8 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
             )
         ).fetchall()
     assert [(row["modality"], row["state"]) for row in rows] == [
-        ("IMAGE", "READY"),
-        ("TEXT", "READY"),
+        ("IMAGE", "EMBEDDED"),
+        ("TEXT", "EMBEDDED"),
     ]
     assert len({row["result_payload_id"] for row in rows}) == 1
 
@@ -1807,6 +1861,7 @@ async def test_invalid_batch_response_settles_cost_and_fails_all_facets(
         retrieval=retrieval,
         payloads=payloads,
         provider=_DirectEmbeddingProvider(store, profile, client),
+        vector_index=object(),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
@@ -1971,6 +2026,7 @@ async def test_unrelated_forget_during_provider_call_keeps_valid_batch_publishab
         retrieval=retrieval,
         payloads=payloads,
         provider=_DirectEmbeddingProvider(store, profile, ForgetDuringDispatch()),
+        vector_index=object(),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",
@@ -2032,6 +2088,7 @@ async def test_unrelated_forget_during_provider_call_keeps_valid_batch_publishab
         retrieval=retrieval,
         payloads=payloads,
         provider=_DirectEmbeddingProvider(store, profile, ForgetOwnSourceDuringDispatch()),
+        vector_index=object(),
         profile=profile,
         component_id="embedding.qiyu-vl",
         generation_id="generation/qiyu-vl/1",

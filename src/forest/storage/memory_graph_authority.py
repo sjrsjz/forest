@@ -1298,7 +1298,18 @@ class MemoryGraphRepository:
             )
             await conn.execute(
                 sql.SQL(
-                    "UPDATE {} SET state='SUPPRESSED',current_attempt_id=NULL,vector=NULL,"
+                    "INSERT INTO {}(bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch) "
+                    "SELECT bot_id,index_ref_id,space_id,source_unit_id,%s FROM {} WHERE bot_id=%s "
+                    "AND source_unit_id=%s AND index_ref_id IS NOT NULL ON CONFLICT DO NOTHING"
+                ).format(
+                    self._table("vector_index_deletions"),
+                    self._table("embedding_facets"),
+                ),
+                (deletion_epoch, self.store.bot_id, row["source_unit_id"]),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='SUPPRESSED',current_attempt_id=NULL,index_ref_id=NULL,"
                     "vector_digest=NULL,result_payload_id=NULL,result_payload_digest=NULL,"
                     "published_at=NULL,updated_at=clock_timestamp() "
                     "WHERE bot_id=%s AND source_unit_id=%s AND state<>'SUPPRESSED'"

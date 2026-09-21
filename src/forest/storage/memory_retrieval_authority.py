@@ -769,8 +769,9 @@ class MemoryRetrievalRepository:
         facets = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT facet_id,source_unit_id,part_id,modality,selector_start_char,"
-                    "selector_end_char,state FROM {} WHERE bot_id=%s AND query_id=%s "
+                    "SELECT facet_id,purpose,source_unit_id,source_revision,part_id,modality,"
+                    "selector_start_char,selector_end_char,space_id,state FROM {} "
+                    "WHERE bot_id=%s AND query_id=%s "
                     "ORDER BY source_unit_id,part_id,selector_start_char NULLS FIRST,facet_id"
                 ).format(self._table("embedding_facets")),
                 (self.store.bot_id, query_id),
@@ -1630,7 +1631,6 @@ class MemoryRetrievalRepository:
                     409,
                 )
             domain = await self._domain_in(conn)
-            stored_vectors = {}
             vector_digests = {}
             if outcome == "SUCCEEDED":
                 for permit in ordered:
@@ -1639,7 +1639,6 @@ class MemoryRetrievalRepository:
                         dimensions=domain["dimensions"],
                         normalization=domain["normalization"],
                     )
-                    stored_vectors[permit.attempt_id] = stored
                     vector_digests[permit.attempt_id] = _digest(list(stored))
             if all(terminal):
                 for permit in ordered:
@@ -1720,13 +1719,12 @@ class MemoryRetrievalRepository:
                 if outcome == "SUCCEEDED":
                     await conn.execute(
                         sql.SQL(
-                            "UPDATE {} SET state='READY',vector=%s,vector_digest=%s,"
+                            "UPDATE {} SET state='EMBEDDED',index_ref_id=NULL,vector_digest=%s,"
                             "result_payload_id=%s,result_payload_digest=%s,"
-                            "published_at=clock_timestamp(),updated_at=clock_timestamp() "
+                            "published_at=NULL,updated_at=clock_timestamp() "
                             "WHERE bot_id=%s AND facet_id=%s"
                         ).format(self._table("embedding_facets")),
                         (
-                            list(stored_vectors[permit.attempt_id]),
                             vector_digests[permit.attempt_id],
                             result.payload_id,
                             result.digest,
@@ -1868,13 +1866,12 @@ class MemoryRetrievalRepository:
             if outcome == "SUCCEEDED":
                 await conn.execute(
                     sql.SQL(
-                        "UPDATE {} SET state='READY',vector=%s,vector_digest=%s,"
+                        "UPDATE {} SET state='EMBEDDED',index_ref_id=NULL,vector_digest=%s,"
                         "result_payload_id=%s,result_payload_digest=%s,"
-                        "published_at=clock_timestamp(),updated_at=clock_timestamp() "
+                        "published_at=NULL,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND facet_id=%s"
                     ).format(self._table("embedding_facets")),
                     (
-                        list(stored_vector),
                         vector_digest,
                         result.payload_id,
                         result.digest,
@@ -1898,6 +1895,159 @@ class MemoryRetrievalRepository:
                 )
             return dict(attempt)
 
+    async def next_embedded_facet(self, *, purpose: str) -> dict | None:
+        """Return one generated vector waiting for publication to the derived index."""
+        if purpose not in {"DOCUMENT", "QUERY"}:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding purpose", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND purpose=%s AND state='EMBEDDED' "
+                        "ORDER BY updated_at,facet_id LIMIT 1"
+                    ).format(self._table("embedding_facets")),
+                    (self.store.bot_id, purpose),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            deletion_epoch = await self._epoch(conn)
+            body = await self._read_payload(conn, row["result_payload_id"], deletion_epoch)
+            try:
+                payload = json.loads(body)
+                vectors = payload["vectors"]
+                match = next(item for item in vectors if item.get("facet_id") == row["facet_id"])
+                vector = _float32_vector(
+                    match["values"],
+                    dimensions=(await self._domain_in(conn))["dimensions"],
+                    normalization="L2",
+                )
+            except (KeyError, TypeError, ValueError, StopIteration, json.JSONDecodeError) as exc:
+                raise ForestError(
+                    "MEMORY_EMBEDDING_RESULT_INVALID",
+                    "Persisted embedding result cannot rebuild its index row",
+                    500,
+                ) from exc
+            if _digest(list(vector)) != row["vector_digest"]:
+                raise ForestError(
+                    "MEMORY_EMBEDDING_RESULT_INVALID",
+                    "Persisted embedding vector digest differs",
+                    409,
+                )
+            return {**dict(row), "vector": vector, "deletion_epoch": deletion_epoch}
+
+    async def next_index_deletion(self) -> dict | None:
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND state='PENDING' "
+                        "ORDER BY created_at,index_ref_id LIMIT 1"
+                    ).format(self._table("vector_index_deletions")),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    async def settle_index_deletion(self, index_ref_id: str) -> dict:
+        _bounded(index_ref_id, "index_ref_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND index_ref_id=%s FOR UPDATE").format(
+                        self._table("vector_index_deletions")
+                    ),
+                    (self.store.bot_id, index_ref_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError("MEMORY_INDEX_DELETION_NOT_FOUND", "Index deletion is unavailable", 404)
+            if row["state"] == "PENDING":
+                row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET state='DELETED',deleted_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND index_ref_id=%s RETURNING *"
+                        ).format(self._table("vector_index_deletions")),
+                        (self.store.bot_id, index_ref_id),
+                    )
+                ).fetchone()
+            return dict(row)
+
+    async def publish_index_ref(
+        self,
+        *,
+        facet_id: str,
+        index_ref_id: str,
+        expected_vector_digest: str,
+        expected_deletion_epoch: int,
+    ) -> dict:
+        """Commit only the stable ref after an idempotent external index upsert."""
+        _bounded(facet_id, "facet_id", 256)
+        _bounded(index_ref_id, "index_ref_id", 256)
+        if _SHA256_RE.fullmatch(expected_vector_digest) is None:
+            raise ForestError("MEMORY_INPUT_INVALID", "Invalid vector digest", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._epoch(conn, expected=expected_deletion_epoch)
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND facet_id=%s FOR UPDATE").format(
+                        self._table("embedding_facets")
+                    ),
+                    (self.store.bot_id, facet_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError("MEMORY_FACET_NOT_FOUND", "Embedding facet is unavailable", 404)
+            if row["state"] == "READY":
+                if row["index_ref_id"] != index_ref_id or row["vector_digest"] != expected_vector_digest:
+                    raise ForestError("MEMORY_INDEX_PUBLICATION_CONFLICT", "Index publication differs", 409)
+                return dict(row)
+            if row["state"] != "EMBEDDED" or row["vector_digest"] != expected_vector_digest:
+                raise ForestError("MEMORY_INDEX_PUBLICATION_STALE", "Embedding facet changed", 409)
+            updated = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {} SET state='READY',index_ref_id=%s,published_at=clock_timestamp(),"
+                        "updated_at=clock_timestamp() WHERE bot_id=%s AND facet_id=%s RETURNING *"
+                    ).format(self._table("embedding_facets")),
+                    (index_ref_id, self.store.bot_id, facet_id),
+                )
+            ).fetchone()
+            return dict(updated)
+
+    async def prepare_vector_search(self, query_id: str) -> dict:
+        """Freeze a PostgreSQL visibility watermark before remote ANN search."""
+        _bounded(query_id, "query_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            query = await (
+                await conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND query_id=%s FOR SHARE").format(
+                        self._table("memory_queries")
+                    ),
+                    (self.store.bot_id, query_id),
+                )
+            ).fetchone()
+            if query is None:
+                raise ForestError("MEMORY_QUERY_NOT_FOUND", "Memory query does not exist", 404)
+            facets = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT facet_id,index_ref_id,modality,space_id FROM {} "
+                        "WHERE bot_id=%s AND query_id=%s ORDER BY facet_id"
+                    ).format(self._table("embedding_facets")),
+                    (self.store.bot_id, query_id),
+                )
+            ).fetchall()
+            if not facets or any(row["index_ref_id"] is None for row in facets):
+                raise ForestError("MEMORY_QUERY_NOT_READY", "Query refs are not published", 409)
+            snapshot = await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
+            return {
+                "query_id": query_id,
+                "snapshot_at": snapshot["value"],
+                "facets": [dict(row) for row in facets],
+            }
+
     async def freeze_bundle(
         self,
         *,
@@ -1907,6 +2057,8 @@ class MemoryRetrievalRepository:
         expected_deletion_epoch: int,
         result_limit: int = 8,
         candidate_limit_per_facet: int = 64,
+        index_snapshot_at=None,
+        candidate_sets=None,
     ) -> dict:
         for value, field in (
             (operation_id, "operation_id"),
@@ -1984,39 +2136,58 @@ class MemoryRetrievalRepository:
                     "MEMORY_QUERY_NOT_READY", "Every text and image query facet must be ready", 409
                 )
             query_source_ids = sorted({row["source_unit_id"] for row in query_facets})
-            index_snapshot = await (
-                await conn.execute("SELECT clock_timestamp() AS snapshot")
-            ).fetchone()
-            snapshot_at = index_snapshot["snapshot"]
+            if index_snapshot_at is None or not isinstance(candidate_sets, dict):
+                raise ForestError(
+                    "MEMORY_VECTOR_INDEX_REQUIRED",
+                    "Retrieval candidates must come from the vector index service",
+                    503,
+                )
+            snapshot_at = index_snapshot_at
             ranked_by_query = []
             for query_facet in query_facets:
-                rows = await (
-                    await conn.execute(
-                        sql.SQL(
-                            "SELECT f.facet_id,f.source_unit_id,f.source_revision,f.modality,"
-                            "{}.memory_vector_dot(f.vector,%s::real[]) AS score "
-                            "FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
-                            "AND u.source_unit_id=f.source_unit_id "
-                            "WHERE f.bot_id=%s AND f.purpose='DOCUMENT' AND f.state='READY' "
-                            "AND f.space_id=%s AND f.published_at<=%s "
-                            "AND u.eligibility_state='ELIGIBLE' "
-                            "AND NOT (f.source_unit_id=ANY(%s)) "
-                            "ORDER BY score DESC,f.facet_id LIMIT %s"
-                        ).format(
-                            sql.Identifier(self.namespace),
-                            self._table("embedding_facets"),
-                            self._table("source_units"),
-                        ),
-                        (
-                            list(query_facet["vector"]),
-                            self.store.bot_id,
-                            domain["space_id"],
-                            snapshot_at,
-                            query_source_ids,
-                            candidate_limit_per_facet,
-                        ),
-                    )
-                ).fetchall()
+                raw_candidates = candidate_sets.get(query_facet["facet_id"])
+                if not isinstance(raw_candidates, (tuple, list)):
+                    raise ForestError("MEMORY_VECTOR_INDEX_RESPONSE_INVALID", "Candidate set is missing", 502)
+                ordered_refs = []
+                external_scores = {}
+                for item in raw_candidates[:candidate_limit_per_facet]:
+                    if not isinstance(item, dict) or not isinstance(item.get("ref_id"), str):
+                        raise ForestError("MEMORY_VECTOR_INDEX_RESPONSE_INVALID", "Candidate is invalid", 502)
+                    score = item.get("score")
+                    if type(score) not in {int, float} or not math.isfinite(score):
+                        raise ForestError("MEMORY_VECTOR_INDEX_RESPONSE_INVALID", "Candidate score is invalid", 502)
+                    if item["ref_id"] not in external_scores:
+                        ordered_refs.append(item["ref_id"])
+                        external_scores[item["ref_id"]] = float(score)
+                rows_by_ref = {}
+                if ordered_refs:
+                    valid_rows = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT f.facet_id,f.index_ref_id,f.source_unit_id,f.source_revision,"
+                                "f.modality FROM {} f JOIN {} u ON u.bot_id=f.bot_id "
+                                "AND u.source_unit_id=f.source_unit_id WHERE f.bot_id=%s "
+                                "AND f.index_ref_id=ANY(%s) AND f.purpose='DOCUMENT' "
+                                "AND f.state='READY' AND f.space_id=%s AND f.published_at<=%s "
+                                "AND u.eligibility_state='ELIGIBLE' "
+                                "AND NOT (f.source_unit_id=ANY(%s))"
+                            ).format(self._table("embedding_facets"), self._table("source_units")),
+                            (
+                                self.store.bot_id,
+                                ordered_refs,
+                                domain["space_id"],
+                                snapshot_at,
+                                query_source_ids,
+                            ),
+                        )
+                    ).fetchall()
+                    rows_by_ref = {row["index_ref_id"]: dict(row) for row in valid_rows}
+                rows = []
+                for ref_id in ordered_refs:
+                    row = rows_by_ref.get(ref_id)
+                    if row is not None:
+                        row["score"] = external_scores[ref_id]
+                        rows.append(row)
                 best_by_source = {}
                 for rank, row in enumerate(rows, 1):
                     if row["source_unit_id"] not in best_by_source:
@@ -2126,6 +2297,27 @@ class MemoryRetrievalRepository:
                             match["score"],
                         ),
                     )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch) "
+                    "SELECT bot_id,index_ref_id,space_id,source_unit_id,%s FROM {} "
+                    "WHERE bot_id=%s AND query_id=%s AND purpose='QUERY' "
+                    "AND state='READY' AND index_ref_id IS NOT NULL ON CONFLICT DO NOTHING"
+                ).format(
+                    self._table("vector_index_deletions"),
+                    self._table("embedding_facets"),
+                ),
+                (deletion_epoch, self.store.bot_id, query_id),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='SUPPRESSED',current_attempt_id=NULL,index_ref_id=NULL,"
+                    "vector_digest=NULL,result_payload_id=NULL,result_payload_digest=NULL,"
+                    "published_at=NULL,updated_at=clock_timestamp() WHERE bot_id=%s "
+                    "AND query_id=%s AND purpose='QUERY' AND state='READY'"
+                ).format(self._table("embedding_facets")),
+                (self.store.bot_id, query_id),
+            )
             await conn.execute(
                 sql.SQL(
                     "UPDATE {} SET state='FROZEN',bundle_id=%s,frozen_at=clock_timestamp() "

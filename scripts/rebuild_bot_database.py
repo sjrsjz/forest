@@ -183,7 +183,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                     ).fetchone()
             finally:
                 await target.close()
-            if bundles["count"] != 17 or graph_heads["count"] != 0:
+            if bundles["count"] != 18 or graph_heads["count"] != 0:
                 raise ForestError(
                     "BOT_REBUILD_VERIFICATION_FAILED",
                     "Rebuilt Bot database does not contain the expected clean baseline",

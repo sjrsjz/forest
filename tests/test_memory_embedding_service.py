@@ -37,6 +37,12 @@ async def test_embedding_service_keeps_owning_work_after_one_batch_failure():
         async def has_pending_facets(self, *, purpose):
             return purpose == "DOCUMENT"
 
+        async def next_index_deletion(self):
+            return None
+
+        async def next_embedded_facet(self, *, purpose):
+            return None
+
     class Budget:
         async def recover_expired(self):
             return {"released": 0, "unknown": 0}
@@ -45,6 +51,7 @@ async def test_embedding_service_keeps_owning_work_after_one_batch_failure():
         retrieval=Retrieval(),
         payloads=object(),
         provider=object(),
+        vector_index=object(),
         profile=_profile(),
         component_id="memory.graph",
         generation_id="generation/test",
@@ -140,6 +147,7 @@ async def test_local_input_failure_is_not_sent_before_budget_reservation():
         retrieval=retrieval,
         payloads=object(),
         provider=object(),
+        vector_index=object(),
         profile=_profile(),
         component_id="memory.graph",
         generation_id="generation/test",
