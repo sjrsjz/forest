@@ -454,7 +454,14 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
         reference["reason_code"] = reason
     normalized, seen = [], {unit["unit_id"] for unit in units}
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or set(row) != {
+            "unit_id",
+            "source_unit_id",
+            "source_revision",
+            "source",
+            "author",
+            "parts",
+        }:
             raise _error("MODEL_INPUT_INVALID", "Memory evidence entries must be typed objects")
         original = _identifier(row.get("source_unit_id"), "memory source unit")
         identifier = _identifier(row.get("unit_id"), "memory projection unit", maximum=265)
@@ -470,62 +477,6 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
         parts = row.get("parts")
         if not isinstance(parts, list) or len(parts) > 256:
             raise _error("MODEL_INPUT_INVALID", "Memory evidence requires bounded ordered parts")
-        retrieval = row.get("retrieval")
-        if retrieval is not None:
-            legacy_fields = {
-                "kind", "association_id", "edge_id", "seed_source_unit_id", "graph_revision"
-            }
-            current_fields = legacy_fields | {"association_origin", "score_ppm"}
-            retrieval_fields = frozenset(retrieval) if isinstance(retrieval, dict) else frozenset()
-            if (
-                not isinstance(retrieval, dict)
-                or retrieval_fields not in {frozenset(legacy_fields), frozenset(current_fields)}
-                or retrieval.get("kind") != "graph_association"
-            ):
-                raise _error("MODEL_INPUT_INVALID", "Memory association path is invalid")
-            retrieval = {
-                "kind": "graph_association",
-                "association_id": _identifier(
-                    retrieval.get("association_id"), "memory association"
-                ),
-                "edge_id": _identifier(retrieval.get("edge_id"), "memory association edge"),
-                "seed_source_unit_id": _identifier(
-                    retrieval.get("seed_source_unit_id"), "memory association seed"
-                ),
-                "graph_revision": retrieval.get("graph_revision"),
-                **(
-                    {
-                        "association_origin": retrieval.get("association_origin"),
-                        "score_ppm": retrieval.get("score_ppm"),
-                    }
-                    if retrieval_fields == frozenset(current_fields)
-                    else {}
-                ),
-            }
-            if (
-                type(retrieval["graph_revision"]) is not int
-                or not 1 <= retrieval["graph_revision"] < 2**63
-            ):
-                raise _error("MODEL_INPUT_INVALID", "Memory graph revision is invalid")
-            if retrieval_fields == frozenset(current_fields) and (
-                retrieval["association_origin"] not in {"reviewed", "semantic"}
-                or (
-                    retrieval["score_ppm"] is not None
-                    and (
-                        type(retrieval["score_ppm"]) is not int
-                        or not 0 <= retrieval["score_ppm"] <= 1_000_000
-                    )
-                )
-                or (
-                    retrieval["association_origin"] == "semantic"
-                    and retrieval["score_ppm"] is None
-                )
-                or (
-                    retrieval["association_origin"] == "reviewed"
-                    and retrieval["score_ppm"] is not None
-                )
-            ):
-                raise _error("MODEL_INPUT_INVALID", "Memory association provenance is invalid")
         if source["source_kind"] == "GROUP":
             relation = ("SAME_GROUP" if source["source_id"] == current_source["group_source_id"]
                         else "CROSS_GROUP") if current_source.get("channel_kind") == "group" else "GROUP_SOURCE"
@@ -534,8 +485,7 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
         normalized.append({"unit_id": identifier, "source_unit_id": original,
                            "source_revision": revision, "source": source, "author": author,
                            "parts": parts, "current_conversation": current_source,
-                           "relationship_to_current_conversation": relation,
-                           **({"retrieval": retrieval} if retrieval else {})})
+                           "relationship_to_current_conversation": relation})
     return reference, normalized
 
 

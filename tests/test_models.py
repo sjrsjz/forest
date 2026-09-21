@@ -171,6 +171,78 @@ def test_pure_image_trigger_survives_missing_media_and_text_only_projection():
         assert json.loads(result.body)["messages"][1]["content"]
 
 
+def test_memory_evidence_accepts_only_the_current_exact_projection_contract():
+    value = snapshot()
+    value["conversation"] = {
+        "conversation_id": "conversation-group-a",
+        "group_source_id": "onebot:group:group-a",
+        "platform": "onebot-v11",
+        "channel_kind": "group",
+        "channel_id": "group-a",
+    }
+    evidence = {
+        "bundle_id": "bundle-a",
+        "payload_id": "payload-a",
+        "digest": "sha256:" + "a" * 64,
+        "query_id": "query-a",
+        "conversation_id": "conversation-group-a",
+        "space_id": "space-a",
+        "input_cut": 8,
+        "config_revision": 1,
+        "deletion_epoch": 0,
+        "status": "READY",
+        "completeness": {"candidate_count": 1},
+        "evidence": [
+            {
+                "unit_id": "evidence:source-unit-a",
+                "source_unit_id": "source-unit-a",
+                "source_revision": 1,
+                "source": {
+                    "source_id": "onebot:group:group-b",
+                    "source_kind": "GROUP",
+                    "realm_id": "onebot-v11",
+                    "platform": "onebot-v11",
+                    "channel_kind": "group",
+                    "channel_id": "group-b",
+                    "group_source_id": "onebot:group:group-b",
+                    "identity_schema": 1,
+                },
+                "author": {
+                    "principal_ref": "qq:42",
+                    "identity_origin": "memory_verified",
+                },
+                "parts": [{"part_id": "text", "type": "text", "text": "recalled"}],
+            }
+        ],
+    }
+    request = prepare_model_request(
+        value,
+        capabilities(),
+        request_id="request-evidence",
+        transport_attempt_id="attempt-evidence",
+        evidence=evidence,
+    )
+    source = request.manifest["source_manifest"][0]
+    assert source["source"]["channel_id"] == "group-b"
+
+    evidence["evidence"][0]["retrieval"] = {
+        "kind": "graph_association",
+        "association_id": "association-a",
+        "edge_id": "edge-a",
+        "seed_source_unit_id": "seed-a",
+        "graph_revision": 1,
+    }
+    with pytest.raises(ForestError) as caught:
+        prepare_model_request(
+            value,
+            capabilities(),
+            request_id="request-extra-evidence-field",
+            transport_attempt_id="attempt-extra-evidence-field",
+            evidence=evidence,
+        )
+    assert caught.value.code == "MODEL_INPUT_INVALID"
+
+
 def test_nested_attribution_drops_media_fields_and_rejects_untyped_ids():
     source = unit()["source"] | {"image_url": "https://hidden.invalid/token"}
     author = unit()["author"] | {"file_data": "hiddenbase64"}

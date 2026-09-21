@@ -30,8 +30,6 @@ PROTOCOL_REVISIONS = {
     JINA_MODEL: "jina-clip-v2-http-2026-09-v1",
     SILICONFLOW_VL_MODEL: "siliconflow-qwen3-vl-embedding-http-2026-09-v1",
 }
-# Public compatibility name used by existing Jina records and integrations.
-PROTOCOL_REVISION = PROTOCOL_REVISIONS[JINA_MODEL]
 MAX_BATCH_ITEMS = 32
 MAX_TEXT_BYTES = 8192
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
