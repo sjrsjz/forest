@@ -1,0 +1,35 @@
+# 许可群 Agent 触发恢复记录（2026-09-21）
+
+许可群 `933179609` 的一次低频 mention 验收暴露了模型传输重试与协议修复投影中的两个生产缺陷。本记录只保留状态和计数，不记录消息正文、作者标识或 Provider 凭据。
+
+## 现象与持久状态
+
+- 新消息已经完成 Inbox 接纳与 trigger 分类，但同群旧 Run 长期停留在 `PREPARING_MODEL`。同群串行规则正确阻止了第二个并发 Agent Run，因此后续触发保持排队。
+- 旧 ModelRequest 已产生 834 个 `NOT_APPLIED` TransportAttempt。`max_steps` 只限制语义模型轮数，未限制同一语义轮的传输次数；`NOT_APPLIED` 分支也没有退避或终止条件。
+- 发现后先优雅停止 `forest-clean-supervisor-1`，阻断继续调用和费用增长，再部署修复。
+
+## 修正后的收敛规则
+
+- 同一 ModelRequest 最多允许 3 次传输尝试，计数来自持久化 `attempt_count`，进程重启不会重置额度。
+- 重试使用异步退避，只暂停当前群的 Agent 执行协程，不阻塞其他群的 Conversation actor。
+- 明确 HTTP 4xx 属于不可重试的 `NOT_APPLIED`，单次观察后立即终止；错误码包含 HTTP 状态，例如 `MODEL_HTTP_REJECTED_422`。
+- 达到上限或遇到不可重试错误时，Agent 原子写入 `FAILED/AGENT_MODEL_TRANSPORT_FAILED` 检查点并关闭 Session；Conversation Scheduler 结算该 Run 已认领的 trigger 并释放 lane，使后续排队触发能够建立新 Run。
+- Provider 错误码随 `effect_observation_ref` 持久化，故障诊断不再依赖进程日志。
+
+部署后，旧 834 次请求没有产生第 835 次调用，原 Run 直接失败并释放 lane。排队触发随后建立了独立 Run；其一次 PRIMARY 调用得到 `finish_reason=length`，1024 个 completion token 全部被模型推理消耗且可见正文为 0 字节。Agent 按设计进入唯一一次 REPAIR 调用，但该调用暴露了第二个问题：host repair 记录曾以单个 `{type,text}` 对象作为 system content，OpenAI 兼容端点返回 HTTP 422。
+
+## 协议修复与运行配置
+
+- repair 记录现在编码成有界 JSON 字符串，system content 满足 Chat Completions 的字符串契约；其来源仍是 host control，不会冒充用户消息。
+- `agent.runtime` 的 `output_tokens` 已通过模块自己的 Web 管理 contract 从 1024 调整为 4096，desired revision 2 经 plan/apply 生效，并触发 RuntimeGraph revision 9 热替换。
+- 模型种类、Provider endpoint、VL Embedding profile、许可群和触发策略均未改变。
+
+## 验证
+
+- `tests/test_clean_agent_runtime.py` 覆盖“恢复时已达传输上限则零 Provider 调用、持久 Run/Session 失败”的路径。
+- `tests/test_conversation_worker.py` 覆盖传输终态释放 lane。
+- `tests/test_models.py` 明确断言 repair system content 为字符串并能还原 host control 记录。
+- 相关回归：`63 passed`；完整回归：`598 passed, 7 skipped`；Ruff、Python 编译与 diff whitespace 检查通过。
+- 部署镜像 `forest:local` 对应 manifest `sha256:98cd18bc39b6782d8f9fa4e8ec6a03d770ec7751fa90602c083d635161335d48`，Supervisor 为 `running/healthy`。
+
+本次自动诊断和修复没有主动向 QQ 发送测试消息。失败的历史触发保留为可审计终态，不在数据库中篡改为待处理；下一次真人 mention 用于验证 4096 token 下的完整 PRIMARY/REPAIR/Delivery 链。

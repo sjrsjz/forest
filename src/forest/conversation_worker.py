@@ -377,7 +377,10 @@ class ConversationWorker:
                             reason_code=reason_code,
                         )
                         return
-                    if exc.code == "AGENT_PROTOCOL_FAILED":
+                    if exc.code in {
+                        "AGENT_PROTOCOL_FAILED",
+                        "AGENT_MODEL_TRANSPORT_FAILED",
+                    }:
                         await self.scheduler.fail_run(
                             actor,
                             operation_id=_operation(

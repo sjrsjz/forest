@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -31,6 +32,15 @@ from forest.storage.conversation_scheduler import (
 def _stable(kind: str, *parts: object) -> str:
     encoded = "\0".join(str(part) for part in parts).encode("utf-8")
     return f"{kind}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+MODEL_TRANSPORT_MAX_ATTEMPTS = 3
+MODEL_TRANSPORT_RETRY_BACKOFF_SECONDS = (1.0, 3.0)
+_NON_RETRYABLE_MODEL_TRANSPORT_ERRORS = frozenset(
+    {
+        "MODEL_HTTP_REJECTED",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -269,6 +279,67 @@ class DurableSingleAgentExecution:
         )
         return True
 
+    async def _fail_model_transport(
+        self,
+        owner,
+        *,
+        request_id: str,
+        attempt_count: int,
+        last_error_code: str | None,
+    ) -> None:
+        """Durably terminate one model step after a bounded safe retry sequence."""
+
+        failure_code = "AGENT_MODEL_TRANSPORT_FAILED"
+        checkpoint_id = _stable(
+            "checkpoint-model-transport-failed",
+            owner.run_id,
+            request_id,
+            attempt_count,
+        )
+        epoch = await self.payloads.epoch()
+        saved = await self.payloads.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            media_type="application/json",
+            content=json.dumps(
+                {
+                    "phase": "FAILED",
+                    "reason_code": failure_code,
+                    "request_id": request_id,
+                    "attempt_count": attempt_count,
+                    "last_error_code": last_error_code,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            expected_deletion_epoch=epoch,
+        )
+        await self.agent.transition(
+            owner,
+            checkpoint_id=checkpoint_id,
+            expected_phase="PREPARING_MODEL",
+            target_phase="FAILED",
+            state=AgentPayloadRef(
+                saved.payload_id,
+                saved.content_digest,
+                "agent.runtime",
+                "checkpoint.state",
+                checkpoint_id,
+            ),
+            error_code=failure_code,
+        )
+        raise ForestError(
+            failure_code,
+            "Model transport failed within its bounded retry policy",
+            503,
+            details={
+                "request_id": request_id,
+                "attempt_count": attempt_count,
+                "last_error_code": last_error_code,
+            },
+        )
+
     @staticmethod
     def _cancelled(run: dict) -> ForestError:
         return ForestError(
@@ -376,6 +447,23 @@ class DurableSingleAgentExecution:
                     attempt_no = 1
                     attempt_id = _stable("model-attempt", request_id, attempt_no)
                     if stored_request is not None:
+                        if stored_request["state"] == "NOT_APPLIED":
+                            completed_attempts = stored_request["attempt_count"]
+                            if completed_attempts >= MODEL_TRANSPORT_MAX_ATTEMPTS:
+                                await self._fail_model_transport(
+                                    owner,
+                                    request_id=request_id,
+                                    attempt_count=completed_attempts,
+                                    last_error_code=None,
+                                )
+                            await asyncio.sleep(
+                                MODEL_TRANSPORT_RETRY_BACKOFF_SECONDS[
+                                    min(
+                                        completed_attempts - 1,
+                                        len(MODEL_TRANSPORT_RETRY_BACKOFF_SECONDS) - 1,
+                                    )
+                                ]
+                            )
                         attempt_no = stored_request["attempt_count"] + (
                             1 if stored_request["state"] == "NOT_APPLIED" else 0
                         )
@@ -456,6 +544,19 @@ class DurableSingleAgentExecution:
                             result.error_code or "AGENT_PROTOCOL_FAILED",
                             "Model output failed the bounded Agent protocol repair",
                             422,
+                        )
+                    if result.status == "NOT_APPLIED" and (
+                        attempt_no >= MODEL_TRANSPORT_MAX_ATTEMPTS
+                        or any(
+                            (result.error_code or "").startswith(code)
+                            for code in _NON_RETRYABLE_MODEL_TRANSPORT_ERRORS
+                        )
+                    ):
+                        await self._fail_model_transport(
+                            owner,
+                            request_id=request_id,
+                            attempt_count=attempt_no,
+                            last_error_code=result.error_code,
                         )
                     continue
                 if state == "MODEL_PENDING":

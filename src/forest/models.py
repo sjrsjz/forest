@@ -837,16 +837,17 @@ def prepare_model_request(
             for index, item in enumerate(preset_context)
         )
         if repair is not None:
+            repair_record = _Projection.text({
+                "host_control": "forest_protocol_repair",
+                "repair_count": repair["repair_count"],
+                "error_code": repair["error_code"],
+                "candidate_digest": repair["candidate_digest"],
+                "instruction": "Return one complete replacement ModelTurn that satisfies CorePrompt.",
+                "invalid_candidate_excerpt": repair["feedback"],
+            })
             messages.append({
                 "role": capabilities.system_role,
-                "content": _Projection.text({
-                    "host_control": "forest_protocol_repair",
-                    "repair_count": repair["repair_count"],
-                    "error_code": repair["error_code"],
-                    "candidate_digest": repair["candidate_digest"],
-                    "instruction": "Return one complete replacement ModelTurn that satisfies CorePrompt.",
-                    "invalid_candidate_excerpt": repair["feedback"],
-                }),
+                "content": repair_record["text"],
             })
         semantic = [message.copy() for message in messages]
         prefix_length = len(messages)
@@ -1271,8 +1272,12 @@ class ChatCompletionsClient:
                                 state = "NOT_SENT" if response.status_code in {
                                     400, 401, 403, 404, 405, 413, 415, 422, 429,
                                 } else "UNKNOWN"
-                                return self._failure(prepared, state, "MODEL_HTTP_REJECTED" if state == "NOT_SENT"
-                                                     else "MODEL_HTTP_UNCERTAIN")
+                                code = (
+                                    "MODEL_HTTP_REJECTED_"
+                                    if state == "NOT_SENT"
+                                    else "MODEL_HTTP_UNCERTAIN_"
+                                ) + str(response.status_code)
+                                return self._failure(prepared, state, code)
                             if response.headers.get("content-encoding", "identity").lower() != "identity":
                                 raise _error("MODEL_RESPONSE_ENCODING", "Provider response encoding is unsupported")
                             content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()

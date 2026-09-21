@@ -654,7 +654,10 @@ class DurableAgentModelExecutor:
             attempt_id=step.attempt_id,
             observed_state=observed_state,
             evidence_kind="EXECUTOR",
-            effect_observation_ref=f"provider:{step.attempt_id}:{observed_state}",
+            effect_observation_ref=(
+                f"provider:{step.attempt_id}:{observed_state}:"
+                f"{result.error_code or '-'}"
+            ),
             result=result_ref,
             usage=usage_ref,
         )

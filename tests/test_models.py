@@ -112,6 +112,10 @@ def test_protocol_repair_is_one_host_system_record_over_the_same_frozen_input():
         and "forest_protocol_repair" in json.dumps(item["content"], ensure_ascii=False)
     ]
     assert len(repair_messages) == 1
+    assert isinstance(repair_messages[0]["content"], str)
+    assert json.loads(repair_messages[0]["content"])["host_control"] == (
+        "forest_protocol_repair"
+    )
     assert result.manifest["agent_protocol"]["repair_count"] == 1
     assert result.manifest["trigger_ids"] == value["trigger_ids"]
     assert result.manifest["input_revision"] == value["input_revision"]

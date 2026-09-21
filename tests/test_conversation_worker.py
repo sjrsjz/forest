@@ -414,6 +414,36 @@ async def test_terminal_protocol_failure_settles_claimed_triggers_and_releases_l
 
 
 @pytest.mark.asyncio
+async def test_terminal_model_transport_failure_releases_lane_for_pending_trigger():
+    scheduler = FakeScheduler(
+        {
+            "group/a": Lane(
+                initial=_batch("group/a", "must/not/be/selected"),
+                active=("session/existing", "run/existing"),
+                claimed=("trigger/one",),
+            )
+        }
+    )
+
+    class FailedAgent:
+        async def execute(self, _request):
+            raise ForestError(
+                "AGENT_MODEL_TRANSPORT_FAILED",
+                "The bounded model transport failed",
+                503,
+            )
+
+    worker = _worker(scheduler, FailedAgent(), "generation/model-transport-failed")
+    await worker.run_once("group/a")
+
+    assert len(scheduler.failed_runs) == 1
+    failure = scheduler.failed_runs[0]
+    assert failure["reason_code"] == "AGENT_MODEL_TRANSPORT_FAILED"
+    assert scheduler.lanes["group/a"].active is None
+    assert scheduler.actors == set()
+
+
+@pytest.mark.asyncio
 async def test_agent_cancellation_settles_claimed_triggers_and_releases_lane():
     scheduler = FakeScheduler(
         {

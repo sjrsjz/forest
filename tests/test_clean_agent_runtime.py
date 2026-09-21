@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from forest.agent_protocol import (
     PROTOCOL_VERSION,
     parse_model_turn,
 )
+from forest.conversation_worker import AgentExecutionRequest
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import official_storage_bundle
@@ -515,6 +517,129 @@ async def test_execution_converges_a_safe_cancel_request_to_terminal_state(
     assert loaded["state"] == "CANCELLED"
     assert loaded["error_code"] == "ADMIN_REQUESTED"
     assert loaded["session"]["state"] == "CANCELLED"
+
+
+@pytest.mark.postgres
+async def test_recovered_model_retry_limit_fails_without_another_dispatch(
+    clean_agent_runtime,
+):
+    _store, _storage, payloads, repository = clean_agent_runtime
+    values, _config, _preset = await _start(
+        repository,
+        payloads,
+        suffix="retry-limit",
+    )
+    await repository.start_run(**values)
+    owner = await repository.acquire_run("run/retry-limit", "worker/retry-setup")
+    request_id = "model-request:" + hashlib.sha256(
+        "run/retry-limit\x001".encode()
+    ).hexdigest()
+    projection = await _payload(
+        payloads,
+        owner_kind="model.projection",
+        owner_id=request_id,
+        body=b'{"messages":[]}',
+        source_id="run/retry-limit",
+    )
+    plan = ModelRequestPlan(
+        request_id=request_id,
+        request_kind="PRIMARY",
+        provider_component_id="provider.test",
+        provider_generation_id="generation/provider/1",
+        provider_profile_ref="profile/test",
+        model_ref="model/test",
+        instruction_channel="SYSTEM",
+        capability_digest="sha256:" + "a" * 64,
+        projection=projection,
+        projected_content_digest=projection.digest,
+        source_manifest_digest="sha256:" + "b" * 64,
+        output_token_budget=1024,
+    )
+    await repository.prepare_model_request(owner, plan)
+    for attempt_number in range(1, 4):
+        attempt_id = f"attempt/retry-limit/{attempt_number}"
+        wire = await _payload(
+            payloads,
+            owner_kind="model.wire",
+            owner_id=attempt_id,
+            body=b'{"wire":"exact"}',
+            source_id="run/retry-limit",
+            owner_component_id="provider.test",
+        )
+        await repository.prepare_model_attempt(
+            owner,
+            request_id=request_id,
+            attempt_id=attempt_id,
+            effect_operation_ref=f"effect/retry-limit/{attempt_number}",
+            wire=wire,
+        )
+        await repository.mark_model_handoff(
+            owner,
+            request_id=request_id,
+            attempt_id=attempt_id,
+        )
+        observed = await repository.observe_model(
+            owner,
+            observation_operation_id=f"observe/retry-limit/{attempt_number}",
+            request_id=request_id,
+            attempt_id=attempt_id,
+            observed_state="NOT_APPLIED",
+            evidence_kind="EXECUTOR",
+            effect_observation_ref=f"provider/retry-limit/{attempt_number}",
+        )
+        assert observed["accepted"] is True
+    await repository.release_run(owner)
+
+    class ActiveAgentFacade:
+        bot_id = repository.bot_id
+
+        def profile(self):
+            class Profile:
+                max_steps = 32
+
+            return Profile()
+
+        def __getattr__(self, name):
+            return getattr(repository, name)
+
+    class ForbiddenProvider:
+        async def prepare_request(self, *_args, **_values):
+            raise AssertionError("retry exhaustion dispatched another provider request")
+
+    async def forbidden_callback():
+        raise AssertionError("retry exhaustion crossed into conversation projection")
+
+    execution = DurableSingleAgentExecution(
+        agent=ActiveAgentFacade(),
+        provider=ForbiddenProvider(),
+        memory=object(),
+        media=object(),
+        payloads=payloads,
+        owner_id="worker/retry-recovery",
+    )
+    with pytest.raises(ForestError) as caught:
+        await execution.execute(
+            AgentExecutionRequest(
+                conversation_id="group/one",
+                session_ref="session/retry-limit",
+                run_ref="run/retry-limit",
+                initial_batch=None,
+                recovery=True,
+                context_snapshot=forbidden_callback,
+                next_model_input=forbidden_callback,
+                before_external_step=forbidden_callback,
+            )
+        )
+    assert caught.value.code == "AGENT_MODEL_TRANSPORT_FAILED"
+    assert caught.value.details == {
+        "request_id": request_id,
+        "attempt_count": 3,
+        "last_error_code": None,
+    }
+    failed = await repository.load_recovery("run/retry-limit")
+    assert failed["state"] == "FAILED"
+    assert failed["error_code"] == "AGENT_MODEL_TRANSPORT_FAILED"
+    assert failed["session"]["state"] == "FAILED"
 
 
 @pytest.mark.postgres
