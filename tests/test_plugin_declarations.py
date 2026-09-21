@@ -235,11 +235,12 @@ class Commands:
     shutil.copytree(first.root, explicit)
     (explicit / "checksums.json").unlink()
     if field == "schema":
-        (explicit / "forest_generated" / "command-0-input.json").write_text(
-            '{"type":"string"}\n', encoding="utf-8"
-        )
+        schema = explicit / "forest_generated" / "command-0-input.json"
+        schema.chmod(0o600)
+        schema.write_text('{"type":"string"}\n', encoding="utf-8")
     else:
         manifest = explicit / "module.toml"
+        manifest.chmod(0o600)
         old, new = replacement
         text = manifest.read_text(encoding="utf-8")
         assert old in text
