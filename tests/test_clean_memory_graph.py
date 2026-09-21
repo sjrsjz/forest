@@ -235,6 +235,7 @@ async def _unit_values(
     occurrence_suffix: str | None = None,
     occurred_at: datetime | None = None,
     mixed: bool = False,
+    text_body: bytes | None = None,
 ):
     unit_id = f"unit/{unit_suffix}"
     occurrence_suffix = occurrence_suffix or unit_suffix
@@ -246,12 +247,13 @@ async def _unit_values(
         body=(f'{{"subject":"user/{unit_suffix}","display":"member"}}').encode(),
         owner_kind="author.snapshot",
     )
+    text_content = text_body if text_body is not None else f"message {unit_suffix}".encode()
     text = await _put(
         payloads,
         unit_id=unit_id,
         part_id="text",
         media_type="text/plain",
-        body=f"message {unit_suffix}".encode(),
+        body=text_content,
         owner_kind="context.part",
     )
     parts = [
@@ -261,7 +263,7 @@ async def _unit_values(
             "TEXT",
             "text/plain",
             text,
-            byte_length=len(f"message {unit_suffix}".encode()),
+            byte_length=len(text_content),
         )
     ]
     if mixed:
@@ -1674,6 +1676,55 @@ async def test_clean_vl_worker_batches_text_and_image_in_one_dispatch(clean_memo
         ("TEXT", "READY"),
     ]
     assert len({row["result_payload_id"] for row in rows}) == 1
+
+
+@pytest.mark.postgres
+async def test_whitespace_text_is_suppressed_without_poisoning_image_batch(clean_memory_graph):
+    store, _storage, payloads, memory, _forget, batches, _scheduler = clean_memory_graph
+    await _initialize(memory)
+    await _register(memory, "whitespace-mixed")
+    source = await _unit_values(
+        payloads,
+        source_suffix="whitespace-mixed",
+        unit_suffix="whitespace-mixed",
+        mixed=True,
+        text_body=b" \n\t ",
+    )
+    await _capture_and_qualify(
+        memory,
+        payloads,
+        batches,
+        source,
+        suffix="whitespace-mixed",
+    )
+    retrieval = MemoryRetrievalRepository(
+        store,
+        namespace=memory.namespace,
+        payload_verifier=payloads.verify_in,
+        payload_reader=payloads.read_bytes_in,
+        deletion_epoch_guard=payloads.epoch_in,
+    )
+    prepared = await retrieval.prepare_source_facets(
+        operation_id="facets/whitespace-mixed",
+        source_unit_id="unit/whitespace-mixed",
+        expected_deletion_epoch=0,
+    )
+    assert {
+        facet["modality"]: facet["state"] for facet in prepared["facets"]
+    } == {"TEXT": "SUPPRESSED", "IMAGE": "PENDING"}
+    claim = await retrieval.claim_pending_batch(
+        operation_id="embedding/whitespace-mixed/claim",
+        claim_id="embedding/whitespace-mixed/transport",
+        purpose="DOCUMENT",
+        executor_component_id="embedding.qiyu-vl",
+        executor_generation_id="generation/qiyu-vl/1",
+        route_revision="route/qiyu-vl/1",
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert len(claim.permits) == 1
+    assert claim.permits[0].facet_id == next(
+        facet["facet_id"] for facet in prepared["facets"] if facet["modality"] == "IMAGE"
+    )
 
 
 @pytest.mark.postgres

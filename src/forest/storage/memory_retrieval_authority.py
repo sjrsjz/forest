@@ -25,8 +25,10 @@ from forest.storage.memory_graph_authority import MemoryPayloadRef
 
 _SHA256_RE = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _ERROR_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
-_CHUNKER_REVISION = "utf8-contiguous-4096-v1"
+_CHUNKER_REVISION = "utf8-contiguous-4096-v2"
 _MAX_TEXT_FACET_BYTES = 4096
+_MAX_IMAGE_FACET_BYTES = 4 * 1024 * 1024
+_MAX_BATCH_IMAGE_FACET_BYTES = 8 * 1024 * 1024
 
 
 def _bounded(value, field: str, limit: int):
@@ -296,12 +298,26 @@ class MemoryRetrievalRepository:
                         "MEMORY_TEXT_INVALID", "Memory text part is not UTF-8", 422
                     ) from exc
                 selectors = [
-                    (start, end, chunk.encode("utf-8"))
+                    (
+                        start,
+                        end,
+                        chunk.encode("utf-8"),
+                        "PENDING" if chunk.strip() else "SUPPRESSED",
+                    )
                     for start, end, chunk in _text_chunks(text)
                 ]
             elif part["part_kind"] == "IMAGE":
-                selectors = [(None, None, content)]
-            for start, end, facet_content in selectors:
+                selectors = [
+                    (
+                        None,
+                        None,
+                        content,
+                        "PENDING"
+                        if len(content) <= _MAX_IMAGE_FACET_BYTES
+                        else "SUPPRESSED",
+                    )
+                ]
+            for start, end, facet_content, initial_state in selectors:
                 identity = {
                     "purpose": purpose,
                     "query_id": query_id,
@@ -323,6 +339,7 @@ class MemoryRetrievalRepository:
                         "input_payload_id": part["payload_id"],
                         "input_media_type": part["media_type"],
                         "input_byte_length": len(facet_content),
+                        "initial_state": initial_state,
                     }
                 )
         if not values:
@@ -338,8 +355,8 @@ class MemoryRetrievalRepository:
                     "INSERT INTO {}(bot_id,facet_id,purpose,query_id,source_unit_id,"
                     "source_revision,part_id,modality,selector_start_char,selector_end_char,"
                     "input_payload_id,input_payload_digest,facet_content_digest,input_media_type,"
-                    "input_byte_length,space_id,accepted_deletion_epoch) VALUES "
-                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "input_byte_length,space_id,accepted_deletion_epoch,state) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT DO NOTHING"
                 ).format(self._table("embedding_facets")),
                 (
@@ -360,6 +377,7 @@ class MemoryRetrievalRepository:
                     item["input_byte_length"],
                     item["space_id"],
                     deletion_epoch,
+                    item["initial_state"],
                 ),
             )
             row = await (
@@ -994,6 +1012,16 @@ class MemoryRetrievalRepository:
                     (self.store.bot_id, purpose, item_limit),
                 )
             ).fetchall()
+            selected_facets = []
+            selected_image_bytes = 0
+            for facet in facets:
+                if facet["modality"] == "IMAGE":
+                    next_image_bytes = selected_image_bytes + facet["input_byte_length"]
+                    if next_image_bytes > _MAX_BATCH_IMAGE_FACET_BYTES:
+                        continue
+                    selected_image_bytes = next_image_bytes
+                selected_facets.append(facet)
+            facets = selected_facets
             claim = await (
                 await conn.execute(
                     sql.SQL(

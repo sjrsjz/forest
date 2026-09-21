@@ -99,13 +99,13 @@ class CleanMemoryEmbeddingService:
         self._wake.clear()
 
     async def _run(self) -> None:
-        try:
-            while not self._closing:
-                await self._admission.wait()
-                if self._closing:
-                    return
-                self._idle.clear()
-                outcome = "IDLE"
+        while not self._closing:
+            await self._admission.wait()
+            if self._closing:
+                return
+            self._idle.clear()
+            outcome = "IDLE"
+            try:
                 try:
                     await self.retrieval.recover_expired_attempts()
                     await self.budget.recover_expired()
@@ -116,25 +116,26 @@ class CleanMemoryEmbeddingService:
                         purpose = "DOCUMENT"
                     if purpose is not None:
                         outcome = await self._execute_one(purpose)
-                finally:
-                    self._idle.set()
-                if outcome == "BACKOFF":
-                    await self._wait(self._retry_delay)
-                    self._retry_delay = min(self._retry_delay * 2, 300)
-                elif outcome == "BUDGET":
-                    await self._wait(60)
-                elif outcome == "SUCCESS":
-                    self._retry_delay = self.poll_interval
-                if outcome == "IDLE" or not self._admission.is_set():
-                    await self._wait()
-        except asyncio.CancelledError:
-            raise
-        except ForestError as exc:
-            self.failure = exc.code
-            raise
-        except Exception:
-            self.failure = "MEMORY_EMBEDDING_WORKER_FAILED"
-            raise
+                except asyncio.CancelledError:
+                    raise
+                except ForestError as exc:
+                    self.failure = exc.code
+                    outcome = "BACKOFF"
+                except Exception:
+                    self.failure = "MEMORY_EMBEDDING_WORKER_FAILED"
+                    outcome = "BACKOFF"
+            finally:
+                self._idle.set()
+            if outcome == "BACKOFF":
+                await self._wait(self._retry_delay)
+                self._retry_delay = min(self._retry_delay * 2, 300)
+            elif outcome == "BUDGET":
+                await self._wait(60)
+            elif outcome == "SUCCESS":
+                self.failure = None
+                self._retry_delay = self.poll_interval
+            if outcome == "IDLE" or not self._admission.is_set():
+                await self._wait()
 
     async def _execute_one(self, purpose: str) -> str:
         self._sequence += 1

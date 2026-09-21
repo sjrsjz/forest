@@ -206,20 +206,6 @@ class MemoryEmbeddingWorker:
                 "Embedding worker and request budget configuration differ",
                 422,
             )
-        if budget_claim is not None:
-            if type(budget_claim) is not EmbeddingBudgetClaim:
-                raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding budget claim", 422)
-            await self.budget.reserve(
-                operation_id=budget_claim.operation_id,
-                reservation_id=budget_claim.reservation_id,
-                batch_ref=batch_attempt_id,
-                policy_revision=budget_claim.policy_revision,
-                budget_day=budget_claim.budget_day,
-                request_limit=budget_claim.request_limit,
-                token_limit=budget_claim.token_limit,
-                reserved_tokens=budget_claim.reserved_tokens,
-                deadline_at=deadline_at,
-            )
         permits = []
         try:
             for item in items:
@@ -234,18 +220,41 @@ class MemoryEmbeddingWorker:
                         deadline_at=deadline_at,
                     )
                 )
-        except Exception:
-            await self._abort_prepared(tuple(permits), "EMBEDDING_BATCH_PREPARATION_ABORTED")
-            if budget_claim is not None:
-                await self.budget.settle(
-                    reservation_id=budget_claim.reservation_id,
-                    settlement_operation_id=_operation(
-                        "embedding-budget-settlement:", batch_attempt_id
-                    ),
-                    outcome="RELEASED",
-                    error_code="EMBEDDING_BATCH_PREPARATION_ABORTED",
+        except BaseException:
+            await asyncio.shield(
+                self._abort_prepared(
+                    tuple(permits), "EMBEDDING_BATCH_PREPARATION_ABORTED"
                 )
+            )
             raise
+        try:
+            inputs = tuple(self._input(value) for value in materialized)
+        except BaseException:
+            await asyncio.shield(
+                self._abort_prepared(tuple(permits), "EMBEDDING_LOCAL_INPUT_INVALID")
+            )
+            raise
+        if budget_claim is not None:
+            if type(budget_claim) is not EmbeddingBudgetClaim:
+                await self._abort_prepared(tuple(permits), "EMBEDDING_BUDGET_CLAIM_INVALID")
+                raise ForestError("MEMORY_INPUT_INVALID", "Invalid embedding budget claim", 422)
+            try:
+                await self.budget.reserve(
+                    operation_id=budget_claim.operation_id,
+                    reservation_id=budget_claim.reservation_id,
+                    batch_ref=batch_attempt_id,
+                    policy_revision=budget_claim.policy_revision,
+                    budget_day=budget_claim.budget_day,
+                    request_limit=budget_claim.request_limit,
+                    token_limit=budget_claim.token_limit,
+                    reserved_tokens=budget_claim.reserved_tokens,
+                    deadline_at=deadline_at,
+                )
+            except BaseException:
+                await asyncio.shield(
+                    self._abort_prepared(tuple(permits), "EMBEDDING_BUDGET_NOT_RESERVED")
+                )
+                raise
         handoff_id = _operation("embedding-batch-handoff:", batch_attempt_id)
 
         async def permit_in(conn, *, request):
@@ -261,7 +270,7 @@ class MemoryEmbeddingWorker:
 
         try:
             result = await self.provider.encode(
-                tuple(self._input(value) for value in materialized),
+                inputs,
                 request_id="request:" + batch_attempt_id,
                 transport_attempt_id=batch_attempt_id,
                 purpose=next(iter(purposes)),

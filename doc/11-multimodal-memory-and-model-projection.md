@@ -177,6 +177,8 @@ Worker 使用有界批次、积压阈值、每 Bot 预算和重试退避。媒�
 
 `memory.graph` 领取一批 facet 后物化有界 `EmbeddingEncodeRequest`，其中只包含受管 text/image payload 引用、逐项来源摘要、purpose、空间身份、请求 deadline 和稳定 effect identity。它经内核 Contract Router 调用准确 `embedding.encode/1` Generation。Embedding 在实际发送前验证这些引用、实际输入模态、大小和冻结空间，写自己的 transport attempt；它不根据 Memory 表补字段，也不决定某个来源是否有资格进入索引。
 
+Memory 必须在预算预留前完成本地 facet 物化、来源投影与逐项输入校验。空白文本、超过单图限制或其他确定不可编码的部分保留为 `SUPPRESSED` facet，以便管理面解释索引缺口，但不得进入 claim；批次领取还必须限制累计图片字节，不能生成 Provider 必然拒绝的请求。若 claim 已建立而网络交接尚未发生，本地失败必须把整批 attempt 结算为 `NOT_SENT`，并释放或避免建立预算预留。单批异常只能触发有界退避；生命周期 Worker 继续运行并在后续循环执行过期 attempt 与预算恢复，不能让一条消息永久终止整个 Bot 的索引任务。
+
 Embedding 返回 `EmbeddingEncodeObservation`：固定 request/attempt、空间、逐 facet 向量结果载荷、usage 与 `RESPONDED | REJECTED | NOT_SENT | UNKNOWN`。向量字节由 Embedding 以自身 owner 身份发布，Memory 只能引用和读取获准结果。Memory 的结算事务重新验证 claim/lease、当前 RuntimeGraph member、facet/source revision、删除 epoch、空间和结果摘要，再推进 `READY/RETRYABLE_FAILURE/UNKNOWN/SUPPRESSED`。网络调用和向量计算不在该事务内。
 
 热替换时，Memory claim 固定准确 Embedding Generation 与契约版本。交接前失败可按相同 facet 创建新 attempt；交接后失去结果必须保持 `UNKNOWN` 并向原 Generation/外部 effect 查询，不能换 endpoint 重发。Embedding endpoint 或凭据轮换会建立新 Generation，但只有声明与 Bot 已冻结 `EmbeddingSpaceIdentity` 完全兼容时才可进入 RuntimeGraph；模型种类、修订、维度、预处理、归一化或对齐语义变化仍必须拒绝。
