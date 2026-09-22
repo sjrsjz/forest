@@ -232,6 +232,11 @@ class RuntimeModuleFactoryContext:
 
         return self._router.event_subscriptions(self.component_id)
 
+    def event_publications(self) -> tuple[tuple[str, object], ...]:
+        """Discover event publication contracts for the routing authority."""
+
+        return self._router.event_publications(self.component_id)
+
     def component_jobs(self) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
         """Discover component-owned job handlers for the routing authority."""
 
@@ -408,6 +413,26 @@ class RuntimeContractRouter:
                 )
                 discovered.append((descriptor.component_id, contribution, handle))
         return tuple(discovered)
+
+    def event_publications(
+        self, caller_component_id: str
+    ) -> tuple[tuple[str, object], ...]:
+        if caller_component_id != "routing.graph":
+            raise ForestError(
+                "RUNTIME_EVENT_DIRECTORY_FORBIDDEN",
+                "Only routing.graph may consume the event publication directory",
+                403,
+            )
+        return tuple(
+            (descriptor.component_id, contribution)
+            for descriptor in sorted(
+                self.registry.descriptors, key=lambda item: item.component_id
+            )
+            for contribution in sorted(
+                descriptor.event_publications,
+                key=lambda item: (item.topic, item.contract),
+            )
+        )
 
     def component_jobs(
         self, caller_component_id: str

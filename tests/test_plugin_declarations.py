@@ -333,6 +333,15 @@ class Worker:
         service_operation_ledger=object(),
     )
     subscription = descriptor.event_subscriptions[0]
+    publication = descriptor.event_publications[0]
+    assert (
+        publication.topic,
+        publication.contract,
+    ) == (
+        "event.ready",
+        "1.0",
+    )
+    assert publication.event_schema_digest.startswith("sha256:")
     assert (
         subscription.subscriber_id,
         subscription.topic,

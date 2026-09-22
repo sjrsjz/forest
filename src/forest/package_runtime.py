@@ -39,6 +39,7 @@ from forest.runtime_generation import BoundGenerationIdentity, PreparedGeneratio
 from forest.runtime_modules import (
     RuntimeArtifactIdentity,
     RuntimeComponentJobContribution,
+    RuntimeEventPublicationContribution,
     RuntimeEventSubscriptionContribution,
     RuntimeModuleDescriptor,
 )
@@ -835,6 +836,14 @@ def package_runtime_descriptor(
         )
         for item in component.get("subscribes", ())
     )
+    event_publications = tuple(
+        RuntimeEventPublicationContribution(
+            topic=item["topic"],
+            contract=item["contract"],
+            event_schema=snapshot.schema(item["schema"]),
+        )
+        for item in component.get("publishes", ())
+    )
     component_jobs = tuple(
         RuntimeComponentJobContribution(
             handler_id=item["handler_id"],
@@ -890,6 +899,7 @@ def package_runtime_descriptor(
         ),
         management=tuple(management),
         storage=storage,
+        event_publications=event_publications,
         event_subscriptions=event_subscriptions,
         component_jobs=component_jobs,
     )

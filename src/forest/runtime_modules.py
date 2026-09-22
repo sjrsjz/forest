@@ -439,6 +439,37 @@ class RuntimeEventSubscriptionContribution:
 
 
 @dataclass(frozen=True)
+class RuntimeEventPublicationContribution:
+    """One event contract a generation-bound component may publish."""
+
+    topic: str
+    contract: str
+    event_schema: dict
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.topic)
+            or not re.fullmatch(r"[1-9][0-9]*\.[0-9]+", self.contract)
+            or not isinstance(self.event_schema, dict)
+        ):
+            raise ValueError("Runtime event publication contribution is invalid")
+        digest_json(self.event_schema)
+
+    @property
+    def event_schema_digest(self) -> str:
+        return digest_json(self.event_schema)
+
+    def as_fact(self) -> dict:
+        return {
+            "protocol": "forest.event-publication-contribution/1",
+            "topic": self.topic,
+            "contract": self.contract,
+            "event_schema": self.event_schema,
+            "event_schema_digest": self.event_schema_digest,
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeComponentJobContribution:
     """One component-owned durable job handler bound to its package Generation."""
 
@@ -587,6 +618,7 @@ class RuntimeModuleDescriptor:
     agent_tools: tuple[RuntimeAgentToolContribution, ...] = ()
     shell_commands: tuple[RuntimeShellCommandContribution, ...] = ()
     job_types: tuple[RuntimeJobTypeContribution, ...] = ()
+    event_publications: tuple[RuntimeEventPublicationContribution, ...] = ()
     event_subscriptions: tuple[RuntimeEventSubscriptionContribution, ...] = ()
     component_jobs: tuple[RuntimeComponentJobContribution, ...] = ()
 
@@ -615,6 +647,11 @@ class RuntimeModuleDescriptor:
         job_keys = [(item.job_type, item.job_version) for item in self.job_types]
         if len(job_keys) != len(set(job_keys)):
             raise ValueError("Runtime job type contribution identities must be unique")
+        publication_keys = [
+            (item.topic, item.contract) for item in self.event_publications
+        ]
+        if len(publication_keys) != len(set(publication_keys)):
+            raise ValueError("Runtime event publication identities must be unique")
         subscription_keys = [
             (item.subscriber_id, item.contract_major) for item in self.event_subscriptions
         ]
@@ -772,6 +809,9 @@ class RuntimeModuleRegistry:
             "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
             "shell_commands": [item.as_fact() for item in descriptor.shell_commands],
             "job_types": [item.as_fact() for item in descriptor.job_types],
+            "event_publications": [
+                item.as_fact() for item in descriptor.event_publications
+            ],
             "event_subscriptions": [
                 item.as_fact() for item in descriptor.event_subscriptions
             ],
