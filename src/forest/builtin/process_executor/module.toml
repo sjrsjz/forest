@@ -27,6 +27,9 @@ start_timeout_s = 10
 drain_timeout_s = 120
 stop_timeout_s = 10
 
+[components.capabilities]
+requests = ["service.call:process.native.spawn"]
+
 [components.management_ui]
 entrypoint = "ui/index.html"
 protocol = "forest.management-ui/1"
@@ -39,10 +42,17 @@ job_type = "native.execute"
 job_version = 1
 name = "job.process.execute"
 contract = "1.0"
-kind = "process.native"
-semantics = "at-most-once"
+handler = "native.execute"
 input_schema = "schemas/execute-input.json"
 output_schema = "schemas/execute-output.json"
 max_attempts = 1
 timeout_s = 3660
 max_concurrency = 2
+
+[[components.effect_services]]
+name = "process.native.spawn"
+contract = "1.0"
+kind = "process.native"
+semantics = "at-most-once"
+input_schema = "schemas/spawn-input.json"
+output_schema = "schemas/spawn-output.json"

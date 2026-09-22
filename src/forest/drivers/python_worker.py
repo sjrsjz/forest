@@ -195,7 +195,10 @@ class PythonWorker:
 
     def _expected_jobs(self) -> list[str]:
         jobs = self.package.manifest["components"][0].get("jobs", [])
-        identities = [item["handler_id"] for item in jobs]
+        job_types = self.package.manifest["components"][0].get("job_types", [])
+        identities = [item["handler_id"] for item in jobs] + [
+            item["handler"] for item in job_types
+        ]
         if len(identities) != len(set(identities)):
             raise ForestError(
                 "JOB_DECLARATION_INVALID", "Manifest contains duplicate job handlers", 422

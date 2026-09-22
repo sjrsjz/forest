@@ -223,8 +223,7 @@ MANIFEST_SCHEMA = {
                                 "job_version",
                                 "name",
                                 "contract",
-                                "kind",
-                                "semantics",
+                                "handler",
                                 "input_schema",
                                 "output_schema",
                                 "max_attempts",
@@ -238,7 +237,7 @@ MANIFEST_SCHEMA = {
                                         "job_type",
                                         "name",
                                         "contract",
-                                        "kind",
+                                        "handler",
                                         "input_schema",
                                         "output_schema",
                                     )
@@ -246,7 +245,6 @@ MANIFEST_SCHEMA = {
                                 "job_version": {
                                     "type": "integer", "minimum": 1, "maximum": 2147483647
                                 },
-                                "semantics": {"const": "at-most-once"},
                                 "max_attempts": {
                                     "type": "integer", "minimum": 1, "maximum": 32
                                 },
@@ -810,16 +808,24 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_SERVICES", "A service contract major.minor is required")
         _schema(files, service.get("input_schema"))
         _schema(files, service.get("output_schema"))
-        if service in (*effect_services, *job_types) and not IDENTIFIER.fullmatch(
+        if service in effect_services and not IDENTIFIER.fullmatch(
             service.get("kind", "")
         ):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
     contributed_job_types = set()
+    contributed_job_handlers = set()
     for definition in job_types:
         job_type = definition.get("job_type", "")
-        if not IDENTIFIER.fullmatch(job_type) or job_type in contributed_job_types:
+        handler = definition.get("handler", "")
+        if (
+            not IDENTIFIER.fullmatch(job_type)
+            or job_type in contributed_job_types
+            or not IDENTIFIER.fullmatch(handler)
+            or handler in contributed_job_handlers
+        ):
             _fail("INVALID_JOB_TYPES", "Job type identities must be valid and unique")
         contributed_job_types.add(job_type)
+        contributed_job_handlers.add(handler)
     published_topics = set()
     for publication in component.get("publishes", []):
         topic = publication.get("topic", "")
@@ -899,7 +905,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
         message_handler_methods.add(handler)
     capabilities = component.get("capabilities", {}).get("requests", [])
     allowed_capabilities = {"state.read", "state.write"} | {
-        "service.call:" + name for name in dependency_names
+        "service.call:" + name
+        for name in dependency_names | {item["name"] for item in effect_services}
     } | {"event.publish:" + topic for topic in published_topics} | {
         "job.schedule:" + handler_id for handler_id in job_ids
     }

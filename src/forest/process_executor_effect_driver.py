@@ -14,7 +14,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
-from forest.job_protocol import DurableJobExecutionRequest
+from forest.package_capabilities import PackageJobCallScope
 from forest.process_executor_builtin import (
     ExecutionProfile,
     parse_process_executor_configuration,
@@ -35,8 +35,7 @@ class NativeProcessEffectDriver:
     ) -> None:
         if (
             declaration.get("kind") != "process.native"
-            or declaration.get("name") != "job.process.execute"
-            or declaration.get("job_type") != "native.execute"
+            or declaration.get("name") != "process.native.spawn"
         ):
             raise ForestError(
                 "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
@@ -184,22 +183,22 @@ class NativeProcessEffectDriver:
                 kept.extend(chunk[: limit - len(kept)])
         return bytes(kept), total, total > len(kept)
 
-    async def _save_output(self, request, stream_name: str, body: bytes):
+    async def _save_output(self, operation_id: str, stream_name: str, body: bytes):
         if not body:
             return None
         epoch = await self.payloads.epoch()
         saved = await self.payloads.put_bytes(
             owner_component_id="process.executor",
             owner_kind="job.output",
-            owner_id=f"{request.job_id}:{request.attempt}:{stream_name}",
+            owner_id=f"{operation_id}:{stream_name}",
             media_type="application/octet-stream",
             content=body,
             sources=(
                 PayloadSource(
                     "process.executor",
-                    "native.execute.output",
-                    request.job_id,
-                    request.attempt,
+                    "native.process.output",
+                    operation_id,
+                    self.configuration_revision,
                     part_id=stream_name,
                 ),
             ),
@@ -212,18 +211,20 @@ class NativeProcessEffectDriver:
             "media_type": saved.media_type,
         }
 
-    async def invoke_job(self, request: DurableJobExecutionRequest, *, scope, invocation) -> dict:
+    async def invoke(self, payload: dict, *, scope, invocation) -> dict:
         await self._admit(scope)
-        if type(request) is not DurableJobExecutionRequest:
-            raise ForestError("JOB_EXECUTION_INPUT_INVALID", "Job request is invalid", 422)
-        profile_id = request.input.get("profile_id")
-        arguments = request.input.get("arguments")
-        if not isinstance(profile_id, str) or not isinstance(arguments, dict):
-            raise ForestError("JOB_EXECUTION_INPUT_INVALID", "Job input is invalid", 422)
+        if not isinstance(scope, PackageJobCallScope):
+            raise ForestError(
+                "PROCESS_CALL_SCOPE_INVALID",
+                "Native process effects require a durable Job call scope",
+                403,
+            )
+        profile_id = payload.get("profile_id")
+        arguments = payload.get("arguments")
         profile = self.profiles.get(profile_id)
         if profile is None:
             raise ForestError("PROCESS_PROFILE_NOT_FOUND", "Execution profile is unavailable", 404)
-        if await request.cancellation_requested():
+        if await scope.cancellation_requested():
             raise ForestError("JOB_CANCELLED", "Job was cancelled before execution", 409)
         self._verified_executable(profile)
         argv = self._argv(profile, arguments)
@@ -238,6 +239,26 @@ class NativeProcessEffectDriver:
             "require_posix_limits": profile.require_posix_limits,
             "limits": profile.limits,
         }
+        submitted = {
+            "executable": payload.get("executable"),
+            "argv": payload.get("argv"),
+            "working_directory": payload.get("working_directory"),
+            "environment": payload.get("environment"),
+            "run_as": payload.get("run_as"),
+            "network_policy": payload.get("network_policy"),
+            "require_posix_limits": payload.get("require_posix_limits"),
+            "limits": payload.get("limits"),
+        }
+        if (
+            payload.get("protocol") != "forest.process-spawn/1"
+            or payload.get("executable_sha256") != profile.executable_sha256
+            or submitted != manifest
+        ):
+            raise ForestError(
+                "PROCESS_EFFECT_PLAN_MISMATCH",
+                "Native process plan exceeds the frozen profile",
+                403,
+            )
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -262,7 +283,7 @@ class NativeProcessEffectDriver:
             cancelled = False
             timed_out = False
             while process.returncode is None:
-                if await request.cancellation_requested():
+                if await scope.cancellation_requested():
                     cancelled = True
                     await self._terminate(process, profile.limits["terminate_grace_seconds"])
                     break
@@ -286,12 +307,11 @@ class NativeProcessEffectDriver:
         stdout_body, stdout_total, stdout_truncated = stdout
         stderr_body, stderr_total, stderr_truncated = stderr
         stdout_ref, stderr_ref = await asyncio.gather(
-            self._save_output(request, "stdout", stdout_body),
-            self._save_output(request, "stderr", stderr_body),
+            self._save_output(invocation.operation_id, "stdout", stdout_body),
+            self._save_output(invocation.operation_id, "stderr", stderr_body),
         )
         return {
-            "protocol": "forest.native-execution-result/1",
-            "profile_id": profile.profile_id,
+            "protocol": "forest.process-spawn-result/1",
             "exit_code": process.returncode,
             "stdout": stdout_ref,
             "stderr": stderr_ref,

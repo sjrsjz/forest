@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "profile_id", "arguments", "executable", "executable_sha256", "argv", "working_directory", "environment", "run_as", "network_policy", "require_posix_limits", "limits"],
+  "properties": {
+    "protocol": {"const": "forest.process-spawn/1"},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+    "arguments": {"type": "object"},
+    "executable": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "executable_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "argv": {"type": "array", "minItems": 1, "maxItems": 257, "items": {"type": "string", "maxLength": 8192}},
+    "working_directory": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "environment": {"type": "object", "maxProperties": 130, "additionalProperties": {"type": "string", "maxLength": 8192}},
+    "run_as": {"type": "object", "additionalProperties": false, "required": ["uid", "gid"], "properties": {"uid": {"type": "integer", "minimum": 0}, "gid": {"type": "integer", "minimum": 0}}},
+    "network_policy": {"enum": ["deny", "inherit"]},
+    "require_posix_limits": {"type": "boolean"},
+    "limits": {"type": "object", "additionalProperties": false, "required": ["cpu_seconds", "memory_bytes", "wall_seconds", "output_bytes", "open_files", "processes", "terminate_grace_seconds"], "properties": {"cpu_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "memory_bytes": {"type": "integer", "minimum": 16777216, "maximum": 68719476736}, "wall_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "output_bytes": {"type": "integer", "minimum": 1024, "maximum": 33554432}, "open_files": {"type": "integer", "minimum": 8, "maximum": 4096}, "processes": {"type": "integer", "minimum": 1, "maximum": 1024}, "terminate_grace_seconds": {"type": "integer", "minimum": 1, "maximum": 60}}}
+  }
+}

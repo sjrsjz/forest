@@ -143,12 +143,7 @@ async def bootstrap_builtin_package(
         validator=configuration_validator,
     )
     effect_driver_factories = effect_driver_registry.resolve(
-        tuple(
-            (
-                *snapshot.component.get("effect_services", ()),
-                *snapshot.component.get("job_types", ()),
-            )
-        )
+        tuple(snapshot.component.get("effect_services", ()))
     )
     packaged_ui = snapshot.management_ui()
     if packaged_ui is None:

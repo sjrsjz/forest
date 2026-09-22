@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -284,7 +286,37 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
 async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_path):
     source = Path(__file__).parents[1] / "src/forest/builtin/process_executor"
     snapshot = PackageCatalog(tmp_path / "catalog").build(source)
-    configuration = {"protocol": "forest.process.executor/1", "profiles": []}
+    configuration = {
+        "protocol": "forest.process.executor/1",
+        "profiles": [
+            {
+                "profile_id": "fixture.echo",
+                "executable": "/usr/bin/echo",
+                "executable_sha256": "sha256:" + "0" * 64,
+                "arguments_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "argv": [{"literal": "hello"}],
+                "working_directory": "/tmp",
+                "environment": {},
+                "run_as": {"uid": 0, "gid": 0},
+                "network_policy": "inherit",
+                "require_posix_limits": False,
+                "limits": {
+                    "cpu_seconds": 1,
+                    "memory_bytes": 16777216,
+                    "wall_seconds": 1,
+                    "output_bytes": 1024,
+                    "open_files": 8,
+                    "processes": 1,
+                    "terminate_grace_seconds": 1,
+                },
+            }
+        ],
+    }
 
     class Configuration:
         async def desired(self, *, include_value=False):
@@ -301,18 +333,18 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
         async def start(self):
             events.append("start")
 
-        async def invoke_job(self, request, *, scope, invocation):
+        async def invoke(self, payload, *, scope, invocation):
             events.append(
                 (
-                    "invoke_job",
-                    request.job_id,
+                    "invoke",
+                    payload["profile_id"],
                     scope.generation_id,
                     invocation.operation_id,
+                    type(scope).__name__,
                 )
             )
             return {
-                "protocol": "forest.native-execution-result/1",
-                "profile_id": request.input["profile_id"],
+                "protocol": "forest.process-spawn-result/1",
                 "exit_code": 0,
                 "stdout": None,
                 "stderr": None,
@@ -334,19 +366,32 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
 
     def driver_factory(*_values):
         return Driver()
+
+    async def verify_generation(**_values):
+        return None
+
     descriptor = package_runtime_descriptor(
         snapshot,
         bot_id="bot-package-runtime",
         module_configuration=Configuration(),
-        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        grants=SimpleNamespace(
+            grant_set_digest="sha256:" + "1" * 64,
+            entries=(
+                SimpleNamespace(
+                    capability="service.call:process.native.spawn",
+                    resource_kind="component",
+                    resource_id="process.executor",
+                ),
+            ),
+        ),
         resolved_contracts={},
         startup_components=(),
-        generation_verifier=lambda **_values: None,
-        generation_member_verifier=lambda **_values: None,
+        generation_verifier=verify_generation,
+        generation_member_verifier=verify_generation,
         state_queries=None,
         state_commands=None,
         service_operation_ledger=EffectServiceLedger(),
-        effect_driver_factories={"job.process.execute": driver_factory},
+        effect_driver_factories={"process.native.spawn": driver_factory},
     )
     assert descriptor.job_types[0].as_fact() == {
         "protocol": "forest.job-type-contribution/1",
@@ -367,15 +412,24 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
         snapshot=snapshot,
         bot_id="bot-package-runtime",
         module_configuration=Configuration(),
-        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        grants=SimpleNamespace(
+            grant_set_digest="sha256:" + "1" * 64,
+            entries=(
+                SimpleNamespace(
+                    capability="service.call:process.native.spawn",
+                    resource_kind="component",
+                    resource_id="process.executor",
+                ),
+            ),
+        ),
         service_routes={},
         resolved_contracts={},
-        generation_verifier=lambda **_values: None,
-        generation_member_verifier=lambda **_values: None,
+        generation_verifier=verify_generation,
+        generation_member_verifier=verify_generation,
         state_queries=None,
         state_commands=None,
         service_operation_ledger=EffectServiceLedger(),
-        effect_driver_factories={"job.process.execute": driver_factory},
+        effect_driver_factories={"process.native.spawn": driver_factory},
     )
     context = PreparedGenerationContext(
         activation_id="process-generation",
@@ -442,14 +496,21 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
         ),
         {},
     )
+    assert result["profile_id"] == "fixture.echo"
     assert result["exit_code"] == 0
     assert events == [
         "start",
         (
-            "invoke_job",
-            "job-fixture",
+            "invoke",
+            "fixture.echo",
             "generation:process:1",
-            "job.execute:fixture:1",
+            "op:" + hashlib.sha256(
+                json.dumps(
+                    ["job.execute:fixture:1", "native-process-spawn:v1"],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "PackageJobCallScope",
         ),
     ]
     await adapter.quiesce()

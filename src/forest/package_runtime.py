@@ -22,6 +22,7 @@ from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_capabilities import (
     PackageCallScope,
+    PackageJobCallScope,
     PackageServiceError,
     PackageServiceOperationLedger,
     PackageServiceRoute,
@@ -31,7 +32,6 @@ from forest.package_capabilities import (
 from forest.package_effects import (
     PackageEffectDriver,
     PackageEffectDriverFactory,
-    PackageJobEffectDriver,
     PackageServiceEffectDriver,
 )
 from forest.packages import PackageSnapshot, contract_range
@@ -144,6 +144,7 @@ class PackageGenerationAdapter:
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
         self._effect_drivers: dict[str, PackageEffectDriver] = {}
+        self._job_cancellations: dict[str, Callable[[], Awaitable[bool]]] = {}
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
         self._worker_factory = worker_factory
@@ -219,6 +220,15 @@ class PackageGenerationAdapter:
             {"service_id": name, "version": _major(contract)}
             for name, contract in sorted(self._resolved_contracts.items())
         ]
+        local_effects = {item["name"]: item for item in self.component.get("effect_services", ())}
+        requirements.extend(
+            {
+                "service_id": name,
+                "version": _major(local_effects[name]["contract"]),
+            }
+            for name in sorted(local_effects)
+            if f"service.call:{name}" in self._requested_capabilities
+        )
         if any(item.startswith("event.publish:") for item in self._requested_capabilities):
             requirements.append(
                 {"service_id": "routing.event.publish", "version": 1}
@@ -327,6 +337,7 @@ class PackageGenerationAdapter:
         dispatch: Callable[[PythonWorker, PackageCallScope, str], Awaitable[Any]],
         normalize: Callable[[Any], Any],
         result_valid: Callable[[Any], bool],
+        cancellation_requested: Callable[[], Awaitable[bool]] | None = None,
     ) -> Any:
         self._check_route(route)
         worker = self._worker
@@ -334,7 +345,7 @@ class PackageGenerationAdapter:
         prepared = self._prepared_binding
         assert worker is not None and identity is not None and prepared is not None
         call_id = "call:" + uuid4().hex
-        scope = PackageCallScope(
+        scope_values = dict(
             bot_id=self.bot_id,
             component_id=self.component_id,
             generation_id=identity.generation_id,
@@ -344,6 +355,13 @@ class PackageGenerationAdapter:
             call_operation_id=invocation.operation_id,
             causal_root_kind=invocation.causal_root_kind,
             causal_root_id=invocation.causal_root_id,
+        )
+        scope = (
+            PackageJobCallScope(
+                **scope_values, cancellation_requested=cancellation_requested
+            )
+            if cancellation_requested is not None
+            else PackageCallScope(**scope_values)
         )
         service_route = PackageServiceRoute(
             service_id=service_id,
@@ -555,13 +573,6 @@ class PackageGenerationAdapter:
                     "Durable Job input violates its immutable package schema",
                     422,
                 )
-            driver = self._effect_drivers.get(service_id)
-            if not isinstance(driver, PackageJobEffectDriver):
-                raise ForestError(
-                    "PACKAGE_EFFECT_DRIVER_NOT_READY",
-                    "Package Job effect driver is not attached to this Generation",
-                    503,
-                )
             operation_input = {
                 "job_id": request.job_id,
                 "job_type": request.job_type,
@@ -570,15 +581,29 @@ class PackageGenerationAdapter:
                 "requested_by": request.requested_by,
                 "input": request.input,
             }
+            async def dispatch(worker, _scope, call_id):
+                self._job_cancellations[call_id] = request.cancellation_requested
+                try:
+                    return await worker.deliver_job(
+                        declaration["handler"],
+                        operation_input,
+                        call_id=call_id,
+                        operation_id=invocation.operation_id,
+                        causal_root_kind=invocation.causal_root_kind,
+                        causal_root_id=invocation.causal_root_id,
+                        timeout=invocation.timeout_seconds,
+                        before_send=lambda: self._verify_dispatch(route),
+                    )
+                finally:
+                    self._job_cancellations.pop(call_id, None)
+
             return await self._run_service_operation(
                 route=route,
                 invocation=invocation,
                 service_id=service_id,
                 input_value=operation_input,
                 durable=True,
-                dispatch=lambda _worker, scope, _call_id: driver.invoke_job(
-                    request, scope=scope, invocation=invocation
-                ),
+                dispatch=dispatch,
                 normalize=lambda result: result,
                 result_valid=output_validator.is_valid,
             )
@@ -684,11 +709,18 @@ class PackageGenerationAdapter:
     ) -> Any:
         scope = self._call_scope(identity, call_id)
         service_id = request["service"]
+        local = next(
+            (
+                item
+                for item in self.component.get("effect_services", ())
+                if item["name"] == service_id
+            ),
+            None,
+        )
         route = self._service_routes.get(service_id)
-        contract = self._resolved_contracts.get(service_id)
+        contract = local["contract"] if local is not None else self._resolved_contracts.get(service_id)
         if (
-            route is None
-            or contract is None
+            contract is None
             or request["contract_major"] != _major(contract)
             or not self._has_capability(f"service.call:{service_id}")
         ):
@@ -698,6 +730,19 @@ class PackageGenerationAdapter:
                 403,
             )
         timeout = self._worker.remaining_timeout(call_id, request["timeout"])
+        if local is not None:
+            return await self._invoke_local_effect(
+                identity,
+                call_id,
+                local,
+                request["payload"],
+                operation_id=request["operation_id"],
+                timeout_seconds=timeout,
+            )
+        if route is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "Declared service route is unavailable", 503
+            )
         return await route.invoke(
             request["payload"],
             operation_id=request["operation_id"],
@@ -705,6 +750,77 @@ class PackageGenerationAdapter:
             parent_call_id=call_id,
             causal_root_kind=scope.causal_root_kind,
             causal_root_id=scope.causal_root_id,
+        )
+
+    async def _invoke_local_effect(
+        self,
+        identity: WorkerIdentity,
+        call_id: str,
+        declaration: dict,
+        payload: Any,
+        *,
+        operation_id: str,
+        timeout_seconds: float,
+    ) -> Any:
+        service_id = declaration["name"]
+        if not isinstance(payload, dict):
+            raise ForestError(
+                "RUNTIME_SERVICE_INPUT_INVALID", "Effect payload must be an object", 422
+            )
+        input_validator, output_validator = self._service_schemas[service_id]
+        if not input_validator.is_valid(payload):
+            raise ForestError(
+                "RUNTIME_SERVICE_INPUT_INVALID",
+                "Effect payload violates its immutable schema",
+                422,
+            )
+        scope = self._call_scope(identity, call_id)
+        generation = self.generation_identity
+        if generation is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_BOUND", "Effect call has no Generation", 409
+            )
+        driver = self._effect_drivers.get(service_id)
+        if not isinstance(driver, PackageServiceEffectDriver):
+            raise ForestError(
+                "PACKAGE_EFFECT_DRIVER_NOT_READY",
+                "Package effect driver is not attached to this Generation",
+                503,
+            )
+        route = FrozenServiceRoute(
+            service_id=service_id,
+            version=_major(declaration["contract"]),
+            caller_component_id=self.component_id,
+            provider_component_id=self.component_id,
+            provider_generation_id=generation.generation_id,
+            graph_id=generation.graph_id,
+            graph_revision=generation.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        invocation = RuntimeServiceInvocation(
+            operation_id,
+            timeout_seconds,
+            scope.causal_root_kind,
+            scope.causal_root_id,
+            parent_call_id=call_id,
+        )
+        return await self._run_service_operation(
+            route=route,
+            invocation=invocation,
+            service_id=service_id,
+            input_value=payload,
+            durable=declaration["semantics"] == "at-most-once",
+            dispatch=lambda _worker, effect_scope, _effect_call_id: driver.invoke(
+                payload, scope=effect_scope, invocation=invocation
+            ),
+            normalize=lambda result: result,
+            result_valid=output_validator.is_valid,
+            cancellation_requested=(
+                scope.cancellation_requested
+                if isinstance(scope, PackageJobCallScope)
+                else None
+            ),
         )
 
     def _has_capability(self, capability: str) -> bool:
@@ -730,7 +846,7 @@ class PackageGenerationAdapter:
                 409,
             )
         causal_root_kind, causal_root_id = worker.call_causal_root(call_id)
-        return PackageCallScope(
+        values = dict(
             bot_id=self.bot_id,
             component_id=self.component_id,
             generation_id=generation.generation_id,
@@ -740,6 +856,12 @@ class PackageGenerationAdapter:
             call_operation_id=worker.call_operation_id(call_id),
             causal_root_kind=causal_root_kind,
             causal_root_id=causal_root_id,
+        )
+        cancellation = self._job_cancellations.get(call_id)
+        return (
+            PackageJobCallScope(**values, cancellation_requested=cancellation)
+            if cancellation is not None
+            else PackageCallScope(**values)
         )
 
     async def _state_gateway(
@@ -939,10 +1061,7 @@ class PackageGenerationAdapter:
             # The Worker may now dispatch, but the Adapter gate and persistent
             # route remain closed until activate_generation runs after commit.
             await worker.activate(_timeout(self.component, "start_timeout_s", 10))
-            for declaration in (
-                *self.component.get("effect_services", ()),
-                *self.component.get("job_types", ()),
-            ):
+            for declaration in self.component.get("effect_services", ()):
                 service_id = declaration["name"]
                 factory = self._effect_driver_factories[service_id]
                 driver = factory(
@@ -951,12 +1070,7 @@ class PackageGenerationAdapter:
                     self.generation_identity,
                     declaration,
                 )
-                expected_driver = (
-                    PackageJobEffectDriver
-                    if declaration in self.component.get("job_types", ())
-                    else PackageServiceEffectDriver
-                )
-                if not isinstance(driver, expected_driver):
+                if not isinstance(driver, PackageServiceEffectDriver):
                     raise ForestError(
                         "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
                         "Effect driver does not implement its declared port",
@@ -1094,10 +1208,7 @@ def package_runtime_descriptor(
     effect_driver_factories = dict(effect_driver_factories or {})
     declared_effect_services = {
         item["name"]
-        for item in (
-            *component.get("effect_services", ()),
-            *component.get("job_types", ()),
-        )
+        for item in component.get("effect_services", ())
     }
     if set(effect_driver_factories) != declared_effect_services:
         raise ForestError(

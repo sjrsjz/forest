@@ -719,10 +719,10 @@ class ServicesHandle:
             raise ForestError(
                 "INVALID_SERVICE_REQUEST", "A stable service operation ID is required", 422
             )
-        if timeout is not None and (type(timeout) not in {int, float} or not 0 < timeout <= 120):
+        if timeout is not None and (type(timeout) not in {int, float} or not 0 < timeout <= 86_400):
             raise ForestError(
                 "INVALID_SERVICE_REQUEST",
-                "Service timeout must be greater than zero and at most 120 seconds",
+                "Service timeout must be greater than zero and at most 86400 seconds",
                 422,
             )
         return await self._rpc(

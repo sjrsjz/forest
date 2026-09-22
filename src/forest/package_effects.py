@@ -37,19 +37,6 @@ class PackageServiceEffectDriver(PackageEffectDriver, Protocol):
     ) -> dict: ...
 
 
-@runtime_checkable
-class PackageJobEffectDriver(PackageEffectDriver, Protocol):
-    """Effect port for a durable Job type declared by a package."""
-
-    async def invoke_job(
-        self,
-        request: object,
-        *,
-        scope: PackageCallScope,
-        invocation: RuntimeServiceInvocation,
-    ) -> dict: ...
-
-
 PackageEffectDriverFactory = Callable[
     [dict, int, BoundGenerationIdentity, Mapping[str, Any]],
     PackageEffectDriver,

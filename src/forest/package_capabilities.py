@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -17,6 +18,13 @@ class PackageCallScope:
     call_operation_id: str
     causal_root_kind: str
     causal_root_id: str
+
+
+@dataclass(frozen=True)
+class PackageJobCallScope(PackageCallScope):
+    """Host-only extension available to effects nested under a durable Job call."""
+
+    cancellation_requested: Callable[[], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
