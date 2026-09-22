@@ -82,6 +82,8 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 宿主只能读取经校验的不可变 `PackageSnapshot` 和声明，创建运行时 Driver，并保存不透明 Worker/Generation 句柄。插件代码只允许在其 Worker 中导入和执行。模块间调用只能携带契约 DTO、稳定引用和受管 Payload，不能越过 IPC 返回 Python 对象、Repository、客户端或闭包。
 
+需要 Secret、网络、文件或进程能力的 builtin 仍必须是完整插件包。包在 manifest 中声明有界 `effect_service`；部署环境只按 `effect kind` 安装通用宿主驱动工厂。`PackageGenerationAdapter` 用同一冻结配置和准确 Generation 身份创建驱动，驱动与 Worker 共同经历 start、quiesce、resume、close，服务路由也指向该 Generation。驱动不是可独立启动的宿主业务模块，不能脱离包路由长期存活；Worker 不接触 Secret 明文或原始客户端。
+
 ### 2.2 插件热重载是强制生命周期，不是开发辅助
 
 所有普通插件（包括 builtin）必须完整支持 `drain` 热重载。唯一合法路径为：捕获新源码形成不同内容摘要 → 静态校验 manifest/schema/依赖/能力 → 创建新 Worker 与新 Generation → 在无生产写权限下 prepare/start/health → 冻结旧路由准入 → 排空旧代在途调用和持久安全点 → 原子提交新 route/registry/config effective → 本地开放新代 admission → 停止并回收旧 Worker、任务、连接与临时环境。候选在提交前任一步失败时，必须销毁候选并恢复旧代准入；提交后不得把旧对象重新激活为当前代，回退也要创建新的 Generation。

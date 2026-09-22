@@ -26,6 +26,7 @@ from forest.package_capabilities import (
     PackageStateCommands,
     PackageStateQueries,
 )
+from forest.package_effects import PackageEffectDriver, PackageEffectDriverFactory
 from forest.packages import PackageSnapshot, contract_range
 from forest.routing_protocol import (
     DurableComponentJobRequest,
@@ -113,6 +114,7 @@ class PackageGenerationAdapter:
         state_queries: PackageStateQueries | None,
         state_commands: PackageStateCommands | None,
         service_operation_ledger: PackageServiceOperationLedger,
+        effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
         event_publisher=None,
         component_job_scheduler=None,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
@@ -130,6 +132,8 @@ class PackageGenerationAdapter:
         self._state_queries = state_queries
         self._state_commands = state_commands
         self._service_operation_ledger = service_operation_ledger
+        self._effect_driver_factories = dict(effect_driver_factories or {})
+        self._effect_drivers: dict[str, PackageEffectDriver] = {}
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
         self._worker_factory = worker_factory
@@ -144,7 +148,10 @@ class PackageGenerationAdapter:
                 Draft202012Validator(self.snapshot.schema(item["input_schema"])),
                 Draft202012Validator(self.snapshot.schema(item["output_schema"])),
             )
-            for item in self.component.get("provides", ())
+            for item in (
+                *self.component.get("provides", ()),
+                *self.component.get("effect_services", ()),
+            )
         }
         self._event_subscriptions = {
             item["subscriber_id"]: (
@@ -183,7 +190,10 @@ class PackageGenerationAdapter:
 
         services = [
             {"service_id": item["name"], "version": _major(item["contract"])}
-            for item in self.component.get("provides", ())
+            for item in (
+                *self.component.get("provides", ()),
+                *self.component.get("effect_services", ()),
+            )
         ]
         services.extend(
             {"service_id": service_id, "version": 1}
@@ -230,6 +240,14 @@ class PackageGenerationAdapter:
         }
         handlers.update(
             {
+                (item["name"], _major(item["contract"])): self._effect_service_handler(
+                    item["name"]
+                )
+                for item in self.component.get("effect_services", ())
+            }
+        )
+        handlers.update(
+            {
                 (service_id, 1): self._event_subscription_handler(subscriber_id)
                 for subscriber_id, (_item, _validator, service_id) in (
                     self._event_subscriptions.items()
@@ -266,7 +284,7 @@ class PackageGenerationAdapter:
                 409,
             )
 
-    async def _run_worker_operation(
+    async def _run_service_operation(
         self,
         *,
         route: FrozenServiceRoute,
@@ -274,7 +292,7 @@ class PackageGenerationAdapter:
         service_id: str,
         input_value: dict,
         durable: bool,
-        dispatch: Callable[[PythonWorker, str], Awaitable[Any]],
+        dispatch: Callable[[PythonWorker, PackageCallScope, str], Awaitable[Any]],
         normalize: Callable[[Any], Any],
         result_valid: Callable[[Any], bool],
     ) -> Any:
@@ -327,7 +345,7 @@ class PackageGenerationAdapter:
                         )
                     return admission.result
             try:
-                result = normalize(await dispatch(worker, call_id))
+                result = normalize(await dispatch(worker, scope, call_id))
             except ForestError as error:
                 if durable:
                     await self._service_operation_ledger.fail(
@@ -401,13 +419,13 @@ class PackageGenerationAdapter:
                     "Plugin service payload violates its immutable schema",
                     422,
                 )
-            return await self._run_worker_operation(
+            return await self._run_service_operation(
                 route=route,
                 invocation=invocation,
                 service_id=service_id,
                 input_value=payload,
                 durable=self._durable_service_results,
-                dispatch=lambda worker, call_id: worker.invoke(
+                dispatch=lambda worker, _scope, call_id: worker.invoke(
                         service_id,
                         payload,
                         call_id=call_id,
@@ -426,6 +444,50 @@ class PackageGenerationAdapter:
 
         return RoutedServiceEndpoint(routed=routed)
 
+    def _effect_service_handler(self, service_id: str) -> RoutedServiceEndpoint:
+        async def routed(route, invocation, *args, **kwargs):
+            if args and kwargs or len(args) > 1:
+                raise ForestError(
+                    "RUNTIME_SERVICE_INPUT_INVALID",
+                    "Plugin effect services accept one JSON payload",
+                    422,
+                )
+            payload = args[0] if args else kwargs
+            if not isinstance(payload, dict):
+                raise ForestError(
+                    "RUNTIME_SERVICE_INPUT_INVALID",
+                    "Plugin effect service payload must be an object",
+                    422,
+                )
+            input_validator, output_validator = self._service_schemas[service_id]
+            if not input_validator.is_valid(payload):
+                raise ForestError(
+                    "RUNTIME_SERVICE_INPUT_INVALID",
+                    "Plugin effect service payload violates its immutable schema",
+                    422,
+                )
+            driver = self._effect_drivers.get(service_id)
+            if driver is None:
+                raise ForestError(
+                    "PACKAGE_EFFECT_DRIVER_NOT_READY",
+                    "Package effect driver is not attached to this Generation",
+                    503,
+                )
+            return await self._run_service_operation(
+                route=route,
+                invocation=invocation,
+                service_id=service_id,
+                input_value=payload,
+                durable=True,
+                dispatch=lambda _worker, scope, _call_id: driver.invoke(
+                    payload, scope=scope, invocation=invocation
+                ),
+                normalize=lambda result: result,
+                result_valid=output_validator.is_valid,
+            )
+
+        return RoutedServiceEndpoint(routed=routed)
+
     def _event_subscription_handler(self, subscriber_id: str) -> RoutedServiceEndpoint:
         _declaration, validator, service_id = self._event_subscriptions[subscriber_id]
 
@@ -441,13 +503,13 @@ class PackageGenerationAdapter:
                     422,
                 )
             payload = request.worker_payload()
-            return await self._run_worker_operation(
+            return await self._run_service_operation(
                 route=route,
                 invocation=invocation,
                 service_id=service_id,
                 input_value=payload,
                 durable=True,
-                dispatch=lambda worker, call_id: worker.deliver_event(
+                dispatch=lambda worker, _scope, call_id: worker.deliver_event(
                     subscriber_id,
                     payload,
                     call_id=call_id,
@@ -478,13 +540,13 @@ class PackageGenerationAdapter:
                     422,
                 )
             payload = request.worker_payload()
-            return await self._run_worker_operation(
+            return await self._run_service_operation(
                 route=route,
                 invocation=invocation,
                 service_id=service_id,
                 input_value=payload,
                 durable=True,
-                dispatch=lambda worker, call_id: worker.deliver_job(
+                dispatch=lambda worker, _scope, call_id: worker.deliver_job(
                     handler_id,
                     payload,
                     call_id=call_id,
@@ -760,6 +822,7 @@ class PackageGenerationAdapter:
             job_handler=self._job_gateway,
         )
         self._worker = worker
+        started_drivers: list[PackageEffectDriver] = []
         try:
             await worker.launch(_timeout(self.component, "prepare_timeout_s", 10))
             await worker.prepare(
@@ -775,9 +838,41 @@ class PackageGenerationAdapter:
             # The Worker may now dispatch, but the Adapter gate and persistent
             # route remain closed until activate_generation runs after commit.
             await worker.activate(_timeout(self.component, "start_timeout_s", 10))
-        except BaseException:
+            for declaration in self.component.get("effect_services", ()):
+                service_id = declaration["name"]
+                factory = self._effect_driver_factories[service_id]
+                driver = factory(
+                    self._configuration,
+                    self._configuration_revision,
+                    self.generation_identity,
+                    declaration,
+                )
+                started_drivers.append(driver)
+                await driver.start()
+                self._effect_drivers[service_id] = driver
+        except BaseException as start_error:
             self.state = PackageGenerationState.FAILED
-            await worker.terminate()
+            cleanup_results = await asyncio.gather(
+                *(driver.close() for driver in reversed(started_drivers)),
+                worker.terminate(),
+                return_exceptions=True,
+            )
+            self._effect_drivers.clear()
+            cleanup_errors = [
+                type(item).__name__
+                for item in cleanup_results
+                if isinstance(item, BaseException)
+            ]
+            if cleanup_errors:
+                raise ForestError(
+                    "PACKAGE_GENERATION_START_ROLLBACK_FAILED",
+                    "Package start failed and one or more owned resources did not close",
+                    500,
+                    details={
+                        "start_error": type(start_error).__name__,
+                        "cleanup_errors": cleanup_errors,
+                    },
+                ) from start_error
             raise
         self.state = PackageGenerationState.WORKER_READY
 
@@ -799,6 +894,8 @@ class PackageGenerationAdapter:
             async with asyncio.timeout(timeout):
                 await self._worker.quiesce(timeout=timeout)
                 await self._services_drained.wait()
+                for driver in self._effect_drivers.values():
+                    await driver.quiesce()
         except BaseException:
             self.state = PackageGenerationState.FAILED
             raise
@@ -809,13 +906,20 @@ class PackageGenerationAdapter:
             raise ForestError(
                 "LIFECYCLE_INVALID", "Only a quiescent Package Generation can resume", 409
             )
-        await self._worker.resume(_timeout(self.component, "start_timeout_s", 10))
-        health = await self._worker.health(_timeout(self.component, "start_timeout_s", 10))
-        if health.get("healthy") is not True:
-            self.state = PackageGenerationState.FAILED
-            raise ForestError(
-                "WORKER_UNHEALTHY", "Resumed Worker failed its health contract", 503
+        try:
+            for driver in self._effect_drivers.values():
+                await driver.resume()
+            await self._worker.resume(_timeout(self.component, "start_timeout_s", 10))
+            health = await self._worker.health(
+                _timeout(self.component, "start_timeout_s", 10)
             )
+            if health.get("healthy") is not True:
+                raise ForestError(
+                    "WORKER_UNHEALTHY", "Resumed Worker failed its health contract", 503
+                )
+        except BaseException:
+            self.state = PackageGenerationState.FAILED
+            raise
         self.state = PackageGenerationState.WORKER_READY
 
     async def close(self) -> None:
@@ -828,13 +932,22 @@ class PackageGenerationAdapter:
                 409,
             )
         worker = self._worker
-        try:
-            if worker is not None:
-                await worker.stop(
-                    timeout=_timeout(self.component, "stop_timeout_s", 5)
-                )
-        finally:
-            self.state = PackageGenerationState.STOPPED
+        close_operations = [driver.close() for driver in self._effect_drivers.values()]
+        if worker is not None:
+            close_operations.append(
+                worker.stop(timeout=_timeout(self.component, "stop_timeout_s", 5))
+            )
+        results = await asyncio.gather(*close_operations, return_exceptions=True)
+        self._effect_drivers.clear()
+        self.state = PackageGenerationState.STOPPED
+        failures = [type(item).__name__ for item in results if isinstance(item, BaseException)]
+        if failures:
+            raise ForestError(
+                "PACKAGE_GENERATION_CLOSE_FAILED",
+                "One or more Generation-owned resources failed to close",
+                500,
+                details={"failures": failures},
+            )
 
 
 def package_runtime_descriptor(
@@ -850,6 +963,7 @@ def package_runtime_descriptor(
     state_queries: PackageStateQueries | None,
     state_commands: PackageStateCommands | None,
     service_operation_ledger: PackageServiceOperationLedger,
+    effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
     storage=None,
     management=(),
     management_contract=None,
@@ -860,6 +974,20 @@ def package_runtime_descriptor(
 
     snapshot.verify()
     component = snapshot.component
+    effect_driver_factories = dict(effect_driver_factories or {})
+    declared_effect_services = {
+        item["name"] for item in component.get("effect_services", ())
+    }
+    if set(effect_driver_factories) != declared_effect_services:
+        raise ForestError(
+            "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
+            "Effect driver bindings must exactly match declared effect services",
+            500,
+            details={
+                "declared": sorted(declared_effect_services),
+                "bound": sorted(effect_driver_factories),
+            },
+        )
     requested = frozenset(component.get("capabilities", {}).get("requests", ()))
     gateway_capabilities = {
         item
@@ -961,6 +1089,7 @@ def package_runtime_descriptor(
             state_queries=state_queries,
             state_commands=state_commands,
             service_operation_ledger=service_operation_ledger,
+            effect_driver_factories=effect_driver_factories,
             event_publisher=event_publisher,
             component_job_scheduler=component_job_scheduler,
             worker_factory=worker_factory,

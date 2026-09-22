@@ -19,7 +19,7 @@
 
 ## 仍阻塞发布的插件架构缺口
 
-`PackageGenerationAdapter` 已闭合不可变 `PackageSnapshot`、隔离 `PythonWorker` 与 `RuntimeModuleRegistry`/`kernel.runtime` Generation 的生产路径。`conversation.trigger-policy` 与 `codec.onebot` 已成为真实 builtin 包，携带 manifest、配置/输入/输出 schema 和 Worker 入口；宿主只构造通用包适配器，不再 import 或保留这两项功能的宿主实现。Adapter 通过冻结 contract route 调用准确 Codec Generation；Codec 不持有 Binding、凭据、网络客户端或业务状态，Adapter 在产生外部效果前独立复核 action、wire 摘要和允许的 segment。跨 Worker 调用现已显式分离稳定业务 `operation_id` 与单次执行 `call_id`；Router 传递冻结 route 和 invocation，嵌套调用记录父调用且只能缩短父 deadline，缺少调用身份的插件端口直接拒绝。候选 Worker 在 route 发布前完成准备、启动和健康检查，本地 admission gate 保持关闭；旧 Generation 先冻结并排空，持久 route 提交后新 gate 才同步打开。失败发布会先恢复旧 Worker，再恢复旧 gate；ACTIVE Worker 不允许绕过 QUIESCENT 直接清理。
+`PackageGenerationAdapter` 已闭合不可变 `PackageSnapshot`、隔离 `PythonWorker` 与 `RuntimeModuleRegistry`/`kernel.runtime` Generation 的生产路径。`conversation.trigger-policy`、`codec.onebot` 与 `provider.chat-completions` 已成为真实 builtin 包，携带 manifest、配置/输入/输出 schema 和 Worker 入口；旧 `clean_provider_module.py`、`clean_provider_runtime.py` 已物理删除。Provider 包的 Worker 只冻结公开 profile/能力快照，manifest 声明的 `provider.model.dispatch` 由 Generation 专属 `chat-completions.http` 效果驱动实现；Secret 和 HTTP client 不进入 Worker。效果驱动与 Worker 共同 start/quiesce/resume/close，候选启动失败会同时回收两者，服务在途计数与持久操作账本覆盖外部效果调用。Adapter 通过冻结 contract route 调用准确 Codec Generation；Codec 不持有 Binding、凭据、网络客户端或业务状态，Adapter 在产生外部效果前独立复核 action、wire 摘要和允许的 segment。跨 Worker 调用现已显式分离稳定业务 `operation_id` 与单次执行 `call_id`；Router 传递冻结 route 和 invocation，嵌套调用记录父调用且只能缩短父 deadline，缺少调用身份的插件端口直接拒绝。候选 Worker 和效果驱动在 route 发布前完成准备、启动和健康检查，本地 admission gate 保持关闭；旧 Generation 先冻结并排空，持久 route 提交后新 gate 才同步打开。失败发布会先恢复旧 Worker/驱动，再恢复旧 gate；ACTIVE Generation 不允许绕过 QUIESCENT 直接清理。
 
 插件宿主已删除读写合一的 `PackageCapabilityGateway`。State Query 与 State Command 分别由 `PackageStateQueries`、`PackageStateCommands` 端口和独立宿主对象承载；Adapter 构造时分别取得端口，缺少包所声明的任一端口会在描述符编译阶段失败。写入事务同时完成当前 Generation 成员围栏、稳定操作重放、key 级串行、revision CAS、受管 Payload、不可变 step 与 head 推进。相同操作跨执行尝试返回原回执，输入变化明确冲突；同 revision 并发写确定地只有一个成功。获得副作用能力的插件服务现在先进入持久 `service_operations/service_call_attempts`：稳定 operation 固定输入与因果根，每个 call 固定准确 Generation/Worker/图/父调用/deadline，最多一次 Worker 派发，成功或失败终态保存为 Payload 并可跨 call 重放，过期无终态只落 `UNKNOWN`。Adapter 排空覆盖账本准入、Worker 和终态提交。纯 Codec/Trigger 不写账本。真实 `forest.counter` 包已在隔离 Worker 与完整 RuntimeGraph 中证明重复服务 operation 返回原结果且状态只推进一次。Event 与 ComponentJob 不再伪装成 Gateway 回调，而是通过 package runtime contract 中声明的两个冻结 routing 服务句柄进入独立 authority。
 
@@ -31,7 +31,7 @@
 
 该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
 
-其余 Agent、Memory、Provider、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。迁移阻塞按机制分为两类：Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 需要包级 domain Query/Command 和 UnitOfWork participant；Provider、Embedding、Vector Index、Adapter transport、Media 与 Process Executor 还需要 Secret lease 和受限 Effect executor。它们必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
+其余 Agent、Memory、Embedding、Vector Index、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。迁移阻塞按机制分为两类：Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 需要包级 domain Query/Command 和 UnitOfWork participant；Embedding、Vector Index、Adapter transport、Media 与 Process Executor 需要按 Provider 已采用的包级 `effect_service` 模式接入 Secret lease 和受限 Effect executor。它们必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
 
 ## 已落地但尚未接入插件 Worker 的运行时切片
 
@@ -67,7 +67,7 @@
 
 > **生产接线状态：** Conversation Worker、单 Agent 执行、Context 投影、Provider 调用、最终回复与 Session 交接已经进入同一干净 RuntimeGraph。Agent→Provider 与 Conversation→Agent 使用冻结到准确图/代际/契约版本的 Contract Router 句柄；Conversation 只调用输入选择、最终回复和 Session 交接三个内核 UoW 服务，Agent、Conversation、Memory、Delivery participant 由内核按声明解析。生产模块不再通过共享模块字典、直接运行实例或 bound participant 完成这条链。PostgreSQL 集成测试已从真实 OneBot 入站事实自动生成回复、原子提交 Context/SendIntent、经 Delivery 发送并静默关闭 Session。
 当前候选 RuntimeGraph 共 19 个成员：五个内核模块，以及 `provider.chat-completions`、`embedding.multimodal`、`vector.index`、`memory.graph`、`media.capture`、`agent.runtime`、`conversation.scheduler`、`conversation.trigger-policy`、`codec.onebot`、`adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command` 十四个平级业务模块：
-- `provider.chat-completions` 独占共享 HTTP 客户端、端点/模型能力快照和单次 `ModelInputProjection`；每个请求绑定精确 Provider Generation 与能力摘要，实际发送前在短许可事务中再次复核 DATA admission；
+- `provider.chat-completions` builtin 的 Worker 独占公开 profile/模型能力快照；Agent 按该快照完成单次 `ModelInputProjection`，Provider Generation 的受限效果驱动独占端点、Secret 解析与 HTTP client。每个请求绑定精确 Provider Generation 与能力摘要；Agent→Effect 的事务同时提交授权票据消费、RuntimeGraph fence、Effect handoff 与 Agent attempt handoff，驱动在实际 HTTP 发送前再次复核 Effect 和 Generation；
 - text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
 - `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
 - Agent `COMPLETED` Run 不再擅自关闭 Session；Conversation 排空决定显式关闭，或在同一 Session 下原子推进唯一后继 Run；

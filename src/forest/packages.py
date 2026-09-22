@@ -181,6 +181,31 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "effect_services": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "name",
+                                "contract",
+                                "kind",
+                                "input_schema",
+                                "output_schema",
+                            ],
+                            "properties": {
+                                key: {"type": "string"}
+                                for key in (
+                                    "name",
+                                    "contract",
+                                    "kind",
+                                    "input_schema",
+                                    "output_schema",
+                                )
+                            },
+                        },
+                    },
                     "management_ui": {
                         "type": "object",
                         "additionalProperties": False,
@@ -686,6 +711,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _management_ui(files, component)
     _storage_bundle(files, component)
     services = component.get("provides", [])
+    effect_services = component.get("effect_services", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
     if component.get("message_handler_takeover", "none") == "compatible" and not message_handlers:
@@ -697,6 +723,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     component_jobs = component.get("jobs", [])
     if len(services) > 32 or (
         not services
+        and not effect_services
         and not commands
         and not message_handlers
         and not subscriptions
@@ -707,7 +734,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "Declare at least one service, subscription, job, command, or message handler",
         )
     names = set()
-    for service in services:
+    for service in (*services, *effect_services):
         name = service.get("name", "")
         if not IDENTIFIER.fullmatch(name) or name in names:
             _fail("INVALID_SERVICES", "Service names must be valid and unique")
@@ -718,6 +745,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_SERVICES", "A service contract major.minor is required")
         _schema(files, service.get("input_schema"))
         _schema(files, service.get("output_schema"))
+        if service in effect_services and not IDENTIFIER.fullmatch(service.get("kind", "")):
+            _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
     published_topics = set()
     for publication in component.get("publishes", []):
         topic = publication.get("topic", "")

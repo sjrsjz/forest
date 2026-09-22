@@ -67,6 +67,7 @@ class DurableSingleAgentExecution:
         *,
         agent,
         provider,
+        model_effects,
         memory,
         media,
         payloads,
@@ -77,6 +78,7 @@ class DurableSingleAgentExecution:
         self.model = DurableAgentModelExecutor(
             agent=agent,
             provider=provider,
+            model_effects=model_effects,
             payloads=payloads,
         )
         self.tools = DurableAgentToolExecutor(agent=agent, payloads=payloads)
@@ -584,11 +586,13 @@ class DurableSingleAgentExecution:
                     continue
                 if state == "MODEL_PENDING":
                     result = await self.model.reconcile_after_restart(owner)
-                    raise ForestError(
-                        "AGENT_MODEL_RESULT_UNKNOWN",
-                        result.error_code or "Model result is unknown",
-                        409,
-                    )
+                    if result.status == "UNKNOWN":
+                        raise ForestError(
+                            "AGENT_MODEL_RESULT_UNKNOWN",
+                            result.error_code or "Model result is unknown",
+                            409,
+                        )
+                    continue
                 if state in {"PARSING", "SAFE_BOUNDARY"}:
                     request_head = recovery["current_request"]
                     attempt_head = recovery["current_attempt"]

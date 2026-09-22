@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "request_id"],
+  "properties": {
+    "protocol": {"const": "forest.provider-bind-request/1"},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256}
+  }
+}

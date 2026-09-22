@@ -15,6 +15,9 @@ from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from forest.builtin_packages import bootstrap_builtin_package
+from forest.chat_completions_effect_driver import (
+    chat_completions_effect_driver_factory,
+)
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
@@ -23,7 +26,6 @@ from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_process_executor_module import bootstrap_clean_process_executor
-from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_vector_index_module import (
     bootstrap_clean_vector_index,
@@ -33,6 +35,7 @@ from forest.core_runtime import bootstrap_clean_kernel
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
+from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
 from forest.routing_graph_module import bootstrap_routing_graph
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -458,18 +461,24 @@ class CleanBotHost:
             input_modalities=self.settings.model_input_modalities,
             max_output_tokens=self.settings.model_max_output_tokens,
         )
-        provider_options = {}
+        async def resolve_provider_secret(secret_ref, _revision):
+            if secret_ref != self.settings.model_credential_ref:
+                raise ForestError(
+                    "PROVIDER_CREDENTIAL_UNAVAILABLE",
+                    "Provider credential reference differs",
+                    409,
+                )
+            return self.settings.model_api_key
+
+        provider_driver_options = {}
         if self._model_client_factory is not None:
-            provider_options["client_factory"] = self._model_client_factory
-        provider = await bootstrap_clean_provider(
+            provider_driver_options["client_factory"] = self._model_client_factory
+        provider = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/provider_chat_completions"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            credential_resolver=lambda secret_ref, _revision: (
-                self.settings.model_api_key
-                if secret_ref == self.settings.model_credential_ref
-                else None
-            ),
             initial_configuration={
                 "protocol": "forest.provider.chat-completions/1",
                 "base_url": self.settings.model_base_url,
@@ -478,7 +487,16 @@ class CleanBotHost:
                 "max_connections": self.settings.model_max_connections,
                 "capabilities": capabilities.as_dict(),
             },
-            **provider_options,
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "chat-completions.http": chat_completions_effect_driver_factory(
+                        effects=self._kernel.effect,
+                        runtime=self._kernel.runtime,
+                        credential_resolver=resolve_provider_secret,
+                        **provider_driver_options,
+                    )
+                }
+            ),
         )
         embedding_profile = {
             "deployment_id": self.settings.embedding_deployment_id,

@@ -11,7 +11,6 @@ from dataclasses import replace
 import pytest
 
 from forest.agent_protocol import ProtocolRepairView
-from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
 from forest.errors import ForestError
 from forest.models import (
     ChatCompletionsClient,
@@ -19,6 +18,7 @@ from forest.models import (
     ModelCapabilities,
     prepare_model_request,
 )
+from forest.provider_builtin import validate_provider_configuration
 
 
 def unit(identifier="u1", text="hello", *, user="alice", group="group-a", parts=None, role="user"):
@@ -47,7 +47,7 @@ def capabilities(**changes):
     return ModelCapabilities("deployment-a", "test-model", "capability-1", **changes)
 
 
-def test_provider_runtime_drops_retired_context_policy_fields_from_legacy_configuration():
+def test_provider_configuration_rejects_retired_context_policy_fields():
     legacy = capabilities().as_dict()
     legacy.update({
         "context_limit": 65536,
@@ -56,22 +56,15 @@ def test_provider_runtime_drops_retired_context_policy_fields_from_legacy_config
         "max_image_pixels": 16777216,
         "image_token_upper_bound": 4096,
     })
-    normalized, parsed = CleanChatCompletionsProviderRuntime._parse_configuration({
-        "protocol": "forest.provider.chat-completions/1",
-        "base_url": "https://example.invalid",
-        "credential_ref": "secret://provider/test",
-        "timeout_seconds": 30,
-        "max_connections": 2,
-        "capabilities": legacy,
-    })
-    assert parsed.as_dict() == normalized["capabilities"]
-    assert set(legacy) - set(normalized["capabilities"]) == {
-        "context_limit",
-        "max_images",
-        "max_image_bytes",
-        "max_image_pixels",
-        "image_token_upper_bound",
-    }
+    with pytest.raises(ForestError, match="Provider configuration is invalid"):
+        validate_provider_configuration({
+            "protocol": "forest.provider.chat-completions/1",
+            "base_url": "https://example.invalid",
+            "credential_ref": "secret://provider/test",
+            "timeout_seconds": 30,
+            "max_connections": 2,
+            "capabilities": legacy,
+        })
 
 
 def prepared(value=None, caps=None, *, media=None, tools=(), stream=True, **kwargs):

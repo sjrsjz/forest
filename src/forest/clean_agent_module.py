@@ -12,7 +12,10 @@ from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS
 from forest.clean_agent_management import CleanAgentManagementContract
 from forest.clean_agent_runtime import CleanAgentRuntime
 from forest.errors import ForestError
+from forest.model_effect_execution import KernelModelEffectExecutionPort
+from forest.models import ModelCapabilities, prepare_model_request
 from forest.packages import digest_json
+from forest.provider_protocol import BoundProviderRequest
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
     RuntimeManagementContribution,
@@ -37,17 +40,72 @@ class CleanAgentModule:
 
 
 class _RoutedChatProvider:
-    """Provider facade backed only by frozen Contract Router handles."""
+    """Agent-owned projection bound to an immutable Provider profile."""
 
-    def __init__(self, project, dispatch) -> None:
-        self._project = project
-        self._dispatch = dispatch
+    def __init__(self, bind) -> None:
+        self._bind = bind
 
-    async def prepare_request(self, *args, **kwargs):
-        return await self._project(*args, **kwargs)
-
-    async def dispatch(self, *args, **kwargs):
-        return await self._dispatch(*args, **kwargs)
+    async def prepare_request(
+        self,
+        snapshot,
+        *,
+        request_id,
+        transport_attempt_id,
+        preset_context=(),
+        tools=(),
+        media=None,
+        output_tokens=1024,
+        stream=True,
+        evidence=None,
+        repair_view=None,
+    ):
+        profile = await self._bind.invoke(
+            {
+                "protocol": "forest.provider-bind-request/1",
+                "request_id": request_id,
+            },
+            operation_id="provider-bind:" + digest_json(request_id)[7:],
+            causal_root_kind="agent.model",
+            causal_root_id=request_id,
+        )
+        route = self._bind.route
+        try:
+            capabilities = ModelCapabilities(**profile["capabilities"])
+        except (KeyError, TypeError, ForestError) as exc:
+            raise ForestError(
+                "PROVIDER_PROFILE_INVALID", "Provider profile is invalid", 502
+            ) from exc
+        if (
+            profile["component_id"] != route.provider_component_id
+            or profile["generation_id"] != route.provider_generation_id
+            or profile["capability_digest"] != digest_json(capabilities.as_dict())
+        ):
+            raise ForestError(
+                "PROVIDER_PROFILE_FENCE_MISMATCH",
+                "Provider profile differs from its routed Generation",
+                409,
+            )
+        prepared = prepare_model_request(
+            snapshot,
+            capabilities,
+            request_id=request_id,
+            transport_attempt_id=transport_attempt_id,
+            preset_context=preset_context,
+            tools=tools,
+            media=media,
+            output_tokens=output_tokens,
+            stream=stream,
+            evidence=evidence,
+            repair_view=repair_view,
+        )
+        return BoundProviderRequest(
+            component_id=profile["component_id"],
+            generation_id=profile["generation_id"],
+            provider_profile_ref=profile["profile_ref"],
+            capability_digest=profile["capability_digest"],
+            capabilities=capabilities,
+            prepared=prepared,
+        )
 
 
 class _RoutedMemory:
@@ -191,7 +249,7 @@ async def bootstrap_clean_agent(
         grantee_id="agent.runtime",
         entries=(
             CapabilityGrant("agent.run", "bot", store.bot_id),
-            CapabilityGrant("provider.invoke", "bot", store.bot_id),
+            CapabilityGrant("provider.invoke", "bot", store.bot_id, delegable=True),
             CapabilityGrant("tool.invoke", "bot", store.bot_id, delegable=True),
         ),
         expected_policy_revision=policy_revision,
@@ -250,15 +308,18 @@ async def bootstrap_clean_agent(
 
             tool_route_factories.append(route_factory)
 
+        provider_bind = contracts.service(
+            "provider.profile.bind", 1, owned_work=True
+        )
+        provider_dispatch = contracts.service(
+            "provider.model.dispatch", 1, owned_work=True
+        )
         runtime = CleanAgentRuntime(
             repository=repository,
             module_configuration=configuration,
             grants=grants,
             payloads=kernel.payload,
-            provider=_RoutedChatProvider(
-                contracts.service("provider.model.project", 1, owned_work=True),
-                contracts.service("provider.model.dispatch", 1, owned_work=True),
-            ),
+            provider=_RoutedChatProvider(provider_bind),
             memory=_RoutedMemory(
                 contracts.service("memory.recall", 1, owned_work=True),
             ),
@@ -274,6 +335,15 @@ async def bootstrap_clean_agent(
             tool_requirements=tuple(tool_requirements),
             generation_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
+        )
+        runtime.model_effects = KernelModelEffectExecutionPort(
+            agent=runtime,
+            effects=kernel.effect,
+            payloads=kernel.payload,
+            runtime=kernel.runtime,
+            authorization=kernel.authorization,
+            agent_grants=grants,
+            service=provider_dispatch,
         )
         runtime.management_contract = CleanAgentManagementContract(
             configuration,

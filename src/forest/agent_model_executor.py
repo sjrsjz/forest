@@ -112,13 +112,14 @@ class DurableAgentModelExecutor:
     process authority.
     """
 
-    def __init__(self, *, agent, provider, payloads) -> None:
+    def __init__(self, *, agent, provider, payloads, model_effects=None) -> None:
         self.agent = agent
         self.provider = provider
+        self.model_effects = model_effects
         self.payloads = payloads
 
     async def reconcile_after_restart(self, owner) -> AgentModelStepResult:
-        """Fence an unqueryable in-flight Chat Completions attempt as UNKNOWN."""
+        """Recover durable Effect evidence or fence an unqueryable transport UNKNOWN."""
 
         recovery = await self.agent.load_recovery(owner.run_id)
         request = recovery["current_request"]
@@ -146,15 +147,53 @@ class DurableAgentModelExecutor:
                 "Run has no unqueryable in-flight model attempt",
                 409,
             )
+        result = None
+        if self.model_effects is not None:
+            try:
+                result = await self.model_effects.query(attempt["effect_operation_ref"])
+            except ForestError as exc:
+                if exc.code != "PROVIDER_RESULT_UNQUERYABLE":
+                    raise
+        observed_state = "UNKNOWN"
+        result_ref = None
+        usage_ref = None
+        if result is not None:
+            observed_state = {
+                "RESPONDED": "SUCCEEDED",
+                "NOT_SENT": "NOT_APPLIED",
+                "UNKNOWN": "UNKNOWN",
+            }[result.status]
+            if result.status == "RESPONDED":
+                result_ref = await self._payload(
+                    request["provider_component_id"],
+                    "model.result",
+                    attempt["attempt_id"],
+                    _canonical(result.as_dict()),
+                )
+                if result.usage is not None:
+                    usage_ref = await self._payload(
+                        request["provider_component_id"],
+                        "model.usage",
+                        attempt["attempt_id"],
+                        _canonical(result.usage),
+                    )
         await self.agent.observe_model(
             owner,
-            observation_operation_id=f"recover-unknown:{attempt['attempt_id']}",
+            observation_operation_id=_stable(
+                "recover-model-effect", attempt["attempt_id"], observed_state
+            ),
             request_id=request["request_id"],
             attempt_id=attempt["attempt_id"],
-            observed_state="UNKNOWN",
-            evidence_kind="EXECUTOR",
-            effect_observation_ref=f"provider-restart:{attempt['attempt_id']}",
+            observed_state=observed_state,
+            evidence_kind="RECONCILIATION" if result is not None else "EXECUTOR",
+            effect_observation_ref=_stable(
+                "effect-observation", attempt["effect_operation_ref"], observed_state
+            ),
+            result=result_ref,
+            usage=usage_ref,
         )
+        if result is not None:
+            return AgentModelStepResult(observed_state, text=result.text)
         return AgentModelStepResult(
             "UNKNOWN",
             error_code="MODEL_RESULT_UNQUERYABLE_AFTER_RESTART",
@@ -622,19 +661,19 @@ class DurableAgentModelExecutor:
             wire=wire,
         )
 
-        async def permit(conn, *, request):
-            if request is not bound:
-                raise ForestError(
-                    "PROVIDER_REQUEST_FENCE_MISMATCH", "Provider request changed", 409
-                )
-            await self.agent.mark_model_handoff_in(
-                conn,
-                owner,
-                request_id=step.request_id,
-                attempt_id=step.attempt_id,
+        if self.model_effects is None:
+            raise ForestError(
+                "MODEL_EFFECT_PORT_UNAVAILABLE",
+                "Agent model execution requires the kernel Effect port",
+                503,
             )
-
-        result = await self.provider.dispatch(bound, permit_in=permit)
+        result = await self.model_effects.dispatch(
+            bound,
+            owner=owner,
+            request_id=step.request_id,
+            attempt_id=step.attempt_id,
+            effect_id=step.effect_operation_ref,
+        )
         observed_state = {
             "RESPONDED": "SUCCEEDED",
             "NOT_SENT": "NOT_APPLIED",

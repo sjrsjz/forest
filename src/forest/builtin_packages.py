@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from forest.clean_management_contract import CleanModuleConfigurationContract
+from forest.package_effects import (
+    EMPTY_PACKAGE_EFFECT_DRIVERS,
+    PackageEffectDriverRegistry,
+)
 from forest.package_runtime import package_runtime_descriptor
 from forest.package_service_ledger import KernelPackageServiceOperationLedger
 from forest.package_state_ports import (
@@ -84,6 +88,7 @@ async def bootstrap_builtin_package(
     initial_configuration: dict[str, Any],
     resolved_contracts: dict[str, str] | None = None,
     startup_components: tuple[str, ...] = (),
+    effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
 ) -> BuiltinPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
@@ -126,6 +131,9 @@ async def bootstrap_builtin_package(
         configuration,
         schema=configuration_schema,
     )
+    effect_driver_factories = effect_driver_registry.resolve(
+        tuple(snapshot.component.get("effect_services", ()))
+    )
     descriptor = package_runtime_descriptor(
         snapshot,
         bot_id=store.bot_id,
@@ -156,6 +164,7 @@ async def bootstrap_builtin_package(
             kernel.runtime,
             kernel.payload,
         ),
+        effect_driver_factories=effect_driver_factories,
         storage=storage,
         management=(configuration_management_contribution(component_id),),
         management_contract=management_contract,

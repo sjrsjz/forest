@@ -15,11 +15,6 @@ from forest.clean_embedding_module import (
     default_embedding_configuration,
 )
 from forest.clean_embedding_runtime import CleanMultimodalEmbeddingRuntime
-from forest.clean_provider_module import (
-    PROVIDER_CONFIGURATION_SCHEMA,
-    default_provider_configuration,
-)
-from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
 from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA, default_shell_configuration
 from forest.clean_shell_runtime import CleanShellRuntime
 from forest.clean_vector_index_module import (
@@ -29,6 +24,11 @@ from forest.clean_vector_index_module import (
 from forest.clean_vector_index_runtime import CleanMilvusVectorIndexRuntime
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
+from forest.provider_builtin import (
+    PROVIDER_CONFIGURATION_SCHEMA,
+    default_provider_configuration,
+    validate_provider_configuration,
+)
 from forest.runtime_modules import RuntimeManagementContribution
 
 TRIGGER_POLICY_CONFIGURATION_SCHEMA = json.loads(
@@ -128,7 +128,7 @@ def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContributi
             "Chat Completions Provider",
             "Model endpoint, credential reference, limits, and declared capabilities.",
             default_provider_configuration(),
-            CleanChatCompletionsProviderRuntime._parse_configuration,
+            validate_provider_configuration,
         ),
         (
             "embedding.multimodal",
@@ -256,7 +256,7 @@ class OfficialBotSettingsResolver:
                     details={"component_id": component_id},
                 )
 
-        provider, capabilities = CleanChatCompletionsProviderRuntime._parse_configuration(
+        provider, capabilities = validate_provider_configuration(
             components["provider.chat-completions"].config
         )
         embedding, embedding_profile = CleanMultimodalEmbeddingRuntime._parse_configuration(

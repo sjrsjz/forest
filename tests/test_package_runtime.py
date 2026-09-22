@@ -15,6 +15,17 @@ class NoServiceLedger:
     pass
 
 
+class EffectServiceLedger:
+    async def begin(self, *_args):
+        return SimpleNamespace(execute=True, error=None, result=None)
+
+    async def succeed(self, *_args):
+        return None
+
+    async def fail(self, *_args):
+        return None
+
+
 class Configuration:
     async def desired(self, *, include_value=False):
         value = {
@@ -138,3 +149,128 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
     await adapter.close()
     assert adapter.state is PackageGenerationState.STOPPED
     assert worker is not None and not worker.alive
+
+
+async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
+    source = Path(__file__).parents[1] / "src/forest/builtin/provider_chat_completions"
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    config = {
+        "protocol": "forest.provider.chat-completions/1",
+        "base_url": "https://example.invalid/v1",
+        "credential_ref": "secret://test/provider",
+        "timeout_seconds": 30,
+        "max_connections": 2,
+        "capabilities": {
+            "deployment_id": "test",
+            "model": "test-model",
+            "capability_revision": "test/1",
+            "model_revision": "test/1",
+            "input_modalities": ["text"],
+            "supports_tools": True,
+            "supports_streaming": True,
+            "stream_usage": True,
+            "max_output_tokens": 1024,
+            "image_roles": ["user"],
+            "image_detail": "auto",
+            "system_role": "system",
+            "output_token_parameter": "max_completion_tokens",
+            "tool_image_mapping": "omit",
+        },
+    }
+
+    class ProviderConfiguration:
+        async def desired(self, *, include_value=False):
+            return SimpleNamespace(
+                revision=7,
+                payload_id="payload:provider:7",
+                payload_digest=digest_json(config),
+                value=config if include_value else None,
+            )
+
+    events = []
+
+    class Driver:
+        async def start(self):
+            events.append("start")
+
+        async def invoke(self, payload, *, scope, invocation):
+            events.append(("invoke", scope.generation_id, invocation.operation_id))
+            prepared = payload["prepared"]
+            return {
+                "status": "RESPONDED",
+                "request_id": prepared["request_id"],
+                "transport_attempt_id": prepared["transport_attempt_id"],
+                "payload_digest": prepared["payload_digest"],
+                "text": "ok",
+                "tool_calls": [],
+                "usage": None,
+                "finish_reason": "stop",
+                "provider_response_id": None,
+                "provider_model": "test-model",
+                "error_code": None,
+            }
+
+        async def quiesce(self):
+            events.append("quiesce")
+
+        async def resume(self):
+            events.append("resume")
+
+        async def close(self):
+            events.append("close")
+
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=ProviderConfiguration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={},
+        resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None,
+        state_commands=None,
+        service_operation_ledger=EffectServiceLedger(),
+        effect_driver_factories={
+            "provider.model.dispatch": lambda *_values: Driver()
+        },
+    )
+    context = PreparedGenerationContext(
+        activation_id="effect-generation",
+        component_id="provider.chat-completions",
+        requires=(),
+        package_id=snapshot.manifest["package_id"],
+        package_version=snapshot.manifest["version"],
+        package_digest=snapshot.digest,
+        driver="forest.python-worker/1",
+        trust_level="official",
+        descriptor_digest="sha256:" + "2" * 64,
+        route_contract_digest=digest_json(adapter.runtime_contract),
+        management_contract_digest=digest_json(None),
+        management_ui_digest=digest_json([]),
+        state_schema=1,
+        state_contract_digest=digest_json(adapter.state_contract),
+        storage=None,
+    )
+    await adapter.prepare_generation(context)
+    await adapter.bind_generation(
+        BoundGenerationIdentity(
+            "provider.chat-completions",
+            "generation:provider:1",
+            "graph:provider:1",
+            1,
+            "sha256:" + "3" * 64,
+            context.activation_id,
+        )
+    )
+    await adapter.start()
+    adapter.activate_generation()
+    assert events == ["start"]
+    await adapter.quiesce()
+    assert events[-1] == "quiesce"
+    await adapter.resume()
+    adapter.activate_generation()
+    assert events[-1] == "resume"
+    await adapter.quiesce()
+    await adapter.close()
+    assert events[-2:] == ["quiesce", "close"]

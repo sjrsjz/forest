@@ -66,7 +66,7 @@ class CleanAgentRuntime:
             {"service_id": "shell.agent.execute", "version": 1},
         ],
         "requires": [
-            {"service_id": "provider.model.project", "version": 1},
+            {"service_id": "provider.profile.bind", "version": 1},
             {"service_id": "provider.model.dispatch", "version": 1},
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "media.context.resolve", "version": 1},
@@ -96,6 +96,7 @@ class CleanAgentRuntime:
         generation_verifier,
         generation_member_verifier=None,
         provider=None,
+        model_effects=None,
         memory=None,
         media=None,
         cancel_wake=None,
@@ -107,6 +108,7 @@ class CleanAgentRuntime:
         self.grants = grants
         self.payloads = payloads
         self.provider = provider
+        self.model_effects = model_effects
         self.memory = memory
         self.media = media
         self.cancel_wake = cancel_wake
@@ -280,11 +282,17 @@ class CleanAgentRuntime:
                 "Agent Generation identity was not bound",
                 503,
             )
-        if self.provider is not None and self.memory is not None and self.media is not None:
+        if (
+            self.provider is not None
+            and self.model_effects is not None
+            and self.memory is not None
+            and self.media is not None
+        ):
             tool_routes = tuple(factory() for factory in self.tool_route_factories)
             self.execution = DurableSingleAgentExecution(
                 agent=self,
                 provider=self.provider,
+                model_effects=self.model_effects,
                 memory=self.memory,
                 media=self.media,
                 payloads=self.payloads,

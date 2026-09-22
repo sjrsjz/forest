@@ -117,7 +117,7 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 代码位于宿主进程不等于它属于内核。只有 RuntimeGraph/Generation、Payload、授权、Effect 账本和审计这五类不可替代机制属于 bootstrap 内核；它们没有普通热重载语义，只能随受控宿主重启。`routing.graph`、Conversation、Agent、Memory、Shell、Job、Delivery、Adapter、Provider、Embedding、Vector Index、Media 与 Process Executor 都是模块，必须来自不可变包并获得独立 Generation。官方身份只改变签名、信任等级和可授予能力，不允许宿主用 `bootstrap_clean_*` 直接构造其业务对象。
 
-模块包与执行副作用的宿主驱动是两个生命周期对象。模块 Worker 只能提交内容寻址、类型化且已授权的效果计划；Effect authority 固化 operation、输入、目标、调用 Generation、执行器 Generation、deadline 与 fence 后，准确的执行器驱动才可解析 Secret 并发生网络、文件或进程交接。Secret 明文不进入 Worker、配置 Payload、Event、Job、trace 或结果；Worker 也不获得通用 HTTP、文件系统、子进程或任意 Secret 读取能力。Provider、Embedding、Vector Index、OneBot transport、Media fetch 与 Process Executor 各自使用受限 effect kind 和目标 schema，不能共享一个“万能网络请求”接口。
+模块 Worker 与宿主效果驱动是两个执行对象，但只能属于同一个 Package Generation 生命周期。模块 Worker 只能提交内容寻址、类型化且已授权的效果计划；包 manifest 以 `effect_service` 声明准确 effect kind 和输入/输出 schema，部署环境按 kind 提供受限驱动工厂。`PackageGenerationAdapter` 用冻结配置与准确 Generation 创建驱动，并统一执行 start、quiesce、resume、close；候选失败必须同时回收 Worker 与已启动驱动，旧代排空必须覆盖效果服务的准入、调用与终态提交。Effect authority 固化 operation、输入、目标、调用 Generation、执行器 Generation、deadline 与 fence 后，准确驱动才可解析 Secret 并发生网络、文件或进程交接。驱动不能脱离包路由形成另一个宿主业务模块或独立切换配置。Secret 明文不进入 Worker、配置 Payload、Event、Job、trace 或结果；Worker 也不获得通用 HTTP、文件系统、子进程或任意 Secret 读取能力。Provider、Embedding、Vector Index、OneBot transport、Media fetch 与 Process Executor 各自使用受限 effect kind 和目标 schema，不能共享一个“万能网络请求”接口。
 
 带复杂持久状态的模块仍然是插件，不能因此退回宿主 import。它们的包声明 domain Query、domain Command、storage bundle 和可选 UnitOfWork participant；宿主只加载通用 authority driver，按包摘要安装独占 namespace，并把每次命令固定到准确 Generation、schema 与事务。Worker 不能取得数据库连接、Repository 或 SQL 字符串执行能力。查询与命令使用不同契约；跨模块原子提交只接受各模块返回的不可变 plan，由内核协调已注册 participant，不能把别的模块 Repository 注入当前模块。
 

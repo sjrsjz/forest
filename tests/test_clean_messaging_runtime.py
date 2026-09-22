@@ -31,13 +31,15 @@ from forest.builtin_memory_tool import MEMORY_EXACT_RECALL_TOOL
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
+from forest.chat_completions_effect_driver import (
+    chat_completions_effect_driver_factory,
+)
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
 from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
-from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.clean_vector_index_module import (
     bootstrap_clean_vector_index,
@@ -47,7 +49,9 @@ from forest.core_runtime import bootstrap_clean_kernel
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
+from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
+from forest.provider_builtin import default_provider_configuration
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
@@ -378,12 +382,24 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         model_clients.append(client)
         return client
 
-    provider = await bootstrap_clean_provider(
+    package_catalog = PackageCatalog(tmp_path / "package-catalog")
+    provider = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/provider_chat_completions",
+        package_catalog,
         store,
         installer,
         kernel=kernel,
-        credential_resolver=lambda _secret_ref, _revision: "test-model-key",
-        client_factory=create_model_client,
+        initial_configuration=default_provider_configuration(),
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "chat-completions.http": chat_completions_effect_driver_factory(
+                    effects=kernel.effect,
+                    runtime=kernel.runtime,
+                    credential_resolver=lambda _secret_ref, _revision: "test-model-key",
+                    client_factory=create_model_client,
+                )
+            }
+        ),
     )
     embedding = await bootstrap_clean_embedding(
         store,
@@ -415,7 +431,6 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     media = await bootstrap_clean_media(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
-    package_catalog = PackageCatalog(tmp_path / "package-catalog")
     trigger_policy = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/trigger_policy",
         package_catalog,
@@ -590,7 +605,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         )
         assert conversation_runtime.active is True
         assert agent_runtime.active is True
-        assert provider_runtime.active is True
+        assert provider_runtime.state is ModuleLifecycleState.ACTIVE or (
+            provider_runtime.state.value == "ACTIVE"
+        )
         assert agent_runtime.execution is not None
         assert set(agent_runtime.execution.routes) == {
             "memory_recall_exact",
@@ -667,7 +684,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert await memory_runtime.list_trunks() == []
         assert delivery_runtime.active is True
         assert agent_runtime.provider is not provider_runtime
-        provider_route = agent_runtime.provider._project.route
+        provider_route = agent_runtime.provider._bind.route
         assert provider_route.caller_component_id == "agent.runtime"
         assert provider_route.provider_component_id == "provider.chat-completions"
         assert provider_route.provider_generation_id == (
@@ -901,19 +918,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "provider.chat-completions"
         ]
         assert "secret.invalid" not in request.prepared.body.decode()
-        permitted = []
-
-        async def permit(_conn, *, request):
-            permitted.append(request.prepared.request_id)
-
-        response = await agent_runtime.provider.dispatch(request, permit_in=permit)
-        assert response.status == "RESPONDED"
-        assert permitted == ["model-request:test"]
-
         owner = await agent_runtime.acquire_run("agent/run/test", "agent-worker/test")
         executor = DurableAgentModelExecutor(
             agent=agent_runtime,
             provider=agent_runtime.provider,
+            model_effects=agent_runtime.model_effects,
             payloads=kernel.payload,
         )
         with pytest.raises(ForestError) as caught:

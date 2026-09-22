@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "request_id", "transport_attempt_id", "payload_digest", "text", "tool_calls", "usage", "finish_reason", "provider_response_id", "provider_model", "error_code"],
+  "properties": {
+    "status": {"enum": ["RESPONDED", "NOT_SENT", "UNKNOWN"]},
+    "request_id": {"type": "string"},
+    "transport_attempt_id": {"type": "string"},
+    "payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "text": {"type": "string"},
+    "tool_calls": {"type": "array", "items": {"type": "object"}},
+    "finish_reason": {"type": ["string", "null"]},
+    "usage": {"type": ["object", "null"]},
+    "provider_response_id": {"type": ["string", "null"]},
+    "provider_model": {"type": ["string", "null"]},
+    "error_code": {"type": ["string", "null"]}
+  }
+}
