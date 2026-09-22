@@ -81,7 +81,7 @@ def test_terminal_and_thinking_only_turns_are_distinct():
     assert pending.thinking_only and not pending.terminal
 
 
-def test_bounded_parameter_alias_from_compatible_provider_is_accepted():
+def test_parameter_alias_is_rejected_instead_of_normalized_by_the_host():
     candidate = (
         '<valid_agent_protocol_content_block block_type="ModelTurn">'
         '<parameter name="payload"><parameter name="blocks">'
@@ -89,9 +89,7 @@ def test_bounded_parameter_alias_from_compatible_provider_is_accepted():
         + assistant("done")
         + "</parameter></parameter></valid_agent_protocol_content_block>"
     )
-    turn = parse_model_turn(candidate)
-    assert turn.terminal
-    assert turn.assistant_text == "done"
+    fails("AGENT_PROTOCOL_STRUCTURE", candidate)
 
 
 @pytest.mark.parametrize(
@@ -111,7 +109,7 @@ def test_bounded_parameter_alias_from_compatible_provider_is_accepted():
         + "</parameter></parameter></valid_agent_protocol_content_block>",
     ],
 )
-def test_parameter_alias_does_not_expand_the_protocol_grammar(candidate):
+def test_parameter_elements_are_never_protocol_containers(candidate):
     fails("AGENT_PROTOCOL_STRUCTURE", candidate)
 
 

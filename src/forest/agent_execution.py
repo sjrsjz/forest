@@ -14,6 +14,7 @@ from forest.agent_model_executor import (
     AgentToolBinding,
     DurableAgentModelExecutor,
 )
+from forest.agent_protocol import ProtocolRepairView
 from forest.agent_tool_executor import DurableAgentToolExecutor
 from forest.conversation_worker import (
     AgentExecutionCompletion,
@@ -349,7 +350,9 @@ class DurableSingleAgentExecution:
             details={"run_id": run["run_id"], "reason_code": run.get("error_code")},
         )
 
-    async def _with_protocol_repair(self, recovery: dict, snapshot: dict) -> tuple[dict, str]:
+    async def _protocol_repair_view(
+        self, recovery: dict
+    ) -> tuple[ProtocolRepairView, str]:
         failure = recovery.get("current_protocol_failure")
         if (
             not isinstance(failure, dict)
@@ -369,30 +372,25 @@ class DurableSingleAgentExecution:
                 "Protocol repair feedback cannot be restored",
                 500,
             ) from exc
+        try:
+            repair_view = ProtocolRepairView.from_record(feedback)
+        except ForestError as exc:
+            raise ForestError(
+                "AGENT_PROTOCOL_REPAIR_PAYLOAD_CONFLICT",
+                "Protocol repair feedback differs from its durable boundary",
+                409,
+            ) from exc
         if (
-            not isinstance(feedback, dict)
-            or set(feedback)
-            != {
-                "repair_count",
-                "error_code",
-                "validation_reason",
-                "candidate_digest",
-                "feedback",
-            }
-            or feedback.get("repair_count") != recovery.get("repair_count")
-            or feedback.get("error_code") != failure.get("error_code")
-            or feedback.get("candidate_digest") != failure.get("candidate_digest")
-            or not isinstance(feedback.get("validation_reason"), str)
-            or not isinstance(feedback.get("feedback"), str)
-            or len(feedback["validation_reason"].encode("utf-8")) > 4096
-            or len(feedback["feedback"].encode("utf-8")) > 32768
+            repair_view.repair_count != recovery.get("repair_count")
+            or repair_view.error_code != failure.get("error_code")
+            or repair_view.candidate_digest != failure.get("candidate_digest")
         ):
             raise ForestError(
                 "AGENT_PROTOCOL_REPAIR_PAYLOAD_CONFLICT",
                 "Protocol repair feedback differs from its durable boundary",
                 409,
             )
-        return {**snapshot, "protocol_repair": feedback}, failure["failed_request_id"]
+        return repair_view, failure["failed_request_id"]
 
     async def execute(self, request: AgentExecutionRequest) -> AgentExecutionCompletion:
         if type(request) is not AgentExecutionRequest:
@@ -490,43 +488,59 @@ class DurableSingleAgentExecution:
                         turn_id=_stable("model-turn", run["run_id"], step_seq),
                         final_reply_ref=_stable("reply", run["run_id"]),
                     )
-                    context = await request.context_snapshot()
-                    snapshot = await self.projector.project(
-                        run=run,
-                        context=context,
-                        logical_step_id=f"{run['run_id']}:step:{step_seq}",
-                        tool_bindings=bindings,
-                    )
+                    logical_step_id = f"{run['run_id']}:step:{step_seq}"
                     repair_of_request_id = None
+                    repair_view = None
                     if is_repair:
-                        snapshot, repair_of_request_id = await self._with_protocol_repair(
-                            recovery,
-                            snapshot,
+                        repair_view, repair_of_request_id = await self._protocol_repair_view(
+                            recovery
                         )
-                    latest_input = run["inputs"][-1]
-                    recalled = await self.memory.recall(
-                        recall_id=_stable(
-                            "memory-recall",
-                            run["run_id"],
-                            latest_input["input_revision"],
-                            latest_input["input_batch_ref"],
-                            latest_input["context_revision"],
-                            run["selected_input_end_seq"],
-                        ),
-                        conversation_id=request.conversation_id,
-                        input_batch_ref=latest_input["input_batch_ref"],
-                        context_revision=latest_input["context_revision"],
-                        input_cut=run["selected_input_end_seq"],
-                    )
-                    current_media = await self.media.resolve_context(snapshot)
-                    recalled_media = {} if recalled is None else recalled.media
-                    combined_media = {**current_media, **recalled_media}
+                        snapshot = {
+                            "bot_id": self.agent.bot_id,
+                            "run_id": run["run_id"],
+                            "logical_step_id": logical_step_id,
+                            "input_revision": run["input_revision"],
+                            "context_revision": run["context_revision"],
+                            "context_view_revision": run["context_view_revision"],
+                            "selected_input_end_seq": run["selected_input_end_seq"],
+                            "trigger_ids": [item["trigger_ref"] for item in run["triggers"]],
+                            "input_batch_ids": [item["input_batch_ref"] for item in run["inputs"]],
+                            "units": [],
+                        }
+                        recalled = None
+                        combined_media = None
+                    else:
+                        context = await request.context_snapshot()
+                        snapshot = await self.projector.project(
+                            run=run,
+                            context=context,
+                            logical_step_id=logical_step_id,
+                            tool_bindings=bindings,
+                        )
+                        latest_input = run["inputs"][-1]
+                        recalled = await self.memory.recall(
+                            recall_id=_stable(
+                                "memory-recall",
+                                run["run_id"],
+                                latest_input["input_revision"],
+                                latest_input["input_batch_ref"],
+                                latest_input["context_revision"],
+                                run["selected_input_end_seq"],
+                            ),
+                            conversation_id=request.conversation_id,
+                            input_batch_ref=latest_input["input_batch_ref"],
+                            context_revision=latest_input["context_revision"],
+                            input_cut=run["selected_input_end_seq"],
+                        )
+                        current_media = await self.media.resolve_context(snapshot)
+                        recalled_media = {} if recalled is None else recalled.media
+                        combined_media = {**current_media, **recalled_media}
                     await request.before_external_step()
                     result = await self.model.execute(
                         owner,
                         step,
                         snapshot,
-                        preset_context=profile.preset_context,
+                        preset_context=() if is_repair else profile.preset_context,
                         tools=declarations,
                         media=combined_media,
                         evidence=None if recalled is None else recalled.evidence,
@@ -535,6 +549,7 @@ class DurableSingleAgentExecution:
                         stream=profile.stream,
                         request_kind="REPAIR" if is_repair else "PRIMARY",
                         repair_of_request_id=repair_of_request_id,
+                        repair_view=repair_view,
                         allow_protocol_repair=(
                             not is_repair
                             and recovery["repair_count"] < 1

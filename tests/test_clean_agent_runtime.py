@@ -1394,18 +1394,13 @@ async def test_invalid_model_turn_recovers_one_durable_repair_after_owner_restar
     recovery = await agent.load_recovery("run/one")
     execution = object.__new__(DurableSingleAgentExecution)
     execution.payloads = payloads
-    repair_snapshot, repair_of = await execution._with_protocol_repair(
-        recovery,
-        {"run_id": "run/one", "units": []},
-    )
+    repair_view, repair_of = await execution._protocol_repair_view(recovery)
     assert repair_of == plan.request_id
-    assert repair_snapshot["protocol_repair"] == {
-        "repair_count": 1,
-        "error_code": "AGENT_PROTOCOL_XML",
-        "validation_reason": "Model candidate is not one complete XML document",
-        "candidate_digest": failure["candidate_digest"],
-        "feedback": "not xml",
-    }
+    assert repair_view.repair_count == 1
+    assert repair_view.error_code == "AGENT_PROTOCOL_XML"
+    assert repair_view.validation_reason == "Model candidate is not one complete XML document"
+    assert repair_view.candidate_digest == failure["candidate_digest"]
+    assert repair_view.invalid_candidate == "not xml"
 
     repair_plan, repair_attempt = await _prepare_repair_dispatched(
         agent,

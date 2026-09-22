@@ -24,7 +24,9 @@ from forest.agent_protocol import (
     CORE_PROMPT_SHA256,
     PARSER_REVISION,
     PROTOCOL_ID,
+    PROTOCOL_REPAIR_PROMPT,
     PROTOCOL_VERSION,
+    ProtocolRepairView,
     compose_core_instructions,
     preset_message,
 )
@@ -755,6 +757,7 @@ def prepare_model_request(
     preset_context: Sequence[str] = (), tools: Sequence[dict] = (),
     media: Mapping[str | tuple[str, str], MediaSnapshot] | None = None,
     output_tokens: int = 1024, stream: bool = True, evidence: dict | None = None,
+    repair_view: ProtocolRepairView | None = None,
 ) -> PreparedModelRequest:
     """Serialize a Context-owned immutable ModelView without trimming it.
 
@@ -784,21 +787,84 @@ def prepare_model_request(
             or sum(len(item.encode("utf-8")) for item in preset_context) > 32768):
         raise _error("MODEL_PRESET_INVALID", "PresetContext must contain bounded system messages")
     preset_context = tuple(preset_context)
-    repair = snapshot.get("protocol_repair")
-    if repair is not None and (
-        not isinstance(repair, dict)
-        or set(repair) != {
-            "repair_count", "error_code", "validation_reason", "candidate_digest", "feedback"
+    if repair_view is not None and type(repair_view) is not ProtocolRepairView:
+        raise _error("MODEL_REPAIR_INVALID", "Protocol repair requires an Agent-owned repair view")
+    declarations = _tools(tools, capabilities)
+    if repair_view is not None:
+        if preset_context or media or evidence is not None or snapshot.get("units"):
+            raise _error(
+                "MODEL_REPAIR_SCOPE_INVALID",
+                "Protocol repair cannot contain Preset, Context, Memory, or media",
+            )
+        repair_message = repair_view.render(declarations)
+        messages = [{"role": capabilities.system_role, "content": repair_message}]
+        body = {
+            "model": capabilities.model,
+            "messages": messages,
+            "stream": stream,
+            capabilities.output_token_parameter: output_tokens,
+            "n": 1,
         }
-        or type(repair["repair_count"]) is not int
-        or not 1 <= repair["repair_count"] <= 1
-        or any(not isinstance(repair[key], str) for key in (
-            "error_code", "validation_reason", "candidate_digest", "feedback"
-        ))
-        or len(repair["validation_reason"].encode("utf-8")) > 4096
-        or len(repair["feedback"].encode("utf-8")) > 32768
-    ):
-        raise _error("MODEL_REPAIR_INVALID", "Protocol repair feedback is not a bounded host record")
+        if stream and capabilities.stream_usage:
+            body["stream_options"] = {"include_usage": True}
+        encoded = _encode(body)
+        cut_names = (
+            "input_revision",
+            "context_revision",
+            "context_view_revision",
+            "selected_input_end_seq",
+            "trigger_ids",
+            "input_batch_ids",
+        )
+        semantic = [message.copy() for message in messages]
+        manifest = {
+            "request_id": request_id,
+            **{
+                name: snapshot[name]
+                for name in ("bot_id", "run_id", "logical_step_id", *cut_names)
+            },
+            "actual_deployment_id": capabilities.deployment_id,
+            "model": capabilities.model,
+            "model_revision": capabilities.model_revision,
+            "capability_snapshot": capabilities.as_dict(),
+            "capability_revision": capabilities.capability_revision,
+            "projection_version": PROJECTION_REVISION,
+            "serializer_revision": SERIALIZER_REVISION,
+            "agent_protocol": {
+                "protocol_id": PROTOCOL_ID,
+                "protocol_version": PROTOCOL_VERSION,
+                "parser_revision": PARSER_REVISION,
+                "core_role": capabilities.system_role,
+                "repair_count": repair_view.repair_count,
+                "repair_candidate_digest": repair_view.candidate_digest,
+                "repair_prompt_digest": "sha256:"
+                + hashlib.sha256(PROTOCOL_REPAIR_PROMPT.encode("utf-8")).hexdigest(),
+                "preset_context_digest": digest_json([]),
+                "preset_message_count": 0,
+            },
+            "source_cut_digest": digest_json({name: snapshot[name] for name in cut_names}),
+            "input_digest": digest_json(snapshot),
+            "source_manifest": [],
+            "included_part_refs": [],
+            "omitted_part_refs": [],
+            "omitted_unit_ids": [],
+            "media_transform_refs": [],
+            "projected_units": semantic,
+            "projected_content_digest": digest_json(semantic),
+            "tool_names": [tool["function"]["name"] for tool in declarations],
+            "tool_contract_digest": digest_json(declarations),
+        }
+        result = PreparedModelRequest(
+            request_id,
+            transport_attempt_id,
+            encoded,
+            _encode(manifest).decode(),
+            "sha256:" + hashlib.sha256(encoded).hexdigest(),
+            output_tokens,
+            stream,
+        )
+        result.verify()
+        return result
     units = _canonical_units(snapshot)
     memory_reference, memory_units = None, []
     if evidence is not None:
@@ -807,7 +873,6 @@ def prepare_model_request(
         for unit in memory_units:
             validator.validate_memory_parts(unit)
     grouped = _groups(units, capabilities)
-    declarations = _tools(tools, capabilities)
     required = set(snapshot.get("required_unit_ids", [unit["unit_id"] for unit in units]))
     if not required.issubset({unit["unit_id"] for unit in units}):
         raise _error("MODEL_INPUT_INVALID", "Required source unit is absent from the frozen input")
@@ -818,26 +883,6 @@ def prepare_model_request(
         {"role": capabilities.system_role, "content": preset_message(index, item)}
         for index, item in enumerate(preset_context)
     )
-    if repair is not None:
-        repair_record = _Projection.text({
-            "host_control": "forest_protocol_repair",
-            "repair_count": repair["repair_count"],
-            "error_code": repair["error_code"],
-            "validation_reason": repair["validation_reason"],
-            "candidate_digest": repair["candidate_digest"],
-            "instruction": (
-                "Produce one complete replacement now. Return exactly one "
-                "<valid_agent_protocol_content_block block_type=\"ModelTurn\"> root and "
-                "nothing before or after it. Use literal <payload><blocks> containers; never "
-                "use generic <parameter> wrappers. If requesting a tool, FunctionCall must be "
-                "the final retained block."
-            ),
-            "invalid_candidate_excerpt": repair["feedback"],
-        })
-        messages.append({
-            "role": capabilities.system_role,
-            "content": repair_record["text"],
-        })
     semantic = [message.copy() for message in messages]
     prefix_length = len(messages)
     for group in grouped:
@@ -905,7 +950,7 @@ def prepare_model_request(
                            "core_role": capabilities.system_role,
                            "preset_context_digest": digest_json(list(preset_context)),
                            "preset_message_count": len(preset_context),
-                           "repair_count": repair["repair_count"] if repair else 0},
+                           "repair_count": 0},
         "evidence_renderer_revision": "typed-source-json-v1",
         "source_cut_digest": digest_json({name: snapshot[name] for name in (
             "input_revision", "context_revision", "context_view_revision", "selected_input_end_seq",

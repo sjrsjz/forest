@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from forest.agent_protocol import ModelTurn, parse_model_turn
+from forest.agent_protocol import ModelTurn, ProtocolRepairView, parse_model_turn
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.agent_runtime_authority import (
@@ -543,6 +543,7 @@ class DurableAgentModelExecutor:
         stream: bool = True,
         request_kind: str = "PRIMARY",
         repair_of_request_id: str | None = None,
+        repair_view: ProtocolRepairView | None = None,
         allow_protocol_repair: bool = True,
         repair_feedback_byte_limit: int = 8192,
     ) -> AgentModelStepResult:
@@ -565,6 +566,12 @@ class DurableAgentModelExecutor:
                 "Model snapshot differs from the durable Agent input fence",
                 409,
             )
+        if (request_kind == "REPAIR") is not (type(repair_view) is ProtocolRepairView):
+            raise ForestError(
+                "AGENT_PROTOCOL_REPAIR_BOUNDARY_INVALID",
+                "Repair request kind and Agent-owned repair view differ",
+                409,
+            )
         bound = await self.provider.prepare_request(
             snapshot,
             request_id=step.request_id,
@@ -575,6 +582,7 @@ class DurableAgentModelExecutor:
             evidence=evidence,
             output_tokens=output_tokens,
             stream=stream,
+            repair_view=repair_view,
         )
         manifest = bound.prepared.manifest
         projection = await self._payload(

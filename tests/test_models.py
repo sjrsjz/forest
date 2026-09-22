@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from forest.agent_protocol import ProtocolRepairView
 from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
 from forest.errors import ForestError
 from forest.models import (
@@ -123,33 +124,42 @@ def test_group_authors_and_literal_data_are_preserved_without_role_forgery():
     assert result.manifest["trigger_ids"] == value["trigger_ids"]
 
 
-def test_protocol_repair_is_one_host_system_record_over_the_same_frozen_input():
-    value = snapshot(unit(text="keep the original user input"))
-    value["protocol_repair"] = {
-        "repair_count": 1,
-        "error_code": "AGENT_PROTOCOL_XML",
-        "validation_reason": "Model candidate is not one complete XML document",
-        "candidate_digest": "sha256:" + "a" * 64,
-        "feedback": "invalid candidate excerpt",
-    }
-    result = prepared(value, stream=False)
-    body = json.loads(result.body)
-    repair_messages = [
-        item
-        for item in body["messages"]
-        if item["role"] == "system"
-        and "forest_protocol_repair" in json.dumps(item["content"], ensure_ascii=False)
-    ]
-    assert len(repair_messages) == 1
-    assert isinstance(repair_messages[0]["content"], str)
-    assert json.loads(repair_messages[0]["content"])["host_control"] == (
-        "forest_protocol_repair"
+def test_protocol_repair_projection_contains_only_the_durable_invalid_candidate():
+    value = snapshot()
+    value["units"] = []
+    repair = ProtocolRepairView(
+        repair_count=1,
+        error_code="AGENT_PROTOCOL_XML",
+        validation_reason="Model candidate is not one complete XML document",
+        candidate_digest="sha256:" + "a" * 64,
+        invalid_candidate="invalid candidate excerpt",
     )
-    assert "literal <payload><blocks>" in repair_messages[0]["content"]
+    result = prepared(value, stream=False, repair_view=repair)
+    body = json.loads(result.body)
+    assert len(body["messages"]) == 1
+    content = body["messages"][0]["content"]
+    assert "<forest_protocol_repair" in content
+    assert "invalid candidate excerpt" in content
+    assert "Rewrite that candidate only" in content
     assert result.manifest["agent_protocol"]["repair_count"] == 1
     assert result.manifest["trigger_ids"] == value["trigger_ids"]
     assert result.manifest["input_revision"] == value["input_revision"]
-    assert "keep the original user input" in result.body.decode()
+    assert result.manifest["source_manifest"] == []
+    assert result.manifest["included_part_refs"] == []
+    assert "keep the original user input" not in result.body.decode()
+
+
+def test_protocol_repair_rejects_normal_agent_inputs():
+    repair = ProtocolRepairView(
+        1,
+        "AGENT_PROTOCOL_XML",
+        "invalid XML",
+        "sha256:" + "a" * 64,
+        "not xml",
+    )
+    with pytest.raises(ForestError) as caught:
+        prepared(snapshot(unit(text="conversation data")), repair_view=repair)
+    assert caught.value.code == "MODEL_REPAIR_SCOPE_INVALID"
 
 
 def test_text_projection_omits_images_media_wrappers_and_nested_images_without_mutating_facts():

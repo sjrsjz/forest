@@ -248,6 +248,7 @@ class CleanChatCompletionsProviderRuntime:
         output_tokens: int = 1024,
         stream: bool = True,
         evidence: dict | None = None,
+        repair_view=None,
     ) -> BoundProviderRequest:
         if self.capabilities is None or self.capability_digest is None:
             raise ForestError(
@@ -266,6 +267,7 @@ class CleanChatCompletionsProviderRuntime:
             output_tokens=output_tokens,
             stream=stream,
             evidence=evidence,
+            repair_view=repair_view,
         )
         identity = self.generation_identity
         return BoundProviderRequest(
