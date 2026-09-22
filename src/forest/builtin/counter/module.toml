@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.counter"
-version = "0.2.0"
+version = "0.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "counter:Counter"
@@ -17,7 +17,30 @@ entrypoint = "ui/index.html"
 protocol = "forest.management-ui/1"
 
 [components.capabilities]
-requests = ["state.read", "state.write"]
+requests = ["domain.query:counter.current", "domain.command:counter.set"]
+
+[components.storage]
+schema_id = "forest.counter"
+schema_version = "1.0.0"
+baseline = "schema/counter.sql"
+baseline_sha256 = "63d3d2e8bbbd35da6cd826c892943f99a76f78c47cca8484854717d08512d1f6"
+scope = "bot"
+repository_contract = "forest.counter.repository/1"
+execution_profile = "official"
+
+[[components.domain_queries]]
+name = "counter.current"
+contract = "1.0"
+function = "counter_current"
+input_schema = "schemas/domain-current-input.json"
+output_schema = "schemas/domain-current-output.json"
+
+[[components.domain_commands]]
+name = "counter.set"
+contract = "1.0"
+function = "counter_set"
+input_schema = "schemas/domain-set-input.json"
+output_schema = "schemas/domain-set-output.json"
 
 [[components.provides]]
 name = "counter.increment"

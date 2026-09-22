@@ -20,6 +20,7 @@ _PACKAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KERNEL_SCHEMA = "forest_kernel"
 _KERNEL_RELATIONS = frozenset({"bot_identity", "schema_bundles"})
 _LOCK_DOMAIN = b"forest.schema-bundle/1\0"
+_MODULE_SCHEMA_TOKEN = "__forest_module_schema__"
 
 
 def _lock_key(bot_id: str, schema_id: str) -> int:
@@ -155,7 +156,11 @@ class SchemaBundleInstaller:
                             sql.Identifier(spec.namespace)
                         )
                     )
-                    await conn.execute(source)
+                    rendered = source.replace(
+                        _MODULE_SCHEMA_TOKEN,
+                        sql.Identifier(spec.namespace).as_string(conn),
+                    )
+                    await conn.execute(rendered)
                     count = await self._owned_object_count(conn, spec.namespace)
                     if count == 0:
                         raise ForestError(

@@ -22,6 +22,8 @@ from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_capabilities import (
     PackageCallScope,
+    PackageDomainCommands,
+    PackageDomainQueries,
     PackageJobCallScope,
     PackageServiceError,
     PackageServiceOperationLedger,
@@ -121,6 +123,8 @@ class PackageGenerationAdapter:
         generation_member_verifier: GenerationVerifier,
         state_queries: PackageStateQueries | None,
         state_commands: PackageStateCommands | None,
+        domain_queries: PackageDomainQueries | None = None,
+        domain_commands: PackageDomainCommands | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
         effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -140,6 +144,8 @@ class PackageGenerationAdapter:
         self._generation_member_verifier = generation_member_verifier
         self._state_queries = state_queries
         self._state_commands = state_commands
+        self._domain_queries = domain_queries
+        self._domain_commands = domain_commands
         self._service_operation_ledger = service_operation_ledger
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
@@ -162,6 +168,8 @@ class PackageGenerationAdapter:
             for item in (
                 *self.component.get("provides", ()),
                 *self.component.get("effect_services", ()),
+                *self.component.get("domain_queries", ()),
+                *self.component.get("domain_commands", ()),
                 *self.component.get("job_types", ()),
             )
         }
@@ -186,6 +194,7 @@ class PackageGenerationAdapter:
         )
         self._durable_service_results = any(
             item == "state.write"
+            or item.startswith("domain.command:")
             or item.startswith("event.publish:")
             or item.startswith("job.schedule:")
             or item.startswith("service.call:")
@@ -241,6 +250,19 @@ class PackageGenerationAdapter:
             "protocol": "forest.runtime-services/1",
             "services": services,
             "requires": requirements,
+            "domain_ports": [
+                {
+                    "kind": kind,
+                    "name": item["name"],
+                    "version": _major(item["contract"]),
+                    "function": item["function"],
+                }
+                for kind, declarations in (
+                    ("query", self.component.get("domain_queries", ())),
+                    ("command", self.component.get("domain_commands", ())),
+                )
+                for item in declarations
+            ],
         }
         self.state_schema = self.component["state_schema"]
         state_schema_ref = self.component.get("state_value_schema")
@@ -752,6 +774,97 @@ class PackageGenerationAdapter:
             causal_root_id=scope.causal_root_id,
         )
 
+    async def _domain_query_gateway(
+        self, identity: WorkerIdentity, call_id: str, request: dict
+    ) -> Any:
+        return await self._domain_gateway("query", identity, call_id, request)
+
+    async def _domain_command_gateway(
+        self, identity: WorkerIdentity, call_id: str, request: dict
+    ) -> Any:
+        return await self._domain_gateway("command", identity, call_id, request)
+
+    async def _domain_gateway(
+        self,
+        kind: str,
+        identity: WorkerIdentity,
+        parent_call_id: str,
+        request: dict,
+    ) -> Any:
+        outer = self._call_scope(identity, parent_call_id)
+        declarations = self.component.get(
+            "domain_queries" if kind == "query" else "domain_commands", ()
+        )
+        declaration = next(
+            (item for item in declarations if item["name"] == request["name"]), None
+        )
+        capability = f"domain.{kind}:{request['name']}"
+        if (
+            declaration is None
+            or request["contract_major"] != _major(declaration["contract"])
+            or not self._has_capability(capability)
+        ):
+            raise ForestError(
+                "CAPABILITY_DENIED",
+                "Worker requested an undeclared domain authority capability",
+                403,
+            )
+        payload = request["payload"]
+        if not isinstance(payload, dict):
+            raise ForestError(
+                "DOMAIN_INPUT_INVALID", "Domain authority payload must be an object", 422
+            )
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not input_validator.is_valid(payload):
+            raise ForestError(
+                "DOMAIN_INPUT_INVALID",
+                "Domain authority payload violates its immutable schema",
+                422,
+            )
+        timeout = self._worker.remaining_timeout(parent_call_id, request["timeout"])
+        operation_id = (
+            request["operation_id"] if kind == "command" else outer.call_operation_id
+        )
+        scope = PackageCallScope(
+            bot_id=outer.bot_id,
+            component_id=outer.component_id,
+            generation_id=outer.generation_id,
+            instance_id=outer.instance_id,
+            worker_incarnation=outer.worker_incarnation,
+            call_id="call:" + uuid4().hex,
+            call_operation_id=operation_id,
+            causal_root_kind=outer.causal_root_kind,
+            causal_root_id=outer.causal_root_id,
+        )
+        authority = self._domain_queries if kind == "query" else self._domain_commands
+        if authority is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "Domain authority port is unavailable", 503
+            )
+        if kind == "query":
+            result = await authority.invoke_query(
+                scope,
+                declaration,
+                payload,
+                parent_call_id=parent_call_id,
+                timeout_seconds=timeout,
+            )
+        else:
+            result = await authority.invoke_command(
+                scope,
+                declaration,
+                payload,
+                parent_call_id=parent_call_id,
+                timeout_seconds=timeout,
+            )
+        if not output_validator.is_valid(result):
+            raise ForestError(
+                "DOMAIN_OUTPUT_INVALID",
+                "Domain authority result violates its immutable schema",
+                502,
+            )
+        return result
+
     async def _invoke_local_effect(
         self,
         identity: WorkerIdentity,
@@ -1041,6 +1154,8 @@ class PackageGenerationAdapter:
             self._state_gateway,
             limits=_worker_limits(self.component),
             service_handler=self._service_gateway,
+            domain_query_handler=self._domain_query_gateway,
+            domain_command_handler=self._domain_command_gateway,
             event_handler=self._event_gateway,
             job_handler=self._job_gateway,
         )
@@ -1192,6 +1307,8 @@ def package_runtime_descriptor(
     generation_member_verifier: GenerationVerifier,
     state_queries: PackageStateQueries | None,
     state_commands: PackageStateCommands | None,
+    domain_queries: PackageDomainQueries | None = None,
+    domain_commands: PackageDomainCommands | None = None,
     service_operation_ledger: PackageServiceOperationLedger,
     configuration_validator: Callable[[object], Any] | None = None,
     effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -1205,6 +1322,15 @@ def package_runtime_descriptor(
 
     snapshot.verify()
     component = snapshot.component
+    if (
+        component.get("storage", {}).get("execution_profile") == "official"
+        and trust_level != "official"
+    ):
+        raise ForestError(
+            "PACKAGE_STORAGE_TRUST_REQUIRED",
+            "Official storage execution requires an official package trust binding",
+            403,
+        )
     effect_driver_factories = dict(effect_driver_factories or {})
     declared_effect_services = {
         item["name"]
@@ -1237,6 +1363,14 @@ def package_runtime_descriptor(
             ("state.write", state_commands is not None),
         )
         if installed
+    ) | frozenset(
+        f"domain.query:{item['name']}"
+        for item in component.get("domain_queries", ())
+        if domain_queries is not None
+    ) | frozenset(
+        f"domain.command:{item['name']}"
+        for item in component.get("domain_commands", ())
+        if domain_commands is not None
     )
     unsupported = gateway_capabilities - installed_capabilities
     if unsupported:
@@ -1333,6 +1467,8 @@ def package_runtime_descriptor(
             generation_member_verifier=generation_member_verifier,
             state_queries=state_queries,
             state_commands=state_commands,
+            domain_queries=domain_queries,
+            domain_commands=domain_commands,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,
             effect_driver_factories=effect_driver_factories,

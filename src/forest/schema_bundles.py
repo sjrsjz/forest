@@ -112,9 +112,9 @@ def validate_official_storage_baseline(source: bytes, expected_sha256: str) -> s
 
     Official modules require triggers, functions and ALTER statements to keep
     their database invariants. This profile is an integrity check rather than a
-    SQL sandbox: the same signed distribution already executes trusted Python in
-    the host process. Runtime admission prevents installed packages from
-    selecting this profile.
+    SQL sandbox: this profile is restricted to storage bytes shipped by the
+    trusted Forest distribution. Runtime admission prevents installed packages
+    from selecting it; package Python still executes only inside its Worker.
     """
 
     sql = _verified_source(source, expected_sha256, MAX_OFFICIAL_STORAGE_BASELINE_BYTES)

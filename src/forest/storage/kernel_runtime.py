@@ -675,6 +675,38 @@ class KernelRuntimeRepository:
     ) -> RuntimeGenerationGraph:
         """Fence already-owned work to the current graph while admissions are frozen."""
 
+        return await self._verify_generation_member_in(
+            conn,
+            component_id=component_id,
+            generation_id=generation_id,
+            lock=True,
+        )
+
+    async def verify_generation_member_snapshot_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+    ) -> RuntimeGenerationGraph:
+        """Verify membership in a caller-owned repeatable-read, read-only snapshot."""
+
+        return await self._verify_generation_member_in(
+            conn,
+            component_id=component_id,
+            generation_id=generation_id,
+            lock=False,
+        )
+
+    async def _verify_generation_member_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+        lock: bool,
+    ) -> RuntimeGenerationGraph:
+
         if (
             not isinstance(component_id, str)
             or _IDENTIFIER.fullmatch(component_id) is None
@@ -687,7 +719,8 @@ class KernelRuntimeRepository:
                 "Generation member fence identity is invalid",
                 422,
             )
-        await self._identity_in(conn)
+        await self._identity_in(conn, lock=lock)
+        lock_clause = sql.SQL("FOR SHARE OF s,h,rg,gm,g" if lock else "")
         row = await (
             await conn.execute(
                 sql.SQL(
@@ -699,13 +732,14 @@ class KernelRuntimeRepository:
                     "JOIN {} g ON g.bot_id=gm.bot_id AND g.generation_id=gm.generation_id "
                     "AND g.component_id=gm.component_id WHERE s.bot_id=%s "
                     "AND gm.component_id=%s AND gm.generation_id=%s "
-                    "FOR SHARE OF s,h,rg,gm,g"
+                    "{}"
                 ).format(
                     self._table("runtime_state"),
                     self._table("runtime_graph_head"),
                     self._table("runtime_graphs"),
                     self._table("runtime_graph_modules"),
                     self._table("generations"),
+                    lock_clause,
                 ),
                 (self.store.bot_id, component_id, generation_id),
             )
@@ -1289,10 +1323,11 @@ class KernelRuntimeRepository:
                     (self.store.bot_id, graph.graph_id),
                 )
 
-    async def _identity_in(self, conn) -> None:
+    async def _identity_in(self, conn, *, lock: bool = True) -> None:
+        lock_clause = " FOR SHARE" if lock else ""
         row = await (
             await conn.execute(
-                "SELECT bot_id FROM forest_kernel.bot_identity WHERE singleton FOR SHARE"
+                "SELECT bot_id FROM forest_kernel.bot_identity WHERE singleton" + lock_clause
             )
         ).fetchone()
         if row is None or row["bot_id"] != self.store.bot_id:

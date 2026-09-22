@@ -764,7 +764,7 @@ async def test_component_state_separates_queries_from_revision_checked_commands(
 
 
 @pytest.mark.postgres
-async def test_builtin_package_state_runs_only_through_kernel_gateway(
+async def test_builtin_package_domain_state_runs_only_through_declared_authority(
     clean_authority,
     tmp_path,
 ):
@@ -841,6 +841,25 @@ async def test_builtin_package_state_runs_only_through_kernel_gateway(
         assert second == {"value": 4, "revision": 2, "label": "计数"}
         assert replay == first
         assert third == {"value": 6, "revision": 3, "label": "计数"}
+        async with store.pool.connection() as conn:
+            domain_row = await (
+                await conn.execute(
+                    sql.SQL("SELECT value,revision FROM {}.counter_values").format(
+                        sql.Identifier(counter.descriptor.storage.spec.namespace)
+                    )
+                )
+            ).fetchone()
+            generic_state = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS count FROM {}.state_heads "
+                        "WHERE bot_id=%s AND component_id=%s"
+                    ).format(sql.Identifier(kernel.runtime.namespace)),
+                    (store.bot_id, "forest.counter"),
+                )
+            ).fetchone()
+        assert dict(domain_row) == {"value": 6, "revision": 3}
+        assert generic_state["count"] == 0
     finally:
         assert await registry.close() == []
 

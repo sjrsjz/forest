@@ -97,6 +97,7 @@ StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
 ServiceHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 EventHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 JobHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+DomainHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 
 
 class PythonWorker:
@@ -109,6 +110,8 @@ class PythonWorker:
         limits: WorkerLimits | None = None,
         python_executable: str = sys.executable,
         service_handler: ServiceHandler | None = None,
+        domain_query_handler: DomainHandler | None = None,
+        domain_command_handler: DomainHandler | None = None,
         event_handler: EventHandler | None = None,
         job_handler: JobHandler | None = None,
     ):
@@ -116,6 +119,8 @@ class PythonWorker:
         self.identity = identity
         self.state_handler = state_handler
         self.service_handler = service_handler
+        self.domain_query_handler = domain_query_handler
+        self.domain_command_handler = domain_command_handler
         self.event_handler = event_handler
         self.job_handler = job_handler
         self.limits = limits or WorkerLimits()
@@ -436,7 +441,14 @@ class PythonWorker:
                                 details=_error_details(error),
                             )
                         )
-                elif message.get("kind") in {"state", "service", "event", "job"}:
+                elif message.get("kind") in {
+                    "state",
+                    "service",
+                    "domain_query",
+                    "domain_command",
+                    "event",
+                    "job",
+                }:
                     request_id = message.get("id")
                     if (
                         not isinstance(request_id, str)
@@ -524,6 +536,38 @@ class PythonWorker:
                 if self.service_handler is None:
                     raise ForestError("CAPABILITY_DENIED", "No service gateway is available", 403)
                 value = await self.service_handler(self.identity, call_id, payload)
+            elif kind == "domain_query":
+                expected = {"name", "payload", "contract_major", "timeout"}
+                if not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "DOMAIN_QUERY_REQUEST_INVALID",
+                        "Domain query request contains unsupported fields",
+                        422,
+                    )
+                if self.domain_query_handler is None:
+                    raise ForestError(
+                        "CAPABILITY_DENIED", "No domain query gateway is available", 403
+                    )
+                value = await self.domain_query_handler(self.identity, call_id, payload)
+            elif kind == "domain_command":
+                expected = {
+                    "name",
+                    "payload",
+                    "contract_major",
+                    "operation_id",
+                    "timeout",
+                }
+                if not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "DOMAIN_COMMAND_REQUEST_INVALID",
+                        "Domain command request contains unsupported fields",
+                        422,
+                    )
+                if self.domain_command_handler is None:
+                    raise ForestError(
+                        "CAPABILITY_DENIED", "No domain command gateway is available", 403
+                    )
+                value = await self.domain_command_handler(self.identity, call_id, payload)
             elif kind == "event":
                 expected = {"topic", "payload", "contract", "operation_id"}
                 if not isinstance(payload, dict) or payload.keys() != expected:
@@ -591,6 +635,10 @@ class PythonWorker:
                             if kind == "state"
                             else "SERVICE_RESULT_INVALID"
                             if kind == "service"
+                            else "DOMAIN_QUERY_RESULT_INVALID"
+                            if kind == "domain_query"
+                            else "DOMAIN_COMMAND_RESULT_INVALID"
+                            if kind == "domain_command"
                             else "EVENT_RESULT_INVALID"
                             if kind == "event"
                             else "JOB_RESULT_INVALID"

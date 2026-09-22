@@ -40,6 +40,7 @@ from forest.plugin_declarations import synthesize_manifest, verify_checksums, wi
 from forest.schema_bundles import (
     MAX_STORAGE_BASELINE_BYTES,
     StorageBundleSpec,
+    validate_official_storage_baseline,
     validate_storage_baseline,
 )
 from forest.security import private_directory
@@ -54,6 +55,7 @@ MAX_PACKAGE_ENTRIES = 4096
 MAX_PACKAGE_DEPTH = 32
 MAX_MANAGEMENT_UI_BYTES = 256 * 1024
 IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
+SQL_FUNCTION = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
 MANIFEST_SCHEMA = {
@@ -212,6 +214,34 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    **{
+                        kind: {
+                            "type": "array",
+                            "maxItems": 64,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "name",
+                                    "contract",
+                                    "function",
+                                    "input_schema",
+                                    "output_schema",
+                                ],
+                                "properties": {
+                                    key: {"type": "string"}
+                                    for key in (
+                                        "name",
+                                        "contract",
+                                        "function",
+                                        "input_schema",
+                                        "output_schema",
+                                    )
+                                },
+                            },
+                        }
+                        for kind in ("domain_queries", "domain_commands")
+                    },
                     "job_types": {
                         "type": "array",
                         "maxItems": 32,
@@ -294,6 +324,9 @@ MANIFEST_SCHEMA = {
                             "baseline_sha256": {"type": "string"},
                             "scope": {"const": "bot"},
                             "repository_contract": {"type": "string"},
+                            "execution_profile": {
+                                "enum": ["declarative", "official"]
+                            },
                         },
                     },
                     "publishes": {
@@ -688,7 +721,11 @@ def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
         declaration["baseline_sha256"],
         declaration["repository_contract"],
     )
-    validate_storage_baseline(content, spec.baseline_sha256)
+    execution_profile = declaration.get("execution_profile", "declarative")
+    if execution_profile == "official":
+        validate_official_storage_baseline(content, spec.baseline_sha256)
+    else:
+        validate_storage_baseline(content, spec.baseline_sha256)
     return {
         "schema_id": spec.schema_id,
         "schema_version": spec.schema_version,
@@ -697,6 +734,7 @@ def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
         "baseline_sha256": spec.baseline_sha256,
         "scope": declaration["scope"],
         "repository_contract": spec.repository_contract,
+        "execution_profile": execution_profile,
         "bytes": len(content),
     }
 
@@ -773,6 +811,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _storage_bundle(files, component)
     services = component.get("provides", [])
     effect_services = component.get("effect_services", [])
+    domain_queries = component.get("domain_queries", [])
+    domain_commands = component.get("domain_commands", [])
     job_types = component.get("job_types", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
@@ -797,7 +837,13 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "Declare at least one service, subscription, job, command, or message handler",
         )
     names = set()
-    for service in (*services, *effect_services, *job_types):
+    for service in (
+        *services,
+        *effect_services,
+        *domain_queries,
+        *domain_commands,
+        *job_types,
+    ):
         name = service.get("name", "")
         if not IDENTIFIER.fullmatch(name) or name in names:
             _fail("INVALID_SERVICES", "Service names must be valid and unique")
@@ -812,6 +858,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
             service.get("kind", "")
         ):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
+        if service in (*domain_queries, *domain_commands) and not SQL_FUNCTION.fullmatch(
+            service.get("function", "")
+        ):
+            _fail(
+                "INVALID_DOMAIN_AUTHORITY",
+                "Domain authority functions must be portable unqualified SQL identifiers",
+            )
+    if (domain_queries or domain_commands) and component.get("storage") is None:
+        _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority ports require package storage")
+    functions = [item["function"] for item in (*domain_queries, *domain_commands)]
+    if len(functions) != len(set(functions)):
+        _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
     contributed_job_types = set()
     contributed_job_handlers = set()
     for definition in job_types:
@@ -907,6 +965,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
     allowed_capabilities = {"state.read", "state.write"} | {
         "service.call:" + name
         for name in dependency_names | {item["name"] for item in effect_services}
+    } | {
+        "domain.query:" + item["name"] for item in domain_queries
+    } | {
+        "domain.command:" + item["name"] for item in domain_commands
     } | {"event.publish:" + topic for topic in published_topics} | {
         "job.schedule:" + handler_id for handler_id in job_ids
     }

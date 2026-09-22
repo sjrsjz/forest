@@ -49,6 +49,27 @@ class Configuration:
         )
 
 
+def test_installed_package_cannot_enable_official_domain_storage(tmp_path):
+    source = Path(__file__).parents[1] / "src/forest/builtin/counter"
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    with pytest.raises(ForestError) as caught:
+        package_runtime_descriptor(
+            snapshot,
+            bot_id="bot-package-runtime",
+            module_configuration=Configuration(),
+            grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+            resolved_contracts={},
+            startup_components=(),
+            generation_verifier=lambda **_values: None,
+            generation_member_verifier=lambda **_values: None,
+            state_queries=None,
+            state_commands=None,
+            service_operation_ledger=NoServiceLedger(),
+            trust_level="installed",
+        )
+    assert caught.value.code == "PACKAGE_STORAGE_TRUST_REQUIRED"
+
+
 async def test_package_generation_uses_isolated_worker_and_explicit_reload_states(tmp_path):
     source = Path(__file__).parents[1] / "src/forest/builtin/trigger_policy"
     snapshot = PackageCatalog(tmp_path / "catalog").build(source)

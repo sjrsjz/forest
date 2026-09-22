@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from forest.clean_management_contract import CleanModuleConfigurationContract
+from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_effects import (
     EMPTY_PACKAGE_EFFECT_DRIVERS,
     PackageEffectDriverRegistry,
@@ -145,6 +146,23 @@ async def bootstrap_builtin_package(
     effect_driver_factories = effect_driver_registry.resolve(
         tuple(snapshot.component.get("effect_services", ()))
     )
+    has_domain_authority = bool(
+        snapshot.component.get("domain_queries")
+        or snapshot.component.get("domain_commands")
+    )
+    domain_authority = (
+        PostgresPackageDomainAuthority(
+            store,
+            kernel.runtime,
+            component_id=component_id,
+            runtime_package_digest=snapshot.digest,
+            storage_spec=storage.spec,
+            storage_package_digest=storage.package_digest,
+            storage_execution_profile=storage.execution_profile,
+        )
+        if has_domain_authority
+        else None
+    )
     packaged_ui = snapshot.management_ui()
     if packaged_ui is None:
         management = (configuration_management_contribution(component_id),)
@@ -188,6 +206,8 @@ async def bootstrap_builtin_package(
             kernel.runtime,
             kernel.payload,
         ),
+        domain_queries=domain_authority,
+        domain_commands=domain_authority,
         service_operation_ledger=KernelPackageServiceOperationLedger(
             kernel.runtime,
             kernel.payload,

@@ -68,6 +68,31 @@ class PackageStateCommands(Protocol):
         operation_id: str,
     ) -> dict: ...
 
+
+class PackageDomainQueries(Protocol):
+    async def invoke_query(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
+
+class PackageDomainCommands(Protocol):
+    async def invoke_command(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
+
 class PackageServiceOperationLedger(Protocol):
     async def begin(
         self,

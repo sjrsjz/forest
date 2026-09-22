@@ -737,6 +737,85 @@ class ServicesHandle:
         )
 
 
+class DomainQueriesHandle:
+    def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
+        self._rpc = rpc
+        self._scope = scope
+
+    async def call(
+        self,
+        query: str,
+        payload: Any,
+        *,
+        contract_major: int = 1,
+        timeout: float | None = None,
+    ) -> Any:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No domain query gateway is available", 403)
+        _validate_domain_request(query, contract_major, timeout)
+        return await self._rpc(
+            scope.call_id,
+            {
+                "name": query,
+                "payload": payload,
+                "contract_major": contract_major,
+                "timeout": timeout,
+            },
+        )
+
+
+class DomainCommandsHandle:
+    def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
+        self._rpc = rpc
+        self._scope = scope
+
+    async def call(
+        self,
+        command: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        contract_major: int = 1,
+        timeout: float | None = None,
+    ) -> Any:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No domain command gateway is available", 403)
+        _validate_domain_request(command, contract_major, timeout)
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ForestError(
+                "INVALID_DOMAIN_COMMAND", "A stable domain operation ID is required", 422
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "name": command,
+                "payload": payload,
+                "contract_major": contract_major,
+                "operation_id": operation_id,
+                "timeout": timeout,
+            },
+        )
+
+
+def _validate_domain_request(name: str, contract_major: int, timeout: float | None) -> None:
+    if not isinstance(name, str) or not 1 <= len(name) <= 128:
+        raise ForestError("INVALID_DOMAIN_REQUEST", "A bounded domain port name is required", 422)
+    if type(contract_major) is not int or contract_major < 1:
+        raise ForestError(
+            "INVALID_DOMAIN_REQUEST", "Domain contract major must be a positive integer", 422
+        )
+    if timeout is not None and (
+        type(timeout) not in {int, float} or not 0 < timeout <= 86_400
+    ):
+        raise ForestError(
+            "INVALID_DOMAIN_REQUEST",
+            "Domain timeout must be greater than zero and at most 86400 seconds",
+            422,
+        )
+
+
 class EventsHandle:
     def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
         self._rpc = rpc
@@ -830,6 +909,8 @@ class PluginContext:
         task_owner: OwnedTasks | None = None,
         resource_owner: OwnedResources | None = None,
         service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        domain_query_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        domain_command_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         job_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         identity: Mapping | None = None,
@@ -839,6 +920,8 @@ class PluginContext:
         self._scope = scope
         self._rpc = rpc
         self._service_rpc = service_rpc
+        self._domain_query_rpc = domain_query_rpc
+        self._domain_command_rpc = domain_command_rpc
         self._event_rpc = event_rpc
         self._job_rpc = job_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
@@ -850,6 +933,8 @@ class PluginContext:
         self.resources = ResourcesHandle(self._resource_owner, scope)
         self.operations = OperationsHandle(scope)
         self.services = ServicesHandle(service_rpc, scope)
+        self.queries = DomainQueriesHandle(domain_query_rpc, scope)
+        self.commands = DomainCommandsHandle(domain_command_rpc, scope)
         self.events = EventsHandle(event_rpc, scope)
         self.jobs = JobsHandle(job_rpc, scope)
 
@@ -861,6 +946,8 @@ class PluginContext:
             task_owner=self._task_owner,
             resource_owner=self._resource_owner,
             service_rpc=self._service_rpc,
+            domain_query_rpc=self._domain_query_rpc,
+            domain_command_rpc=self._domain_command_rpc,
             event_rpc=self._event_rpc,
             job_rpc=self._job_rpc,
             identity=self.identity,

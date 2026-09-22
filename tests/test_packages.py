@@ -197,6 +197,7 @@ def test_storage_bundle_is_content_addressed_package_content(tmp_path):
         "baseline_sha256": digest,
         "scope": "bot",
         "repository_contract": "counter.repository/1",
+        "execution_profile": "declarative",
         "bytes": len(sql),
         "package_digest": snapshot.digest,
     }
@@ -239,6 +240,30 @@ def test_invalid_storage_bundle_declarations_are_rejected(
     with pytest.raises(ForestError) as caught:
         PackageCatalog(tmp_path / "catalog").build(root)
     assert caught.value.code == code
+
+
+def test_domain_authority_ports_require_package_owned_storage(tmp_path):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'requests = ["state.read", "state.write"]',
+            'requests = ["domain.query:counter.current"]',
+        )
+        + """
+
+[[components.domain_queries]]
+name = "counter.current"
+contract = "1.0"
+function = "counter_current"
+input_schema = "schemas/input.json"
+output_schema = "schemas/output.json"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert caught.value.code == "INVALID_DOMAIN_AUTHORITY"
 
 
 @pytest.mark.parametrize("entrypoint,protocol,body", [

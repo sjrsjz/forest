@@ -94,6 +94,12 @@ class WorkerRuntime:
     async def service_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("service", call_id, payload)
 
+    async def domain_query_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("domain_query", call_id, payload)
+
+    async def domain_command_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("domain_command", call_id, payload)
+
     async def event_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("event", call_id, payload)
 
@@ -317,6 +323,8 @@ class WorkerRuntime:
                     task_limit=self.limits.max_owned_tasks,
                     resource_limit=self.limits.max_owned_resources,
                     service_rpc=self.service_rpc,
+                    domain_query_rpc=self.domain_query_rpc,
+                    domain_command_rpc=self.domain_command_rpc,
                     event_rpc=self.event_rpc,
                     job_rpc=self.job_rpc,
                     identity=self.bootstrap["identity"],
@@ -453,7 +461,14 @@ class WorkerRuntime:
             while not self.stopping:
                 message = await read_frame(reader, self.limits.max_frame_bytes)
                 kind = message.get("kind")
-                if kind in {"state_result", "service_result", "event_result", "job_result"}:
+                if kind in {
+                    "state_result",
+                    "service_result",
+                    "domain_query_result",
+                    "domain_command_result",
+                    "event_result",
+                    "job_result",
+                }:
                     future = self.state_pending.get(message.get("id"))
                     if future is None or future.done():
                         continue

@@ -23,6 +23,8 @@
 
 插件宿主已删除读写合一的 `PackageCapabilityGateway`。State Query 与 State Command 分别由 `PackageStateQueries`、`PackageStateCommands` 端口和独立宿主对象承载；Adapter 构造时分别取得端口，缺少包所声明的任一端口会在描述符编译阶段失败。写入事务同时完成当前 Generation 成员围栏、稳定操作重放、key 级串行、revision CAS、受管 Payload、不可变 step 与 head 推进。相同操作跨执行尝试返回原回执，输入变化明确冲突；同 revision 并发写确定地只有一个成功。获得副作用能力的插件服务现在先进入持久 `service_operations/service_call_attempts`：稳定 operation 固定输入与因果根，每个 call 固定准确 Generation/Worker/图/父调用/deadline，最多一次 Worker 派发，成功或失败终态保存为 Payload 并可跨 call 重放，过期无终态只落 `UNKNOWN`。Adapter 排空覆盖账本准入、Worker 和终态提交。纯 Codec/Trigger 不写账本。真实 `forest.counter` 包已在隔离 Worker 与完整 RuntimeGraph 中证明重复服务 operation 返回原结果且状态只推进一次。Event 与 ComponentJob 不再伪装成 Gateway 回调，而是通过 package runtime contract 中声明的两个冻结 routing 服务句柄进入独立 authority。
 
+包级领域状态现已具备独立 Query/Command ABI。manifest 冻结端口名、契约、SQL 函数和输入/输出 schema；Worker 只能分别通过 `ctx.queries` 与 `ctx.commands` 请求已声明且已授权的端口。宿主的 PostgreSQL Domain Authority Driver 不导入包 Python、不识别业务 DTO 或表名，只校验准确 Generation/member、storage identity、函数签名/波动性/`SECURITY INVOKER`/固定 `search_path`，然后调用包 namespace 内的二参数 JSONB 函数。Query 在 repeatable-read 只读快照中执行；Command 使用稳定 operation ID 并由包私有表封闭幂等语义。只有 official 包可启用函数型 storage baseline。`forest.counter` 已完成该路径切换，并证明领域状态只写入包 namespace，内核通用 `state_heads` 保持为空；这一路径是后续有状态 builtin 迁移的基础机制，不是总 Repository Gateway。
+
 包级 Event subscription 与 ComponentJob 使用不同的封闭 contribution、内容寻址 handler service 和 Worker 投递协议；PackageAdapter 只持有冻结的 `routing.event.publish/1`、`routing.component-job.schedule/1` 服务句柄，不持有 routing Repository。双向运行关系不进入启动 DAG：发布/调度组件单向依赖 `routing.graph` authority，dispatcher 到 handler 依靠持久 claim 和冻结 Contract Route。Registry 已实现描述符声明的两阶段 owned-work 排空；局部 Generation 激活不开放领取，整张图 ACTIVE 且 Router 开放后才由 Registry 统一打开 owned-work gate。失败恢复先恢复模块和本地门，最后开放持久 graph admission，FAILED/STOPPED 的半恢复图不能重新接纳工作。Event/ComponentJob 没有映射到通用 `job.scheduler`。
 
 `routing.graph` 的干净存储 baseline 已定义不可变 Route publication、发布/订阅/ComponentJob 路由、Event 与逐订阅 delivery/attempt、ComponentJob 与逐次 attempt；数据库 trigger 封闭 delivery、Job 和 attempt 的合法转移。claim 现在同时保存 routing 所有者 Generation 与目标插件 Generation，结算必须匹配 token、attempt、routing Generation、目标 Generation 和未过期 lease。过期且无法证明外部结果的 attempt 只进入 `UNKNOWN`，不自动重复副作用。目录发布、Event 和 ComponentJob 分属三个 Command authority，共享层只有不可变 Route/Claim 值。
@@ -31,7 +33,7 @@
 
 该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
 
-其余 Agent、Memory、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。迁移阻塞按机制分为两类：Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 需要包级 domain Query/Command 和 UnitOfWork participant；Adapter transport 与 Media 需要按现有包级 `effect_service` 模式接入 Secret lease 和受限 Effect executor。它们必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
+其余 Agent、Memory、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。包级 domain Query/Command 已落地；Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 仍缺少声明式 UnitOfWork participant，Adapter transport 与 Media 仍需按现有包级 `effect_service` 模式接入 Secret lease 和受限 Effect executor。它们必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
 
 ## 已落地但尚未接入插件 Worker 的运行时切片
 
