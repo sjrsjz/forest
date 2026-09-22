@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
-from forest.package_runtime import PackageGenerationAdapter, PackageGenerationState
+from forest.job_protocol import DurableJobExecutionRequest
+from forest.package_runtime import (
+    PackageGenerationAdapter,
+    PackageGenerationState,
+    package_runtime_descriptor,
+)
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
@@ -271,6 +276,182 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
     await adapter.resume()
     adapter.activate_generation()
     assert events[-1] == "resume"
+    await adapter.quiesce()
+    await adapter.close()
+    assert events[-2:] == ["quiesce", "close"]
+
+
+async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_path):
+    source = Path(__file__).parents[1] / "src/forest/builtin/process_executor"
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    configuration = {"protocol": "forest.process.executor/1", "profiles": []}
+
+    class Configuration:
+        async def desired(self, *, include_value=False):
+            return SimpleNamespace(
+                revision=3,
+                payload_id="payload:process:3",
+                payload_digest=digest_json(configuration),
+                value=configuration if include_value else None,
+            )
+
+    events = []
+
+    class Driver:
+        async def start(self):
+            events.append("start")
+
+        async def invoke_job(self, request, *, scope, invocation):
+            events.append(
+                (
+                    "invoke_job",
+                    request.job_id,
+                    scope.generation_id,
+                    invocation.operation_id,
+                )
+            )
+            return {
+                "protocol": "forest.native-execution-result/1",
+                "profile_id": request.input["profile_id"],
+                "exit_code": 0,
+                "stdout": None,
+                "stderr": None,
+                "stdout_total_bytes": 0,
+                "stderr_total_bytes": 0,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "network_policy": "inherit",
+            }
+
+        async def quiesce(self):
+            events.append("quiesce")
+
+        async def resume(self):
+            events.append("resume")
+
+        async def close(self):
+            events.append("close")
+
+    def driver_factory(*_values):
+        return Driver()
+    descriptor = package_runtime_descriptor(
+        snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        resolved_contracts={},
+        startup_components=(),
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None,
+        state_commands=None,
+        service_operation_ledger=EffectServiceLedger(),
+        effect_driver_factories={"job.process.execute": driver_factory},
+    )
+    assert descriptor.job_types[0].as_fact() == {
+        "protocol": "forest.job-type-contribution/1",
+        "job_type": "native.execute",
+        "job_version": 1,
+        "service_id": "job.process.execute",
+        "service_version": 1,
+        "input_schema": snapshot.schema("schemas/execute-input.json"),
+        "input_schema_digest": digest_json(
+            snapshot.schema("schemas/execute-input.json")
+        ),
+        "max_attempts": 1,
+        "timeout_seconds": 3660,
+        "max_concurrency": 2,
+    }
+
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={},
+        resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None,
+        state_commands=None,
+        service_operation_ledger=EffectServiceLedger(),
+        effect_driver_factories={"job.process.execute": driver_factory},
+    )
+    context = PreparedGenerationContext(
+        activation_id="process-generation",
+        component_id="process.executor",
+        requires=(),
+        package_id=snapshot.manifest["package_id"],
+        package_version=snapshot.manifest["version"],
+        package_digest=snapshot.digest,
+        driver="forest.python-worker/1",
+        trust_level="official",
+        descriptor_digest="sha256:" + "2" * 64,
+        route_contract_digest=digest_json(adapter.runtime_contract),
+        management_contract_digest=digest_json(None),
+        management_ui_digest=digest_json([]),
+        state_schema=1,
+        state_contract_digest=digest_json(adapter.state_contract),
+        storage=None,
+    )
+    await adapter.prepare_generation(context)
+    await adapter.bind_generation(
+        BoundGenerationIdentity(
+            "process.executor",
+            "generation:process:1",
+            "graph:process:1",
+            1,
+            "sha256:" + "3" * 64,
+            context.activation_id,
+        )
+    )
+    await adapter.start()
+    adapter.activate_generation()
+    endpoint = adapter.runtime_service_handlers()[("job.process.execute", 1)]
+    route = FrozenServiceRoute(
+        service_id="job.process.execute",
+        version=1,
+        caller_component_id="job.scheduler",
+        provider_component_id="process.executor",
+        provider_generation_id="generation:process:1",
+        graph_id="graph:process:1",
+        graph_revision=1,
+        admission_lane="DATA",
+        owned_work=True,
+    )
+    invocation = RuntimeServiceInvocation(
+        "job.execute:fixture:1", 3660, "job.scheduler", "job-fixture"
+    )
+
+    async def not_cancelled():
+        return False
+
+    result = await endpoint.invoke_routed(
+        route,
+        invocation,
+        (
+            DurableJobExecutionRequest(
+                "job-fixture",
+                "native.execute",
+                1,
+                1,
+                "admin:test",
+                {"profile_id": "fixture.echo", "arguments": {}},
+                not_cancelled,
+            ),
+        ),
+        {},
+    )
+    assert result["exit_code"] == 0
+    assert events == [
+        "start",
+        (
+            "invoke_job",
+            "job-fixture",
+            "generation:process:1",
+            "job.execute:fixture:1",
+        ),
+    ]
     await adapter.quiesce()
     await adapter.close()
     assert events[-2:] == ["quiesce", "close"]

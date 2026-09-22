@@ -22,6 +22,7 @@ from forest.package_state_ports import (
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
+    RuntimePackageManagementContribution,
     RuntimeStorageBundle,
     configuration_management_contribution,
 )
@@ -142,8 +143,30 @@ async def bootstrap_builtin_package(
         validator=configuration_validator,
     )
     effect_driver_factories = effect_driver_registry.resolve(
-        tuple(snapshot.component.get("effect_services", ()))
+        tuple(
+            (
+                *snapshot.component.get("effect_services", ()),
+                *snapshot.component.get("job_types", ()),
+            )
+        )
     )
+    packaged_ui = snapshot.management_ui()
+    if packaged_ui is None:
+        management = (configuration_management_contribution(component_id),)
+    else:
+        ui_metadata, _content = packaged_ui
+        ui_declaration = snapshot.component["management_ui"]
+        management = (
+            RuntimePackageManagementContribution(
+                "configuration",
+                ui_declaration.get("label", component_id),
+                ("bot",),
+                component_id,
+                ui_metadata["sha256"],
+                group=ui_declaration.get("group", "configuration"),
+                order=ui_declaration.get("order", 10),
+            ),
+        )
     descriptor = package_runtime_descriptor(
         snapshot,
         bot_id=store.bot_id,
@@ -177,7 +200,7 @@ async def bootstrap_builtin_package(
         configuration_validator=configuration_validator,
         effect_driver_factories=effect_driver_factories,
         storage=storage,
-        management=(configuration_management_contribution(component_id),),
+        management=management,
         management_contract=management_contract,
         trust_level="official",
     )

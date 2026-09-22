@@ -32,5 +32,9 @@ button.quiet { color:#bad0c5; background:#13251e; border:1px solid #315144; }
 .tabs { flex:0 0 auto; display:flex; gap:6px; padding:8px 12px; border-bottom:1px solid #223a30; overflow-x:auto; }.tabs button{padding:6px 10px;background:#13251e;color:#a9bfb4}.tabs button.selected{background:#2b5945;color:#e7fff3}
 .contribution-root { min-height:0; flex:1; overflow:hidden; padding:12px; }
 .contribution-view { height:100%; min-height:0; overflow:auto; }
+.sandbox-shell { height:100%; min-height:0; display:grid; grid-template-rows:auto minmax(0,1fr); gap:8px; }
+.sandbox-controls { display:flex; align-items:center; justify-content:flex-end; gap:7px; min-height:36px; }
+.sandbox-controls span { margin-right:auto; color:#91aa9e; font-size:12px; }
+.package-ui-frame { width:100%; height:100%; min-height:0; border:1px solid #29473a; border-radius:9px; background:#0b1712; }
 .notice { position:absolute; z-index:4; top:24px; right:24px; max-width:520px; padding:10px 14px; border:1px solid #77504b; border-radius:8px; background:#321b19; color:#ffc8c1; }
 @media (max-width:780px){.console{grid-template:54px 44px minmax(0,1fr)/1fr}.sidebar{border-right:0;border-bottom:1px solid #223a30}.sidebar-title{display:none}#module-nav{display:flex;overflow-x:auto;padding:4px}#module-nav button{flex:0 0 auto;width:auto;max-width:220px}.workspace{grid-row:3}.module-row{grid-template-columns:1fr 90px}.module-row code{display:none}.runtime-line code{display:none}}

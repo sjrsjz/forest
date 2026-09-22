@@ -48,6 +48,156 @@ function notice(message) {
   $('notice').classList.toggle('hidden', !message);
 }
 
+let activeSandboxCleanup = null;
+
+async function fetchText(path) {
+  const response = await fetch(scopedPath(path), {credentials: 'same-origin'});
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.message || body.code || `HTTP ${response.status}`);
+  }
+  return response.text();
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function mountSandboxedPackage(root, row, contribution) {
+  const surface = contribution.surface;
+  const html = await fetchText(surface.artifact);
+  if (await sha256Hex(html) !== surface.sha256) {
+    throw new Error('模块管理 UI 摘要校验失败');
+  }
+  const base = `/management/v1/modules/${encodeURIComponent(row.component_id)}/configuration`;
+  const configuration = await api(base);
+  let draft = structuredClone(configuration.desired.value);
+  let plan = null;
+  let messages = [];
+  const nonce = crypto.randomUUID();
+  const channel = new MessageChannel();
+  const blobUrl = URL.createObjectURL(new Blob([html], {type: 'text/html'}));
+  const shell = document.createElement('div');
+  shell.className = 'sandbox-shell';
+  const controls = document.createElement('div');
+  controls.className = 'sandbox-controls';
+  const state = document.createElement('span');
+  state.textContent = '等待模块 UI';
+  const discard = document.createElement('button');
+  discard.className = 'quiet';
+  discard.textContent = '丢弃草稿';
+  const apply = document.createElement('button');
+  apply.textContent = '应用计划';
+  apply.disabled = true;
+  controls.append(state, discard, apply);
+  const frame = document.createElement('iframe');
+  frame.className = 'package-ui-frame';
+  frame.sandbox = 'allow-scripts';
+  frame.referrerPolicy = 'no-referrer';
+  frame.title = contribution.label;
+  shell.append(controls, frame);
+  root.append(shell);
+
+  const send = (type, payload = {}) => channel.port1.postMessage({
+    protocol: 'forest.management-ui-channel/1', type, nonce, ...payload,
+  });
+  const fail = error => {
+    const message = error instanceof Error ? error.message : String(error);
+    state.textContent = message;
+    send('error', {message});
+  };
+  channel.port1.onmessage = async event => {
+    const message = event.data;
+    let encoded;
+    try { encoded = JSON.stringify(message); } catch { return; }
+    const now = Date.now();
+    messages = messages.filter(value => now - value < 1000);
+    if (
+      !message || message.protocol !== 'forest.management-ui-channel/1'
+      || message.nonce !== nonce || encoded.length > 262144 || messages.length >= 20
+    ) return;
+    messages.push(now);
+    try {
+      if (message.type === 'ready') {
+        state.textContent = 'UI 已隔离连接';
+        send('initialize', {
+          component: {
+            component_id: row.component_id,
+            generation_id: row.generation_id,
+            package: row.artifact,
+          },
+          configuration,
+        });
+      } else if (message.type === 'set-draft') {
+        if (!message.value || Array.isArray(message.value) || typeof message.value !== 'object') {
+          throw new Error('模块 UI 草稿必须是对象');
+        }
+        draft = structuredClone(message.value);
+        plan = null;
+        apply.disabled = true;
+        state.textContent = '草稿未生成计划';
+      } else if (message.type === 'validate' || message.type === 'request-plan') {
+        const key = crypto.randomUUID();
+        plan = await api(`${base}/plans`, {
+          method: 'POST',
+          headers: {'idempotency-key': `${key}:plan`},
+          body: JSON.stringify({
+            expected_desired_revision: configuration.desired.revision,
+            value: draft,
+          }),
+        });
+        apply.dataset.key = key;
+        apply.disabled = false;
+        state.textContent = '计划已校验，等待管理员应用';
+        send('plan-ready', {plan_id: plan.plan_id});
+      } else if (message.type === 'discard-draft') {
+        discard.click();
+      } else if (message.type === 'resize') {
+        send('resize-assigned', {height: frame.clientHeight});
+      }
+    } catch (error) {
+      fail(error);
+    }
+  };
+  channel.port1.start();
+  discard.onclick = () => {
+    draft = structuredClone(configuration.desired.value);
+    plan = null;
+    apply.disabled = true;
+    state.textContent = '草稿已恢复';
+    send('reset', {value: draft});
+  };
+  apply.onclick = async () => {
+    if (!plan) return;
+    apply.disabled = true;
+    try {
+      const result = await api(`${base}/apply`, {
+        method: 'POST',
+        headers: {'idempotency-key': `${apply.dataset.key}:apply`},
+        body: JSON.stringify({
+          plan_id: plan.plan_id,
+          expected_desired_revision: configuration.desired.revision,
+        }),
+      });
+      state.textContent = `配置 r${result.configuration.revision} 已生效`;
+      send('applied', {revision: result.configuration.revision});
+      await refresh();
+    } catch (error) {
+      apply.disabled = false;
+      fail(error);
+    }
+  };
+  frame.onload = () => frame.contentWindow.postMessage({
+    protocol: 'forest.management-ui-connect/1', type: 'connect', nonce,
+  }, '*', [channel.port2]);
+  frame.src = blobUrl;
+  activeSandboxCleanup = () => {
+    channel.port1.close();
+    URL.revokeObjectURL(blobUrl);
+  };
+}
+
 function showOverview() {
   $('overview').classList.remove('hidden');
   $('module-view').classList.add('hidden');
@@ -79,6 +229,10 @@ function renderScopes(rows) {
 }
 
 async function openModule(row, button) {
+  if (activeSandboxCleanup) {
+    activeSandboxCleanup();
+    activeSandboxCleanup = null;
+  }
   document.querySelectorAll('#module-nav button').forEach(
     item => item.classList.toggle('selected', item === button),
   );
@@ -108,6 +262,10 @@ async function openModule(row, button) {
       );
       root.replaceChildren();
       try {
+        if (contribution.surface.kind === 'sandboxed-package') {
+          await mountSandboxedPackage(root, row, contribution);
+          return;
+        }
         const template = await fetch(contribution.surface.template).then(response => {
           if (!response.ok) throw new Error('管理模板读取失败');
           return response.text();

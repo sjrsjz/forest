@@ -1,0 +1,48 @@
+manifest_version = 1
+package_id = "forest.process-executor"
+version = "2.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "process_executor:ProcessExecutor"
+
+[[components]]
+id = "process.executor"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+provides = []
+
+[components.resources]
+max_frame_bytes = 65536
+max_inflight = 4
+max_queue_items = 16
+max_state_inflight = 1
+max_owned_tasks = 2
+max_owned_resources = 2
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 120
+stop_timeout_s = 10
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+label = "受控进程执行"
+group = "configuration"
+order = 10
+
+[[components.job_types]]
+job_type = "native.execute"
+job_version = 1
+name = "job.process.execute"
+contract = "1.0"
+kind = "process.native"
+semantics = "at-most-once"
+input_schema = "schemas/execute-input.json"
+output_schema = "schemas/execute-output.json"
+max_attempts = 1
+timeout_s = 3660
+max_concurrency = 2

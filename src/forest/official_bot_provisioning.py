@@ -430,6 +430,7 @@ class OfficialBotProvisioner:
             "memory.graph",
             "media.capture",
             "agent.runtime",
+            "routing.graph",
             "conversation.trigger-policy",
             "codec.onebot",
             "conversation.scheduler",

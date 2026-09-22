@@ -4,10 +4,10 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 19 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 20 个成员：
 
 - `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
-- `provider.chat-completions`、`embedding.multimodal`、`vector.index`、`memory.graph`、`media.capture`、`agent.runtime`；
+- `routing.graph`, `provider.chat-completions`、`embedding.multimodal`、`vector.index`、`memory.graph`、`media.capture`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`、`codec.onebot`；
 - `adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command`。
 
@@ -84,9 +84,9 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化只创建 `forest_deployment`；供应器为每个 Bot 按 Bot ID 派生稳定库名和无特权 login role，为该 role 生成随机口令，只允许在同一批准集群创建，并复核 role flags 与数据库 owner。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
-若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个尚未发布的 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载同一只读 Secret 卷和 `scripts/rebuild_bot_database.py`。脚本默认只输出派生库名、role、profile 摘要和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 19 个 baseline；不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 19 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
+若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个尚未发布的 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载同一只读 Secret 卷和 `scripts/rebuild_bot_database.py`。脚本默认只输出派生库名、role、profile 摘要和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 20 个 baseline；不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 20 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
 
-长时实网验收使用 `scripts/observe_live_bot.py`，并在候选镜像、同一 deployment 网络和 Supervisor 的只读 Secret mount 中运行。该探针只输出 RuntimeGraph、Binding、Client、工作项和 Memory 终态计数，不读取或输出凭据、Payload 正文、群消息、作者身份或媒体内容。每个样本使用 Bot 数据库的只读 repeatable-read 事务，检查 19 个 schema bundle、19 个当前图成员及最新生命周期、OneBot desired/effective revision、超过期限的 Embedding attempt/预算预留，以及同一 Agent session 是否出现多个未终结 Run；deployment 状态和管理端 HTTP 同期采样。任一样本出现违反项时最终退出码为 1，完整时段无违反项才退出 0。sidecar 不提供管理 HTTP，运行时应加 `--no-healthcheck`，避免继承 runtime 镜像的 Supervisor healthcheck：
+长时实网验收使用 `scripts/observe_live_bot.py`，并在候选镜像、同一 deployment 网络和 Supervisor 的只读 Secret mount 中运行。该探针只输出 RuntimeGraph、Binding、Client、工作项和 Memory 终态计数，不读取或输出凭据、Payload 正文、群消息、作者身份或媒体内容。每个样本使用 Bot 数据库的只读 repeatable-read 事务，检查 20 个 schema bundle、20 个当前图成员及最新生命周期、OneBot desired/effective revision、超过期限的 Embedding attempt/预算预留，以及同一 Agent session 是否出现多个未终结 Run；deployment 状态和管理端 HTTP 同期采样。任一样本出现违反项时最终退出码为 1，完整时段无违反项才退出 0。sidecar 不提供管理 HTTP，运行时应加 `--no-healthcheck`，避免继承 runtime 镜像的 Supervisor healthcheck：
 
 ```powershell
 docker run --rm --no-healthcheck --network forest-clean_default `

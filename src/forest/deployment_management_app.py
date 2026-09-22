@@ -7,7 +7,7 @@ from importlib.resources import files
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -100,7 +100,7 @@ def create_deployment_management_app(
         response.headers["content-security-policy"] = (
             "default-src 'none'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            "frame-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         )
         if request.url.path.startswith("/management/"):
             response.headers["cache-control"] = "no-store"
@@ -246,6 +246,22 @@ def create_deployment_management_app(
         session = await authenticated(request)
         async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             return await gateway.read_configuration(component_id)
+
+    @app.get(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/management-ui/{artifact_sha256}"
+    )
+    async def scoped_management_ui(
+        scope_kind: str,
+        scope_id: str,
+        component_id: str,
+        artifact_sha256: str,
+        request: Request,
+    ):
+        session = await authenticated(request)
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
+            content = await gateway.read_management_ui(component_id, artifact_sha256)
+            return Response(content, media_type="text/html; charset=utf-8")
 
     @app.post(
         "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"

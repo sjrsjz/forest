@@ -179,7 +179,7 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
             execute=True,
             confirmation=target_name,
         )
-        assert result["schema_bundles"] == 19
+        assert result["schema_bundles"] == 20
         assert result["runtime_graph_heads"] == 0
         target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
         marker = await (

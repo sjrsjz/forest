@@ -212,6 +212,53 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "job_types": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "job_type",
+                                "job_version",
+                                "name",
+                                "contract",
+                                "kind",
+                                "semantics",
+                                "input_schema",
+                                "output_schema",
+                                "max_attempts",
+                                "timeout_s",
+                                "max_concurrency",
+                            ],
+                            "properties": {
+                                **{
+                                    key: {"type": "string"}
+                                    for key in (
+                                        "job_type",
+                                        "name",
+                                        "contract",
+                                        "kind",
+                                        "input_schema",
+                                        "output_schema",
+                                    )
+                                },
+                                "job_version": {
+                                    "type": "integer", "minimum": 1, "maximum": 2147483647
+                                },
+                                "semantics": {"const": "at-most-once"},
+                                "max_attempts": {
+                                    "type": "integer", "minimum": 1, "maximum": 32
+                                },
+                                "timeout_s": {
+                                    "type": "integer", "minimum": 1, "maximum": 86400
+                                },
+                                "max_concurrency": {
+                                    "type": "integer", "minimum": 1, "maximum": 128
+                                },
+                            },
+                        },
+                    },
                     "management_ui": {
                         "type": "object",
                         "additionalProperties": False,
@@ -219,6 +266,16 @@ MANIFEST_SCHEMA = {
                         "properties": {
                             "entrypoint": {"type": "string"},
                             "protocol": {"const": "forest.management-ui/1"},
+                            "label": {
+                                "type": "string", "minLength": 1, "maxLength": 128
+                            },
+                            "group": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+                            },
+                            "order": {
+                                "type": "integer", "minimum": -10000, "maximum": 10000
+                            },
                         },
                     },
                     "storage": {
@@ -718,6 +775,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _storage_bundle(files, component)
     services = component.get("provides", [])
     effect_services = component.get("effect_services", [])
+    job_types = component.get("job_types", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
     if component.get("message_handler_takeover", "none") == "compatible" and not message_handlers:
@@ -730,6 +788,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     if len(services) > 32 or (
         not services
         and not effect_services
+        and not job_types
         and not commands
         and not message_handlers
         and not subscriptions
@@ -740,7 +799,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "Declare at least one service, subscription, job, command, or message handler",
         )
     names = set()
-    for service in (*services, *effect_services):
+    for service in (*services, *effect_services, *job_types):
         name = service.get("name", "")
         if not IDENTIFIER.fullmatch(name) or name in names:
             _fail("INVALID_SERVICES", "Service names must be valid and unique")
@@ -751,8 +810,16 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_SERVICES", "A service contract major.minor is required")
         _schema(files, service.get("input_schema"))
         _schema(files, service.get("output_schema"))
-        if service in effect_services and not IDENTIFIER.fullmatch(service.get("kind", "")):
+        if service in (*effect_services, *job_types) and not IDENTIFIER.fullmatch(
+            service.get("kind", "")
+        ):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
+    contributed_job_types = set()
+    for definition in job_types:
+        job_type = definition.get("job_type", "")
+        if not IDENTIFIER.fullmatch(job_type) or job_type in contributed_job_types:
+            _fail("INVALID_JOB_TYPES", "Job type identities must be valid and unique")
+        contributed_job_types.add(job_type)
     published_topics = set()
     for publication in component.get("publishes", []):
         topic = publication.get("topic", "")

@@ -9,7 +9,7 @@ from importlib.resources import files
 from typing import Any
 
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
@@ -286,6 +286,38 @@ class CleanManagementGateway:
         )
         return await self.contract(component_id).read()
 
+    async def read_management_ui(
+        self,
+        component_id: str,
+        artifact_sha256: str,
+        *,
+        authorization=None,
+        operation_id=None,
+    ) -> bytes:
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key="configuration.read",
+            input_digest=digest_json({}),
+            required_role="AUDITOR",
+        )
+        try:
+            module = self.registry().get(component_id)
+        except KeyError:
+            raise ForestError(
+                "RUNTIME_MODULE_NOT_FOUND", "Runtime module does not exist", 404
+            ) from None
+        read_artifact = getattr(module, "management_ui_artifact", None)
+        if not callable(read_artifact):
+            raise ForestError(
+                "PACKAGE_MANAGEMENT_UI_NOT_FOUND",
+                "Runtime module does not publish a package management UI",
+                404,
+            )
+        _metadata, content = read_artifact(artifact_sha256)
+        return content
+
     async def plan_configuration(
         self,
         component_id: str,
@@ -461,7 +493,7 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
         response.headers["content-security-policy"] = (
             "default-src 'none'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            "frame-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         )
         if request.url.path.startswith("/management/"):
             response.headers["cache-control"] = "no-store"
@@ -493,6 +525,18 @@ def create_clean_management_app(host, *, access_token: str) -> FastAPI:
     ):
         authenticated(x_forest_management_token)
         return await gateway.contract(component_id).read()
+
+    @app.get(
+        "/management/v1/modules/{component_id}/management-ui/{artifact_sha256}"
+    )
+    async def read_management_ui(
+        component_id: str,
+        artifact_sha256: str,
+        x_forest_management_token: str | None = Header(default=None),
+    ):
+        authenticated(x_forest_management_token)
+        content = await gateway.read_management_ui(component_id, artifact_sha256)
+        return Response(content, media_type="text/html; charset=utf-8")
 
     @app.post("/management/v1/modules/{component_id}/configuration/plans")
     async def plan_configuration(

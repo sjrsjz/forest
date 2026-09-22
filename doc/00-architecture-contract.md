@@ -82,9 +82,11 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 宿主只能读取经校验的不可变 `PackageSnapshot` 和声明，创建运行时 Driver，并保存不透明 Worker/Generation 句柄。插件代码只允许在其 Worker 中导入和执行。模块间调用只能携带契约 DTO、稳定引用和受管 Payload，不能越过 IPC 返回 Python 对象、Repository、客户端或闭包。
 
-需要 Secret、网络、文件或进程能力的 builtin 仍必须是完整插件包。包在 manifest 中声明有界 `effect_service`；部署环境只按 `effect kind` 安装通用宿主驱动工厂。`PackageGenerationAdapter` 用同一冻结配置和准确 Generation 身份创建驱动，驱动与 Worker 共同经历 start、quiesce、resume、close，服务路由也指向该 Generation。驱动不是可独立启动的宿主业务模块，不能脱离包路由长期存活；Worker 不接触 Secret 明文或原始客户端。
+需要 Secret、网络、文件或进程能力的 builtin 仍必须是完整插件包。包在 manifest 中声明有界 `effect_service`，持久任务执行器同时以 `job_type` 声明 Job 身份、服务契约、输入/输出 schema、超时、重试与并发上限；部署环境只按 `effect kind` 安装通用宿主驱动工厂。`PackageGenerationAdapter` 用同一冻结配置和准确 Generation 身份创建驱动，驱动与 Worker 共同经历 start、quiesce、resume、close，服务和 Job 路由也指向该 Generation。驱动不是可独立启动的宿主业务模块，不能脱离包路由长期存活；Worker 不接触 Secret 明文或原始客户端。
 
 每个 `effect_service` 必须声明 `semantics`：`at-most-once` 表示不可安全重复的外部效果，必须先进入持久操作账本并在不确定交接后停止自动重试；`idempotent` 表示目标由稳定业务键收敛，可在准确 Generation fence 下重复执行；`read` 表示无业务写入的查询。调用方不能用宿主私有约定猜测语义，Package Adapter 也不能把所有效果一律写成最多一次，从而永久缓存派生索引的瞬时失败。
+
+`job_type` 是包贡献给 `job.scheduler` 的持久执行端口，不是宿主注册一个业务 Python 回调。Scheduler 独占排队、claim、续租、取消和终态；Package Adapter 把 `DurableJobExecutionRequest` 经冻结服务路由交给声明该类型的准确 Generation，并以 `(job_id, attempt)` 形成稳定操作身份。执行驱动必须实现独立的 Job effect port，不能冒充普通 JSON effect service；旧 Generation 排空覆盖已经接纳的 Job 调用，候选失败时 Worker 与驱动一并回收。
 
 ### 2.2 插件热重载是强制生命周期，不是开发辅助
 

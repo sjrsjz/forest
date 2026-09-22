@@ -3,13 +3,15 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.native_exec_helper import seccomp_available
-from forest.process_executor_runtime import ProcessExecutorRuntime
+from forest.process_executor_builtin import parse_process_executor_configuration
+from forest.process_executor_effect_driver import NativeProcessEffectDriver
 
 
 class FakePayloads:
@@ -67,31 +69,48 @@ def profile(executable: Path, *, network_policy="inherit", wall_seconds=5):
 
 def runtime_with(profile_value):
     payloads = FakePayloads()
-    runtime = ProcessExecutorRuntime(
-        module_configuration=None,
-        grants=None,
+    identity = SimpleNamespace(
+        component_id="process.executor", generation_id="generation:process:test"
+    )
+
+    class Runtime:
+        async def verify_generation_member(self, **values):
+            assert values == {
+                "component_id": identity.component_id,
+                "generation_id": identity.generation_id,
+            }
+
+    runtime = NativeProcessEffectDriver(
+        {"protocol": "forest.process.executor/1", "profiles": [profile_value]},
+        1,
+        identity,
+        {
+            "kind": "process.native",
+            "name": "job.process.execute",
+            "job_type": "native.execute",
+        },
+        runtime=Runtime(),
         payloads=payloads,
     )
-    runtime.profiles = {profile_value["profile_id"]: ProcessExecutorRuntime._parse_configuration(
-        {"protocol": "forest.process.executor/1", "profiles": [profile_value]}
-    )[profile_value["profile_id"]]}
-    runtime.generation_identity = object()
-    runtime.active = True
-    return runtime, payloads
+    runtime.accepting = True
+    scope = SimpleNamespace(
+        component_id=identity.component_id, generation_id=identity.generation_id
+    )
+    return runtime, payloads, scope
 
 
 def test_profile_parser_rejects_dynamic_path_and_invalid_argument_schema(tmp_path):
     value = profile(Path(sys.executable))
     value["executable"] = "python"
     with pytest.raises(ForestError, match="Execution profile is invalid"):
-        ProcessExecutorRuntime._parse_configuration(
+        parse_process_executor_configuration(
             {"protocol": "forest.process.executor/1", "profiles": [value]}
         )
 
     value = profile(Path(sys.executable))
     value["arguments_schema"] = {"type": "definitely-not-a-json-schema-type"}
     with pytest.raises(ForestError, match="argument schema is invalid"):
-        ProcessExecutorRuntime._parse_configuration(
+        parse_process_executor_configuration(
             {"protocol": "forest.process.executor/1", "profiles": [value]}
         )
 
@@ -99,7 +118,7 @@ def test_profile_parser_rejects_dynamic_path_and_invalid_argument_schema(tmp_pat
 @pytest.mark.skipif(os.name != "posix", reason="native resource guard is exercised in Linux")
 async def test_profile_executes_without_shell_and_saves_bounded_artifacts():
     executable = Path(sys.executable)
-    runtime, payloads = runtime_with(profile(executable))
+    runtime, payloads, scope = runtime_with(profile(executable))
     request = DurableJobExecutionRequest(
         "job-fixture",
         "native.execute",
@@ -109,7 +128,7 @@ async def test_profile_executes_without_shell_and_saves_bounded_artifacts():
         {"profile_id": "fixture.echo", "arguments": {"value": "$(touch should-not-run)"}},
         lambda: asyncio.sleep(0, result=False),
     )
-    result = await runtime.execute(request)
+    result = await runtime.invoke_job(request, scope=scope, invocation=None)
     assert result["exit_code"] == 0
     assert result["stdout_total_bytes"] == len(b"$(touch should-not-run)\n")
     assert payloads.saved[0]["content"] == b"$(touch should-not-run)\n"
@@ -117,7 +136,7 @@ async def test_profile_executes_without_shell_and_saves_bounded_artifacts():
 
 
 def test_profile_argument_schema_is_enforced_before_spawn():
-    runtime, _payloads = runtime_with(profile(Path(sys.executable)))
+    runtime, _payloads, _scope = runtime_with(profile(Path(sys.executable)))
     parsed = runtime.profiles["fixture.echo"]
     with pytest.raises(ForestError, match="Arguments do not match"):
         runtime._argv(parsed, {"value": 42})
@@ -131,7 +150,7 @@ async def test_deny_profile_blocks_network_syscalls():
         {"literal": "import socket; socket.socket()"},
         {"argument": "value"},
     ]
-    runtime, payloads = runtime_with(value)
+    runtime, payloads, scope = runtime_with(value)
     request = DurableJobExecutionRequest(
         "job-network",
         "native.execute",
@@ -141,7 +160,7 @@ async def test_deny_profile_blocks_network_syscalls():
         {"profile_id": "fixture.echo", "arguments": {"value": "ignored"}},
         lambda: asyncio.sleep(0, result=False),
     )
-    result = await runtime.execute(request)
+    result = await runtime.invoke_job(request, scope=scope, invocation=None)
     assert result["exit_code"] != 0
     assert result["network_policy"] == "deny"
     assert b"PermissionError" in next(
@@ -157,7 +176,7 @@ async def test_cancellation_terminates_the_process_group():
         {"literal": "import time; time.sleep(30)"},
         {"argument": "value"},
     ]
-    runtime, _payloads = runtime_with(value)
+    runtime, _payloads, scope = runtime_with(value)
     polls = 0
 
     async def cancelled():
@@ -175,5 +194,5 @@ async def test_cancellation_terminates_the_process_group():
         cancelled,
     )
     with pytest.raises(ForestError) as captured:
-        await runtime.execute(request)
+        await runtime.invoke_job(request, scope=scope, invocation=None)
     assert captured.value.code == "JOB_CANCELLED"

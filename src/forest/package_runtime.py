@@ -19,6 +19,7 @@ from jsonschema import Draft202012Validator
 
 from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
 from forest.errors import ForestError
+from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_capabilities import (
     PackageCallScope,
     PackageServiceError,
@@ -27,7 +28,12 @@ from forest.package_capabilities import (
     PackageStateCommands,
     PackageStateQueries,
 )
-from forest.package_effects import PackageEffectDriver, PackageEffectDriverFactory
+from forest.package_effects import (
+    PackageEffectDriver,
+    PackageEffectDriverFactory,
+    PackageJobEffectDriver,
+    PackageServiceEffectDriver,
+)
 from forest.packages import PackageSnapshot, contract_range
 from forest.routing_protocol import (
     DurableComponentJobRequest,
@@ -46,6 +52,7 @@ from forest.runtime_modules import (
     RuntimeComponentJobContribution,
     RuntimeEventPublicationContribution,
     RuntimeEventSubscriptionContribution,
+    RuntimeJobTypeContribution,
     RuntimeModuleDescriptor,
 )
 
@@ -154,6 +161,7 @@ class PackageGenerationAdapter:
             for item in (
                 *self.component.get("provides", ()),
                 *self.component.get("effect_services", ()),
+                *self.component.get("job_types", ()),
             )
         }
         self._event_subscriptions = {
@@ -196,6 +204,7 @@ class PackageGenerationAdapter:
             for item in (
                 *self.component.get("provides", ()),
                 *self.component.get("effect_services", ()),
+                *self.component.get("job_types", ()),
             )
         ]
         services.extend(
@@ -251,6 +260,14 @@ class PackageGenerationAdapter:
         )
         handlers.update(
             {
+                (item["name"], _major(item["contract"])): self._job_type_handler(
+                    item["name"]
+                )
+                for item in self.component.get("job_types", ())
+            }
+        )
+        handlers.update(
+            {
                 (service_id, 1): self._event_subscription_handler(subscriber_id)
                 for subscriber_id, (_item, _validator, service_id) in (
                     self._event_subscriptions.items()
@@ -266,6 +283,18 @@ class PackageGenerationAdapter:
             }
         )
         return handlers
+
+    def management_ui_artifact(self, expected_sha256: str) -> tuple[dict, bytes]:
+        """Read this exact Generation's verified, immutable UI artifact."""
+
+        artifact = self.snapshot.management_ui()
+        if artifact is None or artifact[0]["sha256"] != expected_sha256:
+            raise ForestError(
+                "PACKAGE_MANAGEMENT_UI_NOT_FOUND",
+                "Management UI does not belong to the active package Generation",
+                404,
+            )
+        return artifact
 
     def _check_route(self, route: FrozenServiceRoute) -> None:
         identity = self.generation_identity
@@ -476,7 +505,7 @@ class PackageGenerationAdapter:
                     422,
                 )
             driver = self._effect_drivers.get(service_id)
-            if driver is None:
+            if not isinstance(driver, PackageServiceEffectDriver):
                 raise ForestError(
                     "PACKAGE_EFFECT_DRIVER_NOT_READY",
                     "Package effect driver is not attached to this Generation",
@@ -490,6 +519,65 @@ class PackageGenerationAdapter:
                 durable=declaration["semantics"] == "at-most-once",
                 dispatch=lambda _worker, scope, _call_id: driver.invoke(
                     payload, scope=scope, invocation=invocation
+                ),
+                normalize=lambda result: result,
+                result_valid=output_validator.is_valid,
+            )
+
+        return RoutedServiceEndpoint(routed=routed)
+
+    def _job_type_handler(self, service_id: str) -> RoutedServiceEndpoint:
+        declaration = next(
+            item for item in self.component.get("job_types", ()) if item["name"] == service_id
+        )
+
+        async def routed(route, invocation, *args, **kwargs):
+            if kwargs or len(args) != 1 or type(args[0]) is not DurableJobExecutionRequest:
+                raise ForestError(
+                    "JOB_EXECUTION_INPUT_INVALID",
+                    "Package job service accepts one durable Job request",
+                    422,
+                )
+            request = args[0]
+            if (
+                request.job_type != declaration["job_type"]
+                or request.job_version != declaration["job_version"]
+            ):
+                raise ForestError(
+                    "JOB_EXECUTION_INPUT_INVALID",
+                    "Durable Job request differs from the package declaration",
+                    422,
+                )
+            input_validator, output_validator = self._service_schemas[service_id]
+            if not input_validator.is_valid(request.input):
+                raise ForestError(
+                    "JOB_EXECUTION_INPUT_INVALID",
+                    "Durable Job input violates its immutable package schema",
+                    422,
+                )
+            driver = self._effect_drivers.get(service_id)
+            if not isinstance(driver, PackageJobEffectDriver):
+                raise ForestError(
+                    "PACKAGE_EFFECT_DRIVER_NOT_READY",
+                    "Package Job effect driver is not attached to this Generation",
+                    503,
+                )
+            operation_input = {
+                "job_id": request.job_id,
+                "job_type": request.job_type,
+                "job_version": request.job_version,
+                "attempt": request.attempt,
+                "requested_by": request.requested_by,
+                "input": request.input,
+            }
+            return await self._run_service_operation(
+                route=route,
+                invocation=invocation,
+                service_id=service_id,
+                input_value=operation_input,
+                durable=True,
+                dispatch=lambda _worker, scope, _call_id: driver.invoke_job(
+                    request, scope=scope, invocation=invocation
                 ),
                 normalize=lambda result: result,
                 result_valid=output_validator.is_valid,
@@ -851,7 +939,10 @@ class PackageGenerationAdapter:
             # The Worker may now dispatch, but the Adapter gate and persistent
             # route remain closed until activate_generation runs after commit.
             await worker.activate(_timeout(self.component, "start_timeout_s", 10))
-            for declaration in self.component.get("effect_services", ()):
+            for declaration in (
+                *self.component.get("effect_services", ()),
+                *self.component.get("job_types", ()),
+            ):
                 service_id = declaration["name"]
                 factory = self._effect_driver_factories[service_id]
                 driver = factory(
@@ -860,6 +951,18 @@ class PackageGenerationAdapter:
                     self.generation_identity,
                     declaration,
                 )
+                expected_driver = (
+                    PackageJobEffectDriver
+                    if declaration in self.component.get("job_types", ())
+                    else PackageServiceEffectDriver
+                )
+                if not isinstance(driver, expected_driver):
+                    raise ForestError(
+                        "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
+                        "Effect driver does not implement its declared port",
+                        500,
+                        details={"service_id": service_id},
+                    )
                 started_drivers.append(driver)
                 await driver.start()
                 self._effect_drivers[service_id] = driver
@@ -990,7 +1093,11 @@ def package_runtime_descriptor(
     component = snapshot.component
     effect_driver_factories = dict(effect_driver_factories or {})
     declared_effect_services = {
-        item["name"] for item in component.get("effect_services", ())
+        item["name"]
+        for item in (
+            *component.get("effect_services", ()),
+            *component.get("job_types", ()),
+        )
     }
     if set(effect_driver_factories) != declared_effect_services:
         raise ForestError(
@@ -1062,6 +1169,19 @@ def package_runtime_descriptor(
             max_concurrency=item.get("max_concurrency", 1),
         )
         for item in component.get("jobs", ())
+    )
+    job_types = tuple(
+        RuntimeJobTypeContribution(
+            job_type=item["job_type"],
+            job_version=item["job_version"],
+            service_id=item["name"],
+            service_version=_major(item["contract"]),
+            input_schema=snapshot.schema(item["input_schema"]),
+            max_attempts=item["max_attempts"],
+            timeout_seconds=item["timeout_s"],
+            max_concurrency=item["max_concurrency"],
+        )
+        for item in component.get("job_types", ())
     )
 
     def factory(_runtime, contracts):
@@ -1145,4 +1265,5 @@ def package_runtime_descriptor(
         event_publications=event_publications,
         event_subscriptions=event_subscriptions,
         component_jobs=component_jobs,
+        job_types=job_types,
     )

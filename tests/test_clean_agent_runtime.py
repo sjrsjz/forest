@@ -506,6 +506,7 @@ async def test_execution_converges_a_safe_cancel_request_to_terminal_state(
     execution = DurableSingleAgentExecution(
         agent=agent,
         provider=object(),
+        model_effects=object(),
         memory=object(),
         media=object(),
         payloads=payloads,
@@ -612,6 +613,7 @@ async def test_recovered_model_retry_limit_fails_without_another_dispatch(
     execution = DurableSingleAgentExecution(
         agent=ActiveAgentFacade(),
         provider=ForbiddenProvider(),
+        model_effects=object(),
         memory=object(),
         media=object(),
         payloads=payloads,

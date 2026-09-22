@@ -48,7 +48,7 @@ class RuntimeServiceInvocation:
             or not 1 <= len(self.operation_id) <= 256
             or isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
-            or not 0 < self.timeout_seconds <= 120
+            or not 0 < self.timeout_seconds <= 86_400
             or not isinstance(self.causal_root_kind, str)
             or not 1 <= len(self.causal_root_kind) <= 128
             or not isinstance(self.causal_root_id, str)

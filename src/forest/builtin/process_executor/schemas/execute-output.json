@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "profile_id", "exit_code", "stdout", "stderr", "stdout_total_bytes", "stderr_total_bytes", "stdout_truncated", "stderr_truncated", "network_policy"],
+  "properties": {
+    "protocol": {"const": "forest.native-execution-result/1"},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+    "exit_code": {"type": "integer"},
+    "stdout": {"$ref": "#/$defs/payload"},
+    "stderr": {"$ref": "#/$defs/payload"},
+    "stdout_total_bytes": {"type": "integer", "minimum": 0},
+    "stderr_total_bytes": {"type": "integer", "minimum": 0},
+    "stdout_truncated": {"type": "boolean"},
+    "stderr_truncated": {"type": "boolean"},
+    "network_policy": {"enum": ["deny", "inherit"]}
+  },
+  "$defs": {
+    "payload": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["payload_id", "content_digest", "byte_length", "media_type"],
+          "properties": {
+            "payload_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "content_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "byte_length": {"type": "integer", "minimum": 0},
+            "media_type": {"const": "application/octet-stream"}
+          }
+        }
+      ]
+    }
+  }
+}

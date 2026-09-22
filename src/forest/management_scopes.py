@@ -441,6 +441,15 @@ class _AuthorizedGateway:
             component_id, authorization=ticket, operation_id=operation_id
         )
 
+    async def read_management_ui(self, component_id: str, artifact_sha256: str):
+        ticket, operation_id = await self._ticket(component_id, "configuration.read", {})
+        return await self.gateway.read_management_ui(
+            component_id,
+            artifact_sha256,
+            authorization=ticket,
+            operation_id=operation_id,
+        )
+
     async def plan_configuration(self, component_id: str, **values):
         self._write()
         body = values["body"]

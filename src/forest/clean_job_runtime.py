@@ -372,7 +372,13 @@ class CleanJobRuntime:
         )
         try:
             async with asyncio.timeout(claim.timeout_seconds):
-                result = await service(request)
+                result = await service.invoke(
+                    request,
+                    operation_id=f"job.execute:{claim.job_id}:{claim.attempt_count}",
+                    causal_root_kind="job.scheduler",
+                    causal_root_id=claim.job_id,
+                    timeout_seconds=claim.timeout_seconds,
+                )
             if not isinstance(result, dict):
                 raise ForestError("JOB_RESULT_INVALID", "Job executor returned no object", 502)
             await self.repository.succeed(claim, result=result)

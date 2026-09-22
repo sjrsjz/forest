@@ -191,6 +191,60 @@ class RuntimeManagementContribution:
 
 
 @dataclass(frozen=True)
+class RuntimePackageManagementContribution:
+    """One immutable package-owned UI loaded in an opaque-origin sandbox."""
+
+    contribution_id: str
+    label: str
+    scope_kinds: tuple[str, ...]
+    component_id: str
+    artifact_sha256: str
+    group: str = "configuration"
+    order: int = 10
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.contribution_id):
+            raise ValueError("Management contribution identity is invalid")
+        if not self.label.strip() or any(ord(char) < 32 for char in self.label):
+            raise ValueError("Management contribution labels must be printable")
+        if (
+            not self.scope_kinds
+            or len(set(self.scope_kinds)) != len(self.scope_kinds)
+            or any(
+                scope not in {"deployment", "host", "bot", "binding", "component"}
+                for scope in self.scope_kinds
+            )
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.component_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.artifact_sha256)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", self.group)
+            or type(self.order) is not int
+            or not -10_000 <= self.order <= 10_000
+        ):
+            raise ValueError("Package management contribution is invalid")
+
+    def as_fact(self, *, public: bool = False) -> dict:
+        surface = {
+            "protocol": "forest.management-ui/1",
+            "artifact": (
+                f"/management/v1/modules/{self.component_id}/management-ui/"
+                f"{self.artifact_sha256}"
+            ),
+            "sha256": self.artifact_sha256,
+        }
+        if public:
+            surface["kind"] = "sandboxed-package"
+        return {
+            "protocol": "forest.management-contribution/1",
+            "contribution_id": self.contribution_id,
+            "label": self.label,
+            "scope_kinds": list(self.scope_kinds),
+            "group": self.group,
+            "order": self.order,
+            "surface": surface,
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeAgentToolContribution:
     """One generation-bound Agent tool published by its executor module."""
 
@@ -617,7 +671,9 @@ class RuntimeModuleDescriptor:
     requires: tuple[str, ...]
     factory: Callable[[Any, dict[str, Any]], Any]
     artifact: RuntimeArtifactIdentity
-    management: tuple[RuntimeManagementContribution, ...] = ()
+    management: tuple[
+        RuntimeManagementContribution | RuntimePackageManagementContribution, ...
+    ] = ()
     storage: RuntimeStorageBundle | None = None
     wakes_on_work: bool = False
     work_notify_order: int = 100

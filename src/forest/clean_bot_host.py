@@ -24,7 +24,6 @@ from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
-from forest.clean_process_executor_module import bootstrap_clean_process_executor
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import embedding_configuration_validator_factory
@@ -34,6 +33,11 @@ from forest.errors import ForestError
 from forest.models import ModelCapabilities
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
+from forest.process_executor_builtin import (
+    default_process_executor_configuration,
+    process_executor_configuration_validator_factory,
+)
+from forest.process_executor_effect_driver import native_process_effect_driver_factory
 from forest.routing_graph_module import bootstrap_routing_graph
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
@@ -651,10 +655,24 @@ class CleanBotHost:
             self.schema_bundle_installer,
             kernel=self._kernel,
         )
-        process_executor = await bootstrap_clean_process_executor(
+        process_executor = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/process_executor"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
+            initial_configuration=default_process_executor_configuration(),
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "process.native": native_process_effect_driver_factory(
+                        runtime=self._kernel.runtime,
+                        payloads=self._kernel.payload,
+                    )
+                }
+            ),
+            configuration_validator_factory=(
+                process_executor_configuration_validator_factory(self.store)
+            ),
         )
 
         token_digest = (

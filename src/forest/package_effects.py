@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
@@ -13,7 +13,20 @@ from forest.runtime_generation import BoundGenerationIdentity
 
 
 class PackageEffectDriver(Protocol):
+    """Lifecycle shared by every host effect attached to one Generation."""
+
     async def start(self) -> None: ...
+
+    async def quiesce(self) -> None: ...
+
+    async def resume(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class PackageServiceEffectDriver(PackageEffectDriver, Protocol):
+    """Effect port for a JSON service declared by a package."""
 
     async def invoke(
         self,
@@ -23,11 +36,18 @@ class PackageEffectDriver(Protocol):
         invocation: RuntimeServiceInvocation,
     ) -> dict: ...
 
-    async def quiesce(self) -> None: ...
 
-    async def resume(self) -> None: ...
+@runtime_checkable
+class PackageJobEffectDriver(PackageEffectDriver, Protocol):
+    """Effect port for a durable Job type declared by a package."""
 
-    async def close(self) -> None: ...
+    async def invoke_job(
+        self,
+        request: object,
+        *,
+        scope: PackageCallScope,
+        invocation: RuntimeServiceInvocation,
+    ) -> dict: ...
 
 
 PackageEffectDriverFactory = Callable[
