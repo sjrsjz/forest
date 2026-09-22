@@ -832,8 +832,10 @@ class PluginContext:
         service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         job_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        identity: Mapping | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
+        self.identity: Mapping[str, Any] = _freeze(identity or {})
         self._scope = scope
         self._rpc = rpc
         self._service_rpc = service_rpc
@@ -861,6 +863,7 @@ class PluginContext:
             service_rpc=self._service_rpc,
             event_rpc=self._event_rpc,
             job_rpc=self._job_rpc,
+            identity=self.identity,
         )
 
     @property

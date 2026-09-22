@@ -1,2 +1,0 @@
--- Trigger Policy owns no business rows. Its durable state is the standard
--- module configuration ledger prepended by official_storage_bundle().

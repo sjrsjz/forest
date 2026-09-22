@@ -4,9 +4,11 @@
 
 ## 1. 插件作者看到的接口
 
-Forest 默认直接运行普通 Python 包。作者编写模块、类和 `async handle`，通过 Context 调用记忆、回复、任务等服务；框架生成声明、启动 Worker、处理 IPC 与代际替换。无需把 Python 编译成 Wasm，也无需编写 Rust、二进制 ABI 或 Worker 协议。
+Forest 接受普通 Python 源码作为插件开发形式，但绝不把插件安装进宿主解释器或由宿主 import。作者编写模块、类和异步 handler；构建器将源码、声明、schema、UI 和锁定依赖捕获为不可变 `PackageSnapshot`，内核只把该快照交给隔离 Python Worker。Worker 内的 SDK 通过受限 IPC Context 调用状态、服务、事件、任务与效果端口；宿主只处理身份、契约、路由、授权和生命周期。无需把 Python 编译成 Wasm，也无需由作者编写 Rust、二进制 ABI 或 Worker 协议。
 
 这一体验参考 AliceBot 的“放入插件、声明处理器、修改代码后重载”，可靠性按[生命周期设计](02-kernel-lifecycle.md)执行。Wasm 仅是未来可选 RuntimeDriver，不是 SDK 使用条件或首版核心里程碑。
+
+“放入插件”不等于把目录加入宿主 `sys.path`。源码变化只能触发一次新的捕获与候选 Generation；活跃快照永不原地覆盖，旧 Worker 永不执行新摘要。builtin 与外部插件使用完全相同的 Worker/Generation 协议。任何只能在宿主重启后生效、只能通过 `importlib.reload()` 生效、或要求在 `clean_bot_host` 一类组合根中新增 import/factory 的业务扩展，都不属于 Forest 插件。
 
 每个组件默认 `scope="bot"`，同一包可以被多个 Bot 启用。一个 Bot 的同一组件实例服务多个会话；类实例不是群级单例，`self` 与模块全局变量不能存放“当前群”“当前用户”或可变 Prompt。
 
@@ -50,7 +52,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 群消息上下文收集由框架统一完成，不要求每个插件重复 push 用户消息。触发分类只产生结构化决策与原始事件引用，不能直接 `Agent.run()` 或自行 `create_task` 开启回复；待触发由唯一 ConversationSession 在模型安全点按最后触发记录选择前缀。没有触发也照常静默保存/裁剪，详见[08](08-group-context-interaction.md)。命令插件若需要长期模型对话，同样申请该会话的调度资格。
 
-当前首版实现只接纳 `@plugin` 类中的 `@command` 方法；只定义 handler 的类无需继承 `Plugin` 或实现生命周期方法，装饰器会提供默认生命周期。模块级函数适配层仍待实现，在此之前构建器不会把模块级装饰器生成成不可执行清单。
+首版协议只接纳 `@plugin` 类中的 `@command` 方法；只定义 handler 的类无需继承 `Plugin` 或实现生命周期方法，装饰器提供默认生命周期。模块级函数适配层不进入协议，构建器不得生成无法由 Worker 执行的清单。
 
 ## 3. 声明生成与授权
 

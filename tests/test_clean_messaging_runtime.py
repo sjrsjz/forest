@@ -4,6 +4,7 @@ import asyncio
 import json
 import traceback
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,7 @@ from forest.builtin_agent_shell import AGENT_SHELL_COMMANDS
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS
 from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
 from forest.builtin_memory_tool import MEMORY_EXACT_RECALL_TOOL
+from forest.builtin_packages import bootstrap_builtin_package
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL
 from forest.clean_agent_module import bootstrap_clean_agent
@@ -37,7 +39,6 @@ from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
-from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
 from forest.clean_vector_index_module import (
     bootstrap_clean_vector_index,
     default_vector_index_configuration,
@@ -46,6 +47,7 @@ from forest.core_runtime import bootstrap_clean_kernel
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
+from forest.packages import PackageCatalog
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
@@ -366,7 +368,7 @@ async def _agent_payload(payloads, *, owner_kind, owner_id, value) -> AgentPaylo
 
 
 @pytest.mark.postgres
-async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_authority):
+async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_authority, tmp_path):
     store, installer = clean_authority
     kernel = await bootstrap_clean_kernel(store, installer)
     model_clients = []
@@ -413,7 +415,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     media = await bootstrap_clean_media(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
-    trigger_policy = await bootstrap_clean_trigger_policy(
+    trigger_policy = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/trigger_policy",
+        PackageCatalog(tmp_path / "package-catalog"),
         store,
         installer,
         kernel=kernel,

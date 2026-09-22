@@ -635,7 +635,11 @@ class RuntimeModuleRegistry:
             "protocol": "forest.runtime-module/1",
             "component_id": descriptor.component_id,
             "requires": list(self._effective_requires(descriptor)),
-            "factory_ref": descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__,
+            "factory_ref": (
+                "forest.package-generation-adapter/1"
+                if descriptor.artifact.driver == "forest.python-worker/1"
+                else descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__
+            ),
             "artifact": descriptor.artifact.as_fact(),
             "management_contributions": [
                 contribution.as_fact() for contribution in descriptor.management
@@ -1249,7 +1253,11 @@ class RuntimeModuleRegistry:
                         continue
                     owned = getattr(self.instances[component_id], "owned_tasks", None)
                     tasks = tuple(owned()) if owned is not None else ()
-                    if not tasks:
+                    if not tasks and not getattr(
+                        self.instances[component_id],
+                        "requires_replacement_quiesce",
+                        False,
+                    ):
                         continue
                     begin_replacement = getattr(
                         self.instances[component_id],
@@ -1290,6 +1298,11 @@ class RuntimeModuleRegistry:
         for component_id in self.order:
             if component_id not in pending:
                 continue
+            resume = getattr(self.instances[component_id], "resume", None)
+            if resume is not None:
+                result = resume()
+                if inspect.isawaitable(result):
+                    await result
             activate = self.instances[component_id].activate_generation
             result = activate()
             if inspect.isawaitable(result):

@@ -319,6 +319,7 @@ class WorkerRuntime:
                     service_rpc=self.service_rpc,
                     event_rpc=self.event_rpc,
                     job_rpc=self.job_rpc,
+                    identity=self.bootstrap["identity"],
                 )
                 await self.plugin.prepare(self.ctx, self.ctx.config, payload.get("restored_state"))
                 self.state = "PREPARED"

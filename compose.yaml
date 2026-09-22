@@ -16,6 +16,7 @@ services:
       - ./scripts/container_init.py:/opt/forest/container_init.py:ro
       - forest_secrets:/run/forest-secrets
       - postgres_data:/var/lib/forest-postgres:ro
+      - forest_packages:/var/lib/forest-packages
 
   secret:
     image: python:3.11.13-slim
@@ -149,10 +150,12 @@ services:
       FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN: ${FOREST_MANAGEMENT_ORIGIN:-http://127.0.0.1:8080}
       FOREST_SUPERVISOR_POLL_SECONDS: ${FOREST_SUPERVISOR_POLL_SECONDS:-1}
       FOREST_SUPERVISOR_MAX_STARTING: ${FOREST_SUPERVISOR_MAX_STARTING:-2}
+      FOREST_PACKAGE_CATALOG_ROOT: /var/lib/forest-packages
     ports:
       - "127.0.0.1:${FOREST_MANAGEMENT_PORT:-8080}:8081"
     volumes:
       - forest_secrets:/run/forest-secrets:ro
+      - forest_packages:/var/lib/forest-packages
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
@@ -172,3 +175,4 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  forest_packages:

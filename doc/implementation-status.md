@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-21。
+更新日期：2026-09-22。
 
 > 本页只记录当前工作树事实，不定义目标架构。发生冲突时依次以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净 Schema 与载荷来源](14-clean-schema-and-payload-provenance.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。Forest 尚不可发布。
 
@@ -17,7 +17,15 @@
 
 设计文档已经先于后续代码完成语义纠偏：00 明确列出被废止的 Bot/Agent 中心组合根、产品子 Agent、固定业务后台、模糊记忆关系、第二套执行链和开发期兼容迁移；10 固定百万级来源的服务端组合筛选、快照键集分页与可解释关系 DTO；12 固定 PC 工作台的有界 pane 布局和模块 UI 尺寸协议。仍存在的旧代码和旧页面均列入删除范围，不能反向解释这些目标契约。
 
-## 已落地的干净微内核切片
+## 仍阻塞发布的插件架构缺口
+
+`PackageGenerationAdapter` 已闭合不可变 `PackageSnapshot`、隔离 `PythonWorker` 与 `RuntimeModuleRegistry`/`kernel.runtime` Generation 的第一条生产路径。`conversation.trigger-policy` 已成为真实 builtin 包，携带 manifest、配置/输入/输出 schema 和 Worker 入口；宿主只构造通用包适配器，不再 import 或保留同功能的宿主实现。候选 Worker 在 route 发布前完成准备、启动和健康检查，本地 admission gate 保持关闭；旧 Generation 先冻结并排空，持久 route 提交后新 gate 才同步打开。失败发布会先恢复旧 Worker，再恢复旧 gate；ACTIVE Worker 不允许绕过 QUIESCENT 直接清理。
+
+该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭该包 Generation。本轮离线套件为 `483 passed, 140 skipped`，真实 PostgreSQL 定向用例为 `2 passed`。这些数字只证明本轮删除旧 trigger 实现后没有断链和上述跨进程/事务边界，不替代架构不变量。
+
+其余 Agent、Memory、Provider、Adapter、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，包声明驱动的 desired graph、通用 State/Event/Job Gateway、Secret/Effect 能力和包自带管理 UI 也尚未接入。因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。后续组件必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加 shim、fallback、双写或第二套生命周期。
+
+## 已落地但尚未接入插件 Worker 的运行时切片
 
 ### 最小 Bootstrap 与五个内核模块
 

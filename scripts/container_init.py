@@ -121,6 +121,19 @@ def prepare_secrets(path: Path) -> None:
         fsync_directory(path)
 
 
+def prepare_package_catalog(path: Path) -> None:
+    """Give only the unprivileged supervisor access to immutable package snapshots."""
+
+    info = directory_info(path)
+    if info.st_uid not in {0, APP_UID}:
+        raise RuntimeError("Package catalog volume belongs to another service account")
+    if any(item.is_symlink() for item in path.iterdir()):
+        raise RuntimeError("Package catalog volume contains a symbolic link")
+    os.chown(path, APP_UID, APP_GID)
+    os.chmod(path, 0o700)
+    fsync_directory(path)
+
+
 def main() -> None:
     try:
         if os.geteuid() != 0:
@@ -128,6 +141,7 @@ def main() -> None:
                 "Volume initialization must run through the dedicated installer service"
             )
         prepare_secrets(Path("/run/forest-secrets"))
+        prepare_package_catalog(Path("/var/lib/forest-packages"))
     except (OSError, RuntimeError) as exc:
         # OSError text can expose paths, but no credential is used in a path.
         # No configuration, credential content, or environment is dumped here.

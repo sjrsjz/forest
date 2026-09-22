@@ -67,6 +67,26 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 `BotRuntimeSupervisor` 只监督冻结的模块图、宿主 lease、资源和健康，不得 import、构造或保存具体 Agent、Memory、Adapter、Shell、Scheduler、Job 或 Delivery 对象。`BindingRuntime`、巨型 `BotStore`/`MessageStore` 和类似业务组合根属于必须删除的错误抽象。
 
+### 2.1 builtin 也是插件，不是宿主源码目录
+
+`builtin` 只表示“随 Forest 发行且默认可安装”，不表示“可以由宿主直接 import”。每个 builtin 必须是完整、可独立捕获的插件包，至少包含 `module.toml`、契约 schema、Worker 入口；有存储、配置或管理界面时还必须包含自己的 schema bundle、配置 schema 与 UI 工件。官方 builtin 与第三方包经过同一条发现、校验、内容寻址、Worker 启动、Generation 发布和回收链路，差异只能来自签名、信任等级和部署授予。
+
+以下实现一律不算模块化，也不得作为过渡层保留：
+
+- 把业务文件移动到 `forest.builtin.*` Python 命名空间后继续由宿主 import；
+- 用 `RuntimeModuleDescriptor.factory` 在宿主进程构造业务类，再把进程内对象登记成 Generation；
+- 由 Supervisor、Bot Host 或 provisioning 代码按组件 ID import、验证或拼装具体业务实现；
+- 用 `importlib.reload()`、覆盖已加载包目录、修改共享单例或重建一组宿主内对象冒充热重载；
+- 新旧实现双轨并存，并以 forwarding shim、fallback 或兼容 DTO 维持错误路径。
+
+宿主只能读取经校验的不可变 `PackageSnapshot` 和声明，创建运行时 Driver，并保存不透明 Worker/Generation 句柄。插件代码只允许在其 Worker 中导入和执行。模块间调用只能携带契约 DTO、稳定引用和受管 Payload，不能越过 IPC 返回 Python 对象、Repository、客户端或闭包。
+
+### 2.2 插件热重载是强制生命周期，不是开发辅助
+
+所有普通插件（包括 builtin）必须完整支持 `drain` 热重载。唯一合法路径为：捕获新源码形成不同内容摘要 → 静态校验 manifest/schema/依赖/能力 → 创建新 Worker 与新 Generation → 在无生产写权限下 prepare/start/health → 冻结旧路由准入 → 排空旧代在途调用和持久安全点 → 原子提交新 route/registry/config effective → 本地开放新代 admission → 停止并回收旧 Worker、任务、连接与临时环境。候选在提交前任一步失败时，必须销毁候选并恢复旧代准入；提交后不得把旧对象重新激活为当前代，回退也要创建新的 Generation。
+
+热重载的单位是不可变包/Worker/Generation，不是 Python module 对象。配置生效、UI 工件、服务路由、命令、订阅、Job、状态 schema 和能力授予都绑定同一 Generation，不能分别切换。内核或不可卸载 bootstrap 代码只允许受控宿主重启，不能借“builtin”身份绕过该规则。
+
 ## 3. 权威执行链
 
 “执行链”是已经发生的路由和因果事实，不是可编辑工作流：

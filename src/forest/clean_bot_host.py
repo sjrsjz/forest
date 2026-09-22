@@ -9,10 +9,12 @@ import os
 import signal
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
+from forest.builtin_packages import bootstrap_builtin_package
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_embedding_module import bootstrap_clean_embedding
@@ -23,7 +25,6 @@ from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_process_executor_module import bootstrap_clean_process_executor
 from forest.clean_provider_module import bootstrap_clean_provider
 from forest.clean_shell_module import bootstrap_clean_shell
-from forest.clean_trigger_policy_module import bootstrap_clean_trigger_policy
 from forest.clean_vector_index_module import (
     bootstrap_clean_vector_index,
     default_vector_index_configuration,
@@ -32,6 +33,7 @@ from forest.core_runtime import bootstrap_clean_kernel
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
+from forest.packages import PackageCatalog
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.clean_bot_store import CleanBotStore
@@ -293,6 +295,7 @@ class CleanBotHost:
         vector_index_client_factory=None,
         media_client_factory=None,
         websocket_client_factory=None,
+        package_catalog=None,
     ) -> None:
         self.settings = settings
         self.store = CleanBotStore(settings.dsn, settings.bot_id)
@@ -312,6 +315,9 @@ class CleanBotHost:
         self._vector_index_client_factory = vector_index_client_factory
         self._media_client_factory = media_client_factory
         self._websocket_client_factory = websocket_client_factory
+        self.package_catalog = package_catalog or PackageCatalog(
+            Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
+        )
 
     @property
     def bot(self):
@@ -566,7 +572,9 @@ class CleanBotHost:
                 )
             ),
         )
-        trigger = await bootstrap_clean_trigger_policy(
+        trigger = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/trigger_policy"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,

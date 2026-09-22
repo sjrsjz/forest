@@ -57,7 +57,7 @@ flowchart LR
   CR --> A
 ```
 
-`BotRuntimeSupervisor` 只负责读取已冻结部署计划、按依赖图建立组件实例、授予能力、监督代际和汇总健康。它不能 `import AgentRuntime`、`MemoryRuntime` 或具体 Adapter。官方组件和第三方组件都通过同一 `ModuleDescriptor`/`ModuleFactory` 注册，只在信任级别、发行来源和允许的能力上不同。
+`BotRuntimeSupervisor` 只负责读取已冻结部署计划、解析内容寻址包、建立 Worker/Generation 句柄、监督代际和汇总健康。它不能 `import AgentRuntime`、`MemoryRuntime` 或具体 Adapter，也不能调用 `bootstrap_*` 工厂构造业务对象。官方组件和第三方组件都由同一个 `PackageDescriptorCompiler` 从已校验 `PackageSnapshot` 生成运行描述符，只在签名、信任级别、发行来源和允许的能力上不同。
 
 只有内核路由与生命周期设施可以从 `ModuleRegistry` 解析实例。业务运行时代码必须消费绑定准确图、代际、契约版本、deadline 与 admission epoch 的调用句柄，不能按 `component_id` 取出另一个模块的 Python 对象。禁止在 Bot/Binding 对象上重新暴露 `agent`、`memory`、`scheduler`、`shell`、`jobs` 等便利属性，也禁止给工厂传入可变的全局 `modules` 字典后由模块自行抓取依赖。模块拥有自己的内部资源，例如 `scheduler.jobs` 拥有 JobStore；调用者不得越过模块边界持有该资源。这样删除或替换模块时，内核与业务模块之间不会留下隐式对象图，依赖和实际调用都能由注册表与 dispatch trace 完整解释。
 
@@ -67,7 +67,7 @@ flowchart LR
 
 通用 action 在验证类型化输入后先派生稳定幂等操作 ID。若模块需要处理凭据或跨库目录预留，可在签发权威票据前执行模块声明的 authorization preparation：它只能返回进入票据的安全载荷和不出模块进程的私有暂存状态。以 OneBot 为例，access token 与 webhook secret 先由 Adapter 加密暂存，票据只包含 `secret_digest`；Binding 目录预留返回冻结的登记载荷。随后通用网关签发票据并调用同一代际的模块 handler。这个阶段不是第二套授权，也不能产生外部副作用；其失败由相同 operation ID 重放或恢复。
 
-模块描述包含：
+模块描述只能从不可变包声明、部署配置引用和内核签发事实编译，包含：
 
 - `component_id`、包摘要、作用域、代际和运行驱动；
 - 提供/依赖的契约及启动依赖边；
@@ -77,7 +77,7 @@ flowchart LR
 
 依赖图必须无环。生命周期协调器拓扑准备和启动，反向排空和停止。Contract Router 只向 ACTIVE 代际发布路由；候选代际完成 schema、依赖、能力、状态迁移和健康检查后一次切换。任何组件失败都按依赖边影响实例，不以“平台子任务失败”笼统拖停无关模块。
 
-`RuntimeModuleRegistry` 必须由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次 Registry 激活分配独立 activation UUID，为完整描述符集建立一个不可变 RuntimeGraph，并为每个模块建立 Generation；即使宿主 lease incarnation 未变化，关闭后再次启动也必须创建新图和新代际，绝不重新激活已经 `STOPPED` 的记录。描述符摘要覆盖依赖、factory 身份、管理契约、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`。物理上同属一个 Forest Python distribution 的模块使用覆盖该 distribution 全部 Python、SQL、HTML、CSS、JavaScript、JSON 和 TOML 资源的真实摘要；物理拆包后才使用各自包摘要。存储 bundle 的 `package_digest` 必须等于描述符工件摘要。
+`RuntimeModuleRegistry` 必须由内核持有 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED` 状态，描述符不能用模块自报字段伪造生命周期。每次 Registry 激活分配独立 activation UUID，为完整描述符集建立一个不可变 RuntimeGraph，并为每个模块建立 Generation；即使宿主 lease incarnation 未变化，关闭后再次启动也必须创建新图和新代际，绝不重新激活已经 `STOPPED` 的记录。业务模块描述符摘要覆盖准确包摘要、依赖、契约、管理贡献、UI 工件和明确的 `package_id/version/digest/scope/driver/trust_level`，不得包含宿主 Python factory 身份。每个 builtin 从第一天就是物理独立包；把多个业务模块视作 `forest` distribution 内对象只适用于待删除旧实现。存储 bundle 的 `package_digest` 必须等于所属插件包摘要。
 
 干净代际的顺序固定为 `prepare_generation → 持久化候选图并分配 generation_id → bind_generation → start/prewarm → publish participants + RuntimeGraph commit → activate_generation`。`start` 只能建立待命资源，不能领取生产工作；需要随路由一起生效的模块事实必须实现事务型 publication participant，在同一个 Bot 数据库事务中与配置 effective、Generation ACTIVE、Route epoch 和 graph head 一起提交。提交后的 `activate_generation` 只能打开已经预热完成的本地 admission gate，不得访问网络、数据库或执行可能失败的业务发布。若本地不变量仍意外抛错，Registry 立即撤下刚发布的路由并把图记为失败，不能把该动作包装成跨事务“补发布”。关闭先在持久路由上原子关闭 DATA/CONTROL admission 并递增 route epoch，RuntimeGraph head 暂时保持当前，使已经持有 actor/run/call lease 的工作可用精确 member fence 完成或 checkpoint；随后按逆依赖序排空。达到 QUIESCENT 后才撤下 head、退休图并追加终态。member fence 不能领取新顶层工作，最终事务还必须校验对应业务 lease/epoch。旧宿主已经失租时只能回收本地资源，不能冒用过期 lease 修改持久事实；新宿主发布新图的事务负责把旧图终结为 STOPPED。官方模块与可安装 Worker 可以使用不同运行驱动，但必须遵守同一 Generation、健康、恢复、依赖隔离和终止契约；运行驱动差异不能产生第二套生命周期事实。
 
@@ -86,6 +86,39 @@ flowchart LR
 核验成功后 `kernel.runtime` 才分配 `generation_id` 并持久化候选 Generation。RuntimeGraph 的每个模块成员必须直接引用这个准确的 `generation_id`，图摘要覆盖按组件稳定排序的 Generation membership、依赖边和路由契约摘要；仅保存 `component_id/package_digest` 不能证明图实际采用了哪个配置、授权、状态契约或工作实例。发布事务只能把全部 `READY` Generation 组成的完整图切成 head，且同时推进对应 Route；任何候选缺少上述绑定、引用非 READY Generation、组件身份不一致或 Host fence 失效，整张图都不得发布。相同 prepare operation 的精确重放返回原候选，输入摘要不同则冲突；关闭后重新启动、配置生效、包替换或授权集改变都创建新 Generation，不能原地改写绑定。
 
 官方 `adapter.onebot` 模块只拥有 Binding 配置与账号身份、连接代际、候选发布/恢复、平台入站观察、网络客户端和连接监督任务，并向其他模块提供 Binding 目录、已认证入站和 OneBot action 传输端口。Binding 配置只引用凭据与其他模块的策略身份；管理员名单、Shell 规则和命令权限属于 `shell.command`，不能因为它们按 Binding 生效就写进 Adapter。`conversation.scheduler` 拥有 Inbox、触发、输入切口和 Context；`shell.command` 拥有控制消息接纳、管理员策略、命令请求与执行；`delivery` 拥有 SendIntent、发送分片、attempt、平台回执引用、UNKNOWN 与对账。Adapter 只执行 Delivery 已许可的一个 transport attempt 并返回类型化观察，不能持有 `MessageStore`、`DeliveryStore`、Shell guard、发送队列或回复顺序。
+
+### 3.1 Package Generation Adapter
+
+Python 插件接入 RuntimeGraph 的唯一桥梁是内核拥有的 `PackageGenerationAdapter`。它不是业务模块基类，也不理解 Agent、Memory、OneBot 或 Provider 字段。它只完成以下机械映射：
+
+1. 从 `PackageSnapshot` 读取单一组件、provides/requires、状态 schema、资源上限、生命周期期限、配置 schema、storage bundle 与管理 UI；
+2. 把服务契约和依赖解析结果编译成 Registry 可验证的描述符，不导入插件代码；
+3. 读取准确 desired 配置修订与 grant set，形成 `PreparedGenerationBinding`，等待 `kernel.runtime` 分配 Generation 身份；
+4. 使用 `(instance_id, generation_id, worker_incarnation, bot_id)` 启动对应 RuntimeDriver，把不可变包根和有限能力句柄交给 Worker；
+5. 将 Worker 暴露的 service/command/event/job handler 包装成 Contract Router 句柄，并在每次发送 IPC 前复核本地 gate、持久 route、Generation 与 call fence；
+6. 监督 Worker 进程、调用、后台任务、连接、临时环境和退出状态，并把失败归约到该 Generation；
+7. 在 quiesce/stop 时拒绝新调用、等待已接纳调用、关闭能力句柄并确保进程退出。
+
+Adapter 不得把插件类、方法、Repository 或客户端返回给 Registry。Registry 看到的实例永远是通用 Driver 句柄；Worker 才能 import `entrypoint`。插件代码若需要调用另一服务，只能经 `ctx.services.call` 发 IPC 回宿主，由宿主 Contract Router 在调用者 Generation 下解析；插件不能读取 Registry，也不能请求按组件 ID取得对象。
+
+配置读取是 Query；配置计划/提交是 Command；Worker 调用、状态提交和外部效果各有独立端口。`prepare_generation` 只能读取冻结配置、声明和授权事实，不得写业务状态或执行网络副作用。Worker 的 `prepare/start/health` 只建立候选资源；即使 Worker 内部已进入可接受 IPC 的待命态，Adapter 的本地 admission gate 与持久 route 在 publication 前保持关闭。`activate_generation` 只同步翻转本地 gate，不做 IPC、网络或数据库操作。
+
+### 3.2 完整热重载与回滚
+
+包源码 watch 只产生“构建候选包”事件。每次变化都重新稳定捕获全部文件并产生新摘要；同一版本不同摘要不得覆盖目录或静默替换 catalog 绑定。重载按以下不可跳步的状态机执行：
+
+```text
+CAPTURED -> VALIDATED -> CANDIDATE_WORKER_READY -> OLD_ADMISSION_FROZEN
+         -> OLD_QUIESCENT -> ROUTES_COMMITTED -> NEW_ADMITTED
+         -> OLD_DISPOSED
+```
+
+- `CANDIDATE_WORKER_READY` 前失败：终止候选进程并删除临时环境，旧代完全不动。
+- 冻结后、提交前失败：候选销毁；旧 Worker 先执行显式 `resume`，健康检查通过后才恢复旧 route admission。同步 `activate_generation` 不能代替 Worker resume。
+- `ROUTES_COMMITTED` 后：旧代永不重新成为当前路由。新代故障通过另一笔替换操作回退到旧包摘要并创建全新 Generation。
+- `OLD_DISPOSED` 只有在旧调用、调用派生的能力请求、后台任务和资源全部收敛且进程已退出后成立；超时必须强制终止并记录 cleanup failure，不能遗留孤儿 Worker。
+
+首版允许为了简化原子性替换整张 Bot RuntimeGraph，但影响集合内的每个 Worker 都必须真实经历上述协议。未受影响组件也会获得新 Generation；后续可缩小影响集合，不能用共享进程内对象绕过代际。Adapter/Ingress 若需在切换期间缓冲平台事件，缓冲所有权和上限必须由其插件契约声明，不能靠 Host 的组件 ID 特判。
 
 Agent 的最终候选不能直接创建 Delivery 记录。`agent.runtime` 先把带 checkpoint 和所答 trigger 集合的 `FinalCandidate` 交给 `conversation.scheduler`；Scheduler 只构造带稳定引用、预期版本和幂等 ID 的 `ReplyCommitPlan`，再调用内核 UnitOfWork 契约。内核按冻结 RuntimeGraph 解析 Agent、Conversation 与 Delivery 的准确 participant，在同一 Bot 事务中提交正式 `REPLY` Context、trigger `ANSWERED`、Agent Run `COMPLETED` 和 Delivery `SendIntent`。任一 participant 失败则整体回滚。业务模块不能持有另两个运行实例或 participant bound method，也不能自己拼接跨模块 UnitOfWork；每个 participant 只写自己的 schema，原子性不靠跨模块直写或跨 schema 外键。
 

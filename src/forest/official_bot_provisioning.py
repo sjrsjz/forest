@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from importlib.resources import files
 from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator
@@ -20,19 +22,42 @@ from forest.clean_provider_module import (
 from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
 from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA, default_shell_configuration
 from forest.clean_shell_runtime import CleanShellRuntime
-from forest.clean_trigger_policy_module import (
-    TRIGGER_POLICY_CONFIGURATION_SCHEMA,
-    default_trigger_policy_configuration,
-)
 from forest.clean_vector_index_module import (
     VECTOR_INDEX_CONFIGURATION_SCHEMA,
     default_vector_index_configuration,
 )
 from forest.clean_vector_index_runtime import CleanMilvusVectorIndexRuntime
-from forest.conversation_trigger_policy import ConversationTriggerPolicyRuntime
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.runtime_modules import RuntimeManagementContribution
+
+TRIGGER_POLICY_CONFIGURATION_SCHEMA = json.loads(
+    files("forest")
+    .joinpath("builtin/trigger_policy/schemas/config.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def default_trigger_policy_configuration() -> dict:
+    return {
+        "protocol": "forest.conversation.trigger-policy/1",
+        "allowed_group_ids": [],
+        "group_trigger_mode": "MENTION",
+        "private_enabled": True,
+    }
+
+
+def validate_trigger_policy_configuration(value: object) -> dict:
+    if not Draft202012Validator(TRIGGER_POLICY_CONFIGURATION_SCHEMA).is_valid(value):
+        raise ForestError(
+            "TRIGGER_POLICY_CONFIGURATION_INVALID",
+            "Trigger policy configuration is invalid",
+            422,
+        )
+    return {
+        **value,
+        "allowed_group_ids": tuple(value["allowed_group_ids"]),
+    }
 
 AGENT_BOOTSTRAP_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -127,7 +152,7 @@ def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContributi
             "Conversation Trigger Policy",
             "Allowed groups and the conditions that create an Agent turn.",
             default_trigger_policy_configuration(),
-            ConversationTriggerPolicyRuntime._parse_configuration,
+            validate_trigger_policy_configuration,
         ),
         (
             "shell.command",
@@ -249,7 +274,7 @@ class OfficialBotSettingsResolver:
                 "Vector index and embedding spaces differ",
                 409,
             )
-        trigger = ConversationTriggerPolicyRuntime._parse_configuration(
+        trigger = validate_trigger_policy_configuration(
             components["conversation.trigger-policy"].config
         )
         shell = CleanShellRuntime._parse_profile(components["shell.command"].config)
