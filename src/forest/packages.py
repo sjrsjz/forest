@@ -191,18 +191,24 @@ MANIFEST_SCHEMA = {
                                 "name",
                                 "contract",
                                 "kind",
+                                "semantics",
                                 "input_schema",
                                 "output_schema",
                             ],
                             "properties": {
-                                key: {"type": "string"}
-                                for key in (
-                                    "name",
-                                    "contract",
-                                    "kind",
-                                    "input_schema",
-                                    "output_schema",
-                                )
+                                **{
+                                    key: {"type": "string"}
+                                    for key in (
+                                        "name",
+                                        "contract",
+                                        "kind",
+                                        "input_schema",
+                                        "output_schema",
+                                    )
+                                },
+                                "semantics": {
+                                    "enum": ["at-most-once", "idempotent", "read"]
+                                },
                             },
                         },
                     },

@@ -14,7 +14,6 @@ from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
 from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
-from forest.clean_vector_index_module import default_vector_index_configuration
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
@@ -40,6 +39,7 @@ from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
+from forest.vector_index_builtin import default_vector_index_configuration
 
 
 @pytest_asyncio.fixture

@@ -126,9 +126,41 @@ class _RoutedEmbeddingProvider:
 
 class _RoutedVectorIndex:
     def __init__(self, *, upsert, search, delete) -> None:
-        self.upsert = upsert
-        self.search = search
-        self.delete = delete
+        self._upsert = upsert
+        self._search = search
+        self._delete = delete
+
+    @staticmethod
+    def _operation(kind: str, payload: dict) -> str:
+        return f"vector-index:{kind}:" + digest_json(payload)[7:]
+
+    async def upsert(self, **payload):
+        payload = {**payload, "vector": list(payload["vector"])}
+        return await self._upsert.invoke(
+            payload,
+            operation_id=self._operation("upsert", payload),
+            causal_root_kind="memory.embedding",
+            causal_root_id=payload["ref_id"],
+        )
+
+    async def search(self, **payload):
+        value = await self._search.invoke(
+            payload,
+            operation_id=self._operation("search", payload),
+            causal_root_kind="memory.recall",
+            causal_root_id=payload["query_ref_id"],
+        )
+        return tuple(value["hits"])
+
+    async def delete(self, **payload):
+        normalized = {**payload, "ref_ids": list(payload["ref_ids"])}
+        operation_id = self._operation("delete", normalized)
+        await self._delete.invoke(
+            normalized,
+            operation_id=operation_id,
+            causal_root_kind="memory.forget",
+            causal_root_id=operation_id,
+        )
 
 
 @dataclass(frozen=True)

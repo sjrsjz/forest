@@ -12,11 +12,6 @@ from forest.bootstrap_contributions import BootstrapConfigurationContribution
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA, default_shell_configuration
 from forest.clean_shell_runtime import CleanShellRuntime
-from forest.clean_vector_index_module import (
-    VECTOR_INDEX_CONFIGURATION_SCHEMA,
-    default_vector_index_configuration,
-)
-from forest.clean_vector_index_runtime import CleanMilvusVectorIndexRuntime
 from forest.embedding_builtin import (
     EMBEDDING_CONFIGURATION_SCHEMA,
     default_embedding_configuration,
@@ -30,6 +25,11 @@ from forest.provider_builtin import (
     validate_provider_configuration,
 )
 from forest.runtime_modules import RuntimeManagementContribution
+from forest.vector_index_builtin import (
+    VECTOR_INDEX_CONFIGURATION_SCHEMA,
+    default_vector_index_configuration,
+    validate_vector_index_configuration,
+)
 
 TRIGGER_POLICY_CONFIGURATION_SCHEMA = json.loads(
     files("forest")
@@ -145,7 +145,7 @@ def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContributi
                 space_id=default_embedding_profile.space_id,
                 dimensions=default_embedding_profile.dimensions,
             ),
-            CleanMilvusVectorIndexRuntime._parse_configuration,
+            validate_vector_index_configuration,
         ),
         (
             "conversation.trigger-policy",
@@ -262,7 +262,7 @@ class OfficialBotSettingsResolver:
         embedding, embedding_profile = validate_embedding_configuration(
             components["embedding.multimodal"].config
         )
-        vector_index = CleanMilvusVectorIndexRuntime._parse_configuration(
+        vector_index = validate_vector_index_configuration(
             components["vector.index"].config
         )
         if (

@@ -40,10 +40,6 @@ from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_shell_module import bootstrap_clean_shell
-from forest.clean_vector_index_module import (
-    bootstrap_clean_vector_index,
-    default_vector_index_configuration,
-)
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import (
     default_embedding_configuration,
@@ -65,6 +61,11 @@ from forest.storage.agent_runtime_authority import (
 )
 from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
 from forest.storage.payload_authority import PayloadSource
+from forest.vector_index_builtin import (
+    default_vector_index_configuration,
+    vector_index_configuration_validator_factory,
+)
+from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
 
 
 class FakeWebSocketClient:
@@ -435,7 +436,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     async def resolve_vector_token(*_args):
         return ""
 
-    vector_index = await bootstrap_clean_vector_index(
+    vector_index = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        package_catalog,
         store,
         installer,
         kernel=kernel,
@@ -443,8 +446,17 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             space_id=embedding_profile.space_id,
             dimensions=embedding_profile.dimensions,
         ),
-        token_resolver=resolve_vector_token,
-        client_factory=FakeMilvusClient,
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "vector-index.milvus": milvus_vector_index_effect_driver_factory(
+                    bot_id=store.bot_id,
+                    runtime=kernel.runtime,
+                    token_resolver=resolve_vector_token,
+                    client_factory=FakeMilvusClient,
+                )
+            }
+        ),
+        configuration_validator_factory=vector_index_configuration_validator_factory(store),
     )
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     media = await bootstrap_clean_media(store, installer, kernel=kernel)

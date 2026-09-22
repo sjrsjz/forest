@@ -1,5 +1,5 @@
 CREATE TABLE vector_index_identity (
-    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    bot_id text PRIMARY KEY,
     initialization_operation_id text NOT NULL
         CHECK (octet_length(initialization_operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -12,14 +12,3 @@ CREATE TABLE vector_index_identity (
     UNIQUE (bot_id,space_id),
     UNIQUE (collection_name)
 );
-
-CREATE FUNCTION forest_vector_index_identity_immutable() RETURNS trigger
-LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
-BEGIN
-    RAISE EXCEPTION 'Forest vector index identity is immutable' USING ERRCODE='55000';
-END;
-$$;
-
-CREATE TRIGGER vector_index_identity_immutable
-    BEFORE UPDATE OR DELETE ON vector_index_identity
-    FOR EACH ROW EXECUTE FUNCTION forest_vector_index_identity_immutable();

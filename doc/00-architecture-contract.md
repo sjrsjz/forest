@@ -84,6 +84,8 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 需要 Secret、网络、文件或进程能力的 builtin 仍必须是完整插件包。包在 manifest 中声明有界 `effect_service`；部署环境只按 `effect kind` 安装通用宿主驱动工厂。`PackageGenerationAdapter` 用同一冻结配置和准确 Generation 身份创建驱动，驱动与 Worker 共同经历 start、quiesce、resume、close，服务路由也指向该 Generation。驱动不是可独立启动的宿主业务模块，不能脱离包路由长期存活；Worker 不接触 Secret 明文或原始客户端。
 
+每个 `effect_service` 必须声明 `semantics`：`at-most-once` 表示不可安全重复的外部效果，必须先进入持久操作账本并在不确定交接后停止自动重试；`idempotent` 表示目标由稳定业务键收敛，可在准确 Generation fence 下重复执行；`read` 表示无业务写入的查询。调用方不能用宿主私有约定猜测语义，Package Adapter 也不能把所有效果一律写成最多一次，从而永久缓存派生索引的瞬时失败。
+
 ### 2.2 插件热重载是强制生命周期，不是开发辅助
 
 所有普通插件（包括 builtin）必须完整支持 `drain` 热重载。唯一合法路径为：捕获新源码形成不同内容摘要 → 静态校验 manifest/schema/依赖/能力 → 创建新 Worker 与新 Generation → 在无生产写权限下 prepare/start/health → 冻结旧路由准入 → 排空旧代在途调用和持久安全点 → 原子提交新 route/registry/config effective → 本地开放新代 admission → 停止并回收旧 Worker、任务、连接与临时环境。候选在提交前任一步失败时，必须销毁候选并恢复旧代准入；提交后不得把旧对象重新激活为当前代，回退也要创建新的 Generation。

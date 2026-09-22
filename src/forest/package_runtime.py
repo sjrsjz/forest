@@ -448,6 +448,12 @@ class PackageGenerationAdapter:
         return RoutedServiceEndpoint(routed=routed)
 
     def _effect_service_handler(self, service_id: str) -> RoutedServiceEndpoint:
+        declaration = next(
+            item
+            for item in self.component.get("effect_services", ())
+            if item["name"] == service_id
+        )
+
         async def routed(route, invocation, *args, **kwargs):
             if args and kwargs or len(args) > 1:
                 raise ForestError(
@@ -481,7 +487,7 @@ class PackageGenerationAdapter:
                 invocation=invocation,
                 service_id=service_id,
                 input_value=payload,
-                durable=True,
+                durable=declaration["semantics"] == "at-most-once",
                 dispatch=lambda _worker, scope, _call_id: driver.invoke(
                     payload, scope=scope, invocation=invocation
                 ),

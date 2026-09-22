@@ -26,10 +26,6 @@ from forest.clean_memory_module import bootstrap_clean_memory, default_memory_co
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_process_executor_module import bootstrap_clean_process_executor
 from forest.clean_shell_module import bootstrap_clean_shell
-from forest.clean_vector_index_module import (
-    bootstrap_clean_vector_index,
-    default_vector_index_configuration,
-)
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
@@ -44,6 +40,11 @@ from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.payload_authority import PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
+from forest.vector_index_builtin import (
+    default_vector_index_configuration,
+    vector_index_configuration_validator_factory,
+)
+from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
 
 
 def _required(name: str) -> str:
@@ -557,10 +558,12 @@ class CleanBotHost:
                 )
             return self.settings.vector_index_token
 
-        vector_index_options = {}
+        vector_index_driver_options = {}
         if self._vector_index_client_factory is not None:
-            vector_index_options["client_factory"] = self._vector_index_client_factory
-        vector_index = await bootstrap_clean_vector_index(
+            vector_index_driver_options["client_factory"] = self._vector_index_client_factory
+        vector_index = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/vector_index_milvus"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
@@ -573,8 +576,19 @@ class CleanBotHost:
                 "credential_ref": self.settings.vector_index_credential_ref,
                 "timeout_seconds": self.settings.vector_index_timeout_seconds,
             },
-            token_resolver=resolve_vector_index_token,
-            **vector_index_options,
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "vector-index.milvus": milvus_vector_index_effect_driver_factory(
+                        bot_id=self.store.bot_id,
+                        runtime=self._kernel.runtime,
+                        token_resolver=resolve_vector_index_token,
+                        **vector_index_driver_options,
+                    )
+                }
+            ),
+            configuration_validator_factory=(
+                vector_index_configuration_validator_factory(self.store)
+            ),
         )
         memory_configuration = default_memory_configuration()
         memory_configuration["embedding"] = embedding_profile
