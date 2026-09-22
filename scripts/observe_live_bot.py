@@ -198,9 +198,9 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("DEPLOYMENT_INTENT_INVALID")
     if deployment["observed_state"] != "ONLINE" or deployment["error_code"] is not None:
         failures.append("DEPLOYMENT_OBSERVATION_INVALID")
-    if bot["schema_bundles"] != 18 or bot["members"] != 18:
+    if bot["schema_bundles"] != 19 or bot["members"] != 19:
         failures.append("RUNTIME_GRAPH_CARDINALITY_INVALID")
-    if bot["lifecycle_recorded"] != 18 or bot["active_members"] != 18:
+    if bot["lifecycle_recorded"] != 19 or bot["active_members"] != 19:
         failures.append("RUNTIME_LIFECYCLE_INVALID")
     binding = bot["binding"] or {}
     if (

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "wire_body_b64", "wire_digest"],
+  "properties": {
+    "action": {"enum": ["send_group_msg", "send_private_msg"]},
+    "wire_body_b64": {"type": "string", "maxLength": 262144},
+    "wire_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

@@ -87,6 +87,8 @@ flowchart LR
 
 官方 `adapter.onebot` 模块只拥有 Binding 配置与账号身份、连接代际、候选发布/恢复、平台入站观察、网络客户端和连接监督任务，并向其他模块提供 Binding 目录、已认证入站和 OneBot action 传输端口。Binding 配置只引用凭据与其他模块的策略身份；管理员名单、Shell 规则和命令权限属于 `shell.command`，不能因为它们按 Binding 生效就写进 Adapter。`conversation.scheduler` 拥有 Inbox、触发、输入切口和 Context；`shell.command` 拥有控制消息接纳、管理员策略、命令请求与执行；`delivery` 拥有 SendIntent、发送分片、attempt、平台回执引用、UNKNOWN 与对账。Adapter 只执行 Delivery 已许可的一个 transport attempt 并返回类型化观察，不能持有 `MessageStore`、`DeliveryStore`、Shell guard、发送队列或回复顺序。
 
+`codec.onebot` 是独立、无状态、可热替换的 builtin 插件，只提供事件规范化和发送载荷编码契约。它不能持有 Binding、凭据、Socket、Repository、Conversation 或发送队列；`adapter.onebot` 通过冻结到准确 Generation 的 Contract Router 句柄调用它，并在外部效果前再次验证 action、wire 摘要和允许的 segment。插件 Worker 发送 IPC 前的最终围栏不得读取线程局部变量或进程级调用上下文：Contract Router 必须把不可变 route 凭据显式交给路由感知 endpoint；endpoint 只按凭据声明的 lane 与 owned-work 位选择新准入围栏或当前图成员围栏。
+
 ### 3.1 Package Generation Adapter
 
 Python 插件接入 RuntimeGraph 的唯一桥梁是内核拥有的 `PackageGenerationAdapter`。它不是业务模块基类，也不理解 Agent、Memory、OneBot 或 Provider 字段。它只完成以下机械映射：

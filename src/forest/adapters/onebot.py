@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
@@ -12,32 +18,201 @@ import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from forest.builtin.onebot.python.onebot_codec import CAPABILITIES as CAPABILITIES
-from forest.builtin.onebot.python.onebot_codec import MAX_EVENT_BYTES as MAX_EVENT_BYTES
-from forest.builtin.onebot.python.onebot_codec import (
-    MAX_RESPONSE_BYTES,
-    _encode,
-    _http_url,
-    _id,
-    _invalid,
-    _json,
-    _string,
-)
-from forest.builtin.onebot.python.onebot_codec import MAX_SEGMENTS as MAX_SEGMENTS
-from forest.builtin.onebot.python.onebot_codec import MAX_SEND_BYTES as MAX_SEND_BYTES
-from forest.builtin.onebot.python.onebot_codec import PLATFORM as PLATFORM
-from forest.builtin.onebot.python.onebot_codec import AuthorizedImage as AuthorizedImage
-from forest.builtin.onebot.python.onebot_codec import NormalizedMessage as NormalizedMessage
-from forest.builtin.onebot.python.onebot_codec import PreparedSend as PreparedSend
-from forest.builtin.onebot.python.onebot_codec import normalize_event as normalize_event
-from forest.builtin.onebot.python.onebot_codec import parse_event as parse_event
-from forest.builtin.onebot.python.onebot_codec import prepare_send as prepare_send
-from forest.builtin.onebot.python.onebot_codec import verify_signature as verify_signature
 from forest.errors import ForestError
 
+CAPABILITIES = {
+    "event_transport": ["http-post", "forward-websocket"],
+    "api_transport": ["http", "forward-websocket"],
+    "event_replay": False,
+    "send_idempotency": False,
+    "send_result_reconciliation": False,
+    "unknown_result_retry": False,
+}
+MAX_EVENT_BYTES = 128 * 1024
+MAX_SEND_BYTES = 192 * 1024
+MAX_RESPONSE_BYTES = 64 * 1024
+MAX_SEGMENTS = 256
 MAX_WS_FRAME_BYTES = MAX_EVENT_BYTES + 4096
 MAX_WS_EVENTS = 256
 MAX_WS_PENDING = 64
+_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]{0,18})\Z")
+_ACTIONS = {"send_group_msg", "send_private_msg"}
+
+
+def _invalid(message: str = "Invalid OneBot transport payload") -> ForestError:
+    return ForestError("ONEBOT_INVALID", message, 400)
+
+
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate key")
+        result[key] = value
+    return result
+
+
+def _json(body: bytes, limit: int) -> Any:
+    if not isinstance(body, bytes) or not 0 < len(body) <= limit:
+        raise _invalid("OneBot body exceeds its byte limit")
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=_unique)
+        pending = [(value, 0)]
+        count = 0
+        while pending:
+            item, depth = pending.pop()
+            count += 1
+            if count > 8192 or depth > 16:
+                raise ValueError("Structure limit")
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) or len(key) > 128 for key in item):
+                    raise ValueError("Key limit")
+                pending.extend((child, depth + 1) for child in item.values())
+            elif isinstance(item, list):
+                pending.extend((child, depth + 1) for child in item)
+            elif isinstance(item, str):
+                item.encode("utf-8")
+            elif isinstance(item, float) and not math.isfinite(item):
+                raise ValueError("Non-finite number")
+            elif isinstance(item, int) and not -(2**63) <= item < 2**63:
+                raise ValueError("Integer limit")
+        return value
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise _invalid("Invalid bounded UTF-8 JSON body") from None
+
+
+def _encode(value: Any, limit: int) -> bytes:
+    try:
+        body = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise _invalid() from None
+    _json(body, limit)
+    return body
+
+
+def _id(value: Any, *, message: bool = False) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise _invalid("Invalid platform identity")
+    if not _DECIMAL.fullmatch(str(value)):
+        raise _invalid("Invalid platform identity")
+    number = int(value)
+    lower, upper = (-(2**31), 2**31) if message else (1, 2**63)
+    if not lower <= number < upper:
+        raise _invalid("Platform identity is outside its range")
+    return str(number)
+
+
+def _string(value: Any, default: str = "", *, limit: int = 1024) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str) or len(value) > limit:
+        raise _invalid("Invalid bounded text field")
+    return value
+
+
+def _http_url(value: str, *, origin_only: bool = False) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 8192:
+        raise _invalid("Invalid HTTP endpoint")
+    if any(ord(char) <= 32 or ord(char) == 127 for char in value) or "\\" in value:
+        raise _invalid("Invalid HTTP endpoint")
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname is not None
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+            and (parsed.port is None or 1 <= parsed.port <= 65535)
+        )
+        if origin_only:
+            valid = valid and not parsed.query and parsed.path in {"", "/"}
+        if not valid:
+            raise ValueError("Invalid origin")
+        parsed.hostname.encode("idna")
+    except (ValueError, UnicodeError):
+        raise _invalid("Invalid HTTP endpoint") from None
+    return value.rstrip("/") if origin_only else value
+
+
+def verify_signature(body: bytes, secret: str, signature: str | None) -> None:
+    """Authenticate exact HTTP ingress bytes inside the Adapter boundary."""
+
+    if not isinstance(body, bytes) or len(body) > MAX_EVENT_BYTES:
+        raise ForestError("ONEBOT_TOO_LARGE", "OneBot body exceeds its byte limit", 413)
+    if not isinstance(secret, str) or not 1 <= len(secret) <= 4096:
+        raise ForestError("ONEBOT_CONFIG_INVALID", "A binding signature secret is required", 503)
+    try:
+        expected = "sha1=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha1).hexdigest()
+    except UnicodeError:
+        raise ForestError("ONEBOT_CONFIG_INVALID", "Invalid binding signature secret", 503) from None
+    if (
+        not isinstance(signature, str)
+        or re.fullmatch(r"sha1=[0-9a-fA-F]{40}", signature) is None
+        or not hmac.compare_digest(expected, signature.lower())
+    ):
+        raise ForestError("ONEBOT_SIGNATURE_INVALID", "Event signature is invalid", 401)
+
+
+def _validate_prepared_body(action: str, body: bytes) -> None:
+    if action not in _ACTIONS:
+        raise _invalid("Unsupported OneBot send action")
+    value = _json(body, MAX_SEND_BYTES)
+    target = "group_id" if action == "send_group_msg" else "user_id"
+    if not isinstance(value, dict) or set(value) != {target, "message", "auto_escape"}:
+        raise _invalid("Prepared send envelope does not match its action")
+    _id(value[target])
+    parts = value["message"]
+    if value["auto_escape"] is not True or not isinstance(parts, list) or not 1 <= len(parts) <= MAX_SEGMENTS:
+        raise _invalid("Prepared send message is invalid")
+    for part in parts:
+        if not isinstance(part, dict) or set(part) != {"type", "data"}:
+            raise _invalid("Prepared send segment is invalid")
+        kind, data = part["type"], part["data"]
+        if kind == "text" and isinstance(data, dict) and set(data) == {"text"}:
+            if not isinstance(data["text"], str):
+                raise _invalid("Prepared text segment is invalid")
+        elif kind == "at" and isinstance(data, dict) and set(data) == {"qq"}:
+            if action != "send_group_msg":
+                raise _invalid("Prepared mention segment is invalid")
+            if data["qq"] != "all":
+                _id(data["qq"])
+        elif kind == "reply" and isinstance(data, dict) and set(data) == {"id"}:
+            _id(data["id"], message=True)
+        else:
+            raise _invalid("Prepared send contains an unsupported segment")
+
+
+@dataclass(frozen=True)
+class PreparedSend:
+    action: str
+    wire_body: bytes
+    wire_digest: str
+
+    def __post_init__(self) -> None:
+        _validate_prepared_body(self.action, self.wire_body)
+        if (
+            not isinstance(self.wire_digest, str)
+            or re.fullmatch(r"[a-f0-9]{64}", self.wire_digest) is None
+            or not hmac.compare_digest(hashlib.sha256(self.wire_body).hexdigest(), self.wire_digest)
+        ):
+            raise _invalid("Prepared send digest does not match its exact bytes")
+
+    @classmethod
+    def from_codec_result(cls, value: Any) -> PreparedSend:
+        if not isinstance(value, dict) or set(value) != {"action", "wire_body_b64", "wire_digest"}:
+            raise _invalid("OneBot codec result is invalid")
+        try:
+            body = base64.b64decode(value["wire_body_b64"], validate=True)
+        except (TypeError, ValueError):
+            raise _invalid("OneBot codec body is not canonical base64") from None
+        return cls(value["action"], body, value["wire_digest"])
 
 
 class _FixedEndpointConnect(connect):
@@ -107,14 +282,6 @@ class OneBotHTTPClient:
     @property
     def is_closed(self) -> bool:
         return self._client.is_closed
-
-    def prepare(
-        self,
-        route: dict[str, Any],
-        parts: list[dict[str, Any] | AuthorizedImage],
-        operation_id: str | None = None,
-    ) -> PreparedSend:
-        return prepare_send(route["channel_kind"], route["channel_id"], parts)
 
     async def send(self, prepared: PreparedSend, *, timeout: float | None = None) -> SendResult:
         if not isinstance(prepared, PreparedSend):
@@ -508,14 +675,6 @@ class OneBotWebSocketClient:
             raise ForestError(
                 "ONEBOT_API_UNAVAILABLE", "Could not verify the OneBot API account", 502
             ) from None
-
-    def prepare(
-        self,
-        route: dict[str, Any],
-        parts: list[dict[str, Any] | AuthorizedImage],
-        operation_id: str | None = None,
-    ) -> PreparedSend:
-        return prepare_send(route["channel_kind"], route["channel_id"], parts)
 
     async def send(self, prepared: PreparedSend, *, timeout: float | None = None) -> SendResult:
         if not isinstance(prepared, PreparedSend):

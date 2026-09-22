@@ -7,6 +7,7 @@ import pytest
 from forest.errors import ForestError
 from forest.package_runtime import PackageGenerationAdapter, PackageGenerationState
 from forest.packages import PackageCatalog, digest_json
+from forest.runtime_contracts import FrozenServiceRoute
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
 
 
@@ -42,6 +43,7 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
         service_routes={},
         resolved_contracts={},
         generation_verifier=verify,
+        generation_member_verifier=verify,
     )
     context = PreparedGenerationContext(
         activation_id="9be186b5-667b-4f48-8051-4b360c087632",
@@ -73,6 +75,18 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
     )
     await adapter.start()
     handler = adapter.runtime_service_handlers()[("conversation.trigger.classify", 1)]
+    route = FrozenServiceRoute(
+        service_id="conversation.trigger.classify",
+        version=1,
+        caller_component_id="adapter.onebot",
+        provider_component_id="conversation.trigger-policy",
+        provider_generation_id="generation:package-runtime:1",
+        graph_id="graph:package-runtime:1",
+        graph_revision=1,
+        admission_lane="DATA",
+        owned_work=False,
+    )
+    assert not callable(handler)
     assert "trigger_policy" not in sys.modules
     normalized = {
         "channel_kind": "group",
@@ -82,11 +96,11 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
         "segments": [{"type": "mention", "external_user_id": "42"}],
     }
     with pytest.raises(ForestError, match="not accepting calls") as candidate:
-        await handler(normalized=normalized)
+        await handler.invoke_routed(route, (), {"normalized": normalized})
     assert candidate.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
 
     adapter.activate_generation()
-    result = await handler(normalized=normalized)
+    result = await handler.invoke_routed(route, (), {"normalized": normalized})
     assert result["decision"] == "TRIGGER"
     assert result["classifier_generation_id"] == "generation:package-runtime:1"
     assert verified[-1] == {
@@ -99,7 +113,9 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
     assert adapter.state is PackageGenerationState.QUIESCENT
     await adapter.resume()
     adapter.activate_generation()
-    assert (await handler(normalized=normalized))["decision"] == "TRIGGER"
+    assert (
+        await handler.invoke_routed(route, (), {"normalized": normalized})
+    )["decision"] == "TRIGGER"
     worker = adapter._worker
     await adapter.quiesce()
     await adapter.close()

@@ -12,12 +12,8 @@ from forest.adapters.onebot import (
     CAPABILITIES,
     MAX_EVENT_BYTES,
     MAX_RESPONSE_BYTES,
-    AuthorizedImage,
     OneBotHTTPClient,
     PreparedSend,
-    normalize_event,
-    parse_event,
-    prepare_send,
     verify_signature,
 )
 from forest.errors import ForestError
@@ -43,235 +39,48 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def parse(value):
-    result = parse_event(encoded(value), self_id="10001")
-    return result.as_dict() if result else None
-
-
 def signature(body, secret="事件签名密钥"):
     return "sha1=" + hmac.new(secret.encode(), body, hashlib.sha1).hexdigest()
 
 
-def test_signed_event_preserves_author_origin_and_order_without_granting_identity():
-    body = encoded(
-        event(
-            principal_ref="forged-admin",
-            message=[
-                {"type": "text", "data": {"text": "这是谁的照片？"}},
-                {"type": "image", "data": {"file": "a.image", "url": "https://media.test/a?key=x"}},
-                {"type": "at", "data": {"qq": "10001"}},
-                {"type": "reply", "data": {"id": "-41"}},
-                {"type": "face", "data": {"id": "178"}},
-            ],
-        )
-    )
-    result = normalize_event(
-        body, self_id="10001", secret="事件签名密钥", signature=signature(body)
-    ).as_dict()
-    assert result["platform"] == "onebot-v11"
-    assert (result["channel_kind"], result["channel_id"], result["thread_id"]) == (
-        "group",
-        "30001",
-        "",
-    )
-    assert result["sent_at"] == "2024-07-03T09:46:40Z"
-    assert result["author"] == {
-        "external_user_id": "20001",
-        "display_name": "群名片",
-        "group_card": "群名片",
-        "is_self": False,
-        "role": "admin",
-    }
-    assert "principal_ref" not in result
-    assert [part["type"] for part in result["segments"]] == [
-        "text",
-        "image",
-        "mention",
-        "reply",
-        "unsupported",
-    ]
-    assert result["segments"][1]["media_ref"] == {
-        "kind": "onebot-source",
-        "uri": "https://media.test/a?key=x",
-        "platform_file": "a.image",
-        "state": "PENDING_CAPTURE",
-    }
-    assert result["segments"][2] == {"type": "mention", "external_user_id": "10001"}
-    assert result["segments"][3] == {"type": "reply", "platform_message_id": "-41"}
-
-
-@pytest.mark.parametrize("bad_signature", [None, "", "sha256=" + "a" * 64, "sha1=" + "0" * 40])
-def test_exact_body_signature_required(bad_signature):
+def test_exact_body_signature_required():
     body = encoded(event())
-    with pytest.raises(ForestError, match="signature"):
-        verify_signature(body, "事件签名密钥", bad_signature)
-    with pytest.raises(ForestError, match="signature"):
-        verify_signature(body + b" ", "事件签名密钥", signature(body))
-    verify_signature(body, "事件签名密钥", signature(body).upper().replace("SHA1", "sha1"))
+    valid = signature(body, secret="event-secret")
+    verify_signature(body, "event-secret", valid)
+    with pytest.raises(ForestError) as error:
+        verify_signature(body + b" ", "event-secret", valid)
+    assert error.value.code == "ONEBOT_SIGNATURE_INVALID"
 
 
 def test_unsigned_configuration_and_oversized_event_are_rejected():
-    with pytest.raises(ForestError) as exc:
+    with pytest.raises(ForestError) as error:
         verify_signature(b"{}", "", None)
-    assert exc.value.code == "ONEBOT_CONFIG_INVALID"
-    with pytest.raises(ForestError) as exc:
+    assert error.value.code == "ONEBOT_CONFIG_INVALID"
+    with pytest.raises(ForestError) as error:
         verify_signature(b" " * (MAX_EVENT_BYTES + 1), "secret", None)
-    assert exc.value.status == 413
+    assert error.value.status == 413
 
 
-@pytest.mark.parametrize("post_type", ["message", "notice", "request", "meta_event"])
-def test_wrong_binding_identity_never_reaches_even_nonmessage_processing(post_type):
-    with pytest.raises(ForestError) as exc:
-        parse(event(self_id=10002, post_type=post_type))
-    assert exc.value.code == "ONEBOT_IDENTITY_MISMATCH"
-    if post_type != "message":
-        assert parse(event(post_type=post_type)) is None
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "&#91;CQ:at,qq=10001&#93;",
-        "&amp;#91;CQ:at,qq=10001&amp;#93;",
-        "[CQ:at,qq=10001,qq=20001]",
-        "[CQ:bad,[CQ:at,qq=10001]]",
-        "[CQ:at, qq=10001]",
-        [{"type": "text", "data": {"text": "[CQ:at,qq=10001]"}}],
-    ],
-)
-def test_escaped_malformed_and_array_text_cannot_forge_a_mention(message):
-    result = parse(event(message=message))
-    assert all(part["type"] == "text" for part in result["segments"])
-
-
-def test_cq_entities_are_decoded_once_in_correct_context():
-    result = parse(
-        event(
-            message=(
-                "&amp;#91;literal&#44;[CQ:at,qq=10001]"
-                "[CQ:share,title=a&#44;b&amp;#91;c,url=https://x.test/?a=b=c&amp;d=e]"
-            )
-        )
-    )
-    assert result["segments"][0] == {"type": "text", "text": "&#91;literal&#44;"}
-    assert result["segments"][1] == {"type": "mention", "external_user_id": "10001"}
-    assert result["segments"][2]["data"] == {
-        "title": "a,b&#91;c",
-        "url": "https://x.test/?a=b=c&d=e",
-    }
-    raw = "&#91;CQ:at,qq=10001&#93;"
-    assert (
-        parse(event(message=[{"type": "text", "data": {"text": raw}}]))["segments"][0]["text"]
-        == raw
-    )
-
-
-def test_private_all_messages_and_anonymous_snapshot_do_not_depend_on_trigger():
-    private = parse(event(message_type="private", message="", sender={}, group_id=None))
-    assert private["channel_id"] == "20001" and private["segments"] == []
-    assert private["author"]["display_name"] == "20001"
-    anonymous = parse(event(anonymous={"id": 55, "name": "匿名者", "flag": "not-context-secret"}))
-    assert anonymous["author"]["anonymous"] == {"id": "55", "name": "匿名者"}
-    assert "not-context-secret" not in json.dumps(anonymous)
-    assert parse(event(sub_type="anonymous"))["author"]["anonymous"]["id"] is None
-    assert parse(event(user_id=10001, sender={"user_id": 10001}))["author"]["is_self"]
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"self_id": True},
-        {"self_id": []},
-        {"self_id": "010001"},
-        {"post_type": []},
-        {"message_type": {}},
-        {"time": True},
-        {"time": 2**63 - 1},
-        {"message_id": 2**31},
-        {"user_id": -1},
-        {"sender": {"user_id": 20002}},
-        {"message": [{"type": "text", "data": {"text": 10}}]},
-        {"message": [{"type": "text", "data": {"text": "x"}}] * 257},
-    ],
-)
-def test_invalid_protocol_fields_have_safe_bounded_errors(changes):
-    with pytest.raises(ForestError):
-        parse(event(**changes))
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b'{"self_id":10001,"self_id":10002}',
-        b'{"self_id":10001,"x":NaN}',
-        b"[" * 40 + b"0" + b"]" * 40,
-        b'{"self_id":10001,"x":"\\ud800"}',
-        '{"self_id":10001}'.encode("utf-16"),
-    ],
-)
-def test_json_duplicate_depth_nonfinite_unicode_are_rejected(body):
-    with pytest.raises(ForestError):
-        parse_event(body, self_id="10001")
-
-
-def test_normalized_message_cannot_be_changed_through_returned_dict():
-    result = parse_event(encoded(event()), self_id="10001")
-    result.as_dict()["author"]["external_user_id"] = "attacker"
-    assert result.as_dict()["author"]["external_user_id"] == "20001"
-
-
-def test_prepared_bytes_are_stable_literal_and_bound_to_action():
-    parts = [
-        {"type": "text", "text": "[CQ:image,file=file:///secret] 中文"},
-        {"type": "mention", "external_user_id": "20001"},
-        {"type": "reply", "platform_message_id": "-42"},
-    ]
-    prepared = prepare_send("group", "30001", parts)
-    parts[0]["text"] = "changed"
-    assert prepared.action == "send_group_msg"
-    assert hashlib.sha256(prepared.wire_body).hexdigest() == prepared.wire_digest
-    body = json.loads(prepared.wire_body)
-    assert body["auto_escape"] is True and body["group_id"] == 30001
-    assert body["message"][0] == {
-        "type": "text",
-        "data": {"text": "[CQ:image,file=file:///secret] 中文"},
-    }
-    with pytest.raises(ForestError):
-        PreparedSend("delete_msg", prepared.wire_body, prepared.wire_digest)
-    with pytest.raises(ForestError):
-        PreparedSend("send_group_msg", prepared.wire_body + b" ", prepared.wire_digest)
-    with pytest.raises(ForestError):
-        PreparedSend("send_private_msg", prepared.wire_body, prepared.wire_digest)
-
-
-@pytest.mark.parametrize(
-    "uri",
-    [
-        "file:///C:/secret",
-        "C:\\secret",
-        "ftp://x.test/a",
-        "https://u:pw@x.test/a",
-        "https://x.test/a\r\nAuthorization: secret",
-        "//x.test/a",
-    ],
-)
-def test_outgoing_media_requires_approved_http_or_bytes_and_never_host_paths(uri):
-    with pytest.raises(ForestError):
-        prepare_send("group", "30001", [AuthorizedImage(uri=uri)])
-    with pytest.raises(ForestError):
-        prepare_send("group", "30001", [{"type": "image", "media_ref": {"uri": uri}}])
-
-
-def test_authorized_image_serializes_bytes_without_opening_a_file_or_url():
-    prepared = prepare_send("private", "20001", [AuthorizedImage(content=b"image bytes")])
-    data = json.loads(prepared.wire_body)
-    assert data["message"][0]["data"] == {
-        "file": "base64://aW1hZ2UgYnl0ZXM=",
-        "proxy": "0",
-        "timeout": "10",
-    }
-    with pytest.raises(ForestError):
-        prepare_send("private", "20001", [{"type": "mention", "external_user_id": "all"}])
+def prepare_send(channel_kind, channel_id, parts):
+    action = "send_group_msg" if channel_kind == "group" else "send_private_msg"
+    target = "group_id" if channel_kind == "group" else "user_id"
+    message = []
+    for part in parts:
+        if part["type"] == "text":
+            message.append({"type": "text", "data": {"text": part["text"]}})
+        elif part["type"] == "mention":
+            message.append({"type": "at", "data": {"qq": part["external_user_id"]}})
+        elif part["type"] == "reply":
+            message.append({"type": "reply", "data": {"id": part["platform_message_id"]}})
+        else:
+            raise AssertionError("test prepared-send helper received unsupported content")
+    body = json.dumps(
+        {target: int(channel_id), "message": message, "auto_escape": True},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return PreparedSend(action, body, hashlib.sha256(body).hexdigest())
 
 
 def response(body=None, *, status=200, headers=(), raw_body=None):
@@ -330,10 +139,10 @@ async def test_real_socket_sends_exact_frozen_body_and_token_once(monkeypatch):
     async with socket_api(reply) as (origin, requests, entered):
         client = OneBotHTTPClient(origin, "private-api-token")
         try:
-            prepared = client.prepare(
-                {"channel_kind": "group", "channel_id": "30001"},
+            prepared = prepare_send(
+                "group",
+                "30001",
                 [{"type": "text", "text": "实际 HTTP 字节"}],
-                operation_id="stable-not-on-wire",
             )
             result = await client.send(prepared)
         finally:

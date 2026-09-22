@@ -585,6 +585,14 @@ class CleanBotHost:
                 "private_enabled": self.settings.private_enabled,
             },
         )
+        onebot_codec = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/onebot_codec"))),
+            self.package_catalog,
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={},
+        )
         jobs = await bootstrap_clean_job(
             self.store,
             self.schema_bundle_installer,
@@ -644,6 +652,7 @@ class CleanBotHost:
                 media.descriptor,
                 agent.descriptor,
                 trigger.descriptor,
+                onebot_codec.descriptor,
                 process_executor.descriptor,
                 jobs.descriptor,
                 shell.descriptor,

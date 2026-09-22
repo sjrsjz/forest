@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import inspect
 import json
@@ -14,8 +15,6 @@ from forest.adapters.onebot import (
     OneBotWebSocketClient,
     PreparedSend,
     SendResult,
-    parse_event,
-    prepare_send,
     verify_signature,
 )
 from forest.errors import ForestError
@@ -126,6 +125,8 @@ class CleanOneBotRuntime:
             {"service_id": "kernel.uow.onebot.ingress", "version": 1},
             {"service_id": "conversation.trigger.classify", "version": 1},
             {"service_id": "shell.ingress.inspect", "version": 1},
+            {"service_id": "onebot.codec.normalize", "version": 1},
+            {"service_id": "onebot.codec.prepare-send", "version": 1},
         ],
     }
     state_schema = 1
@@ -155,6 +156,8 @@ class CleanOneBotRuntime:
         ingress_port,
         trigger_policy,
         shell_inspector,
+        normalize_codec,
+        prepare_send_codec,
         http_client_factory=OneBotHTTPClient,
         websocket_client_factory=OneBotWebSocketClient.create,
     ) -> None:
@@ -166,6 +169,8 @@ class CleanOneBotRuntime:
         self.ingress_port = ingress_port
         self.trigger_policy = trigger_policy
         self.shell_inspector = shell_inspector
+        self.normalize_codec = normalize_codec
+        self.prepare_send_codec = prepare_send_codec
         self.http_client_factory = http_client_factory
         self.websocket_client_factory = websocket_client_factory
         self.generation_identity: BoundGenerationIdentity | None = None
@@ -469,10 +474,13 @@ class CleanOneBotRuntime:
     async def _ingest(self, connection: _ActiveBinding, body: bytes) -> None:
         if not self._accepting or not connection.accepting:
             raise ForestError("STALE_BINDING", "OneBot Generation is quiescing", 409)
-        normalized_message = parse_event(body, self_id=connection.self_id)
-        if normalized_message is None:
+        codec_result = await self.normalize_codec(
+            body_b64=base64.b64encode(body).decode("ascii"),
+            self_id=connection.self_id,
+        )
+        normalized = codec_result["message"]
+        if normalized is None:
             return
-        normalized = normalized_message.as_dict()
         message_ref = normalized["platform_message_id"]
         event_hash = hashlib.sha256(
             (connection.binding_id + "\0" + message_ref).encode()
@@ -708,11 +716,7 @@ class CleanOneBotRuntime:
         verify_signature(body, connection.webhook_secret, signature)
         await self._ingest(connection, body)
 
-    @staticmethod
-    def prepare(route: dict[str, Any], parts: list[dict[str, Any]]) -> PreparedSend:
-        return prepare_send(route["channel_kind"], route["channel_id"], parts)
-
-    def prepare_delivery(
+    async def prepare_delivery(
         self,
         *,
         binding_id: str,
@@ -729,7 +733,12 @@ class CleanOneBotRuntime:
             or not connection.accepting
         ):
             raise ForestError("STALE_BINDING", "OneBot Binding is not accepting sends", 409)
-        prepared = prepare_send(channel_kind.lower(), channel_ref, parts)
+        codec_result = await self.prepare_send_codec(
+            channel_kind=channel_kind.lower(),
+            channel_id=channel_ref,
+            segments=parts,
+        )
+        prepared = PreparedSend.from_codec_result(codec_result)
         return PreparedAdapterSend(
             binding_id,
             connection.client_incarnation,

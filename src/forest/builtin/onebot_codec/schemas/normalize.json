@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["body_b64", "self_id"],
+  "additionalProperties": false,
+  "properties": {
+    "body_b64": {"type": "string", "maxLength": 180000},
+    "self_id": {"type": "string", "pattern": "^[1-9][0-9]{0,18}$"}
+  }
+}

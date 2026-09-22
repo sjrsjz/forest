@@ -58,6 +58,7 @@ _DEFINITIONS = {
             "kernel.runtime",
             "kernel.payload",
             "kernel.authorization",
+            "codec.onebot",
             "conversation.scheduler",
             "conversation.trigger-policy",
             "memory.graph",
@@ -359,6 +360,15 @@ async def bootstrap_clean_messaging(
             "trigger_policy": contracts.service("conversation.trigger.classify", 1),
             "shell_inspector": contracts.service(
                 "shell.ingress.inspect", 1, admission_lane="CONTROL"
+            ),
+            "normalize_codec": contracts.service(
+                "onebot.codec.normalize", 1, owned_work=True
+            ),
+            "prepare_send_codec": contracts.service(
+                "onebot.codec.prepare-send",
+                1,
+                admission_lane="CONTROL",
+                owned_work=True,
             ),
         }
         if http_client_factory is not None:

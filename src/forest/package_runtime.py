@@ -17,6 +17,7 @@ from jsonschema import Draft202012Validator
 from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
 from forest.errors import ForestError
 from forest.packages import PackageSnapshot, contract_range
+from forest.runtime_contracts import FrozenServiceRoute, RoutedServiceEndpoint
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.runtime_modules import RuntimeArtifactIdentity, RuntimeModuleDescriptor
 
@@ -80,6 +81,7 @@ class PackageGenerationAdapter:
         service_routes: Mapping[str, Any],
         resolved_contracts: Mapping[str, str],
         generation_verifier: GenerationVerifier,
+        generation_member_verifier: GenerationVerifier,
         state_handler: StateHandler | None = None,
         event_handler: EventHandler | None = None,
         job_handler: JobHandler | None = None,
@@ -94,6 +96,7 @@ class PackageGenerationAdapter:
         self._service_routes = dict(service_routes)
         self._resolved_contracts = dict(resolved_contracts)
         self._generation_verifier = generation_verifier
+        self._generation_member_verifier = generation_member_verifier
         self._state_handler = state_handler
         self._event_handler = event_handler
         self._job_handler = job_handler
@@ -138,14 +141,14 @@ class PackageGenerationAdapter:
             }
         )
 
-    def runtime_service_handlers(self) -> dict[tuple[str, int], Callable[..., Awaitable[Any]]]:
+    def runtime_service_handlers(self) -> dict[tuple[str, int], RoutedServiceEndpoint]:
         return {
             (item["name"], _major(item["contract"])): self._service_handler(item["name"])
             for item in self.component.get("provides", ())
         }
 
-    def _service_handler(self, service_id: str) -> Callable[..., Awaitable[Any]]:
-        async def invoke(*args, **kwargs):
+    def _service_handler(self, service_id: str) -> RoutedServiceEndpoint:
+        async def invoke(route: FrozenServiceRoute, *args, **kwargs):
             if args and kwargs or len(args) > 1:
                 raise ForestError(
                     "RUNTIME_SERVICE_INPUT_INVALID",
@@ -172,10 +175,23 @@ class PackageGenerationAdapter:
                     "Package Generation is not accepting calls",
                     409,
                 )
+            if (
+                route.provider_component_id != self.component_id
+                or (
+                    self.generation_identity is not None
+                    and route.provider_generation_id
+                    != self.generation_identity.generation_id
+                )
+            ):
+                raise ForestError(
+                    "RUNTIME_SERVICE_ROUTE_STALE",
+                    "Package invocation route does not identify this Generation",
+                    409,
+                )
             result = await self._worker.invoke(
                 service_id,
                 payload,
-                before_send=self._verify_active,
+                before_send=lambda: self._verify_dispatch(route),
             )
             if not output_validator.is_valid(result):
                 raise ForestError(
@@ -185,9 +201,12 @@ class PackageGenerationAdapter:
                 )
             return result
 
-        return invoke
+        async def routed(route: FrozenServiceRoute, *args, **kwargs):
+            return await invoke(route, *args, **kwargs)
 
-    async def _verify_active(self) -> None:
+        return RoutedServiceEndpoint(routed=routed)
+
+    async def _verify_dispatch(self, route: FrozenServiceRoute) -> None:
         identity = self.generation_identity
         if self.state is not PackageGenerationState.ACTIVE or identity is None:
             raise ForestError(
@@ -195,11 +214,17 @@ class PackageGenerationAdapter:
                 "Package Generation stopped admission before Worker dispatch",
                 409,
             )
-        await self._generation_verifier(
-            component_id=self.component_id,
-            generation_id=identity.generation_id,
-            admission_lane="DATA",
-        )
+        if route.owned_work:
+            await self._generation_member_verifier(
+                component_id=self.component_id,
+                generation_id=identity.generation_id,
+            )
+        else:
+            await self._generation_verifier(
+                component_id=self.component_id,
+                generation_id=identity.generation_id,
+                admission_lane=route.admission_lane,
+            )
 
     async def _service_gateway(
         self, identity: WorkerIdentity, _call_id: str, request: dict
@@ -413,6 +438,7 @@ def package_runtime_descriptor(
     resolved_contracts: Mapping[str, str],
     startup_components: tuple[str, ...],
     generation_verifier: GenerationVerifier,
+    generation_member_verifier: GenerationVerifier,
     storage=None,
     management=(),
     management_contract=None,
@@ -445,6 +471,7 @@ def package_runtime_descriptor(
             service_routes=routes,
             resolved_contracts=resolved_contracts,
             generation_verifier=generation_verifier,
+            generation_member_verifier=generation_member_verifier,
             state_handler=state_handler,
             event_handler=event_handler,
             job_handler=job_handler,

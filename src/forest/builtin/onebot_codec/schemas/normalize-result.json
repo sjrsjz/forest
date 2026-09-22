@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message"],
+  "properties": {
+    "message": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "platform",
+            "self_id",
+            "channel_kind",
+            "channel_id",
+            "thread_id",
+            "platform_message_id",
+            "sent_at",
+            "author",
+            "segments"
+          ],
+          "properties": {
+            "platform": {"const": "onebot-v11"},
+            "self_id": {"type": "string"},
+            "channel_kind": {"enum": ["group", "private"]},
+            "channel_id": {"type": "string"},
+            "thread_id": {"type": "string"},
+            "platform_message_id": {"type": "string"},
+            "sent_at": {"type": "string"},
+            "author": {"type": "object"},
+            "segments": {"type": "array", "maxItems": 256}
+          }
+        }
+      ]
+    }
+  }
+}

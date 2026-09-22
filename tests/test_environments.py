@@ -229,9 +229,9 @@ async def test_real_workers_isolate_locked_dependency_generations_and_host_packa
 
 
 async def test_builtin_onebot_codec_is_a_complete_isolated_package(tmp_path):
-    from forest.adapters.onebot import prepare_send
+    from forest.adapters.onebot import PreparedSend
 
-    root = Path(__file__).resolve().parents[1] / "src/forest/builtin/onebot"
+    root = Path(__file__).resolve().parents[1] / "src/forest/builtin/onebot_codec"
     snapshot = PackageCatalog(tmp_path / "catalog").build(root)
     worker = PythonWorker(snapshot, WorkerIdentity("codec", "generation", "incarnation", "bot"))
     try:
@@ -240,13 +240,14 @@ async def test_builtin_onebot_codec_is_a_complete_isolated_package(tmp_path):
         await worker.start()
         await worker.activate()
         segments = [{"type": "text", "text": "literal [CQ:at,qq=42]"}]
-        result = await worker.invoke("onebot.prepare", {
+        result = await worker.invoke("onebot.codec.prepare-send", {
             "channel_kind": "group", "channel_id": "123", "segments": segments,
         }, call_id="prepare", operation_id="prepare")
-        expected = prepare_send("group", "123", segments)
-        assert result["wire_digest"] == expected.wire_digest
-        assert base64.b64decode(result["wire_body_b64"]) == expected.wire_body
-        normalized = await worker.invoke("onebot.normalize", {
+        prepared = PreparedSend.from_codec_result(result)
+        assert json.loads(prepared.wire_body)["message"] == [
+            {"type": "text", "data": {"text": "literal [CQ:at,qq=42]"}}
+        ]
+        normalized = await worker.invoke("onebot.codec.normalize", {
             "self_id": "42", "body_b64": base64.b64encode(json.dumps({
                 "post_type": "message", "message_type": "group", "self_id": 42,
                 "message_id": 1, "user_id": 2, "group_id": 123, "time": 1,

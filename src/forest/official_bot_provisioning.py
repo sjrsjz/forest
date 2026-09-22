@@ -431,6 +431,7 @@ class OfficialBotProvisioner:
             "media.capture",
             "agent.runtime",
             "conversation.trigger-policy",
+            "codec.onebot",
             "conversation.scheduler",
             "adapter.onebot",
             "delivery",

@@ -51,6 +51,7 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 | 模块 | 独占语义 |
 |---|---|
 | `adapter.onebot` | Binding、连接代际、平台事件观察与 OneBot 传输端口 |
+| `codec.onebot` | 无状态 OneBot 事件规范化与获许可发送载荷编码；不拥有连接、凭据或业务状态 |
 | `conversation.scheduler` | Inbox、分类水位、trigger、InputBatch、Context、同群 actor 与正式回复顺序 |
 | `agent.runtime` | Session/Run、CorePrompt 协议、ModelTurn、工具步骤、模型 attempt 与 checkpoint |
 | `memory.graph` | Bot 全局记忆、群主干、来源、图关系、召回、遗忘与派生索引资格 |

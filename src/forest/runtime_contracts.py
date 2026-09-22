@@ -33,6 +33,22 @@ class FrozenServiceRoute:
 
 
 @dataclass(frozen=True)
+class RoutedServiceEndpoint:
+    """Provider endpoint that receives the kernel-sealed route explicitly."""
+
+    routed: Callable
+
+    def __post_init__(self) -> None:
+        if not callable(self.routed):
+            raise TypeError("Routed service endpoint handler must be callable")
+
+    def invoke_routed(
+        self, route: FrozenServiceRoute, args: tuple, kwargs: dict
+    ):
+        return self.routed(route, *args, **kwargs)
+
+
+@dataclass(frozen=True)
 class RuntimeKernelServiceSpec:
     """Declarative kernel coordinator service contributed by an official module."""
 
@@ -328,10 +344,13 @@ class RuntimeContractRouter:
         for key, handler in handlers.items():
             service_id, version = key
             self._validate(service_id, version, "DATA")
-            if not callable(handler) or key in self._providers:
+            if (
+                not callable(handler)
+                and not isinstance(handler, RoutedServiceEndpoint)
+            ) or key in self._providers:
                 raise ForestError(
                     "RUNTIME_SERVICE_PROVIDER_CONFLICT",
-                    "Runtime service has no unique callable provider",
+                    "Runtime service has no unique provider endpoint",
                     409,
                     details={"service_id": service_id, "version": version},
                 )
@@ -485,5 +504,9 @@ class RuntimeContractRouter:
                 "Runtime service provider changed after graph sealing",
                 409,
             )
-        result = handler(*args, **kwargs)
+        result = (
+            handler.invoke_routed(route, args, kwargs)
+            if isinstance(handler, RoutedServiceEndpoint)
+            else handler(*args, **kwargs)
+        )
         return await result if inspect.isawaitable(result) else result

@@ -415,9 +415,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
     memory = await bootstrap_clean_memory(store, installer, kernel=kernel)
     media = await bootstrap_clean_media(store, installer, kernel=kernel)
     agent = await bootstrap_clean_agent(store, installer, kernel=kernel)
+    package_catalog = PackageCatalog(tmp_path / "package-catalog")
     trigger_policy = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/trigger_policy",
-        PackageCatalog(tmp_path / "package-catalog"),
+        package_catalog,
         store,
         installer,
         kernel=kernel,
@@ -427,6 +428,14 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "group_trigger_mode": "MENTION",
             "private_enabled": True,
         },
+    )
+    onebot_codec = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/onebot_codec",
+        package_catalog,
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={},
     )
     clients = []
 
@@ -520,6 +529,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             media.descriptor,
             agent.descriptor,
             trigger_policy.descriptor,
+            onebot_codec.descriptor,
             shell.descriptor,
         )
         + messaging.descriptors
@@ -542,6 +552,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "agent.runtime",
             "conversation.scheduler",
             "conversation.trigger-policy",
+            "codec.onebot",
             "adapter.onebot",
             "delivery",
             "shell.command",

@@ -593,6 +593,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "media.capture",
                     "agent.runtime",
                     "conversation.trigger-policy",
+                    "codec.onebot",
                     "process.executor",
                     "job.scheduler",
                     "shell.command",

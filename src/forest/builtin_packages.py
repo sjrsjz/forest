@@ -141,6 +141,7 @@ async def bootstrap_builtin_package(
             )
         ),
         generation_verifier=kernel.runtime.verify_active_generation,
+        generation_member_verifier=kernel.runtime.verify_generation_member,
         storage=storage,
         management=(configuration_management_contribution(component_id),),
         management_contract=management_contract,

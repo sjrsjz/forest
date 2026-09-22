@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +97,52 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
     async def inspect_shell(**_values):
         return None
 
+    async def normalize_codec(*, body_b64, self_id):
+        event = json.loads(base64.b64decode(body_b64, validate=True))
+        assert str(event["self_id"]) == self_id
+        return {
+            "message": {
+                "platform": "onebot-v11",
+                "self_id": self_id,
+                "channel_kind": event["message_type"],
+                "channel_id": str(event["group_id"]),
+                "thread_id": "",
+                "platform_message_id": str(event["message_id"]),
+                "sent_at": datetime.fromtimestamp(event["time"], UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "author": {
+                    "external_user_id": str(event["user_id"]),
+                    "display_name": event["sender"]["nickname"],
+                    "group_card": "",
+                    "is_self": False,
+                    "role": event["sender"]["role"],
+                },
+                "segments": [{"type": "text", "text": "hello"}],
+            }
+        }
+
+    async def prepare_send_codec(*, channel_kind, channel_id, segments):
+        target = "group_id" if channel_kind == "group" else "user_id"
+        action = "send_group_msg" if channel_kind == "group" else "send_private_msg"
+        body = json.dumps(
+            {
+                target: int(channel_id),
+                "message": [
+                    {"type": "text", "data": {"text": part["text"]}}
+                    for part in segments
+                ],
+                "auto_escape": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return {
+            "action": action,
+            "wire_body_b64": base64.b64encode(body).decode(),
+            "wire_digest": hashlib.sha256(body).hexdigest(),
+        }
+
     ingress = OneBotIngressUnitOfWork(store, adapter=adapter, conversation=scheduler)
     runtime = CleanOneBotRuntime(
         repository=adapter,
@@ -104,6 +153,8 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         ingress_port=ingress,
         trigger_policy=classify,
         shell_inspector=inspect_shell,
+        normalize_codec=normalize_codec,
+        prepare_send_codec=prepare_send_codec,
         websocket_client_factory=create_client,
     )
     identity = BoundGenerationIdentity(
@@ -180,6 +231,8 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         ingress_port=ingress,
         trigger_policy=classify,
         shell_inspector=inspect_shell,
+        normalize_codec=normalize_codec,
+        prepare_send_codec=prepare_send_codec,
         websocket_client_factory=create_client,
     )
     successor_identity = BoundGenerationIdentity(

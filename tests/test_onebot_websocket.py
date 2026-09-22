@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 
 import pytest
@@ -9,6 +10,19 @@ from websockets.asyncio.server import serve
 from forest.adapters import onebot
 
 _END = object()
+
+
+def prepared_text(text: str) -> onebot.PreparedSend:
+    body = json.dumps(
+        {
+            "group_id": 933179609,
+            "message": [{"type": "text", "data": {"text": text}}],
+            "auto_escape": True,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return onebot.PreparedSend("send_group_msg", body, hashlib.sha256(body).hexdigest())
 
 
 class FakeSocket:
@@ -139,10 +153,7 @@ async def test_disconnect_after_action_handoff_returns_unknown_and_exposes_owned
 ):
     client, socket = await create_client(monkeypatch)
     try:
-        prepared = client.prepare(
-            {"channel_kind": "group", "channel_id": "933179609"},
-            [{"type": "text", "text": "test"}],
-        )
+        prepared = prepared_text("test")
         sending = asyncio.create_task(client.send(prepared, timeout=3))
         await asyncio.wait_for(socket.sent_event.wait(), timeout=3)
         await socket.remote_disconnect()
