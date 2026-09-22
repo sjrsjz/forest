@@ -125,6 +125,19 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 带复杂持久状态的模块仍然是插件，不能因此退回宿主 import。它们的包声明 domain Query、domain Command、storage bundle 和可选 UnitOfWork participant；宿主只加载通用 authority driver，按包摘要安装独占 namespace，并把每次命令固定到准确 Generation、schema 与事务。Worker 不能取得数据库连接、Repository 或 SQL 字符串执行能力。查询与命令使用不同契约；跨模块原子提交只接受各模块返回的不可变 plan，由内核协调已注册 participant，不能把别的模块 Repository 注入当前模块。
 
+首版 domain authority ABI 固定如下，后续模块不得自行发明另一条数据库通道：
+
+- manifest 的 `domain_queries` 与 `domain_commands` 分别声明稳定名称、契约版本、输入/输出 schema 和 storage bundle 内的函数标识；名称在组件内全局唯一，函数只能是未经限定的 PostgreSQL identifier，namespace 永远由 schema authority 根据 `schema_id` 派生；
+- official baseline 如需在函数体中引用自有对象，只能使用安装器识别的 `__forest_module_schema__` 标记；安装器在摘要和 official profile 校验完成后把它机械替换成派生 namespace 的引用标识。包不能提交 namespace、`search_path` 或任意 SQL；函数自身固定 `SET search_path = pg_catalog`，通用驱动在每次调用前复核签名、易变性、返回类型、`SECURITY INVOKER` 和该固定 search path；
+- 函数签名固定为 `(context jsonb, input jsonb) -> jsonb`。`context` 由宿主生成并包含 Bot、组件、准确 Generation、call、稳定 operation、因果根、父调用和 deadline；Worker 不能提供或覆盖这些字段；
+- 返回值固定为 `forest.domain-result/1` envelope，只允许 `ok + value` 或 `ok=false + error{code,message,status,details}` 两种互斥形态。Adapter 在交还 Worker 前验证 envelope 和声明的输出 schema，SQL 异常不会把查询文本、表名或连接信息泄漏到 Worker；
+- Query 在 `READ ONLY` 短事务中运行，并在同一事务内复核准确 Generation member、schema bundle/package digest 和函数身份；即使函数错误声明为 VOLATILE，数据库也会拒绝写入。Query 不进入 Command operation ledger，也不能创建缺省值；
+- Command 在一个可写短事务中完成相同 fence，稳定 `(component_id, operation_id)`、输入摘要、函数身份和因果根必须由模块私有表唯一化；同输入重放返回原 envelope，异输入冲突。宿主不在函数调用前后拼第二次业务写入；
+- `ctx.queries.call` 与 `ctx.commands.call` 是两个不同 SDK 类型和 IPC kind。它们不能退化为 `ctx.services.call("sql", ...)`、任意 SQL、Repository RPC 或可选宿主回调；权限也分别使用 `domain.query:<name>` 与 `domain.command:<name>`；
+- Domain Authority Driver 是内核机制代码，只接受已安装 package storage identity、冻结声明和调用 scope；它没有组件 ID 分支、业务 DTO、默认配置或模块特定重试。包 Python 入口仍只在隔离 Worker 导入，official 身份不允许包向宿主进程装载 Python Capsule。
+
+需要跨模块原子提交时，Worker 先生成不可变 plan；内核协调器只解析 manifest 已注册的 participant，并把同一连接与准确 participant operation 交给各模块 Domain Authority Driver。participant 函数只能修改自己的 namespace，并必须在最终写入前复核本模块 Generation/member 与业务 lease。协调器负责固定参与者集合、锁序、整体提交/回滚和审计，不读取模块表、补状态或重试未知副作用。
+
 因此迁移顺序由缺失机制决定：纯计算/策略服务直接进入 `python-worker`；有领域状态的模块先补齐 package domain authority/participant 协议；有外部 I/O 的模块再补齐 Secret lease 与类型化 Effect executor 协议。不得为了提前移动目录而把宿主回调、客户端或 Repository 塞进 Adapter。
 
 ### 3.3 完整热重载与回滚
