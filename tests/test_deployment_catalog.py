@@ -633,7 +633,6 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             model="test-model",
             capability_revision="test/1",
             input_modalities=("text", "image"),
-            context_limit=32768,
             max_output_tokens=2048,
         )
         components = {

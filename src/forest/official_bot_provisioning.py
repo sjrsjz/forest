@@ -286,7 +286,6 @@ class OfficialBotSettingsResolver:
             model_api_key=model_key,
             model=capabilities.model,
             model_deployment_id=capabilities.deployment_id,
-            model_context_limit=capabilities.context_limit,
             model_max_output_tokens=capabilities.max_output_tokens,
             model_input_modalities=capabilities.input_modalities,
             embedding_endpoint=embedding["endpoint"],

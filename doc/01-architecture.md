@@ -121,7 +121,7 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | `conversation.scheduler` | 全量入站 → 分类流水、输入切口、Context、Agent 启动/续跑请求、最终回复提交 | 每会话邮箱、actor lease、输入游标、触发、InputBatch、Context 与 reply sequence；只引用 Agent Session/Run | 暂停消费，Inbox/触发状态保留 |
 | `command.router` / `message.router` | 业务命令与普通 Handler 的策略/执行 → 分类结果；调用目标由内核 Contract Router 按冻结 RuntimeGraph 解析 | 各自策略、claim 与结果；不拥有 Inbox、Agent 或内核 service head | 错误按阶段策略隔离，禁止全链静默吞错 |
 | `agent.runtime` | 冻结 Run 输入 → checkpoint、ModelTurn、ToolCall、最终候选 | Agent Session、Run、模型请求/观察、轮次、工具与 checkpoint；不拥有 Context、trigger 或 SendIntent | 从安全边界恢复，其他会话继续 |
-| `provider.*` | 实际模型能力快照、规范投影请求 → 规范流事件 | 客户端、限流器与逐请求manifest | 切换实际模型须重做模态投影/预算，不改完整历史；记录真正可见parts |
+| `provider.*` | 实际模型能力快照、已定稿请求 → 规范流事件 | 客户端、限流器与逐请求manifest | 切换实际模型须重做能力投影，不改完整历史；记录真正可见parts，不拥有Context预算 |
 | `embedding.*` | text/image/mixed输入 → 对齐空间向量 | 版本化EmbeddingProfile、异步批量任务与工件 | 图片索引失败显式降级/修复，不能用caption假装原生图片嵌入 |
 | `vector.index` | 稳定 `ref_id` + 向量的幂等发布/删除；查询 `ref_id` → ANN 候选引用和分数 | Bot 生命周期绑定的向量空间、Milvus collection 身份、endpoint/凭据配置；不拥有正文、来源、权限或图关系 | 索引不可用时暂停语义召回并继续接纳权威事实；可从 PostgreSQL 引用和嵌入结果重建 |
 | `media.*` | 平台媒体引用 → Bot域受管不可变媒体与派生版本 | MediaAsset、来源关联、载荷引用与获取作业 | 原始来源不丢；限时获取失败保持明确不可用，不永久阻塞分类或控制入口 |
@@ -180,8 +180,8 @@ Bot 逻辑隔离是最低要求。默认部署为每 Bot 独立事实数据库/�
 1. Adapter 认证平台连接，使用绑定目录确定 `bot_id`；规范化消息、去重键与来源身份。
 2. 接入协调器在同一 Bot UnitOfWork 中让 Adapter 记录平台观察、Conversation Scheduler 写 Inbox 并分配 `ingress_seq`；命中保留前缀时再让 `shell.command` 写 RECEIVED 请求，否则登记普通分类工作与持久唤醒。各 participant 只能写自己的 schema，任一失败整体回滚；提交成功才视为 Forest 已接收。协议不支持确认/回放时，记录其能力限制。
 3. 控制命令的完整参数解析在事务外进行，解析结果冻结后独立授权入场，不等待 Agent 或前面尚未分类的记录。Pipeline 分别记录上下文可读性与触发决策；未触发、命令已消费仍保留群消息历史，敏感控制正文只提供安全投影。异步分类维护连续完成水位，不能改变 ingress_seq 顺序。
-4. 无活跃 Agent 且无触发时，Conversation Actor 静默追加群消息并裁剪；有触发则在安全边界冻结截至最后触发记录的 InputBatch，并请求 `agent.runtime` 建立或续接该 Conversation 唯一活动 Agent Session。Conversation 只保存 Session/Run 引用和 fence，不拥有 Agent 状态机。
-5. Agent先用合法文本/图片查询全局记忆，再按实际LLM能力投影输入并计算请求预算；文本LLM请求不含图片载荷。模型与工具串行推进；工具闭合后的下一安全点若出现新触发，先保存前序完整步骤，再追加截至该触发的消息前缀。普通尾部和迟到媒体不修改已冻结请求。
+4. 无活跃 Agent 且无触发时，Conversation Actor 以有界 `SILENT_DRAIN` 批次静默追加群消息，并由 Context 按自身高低水位持续归档、裁剪；该路径不调用 Agent 或模型。出现触发时，新 Run 在首次模型调用前冻结截至最后触发记录的 InputBatch 与当前 ContextView。Conversation 只保存 Session/Run 引用和 fence，不拥有 Agent 状态机。
+5. Agent 先用合法文本/图片查询全局记忆，再把已冻结 ContextView、证据和工具目录交给实际 LLM 的能力投影；文本 LLM 请求不含图片载荷。Provider 不读取 Context 策略，也不估算、裁剪或拒绝历史。同一 Run 的模型与工具串行推进；工具闭合后的下一安全点若出现新触发，只追加截至该触发的消息前缀，不重新裁剪已冻结视图。普通尾部和迟到媒体不修改已冻结请求。
 6. Agent 先提交完整 ModelTurn/checkpoint 并产出 `FinalCandidate`。随后协调器主持短 UnitOfWork：Agent 关闭准确 Run，Conversation 提交正式 `REPLY` Context 与实际覆盖 trigger 的 `ANSWERED` 状态，Delivery 创建 SendIntent，必要时 Memory 只登记自己的整理工作。各模块经 participant 端口写各自 schema；任一失败整体回滚。Agent 失败不删除已入历史的消息，也不能绕过 Conversation 直接发送。
 7. 若有待触发记录，同一 Session 继续下一个串行 Run；否则静默排空尾部并裁剪，在原子检查后退回空闲。Delivery 的 CHAT 通道按会话 response_seq 发送；CONTROL 回执按 command_id/control_seq 独立排序，两者均使用持久化 ReplyRoute 并遵守平台限流。
 

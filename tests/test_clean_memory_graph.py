@@ -1019,7 +1019,7 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
         deletion_epoch_guard=payloads.epoch_in,
     )
 
-    async def admit(number: int, *, capture: bool):
+    async def admit(number: int, *, capture: bool, trigger: bool = False):
         suffix = f"uow-{number}"
         values = await _unit_values(
             payloads,
@@ -1080,11 +1080,19 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
             operation_id=f"classify/{suffix}",
             conversation_id="conversation/a",
             event_id=f"event/{suffix}",
-            decision="NO_TRIGGER",
+            decision="TRIGGER" if trigger else "NO_TRIGGER",
             classifier_component_id="conversation.classifier",
             classifier_generation_id="generation/classifier/1",
             rule_revision="rules/1",
-            reason_code="ordinary",
+            reason_code="trigger" if trigger else "ordinary",
+            **(
+                {
+                    "trigger_id": f"trigger/{suffix}",
+                    "principal_ref": f"principal/{suffix}",
+                }
+                if trigger
+                else {}
+            ),
         )
         if capture:
             await memory.capture_source_unit(operation_id=f"capture/{suffix}", **values)
@@ -1115,11 +1123,22 @@ async def test_conversation_cut_and_memory_eligibility_commit_as_one_unit_of_wor
         actual_memory.capture_source_unit(operation_id="capture/uow-3", **racing),
     )
     assert selection["memory_qualified_count"] + selection["memory_pending_count"] == 1
-    assert (await memory.query_sources())["items"] == []
+    assert selection["memory_archived_count"] == 2
+    assert selection["memory_archive_pending_count"] == 0
+    assert {item["source_unit_id"] for item in (await memory.query_sources())["items"]} == {
+        "unit/uow-1",
+        "unit/uow-2",
+    }
 
-    await admit(4, capture=True)
-    archived = await unit_of_work.select_input(actor, "selection/uow/4", boundary="IDLE")
-    assert archived["memory_archived_count"] == 2
+    await admit(4, capture=True, trigger=True)
+    archived = await unit_of_work.select_input(
+        actor,
+        "selection/uow/4",
+        boundary="IDLE",
+        session_ref="session/uow",
+        run_ref="run/uow",
+    )
+    assert archived["memory_archived_count"] == 0
     assert archived["memory_archive_pending_count"] == 0
     assert {item["source_unit_id"] for item in (await memory.query_sources())["items"]} == {
         "unit/uow-1",

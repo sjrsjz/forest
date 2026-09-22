@@ -69,7 +69,7 @@ flowchart LR
 
 群甲的活动 Prompt 不直接拼接群乙的聊天历史。需要跨群知识时从 Bot 全局记忆召回证据，每项在实际模型输入中标明原始来源群、作者与当前使用群，不能只在日志/metadata保存来源。会话本地缓存不是第二套长期记忆库，淘汰后从 Context 事实恢复。
 
-一个群只有一个活跃 ConversationSession，内部 Run 与 Provider 调用串行。所有群消息先进入该会话的持久输入流水；触发只决定是否调用 Agent，不决定是否保存上下文。下一次模型调用前的安全边界选取截至最后一个待触发记录的连续消息前缀，包含中间其他用户的普通发言；其后的非触发尾部保留到下一触发或工作结束后的静默排空。无触发的空闲群也会持续入 Context 和裁剪。完整契约见[08 群聊交互设计](08-group-context-interaction.md)。
+一个群只有一个活跃 ConversationSession，内部 Run 与 Provider 调用串行。所有群消息先进入该会话的持久输入流水；触发只决定是否调用 Agent，不决定是否保存上下文。空闲群通过 `SILENT_DRAIN` 持续归档并按 Context 自身高低水位裁剪，避免活动窗口随静默消息无限增长；这不启动 Agent 或模型。新 Run 首次模型调用前，Context 选取截至最后一个待触发记录的连续消息前缀并冻结当前视图，包含中间其他用户的普通发言；其后的非触发尾部保留到下一触发或工作结束后的静默排空。同一 Run 后续模型步骤只扩展冻结视图，不重新选择历史前缀。完整契约见[08 群聊交互设计](08-group-context-interaction.md)。
 
 同群唯一响应链是强约束，不能以“只串行最终提交、允许多个模型并行生成”替代。Agent 内部只有顺序的 ModelTurn/工具循环，不创建另一个模型 Agent。Kernel 中组件发起的嵌套 RPC 只是同一工具调用树，不具有 Prompt、Context、记忆或回复身份。
 
@@ -140,7 +140,7 @@ Provider 输出先按字节、事件数和 UTF-8 限制收敛，再由禁用 DTD
 
 ### 3.2 Run 输入与资源
 
-一次 Run 固定 `bot_id, conversation_id?, session_id?, ReplyRoute 的会话目标, agent_config_revision, preset_context_revision, agent_contract, module_generation, budget_snapshot_ref, service_principal_ref`。这些引用分别指向其 owner 的不可变事实，不是一份跨模块 Bot 配置。Run 输入使用追加式 InputBatch，不再假定整个 Run 的 input_event_ids 从启动到结束永远不变；每批冻结来源前缀、trigger_ids、逐触发 principal_ref 与 input_revision，每次模型调用固定其所见输入版本。
+一次 Run 固定 `bot_id, conversation_id?, session_id?, ReplyRoute 的会话目标, agent_config_revision, preset_context_revision, agent_contract, module_generation, context_view_revision, service_principal_ref`。这些引用分别指向其 owner 的不可变事实，不是一份跨模块 Bot 配置。Run 输入使用追加式 InputBatch，不再假定整个 Run 的 input_event_ids 从启动到结束永远不变；每批冻结来源前缀、trigger_ids、逐触发 principal_ref 与 input_revision，每次模型调用固定其所见输入版本。
 
 Agent 的 Prompt 使用冻结的配置版本；安全权限与删除状态始终重验，不能冻结一份权限后无限有效。Run 读取的长期记忆附 `source_revision, projection_revision, evidence_ids, deletion_epoch`，其结果可能在执行期间失效。
 
@@ -184,12 +184,12 @@ Run 状态机不负责释放整个群的响应资格：WAIT_TOOL、WAIT_APPROVAL
 
 1. 在当前会话唯一 Session 下取得执行 lease，选择并持久化下一 InputBatch 的固定切口。初次触发和忙时接入均包含从 context_applied_seq 之后直到最后待触发记录的所有消息，不能只取触发文本。
 2. 输入批次独立追加 Context、更新输入水位并 claim 对应触发；执行正常裁剪，固定本次 context_revision/context_view_revision/input_revision。输入已提交不等于触发已回应。
-3. 从冻结输入的合法text/image parts构造记忆查询，召回Bot全局多模态证据；按实际Provider/模型能力投影历史、证据及工具结果并校验请求预算。事务外构建精确载荷，最终许可事务保存语义ModelRequestManifest、传输ModelTransportAttempt及预算预留后发送，详见[11](11-multimodal-memory-and-model-projection.md)。图片嵌入/查询能力不因对话LLM仅支持文本而失效，运行中的请求不随新消息或迟到图片变化。
+3. 从冻结输入的合法 text/image parts 构造记忆查询，召回 Bot 全局多模态证据；按实际模型能力投影已由 Context 定稿的历史、证据及工具结果。事务外构建精确载荷，最终许可事务保存语义 ModelRequestManifest 与传输 ModelTransportAttempt 后发送，详见[11](11-multimodal-memory-and-model-projection.md)。Provider 不接收 Context 预算或裁剪策略。图片嵌入/查询能力不因对话 LLM 仅支持文本而失效，运行中的请求不随新消息或迟到图片变化。
 4. 按 `forest-agent-protocol/v1` 将输出解析为一个原子 ModelTurn。协议错误最多进行一次有界修复；合法 FunctionCall 按其具体请求主体校验参数、权限、预算、幂等与目标，提交意图并等待结果或保存 checkpoint。模型不得直接产生可信 ControlProposal；管理控制继续走确定性 Shell/管理服务。
 5. 模型流和工具结果闭合后形成安全边界。完整步骤先保存有序 RunStep/checkpoint；若有新触发，在下一输入批次追加之前或同一事务中 flush 前序尚未发布的完整步骤，再按新切口接入消息。未闭合的工具调用与流之间禁止插入新群消息。
-6. 每次安全边界更新视图并检查裁剪预算；没有新触发时不吸收普通尾部，仅按当前任务决定是否继续调用模型。裁剪不能只在首次创建 Agent 时执行。
+6. 新 Run 首次模型调用前冻结模型视图；同一 Run 的后续安全边界只接入截至最后新触发记录的因果后缀，不重新裁剪或重选历史。没有新触发时不吸收普通尾部，仅按当前任务决定是否继续调用模型。空闲期的持久 Context 维护由 `SILENT_DRAIN` 独立执行。
 7. 终止 Assistant 先形成持久 `FinalCandidate` checkpoint。协调器随后主持同一 Bot UnitOfWork：`agent.runtime` 关闭准确 Run，`conversation.scheduler` 追加正式 `REPLY` Context、标记实际覆盖 trigger 并分配 CHAT `response_seq`，`delivery` 创建 SendIntent，Memory 为该成功回复登记“触发源 → 已实际投影的直接召回种子”关联日志。各 participant 只写自己的 schema，任一失败整体回滚。触发源尚未归档时日志保持待提升，不得提前把活跃 Context 写入长期图。仅因为队列中有新触发，不丢弃当前已经生成且仍合法的回答；新触发进入后继串行 Run。
-8. Session 调度器再次检查持久队列：有触发则启动后继串行 Run；无触发则不再请求对话模型，静默追加剩余普通消息、归档/裁剪，最后原子检查水位并退出。并发入站或分类完成必须留下待调度工作，不能丢失唤醒。
+8. Session 调度器再次检查持久队列：有触发则启动后继串行 Run，并在该 Run 首次模型调用前冻结当前 ContextView；无触发则不再请求对话模型，以 `SILENT_DRAIN` 静默追加、归档和按水位裁剪剩余普通消息，最后原子检查水位并退出。并发入站或分类完成必须留下待调度工作，不能丢失唤醒。
 
 输入事实、完整模型/工具步骤、最终可见回复采用不同提交边界；ModelTurn 仍整体提交，不逐 token 写 Context。前序完整步骤在后来的用户输入之前发布，来源时间与 commit_seq 各自保留。取消/失败保留已经入库的群消息与工具事实，仅将未完成输出标记为失败分支，不把它们冒充群回复。恢复复用已确认工具结果，也不能重复追加同一 InputBatch。
 
@@ -214,7 +214,7 @@ RunCheckpoint
 
 checkpoint 只引用已持久的输入与步骤结果，写入与 Run 状态转换同事务。读取时校验 Bot、schema、checksum 和契约兼容；不兼容时明确终止或执行受控迁移，禁止以新模型猜测旧工具是否做过。
 
-模型输出绑定实际产生它的request manifest与transport attempt，不能把原始多模态Context当作该模型已经看到的内容。manifest固定语义投影，attempt单独固定精确请求体的payload_digest；URL续签不能改写旧attempt。请求切换实际Provider/模型时，从同一合法输入切口重新计算能力投影与预算，并记录新attempt及manifest；不能将视觉请求原样交给文本模型，也不能用新清单覆盖旧调用所见。RunStep以model_request_id/transport_attempt_id/model_call_epoch及Run/Session fence校验唯一有效候选；旧请求必须终态或被明确放弃并失去提交权后才能接替，迟到结果只作对账，UNKNOWN费用仍保留。纯图片被省略时仍保留触发和明确不可见标记，不能宣称已分析原图。
+模型输出绑定实际产生它的 request manifest 与 transport attempt，不能把原始多模态 Context 当作该模型已经看到的内容。manifest 固定能力投影，attempt 单独固定精确请求体的 payload_digest；URL 续签不能改写旧 attempt。请求切换实际 Provider/模型时，从同一冻结 ContextView 重新做能力投影，并记录新 attempt 及 manifest；不能将视觉请求原样交给文本模型，也不能用新清单覆盖旧调用所见。RunStep 以 model_request_id/transport_attempt_id/model_call_epoch 及 Run/Session fence 校验唯一有效候选；旧请求必须终态或被明确放弃并失去提交权后才能接替，迟到结果只作对账，UNKNOWN 费用仍保留。纯图片被省略时仍保留触发和明确不可见标记，不能宣称已分析原图。
 
 `RELOAD_WAIT` 带 lifecycle operation_id，普通调度器不能领取；新路由发布且 checkpoint 兼容后，协调器 CAS 为 RESUME_QUEUED。切换前中止则由原操作所有者恢复旧代。防止旧代交出 lease 后又在切换前领取同一 Run。
 
@@ -372,7 +372,7 @@ Milvus ANN 只选择直接种子；各查询 facet 的候选经 RRF 排序后取
 
 Context 归档先写可靠 Archive 和来源映射，再提交确定性裁剪视图；索引异步失败可以重试，不能把未可靠归档的上下文直接裁掉。**裁剪不调用摘要模型，不创建记忆摘要或摘要Job**：按本地token预算保留近期完整单元、必要触发及工具因果组，将其余已归档单元移出活动视图，保留准确来源范围/引用。裁剪改变活动视图，不删除已提交日志；遗忘操作另行处理。
 
-群聊 InputBatch 和 SILENT_DRAIN 也触发同一归档/裁剪流程，不能依赖模型产出最终回答才整理上下文。超长普通前缀先分块持久化；模型只看到预算内的原文单元及明确的归档省略范围，不能宣称看过被移出的正文。保留未回应触发的必要原文、作者及工具边界；最小必要集合仍超预算时明确 INPUT_BUDGET_EXCEEDED，不偷偷用LLM摘要补救。context_applied_seq 不随裁剪回退，视图manifest保存author/source覆盖，异步旧视图发布仍遵守06的输入与删除屏障。详见[08](08-group-context-interaction.md)。
+群聊 InputBatch 与 `SILENT_DRAIN` 都可靠追加 Context；空闲维护批次越过高水位时立即归档并裁剪到低水位，不等待下一次触发。新 Run 首次模型调用只冻结当时已经维护好的 ContextView；同一 Run 后续步骤只扩展因果后缀。超长普通前缀先分块持久化；模型只看到 ContextView 保留的原文单元及明确的归档省略范围，不能宣称看过被移出的正文。保留未回应触发的必要原文、作者及工具边界；最小必要集合仍超过 Context 策略硬界时由 Context/Agent 明确失败，不偷偷用 LLM 摘要补救。Provider 不接收预算估算。context_applied_seq 不随裁剪回退，视图 manifest 保存 author/source 覆盖，异步旧视图发布仍遵守 06 的输入与删除屏障。详见[08](08-group-context-interaction.md)。
 
 归档/索引 Job 使用稳定源单元及覆盖源集digest去重，主干结构无需LLM生成。向量可以按有界批量异步建立，Embedding失败不阻塞裁剪；不能把一次裁剪自动变成逐消息的摘要、事实抽取或联想模型调用。显式 Agent/管理任务若需要语义提取，独立申请预算并沿用06的工件协议，不成为接入/裁剪的隐藏依赖。多模态媒体采用引用计数/lineage，清理前确认没有合法剩余引用。
 

@@ -299,9 +299,26 @@ async def test_context_view_compaction_is_exact_local_and_keeps_canonical_histor
     assert last is not None
     assert last["context_view_revision"] == 1
 
+    before_run = await scheduler.context_snapshot(actor)
+    assert before_run["context_view_unit_count"] == 3
+    assert before_run["context_archived_unit_count"] == 3
+
+    await _admit(scheduler, payloads, conversation, 7, "user/1")
+    await _classify(scheduler, conversation, 7, "TRIGGER", "user/1")
+    last = await scheduler.select_input(
+        actor,
+        "select/compact/run-start",
+        boundary="IDLE",
+        session_ref="session/compact",
+        run_ref="run/compact",
+        context_view_policy=policy,
+    )
+    assert last["kind"] == "TRIGGER_INPUT"
+    assert last["context_view_revision"] == 1
+
     snapshot = await scheduler.context_snapshot(actor)
     assert snapshot["context_view_revision"] == 1
-    assert snapshot["context_view_unit_count"] == 3
+    assert snapshot["context_view_unit_count"] == 4
     assert snapshot["context_archived_unit_count"] == 3
     assert snapshot["archive"] == {
         "compaction_id": snapshot["archive"]["compaction_id"],
@@ -315,12 +332,37 @@ async def test_context_view_compaction_is_exact_local_and_keeps_canonical_histor
     }
     assert snapshot["units"][0]["kind"] == "CONTROL"
     assert snapshot["units"][0]["source_kind"] == "context.archive"
-    assert [unit["ingress_seq"] for unit in snapshot["units"][1:]] == [4, 5, 6]
+    assert [unit["ingress_seq"] for unit in snapshot["units"][1:]] == [4, 5, 6, 7]
     assert [unit["author_subject_ref"] for unit in snapshot["units"][1:]] == [
         "user/0",
         "user/1",
         "user/0",
+        "user/1",
     ]
+
+    for number in range(8, 13):
+        await _admit(scheduler, payloads, conversation, number, f"user/{number % 2}")
+        await _classify(
+            scheduler,
+            conversation,
+            number,
+            "TRIGGER" if number == 12 else "NO_TRIGGER",
+            f"user/{number % 2}",
+        )
+    extension = await scheduler.select_input(
+        actor,
+        "select/compact/same-run-extension",
+        boundary="MODEL_SAFE_POINT",
+        session_ref="session/compact",
+        run_ref="run/compact",
+        context_view_policy=policy,
+    )
+    assert extension["kind"] == "TRIGGER_INPUT"
+    assert extension["context_view_revision"] == 1
+    extended = await scheduler.context_snapshot(actor)
+    assert extended["context_view_revision"] == 1
+    assert extended["context_view_unit_count"] == 9
+    assert extended["context_archived_unit_count"] == 3
 
     namespace = sql.Identifier(storage.spec.namespace)
     async with store.pool.connection() as conn:
@@ -348,7 +390,7 @@ async def test_context_view_compaction_is_exact_local_and_keeps_canonical_histor
                 (store.bot_id, conversation),
             )
         ).fetchone()
-    assert canonical_count["value"] == 6
+    assert canonical_count["value"] == 12
     assert [row["context_revision"] for row in archived] == [1, 2, 3]
     async with store.pool.connection() as conn, conn.transaction():
         reference = await payloads.verify_in(
@@ -372,11 +414,47 @@ async def test_context_view_compaction_is_exact_local_and_keeps_canonical_histor
 
     replay = await scheduler.select_input(
         actor,
-        "select/compact/6",
+        "select/compact/run-start",
         boundary="IDLE",
+        session_ref="session/compact",
+        run_ref="run/compact",
         context_view_policy=ContextViewPolicy(100, 50),
     )
     assert replay == last
+
+
+@pytest.mark.postgres
+async def test_single_large_silent_drain_is_compacted_before_commit_returns(clean_scheduler):
+    _store, _storage, payloads, scheduler = clean_scheduler
+    conversation = "group/compact-bulk-silent"
+    policy = ContextViewPolicy(
+        high_watermark_units=4,
+        retain_units=2,
+        policy_revision="context-view-unit-window-v1",
+    )
+    for number in range(1, 101):
+        await _admit(scheduler, payloads, conversation, number, f"user/{number % 3}")
+        await _classify(scheduler, conversation, number, "NO_TRIGGER", f"user/{number % 3}")
+
+    actor = await scheduler.acquire_actor(conversation, "worker/compact-bulk-silent")
+    drained = await scheduler.select_input(
+        actor,
+        "select/compact-bulk-silent",
+        boundary="IDLE",
+        context_view_policy=policy,
+    )
+    assert drained["kind"] == "SILENT_DRAIN"
+    assert (drained["start_seq"], drained["end_seq"]) == (1, 100)
+    assert drained["context_view_revision"] == 1
+
+    snapshot = await scheduler.context_snapshot(actor)
+    assert snapshot["context_view_unit_count"] == 2
+    assert snapshot["context_archived_unit_count"] == 98
+    assert [unit["ingress_seq"] for unit in snapshot["units"][1:]] == [99, 100]
+    assert [unit["author_subject_ref"] for unit in snapshot["units"][1:]] == [
+        "user/0",
+        "user/1",
+    ]
 
 
 @pytest.mark.postgres

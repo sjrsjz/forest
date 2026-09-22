@@ -539,7 +539,6 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         model_api_key="test-model-key",
         model="test-model",
         model_deployment_id="provider.chat-completions/test",
-        model_context_limit=32768,
         model_max_output_tokens=1024,
         model_input_modalities=("text",),
         embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",

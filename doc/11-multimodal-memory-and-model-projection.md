@@ -249,8 +249,7 @@ ModelCapabilities
   actual_deployment_id, provider_adapter_revision, capability_revision
   model_revision, supported_input_modalities
   supported_roles, modalities_by_role, accepted_image_types
-  max_images, max_pixels, max_image_bytes, supported_detail_modes
-  context_limit, output_reserve, tokenizer_revision, image_cost_rule_revision
+  supported_detail_modes
   tool_protocol_revision, structural_mapping_revision
 
 ModelRequestManifest
@@ -260,7 +259,7 @@ ModelRequestManifest
   capability_revision, projection_version, evidence_renderer_revision
   included_part_refs, omitted_part_refs, omission_reasons
   projected_units_ref, source_manifest, media_transform_refs
-  input_digest, projected_content_digest, budget_snapshot
+  input_digest, projected_content_digest
 
 ModelTransportAttempt
   transport_attempt_id, request_id
@@ -288,12 +287,12 @@ manifest 的 source_manifest 描述批准进入请求的文本/图片及其必�
 每次 API 调用严格依次执行：
 
 1. 在既有安全边界固定 InputBatch、Context 视图、工具闭合步骤和合法召回来源，不改变最新触发切口。
-2. 解析本次真正使用的 Provider、模型修订、能力与预算快照。
+2. 解析本次真正使用的 Provider、模型修订与能力快照；该快照不包含 Context 预算或裁剪策略。
 3. 从规范事实构建独立 ModelView；对所有角色、历史消息、引用/转发、工具结果、RAG 证据及嵌套内容逐段执行允许模态规则。
 4. 移除不支持的内容段，保留真实作者、来源头、文本和工具协议结构；记录被省略段和原因。
-5. 在 ModelView 副本上按实际 tokenizer、图像成本规则、图片数量/像素/字节限额进行预算与确定性选择。结果只进入 request manifest，不回写 context_compactions；需要原图变换时保存具体派生引用，不得自动调用 LLM 摘要补洞。
+5. 完整投影 Context 已发布的活动视图和 Memory 已选定的证据；serializer 不估算 token 预算，不删除单元、不截断证据。需要缩小历史时，Agent 只能在新 Run 的首次调用前请求 Context 所有者发布持久 ViewPlan；需要原图变换时保存具体派生引用，不得自动调用 LLM 摘要补洞。
 6. 事务外按冻结来源与当前授权物化媒体，由 adapter 使用固定序列化版本构建精确 API 请求体；此时可申请仅覆盖本次需要的短效媒体 URL。计算请求体字节的 payload_digest，不记录令牌明文，也不在此时发出模型调用。
-7. 短事务重验权限、删除状态、输入切口、运行 fence、能力和媒体物化绑定，为该精确载荷签发限时发送许可，并原子保存语义 manifest、不可变 transport attempt 及预算预留。锁内不下载媒体、不签 URL、不做编码或网络请求。
+7. 短事务重验权限、删除状态、输入切口、运行 fence、能力和媒体物化绑定，为该精确载荷签发限时发送许可，并原子保存语义 manifest 与不可变 transport attempt。锁内不下载媒体、不签 URL、不做编码或网络请求。
 8. 提交后 Gateway 核验许可仍适用于这个 transport_attempt_id、payload_digest、绑定与时限，以已经构建的相同请求体发送。过期、失权或未通过现有发送 fence 时拒绝发送；不能在许可后另行改图、改 URL 或重新序列化成不同字节后沿用旧摘要。
 
 能力限制包含角色限制。例如一个模型只允许在用户消息接受图片时，工具结果中的图片不能原样透传。Adapter 仅可采用已声明的结构映射，把图片放入受支持的数据容器并保留原工具/来源语义；未声明映射时省略该段，不把工具数据升级成 system 指令。工具调用 ID 与对应结果边界不能因省略图片破坏。
@@ -330,21 +329,21 @@ manifest 的 source_manifest 描述批准进入请求的文本/图片及其必�
 
 纯文本 ModelView 保留来源头、p0，并以“unit-a-31 中的图片未传给当前模型”代替 p1 的呈现；manifest 的 omitted_part_refs 包含 p1，实际请求完全没有图片载荷。图片召回仍可返回“群乙的小林在 event-b-72 发送过匹配图片”的可信来源记录；模型只能据检索结果说明来源，不能补写图片中未有文本证据支持的内容。
 
-## 11. 预算、缓存与重试
+## 11. ContextView、缓存与重试
 
-LLM 的文本 token、图像数量、像素/字节限制、图像成本估算和输出预留分别记账。没有可靠图像成本公式时使用部署声明的保守上界，不能把图片计为零 token。规范活动视图按独立且版本化的 `context_view_profile` 管理年龄、条目/字节/媒体引用上限，避免使用文字模型时大量图片成为无限积压的活动历史。
+规范活动视图由独立且版本化的 `context_view_profile` 管理年龄、条目、估算 token/字节和媒体引用上限；预算算法、低水位、pin 与归档选择都属于 Context 模块。空闲 `SILENT_DRAIN` 持续执行这套持久维护；Agent 在新 Run 第一次调用模型前冻结当前 ViewPlan，此后同一 Run 只追加有界因果单元。Provider 能力和请求 manifest 不包含这套策略。
 
-持久 ViewPlan 可以依据既定策略将旧的完整源单元移出活动窗口，保留可靠归档与必要 pin；不能因为当前 LLM 不支持图片而从事实或规范活动视图删除图像段。每请求的模态省略与 token/image 预算选择只作用于投影副本。原始触发的图片 pin、持久 Context 裁剪记录与本请求 omitted_part_refs 是三类不同事实，不能相互替代。
+持久 ViewPlan 可以依据既定策略将旧的完整源单元移出活动窗口，保留可靠归档与必要 pin；不能因为当前 LLM 不支持图片而从事实或规范活动视图删除图像段。每请求投影只允许做由目标 API 能力必然要求的模态转换，例如文本模型用明确缺失标记替代图片；不得再按 token/image 估算选择历史或 RAG 证据。原始触发的图片 pin、持久 Context 裁剪记录与本请求 omitted_part_refs 是三类不同事实，不能相互替代。
 
-必需触发原始段不能被无提示预算裁剪。支持图像但本次预算容不下必需图像时，返回 `INPUT_BUDGET_EXCEEDED` 或采用预先声明并记录原因的受限投影；不能静默删除然后声称完成视觉任务。为不支持图像模型生成的缺失标记本身是明确能力降级，不把图片视作已经读过。
+必需触发原始段不能被无提示裁剪。若 Context 已无法缩小必要集合，则由 Context/Agent 的显式有界失败策略终止，不能把这项决定推给 Provider，也不能静默删除后声称完成视觉任务。上游 API 的真实拒绝只作为该 transport attempt 的失败结果处理，不在同一 Run 中临时重选历史。为不支持图像模型生成的缺失标记本身是明确能力降级，不把图片视作已经读过。
 
-检索缓存含 Bot、权限/删除/输入边界、query ordered_parts_digest、实际媒体物化/digest、profile/space/预处理版本、索引水位与 fusion 策略。模型投影缓存再包含 actual deployment、capability revision、projection/renderer 版本、Context 视图和预算。仅以同一文本或同一 media_id 为键不够。
+检索缓存含 Bot、权限/删除/输入边界、query ordered_parts_digest、实际媒体物化/digest、profile/space/预处理版本、索引水位与 fusion 策略。模型投影缓存再包含 actual deployment、capability revision、projection/renderer 版本与准确 Context 视图修订。仅以同一文本或同一 media_id 为键不够。
 
 `input_digest` 固定本次规范输入及证据来源；`projected_content_digest` 固定投影后的有序语义内容与稳定媒体/变换引用；`ModelTransportAttempt.payload_digest` 则对实际 API 请求体字节计算，包含体内使用的短效 URL 或图像编码，但不把 HTTP 鉴权头当作普通内容。临时凭据不得写入语义清单；精确请求体只在受限发送缓冲中保存，必要的恢复对象必须按凭据级策略加密、限权、限期保留。
 
 URL 续签、图片传输编码变化或重新序列化导致请求体字节不同，必须构建新的 transport_attempt_id、payload_digest 与许可，不能覆盖旧记录。若语义图片、来源、模型、能力、投影内容均未变化，可引用原 request_id；否则生成新语义 manifest。崩溃后丢失发送缓冲时不能凭稳定媒体引用假称重建了旧精确载荷；先根据持久派发状态对账，UNKNOWN 不盲重发，允许重试后建立新的传输尝试。
 
-Provider fallback 生成新的 request_id/manifest 及 transport attempt，从同一冻结 InputBatch 和来源修订重新投影。视觉模型失败后回落纯文本时图片被移除；纯文本回落视觉模型时也必须重新预算与鉴权。两者都不能复用不兼容 payload，也不能吸入后来群消息。每次真实传输尝试单独预留/对账费用；未发送、结果不明与已响应不能统一按零费用结算。
+Provider fallback 生成新的 request_id/manifest 及 transport attempt，从同一冻结 InputBatch、ContextView 和来源修订重新投影。视觉模型失败后回落纯文本时图片被移除；纯文本回落视觉模型时也必须重新鉴权。两者都不能复用不兼容 payload，也不能吸入后来群消息或重新裁剪历史。每次真实传输尝试单独对账费用；未发送、结果不明与已响应不能统一按零费用结算。
 
 新尝试只有在旧尝试进入终态，或经过明确允许的放弃决议并使旧候选提交 fence 失效后，才能接续同一 logical_step。RunStep 的调用子记录只允许一个当前有效 `model_request_id/transport_attempt_id`，其中 model_request_id 外键指向 manifest.request_id；尝试接替通过 CAS 推进 `model_call_epoch`。最终结果比较这三个字段与现有 Run/Session fence，新旧结果不能同时提交。迟到的旧响应只能入受限对账记录，不能追加第二个 ModelTurn、继续工具或覆盖新结果。放弃本地等待和切换模型不表示外部请求已撤回；已许可且可能发出的请求继续记账，保留 UNKNOWN 与后续费用核对。
 

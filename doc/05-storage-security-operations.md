@@ -72,7 +72,7 @@ PostgreSQL 作为首版持久事实与协调账本。每个 Bot 的共享图包�
 | `context_compactions` | compaction_id、conversation_id、source_manifest、input_digest、base_context_revision、base_view_revision、context_view_profile_ref、token_budget、tokenizer_version、trim_policy_version、pin_set_ref、deletion_epoch、result_ref、status | result_ref 为确定性 canonical 活动视图 manifest；预算/模态成本策略由 context_view_profile_ref 固定，独立于实际 LLM 的单次请求投影；先归档后移出视图，不生成模型摘要；旧候选不得覆盖新来源/身份，输入游标不回退 |
 | `context_compaction_units` | conversation_id、compaction_id、archived_index、unit_id、context_revision、unit_index、payload_digest、author_payload_digest | 每个 Context 单元最多归档一次；精确成员关系不可变，归档不改写或删除 `context_units` 与载荷 |
 | `run_steps` | run_id、logical_step_id、input_revision、visible_trigger_ids、contract、input_digest、result_ref、closed、context_unit_ids、status、model_request_id?、transport_attempt_id?、model_call_epoch、provider_receipt?、usage? | 完整步骤可幂等flush；模型调用/传输阶段与不确定状态沿用该步骤及checkpoint，不另设执行账本；同step至多一个当前有效request/attempt，接替时CAS推进model_call_epoch；未闭合流/工具不与新群输入交错 |
-| `model_request_manifests` | request_id、run_id、logical_step_id、context_revision、context_view_revision、input_revision、input_batch_refs、source_cut_digest、source_manifest_ref、actual_deployment_id、model_revision、capability_snapshot_ref、capability_revision、projection_version、evidence_renderer_revision、included_part_refs、omitted_part_refs、omission_reasons、projected_units_ref、media_transform_refs、input_digest、projected_content_digest、budget_snapshot、deletion_epoch、policy_revision | ModelRequestManifest 为不可变语义请求；source manifest 覆盖实际纳入内容及必要派生依据，omitted 清单不表示已见；不放 wire hash/可变派发状态，不回写 canonical Context 或充当裁剪结果 |
+| `model_request_manifests` | request_id、run_id、logical_step_id、context_revision、context_view_revision、input_revision、input_batch_refs、source_cut_digest、source_manifest_ref、actual_deployment_id、model_revision、capability_snapshot_ref、capability_revision、projection_version、evidence_renderer_revision、included_part_refs、omitted_part_refs、omission_reasons、projected_units_ref、media_transform_refs、input_digest、projected_content_digest、deletion_epoch、policy_revision | ModelRequestManifest 为不可变能力投影；source manifest 覆盖实际纳入内容及必要派生依据，omitted 清单不表示已见；不含 Context 预算/裁剪策略，不放 wire hash/可变派发状态，不回写 canonical Context 或充当裁剪结果 |
 | `model_transport_attempts` | transport_attempt_id、request_id、payload_digest、serializer_revision、permit_ref、permit_expires_at、budget_receipt_ref、created_at | ModelTransportAttempt 固定已prepare精确API body的wire摘要；短效URL不普通持久化；刷新URL产生新attempt，不改旧hash；派发state/receipt/usage沿用RunStep/checkpoint并按attempt关联 |
 | `approval_requests` | approval_id、operation_id?、command_id?、origin_ref、principal、scope、input_digest、plan_digest、argv_digest?、command_version?、schema_digest、expected_revisions、generation_digest、origin_bot_id?、target_bot_id?、conversation_id?、token_digest、expires_at、decision、consumed_at | 工具、Shell 与 WebUI 共用目标域批准权威；origin_ref 按 shell/web/tool 分支约束，Web 不填伪造群会话；对象不可变，决定绑定主体/计划/目标/版本；令牌短效且原子单次消费 |
 
@@ -177,9 +177,9 @@ fact_store_ref 指向该 Bot 的完整事实与协调库，更换时执行独立
 
 对话 LLM 的 `ModelCapabilities` 是单独版本化的能力快照，与 EmbeddingProfile 无依赖。Provider/模型组合未声明支持图片时，按文本能力投影：先在固定 InputBatch 切口及当前授权下取得 canonical Context、召回和完整工具结果，再递归去掉所有非文本 ContentPart，最后按目标 API 序列化。不得发送 image 部分、图像字节/base64、可下载的原图 URL 或媒体句柄供文本模型绕过限制，也不自动补发 OCR/caption/视觉模型请求。保留获准的群/作者标签及无图像语义推测的缺失标记；只有图片的消息仍有来源和遗漏事实，不能伪造文本解释。结构化工具输出按 schema 渲染安全文本投影，必要的 tool-call/result 配对保留，不能仅删除顶层 image 字段却把深层二进制序列化成 JSON 字符串。
 
-`ModelRequestManifest` 冻结本次 `included_part_refs` 与 `omitted_part_refs`，后者逐项附 UNSUPPORTED_MODALITY/UNAVAILABLE/REQUEST_BUDGET/POLICY 等原因；不可公开的原来源仅留受限审计引用，不能把敏感来源名称或数量写给模型。manifest 同时保存来源切口、实际模型能力版本、投影版本、语义 `input_digest/projected_content_digest` 与本次预算依据，使 ModelTurn 能追溯模型实际看到什么。其 source manifest 只将实际纳入内容及必要派生依据视为模型输入，omitted 清单另行审计。它既不是 `context_compactions.result_ref`，也不能更新 context_applied_seq、删减 canonical parts 或把未读图片标为已理解。
+`ModelRequestManifest` 冻结本次 `included_part_refs` 与 `omitted_part_refs`，后者逐项记录 UNSUPPORTED_MODALITY、UNAVAILABLE 等能力或物化原因；Provider 不得淘汰 Context 或 Memory 已选内容。不可公开的原来源仅留受限审计引用，不能把敏感来源名称或数量写给模型。manifest 同时保存来源切口、实际模型能力版本、投影版本与语义 `input_digest/projected_content_digest`，使 ModelTurn 能追溯模型实际看到什么。它既不是 `context_compactions.result_ref`，也不能更新 context_applied_seq、删减 canonical parts 或把未读图片标为已理解。
 
-每次实际调用包括工具后的续调和已获准的 Provider fallback 都执行投影；fallback 固定原 `input_revision/source_cut_digest`，按新能力及预算重新生成 manifest，不重用视觉请求的 payload，不趁重试纳入新群队列。能力快照在本次 dispatch 固定，热重载后续调用可使用新快照；旧在途结果按原请求 manifest 审计，不把新模型能力追写进去。请求预算基于实际投影后的文本、图片数/像素或目标模型成本规则，并预留输出/工具结构开销；超限仅改变本次获准请求视图或进入显式预算处理，不回写 canonical 裁剪计划，不调用摘要模型缩短内容。
+每次实际调用包括工具后的续调和已获准的 Provider fallback 都执行能力投影；fallback 固定原 `input_revision/source_cut_digest/context_view_revision`，按新能力重新生成 manifest，不重用视觉请求的 payload，不趁重试纳入新群队列。能力快照在本次 dispatch 固定，热重载后续调用可使用新快照；旧在途结果按原请求 manifest 审计，不把新模型能力追写进去。Provider 不计算 Context 预算。历史缩小只能由 Context 模块在空闲 `SILENT_DRAIN` 或新 Run 首次视图冻结前发布新的 `context_compactions`，且不调用摘要模型；同一 Run 的后续安全点不得重选历史。
 
 模型出站按“事务外 prepare → 最终短事务许可 → 实际发送”执行：Provider Gateway 按冻结语义请求及当前模型能力、Bot/来源授权获取字节或短效签名 URL，构建精确 API body；随后在最终事务重验来源、删除、Session/Run及预算，冻结 `ModelTransportAttempt.payload_digest`、serializer版本和短效permit，提交后才将该精确body交给目标API。body在prepare时尚未发给模型，失权、能力不符或permit过期须丢弃/重新准备，不能以缓存payload为授权。请求在许可后已有在途外部效果时，仍遵循撤权/遗忘的既有线性化边界。
 
@@ -440,7 +440,7 @@ forest memory rebuild --bot alice --scope <scope_id>
 | A-17 | Context 提交后 outbox dispatcher 崩溃 | 恢复后意图仍可投递；不出现历史成功而意图丢失 |
 | A-18 | 存储配置/embedding 版本迁移 | 旧凭据与句柄失效，事实数量/摘要和访问隔离校验通过 |
 | A-19 | 忙时普通A、触发B、普通C、触发D、普通E | 下一模型安全点追加A–D，E继续排队；没有新触发且工作结束后E静默入Context |
-| A-20 | 长时间仅有普通群消息，无触发 | 全量来源逐条入Context并持续确定性裁剪/归档，无对话模型调用、裁剪模型调用或回复意图 |
+| A-20 | 长时间仅有普通群消息，无触发 | 全量来源逐条入 Context；`SILENT_DRAIN` 按高低水位持续归档/裁剪，不调用任何模型、不创建回复意图，活动窗口保持有界 |
 | A-21 | 静默排空/关闭Session时新触发到达或分类完成 | 触发不丢失、不被silent claim为已回答、不产生两个Session |
 | A-22 | WAIT_TOOL/WAIT_APPROVAL/RELOAD期间收到多个触发 | 继续接收和分类；原Session恢复后到最后触发切口，零同群并发响应链 |
 | A-23 | 同名/改名用户、转发与第一人称混杂 | 原作者ID/显示名快照/引用作者及群来源分别保留，裁剪引用、召回和工具授权不串人 |

@@ -341,11 +341,11 @@ EmbeddingProfile 与 Bot 生命周期绑定，同一 Bot 不执行空间原地�
 
 ### 6.7 模型能力投影与并发请求
 
-`ModelRequestManifest` 是固定 `context_revision/context_view_revision/input_revision/source_cut_digest` 上的确定性投影记录；增加能力快照、projection version、请求预算与实际 included/omitted part refs 后，才能准确比较同输入映射。text-only 模型从 canonical 图文 Context、召回和完整工具结果中递归移除非文本载荷，保留合法文本与安全来源定位；映射不改 canonical parts、图像索引或裁剪 profile，不将缺失图像编造为文本描述。
+`ModelRequestManifest` 是固定 `context_revision/context_view_revision/input_revision/source_cut_digest` 上的确定性能力投影记录；增加能力快照、projection version 与实际 included/omitted part refs 后，才能准确比较同输入映射。text-only 模型从 canonical 图文 Context、召回和完整工具结果中递归移除非文本载荷，保留合法文本与安全来源定位；映射不改 canonical parts、图像索引或裁剪 profile，不将缺失图像编造为文本描述。
 
 能力热重载、Provider fallback 与迟到图片是不同事件。本次 dispatch 固定能力/可用媒体修订与 manifest，后来图片完成不能回写“本次模型已看到图片”。fallback 只有在原请求状态允许新调用时，才沿同一个 source cut 按新能力重新投影并生成独立 manifest；不能把超时一律当作旧调用未执行，也不能混入新触发尾部。新的合法模型安全点可以选择已经就绪的图片版本，但要保存新的源物化快照和实际输入依据。召回索引空间迁移不改变已冻结 evidence refs，图片源变化/遗忘则必须重新验证这些引用。
 
-请求预算仅在当前投影上计算文本/图片开销，必要的有界缩减进入本次 request manifest；不能把 text-only 的 omitted parts 或请求保留集合提交为 `context_compactions.result_ref`。同一 canonical 视图先调用文本模型再调用视觉模型，第二次仍可读取当前授权、未遗忘且可用的原图片。投影、预算和缺失标记都不创建摘要、OCR 或 caption 调用；这些额外语义服务仅可作为用户/Agent 显式请求的独立能力与预算任务，不能被记作原生图片嵌入或成本免费的裁剪步骤。
+Provider 投影不计算请求预算，也不产生请求级历史保留集合；text-only 的 omitted parts 只表示能力缺失，不能提交为 `context_compactions.result_ref`。同一 canonical 视图先调用文本模型再调用视觉模型，第二次仍可读取当前授权、未遗忘且可用的原图片。投影和缺失标记都不创建摘要、OCR 或 caption 调用；这些额外语义服务仅可作为用户/Agent 显式请求的独立能力任务，不能被记作原生图片嵌入或成本免费的裁剪步骤。
 
 语义请求与实际传输分别固定。`ModelRequestManifest`保存语义input/projected content摘要；Gateway先在事务外基于合法冻结refs准备精确body（含实际短效URL/字节），最终permit短事务再验授权/删除、Session和预算，并写不可变 `model_transport_attempts` 的wire `payload_digest`，提交后才发送。URL刷新产生新transport_attempt_id，原请求语义不变时可复用manifest，但不覆盖旧hash；能力fallback则创建新语义request。调用state/receipt/usage和UNKNOWN仍由RunStep/checkpoint统一管理，不能因为建立了新attempt就绕过旧调用的不确定状态；亦不能先冻结一个未知wirehash再在事务外悄悄改变body。
 
@@ -504,7 +504,7 @@ CHAT 按会话 `response_seq` 顺序发送；CONTROL 按命令 `control_seq` 保
 | CC-37 | 图片遗忘先于旧下载/缩略图/embedding 返回，随后缓存命中 | 接纳/发布与新媒体签发被 epoch/suppression 拒绝；所有来源派生验证失效，物理字节残留不恢复可见性 |
 | CC-38 | 共享 blob 的群甲来源删除与群乙引用接纳/GC 交错 | 当前权限及 GC CAS 保护合法乙来源，甲依据不复活；无合法引用才物理清理，不跨 Bot 计数 |
 | CC-39 | 同 capture 的可变 URL 返回不同图片且交换完成顺序 | 摘要验证/明确修订仲裁，无已固定 media revision 覆盖；承认输入不同，不假称下载顺序合流 |
-| CC-40 | text-only 请求预算变化与 canonical 裁剪、嵌套工具输出并发 | 请求省略不回写 canonical view；最终 API 无非文本载荷，工具结构合法，裁剪/投影额外模型调用为零 |
+| CC-40 | text-only 能力投影与 canonical 裁剪、嵌套工具输出并发 | 能力省略不回写 canonical view；最终 API 无非文本载荷，工具结构合法，裁剪/投影额外模型调用为零 |
 | CC-41 | prepare签名URL后撤权/删除，或permit过期需刷新URL；另一次发送UNKNOWN | final permit拦截失权；合法刷新建新transport attempt/hash且旧hash不变，语义manifest按需复用；UNKNOWN不因此被盲目重发 |
 | CC-42 | 新fallback已成为当前调用，旧模型响应与新响应同时到达 | request/attempt/call epoch及Run/Session最终CAS只接纳当前结果；旧响应仅费用对账，最多一个ModelTurn/工具步骤，不因本地取消将UNKNOWN归零 |
 

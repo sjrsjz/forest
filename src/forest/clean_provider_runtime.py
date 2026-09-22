@@ -113,13 +113,26 @@ class CleanChatCompletionsProviderRuntime:
             raise ForestError(
                 "PROVIDER_CONFIGURATION_INVALID", "Provider capabilities are invalid", 422
             )
+        # Older deployment profiles stored Context/image sizing policy beside
+        # transport capabilities.  Drop those fields at the configuration
+        # boundary; they are not part of the runtime Provider snapshot and
+        # cannot affect request admission or projection.
+        capabilities = dict(capabilities)
+        for retired in (
+            "context_limit",
+            "max_images",
+            "max_image_bytes",
+            "max_image_pixels",
+            "image_token_upper_bound",
+        ):
+            capabilities.pop(retired, None)
         try:
             parsed = ModelCapabilities(**capabilities)
         except (ForestError, TypeError) as exc:
             raise ForestError(
                 "PROVIDER_CONFIGURATION_INVALID", "Provider capabilities are invalid", 422
             ) from exc
-        return value, parsed
+        return {**value, "capabilities": parsed.as_dict()}, parsed
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired(include_value=True)

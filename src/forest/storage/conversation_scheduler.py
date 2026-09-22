@@ -1060,12 +1060,18 @@ class ConversationSchedulerRepository:
         compaction = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT compaction_id FROM {} WHERE bot_id=%s AND operation_id=%s"
+                    "SELECT compaction_id,published_view_revision FROM {} "
+                    "WHERE bot_id=%s AND operation_id=%s"
                 ).format(self._table("context_compactions")),
                 (self.store.bot_id, compaction_operation_id),
             )
         ).fetchone()
         if compaction is not None:
+            # The immutable batch records the view revision observed before
+            # its Context rows existed.  A post-append maintenance compaction
+            # belongs to the same selection operation and is its published
+            # result for callers and idempotent replay.
+            result["context_view_revision"] = compaction["published_view_revision"]
             archived_events = await (
                 await conn.execute(
                     sql.SQL(
@@ -1583,15 +1589,6 @@ class ConversationSchedulerRepository:
             raise ForestError(
                 "CONVERSATION_SEQUENCE_CORRUPT", "Recovery claim has no committed Context", 500
             )
-        lane = await self._compact_context_view(
-            conn,
-            lane=lane,
-            actor=actor,
-            selection_operation_id=operation_id,
-            policy=context_view_policy or self.context_view_policy,
-            pin_active_session=boundary == "MODEL_SAFE_POINT",
-        )
-        memory_archive = lane.pop("_memory_archive", None)
         selected_end = end_seq if end_seq is not None else lane["context_applied_seq"]
         batch_id = "batch:" + hashlib.sha256(
             _canonical([self.store.bot_id, operation_id])
@@ -1721,6 +1718,19 @@ class ConversationSchedulerRepository:
         lane["context_revision"] = context_revision
         lane["context_view_unit_count"] += len(events)
         lane["mailbox_revision"] += 1
+        # Compact after the append so a single large silent catch-up batch is
+        # bounded immediately rather than waiting for another message.  A Run
+        # safe point only extends its frozen causal suffix.
+        if boundary != "MODEL_SAFE_POINT":
+            lane = await self._compact_context_view(
+                conn,
+                lane=lane,
+                actor=actor,
+                selection_operation_id=operation_id,
+                policy=context_view_policy or self.context_view_policy,
+                pin_active_session=False,
+            )
+        memory_archive = lane.pop("_memory_archive", None)
         selection = await self._record_selection(
             conn,
             operation_id=operation_id,

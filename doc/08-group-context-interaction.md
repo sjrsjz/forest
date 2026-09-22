@@ -88,7 +88,7 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 InputBatch 的 `kind` 分为：
 
 - `TRIGGER_INPUT`：选择触发后增加新的来源前缀，并把对应触发领取给当前 Session/Run。
-- `SILENT_DRAIN`：无触发时只追加普通来源前缀；`run_id = null`，不产生回复型 Run。
+- `SILENT_DRAIN`：无触发时追加普通来源前缀，并在越过 Context 高水位时于同一维护事务归档、裁剪；`run_id = null`，不产生回复型 Run。
 - `RECOVERY_CLAIM`：恢复尚未完成的触发，而其来源已经提交过；`start_seq = end_seq = null`，引用既有 Context 单元，不重复追加消息。
 
 输入选择端口必须显式带边界原因，不能用一个含糊的“拉取下一条”接口：
@@ -173,7 +173,7 @@ Provider 支持结构化 metadata 时保留相应字段；只接受常规消息�
 
 ### 3.3 按LLM能力投影，完整上下文保留图片
 
-CanonicalContext、归档及Evidence保存有序text/image ContentPart和逐part来源。调用API前先固定合法输入切口与媒体物化快照、完成获权多模态召回，再解析实际Provider/模型的能力，构造独立ModelInputProjection，最后计算该请求的文本/图片预算并写入manifest。不能先按文本LLM去图再把删后的文本当作记忆查询的唯一输入；图片仍可以直接用于嵌入和召回。
+CanonicalContext、归档及 Evidence 保存有序 text/image ContentPart 和逐 part 来源。新 Run 第一次调用 API 前，Agent 请求 Context 冻结已经按自身策略维护的 ContextView，再完成获权多模态召回，最后按实际模型能力构造独立 ModelInputProjection。Provider 只接收投影结果，不接收 Context 预算、裁剪配置或候选历史。不能先按文本 LLM 去图再把删后的文本当作记忆查询的唯一输入；图片仍可以直接用于嵌入和召回。
 
 若实际模型不支持图片，递归去掉所有角色中的image parts以及被声明为媒体载荷的URL/base64/file字段，包括历史轮次、引用内容、检索证据与工具结果；保留合法文本、作者/群来源、工具call_id和结果配对。可以保留纯文本“此处有图片，未提供给当前模型”的事实标记，不把图片地址或编码转写成文本来假装已完成投影。明确来自原文的普通文字URL按文本处理，不靠泛化字符串删除破坏用户内容。
 
@@ -250,7 +250,7 @@ CHAT 回复分配同会话递增 `response_seq`，Delivery 依序领取，避免
 
 ### 5.2 静默推入的两种入口
 
-空闲收到普通消息和 Agent 结束后的尾部排空使用同一个 `SILENT_DRAIN` 协议。每个有界维护批次都在协调行锁内先检查触发，再冻结 `silent_end_seq = classified_through_seq`，追加 `(context_applied_seq, silent_end_seq]`，推进游标并登记裁剪工作。
+空闲收到普通消息和 Agent 结束后的尾部排空使用同一个 `SILENT_DRAIN` 协议。每个有界维护批次都在协调行锁内先检查触发，再冻结 `silent_end_seq = classified_through_seq`，追加 `(context_applied_seq, silent_end_seq]` 并推进游标。提交前按“现有活动单元 + 本批单元”检查 Context 高水位；越界时先可靠归档足够的旧前缀，使本批提交后的活动窗口回到低水位目标。它可以发布新的持久裁剪视图，但不创建回复型 Run，也不调用 LLM。
 
 如果检查时有待处理触发，立即改走触发选择，不能先把整条普通尾部静默推完。安全点之后新消息的序号大于已冻结边界，不影响已选择的输入批次；下一维护批次再次检查触发，不沿用上次“没有触发”的判断。
 
@@ -292,7 +292,7 @@ context_applied_seq == classified_through_seq
 | `WAIT_INPUT` | 连续分类头推进到可用触发，上一 Run 已完成 | `READY_NEXT`，创建后继 Run |
 | `RUNNING` | 最终提交后没有待处理触发 | `DRAINING` |
 | `DRAINING` | 发现新触发 | `READY_NEXT / WAIT_INPUT` |
-| `DRAINING` | 无触发，有普通前缀；静默追加/裁剪 | `DRAINING` |
+| `DRAINING` | 无触发，有普通前缀；静默追加 Context | `DRAINING` |
 | `DRAINING` | 重验无待处理工作，原子关闭 Session | `IDLE` |
 
 这里的 IDLE 是会话无活跃 Session 的状态；其余状态由持久 Session 协调。Actor 的内存实例可以淘汰，Worker 可以更换，逻辑 Session 身份仍连续。
@@ -448,13 +448,15 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 
 ## 8. 无模型摘要的裁剪与历史顺序
 
-### 8.1 每次输入追加都参与裁剪
+### 8.1 持久 Context 维护与 Run 模型视图冻结
 
-`TRIGGER_INPUT` 与 `SILENT_DRAIN` 使用同一 token 计数和裁剪入口。没有触发并不免除裁剪；也不能只有最初构造 Agent 时裁剪一次、后续模型步骤无限 `extend`。
+持久 Context 维护不依赖 Agent 是否正在工作。`SILENT_DRAIN` 与空闲边界的 `TRIGGER_INPUT` 在提交前按 Context 自身策略检查“现有活动单元 + 本批单元”；越过高水位就先可靠归档旧前缀并裁剪到低水位，再追加本批。由此，Bot 即使数月没有被触发，活动窗口也保持有界，完整原文仍在 CanonicalContext/Archive 中可追溯。
 
-这里区分两类视图：持久ViewPlan按明确`context_view_profile_ref`管理完整多模态近期窗口、归档引用和本地资源预算，不随当前LLM是否支持图片而改变保存语义；每次Provider调用另对ModelInputProjection核算实际文本token、图片数量/分辨率/成本、来源标题及输出预留。模型或能力变化只重建当次请求投影和预算，不把去图结果写回context_compactions。正常持久裁剪仍可按既定保留策略整体移出已归档旧单元，但“不支持模态”不能成为删除原图或永久移出图片的理由。
+新 Run 准备第一次模型调用时冻结当时的持久 ContextView，并加入本 Run 当前 RAG、触发输入和必要因果后缀。这里的“一次”指每个 Run 只做一次模型视图选择，不表示空闲期停止持久裁剪。同一 Run 后续模型、工具、思考、修复以及安全点接入消息只调用 `extend`，不得重新选择历史前缀；活动 Run 期间也不发布会改写该冻结前缀的后台裁剪。Run 的步骤数、工具数和排队接入量由 Agent 自身上限约束。
 
-确定性选择先计固定开销与必留集合，再按Context提交顺序从近到远选择完整可选单元；同序号按稳定unit_id决胜，不按Worker读取完成先后选择。持久ViewPlan使用context_view_profile的预算；请求投影使用实际模型预算并优先预留系统约束/输出空间，二者保留/移出清单分别记录。触发裁剪后以各自配置低水位为目标，必要集合高于低水位但不超过硬预算时优先满足必要集合；第一个可选旧单元放不下时停止扩展旧窗口，整组移出，不切断call/result配对。预算估算在本地按固定版本完成，不调用远端模型。
+持久 ViewPlan 按明确 `context_view_profile_ref` 管理完整多模态近期窗口、归档引用和本地资源预算，不随当前 LLM 是否支持图片而改变保存语义。Context 是历史选择与裁剪的唯一所有者；Provider 只按目标能力序列化已经定稿的 ModelInputProjection，不能读取 `context_view_profile_ref`，也不能删减历史或 RAG 证据。模型或能力变化只重建当次能力投影，不把去图结果写回 `context_compactions`。正常持久裁剪仍可按既定保留策略整体移出已归档旧单元，但“不支持模态”不能成为删除原图或永久移出图片的理由。
+
+确定性选择先计固定开销与必留集合，再按 Context 提交顺序从近到远选择完整可选单元；同序号按稳定 unit_id 决胜，不按 Worker 读取完成先后选择。ViewPlan 使用 `context_view_profile` 的估算算法和高低水位，触发裁剪后以配置低水位为目标；第一个可选旧单元放不下时停止扩展旧窗口，整组移出，不切断 call/result 配对。预算估算只在 Context 内按固定版本完成，不调用远端模型，也不进入 Provider manifest。
 
 完整归档覆盖清单保存在事实库；Prompt只保留有界的归档提示及manifest引用，不随历史增长逐条累积占位。多个省略范围可引用同一不可变manifest，准确映射仍可按权限查询。证据来源头、近期原文和必要原文全部计入实际预算，不能因引用在数据库里而声称对应正文已进入模型。
 
@@ -467,15 +469,15 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 - 一个完整工具因果组，不能只保留 tool-result 却删去对应 tool-call，或相反。
 - 删除、撤回及不可读取内容的合法占位，不保留被禁止内容的残片。
 
-若仅待回答触发的最小必要原文就超过输入预算，不能偷偷遗漏早期触发或无限等待。记录明确的 `INPUT_BUDGET_EXCEEDED`，按有界恢复/失败策略处理并保留每个触发状态；切口不被悄悄改成最后一条消息。正文超过单消息限制时使用已声明的附件/内容引用策略，不能伪称模型已读完未提供的原文。
+若 Context 判断仅待回答触发的最小必要原文就超过其策略硬界，不能偷偷遗漏早期触发或无限等待。记录明确的 Context 裁剪失败并按有界恢复/失败策略处理，保留每个触发状态；切口不被悄悄改成最后一条消息。若只是 Provider 配置中的估算值超限，仍应发送已定稿请求，由上游真实结果裁决。正文超过传输层硬字节限制时使用已声明的附件/内容引用策略，不能伪称模型已读完未提供的原文。
 
 ### 8.2 确定性视图发布与合流
 
 先可靠写 Archive 及来源映射，再以 `context_compactions` 发布裁剪视图。裁剪器只计算确定性的 ViewPlan：保留单元、移出单元、归档引用、token计数和来源覆盖，不能输出自然语言摘要。Context 发布经Actor/会话协调事务；后台任务不能修改正在使用的共享消息数组。可靠归档已完成但Embedding/图邻接仍滞后时，裁剪可以完成，召回显式报告索引水位。
 
-ViewPlan固定有序源集、覆盖范围、基础context_view_revision、context_view_profile_ref、tokenizer/策略版本、预算、必留触发/因果组及deletion epoch。发布时核验所有依赖；老计划晚完成不得覆盖新输入或新视图。若只裁剪已声明前缀，必须证明保留当前完整后缀，且整体预算仍合法，否则重建计划；不能覆盖旧的整段Context快照。相同来源、策略、预算和必留集合得到相同保留/移出语义，不发生LLM工件选择。每请求的模态省略及预算选择另存ModelRequestManifest，不借此发布持久ViewPlan。来源/删除屏障仍遵守[06](06-concurrent-convergence.md)。
+ViewPlan固定有序源集、覆盖范围、基础context_view_revision、context_view_profile_ref、tokenizer/策略版本、预算、必留触发/因果组及deletion epoch。发布时核验所有依赖；老计划晚完成不得覆盖新输入或新视图。若只裁剪已声明前缀，必须证明保留当前完整后缀，且整体预算仍合法，否则重建计划；不能覆盖旧的整段Context快照。相同来源、策略、预算和必留集合得到相同保留/移出语义，不发生LLM工件选择。ModelRequestManifest 只记录能力投影，不产生第二套历史保留/移出清单。来源/删除屏障仍遵守[06](06-concurrent-convergence.md)。
 
-当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。活动 Run 的安全点保护其 Session 输入，`PENDING/CLAIMED` trigger 始终受保护；同一新 InputBatch 的所有消息先进入 canonical Context，但只有实际 trigger 是请求预算的硬 pin，普通消息可按正常规则整组移出请求投影。
+当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。新 Run 的触发输入和当前必要后缀受保护；ViewPlan 发布后，该 Run 在所有后续模型步骤保持同一 `context_view_revision`，只追加因果单元。
 
 高流量下合并同会话尚未执行的维护唤醒，维护desired/processed水位；合并只影响本地工作批量，不能遗漏任何来源。采用裁剪高/低水位避免每条消息反复重算，大对象使用缓存token计数与受监督本地计算。系统指令、作者/群来源标题、必留内容和输出预留先计费；超窗时减少普通原文/Evidence项，不能剥掉来源标题凑预算。待答触发必要原文仍放不下就走上述明确失败策略，不自动发摘要请求，也不自动调更昂贵模型。
 
@@ -507,7 +509,7 @@ Bot 已提交的最终回复通过 ModelTurn 入 Context；平台再次推送同
 | t4 | M1 的工具组闭合，进入安全点 | 先存完整工具组；B2 冻结 T=105，追加 102..105；T103/T105 被领取；M2 可见两位新触发者 | 106 |
 | t5 | M2 又调用一次工具，期间仅来 107 普通聊天 | 无 PENDING 触发，M3 沿用输入截止 105，不能把 106/107 带入 | 106、107 |
 | t6 | M3 产生最终回复，事务正常提交 | T101/T103/T105 关联该回复；Session 转 DRAINING | 106、107 |
-| t7 | 静默维护 | SILENT_DRAIN 追加 106..107，正常归档/裁剪，A=107；无新触发后关闭 Session | 空 |
+| t7 | 静默维护 | SILENT_DRAIN 追加 106..107，A=107；按 Context 水位归档/裁剪但不调用模型，无新触发后关闭 Session | 空 |
 
 ### 9.2 最终候选已完成时仍有触发
 

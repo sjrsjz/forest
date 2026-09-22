@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from typing import Protocol
 
 from forest.errors import ForestError
 from forest.storage.conversation_scheduler import ConversationActor, SchedulerContextFact
+
+logger = logging.getLogger(__name__)
 
 
 class _WorkerQuiescing(Exception):
@@ -250,9 +253,22 @@ class ConversationWorker:
                 self.failures.pop(conversation_id, None)
             except ForestError as exc:
                 if exc.code != "CONVERSATION_ACTOR_BUSY":
+                    previous = self.failures.get(conversation_id)
                     self.failures[conversation_id] = exc
+                    if not isinstance(previous, ForestError) or previous.code != exc.code:
+                        logger.exception(
+                            "Conversation worker failed conversation=%s code=%s",
+                            conversation_id,
+                            exc.code,
+                        )
             except BaseException as exc:  # kept observable; the poller must remain alive
+                previous = self.failures.get(conversation_id)
                 self.failures[conversation_id] = exc
+                if previous is None or type(previous) is not type(exc):
+                    logger.exception(
+                        "Conversation worker crashed conversation=%s",
+                        conversation_id,
+                    )
 
     async def _heartbeat(self, actor: ConversationActor, stopped: asyncio.Event) -> None:
         interval = max(0.25, self.actor_lease_seconds / 3)

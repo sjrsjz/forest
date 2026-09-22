@@ -150,7 +150,6 @@ class CleanBotSettings:
     model_api_key: str
     model: str
     model_deployment_id: str
-    model_context_limit: int
     model_max_output_tokens: int
     model_input_modalities: tuple[str, ...]
     embedding_endpoint: str
@@ -229,7 +228,6 @@ class CleanBotSettings:
             model_deployment_id=os.environ.get(
                 "FOREST_MODEL_DEPLOYMENT_ID", "provider.chat-completions/main"
             ),
-            model_context_limit=_positive_int("FOREST_MODEL_CONTEXT_LIMIT", 32768, 256, 2_000_000),
             model_max_output_tokens=_positive_int(
                 "FOREST_MODEL_MAX_OUTPUT_TOKENS", 4096, 1, 262_144
             ),
@@ -451,7 +449,6 @@ class CleanBotHost:
             model=self.settings.model,
             capability_revision="operator-declared/1",
             input_modalities=self.settings.model_input_modalities,
-            context_limit=self.settings.model_context_limit,
             max_output_tokens=self.settings.model_max_output_tokens,
         )
         provider_options = {}

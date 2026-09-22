@@ -50,7 +50,6 @@ printf 'Forest WebUI 一次性配对码（1 小时有效）：%s\n' "$PAIRING_CO
 ```text
 FOREST_BOT_ID=forest-main
 FOREST_MODEL_DEPLOYMENT_ID=provider.chat-completions/main
-FOREST_MODEL_CONTEXT_LIMIT=32768
 FOREST_MODEL_MAX_OUTPUT_TOKENS=4096
 FOREST_MODEL_INPUT_MODALITIES=text
 FOREST_EMBEDDING_DEPLOYMENT_ID=embedding.multimodal/qiyu-vl/default

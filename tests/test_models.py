@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from forest.clean_provider_runtime import CleanChatCompletionsProviderRuntime
 from forest.errors import ForestError
 from forest.models import (
     ChatCompletionsClient,
@@ -43,6 +44,33 @@ def snapshot(*units, required=None):
 
 def capabilities(**changes):
     return ModelCapabilities("deployment-a", "test-model", "capability-1", **changes)
+
+
+def test_provider_runtime_drops_retired_context_policy_fields_from_legacy_configuration():
+    legacy = capabilities().as_dict()
+    legacy.update({
+        "context_limit": 65536,
+        "max_images": 8,
+        "max_image_bytes": 8 * 1024 * 1024,
+        "max_image_pixels": 16777216,
+        "image_token_upper_bound": 4096,
+    })
+    normalized, parsed = CleanChatCompletionsProviderRuntime._parse_configuration({
+        "protocol": "forest.provider.chat-completions/1",
+        "base_url": "https://example.invalid",
+        "credential_ref": "secret://provider/test",
+        "timeout_seconds": 30,
+        "max_connections": 2,
+        "capabilities": legacy,
+    })
+    assert parsed.as_dict() == normalized["capabilities"]
+    assert set(legacy) - set(normalized["capabilities"]) == {
+        "context_limit",
+        "max_images",
+        "max_image_bytes",
+        "max_image_pixels",
+        "image_token_upper_bound",
+    }
 
 
 def prepared(value=None, caps=None, *, media=None, tools=(), stream=True, **kwargs):
@@ -154,10 +182,7 @@ def test_actual_visual_projection_uses_authorized_bytes_and_freezes_media_revisi
     manifest = result.manifest
     assert manifest["media_transform_refs"][0]["media_revision"] == 1
     assert "base64" not in result.manifest_json
-    assert manifest["budget_snapshot"]["image_count"] == 1
-    assert manifest["budget_snapshot"]["image_bytes"] == len(media.content)
     assert any(ref["part_id"] == "1" for ref in manifest["included_part_refs"])
-    assert result.reserved_tokens == result.estimated_input_tokens + result.max_output_tokens
     with pytest.raises(ForestError) as caught:
         prepared(value, capabilities(input_modalities=("text", "image")), media={"media-a": replace(media, bot_id="other")})
     assert caught.value.code == "MODEL_MEDIA_SOURCE_MISMATCH"
@@ -262,10 +287,9 @@ def test_nested_attribution_drops_media_fields_and_rejects_untyped_ids():
         prepared(value)
 
 
-def test_prepared_request_verifies_frozen_wire_options_and_reserved_budget():
+def test_prepared_request_verifies_frozen_wire_options():
     request = prepared()
-    for changed in (replace(request, stream=False), replace(request, max_output_tokens=3),
-                    replace(request, estimated_input_tokens=1)):
+    for changed in (replace(request, stream=False), replace(request, max_output_tokens=3)):
         with pytest.raises(ForestError) as caught:
             changed.verify()
         assert caught.value.code == "MODEL_REQUEST_TAMPERED"
@@ -327,27 +351,64 @@ def test_unclosed_or_mismatched_tools_never_reach_request(change):
     assert caught.value.code == "MODEL_TOOL_SEQUENCE"
 
 
-def test_deterministic_projection_budget_discards_whole_unrequired_groups_only():
+def test_provider_projection_never_discards_context_based_on_capability_metadata():
     first, second = tool_group()
     first["parts"][0]["text"] = "old output " * 1000
     value = snapshot(first, second, unit("new", "new trigger"), required=["new"])
-    result = prepared(value, capabilities(context_limit=6000, max_output_tokens=1000), output_tokens=500,
+    result = prepared(value, capabilities(max_output_tokens=1000), output_tokens=500,
                       tools=[tool_spec()])
-    assert result.manifest["omitted_unit_ids"] == ["assistant-1", "tool-1"]
-    assert [message["role"] for message in json.loads(result.body)["messages"]] == ["system", "user"]
-    assert result.body == prepared(value, capabilities(context_limit=6000, max_output_tokens=1000),
+    assert result.manifest["omitted_unit_ids"] == []
+    assert [message["role"] for message in json.loads(result.body)["messages"]] == [
+        "system", "assistant", "tool", "user",
+    ]
+    assert result.body == prepared(value, capabilities(max_output_tokens=1000),
                                    output_tokens=500, tools=[tool_spec()]).body
-    with pytest.raises(ForestError) as caught:
-        prepared(snapshot(unit(text="mandatory " * 1000)), capabilities(context_limit=3000, max_output_tokens=500), output_tokens=500)
-    assert caught.value.code == "INPUT_BUDGET_EXCEEDED"
+    prepared(
+        snapshot(unit(text="mandatory " * 1000)),
+        capabilities(max_output_tokens=500),
+        output_tokens=500,
+    )
 
 
-def test_required_visual_input_over_image_budget_is_explicit_error():
+def test_empty_memory_status_is_projected_without_provider_budget_authority():
+    value = snapshot(unit("required", "current trigger " * 80), required=["required"])
+    value["conversation"] = {
+        "conversation_id": "conversation-group-a",
+        "group_source_id": "onebot:group:group-a",
+        "platform": "onebot-v11",
+        "channel_kind": "group",
+        "channel_id": "group-a",
+    }
+    evidence = {
+        "bundle_id": "bundle-empty",
+        "payload_id": "payload-empty",
+        "digest": "sha256:" + "a" * 64,
+        "query_id": "query-empty",
+        "conversation_id": "conversation-group-a",
+        "space_id": "space-a",
+        "input_cut": 8,
+        "config_revision": 1,
+        "deletion_epoch": 0,
+        "status": "READY",
+        "completeness": {"candidate_count": 0},
+        "evidence": [],
+    }
+    result = prepared(
+        value,
+        capabilities(max_output_tokens=128),
+        output_tokens=128,
+        evidence=evidence,
+    )
+    assert result.manifest["memory_evidence"]["projected_unit_ids"] == []
+    assert result.manifest["memory_evidence"]["status_projected"] is True
+    assert "current trigger" in result.body.decode()
+
+
+def test_provider_projects_supported_image_without_a_context_budget():
     value = snapshot(unit(parts=[{"type": "image", "media_ref": "media-a"}]))
-    with pytest.raises(ForestError) as caught:
-        prepared(value, capabilities(input_modalities=("text", "image"), max_images=0),
-                 media={"media-a": image(part="0")})
-    assert caught.value.code == "INPUT_BUDGET_EXCEEDED"
+    result = prepared(value, capabilities(input_modalities=("text", "image")),
+                      media={"media-a": image(part="0")})
+    assert len(result.manifest["media_transform_refs"]) == 1
 
 
 @asynccontextmanager

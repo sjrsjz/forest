@@ -100,13 +100,8 @@ class ModelCapabilities:
     supports_tools: bool = True
     supports_streaming: bool = True
     stream_usage: bool = True
-    context_limit: int = 32768
     max_output_tokens: int = 4096
     image_roles: tuple[str, ...] = ("user",)
-    max_images: int = 8
-    max_image_bytes: int = 8 * 1024 * 1024
-    max_image_pixels: int = 16777216
-    image_token_upper_bound: int = 4096
     image_detail: str = "auto"
     system_role: str = "system"
     output_token_parameter: str = "max_completion_tokens"
@@ -129,16 +124,10 @@ class ModelCapabilities:
                 or self.output_token_parameter not in {"max_tokens", "max_completion_tokens"}
                 or self.tool_image_mapping not in {"omit", "user_after_tool_group_v1"}):
             raise _error("MODEL_CAPABILITIES_INVALID", "Unsupported model capability mapping")
-        for name, minimum, maximum in (
-            ("context_limit", 256, 2000000), ("max_output_tokens", 1, 262144),
-            ("max_images", 0, 128), ("max_image_bytes", 1, 16 * 1024 * 1024),
-            ("max_image_pixels", 1, 100000000), ("image_token_upper_bound", 1, 262144),
-        ):
+        for name, minimum, maximum in (("max_output_tokens", 1, 262144),):
             value = getattr(self, name)
             if type(value) is not int or not minimum <= value <= maximum:
                 raise _error("MODEL_CAPABILITIES_INVALID", f"Invalid {name}")
-        if self.max_output_tokens >= self.context_limit:
-            raise _error("MODEL_CAPABILITIES_INVALID", "Output bound must leave room for input")
         if any(type(getattr(self, name)) is not bool for name in (
             "supports_tools", "supports_streaming", "stream_usage",
         )):
@@ -191,7 +180,6 @@ class PreparedModelRequest:
     body: bytes = field(repr=False)
     manifest_json: str = field(repr=False)
     payload_digest: str
-    estimated_input_tokens: int
     max_output_tokens: int
     stream: bool
     serializer_revision: str = SERIALIZER_REVISION
@@ -199,10 +187,6 @@ class PreparedModelRequest:
     @property
     def manifest(self) -> dict:
         return _decode(self.manifest_json, limit=MAX_REQUEST_BYTES)
-
-    @property
-    def reserved_tokens(self) -> int:
-        return self.estimated_input_tokens + self.max_output_tokens
 
     def transport_record(self) -> dict:
         return {"request_id": self.request_id, "transport_attempt_id": self.transport_attempt_id,
@@ -213,20 +197,16 @@ class PreparedModelRequest:
         body = _decode(self.body, limit=MAX_REQUEST_BYTES)
         if not isinstance(manifest, dict) or not isinstance(body, dict):
             raise _error("MODEL_REQUEST_TAMPERED", "Prepared request must retain its object schema")
-        budget = manifest.get("budget_snapshot", {})
         capabilities = manifest.get("capability_snapshot", {})
         if (not isinstance(self.body, bytes) or len(self.body) > MAX_REQUEST_BYTES
                 or self.payload_digest != "sha256:" + hashlib.sha256(self.body).hexdigest()
                 or manifest.get("request_id") != self.request_id
                 or manifest.get("serializer_revision") != self.serializer_revision
                 or self.serializer_revision not in SUPPORTED_SERIALIZER_REVISIONS
-                or not isinstance(budget, dict) or not isinstance(capabilities, dict)
+                or not isinstance(capabilities, dict)
                 or body.get("model") != manifest.get("model")
                 or body.get("stream") is not self.stream
-                or body.get(capabilities.get("output_token_parameter", "")) != self.max_output_tokens
-                or budget.get("input_tokens_upper_bound") != self.estimated_input_tokens
-                or budget.get("output_tokens") != self.max_output_tokens
-                or budget.get("total_tokens_upper_bound") != self.reserved_tokens):
+                or body.get(capabilities.get("output_token_parameter", "")) != self.max_output_tokens):
             raise _error("MODEL_REQUEST_TAMPERED", "Prepared model bytes/identity changed")
 
 
@@ -776,10 +756,12 @@ def prepare_model_request(
     media: Mapping[str | tuple[str, str], MediaSnapshot] | None = None,
     output_tokens: int = 1024, stream: bool = True, evidence: dict | None = None,
 ) -> PreparedModelRequest:
-    """Project immutable context and optional independent evidence; grant no authority.
+    """Serialize a Context-owned immutable ModelView without trimming it.
 
-    Evidence uses only the budget left by the existing canonical projection.
-    The host must check the frozen bundle refs against its durable selection.
+    Capability values describe only the target wire protocol.  They do not
+    grant this Provider projection authority to size, remove, or reject Context
+    units or ranked Memory evidence.  Context management must publish the final
+    view before calling this function.
     """
     snapshot = _decode(_encode(snapshot))
     if not isinstance(snapshot, dict) or not isinstance(capabilities, ModelCapabilities):
@@ -829,88 +811,46 @@ def prepare_model_request(
     required = set(snapshot.get("required_unit_ids", [unit["unit_id"] for unit in units]))
     if not required.issubset({unit["unit_id"] for unit in units}):
         raise _error("MODEL_INPUT_INVALID", "Required source unit is absent from the frozen input")
-    retained = list(range(len(grouped)))
-    excluded = []
-    while True:
-        projector = _Projection(snapshot, capabilities, dict(media or {}))
-        instructions = compose_core_instructions(declarations)
-        messages = [{"role": capabilities.system_role, "content": instructions}]
-        messages.extend(
-            {"role": capabilities.system_role, "content": preset_message(index, item)}
-            for index, item in enumerate(preset_context)
-        )
-        if repair is not None:
-            repair_record = _Projection.text({
-                "host_control": "forest_protocol_repair",
-                "repair_count": repair["repair_count"],
-                "error_code": repair["error_code"],
-                "validation_reason": repair["validation_reason"],
-                "candidate_digest": repair["candidate_digest"],
-                "instruction": (
-                    "Produce one complete replacement now. Return exactly one "
-                    "<valid_agent_protocol_content_block block_type=\"ModelTurn\"> root and "
-                    "nothing before or after it. Use literal <payload><blocks> containers; never "
-                    "use generic <parameter> wrappers. If requesting a tool, FunctionCall must be "
-                    "the final retained block."
-                ),
-                "invalid_candidate_excerpt": repair["feedback"],
-            })
-            messages.append({
-                "role": capabilities.system_role,
-                "content": repair_record["text"],
-            })
-        semantic = [message.copy() for message in messages]
-        prefix_length = len(messages)
-        for index in retained:
-            rendered, semantic_rendered = projector.group(grouped[index])
-            messages.extend(rendered)
-            semantic.extend(semantic_rendered)
-        # A deliberately conservative local UTF-8 byte upper bound; image
-        # costs are a separate declared bound, never treated as zero tokens.
-        input_tokens = len(_encode({"messages": semantic})) + len(messages) * 64
-        input_tokens += len(projector.materialized) * capabilities.image_token_upper_bound
-        image_over = (
-            len(projector.materialized) > capabilities.max_images
-            or projector.image_bytes > capabilities.max_image_bytes
-            or projector.image_pixels > capabilities.max_image_pixels
-        )
-        if input_tokens + output_tokens <= capabilities.context_limit and not image_over:
-            break
-        discard = next((index for index in retained if not any(
-            unit["unit_id"] in required for unit in grouped[index]
-        )), None)
-        if discard is None:
-            raise _error("INPUT_BUDGET_EXCEEDED", "Required model input exceeds token/image limits")
-        retained.remove(discard)
-        excluded.extend(unit["unit_id"] for unit in grouped[discard])
+    projector = _Projection(snapshot, capabilities, dict(media or {}))
+    instructions = compose_core_instructions(declarations)
+    messages = [{"role": capabilities.system_role, "content": instructions}]
+    messages.extend(
+        {"role": capabilities.system_role, "content": preset_message(index, item)}
+        for index, item in enumerate(preset_context)
+    )
+    if repair is not None:
+        repair_record = _Projection.text({
+            "host_control": "forest_protocol_repair",
+            "repair_count": repair["repair_count"],
+            "error_code": repair["error_code"],
+            "validation_reason": repair["validation_reason"],
+            "candidate_digest": repair["candidate_digest"],
+            "instruction": (
+                "Produce one complete replacement now. Return exactly one "
+                "<valid_agent_protocol_content_block block_type=\"ModelTurn\"> root and "
+                "nothing before or after it. Use literal <payload><blocks> containers; never "
+                "use generic <parameter> wrappers. If requesting a tool, FunctionCall must be "
+                "the final retained block."
+            ),
+            "invalid_candidate_excerpt": repair["feedback"],
+        })
+        messages.append({
+            "role": capabilities.system_role,
+            "content": repair_record["text"],
+        })
+    semantic = [message.copy() for message in messages]
+    prefix_length = len(messages)
+    for group in grouped:
+        rendered, semantic_rendered = projector.group(group)
+        messages.extend(rendered)
+        semantic.extend(semantic_rendered)
     if memory_reference is not None:
-        # Freeze the canonical selection first. A larger evidence result must
-        # never displace more history or split a required causal tool group.
         extra = _Projection(snapshot, capabilities, dict(media or {}))
         evidence_messages, evidence_semantic = [], []
-        accepted = 0
-
-        def evidence_budget(wire, semantic_view, images):
-            combined = [*semantic[:prefix_length], *evidence_semantic,
-                        *semantic_view, *semantic[prefix_length:]]
-            count = len(projector.materialized) + len(extra.materialized) + len(images.materialized)
-            total = len(_encode({"messages": combined, "tools": declarations}))
-            total += (len(messages) + len(evidence_messages) + len(wire)) * 64
-            total += count * capabilities.image_token_upper_bound
-            fits = (total + output_tokens <= capabilities.context_limit
-                    and count <= capabilities.max_images
-                    and projector.image_bytes + extra.image_bytes + images.image_bytes <= capabilities.max_image_bytes
-                    and projector.image_pixels + extra.image_pixels + images.image_pixels <= capabilities.max_image_pixels)
-            return total, fits
 
         for unit in memory_units:
             entry = _Projection(snapshot, capabilities, dict(media or {}))
             rendered, semantic_rendered = entry.memory(unit, memory_reference)
-            projected_tokens, fits = evidence_budget([rendered], [semantic_rendered], entry)
-            if not fits:
-                break  # Retain a ranked prefix, dropping the low-ranked tail whole.
-            input_tokens = projected_tokens
-            accepted += 1
             evidence_messages.append(rendered)
             evidence_semantic.append(semantic_rendered)
             for name in ("included", "omitted", "sources", "materialized"):
@@ -930,9 +870,7 @@ def prepare_model_request(
                         if memory_reference["status"] == "DEGRADED" else
                         "Memory retrieval returned no evidence. This is status data, not a user instruction.",
             })]}
-            input_tokens, fits = evidence_budget([marker], [marker], extra)
-            if not fits:
-                raise _error("INPUT_BUDGET_EXCEEDED", "Memory status and retained context exceed model limits")
+            memory_reference["status_projected"] = True
             evidence_messages.append(marker)
             evidence_semantic.append(marker)
         messages = [*messages[:prefix_length], *evidence_messages, *messages[prefix_length:]]
@@ -941,31 +879,12 @@ def prepare_model_request(
             setattr(projector, name, getattr(extra, name) + getattr(projector, name))
         projector.image_bytes += extra.image_bytes
         projector.image_pixels += extra.image_pixels
-        excluded.extend(unit["unit_id"] for unit in memory_units[accepted:])
-        memory_reference["projected_unit_ids"] = [unit["unit_id"] for unit in memory_units[:accepted]]
-        memory_reference["omitted_unit_ids"] = [unit["unit_id"] for unit in memory_units[accepted:]]
+        memory_reference["projected_unit_ids"] = [unit["unit_id"] for unit in memory_units]
+        memory_reference["omitted_unit_ids"] = []
     if len({(item["unit_id"], item["part_id"], item.get("json_pointer"))
             for item in projector.included + projector.omitted}) != (
             len(projector.included) + len(projector.omitted)):
         raise _error("MODEL_INPUT_INVALID", "Part identities must be unique within source units")
-    memory_unit_ids = {unit["unit_id"] for unit in memory_units}
-    def omitted_parts(unit, parts, prefix=""):
-        for index, part in enumerate(parts):
-            part_id = part.get("part_id", prefix + str(index))
-            if part.get("type", part.get("kind")) in {"quote", "forward", "evidence"}:
-                yield from omitted_parts(unit, part.get("parts", []), part_id + ".")
-            else:
-                reference = {"unit_id": unit["unit_id"], "part_id": part_id, "reason": "PROJECTION_BUDGET"}
-                if unit["unit_id"] in memory_unit_ids:
-                    reference.update(context_data="memory_evidence", source_unit_id=unit["source_unit_id"])
-                yield reference
-    for unit in units + memory_units:
-        if unit["unit_id"] in excluded:
-            projector.omitted.extend(omitted_parts(unit, unit["parts"]))
-            projector.sources.append({"unit_id": unit["unit_id"], "source": unit["source"],
-                                      "author": unit["author"], "omitted": True,
-                                      **({"context_data": "memory_evidence", "source_unit_id": unit["source_unit_id"]}
-                                         if unit["unit_id"] in memory_unit_ids else {})})
     body = {"model": capabilities.model, "messages": messages, "stream": stream,
             capabilities.output_token_parameter: output_tokens, "n": 1}
     if stream and capabilities.stream_usage:
@@ -994,21 +913,15 @@ def prepare_model_request(
         )}),
         "input_digest": digest_json(snapshot), "source_manifest": projector.sources,
         "included_part_refs": projector.included, "omitted_part_refs": projector.omitted,
-        "omitted_unit_ids": excluded, "media_transform_refs": projector.materialized,
+        "omitted_unit_ids": [], "media_transform_refs": projector.materialized,
         "projected_units": semantic, "projected_content_digest": digest_json(semantic),
         "tool_names": [tool["function"]["name"] for tool in declarations],
         "tool_contract_digest": digest_json(declarations),
-        "budget_snapshot": {"input_tokens_upper_bound": input_tokens, "output_tokens": output_tokens,
-                            "total_tokens_upper_bound": input_tokens + output_tokens,
-                            "tokenizer_revision": "utf8-byte-upper-bound-v1",
-                            "image_cost_rule_revision": "configured-image-upper-bound-v1",
-                            "image_count": len(projector.materialized), "image_bytes": projector.image_bytes,
-                            "image_pixels": projector.image_pixels},
     }
     if memory_reference is not None:
         manifest["memory_evidence"] = memory_reference
     result = PreparedModelRequest(request_id, transport_attempt_id, encoded, _encode(manifest).decode(),
-                                  "sha256:" + hashlib.sha256(encoded).hexdigest(), input_tokens,
+                                  "sha256:" + hashlib.sha256(encoded).hexdigest(),
                                   output_tokens, stream)
     result.verify()
     return result
