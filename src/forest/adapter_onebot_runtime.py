@@ -474,9 +474,17 @@ class CleanOneBotRuntime:
     async def _ingest(self, connection: _ActiveBinding, body: bytes) -> None:
         if not self._accepting or not connection.accepting:
             raise ForestError("STALE_BINDING", "OneBot Generation is quiescing", 409)
-        codec_result = await self.normalize_codec(
+        normalize_digest = hashlib.sha256(
+            connection.binding_id.encode()
+            + b"\0"
+            + str(connection.connection_epoch).encode()
+            + b"\0"
+            + body
+        ).hexdigest()
+        codec_result = await self.normalize_codec.invoke(
             body_b64=base64.b64encode(body).decode("ascii"),
             self_id=connection.self_id,
+            operation_id="onebot-codec-normalize:" + normalize_digest,
         )
         normalized = codec_result["message"]
         if normalized is None:
@@ -687,7 +695,10 @@ class CleanOneBotRuntime:
         )
         classification = None
         if shell_command is None:
-            classified = await self.trigger_policy(normalized=projected)
+            classified = await self.trigger_policy.invoke(
+                normalized=projected,
+                operation_id="onebot-trigger-classify:" + event_hash,
+            )
             classification = IngressClassification(
                 decision=classified["decision"],
                 classifier_component_id=classified["classifier_component_id"],
@@ -723,6 +734,7 @@ class CleanOneBotRuntime:
         channel_kind: str,
         channel_ref: str,
         parts: list[dict[str, Any]],
+        operation_id: str,
     ) -> PreparedAdapterSend:
         generation = self.generation_identity
         connection = self._active.get(binding_id)
@@ -733,10 +745,11 @@ class CleanOneBotRuntime:
             or not connection.accepting
         ):
             raise ForestError("STALE_BINDING", "OneBot Binding is not accepting sends", 409)
-        codec_result = await self.prepare_send_codec(
+        codec_result = await self.prepare_send_codec.invoke(
             channel_kind=channel_kind.lower(),
             channel_id=channel_ref,
             segments=parts,
+            operation_id=operation_id,
         )
         prepared = PreparedSend.from_codec_result(codec_result)
         return PreparedAdapterSend(

@@ -136,6 +136,7 @@ class PythonWorker:
         self._handshakes: set[asyncio.Task] = set()
         self._pending: dict[str, asyncio.Future] = {}
         self._calls: dict[str, str] = {}
+        self._call_deadlines: dict[str, float] = {}
         self._reserved_calls: set[str] = set()
         self._invocation_tasks: dict[str, asyncio.Task] = {}
         self._cancelled_calls: set[str] = set()
@@ -826,6 +827,7 @@ class PythonWorker:
         self._reserved_calls.add(call_id)
         self._invocation_tasks[call_id] = asyncio.current_task()
         deadline = time.monotonic() + timeout
+        self._call_deadlines[call_id] = deadline
         sent = False
         try:
             async with asyncio.timeout(timeout):
@@ -876,11 +878,37 @@ class PythonWorker:
         finally:
             await self._close_state_calls(call_id)
             self._calls.pop(call_id, None)
+            self._call_deadlines.pop(call_id, None)
             self._reserved_calls.discard(call_id)
             self._invocation_tasks.pop(call_id, None)
             self._cancelled_calls.discard(call_id)
             self._closed_calls.discard(call_id)
             self._admitted -= 1
+
+    def remaining_timeout(
+        self, call_id: str, requested: float | None = None
+    ) -> float:
+        deadline = self._call_deadlines.get(call_id)
+        if deadline is None:
+            raise ForestError(
+                "CALL_CONTEXT_REQUIRED",
+                "Nested service request has no live parent deadline",
+                403,
+            )
+        if requested is not None and (
+            isinstance(requested, bool)
+            or not isinstance(requested, (int, float))
+            or not 0 < requested <= 120
+        ):
+            raise ForestError(
+                "INVALID_SERVICE_REQUEST", "Nested service timeout is invalid", 422
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ForestError(
+                "DEADLINE_EXCEEDED", "Parent service invocation deadline expired", 504
+            )
+        return min(remaining, float(requested)) if requested is not None else remaining
 
     async def cancel(self, call_id: str, timeout: float = 0.5) -> None:
         task = self._invocation_tasks.get(call_id)

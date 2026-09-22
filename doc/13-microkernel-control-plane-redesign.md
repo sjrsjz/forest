@@ -103,6 +103,8 @@ Python 插件接入 RuntimeGraph 的唯一桥梁是内核拥有的 `PackageGener
 
 Adapter 不得把插件类、方法、Repository 或客户端返回给 Registry。Registry 看到的实例永远是通用 Driver 句柄；Worker 才能 import `entrypoint`。插件代码若需要调用另一服务，只能经 `ctx.services.call` 发 IPC 回宿主，由宿主 Contract Router 在调用者 Generation 下解析；插件不能读取 Registry，也不能请求按组件 ID取得对象。
 
+每次跨 Worker 调用必须同时携带两种不可混用的身份：`operation_id` 稳定标识业务操作并承担幂等语义，`call_id` 唯一标识一次执行尝试并承担运行中占用、取消和父子调用关系。重试和重复投递复用 `operation_id`，但每次尝试创建新的 `call_id`；不得根据业务幂等键派生可重复的执行调用号。Contract Router 把冻结 route 与不可变 invocation 显式交给路由感知 endpoint，不使用线程局部或隐式进程上下文。Worker 发起嵌套服务调用时必须声明自己的稳定 `operation_id`，宿主记录当前 `call_id` 为父调用，并把子调用期限限制在父调用剩余期限内；插件不能延长调用树的 deadline，也不能绕过 Router 自行取得服务对象。缺少这些事实的插件调用在边界直接拒绝，不由 Provider、业务模块或兼容分支猜测补齐。
+
 配置读取是 Query；配置计划/提交是 Command；Worker 调用、状态提交和外部效果各有独立端口。`prepare_generation` 只能读取冻结配置、声明和授权事实，不得写业务状态或执行网络副作用。Worker 的 `prepare/start/health` 只建立候选资源；即使 Worker 内部已进入可接受 IPC 的待命态，Adapter 的本地 admission gate 与持久 route 在 publication 前保持关闭。`activate_generation` 只同步翻转本地 gate，不做 IPC、网络或数据库操作。
 
 ### 3.2 完整热重载与回滚

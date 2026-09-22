@@ -33,6 +33,32 @@ class FrozenServiceRoute:
 
 
 @dataclass(frozen=True)
+class RuntimeServiceInvocation:
+    """Explicit identity and deadline for one routed business operation."""
+
+    operation_id: str
+    timeout_seconds: float
+    parent_call_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.operation_id, str)
+            or not 1 <= len(self.operation_id) <= 256
+            or isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not 0 < self.timeout_seconds <= 120
+            or (
+                self.parent_call_id is not None
+                and (
+                    not isinstance(self.parent_call_id, str)
+                    or not 1 <= len(self.parent_call_id) <= 128
+                )
+            )
+        ):
+            raise ValueError("Runtime service invocation is invalid")
+
+
+@dataclass(frozen=True)
 class RoutedServiceEndpoint:
     """Provider endpoint that receives the kernel-sealed route explicitly."""
 
@@ -43,9 +69,13 @@ class RoutedServiceEndpoint:
             raise TypeError("Routed service endpoint handler must be callable")
 
     def invoke_routed(
-        self, route: FrozenServiceRoute, args: tuple, kwargs: dict
+        self,
+        route: FrozenServiceRoute,
+        invocation: RuntimeServiceInvocation,
+        args: tuple,
+        kwargs: dict,
     ):
-        return self.routed(route, *args, **kwargs)
+        return self.routed(route, invocation, *args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -119,7 +149,22 @@ class RuntimeServiceHandle:
         self._request_key = request_key
 
     async def __call__(self, *args, **kwargs):
-        return await self._router.invoke(self._request_key, args, kwargs)
+        return await self._router.invoke(self._request_key, None, args, kwargs)
+
+    async def invoke(
+        self,
+        *args,
+        operation_id: str,
+        timeout_seconds: float = 30,
+        parent_call_id: str | None = None,
+        **kwargs,
+    ):
+        invocation = RuntimeServiceInvocation(
+            operation_id=operation_id,
+            timeout_seconds=timeout_seconds,
+            parent_call_id=parent_call_id,
+        )
+        return await self._router.invoke(self._request_key, invocation, args, kwargs)
 
     @property
     def route(self) -> FrozenServiceRoute:
@@ -452,7 +497,13 @@ class RuntimeContractRouter:
             )
         return route
 
-    async def invoke(self, request_key: tuple, args: tuple, kwargs: dict):
+    async def invoke(
+        self,
+        request_key: tuple,
+        invocation: RuntimeServiceInvocation | None,
+        args: tuple,
+        kwargs: dict,
+    ):
         route = self.route(request_key)
         if self.registry.graph_identity is None or (
             self.registry.graph_identity.graph_id != route.graph_id
@@ -504,9 +555,14 @@ class RuntimeContractRouter:
                 "Runtime service provider changed after graph sealing",
                 409,
             )
-        result = (
-            handler.invoke_routed(route, args, kwargs)
-            if isinstance(handler, RoutedServiceEndpoint)
-            else handler(*args, **kwargs)
-        )
+        if isinstance(handler, RoutedServiceEndpoint):
+            if invocation is None:
+                raise ForestError(
+                    "RUNTIME_SERVICE_INVOCATION_REQUIRED",
+                    "Plugin service calls require an explicit operation identity",
+                    422,
+                )
+            result = handler.invoke_routed(route, invocation, args, kwargs)
+        else:
+            result = handler(*args, **kwargs)
         return await result if inspect.isawaitable(result) else result

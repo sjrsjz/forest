@@ -50,6 +50,26 @@ class FakeWebSocketClient:
         return ()
 
 
+class FakeServiceHandle:
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.operations = []
+
+    async def invoke(
+        self,
+        *args,
+        operation_id,
+        timeout_seconds=30,
+        parent_call_id=None,
+        **kwargs,
+    ):
+        assert isinstance(operation_id, str) and operation_id
+        assert timeout_seconds == 30
+        assert parent_call_id is None
+        self.operations.append(operation_id)
+        return await self.handler(*args, **kwargs)
+
+
 @pytest.mark.postgres
 async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_onebot):
     store, storage, scheduler_storage, payloads, scheduler, adapter = clean_onebot
@@ -151,10 +171,10 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         payloads=payloads,
         secret_resolver=resolve_secret,
         ingress_port=ingress,
-        trigger_policy=classify,
+        trigger_policy=FakeServiceHandle(classify),
         shell_inspector=inspect_shell,
-        normalize_codec=normalize_codec,
-        prepare_send_codec=prepare_send_codec,
+        normalize_codec=FakeServiceHandle(normalize_codec),
+        prepare_send_codec=FakeServiceHandle(prepare_send_codec),
         websocket_client_factory=create_client,
     )
     identity = BoundGenerationIdentity(
@@ -229,10 +249,10 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         payloads=payloads,
         secret_resolver=resolve_secret,
         ingress_port=ingress,
-        trigger_policy=classify,
+        trigger_policy=FakeServiceHandle(classify),
         shell_inspector=inspect_shell,
-        normalize_codec=normalize_codec,
-        prepare_send_codec=prepare_send_codec,
+        normalize_codec=FakeServiceHandle(normalize_codec),
+        prepare_send_codec=FakeServiceHandle(prepare_send_codec),
         websocket_client_factory=create_client,
     )
     successor_identity = BoundGenerationIdentity(

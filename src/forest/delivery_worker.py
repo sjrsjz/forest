@@ -202,6 +202,7 @@ class CleanDeliveryWorker:
                 channel_kind=claim.channel_kind,
                 channel_ref=claim.channel_ref,
                 parts=self._parts(content),
+                operation_id=_operation("prepare-wire", attempt_id),
             )
             if inspect.isawaitable(adapter_send):
                 adapter_send = await adapter_send

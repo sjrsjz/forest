@@ -11,13 +11,18 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
 from typing import Any
+from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 
 from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
 from forest.errors import ForestError
 from forest.packages import PackageSnapshot, contract_range
-from forest.runtime_contracts import FrozenServiceRoute, RoutedServiceEndpoint
+from forest.runtime_contracts import (
+    FrozenServiceRoute,
+    RoutedServiceEndpoint,
+    RuntimeServiceInvocation,
+)
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.runtime_modules import RuntimeArtifactIdentity, RuntimeModuleDescriptor
 
@@ -148,7 +153,12 @@ class PackageGenerationAdapter:
         }
 
     def _service_handler(self, service_id: str) -> RoutedServiceEndpoint:
-        async def invoke(route: FrozenServiceRoute, *args, **kwargs):
+        async def invoke(
+            route: FrozenServiceRoute,
+            invocation: RuntimeServiceInvocation,
+            *args,
+            **kwargs,
+        ):
             if args and kwargs or len(args) > 1:
                 raise ForestError(
                     "RUNTIME_SERVICE_INPUT_INVALID",
@@ -191,6 +201,12 @@ class PackageGenerationAdapter:
             result = await self._worker.invoke(
                 service_id,
                 payload,
+                # A call identifies one execution attempt.  Idempotency belongs
+                # to operation_id, so retries and concurrent duplicate delivery
+                # must never contend for the same live call slot.
+                call_id="call:" + uuid4().hex,
+                operation_id=invocation.operation_id,
+                timeout=invocation.timeout_seconds,
                 before_send=lambda: self._verify_dispatch(route),
             )
             if not output_validator.is_valid(result):
@@ -201,8 +217,8 @@ class PackageGenerationAdapter:
                 )
             return result
 
-        async def routed(route: FrozenServiceRoute, *args, **kwargs):
-            return await invoke(route, *args, **kwargs)
+        async def routed(route, invocation, *args, **kwargs):
+            return await invoke(route, invocation, *args, **kwargs)
 
         return RoutedServiceEndpoint(routed=routed)
 
@@ -227,7 +243,7 @@ class PackageGenerationAdapter:
             )
 
     async def _service_gateway(
-        self, identity: WorkerIdentity, _call_id: str, request: dict
+        self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
         if self._worker is None or identity != self._worker.identity:
             raise ForestError(
@@ -250,7 +266,13 @@ class PackageGenerationAdapter:
                 "Worker requested an undeclared service capability",
                 403,
             )
-        return await route(request["payload"])
+        timeout = self._worker.remaining_timeout(call_id, request["timeout"])
+        return await route.invoke(
+            request["payload"],
+            operation_id=request["operation_id"],
+            timeout_seconds=timeout,
+            parent_call_id=call_id,
+        )
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         if self.state is not PackageGenerationState.NEW:
