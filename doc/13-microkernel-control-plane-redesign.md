@@ -209,6 +209,47 @@ dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph
 
 单次因果展开必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询不能依赖无界递归或把大量消息载入浏览器过滤。查询按 `(received_at,event_id)` 倒序读取精确命中的消息根，并返回绑定其余筛选条件的 `next_before` 游标；游标不能换筛选条件后复用，WebUI 逐页追加而不要求浏览器先取得全部历史。验收必须覆盖十万级数据上的索引计划、延迟和单页因果展开上限。控制台始终只读，不能拖拽 trace 改变生产路由。
 
+### 6.1 `routing.graph` 的 Event 与 ComponentJob 权威
+
+包声明的 `publishes/subscribes/jobs` 是 `routing.graph` 的路由贡献，不得编译成 `kernel.runtime` 回调，也不得把 `@job` 偷换为通用 `job.scheduler` 的 Job 类型。`job.scheduler` 执行由模块目录贡献、可被管理面和 Shell 显式创建的 Bot 级任务；ComponentJob 只能由其所属组件在一次获准调用中创建，目标固定为同一组件声明的 handler。两者可以共用调度算法，不能共用事实所有者、表、重试身份或管理动作。
+
+RuntimeGraph 发布事务把下列 head 与组件 Generation 一起原子切换：
+
+- Event publication：`topic + exact major.minor + payload schema digest + publisher component/generation`；
+- durable subscription：稳定 `subscriber_id + contract major`、接受的 exact contract、schema digest、最大尝试和 handler service；
+- ComponentJob handler：稳定 `handler_id`、输入 schema digest、最大尝试、deadline、并发上限和 handler service。
+
+描述符只贡献不可变声明；`routing.graph` 通过 Contract Router 获得冻结 handler 句柄。它动态依赖所有 subscriber/job handler 的提供组件，因此替换时先停止领取并排空 dispatcher，再排空 handler Worker。发布能力则由 PackageAdapter 在图构建时取得 `routing.graph` 的类型化服务句柄；Adapter 不持有其 Repository，`routing.graph` 也不持有 Adapter 或包实例。一个同时发布和订阅事件的组件不会形成启动环：发布是运行服务依赖，dispatcher 对 handler 的资源排空关系才进入生命周期依赖图。
+
+Event 发布是一个 Command。它在单个短事务中复核调用方准确 Generation、声明的 topic/contract/schema、稳定 `operation_id` 与继承的 causal root，写入受管 Payload、不可变 publication 和当时订阅 head 的逐订阅 delivery。`event_id` 由 Bot、发布组件和 operation 派生；相同 operation 与相同摘要返回原 publication，异载荷明确冲突。Query 不创建缺省 publication、delivery 或 checkpoint。
+
+每个 delivery 以 `(event_id, subscriber_id, contract_major)` 唯一，状态机为：
+
+```text
+QUEUED -> CLAIMED -> SUCCEEDED
+                   -> RETRY_WAIT -> CLAIMED
+                   -> DEAD_LETTER
+                   -> UNKNOWN
+```
+
+领取事务固定 `attempt_id/claim_token/lease_until/target_generation_id/handler_service`。同一 subscription 同时最多一个 delivery 运行，不同 subscription 可在声明的 Bot 预算内并行。handler 调用使用稳定 delivery operation，继承 publication 的 causal root；Worker 成功结果先写调用结果账本，再由 `routing.graph` 以 claim token 结算 delivery。若 dispatcher 在两次提交之间崩溃，恢复必须先查询原调用结果：有终态就结算原 attempt，仍 ACTIVE 就等待，超过 deadline 且无法证明结果则落 `UNKNOWN`，禁止再派发。不能把租约超时直接解释成“handler 未执行”。
+
+`subscriber_id + contract_major` 是跨 Generation 的逻辑消费身份，checkpoint 不含进程或 Generation。新旧声明的 exact contract、schema digest 和 handler protocol 完全相同时，发布新图后未领取 delivery 可由新 Generation 领取；旧 Generation 已领取的 delivery 只允许在 member fence 下完成或保存安全终态。声明变化不得隐式接管旧输入：替换计划必须先排空，或通过显式 replay/retire operation 把剩余项终结为 `DEAD_LETTER/HANDLER_RETIRED`。删除订阅不会删除 publication、delivery、attempt 或 Payload 依据。
+
+ComponentJob 调度也是一个 Command。它复核调用方就是 handler 所属组件，固定 `job_id`、handler/schema、输入 Payload、`available_at`、deadline、重试预算和继承的 causal root；同 operation 同输入重放，异输入冲突。状态机为：
+
+```text
+WAITING -> CLAIMED -> SUCCEEDED
+                  -> RETRY_WAIT -> CLAIMED
+                  -> FAILED
+                  -> CANCELLED
+                  -> UNKNOWN
+```
+
+每次领取创建不可变 attempt，handler 调用 operation 固定为 `job_id + attempt_no`。租约失效时不能直接增加 attempt：dispatcher 先查询该 operation 的持久结果；已成功则提交 Job 成功，已明确失败才按策略进入下一 attempt，仍 ACTIVE 则等待，无法证明结果则把 Job 置为 `UNKNOWN`。因此重试只针对已知失败，不以进程丢失制造第二次副作用。取消只在线性化事务中终结尚未交接的 Job；已交接 handler 或其下游效果遵守原 operation 的结果/UNKNOWN 对账，不能伪装成未执行。
+
+ComponentJob 的兼容接管要求相同 `handler_id`、输入 schema digest 和 handler protocol；未领取项可在图切换后绑定新 Generation，已领取项沿原 member fence 收敛。改变 schema、移除 handler 或降低无法满足的执行预算时，替换计划必须给出排空或显式退役结果，不能让新代码解释旧 Payload。Event 与 ComponentJob 的失败重放、退役、查询和有界分页都属于 `routing.graph` 管理契约；WebUI、Shell 与 CLI 只能调用这些类型化 operation。
+
 ## 7. 可扩展管理视图
 
 模块除配置 UI 外可声明只读管理视图和类型化管理动作。视图查询不是任意 SQL，而是组件注册的 management query contract；返回 DTO 经宿主字段授权、分页上限和脱敏后传给 iframe。动作必须映射到已注册 operation type，并走计划、授权、幂等、审计和生命周期执行器。

@@ -225,6 +225,18 @@ class RuntimeModuleFactoryContext:
 
         return self._router.job_types(self.component_id)
 
+    def event_subscriptions(
+        self,
+    ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        """Discover durable event handlers for the routing authority."""
+
+        return self._router.event_subscriptions(self.component_id)
+
+    def component_jobs(self) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        """Discover component-owned job handlers for the routing authority."""
+
+        return self._router.component_jobs(self.component_id)
+
 
 class RuntimeContractRouter:
     """Resolve runtime service contracts without exposing module instances."""
@@ -359,6 +371,59 @@ class RuntimeContractRouter:
             for contribution in sorted(
                 descriptor.job_types,
                 key=lambda item: (item.job_type, item.job_version),
+            ):
+                handle = self.request(
+                    caller_component_id=caller_component_id,
+                    service_id=contribution.service_id,
+                    version=contribution.service_version,
+                    admission_lane="DATA",
+                    owned_work=True,
+                )
+                discovered.append((descriptor.component_id, contribution, handle))
+        return tuple(discovered)
+
+    def event_subscriptions(
+        self, caller_component_id: str
+    ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        if caller_component_id != "routing.graph":
+            raise ForestError(
+                "RUNTIME_EVENT_DIRECTORY_FORBIDDEN",
+                "Only routing.graph may consume the event subscription directory",
+                403,
+            )
+        discovered = []
+        for descriptor in sorted(
+            self.registry.descriptors, key=lambda item: item.component_id
+        ):
+            for contribution in sorted(
+                descriptor.event_subscriptions,
+                key=lambda item: (item.subscriber_id, item.contract_major),
+            ):
+                handle = self.request(
+                    caller_component_id=caller_component_id,
+                    service_id=contribution.service_id,
+                    version=contribution.service_version,
+                    admission_lane="DATA",
+                    owned_work=True,
+                )
+                discovered.append((descriptor.component_id, contribution, handle))
+        return tuple(discovered)
+
+    def component_jobs(
+        self, caller_component_id: str
+    ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
+        if caller_component_id != "routing.graph":
+            raise ForestError(
+                "RUNTIME_COMPONENT_JOB_DIRECTORY_FORBIDDEN",
+                "Only routing.graph may consume the ComponentJob directory",
+                403,
+            )
+        discovered = []
+        for descriptor in sorted(
+            self.registry.descriptors, key=lambda item: item.component_id
+        ):
+            for contribution in sorted(
+                descriptor.component_jobs, key=lambda item: item.handler_id
             ):
                 handle = self.request(
                     caller_component_id=caller_component_id,

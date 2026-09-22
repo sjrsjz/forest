@@ -4,6 +4,7 @@ import shutil
 import zipfile
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from forest.cli import run_plugin_command
 from forest.errors import ForestError
 from forest.module_validation import validate_component_values
+from forest.package_runtime import package_runtime_descriptor
 from forest.packages import PackageCatalog, source_fingerprint
 from forest.sdk import Plugin, command, declared_commands, declared_services, plugin, service
 
@@ -316,6 +318,35 @@ class Worker:
         "timeout_s": 2.5,
         "max_concurrency": 2,
     }
+    descriptor = package_runtime_descriptor(
+        snapshot,
+        bot_id="bot-routing-contract",
+        module_configuration=object(),
+        grants=SimpleNamespace(entries=()),
+        resolved_contracts={},
+        startup_components=(),
+        generation_verifier=object(),
+        generation_member_verifier=object(),
+        capability_gateway=SimpleNamespace(
+            supported_capabilities=frozenset({"event.publish", "job.schedule"})
+        ),
+        service_operation_ledger=object(),
+    )
+    subscription = descriptor.event_subscriptions[0]
+    assert (
+        subscription.subscriber_id,
+        subscription.topic,
+        subscription.contract,
+        subscription.max_attempts,
+    ) == ("projection.ready", "event.ready", "1.0", 4)
+    component_job = descriptor.component_jobs[0]
+    assert (
+        component_job.handler_id,
+        component_job.max_attempts,
+        component_job.timeout_seconds,
+        component_job.max_concurrency,
+    ) == ("work.refresh", 3, 2.5, 2)
+    assert subscription.service_id != component_job.service_id
 
 
 def test_dynamic_declaration_is_rejected_with_source_location(tmp_path):

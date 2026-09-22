@@ -26,13 +26,22 @@ from forest.package_capabilities import (
     PackageServiceRoute,
 )
 from forest.packages import PackageSnapshot, contract_range
+from forest.routing_protocol import (
+    DurableComponentJobRequest,
+    DurableEventDeliveryRequest,
+)
 from forest.runtime_contracts import (
     FrozenServiceRoute,
     RoutedServiceEndpoint,
     RuntimeServiceInvocation,
 )
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
-from forest.runtime_modules import RuntimeArtifactIdentity, RuntimeModuleDescriptor
+from forest.runtime_modules import (
+    RuntimeArtifactIdentity,
+    RuntimeComponentJobContribution,
+    RuntimeEventSubscriptionContribution,
+    RuntimeModuleDescriptor,
+)
 
 
 class PackageGenerationState(StrEnum):
@@ -74,6 +83,11 @@ def _worker_limits(component: Mapping[str, Any]) -> WorkerLimits:
 
 def _timeout(component: Mapping[str, Any], name: str, default: float) -> float:
     return float(component.get("lifecycle", {}).get(name, default))
+
+
+def _handler_service_id(kind: str, component_id: str, handler_id: str) -> str:
+    identity = hashlib.sha256(f"{component_id}\0{handler_id}".encode()).hexdigest()
+    return f"component.{kind}.{identity}"
 
 
 class PackageGenerationAdapter:
@@ -122,6 +136,22 @@ class PackageGenerationAdapter:
             )
             for item in self.component.get("provides", ())
         }
+        self._event_subscriptions = {
+            item["subscriber_id"]: (
+                item,
+                Draft202012Validator(self.snapshot.schema(item["schema"])),
+                _handler_service_id("event", self.component_id, item["subscriber_id"]),
+            )
+            for item in self.component.get("subscribes", ())
+        }
+        self._component_jobs = {
+            item["handler_id"]: (
+                item,
+                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
+                _handler_service_id("job", self.component_id, item["handler_id"]),
+            )
+            for item in self.component.get("jobs", ())
+        }
         self._requested_capabilities = frozenset(
             self.component.get("capabilities", {}).get("requests", ())
         )
@@ -145,6 +175,14 @@ class PackageGenerationAdapter:
             {"service_id": item["name"], "version": _major(item["contract"])}
             for item in self.component.get("provides", ())
         ]
+        services.extend(
+            {"service_id": service_id, "version": 1}
+            for _item, _validator, service_id in self._event_subscriptions.values()
+        )
+        services.extend(
+            {"service_id": service_id, "version": 1}
+            for _item, _validator, service_id in self._component_jobs.values()
+        )
         requirements = [
             {"service_id": name, "version": _major(contract)}
             for name, contract in sorted(self._resolved_contracts.items())
@@ -168,10 +206,155 @@ class PackageGenerationAdapter:
         )
 
     def runtime_service_handlers(self) -> dict[tuple[str, int], RoutedServiceEndpoint]:
-        return {
+        handlers = {
             (item["name"], _major(item["contract"])): self._service_handler(item["name"])
             for item in self.component.get("provides", ())
         }
+        handlers.update(
+            {
+                (service_id, 1): self._event_subscription_handler(subscriber_id)
+                for subscriber_id, (_item, _validator, service_id) in (
+                    self._event_subscriptions.items()
+                )
+            }
+        )
+        handlers.update(
+            {
+                (service_id, 1): self._component_job_handler(handler_id)
+                for handler_id, (_item, _validator, service_id) in (
+                    self._component_jobs.items()
+                )
+            }
+        )
+        return handlers
+
+    def _check_route(self, route: FrozenServiceRoute) -> None:
+        identity = self.generation_identity
+        if self.state is not PackageGenerationState.ACTIVE or self._worker is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Package Generation is not accepting calls",
+                409,
+            )
+        if (
+            identity is None
+            or self._prepared_binding is None
+            or route.provider_component_id != self.component_id
+            or route.provider_generation_id != identity.generation_id
+        ):
+            raise ForestError(
+                "RUNTIME_SERVICE_ROUTE_STALE",
+                "Package invocation route does not identify this Generation",
+                409,
+            )
+
+    async def _run_worker_operation(
+        self,
+        *,
+        route: FrozenServiceRoute,
+        invocation: RuntimeServiceInvocation,
+        service_id: str,
+        input_value: dict,
+        durable: bool,
+        dispatch: Callable[[PythonWorker, str], Awaitable[Any]],
+        normalize: Callable[[Any], Any],
+        result_valid: Callable[[Any], bool],
+    ) -> Any:
+        self._check_route(route)
+        worker = self._worker
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        assert worker is not None and identity is not None and prepared is not None
+        call_id = "call:" + uuid4().hex
+        scope = PackageCallScope(
+            bot_id=self.bot_id,
+            component_id=self.component_id,
+            generation_id=identity.generation_id,
+            instance_id=prepared.instance_id,
+            worker_incarnation=prepared.worker_incarnation,
+            call_id=call_id,
+            call_operation_id=invocation.operation_id,
+            causal_root_kind=invocation.causal_root_kind,
+            causal_root_id=invocation.causal_root_id,
+        )
+        service_route = PackageServiceRoute(
+            service_id=service_id,
+            graph_id=route.graph_id,
+            graph_revision=route.graph_revision,
+            admission_lane=route.admission_lane,
+            owned_work=route.owned_work,
+            parent_call_id=invocation.parent_call_id,
+            timeout_seconds=invocation.timeout_seconds,
+        )
+        self._service_inflight += 1
+        self._services_drained.clear()
+        try:
+            if durable:
+                admission = await self._service_operation_ledger.begin(
+                    scope, service_route, input_value
+                )
+                if not admission.execute:
+                    if admission.error is not None:
+                        raise ForestError(
+                            admission.error.code,
+                            admission.error.message,
+                            admission.error.status,
+                            details=admission.error.details,
+                        )
+                    if not result_valid(admission.result):
+                        raise ForestError(
+                            "SERVICE_OPERATION_CORRUPT",
+                            "Stored plugin operation result violates its contract",
+                            500,
+                        )
+                    return admission.result
+            try:
+                result = normalize(await dispatch(worker, call_id))
+            except ForestError as error:
+                if durable:
+                    await self._service_operation_ledger.fail(
+                        scope,
+                        service_route,
+                        PackageServiceError(
+                            error.code,
+                            error.message,
+                            error.status,
+                            error.details if isinstance(error.details, dict) else None,
+                        ),
+                    )
+                raise
+            except Exception:
+                if durable:
+                    await self._service_operation_ledger.fail(
+                        scope,
+                        service_route,
+                        PackageServiceError(
+                            "PLUGIN_SERVICE_FAILED",
+                            "Plugin service failed without a typed error",
+                            500,
+                        ),
+                    )
+                raise
+            if not result_valid(result):
+                error = ForestError(
+                    "RUNTIME_SERVICE_OUTPUT_INVALID",
+                    "Plugin service result violates its immutable contract",
+                    502,
+                )
+                if durable:
+                    await self._service_operation_ledger.fail(
+                        scope,
+                        service_route,
+                        PackageServiceError(error.code, error.message, error.status),
+                    )
+                raise error
+            if durable:
+                await self._service_operation_ledger.succeed(scope, service_route, result)
+            return result
+        finally:
+            self._service_inflight -= 1
+            if self._service_inflight == 0:
+                self._services_drained.set()
 
     def _service_handler(self, service_id: str) -> RoutedServiceEndpoint:
         async def invoke(
@@ -200,70 +383,13 @@ class PackageGenerationAdapter:
                     "Plugin service payload violates its immutable schema",
                     422,
                 )
-            if self.state is not PackageGenerationState.ACTIVE or self._worker is None:
-                raise ForestError(
-                    "RUNTIME_GENERATION_NOT_ACTIVE",
-                    "Package Generation is not accepting calls",
-                    409,
-                )
-            if (
-                route.provider_component_id != self.component_id
-                or (
-                    self.generation_identity is not None
-                    and route.provider_generation_id
-                    != self.generation_identity.generation_id
-                )
-            ):
-                raise ForestError(
-                    "RUNTIME_SERVICE_ROUTE_STALE",
-                    "Package invocation route does not identify this Generation",
-                    409,
-                )
-            call_id = "call:" + uuid4().hex
-            scope = PackageCallScope(
-                bot_id=self.bot_id,
-                component_id=self.component_id,
-                generation_id=self.generation_identity.generation_id,
-                instance_id=self._prepared_binding.instance_id,
-                worker_incarnation=self._prepared_binding.worker_incarnation,
-                call_id=call_id,
-                call_operation_id=invocation.operation_id,
-                causal_root_kind=invocation.causal_root_kind,
-                causal_root_id=invocation.causal_root_id,
-            )
-            service_route = PackageServiceRoute(
+            return await self._run_worker_operation(
+                route=route,
+                invocation=invocation,
                 service_id=service_id,
-                graph_id=route.graph_id,
-                graph_revision=route.graph_revision,
-                admission_lane=route.admission_lane,
-                owned_work=route.owned_work,
-                parent_call_id=invocation.parent_call_id,
-                timeout_seconds=invocation.timeout_seconds,
-            )
-            self._service_inflight += 1
-            self._services_drained.clear()
-            try:
-                if self._durable_service_results:
-                    admission = await self._service_operation_ledger.begin(
-                        scope, service_route, payload
-                    )
-                    if not admission.execute:
-                        if admission.error is not None:
-                            raise ForestError(
-                                admission.error.code,
-                                admission.error.message,
-                                admission.error.status,
-                                details=admission.error.details,
-                            )
-                        if not output_validator.is_valid(admission.result):
-                            raise ForestError(
-                                "SERVICE_OPERATION_CORRUPT",
-                                "Stored plugin service result violates its schema",
-                                500,
-                            )
-                        return admission.result
-                try:
-                    result = await self._worker.invoke(
+                input_value=payload,
+                durable=self._durable_service_results,
+                dispatch=lambda worker, call_id: worker.invoke(
                         service_id,
                         payload,
                         call_id=call_id,
@@ -272,57 +398,87 @@ class PackageGenerationAdapter:
                         causal_root_id=invocation.causal_root_id,
                         timeout=invocation.timeout_seconds,
                         before_send=lambda: self._verify_dispatch(route),
-                    )
-                except ForestError as error:
-                    if self._durable_service_results:
-                        await self._service_operation_ledger.fail(
-                            scope,
-                            service_route,
-                            PackageServiceError(
-                                error.code,
-                                error.message,
-                                error.status,
-                                error.details if isinstance(error.details, dict) else None,
-                            ),
-                        )
-                    raise
-                except Exception:
-                    if self._durable_service_results:
-                        await self._service_operation_ledger.fail(
-                            scope,
-                            service_route,
-                            PackageServiceError(
-                                "PLUGIN_SERVICE_FAILED",
-                                "Plugin service failed without a typed error",
-                                500,
-                            ),
-                        )
-                    raise
-                if not output_validator.is_valid(result):
-                    error = ForestError(
-                        "RUNTIME_SERVICE_OUTPUT_INVALID",
-                        "Plugin service result violates its immutable schema",
-                        502,
-                    )
-                    if self._durable_service_results:
-                        await self._service_operation_ledger.fail(
-                            scope,
-                            service_route,
-                            PackageServiceError(error.code, error.message, error.status),
-                        )
-                    raise error
-                if self._durable_service_results:
-                    await self._service_operation_ledger.succeed(
-                        scope, service_route, result
-                    )
-                return result
-            finally:
-                self._service_inflight -= 1
-                if self._service_inflight == 0:
-                    self._services_drained.set()
+                ),
+                normalize=lambda result: result,
+                result_valid=output_validator.is_valid,
+            )
 
         async def routed(route, invocation, *args, **kwargs):
             return await invoke(route, invocation, *args, **kwargs)
+
+        return RoutedServiceEndpoint(routed=routed)
+
+    def _event_subscription_handler(self, subscriber_id: str) -> RoutedServiceEndpoint:
+        _declaration, validator, service_id = self._event_subscriptions[subscriber_id]
+
+        async def routed(route, invocation, request):
+            if (
+                type(request) is not DurableEventDeliveryRequest
+                or request.subscriber_id != subscriber_id
+                or not validator.is_valid(request.payload)
+            ):
+                raise ForestError(
+                    "EVENT_DELIVERY_INPUT_INVALID",
+                    "Event delivery differs from the immutable subscription",
+                    422,
+                )
+            payload = request.worker_payload()
+            return await self._run_worker_operation(
+                route=route,
+                invocation=invocation,
+                service_id=service_id,
+                input_value=payload,
+                durable=True,
+                dispatch=lambda worker, call_id: worker.deliver_event(
+                    subscriber_id,
+                    payload,
+                    call_id=call_id,
+                    operation_id=invocation.operation_id,
+                    causal_root_kind=invocation.causal_root_kind,
+                    causal_root_id=invocation.causal_root_id,
+                    timeout=invocation.timeout_seconds,
+                    before_send=lambda: self._verify_dispatch(route),
+                ),
+                normalize=lambda _result: {"acknowledged": True},
+                result_valid=lambda result: result == {"acknowledged": True},
+            )
+
+        return RoutedServiceEndpoint(routed=routed)
+
+    def _component_job_handler(self, handler_id: str) -> RoutedServiceEndpoint:
+        _declaration, validator, service_id = self._component_jobs[handler_id]
+
+        async def routed(route, invocation, request):
+            if (
+                type(request) is not DurableComponentJobRequest
+                or request.handler_id != handler_id
+                or not validator.is_valid(request.payload)
+            ):
+                raise ForestError(
+                    "COMPONENT_JOB_INPUT_INVALID",
+                    "ComponentJob input differs from the immutable handler contract",
+                    422,
+                )
+            payload = request.worker_payload()
+            return await self._run_worker_operation(
+                route=route,
+                invocation=invocation,
+                service_id=service_id,
+                input_value=payload,
+                durable=True,
+                dispatch=lambda worker, call_id: worker.deliver_job(
+                    handler_id,
+                    payload,
+                    call_id=call_id,
+                    operation_id=invocation.operation_id,
+                    causal_root_kind=invocation.causal_root_kind,
+                    causal_root_id=invocation.causal_root_id,
+                    timeout=invocation.timeout_seconds,
+                    before_send=lambda: self._verify_dispatch(route),
+                ),
+                normalize=lambda result: result,
+                result_valid=lambda result: isinstance(result, dict),
+            )
 
         return RoutedServiceEndpoint(routed=routed)
 
@@ -666,6 +822,33 @@ def package_runtime_descriptor(
             details={"capabilities": sorted(unsupported)},
         )
 
+    event_subscriptions = tuple(
+        RuntimeEventSubscriptionContribution(
+            subscriber_id=item["subscriber_id"],
+            topic=item["topic"],
+            contract=item["contract"],
+            event_schema=snapshot.schema(item["schema"]),
+            service_id=_handler_service_id(
+                "event", component["id"], item["subscriber_id"]
+            ),
+            max_attempts=item.get("max_attempts", 3),
+        )
+        for item in component.get("subscribes", ())
+    )
+    component_jobs = tuple(
+        RuntimeComponentJobContribution(
+            handler_id=item["handler_id"],
+            input_schema=snapshot.schema(item["input_schema"]),
+            service_id=_handler_service_id(
+                "job", component["id"], item["handler_id"]
+            ),
+            max_attempts=item.get("max_attempts", 3),
+            timeout_seconds=item.get("timeout_s", 30),
+            max_concurrency=item.get("max_concurrency", 1),
+        )
+        for item in component.get("jobs", ())
+    )
+
     def factory(_runtime, contracts):
         routes = {
             name: contracts.service(
@@ -707,4 +890,6 @@ def package_runtime_descriptor(
         ),
         management=tuple(management),
         storage=storage,
+        event_subscriptions=event_subscriptions,
+        component_jobs=component_jobs,
     )

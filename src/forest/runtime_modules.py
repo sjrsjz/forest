@@ -388,6 +388,104 @@ class RuntimeJobTypeContribution:
         }
 
 
+@dataclass(frozen=True)
+class RuntimeEventSubscriptionContribution:
+    """One durable logical subscriber implemented by a generation-bound service."""
+
+    subscriber_id: str
+    topic: str
+    contract: str
+    event_schema: dict
+    service_id: str
+    service_version: int = 1
+    max_attempts: int = 3
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.subscriber_id)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.topic)
+            or not re.fullmatch(r"[1-9][0-9]*\.[0-9]+", self.contract)
+            or not isinstance(self.event_schema, dict)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.service_id)
+            or type(self.service_version) is not int
+            or self.service_version < 1
+            or type(self.max_attempts) is not int
+            or not 1 <= self.max_attempts <= 32
+        ):
+            raise ValueError("Runtime event subscription contribution is invalid")
+        digest_json(self.event_schema)
+
+    @property
+    def contract_major(self) -> int:
+        return int(self.contract.split(".", 1)[0])
+
+    @property
+    def event_schema_digest(self) -> str:
+        return digest_json(self.event_schema)
+
+    def as_fact(self) -> dict:
+        return {
+            "protocol": "forest.event-subscription-contribution/1",
+            "subscriber_id": self.subscriber_id,
+            "topic": self.topic,
+            "contract": self.contract,
+            "contract_major": self.contract_major,
+            "event_schema": self.event_schema,
+            "event_schema_digest": self.event_schema_digest,
+            "service_id": self.service_id,
+            "service_version": self.service_version,
+            "max_attempts": self.max_attempts,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeComponentJobContribution:
+    """One component-owned durable job handler bound to its package Generation."""
+
+    handler_id: str
+    input_schema: dict
+    service_id: str
+    service_version: int = 1
+    max_attempts: int = 3
+    timeout_seconds: float = 30
+    max_concurrency: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.handler_id)
+            or not isinstance(self.input_schema, dict)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.service_id)
+            or type(self.service_version) is not int
+            or self.service_version < 1
+            or type(self.max_attempts) is not int
+            or not 1 <= self.max_attempts <= 32
+            or isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not 0 < self.timeout_seconds <= 120
+            or type(self.max_concurrency) is not int
+            or not 1 <= self.max_concurrency <= 16
+        ):
+            raise ValueError("Runtime ComponentJob contribution is invalid")
+        digest_json(self.input_schema)
+
+    @property
+    def input_schema_digest(self) -> str:
+        return digest_json(self.input_schema)
+
+    def as_fact(self) -> dict:
+        return {
+            "protocol": "forest.component-job-contribution/1",
+            "handler_id": self.handler_id,
+            "input_schema": self.input_schema,
+            "input_schema_digest": self.input_schema_digest,
+            "service_id": self.service_id,
+            "service_version": self.service_version,
+            "max_attempts": self.max_attempts,
+            "timeout_seconds": self.timeout_seconds,
+            "max_concurrency": self.max_concurrency,
+        }
+
+
 def configuration_management_contribution(
     label: str = "配置",
 ) -> RuntimeManagementContribution:
@@ -489,6 +587,8 @@ class RuntimeModuleDescriptor:
     agent_tools: tuple[RuntimeAgentToolContribution, ...] = ()
     shell_commands: tuple[RuntimeShellCommandContribution, ...] = ()
     job_types: tuple[RuntimeJobTypeContribution, ...] = ()
+    event_subscriptions: tuple[RuntimeEventSubscriptionContribution, ...] = ()
+    component_jobs: tuple[RuntimeComponentJobContribution, ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -515,6 +615,14 @@ class RuntimeModuleDescriptor:
         job_keys = [(item.job_type, item.job_version) for item in self.job_types]
         if len(job_keys) != len(set(job_keys)):
             raise ValueError("Runtime job type contribution identities must be unique")
+        subscription_keys = [
+            (item.subscriber_id, item.contract_major) for item in self.event_subscriptions
+        ]
+        if len(subscription_keys) != len(set(subscription_keys)):
+            raise ValueError("Runtime event subscription identities must be unique")
+        component_job_ids = [item.handler_id for item in self.component_jobs]
+        if len(component_job_ids) != len(set(component_job_ids)):
+            raise ValueError("Runtime ComponentJob identities must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -612,6 +720,15 @@ class RuntimeModuleRegistry:
                 for descriptor in self.descriptors
                 if descriptor.job_types and descriptor.component_id != "job.scheduler"
             )
+        if "routing.graph" in component_ids:
+            dynamic_requires["routing.graph"].update(
+                descriptor.component_id
+                for descriptor in self.descriptors
+                if (
+                    descriptor.event_subscriptions or descriptor.component_jobs
+                )
+                and descriptor.component_id != "routing.graph"
+            )
         self._dynamic_requires = {
             component_id: tuple(sorted(required))
             for component_id, required in dynamic_requires.items()
@@ -655,6 +772,10 @@ class RuntimeModuleRegistry:
             "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
             "shell_commands": [item.as_fact() for item in descriptor.shell_commands],
             "job_types": [item.as_fact() for item in descriptor.job_types],
+            "event_subscriptions": [
+                item.as_fact() for item in descriptor.event_subscriptions
+            ],
+            "component_jobs": [item.as_fact() for item in descriptor.component_jobs],
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 

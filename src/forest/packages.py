@@ -693,10 +693,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "INVALID_MESSAGE_HANDLERS",
             "Compatible Handler takeover requires at least one message handler",
         )
-    if len(services) > 32 or (not services and not commands and not message_handlers):
+    subscriptions = component.get("subscribes", [])
+    component_jobs = component.get("jobs", [])
+    if len(services) > 32 or (
+        not services
+        and not commands
+        and not message_handlers
+        and not subscriptions
+        and not component_jobs
+    ):
         _fail(
             "INVALID_SERVICES",
-            "Declare at least one service, business command, or message handler",
+            "Declare at least one service, subscription, job, command, or message handler",
         )
     names = set()
     for service in services:
