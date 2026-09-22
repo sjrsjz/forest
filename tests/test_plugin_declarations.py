@@ -327,9 +327,8 @@ class Worker:
         startup_components=(),
         generation_verifier=object(),
         generation_member_verifier=object(),
-        capability_gateway=SimpleNamespace(
-            supported_capabilities=frozenset({"event.publish", "job.schedule"})
-        ),
+        state_queries=None,
+        state_commands=None,
         service_operation_ledger=object(),
     )
     subscription = descriptor.event_subscriptions[0]

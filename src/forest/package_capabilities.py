@@ -45,11 +45,11 @@ class PackageServiceAdmission:
     error: PackageServiceError | None = None
 
 
-class PackageCapabilityGateway(Protocol):
-    supported_capabilities: frozenset[str]
-
+class PackageStateQueries(Protocol):
     async def read_state(self, scope: PackageCallScope, *, state_key: str) -> dict: ...
 
+
+class PackageStateCommands(Protocol):
     async def commit_state(
         self,
         scope: PackageCallScope,

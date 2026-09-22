@@ -105,7 +105,7 @@ Adapter 不得把插件类、方法、Repository 或客户端返回给 Registry�
 
 每次跨 Worker 调用必须同时携带两种不可混用的身份：`operation_id` 稳定标识业务操作并承担幂等语义，`call_id` 唯一标识一次执行尝试并承担运行中占用、取消和父子调用关系。调用还必须携带不可变 `causal_root_kind/causal_root_id`；顶层入口从平台事件、Delivery attempt、Job 或管理请求产生，嵌套调用只能继承父根。重试和重复投递复用 `operation_id` 与因果根，但每次尝试创建新的 `call_id`；不得根据业务幂等键派生可重复的执行调用号。Contract Router 把冻结 route 与不可变 invocation 显式交给路由感知 endpoint，不使用线程局部或隐式进程上下文。Worker 发起嵌套服务调用时必须声明自己的稳定 `operation_id`，宿主记录当前 `call_id` 为父调用，并把子调用期限限制在父调用剩余期限内；插件不能延长调用树的 deadline、改写因果根，也不能绕过 Router 自行取得服务对象。缺少这些事实的插件调用在边界直接拒绝，不由 Provider、业务模块或兼容分支猜测补齐。
 
-Worker 的宿主能力只能汇入一个内核拥有的 `PackageCapabilityGateway`，Adapter 不接受任意 `state_handler/event_handler/job_handler` 回调。Adapter 负责核对不可变包声明、准确 grant、Worker 身份和活动调用作用域；网关按能力种类转入独立权威。`State Query` 与 `State Command` 是两个端口：Query 只读取现有 head 与受管 Payload，缺失时返回 revision 0，不能顺便初始化；Command 在一个 Bot 数据库事务中复核准确 Generation 成员、按 `(component_id,state_key)` 串行、检查 expected revision、保存 Payload、追加以 `(component_id,operation_id)` 唯一的不可变 step 并推进 head。同一操作同一输入跨 `call_id` 返回原回执，输入不同则冲突；并发写同一 revision 只能一个提交。事件发布和任务调度也必须各自接入持久 authority；网关未安装对应 authority 时，声明该能力的包在构图前失败，不能用空实现、进程内队列或组合根回调降级。
+Worker 的宿主能力不能汇入一个同时暴露查询、命令和外部副作用的总 Gateway。`PackageGenerationAdapter` 只接受按语义拆开的显式端口；每个端口都可单独缺席，包请求了未安装的端口时在描述符编译阶段失败。Adapter 负责核对不可变包声明、准确 grant、Worker 身份和活动调用作用域，再把请求送往唯一的所属权威。`PackageStateQueries` 与 `PackageStateCommands` 是两个对象：Query 只读取现有 head 与受管 Payload，缺失时返回 revision 0，不能顺便初始化；Command 在一个 Bot 数据库事务中复核准确 Generation 成员、按 `(component_id,state_key)` 串行、检查 expected revision、保存 Payload、追加以 `(component_id,operation_id)` 唯一的不可变 step 并推进 head。同一操作同一输入跨 `call_id` 返回原回执，输入不同则冲突；并发写同一 revision 只能一个提交。事件发布和任务调度也不进入 State 端口，而是经冻结的 Contract Router 句柄进入各自持久 authority；对应 authority 未进入 RuntimeGraph 时，声明该能力的包在构图前失败，不能用空实现、进程内队列或组合根回调降级。
 
 只读纯服务直接执行，不为每条 Codec/分类调用制造数据库写放大。获得 `state.write`、Event/Job 发布或下游服务调用能力的组件，其服务先进入 `kernel.runtime` 的持久操作账本：`service_operations` 以 `(component_id,operation_id)` 固定服务、输入摘要和因果根，`service_call_attempts` 保存唯一 call、准确 Generation/Worker/RuntimeGraph、父调用和 deadline。同一操作最多派发一次；成功结果和类型化失败均保存为受管 Payload，重复请求只追加 replay attempt 并返回原终态。原 attempt 超过 deadline 而没有终态时只收敛为 `UNKNOWN`，不得重新执行来猜测。Adapter 的在途计数覆盖账本准入、Worker 执行和终态提交，Generation 排空必须等到三段全部结束后才能发布新图。
 
@@ -113,7 +113,17 @@ Worker 的宿主能力只能汇入一个内核拥有的 `PackageCapabilityGatewa
 
 Python 只用于降低模块实现与部署成本，不降低内核正确性要求。正确性必须由封闭状态机、构造时完整的身份类型、单一事实所有者、能力端口和最终事务围栏建立；不得依赖调用方约定、运行时猜测或测试样例补足协议。Query 只能读取既有事实，缺省值也不能在查询路径中落库；Command 只能通过所属 authority 修改状态，并在一个事务中完成其声明的原子事实。外部副作用、持久状态写入和跨模块调用必须分别进入类型化端口，禁止把可选回调、共享可变对象或隐藏 I/O 注入领域逻辑。测试只验证跨进程、并发、故障和协议边界是否兑现这些不变量，不能作为引入读写合一、散落副作用或非法状态补偿分支的理由。
 
-### 3.2 完整热重载与回滚
+### 3.2 内核机制、模块与效果执行器
+
+代码位于宿主进程不等于它属于内核。只有 RuntimeGraph/Generation、Payload、授权、Effect 账本和审计这五类不可替代机制属于 bootstrap 内核；它们没有普通热重载语义，只能随受控宿主重启。`routing.graph`、Conversation、Agent、Memory、Shell、Job、Delivery、Adapter、Provider、Embedding、Vector Index、Media 与 Process Executor 都是模块，必须来自不可变包并获得独立 Generation。官方身份只改变签名、信任等级和可授予能力，不允许宿主用 `bootstrap_clean_*` 直接构造其业务对象。
+
+模块包与执行副作用的宿主驱动是两个生命周期对象。模块 Worker 只能提交内容寻址、类型化且已授权的效果计划；Effect authority 固化 operation、输入、目标、调用 Generation、执行器 Generation、deadline 与 fence 后，准确的执行器驱动才可解析 Secret 并发生网络、文件或进程交接。Secret 明文不进入 Worker、配置 Payload、Event、Job、trace 或结果；Worker 也不获得通用 HTTP、文件系统、子进程或任意 Secret 读取能力。Provider、Embedding、Vector Index、OneBot transport、Media fetch 与 Process Executor 各自使用受限 effect kind 和目标 schema，不能共享一个“万能网络请求”接口。
+
+带复杂持久状态的模块仍然是插件，不能因此退回宿主 import。它们的包声明 domain Query、domain Command、storage bundle 和可选 UnitOfWork participant；宿主只加载通用 authority driver，按包摘要安装独占 namespace，并把每次命令固定到准确 Generation、schema 与事务。Worker 不能取得数据库连接、Repository 或 SQL 字符串执行能力。查询与命令使用不同契约；跨模块原子提交只接受各模块返回的不可变 plan，由内核协调已注册 participant，不能把别的模块 Repository 注入当前模块。
+
+因此迁移顺序由缺失机制决定：纯计算/策略服务直接进入 `python-worker`；有领域状态的模块先补齐 package domain authority/participant 协议；有外部 I/O 的模块再补齐 Secret lease 与类型化 Effect executor 协议。不得为了提前移动目录而把宿主回调、客户端或 Repository 塞进 Adapter。
+
+### 3.3 完整热重载与回滚
 
 包源码 watch 只产生“构建候选包”事件。每次变化都重新稳定捕获全部文件并产生新摘要；同一版本不同摘要不得覆盖目录或静默替换 catalog 绑定。重载按以下不可跳步的状态机执行：
 

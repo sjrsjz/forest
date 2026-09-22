@@ -20,10 +20,11 @@ from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLim
 from forest.errors import ForestError
 from forest.package_capabilities import (
     PackageCallScope,
-    PackageCapabilityGateway,
     PackageServiceError,
     PackageServiceOperationLedger,
     PackageServiceRoute,
+    PackageStateCommands,
+    PackageStateQueries,
 )
 from forest.packages import PackageSnapshot, contract_range
 from forest.routing_protocol import (
@@ -109,7 +110,8 @@ class PackageGenerationAdapter:
         resolved_contracts: Mapping[str, str],
         generation_verifier: GenerationVerifier,
         generation_member_verifier: GenerationVerifier,
-        capability_gateway: PackageCapabilityGateway,
+        state_queries: PackageStateQueries | None,
+        state_commands: PackageStateCommands | None,
         service_operation_ledger: PackageServiceOperationLedger,
         event_publisher=None,
         component_job_scheduler=None,
@@ -125,7 +127,8 @@ class PackageGenerationAdapter:
         self._resolved_contracts = dict(resolved_contracts)
         self._generation_verifier = generation_verifier
         self._generation_member_verifier = generation_member_verifier
-        self._capability_gateway = capability_gateway
+        self._state_queries = state_queries
+        self._state_commands = state_commands
         self._service_operation_ledger = service_operation_ledger
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
@@ -587,13 +590,17 @@ class PackageGenerationAdapter:
         if action == "get":
             if not self._has_capability("state.read"):
                 raise ForestError("CAPABILITY_DENIED", "State read is not granted", 403)
-            return await self._capability_gateway.read_state(
+            if self._state_queries is None:
+                raise ForestError("CAPABILITY_UNAVAILABLE", "State queries are unavailable", 503)
+            return await self._state_queries.read_state(
                 scope, state_key=request["key"]
             )
         if action == "commit":
             if not self._has_capability("state.write"):
                 raise ForestError("CAPABILITY_DENIED", "State write is not granted", 403)
-            return await self._capability_gateway.commit_state(
+            if self._state_commands is None:
+                raise ForestError("CAPABILITY_UNAVAILABLE", "State commands are unavailable", 503)
+            return await self._state_commands.commit_state(
                 scope,
                 state_key=request["key"],
                 value=request["value"],
@@ -840,7 +847,8 @@ def package_runtime_descriptor(
     startup_components: tuple[str, ...],
     generation_verifier: GenerationVerifier,
     generation_member_verifier: GenerationVerifier,
-    capability_gateway: PackageCapabilityGateway,
+    state_queries: PackageStateQueries | None,
+    state_commands: PackageStateCommands | None,
     service_operation_ledger: PackageServiceOperationLedger,
     storage=None,
     management=(),
@@ -862,10 +870,18 @@ def package_runtime_descriptor(
             or item.startswith("job.schedule:")
         )
     }
-    unsupported = gateway_capabilities - capability_gateway.supported_capabilities
+    installed_capabilities = frozenset(
+        capability
+        for capability, installed in (
+            ("state.read", state_queries is not None),
+            ("state.write", state_commands is not None),
+        )
+        if installed
+    )
+    unsupported = gateway_capabilities - installed_capabilities
     if unsupported:
         raise ForestError(
-            "PACKAGE_CAPABILITY_GATEWAY_UNAVAILABLE",
+            "PACKAGE_CAPABILITY_PORT_UNAVAILABLE",
             "Package requests a host capability with no installed authority",
             503,
             details={"capabilities": sorted(unsupported)},
@@ -942,7 +958,8 @@ def package_runtime_descriptor(
             resolved_contracts=resolved_contracts,
             generation_verifier=generation_verifier,
             generation_member_verifier=generation_member_verifier,
-            capability_gateway=capability_gateway,
+            state_queries=state_queries,
+            state_commands=state_commands,
             service_operation_ledger=service_operation_ledger,
             event_publisher=event_publisher,
             component_job_scheduler=component_job_scheduler,

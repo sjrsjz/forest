@@ -11,10 +11,6 @@ from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocatio
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
 
 
-class NoCapabilities:
-    supported_capabilities = frozenset()
-
-
 class NoServiceLedger:
     pass
 
@@ -52,7 +48,8 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
         resolved_contracts={},
         generation_verifier=verify,
         generation_member_verifier=verify,
-        capability_gateway=NoCapabilities(),
+        state_queries=None,
+        state_commands=None,
         service_operation_ledger=NoServiceLedger(),
     )
     context = PreparedGenerationContext(

@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from forest.clean_management_contract import CleanModuleConfigurationContract
-from forest.package_gateway import (
-    KernelPackageCapabilityGateway,
-    KernelPackageServiceOperationLedger,
-)
 from forest.package_runtime import package_runtime_descriptor
+from forest.package_service_ledger import KernelPackageServiceOperationLedger
+from forest.package_state_ports import (
+    KernelPackageStateCommands,
+    KernelPackageStateQueries,
+)
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
@@ -143,7 +144,11 @@ async def bootstrap_builtin_package(
         ),
         generation_verifier=kernel.runtime.verify_active_generation,
         generation_member_verifier=kernel.runtime.verify_generation_member,
-        capability_gateway=KernelPackageCapabilityGateway(
+        state_queries=KernelPackageStateQueries(
+            kernel.runtime,
+            kernel.payload,
+        ),
+        state_commands=KernelPackageStateCommands(
             kernel.runtime,
             kernel.payload,
         ),

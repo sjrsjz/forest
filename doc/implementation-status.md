@@ -1,6 +1,6 @@
 # Forest 当前实现状态
 
-更新日期：2026-09-22。
+更新日期：2026-09-23。
 
 > 本页只记录当前工作树事实，不定义目标架构。发生冲突时依次以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净 Schema 与载荷来源](14-clean-schema-and-payload-provenance.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。Forest 尚不可发布。
 
@@ -21,7 +21,7 @@
 
 `PackageGenerationAdapter` 已闭合不可变 `PackageSnapshot`、隔离 `PythonWorker` 与 `RuntimeModuleRegistry`/`kernel.runtime` Generation 的生产路径。`conversation.trigger-policy` 与 `codec.onebot` 已成为真实 builtin 包，携带 manifest、配置/输入/输出 schema 和 Worker 入口；宿主只构造通用包适配器，不再 import 或保留这两项功能的宿主实现。Adapter 通过冻结 contract route 调用准确 Codec Generation；Codec 不持有 Binding、凭据、网络客户端或业务状态，Adapter 在产生外部效果前独立复核 action、wire 摘要和允许的 segment。跨 Worker 调用现已显式分离稳定业务 `operation_id` 与单次执行 `call_id`；Router 传递冻结 route 和 invocation，嵌套调用记录父调用且只能缩短父 deadline，缺少调用身份的插件端口直接拒绝。候选 Worker 在 route 发布前完成准备、启动和健康检查，本地 admission gate 保持关闭；旧 Generation 先冻结并排空，持久 route 提交后新 gate 才同步打开。失败发布会先恢复旧 Worker，再恢复旧 gate；ACTIVE Worker 不允许绕过 QUIESCENT 直接清理。
 
-插件宿主的 State 能力已收敛为单一类型化 `PackageCapabilityGateway`，读写分别进入 Query/Command 端口；写入事务同时完成当前 Generation 成员围栏、稳定操作重放、key 级串行、revision CAS、受管 Payload、不可变 step 与 head 推进。相同操作跨执行尝试返回原回执，输入变化明确冲突；同 revision 并发写确定地只有一个成功。获得副作用能力的插件服务现在先进入持久 `service_operations/service_call_attempts`：稳定 operation 固定输入与因果根，每个 call 固定准确 Generation/Worker/图/父调用/deadline，最多一次 Worker 派发，成功或失败终态保存为 Payload 并可跨 call 重放，过期无终态只落 `UNKNOWN`。Adapter 排空覆盖账本准入、Worker 和终态提交。纯 Codec/Trigger 不写账本。真实 `forest.counter` 包已在隔离 Worker 与完整 RuntimeGraph 中证明重复服务 operation 返回原结果且状态只推进一次。Event 与 ComponentJob 不再伪装成 Gateway 回调，而是通过 package runtime contract 中声明的两个冻结 routing 服务句柄进入独立 authority。
+插件宿主已删除读写合一的 `PackageCapabilityGateway`。State Query 与 State Command 分别由 `PackageStateQueries`、`PackageStateCommands` 端口和独立宿主对象承载；Adapter 构造时分别取得端口，缺少包所声明的任一端口会在描述符编译阶段失败。写入事务同时完成当前 Generation 成员围栏、稳定操作重放、key 级串行、revision CAS、受管 Payload、不可变 step 与 head 推进。相同操作跨执行尝试返回原回执，输入变化明确冲突；同 revision 并发写确定地只有一个成功。获得副作用能力的插件服务现在先进入持久 `service_operations/service_call_attempts`：稳定 operation 固定输入与因果根，每个 call 固定准确 Generation/Worker/图/父调用/deadline，最多一次 Worker 派发，成功或失败终态保存为 Payload 并可跨 call 重放，过期无终态只落 `UNKNOWN`。Adapter 排空覆盖账本准入、Worker 和终态提交。纯 Codec/Trigger 不写账本。真实 `forest.counter` 包已在隔离 Worker 与完整 RuntimeGraph 中证明重复服务 operation 返回原结果且状态只推进一次。Event 与 ComponentJob 不再伪装成 Gateway 回调，而是通过 package runtime contract 中声明的两个冻结 routing 服务句柄进入独立 authority。
 
 包级 Event subscription 与 ComponentJob 使用不同的封闭 contribution、内容寻址 handler service 和 Worker 投递协议；PackageAdapter 只持有冻结的 `routing.event.publish/1`、`routing.component-job.schedule/1` 服务句柄，不持有 routing Repository。双向运行关系不进入启动 DAG：发布/调度组件单向依赖 `routing.graph` authority，dispatcher 到 handler 依靠持久 claim 和冻结 Contract Route。Registry 已实现描述符声明的两阶段 owned-work 排空；局部 Generation 激活不开放领取，整张图 ACTIVE 且 Router 开放后才由 Registry 统一打开 owned-work gate。失败恢复先恢复模块和本地门，最后开放持久 graph admission，FAILED/STOPPED 的半恢复图不能重新接纳工作。Event/ComponentJob 没有映射到通用 `job.scheduler`。
 
@@ -31,7 +31,7 @@
 
 该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
 
-其余 Agent、Memory、Provider、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，包声明驱动的 desired graph、Event/Job Gateway、Secret/Effect 能力和包自带管理 UI 也尚未接入。因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。后续组件必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加 shim、fallback、双写或第二套生命周期。
+其余 Agent、Memory、Provider、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。迁移阻塞按机制分为两类：Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 需要包级 domain Query/Command 和 UnitOfWork participant；Provider、Embedding、Vector Index、Adapter transport、Media 与 Process Executor 还需要 Secret lease 和受限 Effect executor。它们必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
 
 ## 已落地但尚未接入插件 Worker 的运行时切片
 
