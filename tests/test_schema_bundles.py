@@ -58,6 +58,11 @@ from forest.storage.payload_authority import (
     PayloadSource,
     SourceTarget,
 )
+from forest.storage.routing_graph_authority import (
+    EventPublicationRoute,
+    EventSubscriptionRoute,
+    RoutingGraphCommands,
+)
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.tool_authorization import KernelToolAuthorizationPort
 from forest.tool_effect_execution import KernelToolExecutionPort
@@ -3476,3 +3481,109 @@ async def test_bundle_rejects_unregistered_occupied_namespace(clean_authority):
     with pytest.raises(ForestError) as caught:
         await installer.install(spec, baseline, "sha256:" + "4" * 64)
     assert caught.value.code == "SCHEMA_NAMESPACE_OCCUPIED"
+
+
+@pytest.mark.postgres
+async def test_routing_event_command_atomically_freezes_all_deliveries(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    payload_storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    routing_storage = official_storage_bundle(
+        "routing.graph",
+        "forest.routing.graph",
+        "forest.routing-graph.repository/1",
+        "storage/official/routing_graph.sql",
+    )
+    for storage in (payload_storage, routing_storage):
+        await installer.install(
+            storage.spec,
+            storage.baseline,
+            storage.package_digest,
+            execution_profile=storage.execution_profile,
+        )
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+
+    async def member(_conn, *, component_id, generation_id):
+        assert (component_id, generation_id) == ("example.publisher", "generation:publisher")
+        return SimpleNamespace(graph_id="graph:routing:1")
+
+    commands = RoutingGraphCommands(
+        store,
+        payloads=payloads,
+        generation_member_verifier=member,
+        namespace=routing_storage.spec.namespace,
+    )
+    publication = EventPublicationRoute(
+        "example.publisher",
+        "generation:publisher",
+        "example.ready",
+        "1.0",
+        "sha256:" + "1" * 64,
+    )
+    subscriptions = (
+        EventSubscriptionRoute(
+            "example.projection",
+            1,
+            "example.ready",
+            "1.0",
+            "sha256:" + "2" * 64,
+            "example.consumer",
+            "generation:consumer",
+            "component.event." + "3" * 64,
+            1,
+            3,
+        ),
+    )
+    async with store.pool.connection() as conn, conn.transaction():
+        await commands.publish_directory_in(
+            conn,
+            graph_id="graph:routing:1",
+            graph_digest="sha256:" + "4" * 64,
+            routing_generation_id="generation:routing",
+            publications=(publication,),
+            subscriptions=subscriptions,
+        )
+    created = await commands.publish_event(
+        graph_id="graph:routing:1",
+        publisher_component_id=publication.publisher_component_id,
+        publisher_generation_id=publication.publisher_generation_id,
+        topic=publication.topic,
+        contract=publication.contract,
+        event_schema_digest=publication.event_schema_digest,
+        operation_id="event:publish:1",
+        causal_root_kind="test.operation",
+        causal_root_id="root:1",
+        payload={"value": 7},
+        subscriptions=subscriptions,
+    )
+    replay = await commands.publish_event(
+        graph_id="graph:routing:1",
+        publisher_component_id=publication.publisher_component_id,
+        publisher_generation_id=publication.publisher_generation_id,
+        topic=publication.topic,
+        contract=publication.contract,
+        event_schema_digest=publication.event_schema_digest,
+        operation_id="event:publish:1",
+        causal_root_kind="test.operation",
+        causal_root_id="root:1",
+        payload={"value": 7},
+        subscriptions=subscriptions,
+    )
+    assert created["delivery_count"] == 1 and created["replayed"] is False
+    assert replay == {"event_id": created["event_id"], "replayed": True}
+    async with store.pool.connection() as conn:
+        delivery_count = (
+            await (
+                await conn.execute(
+                    sql.SQL("SELECT count(*) AS count FROM {}.event_deliveries").format(
+                        sql.Identifier(routing_storage.spec.namespace)
+                    )
+                )
+            ).fetchone()
+        )["count"]
+    assert delivery_count == 1

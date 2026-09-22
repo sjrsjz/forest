@@ -27,6 +27,8 @@
 
 `routing.graph` 的干净存储 baseline 已定义不可变 Route publication、发布/订阅/ComponentJob 路由、Event 与逐订阅 delivery/attempt、ComponentJob 与逐次 attempt；数据库 trigger 封闭 delivery、Job 和 attempt 的合法转移，且已在临时 PostgreSQL 17 空命名空间实际建表。包的 `publishes` 也已成为独立描述符贡献，未来 Event Command 无需从 Worker 请求反推声明。Repository、publication participant 和 dispatcher 尚未接线，因此该 baseline 当前不进入生产 RuntimeGraph。
 
+Event Command Repository 已实现目录 publication 与事件发布的两个事务边界。目录按 RuntimeGraph 固定 publisher/subscriber/ComponentJob 的 owner Generation、schema 和 handler；事件事务最终复核 publisher member fence、持久 publication route 及完整订阅集合，并原子保存受管 Payload、Event 和逐订阅 delivery。同 publisher operation 同输入重放，异输入冲突。该路径已在同一 Docker 网络的临时 PostgreSQL 17 中实际安装三个 authority baseline、发布目录、提交 Event 并验证重放不增加 delivery。`routing.graph` 生命周期模块、dispatcher、delivery claim/settlement 和 ComponentJob Command 仍未完成，生产能力继续保持关闭。
+
 该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
 
 其余 Agent、Memory、Provider、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，包声明驱动的 desired graph、Event/Job Gateway、Secret/Effect 能力和包自带管理 UI 也尚未接入。因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。后续组件必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加 shim、fallback、双写或第二套生命周期。
