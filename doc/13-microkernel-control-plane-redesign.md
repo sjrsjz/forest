@@ -138,6 +138,8 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 需要跨模块原子提交时，Worker 先生成不可变 plan；内核协调器只解析 manifest 已注册的 participant，并把同一连接与准确 participant operation 交给各模块 Domain Authority Driver。participant 函数只能修改自己的 namespace，并必须在最终写入前复核本模块 Generation/member 与业务 lease。协调器负责固定参与者集合、锁序、整体提交/回滚和审计，不读取模块表、补状态或重试未知副作用。
 
+`unit_of_work_participants` 使用与 domain Command 相同的固定 JSONB 函数 ABI，但不是 Worker capability，也不经 `ctx.commands`。每项声明冻结 participant 名、契约、函数与输入/输出 schema。RuntimeGraph 绑定后，Package Adapter 只能向内核 participant resolver 提供一个不透明句柄；句柄仅包含 `component_id`、准确 `generation_id` 和 `invoke_in(conn, ...)`，不暴露 Adapter、Worker、Repository、配置对象或生命周期方法。内核 coordinator 的声明必须预先列出完整参与组件，resolver 不接受运行时新增组件；coordinator 以组件 ID 排序取得锁，在同一 caller-owned PostgreSQL transaction 中逐项传入稳定 operation、因果根和 plan 子载荷。每个句柄在写入前再次校验本 Generation member、完整 storage identity、函数 ABI 和输入 schema，输出必须通过 `forest.domain-result/1` 与声明 schema；任一 participant 拒绝、超时或异常都会使整个外层事务回滚。participant 不得自行提交、另开连接、调用外部 Effect，coordinator 也不得读取 participant 私有表或根据部分结果补偿另一模块。
+
 因此迁移顺序由缺失机制决定：纯计算/策略服务直接进入 `python-worker`；有领域状态的模块先补齐 package domain authority/participant 协议；有外部 I/O 的模块再补齐 Secret lease 与类型化 Effect executor 协议。不得为了提前移动目录而把宿主回调、客户端或 Repository 塞进 Adapter。
 
 ### 3.3 完整热重载与回滚

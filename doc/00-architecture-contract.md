@@ -84,6 +84,8 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 复杂持久模块也不得以“受信 builtin”为由向宿主注入 Python Authority Capsule。包必须以 `domain_queries` 与 `domain_commands` 分别声明自己的私有持久端口，并把实现作为同一内容摘要下 storage bundle 中的 PostgreSQL JSON 函数发布；隔离 Worker 只能经不同的 `ctx.queries`、`ctx.commands` 句柄调用。宿主通用 Domain Authority Driver 只负责 schema 校验、准确 Generation/member fence、只读或可写事务、固定函数 ABI 和结果 envelope，不导入包代码、不理解表结构或业务状态。Query 在数据库只读事务中执行，禁止初始化和写入；Command 接收稳定 operation identity，并由模块函数在自身 namespace 内完成幂等、状态转换和结果生成。函数不能访问其他模块 schema；跨模块原子提交必须由 manifest 声明的 UnitOfWork participant 进入内核协调事务，不能把另一个模块的 SQL 函数伪装成本地 Command。
 
+包级 UnitOfWork participant 只能由内核 coordinator 在调用方拥有的单一事务中解析和执行。participant 句柄必须绑定准确组件与 Generation，只允许调用 manifest 冻结的函数和 schema；它不是 Worker 服务、通用 SQL 接口或模块运行实例。协调器的 participant 集合在 RuntimeGraph 中固定，运行时计划只能为这些 participant 提供各自子载荷和稳定 operation，不能动态选择新的组件、跨 namespace 写入或在部分成功后做业务补偿。
+
 需要 Secret、网络、文件或进程能力的 builtin 仍必须是完整插件包。包在 manifest 中声明有界 `effect_service`，持久任务执行器同时以 `job_type` 声明 Job 身份、服务契约、输入/输出 schema、超时、重试与并发上限；部署环境只按 `effect kind` 安装通用宿主驱动工厂。`PackageGenerationAdapter` 用同一冻结配置和准确 Generation 身份创建驱动，驱动与 Worker 共同经历 start、quiesce、resume、close，服务和 Job 路由也指向该 Generation。驱动不是可独立启动的宿主业务模块，不能脱离包路由长期存活；Worker 不接触 Secret 明文或原始客户端。
 
 每个 `effect_service` 必须声明 `semantics`：`at-most-once` 表示不可安全重复的外部效果，必须先进入持久操作账本并在不确定交接后停止自动重试；`idempotent` 表示目标由稳定业务键收敛，可在准确 Generation fence 下重复执行；`read` 表示无业务写入的查询。调用方不能用宿主私有约定猜测语义，Package Adapter 也不能把所有效果一律写成最多一次，从而永久缓存派生索引的瞬时失败。

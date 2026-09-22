@@ -30,6 +30,7 @@ from forest.package_capabilities import (
     PackageServiceRoute,
     PackageStateCommands,
     PackageStateQueries,
+    PackageUnitOfWorkAuthority,
 )
 from forest.package_effects import (
     PackageEffectDriver,
@@ -72,6 +73,44 @@ class PackageGenerationState(StrEnum):
 
 
 GenerationVerifier = Callable[..., Awaitable[Any]]
+ParticipantInvoker = Callable[..., Awaitable[Any]]
+
+
+class PackageUnitOfWorkParticipant:
+    """Generation-bound package participant exposed only to kernel coordinators."""
+
+    __slots__ = ("component_id", "generation_id", "_invoke")
+
+    def __init__(
+        self,
+        component_id: str,
+        generation_id: str,
+        invoke: ParticipantInvoker,
+    ) -> None:
+        self.component_id = component_id
+        self.generation_id = generation_id
+        self._invoke = invoke
+
+    async def invoke_in(
+        self,
+        conn,
+        name: str,
+        payload: dict,
+        *,
+        operation_id: str,
+        causal_root_kind: str,
+        causal_root_id: str,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any:
+        invocation = RuntimeServiceInvocation(
+            operation_id=operation_id,
+            timeout_seconds=timeout_seconds,
+            causal_root_kind=causal_root_kind,
+            causal_root_id=causal_root_id,
+            parent_call_id=parent_call_id,
+        )
+        return await self._invoke(conn, self.generation_id, name, payload, invocation)
 
 
 def _major(contract: str) -> int:
@@ -125,6 +164,7 @@ class PackageGenerationAdapter:
         state_commands: PackageStateCommands | None,
         domain_queries: PackageDomainQueries | None = None,
         domain_commands: PackageDomainCommands | None = None,
+        unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
         effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -146,6 +186,7 @@ class PackageGenerationAdapter:
         self._state_commands = state_commands
         self._domain_queries = domain_queries
         self._domain_commands = domain_commands
+        self._unit_of_work_authority = unit_of_work_authority
         self._service_operation_ledger = service_operation_ledger
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
@@ -172,6 +213,14 @@ class PackageGenerationAdapter:
                 *self.component.get("domain_commands", ()),
                 *self.component.get("job_types", ()),
             )
+        }
+        self._participant_declarations = {
+            item["name"]: (
+                item,
+                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
+                Draft202012Validator(self.snapshot.schema(item["output_schema"])),
+            )
+            for item in self.component.get("unit_of_work_participants", ())
         }
         self._event_subscriptions = {
             item["subscriber_id"]: (
@@ -263,6 +312,14 @@ class PackageGenerationAdapter:
                 )
                 for item in declarations
             ],
+            "unit_of_work_participants": [
+                {
+                    "name": item["name"],
+                    "version": _major(item["contract"]),
+                    "function": item["function"],
+                }
+                for item in self.component.get("unit_of_work_participants", ())
+            ],
         }
         self.state_schema = self.component["state_schema"]
         state_schema_ref = self.component.get("state_value_schema")
@@ -327,6 +384,105 @@ class PackageGenerationAdapter:
                 404,
             )
         return artifact
+
+    def unit_of_work_participant(self) -> PackageUnitOfWorkParticipant:
+        """Resolve a narrow handle bound to this exact package Generation."""
+
+        identity = self.generation_identity
+        if (
+            not self._participant_declarations
+            or self._unit_of_work_authority is None
+            or identity is None
+            or self._prepared_binding is None
+            or self.state not in {
+                PackageGenerationState.ACTIVE,
+                PackageGenerationState.QUIESCING,
+            }
+        ):
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_UNAVAILABLE",
+                "Package UnitOfWork participant is unavailable in this Generation",
+                409,
+            )
+        return PackageUnitOfWorkParticipant(
+            self.component_id,
+            identity.generation_id,
+            self._invoke_unit_of_work_participant,
+        )
+
+    async def _invoke_unit_of_work_participant(
+        self,
+        conn,
+        expected_generation_id: str,
+        name: str,
+        payload: dict,
+        invocation: RuntimeServiceInvocation,
+    ) -> Any:
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        authority = self._unit_of_work_authority
+        declaration_entry = self._participant_declarations.get(name)
+        if (
+            identity is None
+            or prepared is None
+            or authority is None
+            or identity.generation_id != expected_generation_id
+            or self.state not in {
+                PackageGenerationState.ACTIVE,
+                PackageGenerationState.QUIESCING,
+            }
+        ):
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_STALE",
+                "Package UnitOfWork participant no longer owns this Generation",
+                409,
+            )
+        if declaration_entry is None or not isinstance(payload, dict):
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
+                "UnitOfWork participant call differs from the package declaration",
+                422,
+            )
+        declaration, input_validator, output_validator = declaration_entry
+        if not input_validator.is_valid(payload):
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
+                "UnitOfWork participant input violates its immutable schema",
+                422,
+            )
+        scope = PackageCallScope(
+            bot_id=self.bot_id,
+            component_id=self.component_id,
+            generation_id=identity.generation_id,
+            instance_id=prepared.instance_id,
+            worker_incarnation=prepared.worker_incarnation,
+            call_id="call:" + uuid4().hex,
+            call_operation_id=invocation.operation_id,
+            causal_root_kind=invocation.causal_root_kind,
+            causal_root_id=invocation.causal_root_id,
+        )
+        self._service_inflight += 1
+        self._services_drained.clear()
+        try:
+            result = await authority.invoke_participant_in(
+                conn,
+                scope,
+                declaration,
+                payload,
+                parent_call_id=invocation.parent_call_id,
+                timeout_seconds=invocation.timeout_seconds,
+            )
+            if not output_validator.is_valid(result):
+                raise ForestError(
+                    "RUNTIME_UOW_PARTICIPANT_OUTPUT_INVALID",
+                    "UnitOfWork participant result violates its immutable schema",
+                    502,
+                )
+            return result
+        finally:
+            self._service_inflight -= 1
+            if self._service_inflight == 0:
+                self._services_drained.set()
 
     def _check_route(self, route: FrozenServiceRoute) -> None:
         identity = self.generation_identity
@@ -1309,6 +1465,7 @@ def package_runtime_descriptor(
     state_commands: PackageStateCommands | None,
     domain_queries: PackageDomainQueries | None = None,
     domain_commands: PackageDomainCommands | None = None,
+    unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
     service_operation_ledger: PackageServiceOperationLedger,
     configuration_validator: Callable[[object], Any] | None = None,
     effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -1379,6 +1536,12 @@ def package_runtime_descriptor(
             "Package requests a host capability with no installed authority",
             503,
             details={"capabilities": sorted(unsupported)},
+        )
+    if component.get("unit_of_work_participants") and unit_of_work_authority is None:
+        raise ForestError(
+            "PACKAGE_UOW_AUTHORITY_UNAVAILABLE",
+            "Package declares UnitOfWork participants without an installed authority",
+            503,
         )
 
     event_subscriptions = tuple(
@@ -1469,6 +1632,7 @@ def package_runtime_descriptor(
             state_commands=state_commands,
             domain_queries=domain_queries,
             domain_commands=domain_commands,
+            unit_of_work_authority=unit_of_work_authority,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,
             effect_driver_factories=effect_driver_factories,

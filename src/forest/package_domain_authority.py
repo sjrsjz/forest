@@ -75,6 +75,38 @@ class PostgresPackageDomainAuthority:
             timeout_seconds=timeout_seconds,
         )
 
+    async def invoke_participant_in(
+        self,
+        conn,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any:
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                return await self._invoke_in(
+                    conn,
+                    "participant",
+                    scope,
+                    declaration,
+                    payload,
+                    parent_call_id=parent_call_id,
+                    timeout_seconds=timeout_seconds,
+                )
+        except ForestError:
+            raise
+        except TimeoutError as exc:
+            raise ForestError(
+                "DOMAIN_AUTHORITY_TIMEOUT", "Domain authority exceeded its deadline", 504
+            ) from exc
+        except psycopg.Error as exc:
+            raise ForestError(
+                "DOMAIN_AUTHORITY_FAILED", "Domain authority transaction failed", 503
+            ) from exc
+
     async def _invoke(
         self,
         kind: str,
@@ -85,33 +117,6 @@ class PostgresPackageDomainAuthority:
         parent_call_id: str,
         timeout_seconds: float,
     ) -> Any:
-        function = declaration.get("function")
-        if (
-            scope.component_id != self.component_id
-            or not isinstance(function, str)
-            or _FUNCTION.fullmatch(function) is None
-        ):
-            raise ForestError(
-                "DOMAIN_AUTHORITY_BINDING_INVALID",
-                "Domain authority call differs from its frozen package binding",
-                409,
-            )
-        context = {
-            "protocol": "forest.domain-context/1",
-            "bot_id": scope.bot_id,
-            "component_id": scope.component_id,
-            "generation_id": scope.generation_id,
-            "instance_id": scope.instance_id,
-            "worker_incarnation": scope.worker_incarnation,
-            "call_id": scope.call_id,
-            "parent_call_id": parent_call_id,
-            "operation_id": scope.call_operation_id,
-            "causal_root_kind": scope.causal_root_kind,
-            "causal_root_id": scope.causal_root_id,
-            "timeout_seconds": timeout_seconds,
-            "runtime_package_digest": self.runtime_package_digest,
-            "storage_package_digest": self.storage_package_digest,
-        }
         try:
             async with asyncio.timeout(timeout_seconds):
                 async with self.store.pool.connection() as conn, conn.transaction():
@@ -130,18 +135,16 @@ class PostgresPackageDomainAuthority:
                             component_id=self.component_id,
                             generation_id=scope.generation_id,
                         )
-                    await self._verify_storage(conn)
-                    await self._verify_function(conn, function, query=kind == "query")
-                    row = await (
-                        await conn.execute(
-                            sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
-                                sql.Identifier(self.storage_spec.namespace),
-                                sql.Identifier(function),
-                            ),
-                            (Jsonb(context), Jsonb(payload)),
-                        )
-                    ).fetchone()
-            return self._result(row["result"] if row is not None else None)
+                    return await self._invoke_in(
+                        conn,
+                        kind,
+                        scope,
+                        declaration,
+                        payload,
+                        parent_call_id=parent_call_id,
+                        timeout_seconds=timeout_seconds,
+                        generation_verified=True,
+                    )
         except ForestError:
             raise
         except TimeoutError as exc:
@@ -152,6 +155,69 @@ class PostgresPackageDomainAuthority:
             raise ForestError(
                 "DOMAIN_AUTHORITY_FAILED", "Domain authority transaction failed", 503
             ) from exc
+
+    async def _invoke_in(
+        self,
+        conn,
+        kind: str,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+        generation_verified: bool = False,
+    ) -> Any:
+        function = declaration.get("function")
+        name = declaration.get("name")
+        if (
+            scope.component_id != self.component_id
+            or not isinstance(name, str)
+            or not isinstance(function, str)
+            or _FUNCTION.fullmatch(function) is None
+            or kind not in {"query", "command", "participant"}
+        ):
+            raise ForestError(
+                "DOMAIN_AUTHORITY_BINDING_INVALID",
+                "Domain authority call differs from its frozen package binding",
+                409,
+            )
+        if not generation_verified:
+            await self.runtime.verify_generation_member_in(
+                conn,
+                component_id=self.component_id,
+                generation_id=scope.generation_id,
+            )
+        await self._verify_storage(conn)
+        await self._verify_function(conn, function, query=kind == "query")
+        context = {
+            "protocol": "forest.domain-context/1",
+            "port_kind": kind,
+            "port_name": name,
+            "bot_id": scope.bot_id,
+            "component_id": scope.component_id,
+            "generation_id": scope.generation_id,
+            "instance_id": scope.instance_id,
+            "worker_incarnation": scope.worker_incarnation,
+            "call_id": scope.call_id,
+            "parent_call_id": parent_call_id,
+            "operation_id": scope.call_operation_id,
+            "causal_root_kind": scope.causal_root_kind,
+            "causal_root_id": scope.causal_root_id,
+            "timeout_seconds": timeout_seconds,
+            "runtime_package_digest": self.runtime_package_digest,
+            "storage_package_digest": self.storage_package_digest,
+        }
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                    sql.Identifier(self.storage_spec.namespace),
+                    sql.Identifier(function),
+                ),
+                (Jsonb(context), Jsonb(payload)),
+            )
+        ).fetchone()
+        return self._result(row["result"] if row is not None else None)
 
     async def _verify_storage(self, conn) -> None:
         row = await (

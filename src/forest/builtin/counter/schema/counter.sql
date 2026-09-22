@@ -108,3 +108,14 @@ BEGIN
     RETURN result_value;
 END;
 $$;
+
+CREATE FUNCTION counter_set_in_transaction(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    RETURN __forest_module_schema__.counter_set(context, input);
+END;
+$$;

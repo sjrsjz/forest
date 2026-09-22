@@ -25,7 +25,11 @@ from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.packages import PackageCatalog, digest_json
-from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
+from forest.runtime_contracts import (
+    FrozenServiceRoute,
+    RuntimeKernelServiceContext,
+    RuntimeServiceInvocation,
+)
 from forest.runtime_generation import (
     PreparedGenerationBinding,
     RuntimeStorageBinding,
@@ -841,6 +845,37 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
         assert second == {"value": 4, "revision": 2, "label": "计数"}
         assert replay == first
         assert third == {"value": 6, "revision": 3, "label": "计数"}
+        participant = RuntimeKernelServiceContext(
+            registry, ("forest.counter",)
+        ).participant("forest.counter")
+        assert participant.component_id == "forest.counter"
+        assert participant.generation_id == instance.generation_identity.generation_id
+        with pytest.raises(RuntimeError, match="rollback participant"):
+            async with store.pool.connection() as conn, conn.transaction():
+                rolled_back = await participant.invoke_in(
+                    conn,
+                    "counter.set-in-transaction",
+                    {"value": 8, "expected_revision": 3},
+                    operation_id="counter:participant:rollback",
+                    causal_root_kind="test.counter",
+                    causal_root_id="source:counter:rollback",
+                    parent_call_id="call:counter:rollback",
+                    timeout_seconds=10,
+                )
+                assert rolled_back == {"value": 8, "revision": 4}
+                raise RuntimeError("rollback participant")
+        async with store.pool.connection() as conn, conn.transaction():
+            committed = await participant.invoke_in(
+                conn,
+                "counter.set-in-transaction",
+                {"value": 8, "expected_revision": 3},
+                operation_id="counter:participant:commit",
+                causal_root_kind="test.counter",
+                causal_root_id="source:counter:commit",
+                parent_call_id="call:counter:commit",
+                timeout_seconds=10,
+            )
+        assert committed == {"value": 8, "revision": 4}
         async with store.pool.connection() as conn:
             domain_row = await (
                 await conn.execute(
@@ -858,7 +893,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
                     (store.bot_id, "forest.counter"),
                 )
             ).fetchone()
-        assert dict(domain_row) == {"value": 6, "revision": 3}
+        assert dict(domain_row) == {"value": 8, "revision": 4}
         assert generic_state["count"] == 0
     finally:
         assert await registry.close() == []

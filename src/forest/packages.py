@@ -240,7 +240,11 @@ MANIFEST_SCHEMA = {
                                 },
                             },
                         }
-                        for kind in ("domain_queries", "domain_commands")
+                        for kind in (
+                            "domain_queries",
+                            "domain_commands",
+                            "unit_of_work_participants",
+                        )
                     },
                     "job_types": {
                         "type": "array",
@@ -813,6 +817,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     effect_services = component.get("effect_services", [])
     domain_queries = component.get("domain_queries", [])
     domain_commands = component.get("domain_commands", [])
+    unit_of_work_participants = component.get("unit_of_work_participants", [])
     job_types = component.get("job_types", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
@@ -842,6 +847,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         *effect_services,
         *domain_queries,
         *domain_commands,
+        *unit_of_work_participants,
         *job_types,
     ):
         name = service.get("name", "")
@@ -858,16 +864,23 @@ def _manifest(files: dict[str, bytes]) -> dict:
             service.get("kind", "")
         ):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
-        if service in (*domain_queries, *domain_commands) and not SQL_FUNCTION.fullmatch(
-            service.get("function", "")
-        ):
+        if service in (
+            *domain_queries,
+            *domain_commands,
+            *unit_of_work_participants,
+        ) and not SQL_FUNCTION.fullmatch(service.get("function", "")):
             _fail(
                 "INVALID_DOMAIN_AUTHORITY",
                 "Domain authority functions must be portable unqualified SQL identifiers",
             )
-    if (domain_queries or domain_commands) and component.get("storage") is None:
+    if (
+        domain_queries or domain_commands or unit_of_work_participants
+    ) and component.get("storage") is None:
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority ports require package storage")
-    functions = [item["function"] for item in (*domain_queries, *domain_commands)]
+    functions = [
+        item["function"]
+        for item in (*domain_queries, *domain_commands, *unit_of_work_participants)
+    ]
     if len(functions) != len(set(functions)):
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
     contributed_job_types = set()

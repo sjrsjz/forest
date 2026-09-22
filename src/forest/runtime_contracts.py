@@ -142,7 +142,9 @@ class RuntimeKernelServiceContext:
                 "Kernel coordinator requested an undeclared participant",
                 503,
             )
-        return self._registry.instances[component_id]
+        instance = self._registry.instances[component_id]
+        resolver = getattr(instance, "unit_of_work_participant", None)
+        return resolver() if resolver is not None else instance
 
 
 class RuntimeServiceHandle:

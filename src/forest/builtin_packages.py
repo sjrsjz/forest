@@ -149,6 +149,7 @@ async def bootstrap_builtin_package(
     has_domain_authority = bool(
         snapshot.component.get("domain_queries")
         or snapshot.component.get("domain_commands")
+        or snapshot.component.get("unit_of_work_participants")
     )
     domain_authority = (
         PostgresPackageDomainAuthority(
@@ -208,6 +209,7 @@ async def bootstrap_builtin_package(
         ),
         domain_queries=domain_authority,
         domain_commands=domain_authority,
+        unit_of_work_authority=domain_authority,
         service_operation_ledger=KernelPackageServiceOperationLedger(
             kernel.runtime,
             kernel.payload,

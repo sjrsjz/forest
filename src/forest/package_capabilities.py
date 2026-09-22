@@ -93,6 +93,19 @@ class PackageDomainCommands(Protocol):
     ) -> Any: ...
 
 
+class PackageUnitOfWorkAuthority(Protocol):
+    async def invoke_participant_in(
+        self,
+        conn,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
+
 class PackageServiceOperationLedger(Protocol):
     async def begin(
         self,
