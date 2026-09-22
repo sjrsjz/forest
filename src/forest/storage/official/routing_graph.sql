@@ -105,6 +105,7 @@ CREATE TABLE event_deliveries (
     revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND max_attempts),
     claim_token uuid,
+    routing_generation_id text,
     target_generation_id text,
     active_attempt_id text,
     lease_until timestamptz,
@@ -116,10 +117,12 @@ CREATE TABLE event_deliveries (
     UNIQUE (bot_id,event_id,subscriber_id,contract_major),
     FOREIGN KEY (bot_id,event_id) REFERENCES component_events(bot_id,event_id),
     CHECK (
-        (state='CLAIMED' AND claim_token IS NOT NULL AND target_generation_id IS NOT NULL
+        (state='CLAIMED' AND claim_token IS NOT NULL AND routing_generation_id IS NOT NULL
+            AND target_generation_id IS NOT NULL
             AND active_attempt_id IS NOT NULL AND lease_until IS NOT NULL
             AND completed_at IS NULL)
-        OR (state<>'CLAIMED' AND claim_token IS NULL AND target_generation_id IS NULL
+        OR (state<>'CLAIMED' AND claim_token IS NULL AND routing_generation_id IS NULL
+            AND target_generation_id IS NULL
             AND active_attempt_id IS NULL AND lease_until IS NULL)
     ),
     CHECK (
@@ -138,6 +141,7 @@ CREATE TABLE event_delivery_attempts (
     delivery_id text NOT NULL,
     attempt_no integer NOT NULL CHECK (attempt_no > 0),
     claim_token uuid NOT NULL,
+    routing_generation_id text NOT NULL,
     target_generation_id text NOT NULL,
     operation_id text NOT NULL,
     state text NOT NULL CHECK (state IN ('DISPATCHING','SUCCEEDED','FAILED','UNKNOWN')),
@@ -180,6 +184,7 @@ CREATE TABLE component_jobs (
     revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND max_attempts),
     claim_token uuid,
+    routing_generation_id text,
     target_generation_id text,
     handler_service_id text NOT NULL,
     handler_service_version integer NOT NULL CHECK (handler_service_version > 0),
@@ -197,10 +202,12 @@ CREATE TABLE component_jobs (
     FOREIGN KEY (bot_id,graph_id) REFERENCES route_publications(bot_id,graph_id),
     CHECK ((result_payload_id IS NULL) = (result_payload_digest IS NULL)),
     CHECK (
-        (state='CLAIMED' AND claim_token IS NOT NULL AND target_generation_id IS NOT NULL
+        (state='CLAIMED' AND claim_token IS NOT NULL AND routing_generation_id IS NOT NULL
+            AND target_generation_id IS NOT NULL
             AND active_attempt_id IS NOT NULL AND lease_until IS NOT NULL
             AND completed_at IS NULL)
-        OR (state<>'CLAIMED' AND claim_token IS NULL AND target_generation_id IS NULL
+        OR (state<>'CLAIMED' AND claim_token IS NULL AND routing_generation_id IS NULL
+            AND target_generation_id IS NULL
             AND active_attempt_id IS NULL AND lease_until IS NULL)
     ),
     CHECK (
@@ -226,6 +233,7 @@ CREATE TABLE component_job_attempts (
     job_id text NOT NULL,
     attempt_no integer NOT NULL CHECK (attempt_no > 0),
     claim_token uuid NOT NULL,
+    routing_generation_id text NOT NULL,
     target_generation_id text NOT NULL,
     operation_id text NOT NULL,
     state text NOT NULL CHECK (state IN ('DISPATCHING','SUCCEEDED','FAILED','UNKNOWN')),
@@ -276,7 +284,7 @@ BEGIN
         RAISE EXCEPTION 'Forest event delivery identity is immutable' USING ERRCODE='55000';
     END IF;
     IF NEW.revision<>OLD.revision+1 OR NOT (
-        (OLD.state IN ('QUEUED','RETRY_WAIT') AND NEW.state='CLAIMED')
+        (OLD.state IN ('QUEUED','RETRY_WAIT') AND NEW.state IN ('CLAIMED','DEAD_LETTER'))
         OR (OLD.state='CLAIMED' AND NEW.state IN
             ('RETRY_WAIT','SUCCEEDED','DEAD_LETTER','UNKNOWN'))
     ) THEN
@@ -307,7 +315,8 @@ BEGIN
         RAISE EXCEPTION 'Forest ComponentJob identity is immutable' USING ERRCODE='55000';
     END IF;
     IF NEW.revision<>OLD.revision+1 OR NOT (
-        (OLD.state IN ('WAITING','RETRY_WAIT') AND NEW.state IN ('CLAIMED','CANCELLED'))
+        (OLD.state IN ('WAITING','RETRY_WAIT') AND NEW.state IN
+            ('CLAIMED','FAILED','CANCELLED'))
         OR (OLD.state='CLAIMED' AND NEW.state IN
             ('RETRY_WAIT','SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
     ) THEN
@@ -322,10 +331,10 @@ LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
     IF TG_OP='DELETE' OR ROW(
         OLD.bot_id,OLD.attempt_id,OLD.delivery_id,OLD.attempt_no,OLD.claim_token,
-        OLD.target_generation_id,OLD.operation_id,OLD.started_at
+        OLD.routing_generation_id,OLD.target_generation_id,OLD.operation_id,OLD.started_at
     ) IS DISTINCT FROM ROW(
         NEW.bot_id,NEW.attempt_id,NEW.delivery_id,NEW.attempt_no,NEW.claim_token,
-        NEW.target_generation_id,NEW.operation_id,NEW.started_at
+        NEW.routing_generation_id,NEW.target_generation_id,NEW.operation_id,NEW.started_at
     ) OR OLD.state<>'DISPATCHING'
       OR NEW.state NOT IN ('SUCCEEDED','FAILED','UNKNOWN') THEN
         RAISE EXCEPTION 'Illegal Forest event attempt transition' USING ERRCODE='55000';
@@ -339,10 +348,10 @@ LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
     IF TG_OP='DELETE' OR ROW(
         OLD.bot_id,OLD.attempt_id,OLD.job_id,OLD.attempt_no,OLD.claim_token,
-        OLD.target_generation_id,OLD.operation_id,OLD.started_at
+        OLD.routing_generation_id,OLD.target_generation_id,OLD.operation_id,OLD.started_at
     ) IS DISTINCT FROM ROW(
         NEW.bot_id,NEW.attempt_id,NEW.job_id,NEW.attempt_no,NEW.claim_token,
-        NEW.target_generation_id,NEW.operation_id,NEW.started_at
+        NEW.routing_generation_id,NEW.target_generation_id,NEW.operation_id,NEW.started_at
     ) OR OLD.state<>'DISPATCHING'
       OR NEW.state NOT IN ('SUCCEEDED','FAILED','UNKNOWN') THEN
         RAISE EXCEPTION 'Illegal Forest ComponentJob attempt transition' USING ERRCODE='55000';

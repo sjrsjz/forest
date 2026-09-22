@@ -85,19 +85,3 @@ class KernelPackageCapabilityGateway:
             expected_revision=expected_revision,
             operation_id=operation_id,
         )
-
-    async def publish_event(self, scope: PackageCallScope, request: dict) -> dict:
-        self._verify_scope(scope)
-        raise ForestError(
-            "CAPABILITY_UNAVAILABLE",
-            "The durable event authority is not connected to package Workers",
-            503,
-        )
-
-    async def schedule_job(self, scope: PackageCallScope, request: dict) -> dict:
-        self._verify_scope(scope)
-        raise ForestError(
-            "CAPABILITY_UNAVAILABLE",
-            "The durable job authority is not connected to package Workers",
-            503,
-        )

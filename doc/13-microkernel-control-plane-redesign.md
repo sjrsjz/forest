@@ -221,11 +221,15 @@ RuntimeGraph 发布事务把下列 head 与组件 Generation 一起原子切换�
 
 描述符只贡献不可变声明；`routing.graph` 通过 Contract Router 获得冻结 handler 句柄。发布能力则由 PackageAdapter 在图构建时取得 `routing.graph` 的类型化服务句柄；Adapter 不持有其 Repository，`routing.graph` 也不持有 Adapter 或包实例。这里不能把双向运行关系伪装成启动 DAG：同一组件可以既发布又订阅，若令 `routing.graph` 与 handler 互相成为生命周期依赖会形成环，任取一个单阶段关闭顺序也会过早切断另一侧。
 
-替换和关闭采用两阶段排空。拥有持久后台工作的模块必须在不可变描述符中声明 `FREEZE_DRAIN`；声明者必须完整提供同步 `freeze_owned_admission`、异步 `drain_owned_work` 与同步 `resume_owned_admission`，未声明者携带任一钩子或声明者缺少钩子都会在构图阶段失败。全图持久 admission freeze 后，Registry 同步关闭所有声明者的领取门，确保过程尚未让出事件循环时已经没有新 owned work 能进入；随后等待已领取工作到达可结算边界，最后才按反向启动依赖调用 `quiesce`。`routing.graph` 在第一阶段停止领取新 delivery/job，但仍保留 authority 服务端口；包 Worker 排空已经进入的调用树时仍可提交 Event/Job Command。所有包完成后，`routing.graph` 最后排空 authority 调用并关闭。
+替换和关闭采用两阶段排空。拥有持久后台工作的模块必须在不可变描述符中声明 `FREEZE_DRAIN`；声明者必须完整提供同步 `freeze_owned_admission`、异步 `drain_owned_work` 与同步 `open_owned_admission`，未声明者携带任一钩子或声明者缺少钩子都会在构图阶段失败。局部 `activate_generation` 不得自行开始领取；只有整张图全部 ACTIVE 且 Contract Router 已开放后，Registry 才统一调用 `open_owned_admission`。全图持久 admission freeze 后，Registry 同步关闭所有声明者的领取门，确保过程尚未让出事件循环时已经没有新 owned work 能进入；随后等待已领取工作到达可结算边界，最后才按反向启动依赖调用 `quiesce`。`routing.graph` 在第一阶段停止领取新 delivery/job，但仍保留 authority 服务端口；包 Worker 排空已经进入的调用树时仍可提交 Event/Job Command。所有包完成后，`routing.graph` 最后排空 authority 调用并关闭。
 
 Registry 持有准确 replacement operation、已冻结模块集合和已进入 QUIESCENT 的模块集合，不从 Task 数量猜测两阶段排空状态。失败恢复先按正向依赖激活准确的 QUIESCENT 集合，再恢复 Contract Router 和准确的 owned-work gate，最后才开放持久 graph admission；任何模块已进入 FAILED/STOPPED 都拒绝重开入口。每完成一个本地恢复步骤即从集合删除该项，因此中途失败可以沿同一 operation 继续，不能把半恢复图冒充 ACTIVE 图。`freeze_owned_admission` 不改变 Generation ACTIVE/member 事实；dispatcher→handler 是持久 claim 与冻结 Contract Route 的所有权关系，不进入启动依赖图。
 
 Event 发布是一个 Command。它在单个短事务中复核调用方准确 Generation、声明的 topic/contract/schema、稳定 `operation_id` 与继承的 causal root，写入受管 Payload、不可变 publication 和当时订阅 head 的逐订阅 delivery。`event_id` 由 Bot、发布组件和 operation 派生；相同 operation 与相同摘要返回原 publication，异载荷明确冲突。Query 不创建缺省 publication、delivery 或 checkpoint。
+
+稳定 operation 的输入摘要只包含发布者稳定组件身份、topic/contract、业务 Payload、延迟和 causal root 等业务事实，不包含 RuntimeGraph、调用方 Generation 或目标 Route。首次 Command 在同一事务内从当前冻结目录选择准确图和订阅/handler 集合，并把这些执行事实不可变保存；换代后的同组件以相同业务输入恢复同一 operation 时返回首次 Event/ComponentJob，不按新图重复创建，也不因 Generation 改变制造伪冲突。
+
+存储边界按命令域拆分：`RoutingDirectoryCommands` 只发布不可变目录，`ComponentEventCommands` 只负责 Event 创建、delivery claim 与结算，`ComponentJobCommands` 只负责 ComponentJob 创建、claim 与结算；共享文件只含不可变 Route/Claim 值。Runtime 仅编排这些端口和冻结的 Contract Handle。每个 claim 同时固化领取者 `routing_generation_id`、目标插件 Generation、token、attempt 和 lease；结算必须同时匹配全部所有权事实。成功与失败使用不同的公共 Command，调用方不能通过一组互斥可选参数拼出含糊结果。
 
 每个 delivery 以 `(event_id, subscriber_id, contract_major)` 唯一，状态机为：
 

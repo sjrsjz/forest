@@ -60,11 +60,6 @@ class PackageCapabilityGateway(Protocol):
         operation_id: str,
     ) -> dict: ...
 
-    async def publish_event(self, scope: PackageCallScope, request: dict) -> dict: ...
-
-    async def schedule_job(self, scope: PackageCallScope, request: dict) -> dict: ...
-
-
 class PackageServiceOperationLedger(Protocol):
     async def begin(
         self,

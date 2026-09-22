@@ -592,6 +592,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     "memory.graph",
                     "media.capture",
                     "agent.runtime",
+                    "routing.graph",
                     "conversation.trigger-policy",
                     "codec.onebot",
                     "process.executor",

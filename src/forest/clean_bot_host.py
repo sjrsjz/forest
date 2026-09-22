@@ -34,6 +34,7 @@ from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
 from forest.packages import PackageCatalog
+from forest.routing_graph_module import bootstrap_routing_graph
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.clean_bot_store import CleanBotStore
@@ -572,6 +573,11 @@ class CleanBotHost:
                 )
             ),
         )
+        routing = await bootstrap_routing_graph(
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+        )
         trigger = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/trigger_policy"))),
             self.package_catalog,
@@ -651,6 +657,7 @@ class CleanBotHost:
                 memory.descriptor,
                 media.descriptor,
                 agent.descriptor,
+                routing.descriptor,
                 trigger.descriptor,
                 onebot_codec.descriptor,
                 process_executor.descriptor,

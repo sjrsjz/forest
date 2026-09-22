@@ -1022,6 +1022,33 @@ class RuntimeModuleRegistry:
                 "Runtime job types and executor services must be graph-unique",
                 409,
             )
+        subscription_keys = [
+            (subscription.subscriber_id, subscription.contract_major)
+            for descriptor in self.descriptors
+            for subscription in descriptor.event_subscriptions
+        ]
+        if len(subscription_keys) != len(set(subscription_keys)):
+            raise ForestError(
+                "RUNTIME_EVENT_SUBSCRIPTION_CONFLICT",
+                "Durable subscriber identities must be graph-unique",
+                409,
+            )
+        event_schemas: dict[tuple[str, str], str] = {}
+        for descriptor in self.descriptors:
+            contracts = (
+                *descriptor.event_publications,
+                *descriptor.event_subscriptions,
+            )
+            for contract in contracts:
+                key = (contract.topic, contract.contract)
+                digest = contract.event_schema_digest
+                existing = event_schemas.setdefault(key, digest)
+                if existing != digest:
+                    raise ForestError(
+                        "RUNTIME_EVENT_CONTRACT_CONFLICT",
+                        "One exact event contract has multiple schemas",
+                        409,
+                    )
         for descriptor in self.descriptors:
             identity = descriptor.component_id
             if (
@@ -1321,6 +1348,7 @@ class RuntimeModuleRegistry:
                 self._transition(component_id, ModuleLifecycleState.ACTIVE)
                 activated.append(component_id)
             self.contract_router.activate()
+            self._open_owned_admission(self._owned_work_components())
         except BaseException as exc:
             failure_code = (
                 exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
@@ -1528,7 +1556,7 @@ class RuntimeModuleRegistry:
                     reason_code="AGENT_RELOAD_WAIT",
                     reason_ref=operation_id,
                 )
-        self._resume_owned_admission(self._replacement_owned_frozen)
+        self._open_owned_admission(self._replacement_owned_frozen)
         await self.generation_authority.resume_graph_admission(
             lease,
             self.graph_identity,
@@ -1556,7 +1584,7 @@ class RuntimeModuleRegistry:
         hooks = (
             "freeze_owned_admission",
             "drain_owned_work",
-            "resume_owned_admission",
+            "open_owned_admission",
         )
         present = tuple(callable(getattr(instance, name, None)) for name in hooks)
         declared = descriptor.owned_work_lifecycle == OwnedWorkLifecycle.FREEZE_DRAIN
@@ -1586,7 +1614,7 @@ class RuntimeModuleRegistry:
                 frozen.append(component_id)
         except BaseException:
             for component_id in reversed(frozen):
-                self.instances[component_id].resume_owned_admission()
+                self.instances[component_id].open_owned_admission()
             raise
         return tuple(frozen)
 
@@ -1603,9 +1631,9 @@ class RuntimeModuleRegistry:
                 )
             await result
 
-    def _resume_owned_admission(self, frozen: tuple[str, ...]) -> None:
-        for component_id in frozen:
-            result = self.instances[component_id].resume_owned_admission()
+    def _open_owned_admission(self, components: tuple[str, ...]) -> None:
+        for component_id in components:
+            result = self.instances[component_id].open_owned_admission()
             if inspect.isawaitable(result):
                 close = getattr(result, "close", None)
                 if close is not None:

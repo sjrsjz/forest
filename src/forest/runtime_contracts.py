@@ -181,6 +181,27 @@ class RuntimeServiceHandle:
         return self._router.route(self._request_key)
 
 
+class RuntimeGenerationHandle:
+    """Opaque late-bound identity for one member of the immutable graph."""
+
+    __slots__ = ("_router", "component_id")
+
+    def __init__(self, router: RuntimeContractRouter, component_id: str) -> None:
+        self._router = router
+        self.component_id = component_id
+
+    @property
+    def generation_id(self) -> str:
+        graph = self._router.registry.graph_identity
+        if graph is None or self.component_id not in graph.generations:
+            raise ForestError(
+                "RUNTIME_GENERATION_IDENTITY_UNAVAILABLE",
+                "RuntimeGraph member identity is not sealed",
+                503,
+            )
+        return graph.generations[self.component_id]
+
+
 class RuntimeModuleFactoryContext:
     """The only cross-module facility available to a contract-aware factory."""
 
@@ -232,7 +253,9 @@ class RuntimeModuleFactoryContext:
 
         return self._router.event_subscriptions(self.component_id)
 
-    def event_publications(self) -> tuple[tuple[str, object], ...]:
+    def event_publications(
+        self,
+    ) -> tuple[tuple[str, object, RuntimeGenerationHandle], ...]:
         """Discover event publication contracts for the routing authority."""
 
         return self._router.event_publications(self.component_id)
@@ -416,7 +439,7 @@ class RuntimeContractRouter:
 
     def event_publications(
         self, caller_component_id: str
-    ) -> tuple[tuple[str, object], ...]:
+    ) -> tuple[tuple[str, object, RuntimeGenerationHandle], ...]:
         if caller_component_id != "routing.graph":
             raise ForestError(
                 "RUNTIME_EVENT_DIRECTORY_FORBIDDEN",
@@ -424,7 +447,11 @@ class RuntimeContractRouter:
                 403,
             )
         return tuple(
-            (descriptor.component_id, contribution)
+            (
+                descriptor.component_id,
+                contribution,
+                RuntimeGenerationHandle(self, descriptor.component_id),
+            )
             for descriptor in sorted(
                 self.registry.descriptors, key=lambda item: item.component_id
             )

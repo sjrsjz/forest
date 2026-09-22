@@ -25,6 +25,46 @@ def _bounded(value: object, limit: int) -> bool:
 
 
 @dataclass(frozen=True)
+class PublishComponentEvent:
+    publisher_component_id: str
+    publisher_generation_id: str
+    topic: str
+    contract: str
+    payload: Any
+
+    def __post_init__(self) -> None:
+        if (
+            _IDENTIFIER.fullmatch(self.publisher_component_id) is None
+            or not _bounded(self.publisher_generation_id, 512)
+            or _IDENTIFIER.fullmatch(self.topic) is None
+            or _CONTRACT.fullmatch(self.contract) is None
+        ):
+            raise ValueError("Component event publication is invalid")
+        digest_json(self.payload)
+
+
+@dataclass(frozen=True)
+class ScheduleComponentJob:
+    owner_component_id: str
+    owner_generation_id: str
+    handler_id: str
+    payload: dict
+    delay_seconds: int
+
+    def __post_init__(self) -> None:
+        if (
+            _IDENTIFIER.fullmatch(self.owner_component_id) is None
+            or not _bounded(self.owner_generation_id, 512)
+            or _IDENTIFIER.fullmatch(self.handler_id) is None
+            or not isinstance(self.payload, dict)
+            or type(self.delay_seconds) is not int
+            or not 0 <= self.delay_seconds <= 86_400
+        ):
+            raise ValueError("ComponentJob schedule request is invalid")
+        digest_json(self.payload)
+
+
+@dataclass(frozen=True)
 class DurableEventDeliveryRequest:
     event_id: str
     delivery_id: str

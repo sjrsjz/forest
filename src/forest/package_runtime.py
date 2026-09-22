@@ -29,6 +29,8 @@ from forest.packages import PackageSnapshot, contract_range
 from forest.routing_protocol import (
     DurableComponentJobRequest,
     DurableEventDeliveryRequest,
+    PublishComponentEvent,
+    ScheduleComponentJob,
 )
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -109,6 +111,8 @@ class PackageGenerationAdapter:
         generation_member_verifier: GenerationVerifier,
         capability_gateway: PackageCapabilityGateway,
         service_operation_ledger: PackageServiceOperationLedger,
+        event_publisher=None,
+        component_job_scheduler=None,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
     ) -> None:
         self.snapshot = snapshot
@@ -123,6 +127,8 @@ class PackageGenerationAdapter:
         self._generation_member_verifier = generation_member_verifier
         self._capability_gateway = capability_gateway
         self._service_operation_ledger = service_operation_ledger
+        self._event_publisher = event_publisher
+        self._component_job_scheduler = component_job_scheduler
         self._worker_factory = worker_factory
         self._worker: PythonWorker | None = None
         self._configuration: dict[str, Any] | None = None
@@ -188,6 +194,14 @@ class PackageGenerationAdapter:
             {"service_id": name, "version": _major(contract)}
             for name, contract in sorted(self._resolved_contracts.items())
         ]
+        if any(item.startswith("event.publish:") for item in self._requested_capabilities):
+            requirements.append(
+                {"service_id": "routing.event.publish", "version": 1}
+            )
+        if any(item.startswith("job.schedule:") for item in self._requested_capabilities):
+            requirements.append(
+                {"service_id": "routing.component-job.schedule", "version": 1}
+            )
         self.runtime_contract = {
             "protocol": "forest.runtime-services/1",
             "services": services,
@@ -594,7 +608,24 @@ class PackageGenerationAdapter:
         scope = self._call_scope(identity, call_id)
         if not self._has_capability(f"event.publish:{request['topic']}"):
             raise ForestError("CAPABILITY_DENIED", "Event publication is not granted", 403)
-        return await self._capability_gateway.publish_event(scope, request)
+        if self._event_publisher is None:
+            raise ForestError("CAPABILITY_UNAVAILABLE", "Event authority is unavailable", 503)
+        return await self._event_publisher.invoke(
+            PublishComponentEvent(
+                scope.component_id,
+                scope.generation_id,
+                request["topic"],
+                request["contract"],
+                request["payload"],
+            ),
+            operation_id=request["operation_id"],
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
+            timeout_seconds=self._worker.remaining_timeout(
+                call_id, _timeout(self.component, "service_timeout_s", 30)
+            ),
+            parent_call_id=call_id,
+        )
 
     async def _job_gateway(
         self, identity: WorkerIdentity, call_id: str, request: dict
@@ -602,7 +633,24 @@ class PackageGenerationAdapter:
         scope = self._call_scope(identity, call_id)
         if not self._has_capability(f"job.schedule:{request['handler_id']}"):
             raise ForestError("CAPABILITY_DENIED", "Job scheduling is not granted", 403)
-        return await self._capability_gateway.schedule_job(scope, request)
+        if self._component_job_scheduler is None:
+            raise ForestError("CAPABILITY_UNAVAILABLE", "ComponentJob authority is unavailable", 503)
+        return await self._component_job_scheduler.invoke(
+            ScheduleComponentJob(
+                scope.component_id,
+                scope.generation_id,
+                request["handler_id"],
+                request["payload"],
+                request["delay_seconds"],
+            ),
+            operation_id=request["operation_id"],
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
+            timeout_seconds=self._worker.remaining_timeout(
+                call_id, _timeout(self.component, "service_timeout_s", 30)
+            ),
+            parent_call_id=call_id,
+        )
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         if self.state is not PackageGenerationState.NEW:
@@ -806,13 +854,13 @@ def package_runtime_descriptor(
     component = snapshot.component
     requested = frozenset(component.get("capabilities", {}).get("requests", ()))
     gateway_capabilities = {
-        "event.publish"
-        if item.startswith("event.publish:")
-        else "job.schedule"
-        if item.startswith("job.schedule:")
-        else item
+        item
         for item in requested
-        if not item.startswith("service.call:")
+        if not (
+            item.startswith("service.call:")
+            or item.startswith("event.publish:")
+            or item.startswith("job.schedule:")
+        )
     }
     unsupported = gateway_capabilities - capability_gateway.supported_capabilities
     if unsupported:
@@ -868,6 +916,23 @@ def package_runtime_descriptor(
             )
             for name, contract in resolved_contracts.items()
         }
+        event_publisher = (
+            contracts.service(
+                "routing.event.publish", 1, admission_lane="DATA", owned_work=True
+            )
+            if any(item.startswith("event.publish:") for item in requested)
+            else None
+        )
+        component_job_scheduler = (
+            contracts.service(
+                "routing.component-job.schedule",
+                1,
+                admission_lane="DATA",
+                owned_work=True,
+            )
+            if any(item.startswith("job.schedule:") for item in requested)
+            else None
+        )
         adapter = PackageGenerationAdapter(
             snapshot=snapshot,
             bot_id=bot_id,
@@ -879,6 +944,8 @@ def package_runtime_descriptor(
             generation_member_verifier=generation_member_verifier,
             capability_gateway=capability_gateway,
             service_operation_ledger=service_operation_ledger,
+            event_publisher=event_publisher,
+            component_job_scheduler=component_job_scheduler,
             worker_factory=worker_factory,
         )
         if management_contract is not None:

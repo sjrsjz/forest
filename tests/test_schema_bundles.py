@@ -49,6 +49,7 @@ from forest.storage.authorization_authority import (
     KernelAuthorizationRepository,
 )
 from forest.storage.clean_bot_store import CleanBotStore
+from forest.storage.component_event_authority import ComponentEventCommands
 from forest.storage.component_state import ComponentStateCommands, ComponentStateQueries
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
@@ -59,10 +60,10 @@ from forest.storage.payload_authority import (
     PayloadSource,
     SourceTarget,
 )
-from forest.storage.routing_graph_authority import (
+from forest.storage.routing_graph_directory import RoutingDirectoryCommands
+from forest.storage.routing_graph_types import (
     EventPublicationRoute,
     EventSubscriptionRoute,
-    RoutingGraphCommands,
 )
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.tool_authorization import KernelToolAuthorizationPort
@@ -1029,8 +1030,8 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         async def drain_owned_work(self):
             events.append(("drain-owned", "kernel.runtime"))
 
-        def resume_owned_admission(self):
-            events.append(("resume-owned", "kernel.runtime"))
+        def open_owned_admission(self):
+            events.append(("open-owned", "kernel.runtime"))
 
         async def close(self):
             events.append(("close", "kernel.runtime"))
@@ -1094,11 +1095,12 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         ),
         ("start", "kernel.runtime"),
         ("activate", "kernel.runtime"),
+        ("open-owned", "kernel.runtime"),
         ("freeze-owned", "kernel.runtime"),
         ("drain-owned", "kernel.runtime"),
         ("quiesce", "kernel.runtime"),
         ("activate", "kernel.runtime"),
-        ("resume-owned", "kernel.runtime"),
+        ("open-owned", "kernel.runtime"),
         ("freeze-owned", "kernel.runtime"),
         ("drain-owned", "kernel.runtime"),
         ("quiesce", "kernel.runtime"),
@@ -3525,10 +3527,18 @@ async def test_routing_event_command_atomically_freezes_all_deliveries(clean_aut
     payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
 
     async def member(_conn, *, component_id, generation_id):
-        assert (component_id, generation_id) == ("example.publisher", "generation:publisher")
-        return SimpleNamespace(graph_id="graph:routing:1")
+        assert component_id == "example.publisher"
+        graph_id = {
+            "generation:publisher": "graph:routing:1",
+            "generation:publisher:2": "graph:routing:2",
+        }[generation_id]
+        return SimpleNamespace(graph_id=graph_id)
 
-    commands = RoutingGraphCommands(
+    directory = RoutingDirectoryCommands(
+        store,
+        namespace=routing_storage.spec.namespace,
+    )
+    events = ComponentEventCommands(
         store,
         payloads=payloads,
         generation_member_verifier=member,
@@ -3547,7 +3557,7 @@ async def test_routing_event_command_atomically_freezes_all_deliveries(clean_aut
             1,
             "example.ready",
             "1.0",
-            "sha256:" + "2" * 64,
+            publication.event_schema_digest,
             "example.consumer",
             "generation:consumer",
             "component.event." + "3" * 64,
@@ -3556,7 +3566,7 @@ async def test_routing_event_command_atomically_freezes_all_deliveries(clean_aut
         ),
     )
     async with store.pool.connection() as conn, conn.transaction():
-        await commands.publish_directory_in(
+        await directory.publish_directory_in(
             conn,
             graph_id="graph:routing:1",
             graph_digest="sha256:" + "4" * 64,
@@ -3564,31 +3574,40 @@ async def test_routing_event_command_atomically_freezes_all_deliveries(clean_aut
             publications=(publication,),
             subscriptions=subscriptions,
         )
-    created = await commands.publish_event(
-        graph_id="graph:routing:1",
+    created = await events.publish_event(
         publisher_component_id=publication.publisher_component_id,
         publisher_generation_id=publication.publisher_generation_id,
         topic=publication.topic,
         contract=publication.contract,
-        event_schema_digest=publication.event_schema_digest,
         operation_id="event:publish:1",
         causal_root_kind="test.operation",
         causal_root_id="root:1",
         payload={"value": 7},
-        subscriptions=subscriptions,
     )
-    replay = await commands.publish_event(
-        graph_id="graph:routing:1",
+    replacement_publication = replace(
+        publication, publisher_generation_id="generation:publisher:2"
+    )
+    replacement_subscription = replace(
+        subscriptions[0], owner_generation_id="generation:consumer:2"
+    )
+    async with store.pool.connection() as conn, conn.transaction():
+        await directory.publish_directory_in(
+            conn,
+            graph_id="graph:routing:2",
+            graph_digest="sha256:" + "5" * 64,
+            routing_generation_id="generation:routing:2",
+            publications=(replacement_publication,),
+            subscriptions=(replacement_subscription,),
+        )
+    replay = await events.publish_event(
         publisher_component_id=publication.publisher_component_id,
-        publisher_generation_id=publication.publisher_generation_id,
+        publisher_generation_id=replacement_publication.publisher_generation_id,
         topic=publication.topic,
         contract=publication.contract,
-        event_schema_digest=publication.event_schema_digest,
         operation_id="event:publish:1",
         causal_root_kind="test.operation",
         causal_root_id="root:1",
         payload={"value": 7},
-        subscriptions=subscriptions,
     )
     assert created["delivery_count"] == 1 and created["replayed"] is False
     assert replay == {"event_id": created["event_id"], "replayed": True}
