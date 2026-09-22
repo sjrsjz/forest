@@ -5,6 +5,8 @@ import hashlib
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -19,9 +21,11 @@ from forest.agent_tool_executor import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
-from forest.packages import digest_json
+from forest.packages import PackageCatalog, digest_json
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_generation import (
     PreparedGenerationBinding,
     RuntimeStorageBinding,
@@ -44,6 +48,7 @@ from forest.storage.authorization_authority import (
     KernelAuthorizationRepository,
 )
 from forest.storage.clean_bot_store import CleanBotStore
+from forest.storage.component_state import ComponentStateCommands, ComponentStateQueries
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
@@ -683,6 +688,131 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
         and not item["control_admission"]
         for item in routes
     )
+
+
+@pytest.mark.postgres
+async def test_component_state_separates_queries_from_revision_checked_commands(
+    clean_authority,
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    lease = await kernel.runtime.claim_host("state-host", "state-incarnation")
+    binding = runtime_binding("example.state", marker="a")
+    graph = await kernel.runtime.prepare_graph(lease, [binding], str(uuid4()))
+    await kernel.runtime.publish_graph(lease, graph)
+    generation_id = graph.generations["example.state"]
+    queries = ComponentStateQueries(kernel.runtime, kernel.payload)
+    commands = ComponentStateCommands(kernel.runtime, kernel.payload)
+
+    assert await queries.get(
+        component_id="example.state",
+        generation_id=generation_id,
+        state_key="counter",
+    ) == {"value": None, "revision": 0}
+    first = await commands.commit(
+        component_id="example.state",
+        generation_id=generation_id,
+        call_id="call:first",
+        state_key="counter",
+        value={"count": 1},
+        expected_revision=0,
+        operation_id="state:counter:1",
+    )
+    replay = await commands.commit(
+        component_id="example.state",
+        generation_id=generation_id,
+        call_id="call:retry",
+        state_key="counter",
+        value={"count": 1},
+        expected_revision=0,
+        operation_id="state:counter:1",
+    )
+    assert replay == first
+    assert await queries.get(
+        component_id="example.state",
+        generation_id=generation_id,
+        state_key="counter",
+    ) == {"value": {"count": 1}, "revision": 1}
+
+    attempts = await asyncio.gather(
+        *(
+            commands.commit(
+                component_id="example.state",
+                generation_id=generation_id,
+                call_id=f"call:concurrent:{index}",
+                state_key="counter",
+                value={"count": index},
+                expected_revision=1,
+                operation_id=f"state:counter:concurrent:{index}",
+            )
+            for index in (2, 3)
+        ),
+        return_exceptions=True,
+    )
+    assert len([item for item in attempts if isinstance(item, dict)]) == 1
+    conflicts = [item for item in attempts if isinstance(item, ForestError)]
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "COMPONENT_STATE_REVISION_CONFLICT"
+
+
+@pytest.mark.postgres
+async def test_builtin_package_state_runs_only_through_kernel_gateway(
+    clean_authority,
+    tmp_path,
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    counter = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/counter"))),
+        PackageCatalog(tmp_path / "packages"),
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={"label": "计数", "multiplier": 2},
+    )
+    lease = await kernel.runtime.claim_host("counter-host", "counter-incarnation")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=kernel.runtime,
+    )
+    registry = RuntimeModuleRegistry(
+        host,
+        (*kernel.descriptors, counter.descriptor),
+    )
+    await registry.start()
+    try:
+        instance = registry.get("forest.counter")
+        endpoint = instance.runtime_service_handlers()[("counter.increment", 1)]
+        route = FrozenServiceRoute(
+            service_id="counter.increment",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="forest.counter",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        first = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation("counter:service:1", 10),
+            ({"increment": 1},),
+            {},
+        )
+        second = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation("counter:service:2", 10),
+            ({"increment": 1},),
+            {},
+        )
+        assert first == {"value": 2, "revision": 1, "label": "计数"}
+        assert second == {"value": 4, "revision": 2, "label": "计数"}
+    finally:
+        assert await registry.close() == []
 
 
 @pytest.mark.postgres

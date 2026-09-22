@@ -136,6 +136,7 @@ class PythonWorker:
         self._handshakes: set[asyncio.Task] = set()
         self._pending: dict[str, asyncio.Future] = {}
         self._calls: dict[str, str] = {}
+        self._call_operations: dict[str, str] = {}
         self._call_deadlines: dict[str, float] = {}
         self._reserved_calls: set[str] = set()
         self._invocation_tasks: dict[str, asyncio.Task] = {}
@@ -827,6 +828,7 @@ class PythonWorker:
         self._reserved_calls.add(call_id)
         self._invocation_tasks[call_id] = asyncio.current_task()
         deadline = time.monotonic() + timeout
+        self._call_operations[call_id] = operation_id
         self._call_deadlines[call_id] = deadline
         sent = False
         try:
@@ -878,12 +880,23 @@ class PythonWorker:
         finally:
             await self._close_state_calls(call_id)
             self._calls.pop(call_id, None)
+            self._call_operations.pop(call_id, None)
             self._call_deadlines.pop(call_id, None)
             self._reserved_calls.discard(call_id)
             self._invocation_tasks.pop(call_id, None)
             self._cancelled_calls.discard(call_id)
             self._closed_calls.discard(call_id)
             self._admitted -= 1
+
+    def call_operation_id(self, call_id: str) -> str:
+        operation_id = self._call_operations.get(call_id)
+        if call_id not in self._calls or operation_id is None:
+            raise ForestError(
+                "CALL_CONTEXT_REQUIRED",
+                "Capability request has no live parent invocation",
+                403,
+            )
+        return operation_id
 
     def remaining_timeout(
         self, call_id: str, requested: float | None = None

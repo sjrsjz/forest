@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from forest.clean_management_contract import CleanModuleConfigurationContract
+from forest.package_gateway import KernelPackageCapabilityGateway
 from forest.package_runtime import package_runtime_descriptor
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import (
@@ -79,9 +80,6 @@ async def bootstrap_builtin_package(
     initial_configuration: dict[str, Any],
     resolved_contracts: dict[str, str] | None = None,
     startup_components: tuple[str, ...] = (),
-    state_handler=None,
-    event_handler=None,
-    job_handler=None,
 ) -> BuiltinPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
@@ -142,12 +140,13 @@ async def bootstrap_builtin_package(
         ),
         generation_verifier=kernel.runtime.verify_active_generation,
         generation_member_verifier=kernel.runtime.verify_generation_member,
+        capability_gateway=KernelPackageCapabilityGateway(
+            kernel.runtime,
+            kernel.payload,
+        ),
         storage=storage,
         management=(configuration_management_contribution(component_id),),
         management_contract=management_contract,
-        state_handler=state_handler,
-        event_handler=event_handler,
-        job_handler=job_handler,
         trust_level="official",
     )
     return BuiltinPackageModule(snapshot, descriptor, configuration, grants)

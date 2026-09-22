@@ -139,7 +139,6 @@ CREATE TABLE calls (
     error_code text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, call_id),
-    UNIQUE (bot_id, operation_id),
     FOREIGN KEY (bot_id, generation_id, component_id)
         REFERENCES generations(bot_id, generation_id, component_id),
     FOREIGN KEY (bot_id, parent_call_id) REFERENCES calls(bot_id, call_id),
@@ -154,6 +153,7 @@ CREATE TABLE calls (
 );
 
 CREATE INDEX calls_drain ON calls(bot_id, component_id, status);
+CREATE INDEX calls_operation ON calls(bot_id, operation_id, created_at, call_id);
 CREATE INDEX calls_parent ON calls(bot_id, parent_call_id);
 CREATE INDEX calls_root ON calls(bot_id, root_call_id, call_depth, call_id);
 CREATE INDEX calls_causal_root ON calls(
@@ -168,42 +168,30 @@ CREATE TABLE state_heads (
     deleted boolean NOT NULL DEFAULT false,
     value_payload_id text,
     value_digest text,
+    value_owner_id text,
     PRIMARY KEY (bot_id, component_id, state_key),
     CHECK ((value_payload_id IS NULL) = (value_digest IS NULL)),
+    CHECK ((value_payload_id IS NULL) = (value_owner_id IS NULL)),
     CHECK (revision = 0 OR deleted OR value_payload_id IS NOT NULL)
 );
 
 CREATE TABLE state_steps (
     bot_id text NOT NULL,
-    call_id text NOT NULL,
+    component_id text NOT NULL,
     operation_id text NOT NULL,
+    generation_id text NOT NULL,
+    call_id text NOT NULL,
+    state_key text NOT NULL,
+    expected_revision bigint NOT NULL CHECK (expected_revision >= 0),
+    revision bigint NOT NULL CHECK (revision = expected_revision + 1),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     value_payload_id text NOT NULL,
     value_digest text NOT NULL CHECK (value_digest ~ '^sha256:[a-f0-9]{64}$'),
-    receipt_payload_id text NOT NULL,
-    receipt_digest text NOT NULL CHECK (receipt_digest ~ '^sha256:[a-f0-9]{64}$'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (bot_id, call_id, operation_id),
-    FOREIGN KEY (bot_id, call_id) REFERENCES calls(bot_id, call_id)
-);
-
-CREATE TABLE state_revisions (
-    bot_id text NOT NULL,
-    component_id text NOT NULL,
-    state_key text NOT NULL,
-    revision bigint NOT NULL,
-    previous_revision bigint NOT NULL CHECK (previous_revision = revision - 1),
-    deleted boolean NOT NULL DEFAULT false,
-    value_payload_id text,
-    value_digest text,
-    call_id text NOT NULL,
-    operation_id text NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (bot_id, component_id, state_key, revision),
-    FOREIGN KEY (bot_id, call_id, operation_id)
-        REFERENCES state_steps(bot_id, call_id, operation_id),
-    CHECK ((value_payload_id IS NULL) = (value_digest IS NULL)),
-    CHECK (deleted OR value_payload_id IS NOT NULL)
+    PRIMARY KEY (bot_id, component_id, operation_id),
+    UNIQUE (bot_id, component_id, state_key, revision),
+    FOREIGN KEY (bot_id, generation_id, component_id)
+        REFERENCES generations(bot_id, generation_id, component_id)
 );
 
 CREATE TABLE runtime_graph_clock (
@@ -459,8 +447,6 @@ CREATE TRIGGER runtime_graph_identity BEFORE UPDATE ON runtime_graphs
 CREATE TRIGGER graph_replacement_transition BEFORE UPDATE OR DELETE ON graph_replacement_requests
     FOR EACH ROW EXECUTE FUNCTION graph_replacement_guard();
 CREATE TRIGGER state_steps_immutable BEFORE UPDATE OR DELETE ON state_steps
-    FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
-CREATE TRIGGER state_revisions_immutable BEFORE UPDATE OR DELETE ON state_revisions
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER runtime_graph_modules_immutable BEFORE UPDATE OR DELETE ON runtime_graph_modules
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();

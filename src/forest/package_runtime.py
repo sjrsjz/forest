@@ -17,6 +17,7 @@ from jsonschema import Draft202012Validator
 
 from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
 from forest.errors import ForestError
+from forest.package_capabilities import PackageCallScope, PackageCapabilityGateway
 from forest.packages import PackageSnapshot, contract_range
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -39,9 +40,6 @@ class PackageGenerationState(StrEnum):
     FAILED = "FAILED"
 
 
-StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
-EventHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
-JobHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 GenerationVerifier = Callable[..., Awaitable[Any]]
 
 
@@ -87,9 +85,7 @@ class PackageGenerationAdapter:
         resolved_contracts: Mapping[str, str],
         generation_verifier: GenerationVerifier,
         generation_member_verifier: GenerationVerifier,
-        state_handler: StateHandler | None = None,
-        event_handler: EventHandler | None = None,
-        job_handler: JobHandler | None = None,
+        capability_gateway: PackageCapabilityGateway,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
     ) -> None:
         self.snapshot = snapshot
@@ -102,9 +98,7 @@ class PackageGenerationAdapter:
         self._resolved_contracts = dict(resolved_contracts)
         self._generation_verifier = generation_verifier
         self._generation_member_verifier = generation_member_verifier
-        self._state_handler = state_handler
-        self._event_handler = event_handler
-        self._job_handler = job_handler
+        self._capability_gateway = capability_gateway
         self._worker_factory = worker_factory
         self._worker: PythonWorker | None = None
         self._configuration: dict[str, Any] | None = None
@@ -119,6 +113,14 @@ class PackageGenerationAdapter:
             )
             for item in self.component.get("provides", ())
         }
+        self._requested_capabilities = frozenset(
+            self.component.get("capabilities", {}).get("requests", ())
+        )
+        self._granted_capabilities = frozenset(
+            item.capability
+            for item in self.grants.entries
+            if item.resource_kind == "component" and item.resource_id == self.component_id
+        )
 
         services = [
             {"service_id": item["name"], "version": _major(item["contract"])}
@@ -245,21 +247,15 @@ class PackageGenerationAdapter:
     async def _service_gateway(
         self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
-        if self._worker is None or identity != self._worker.identity:
-            raise ForestError(
-                "WORKER_IDENTITY_MISMATCH",
-                "Service request belongs to another Worker",
-                403,
-            )
+        self._call_scope(identity, call_id)
         service_id = request["service"]
         route = self._service_routes.get(service_id)
         contract = self._resolved_contracts.get(service_id)
-        requested = set(self.component.get("capabilities", {}).get("requests", ()))
         if (
             route is None
             or contract is None
             or request["contract_major"] != _major(contract)
-            or f"service.call:{service_id}" not in requested
+            or not self._has_capability(f"service.call:{service_id}")
         ):
             raise ForestError(
                 "CAPABILITY_DENIED",
@@ -273,6 +269,76 @@ class PackageGenerationAdapter:
             timeout_seconds=timeout,
             parent_call_id=call_id,
         )
+
+    def _has_capability(self, capability: str) -> bool:
+        return (
+            capability in self._requested_capabilities
+            and capability in self._granted_capabilities
+        )
+
+    def _call_scope(self, identity: WorkerIdentity, call_id: str) -> PackageCallScope:
+        worker = self._worker
+        generation = self.generation_identity
+        prepared = self._prepared_binding
+        if worker is None or identity != worker.identity:
+            raise ForestError(
+                "WORKER_IDENTITY_MISMATCH",
+                "Capability request belongs to another Worker",
+                403,
+            )
+        if generation is None or prepared is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_BOUND",
+                "Package capability request has no bound Generation",
+                409,
+            )
+        return PackageCallScope(
+            bot_id=self.bot_id,
+            component_id=self.component_id,
+            generation_id=generation.generation_id,
+            instance_id=prepared.instance_id,
+            worker_incarnation=prepared.worker_incarnation,
+            call_id=call_id,
+            call_operation_id=worker.call_operation_id(call_id),
+        )
+
+    async def _state_gateway(
+        self, identity: WorkerIdentity, call_id: str, action: str, request: dict
+    ) -> Any:
+        scope = self._call_scope(identity, call_id)
+        if action == "get":
+            if not self._has_capability("state.read"):
+                raise ForestError("CAPABILITY_DENIED", "State read is not granted", 403)
+            return await self._capability_gateway.read_state(
+                scope, state_key=request["key"]
+            )
+        if action == "commit":
+            if not self._has_capability("state.write"):
+                raise ForestError("CAPABILITY_DENIED", "State write is not granted", 403)
+            return await self._capability_gateway.commit_state(
+                scope,
+                state_key=request["key"],
+                value=request["value"],
+                expected_revision=request["expected_revision"],
+                operation_id=request["operation_id"],
+            )
+        raise ForestError("STATE_REQUEST_INVALID", "Unknown state operation", 422)
+
+    async def _event_gateway(
+        self, identity: WorkerIdentity, call_id: str, request: dict
+    ) -> Any:
+        scope = self._call_scope(identity, call_id)
+        if not self._has_capability(f"event.publish:{request['topic']}"):
+            raise ForestError("CAPABILITY_DENIED", "Event publication is not granted", 403)
+        return await self._capability_gateway.publish_event(scope, request)
+
+    async def _job_gateway(
+        self, identity: WorkerIdentity, call_id: str, request: dict
+    ) -> Any:
+        scope = self._call_scope(identity, call_id)
+        if not self._has_capability(f"job.schedule:{request['handler_id']}"):
+            raise ForestError("CAPABILITY_DENIED", "Job scheduling is not granted", 403)
+        return await self._capability_gateway.schedule_job(scope, request)
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         if self.state is not PackageGenerationState.NEW:
@@ -368,11 +434,11 @@ class PackageGenerationAdapter:
                 self._prepared_binding.worker_incarnation,
                 self.bot_id,
             ),
-            self._state_handler,
+            self._state_gateway,
             limits=_worker_limits(self.component),
             service_handler=self._service_gateway,
-            event_handler=self._event_handler,
-            job_handler=self._job_handler,
+            event_handler=self._event_gateway,
+            job_handler=self._job_gateway,
         )
         self._worker = worker
         try:
@@ -461,12 +527,10 @@ def package_runtime_descriptor(
     startup_components: tuple[str, ...],
     generation_verifier: GenerationVerifier,
     generation_member_verifier: GenerationVerifier,
+    capability_gateway: PackageCapabilityGateway,
     storage=None,
     management=(),
     management_contract=None,
-    state_handler: StateHandler | None = None,
-    event_handler: EventHandler | None = None,
-    job_handler: JobHandler | None = None,
     worker_factory: Callable[..., PythonWorker] = PythonWorker,
     trust_level: str = "installed",
 ) -> RuntimeModuleDescriptor:
@@ -474,6 +538,24 @@ def package_runtime_descriptor(
 
     snapshot.verify()
     component = snapshot.component
+    requested = frozenset(component.get("capabilities", {}).get("requests", ()))
+    gateway_capabilities = {
+        "event.publish"
+        if item.startswith("event.publish:")
+        else "job.schedule"
+        if item.startswith("job.schedule:")
+        else item
+        for item in requested
+        if not item.startswith("service.call:")
+    }
+    unsupported = gateway_capabilities - capability_gateway.supported_capabilities
+    if unsupported:
+        raise ForestError(
+            "PACKAGE_CAPABILITY_GATEWAY_UNAVAILABLE",
+            "Package requests a host capability with no installed authority",
+            503,
+            details={"capabilities": sorted(unsupported)},
+        )
 
     def factory(_runtime, contracts):
         routes = {
@@ -494,9 +576,7 @@ def package_runtime_descriptor(
             resolved_contracts=resolved_contracts,
             generation_verifier=generation_verifier,
             generation_member_verifier=generation_member_verifier,
-            state_handler=state_handler,
-            event_handler=event_handler,
-            job_handler=job_handler,
+            capability_gateway=capability_gateway,
             worker_factory=worker_factory,
         )
         if management_contract is not None:

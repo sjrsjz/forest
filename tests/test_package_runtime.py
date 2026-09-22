@@ -11,6 +11,10 @@ from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocatio
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
 
 
+class NoCapabilities:
+    supported_capabilities = frozenset()
+
+
 class Configuration:
     async def desired(self, *, include_value=False):
         value = {
@@ -39,11 +43,12 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
         snapshot=snapshot,
         bot_id="bot-package-runtime",
         module_configuration=Configuration(),
-        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
         service_routes={},
         resolved_contracts={},
         generation_verifier=verify,
         generation_member_verifier=verify,
+        capability_gateway=NoCapabilities(),
     )
     context = PreparedGenerationContext(
         activation_id="9be186b5-667b-4f48-8051-4b360c087632",

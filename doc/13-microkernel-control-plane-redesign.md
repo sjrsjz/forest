@@ -105,6 +105,8 @@ Adapter 不得把插件类、方法、Repository 或客户端返回给 Registry�
 
 每次跨 Worker 调用必须同时携带两种不可混用的身份：`operation_id` 稳定标识业务操作并承担幂等语义，`call_id` 唯一标识一次执行尝试并承担运行中占用、取消和父子调用关系。重试和重复投递复用 `operation_id`，但每次尝试创建新的 `call_id`；不得根据业务幂等键派生可重复的执行调用号。Contract Router 把冻结 route 与不可变 invocation 显式交给路由感知 endpoint，不使用线程局部或隐式进程上下文。Worker 发起嵌套服务调用时必须声明自己的稳定 `operation_id`，宿主记录当前 `call_id` 为父调用，并把子调用期限限制在父调用剩余期限内；插件不能延长调用树的 deadline，也不能绕过 Router 自行取得服务对象。缺少这些事实的插件调用在边界直接拒绝，不由 Provider、业务模块或兼容分支猜测补齐。
 
+Worker 的宿主能力只能汇入一个内核拥有的 `PackageCapabilityGateway`，Adapter 不接受任意 `state_handler/event_handler/job_handler` 回调。Adapter 负责核对不可变包声明、准确 grant、Worker 身份和活动调用作用域；网关按能力种类转入独立权威。`State Query` 与 `State Command` 是两个端口：Query 只读取现有 head 与受管 Payload，缺失时返回 revision 0，不能顺便初始化；Command 在一个 Bot 数据库事务中复核准确 Generation 成员、按 `(component_id,state_key)` 串行、检查 expected revision、保存 Payload、追加以 `(component_id,operation_id)` 唯一的不可变 step 并推进 head。同一操作同一输入跨 `call_id` 返回原回执，输入不同则冲突；并发写同一 revision 只能一个提交。事件发布和任务调度也必须各自接入持久 authority；网关未安装对应 authority 时，声明该能力的包在构图前失败，不能用空实现、进程内队列或组合根回调降级。
+
 配置读取是 Query；配置计划/提交是 Command；Worker 调用、状态提交和外部效果各有独立端口。`prepare_generation` 只能读取冻结配置、声明和授权事实，不得写业务状态或执行网络副作用。Worker 的 `prepare/start/health` 只建立候选资源；即使 Worker 内部已进入可接受 IPC 的待命态，Adapter 的本地 admission gate 与持久 route 在 publication 前保持关闭。`activate_generation` 只同步翻转本地 gate，不做 IPC、网络或数据库操作。
 
 ### 3.2 完整热重载与回滚
