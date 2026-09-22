@@ -604,6 +604,13 @@ def official_storage_bundle(
     )
 
 
+class OwnedWorkLifecycle(StrEnum):
+    """Whether a module owns durable work that must drain before quiescence."""
+
+    NONE = "NONE"
+    FREEZE_DRAIN = "FREEZE_DRAIN"
+
+
 @dataclass(frozen=True)
 class RuntimeModuleDescriptor:
     component_id: str
@@ -621,6 +628,7 @@ class RuntimeModuleDescriptor:
     event_publications: tuple[RuntimeEventPublicationContribution, ...] = ()
     event_subscriptions: tuple[RuntimeEventSubscriptionContribution, ...] = ()
     component_jobs: tuple[RuntimeComponentJobContribution, ...] = ()
+    owned_work_lifecycle: OwnedWorkLifecycle = OwnedWorkLifecycle.NONE
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -660,6 +668,8 @@ class RuntimeModuleDescriptor:
         component_job_ids = [item.handler_id for item in self.component_jobs]
         if len(component_job_ids) != len(set(component_job_ids)):
             raise ValueError("Runtime ComponentJob identities must be unique")
+        if not isinstance(self.owned_work_lifecycle, OwnedWorkLifecycle):
+            raise ValueError("Runtime owned-work lifecycle declaration is invalid")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -727,6 +737,7 @@ class RuntimeModuleRegistry:
         self._prewarmed = False
         self._contract_routes_sealed = False
         self._replacement_quiesced: tuple[str, ...] = ()
+        self._replacement_owned_frozen: tuple[str, ...] = ()
         self._replacement_operation_id: str | None = None
         self._generation_identities_bound = False
         self.graph_identity = None
@@ -756,15 +767,6 @@ class RuntimeModuleRegistry:
                 descriptor.component_id
                 for descriptor in self.descriptors
                 if descriptor.job_types and descriptor.component_id != "job.scheduler"
-            )
-        if "routing.graph" in component_ids:
-            dynamic_requires["routing.graph"].update(
-                descriptor.component_id
-                for descriptor in self.descriptors
-                if (
-                    descriptor.event_subscriptions or descriptor.component_jobs
-                )
-                and descriptor.component_id != "routing.graph"
             )
         self._dynamic_requires = {
             component_id: tuple(sorted(required))
@@ -816,6 +818,7 @@ class RuntimeModuleRegistry:
                 item.as_fact() for item in descriptor.event_subscriptions
             ],
             "component_jobs": [item.as_fact() for item in descriptor.component_jobs],
+            "owned_work_lifecycle": descriptor.owned_work_lifecycle,
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 
@@ -1106,6 +1109,7 @@ class RuntimeModuleRegistry:
                 await self._install_storage(descriptor)
                 dependencies = self.contract_router.context(component_id)
                 instance = descriptor.factory(self.runtime, dependencies)
+                self._validate_owned_work_lifecycle(descriptor, instance)
                 self.instances[component_id] = instance
                 self.contract_router.register(component_id, instance)
                 if self.generation_authority is not None:
@@ -1386,7 +1390,7 @@ class RuntimeModuleRegistry:
         if self._lifecycle_lock is None:
             self._lifecycle_lock = asyncio.Lock()
         async with self._lifecycle_lock:
-            if self._replacement_quiesced:
+            if self._replacement_operation_id is not None:
                 if self._replacement_operation_id != operation_id:
                     raise ForestError(
                         "RUNTIME_REPLACEMENT_OPERATION_CONFLICT",
@@ -1405,10 +1409,14 @@ class RuntimeModuleRegistry:
                 lease,
                 self.graph_identity,
             )
-            self.contract_router.deactivate()
             self._replacement_operation_id = operation_id
             drained: list[str] = []
             try:
+                self.contract_router.deactivate()
+                self._replacement_owned_frozen = self._freeze_owned_admission()
+                await self._drain_frozen_owned_work(
+                    self._replacement_owned_frozen
+                )
                 for component_id in reversed(self.order):
                     if component_id == "adapter.onebot":
                         continue
@@ -1432,9 +1440,28 @@ class RuntimeModuleRegistry:
                     await self._quiesce_only(component_id)
                     drained.append(component_id)
                 self._replacement_quiesced = tuple(drained)
-            except BaseException:
+            except BaseException as drain_error:
                 self._replacement_quiesced = tuple(drained)
-                await self._resume_owned_work_locked(lease)
+                try:
+                    await self._resume_owned_work_locked(lease)
+                except BaseException as resume_error:
+                    raise ForestError(
+                        "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED",
+                        "RuntimeGraph drain failed and the previous graph cannot safely resume",
+                        503,
+                        details={
+                            "drain_error": (
+                                drain_error.code
+                                if isinstance(drain_error, ForestError)
+                                else type(drain_error).__name__
+                            ),
+                            "resume_error": (
+                                resume_error.code
+                                if isinstance(resume_error, ForestError)
+                                else type(resume_error).__name__
+                            ),
+                        },
+                    ) from resume_error
                 raise
 
     async def resume_owned_work_after_failed_replacement(self) -> None:
@@ -1447,15 +1474,25 @@ class RuntimeModuleRegistry:
 
     async def _resume_owned_work_locked(self, lease) -> None:
         operation_id = self._replacement_operation_id
+        if operation_id is None:
+            return
+        quiesced = set(self._replacement_quiesced)
+        if any(
+            state
+            != (
+                ModuleLifecycleState.QUIESCENT
+                if component_id in quiesced
+                else ModuleLifecycleState.ACTIVE
+            )
+            for component_id, state in self.states.items()
+        ):
+            raise ForestError(
+                "RUNTIME_GRAPH_RESUME_UNSAFE",
+                "A partially failed RuntimeGraph cannot reopen admission",
+                503,
+            )
         agent = self.instances.get("agent.runtime")
-        resumed_runs = ()
-        if operation_id is not None and agent is not None:
-            resumed_runs = await agent.resume_reload_wait(operation_id)
-        await self.generation_authority.resume_graph_admission(
-            lease,
-            self.graph_identity,
-        )
-        pending = set(self._replacement_quiesced)
+        pending = set(quiesced)
         for component_id in self.order:
             if component_id not in pending:
                 continue
@@ -1476,19 +1513,113 @@ class RuntimeModuleRegistry:
                     503,
                 )
             self._transition(component_id, ModuleLifecycleState.ACTIVE)
-        self._replacement_quiesced = ()
-        self._replacement_operation_id = None
+            self._replacement_quiesced = tuple(
+                item for item in self._replacement_quiesced if item != component_id
+            )
         self.contract_router.activate()
+        resumed_runs = ()
+        if agent is not None:
+            resumed_runs = await agent.resume_reload_wait(operation_id)
         conversation = self.instances.get("conversation.scheduler")
-        if operation_id is not None and conversation is not None:
+        if conversation is not None:
             for run in resumed_runs:
                 await conversation.resume_deferred(
                     run["conversation_ref"],
                     reason_code="AGENT_RELOAD_WAIT",
                     reason_ref=operation_id,
                 )
-            if resumed_runs:
-                self.notify_work()
+        self._resume_owned_admission(self._replacement_owned_frozen)
+        await self.generation_authority.resume_graph_admission(
+            lease,
+            self.graph_identity,
+        )
+        self._replacement_operation_id = None
+        if resumed_runs:
+            self.notify_work()
+
+    def _owned_work_components(self) -> tuple[str, ...]:
+        return tuple(
+            component_id
+            for component_id in self.order
+            if next(
+                item
+                for item in self.descriptors
+                if item.component_id == component_id
+            ).owned_work_lifecycle
+            == OwnedWorkLifecycle.FREEZE_DRAIN
+        )
+
+    @staticmethod
+    def _validate_owned_work_lifecycle(
+        descriptor: RuntimeModuleDescriptor, instance: Any
+    ) -> None:
+        hooks = (
+            "freeze_owned_admission",
+            "drain_owned_work",
+            "resume_owned_admission",
+        )
+        present = tuple(callable(getattr(instance, name, None)) for name in hooks)
+        declared = descriptor.owned_work_lifecycle == OwnedWorkLifecycle.FREEZE_DRAIN
+        if (declared and not all(present)) or (not declared and any(present)):
+            raise ForestError(
+                "RUNTIME_OWNED_WORK_CONTRACT_INVALID",
+                f"Module {descriptor.component_id} owned-work lifecycle does not match its descriptor",
+                503,
+            )
+
+    def _freeze_owned_admission(self) -> tuple[str, ...]:
+        """Close every owned-work gate before any asynchronous drain can yield."""
+
+        frozen: list[str] = []
+        try:
+            for component_id in self._owned_work_components():
+                result = self.instances[component_id].freeze_owned_admission()
+                if inspect.isawaitable(result):
+                    close = getattr(result, "close", None)
+                    if close is not None:
+                        close()
+                    raise ForestError(
+                        "RUNTIME_OWNED_ADMISSION_INVALID",
+                        "Owned-work admission freeze must be local and synchronous",
+                        503,
+                    )
+                frozen.append(component_id)
+        except BaseException:
+            for component_id in reversed(frozen):
+                self.instances[component_id].resume_owned_admission()
+            raise
+        return tuple(frozen)
+
+    async def _drain_frozen_owned_work(
+        self, frozen: tuple[str, ...]
+    ) -> None:
+        for component_id in reversed(frozen):
+            result = self.instances[component_id].drain_owned_work()
+            if not inspect.isawaitable(result):
+                raise ForestError(
+                    "RUNTIME_OWNED_DRAIN_INVALID",
+                    "Owned-work drain must be asynchronous",
+                    503,
+                )
+            await result
+
+    def _resume_owned_admission(self, frozen: tuple[str, ...]) -> None:
+        for component_id in frozen:
+            result = self.instances[component_id].resume_owned_admission()
+            if inspect.isawaitable(result):
+                close = getattr(result, "close", None)
+                if close is not None:
+                    close()
+                raise ForestError(
+                    "RUNTIME_OWNED_ADMISSION_INVALID",
+                    "Owned-work admission resume must be local and synchronous",
+                    503,
+                )
+            self._replacement_owned_frozen = tuple(
+                item
+                for item in self._replacement_owned_frozen
+                if item != component_id
+            )
 
     async def close(self) -> list[Exception]:
         if self._lifecycle_lock is None:
@@ -1522,6 +1653,12 @@ class RuntimeModuleRegistry:
                         lease = None
             self.contract_router.deactivate()
             errors = []
+            if not self._replacement_owned_frozen and not self._replacement_quiesced:
+                try:
+                    frozen = self._freeze_owned_admission()
+                    await self._drain_frozen_owned_work(frozen)
+                except Exception as exc:
+                    errors.append(exc)
             for component_id in reversed(self.order):
                 try:
                     state = self.states[component_id]

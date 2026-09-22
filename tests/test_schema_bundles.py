@@ -32,6 +32,7 @@ from forest.runtime_generation import (
 )
 from forest.runtime_modules import (
     ModuleLifecycleState,
+    OwnedWorkLifecycle,
     RuntimeModuleDescriptor,
     RuntimeModuleRegistry,
     official_artifact,
@@ -1022,6 +1023,15 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         async def quiesce(self):
             events.append(("quiesce", "kernel.runtime"))
 
+        def freeze_owned_admission(self):
+            events.append(("freeze-owned", "kernel.runtime"))
+
+        async def drain_owned_work(self):
+            events.append(("drain-owned", "kernel.runtime"))
+
+        def resume_owned_admission(self):
+            events.append(("resume-owned", "kernel.runtime"))
+
         async def close(self):
             events.append(("close", "kernel.runtime"))
             if self.task is not None:
@@ -1045,6 +1055,7 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         lambda *_: CleanModule(),
         official_artifact("bot"),
         storage=runtime_storage,
+        owned_work_lifecycle=OwnedWorkLifecycle.FREEZE_DRAIN,
     )
     registry = RuntimeModuleRegistry(runtime, (descriptor,))
     await registry.prewarm()
@@ -1083,8 +1094,13 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         ),
         ("start", "kernel.runtime"),
         ("activate", "kernel.runtime"),
+        ("freeze-owned", "kernel.runtime"),
+        ("drain-owned", "kernel.runtime"),
         ("quiesce", "kernel.runtime"),
         ("activate", "kernel.runtime"),
+        ("resume-owned", "kernel.runtime"),
+        ("freeze-owned", "kernel.runtime"),
+        ("drain-owned", "kernel.runtime"),
         ("quiesce", "kernel.runtime"),
         ("close", "kernel.runtime"),
     ]

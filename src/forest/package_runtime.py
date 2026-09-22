@@ -887,7 +887,22 @@ def package_runtime_descriptor(
 
     return RuntimeModuleDescriptor(
         component_id=component["id"],
-        requires=startup_components,
+        requires=tuple(
+            dict.fromkeys(
+                (
+                    *startup_components,
+                    *(
+                        ("routing.graph",)
+                        if (
+                            component.get("publishes")
+                            or component.get("subscribes")
+                            or component.get("jobs")
+                        )
+                        else ()
+                    ),
+                )
+            )
+        ),
         factory=factory,
         artifact=RuntimeArtifactIdentity(
             package_id=snapshot.manifest["package_id"],
