@@ -10,11 +10,6 @@ from jsonschema import Draft202012Validator
 
 from forest.bootstrap_contributions import BootstrapConfigurationContribution
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
-from forest.clean_embedding_module import (
-    EMBEDDING_CONFIGURATION_SCHEMA,
-    default_embedding_configuration,
-)
-from forest.clean_embedding_runtime import CleanMultimodalEmbeddingRuntime
 from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA, default_shell_configuration
 from forest.clean_shell_runtime import CleanShellRuntime
 from forest.clean_vector_index_module import (
@@ -22,6 +17,11 @@ from forest.clean_vector_index_module import (
     default_vector_index_configuration,
 )
 from forest.clean_vector_index_runtime import CleanMilvusVectorIndexRuntime
+from forest.embedding_builtin import (
+    EMBEDDING_CONFIGURATION_SCHEMA,
+    default_embedding_configuration,
+    validate_embedding_configuration,
+)
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.provider_builtin import (
@@ -135,7 +135,7 @@ def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContributi
             "Multimodal Embedding Provider",
             "Bot-lifetime text and image embedding identity and endpoint.",
             default_embedding,
-            CleanMultimodalEmbeddingRuntime._parse_configuration,
+            validate_embedding_configuration,
         ),
         (
             "vector.index",
@@ -259,7 +259,7 @@ class OfficialBotSettingsResolver:
         provider, capabilities = validate_provider_configuration(
             components["provider.chat-completions"].config
         )
-        embedding, embedding_profile = CleanMultimodalEmbeddingRuntime._parse_configuration(
+        embedding, embedding_profile = validate_embedding_configuration(
             components["embedding.multimodal"].config
         )
         vector_index = CleanMilvusVectorIndexRuntime._parse_configuration(

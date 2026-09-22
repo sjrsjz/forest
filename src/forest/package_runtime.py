@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
@@ -114,6 +115,7 @@ class PackageGenerationAdapter:
         state_queries: PackageStateQueries | None,
         state_commands: PackageStateCommands | None,
         service_operation_ledger: PackageServiceOperationLedger,
+        configuration_validator: Callable[[object], Any] | None = None,
         effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
         event_publisher=None,
         component_job_scheduler=None,
@@ -132,6 +134,7 @@ class PackageGenerationAdapter:
         self._state_queries = state_queries
         self._state_commands = state_commands
         self._service_operation_ledger = service_operation_ledger
+        self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
         self._effect_drivers: dict[str, PackageEffectDriver] = {}
         self._event_publisher = event_publisher
@@ -751,6 +754,10 @@ class PackageGenerationAdapter:
             raise ForestError(
                 "CONFIG_INVALID", "Package configuration is not finite JSON", 422
             ) from exc
+        if self._configuration_validator is not None:
+            validation = self._configuration_validator(configuration)
+            if inspect.isawaitable(validation):
+                await validation
         self._configuration = configuration
         self._configuration_revision = desired.revision
         identity_seed = hashlib.sha256(
@@ -963,6 +970,7 @@ def package_runtime_descriptor(
     state_queries: PackageStateQueries | None,
     state_commands: PackageStateCommands | None,
     service_operation_ledger: PackageServiceOperationLedger,
+    configuration_validator: Callable[[object], Any] | None = None,
     effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
     storage=None,
     management=(),
@@ -1089,6 +1097,7 @@ def package_runtime_descriptor(
             state_queries=state_queries,
             state_commands=state_commands,
             service_operation_ledger=service_operation_ledger,
+            configuration_validator=configuration_validator,
             effect_driver_factories=effect_driver_factories,
             event_publisher=event_publisher,
             component_job_scheduler=component_job_scheduler,

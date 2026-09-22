@@ -8,7 +8,12 @@ from forest.builtin_memory_shell import MEMORY_SHELL_COMMANDS
 from forest.builtin_memory_tool import MEMORY_EXACT_RECALL_TOOL
 from forest.clean_management_contract import CleanMemoryManagementContract
 from forest.clean_memory_runtime import CleanMemoryRuntime
-from forest.embeddings import SILICONFLOW_VL_MODEL
+from forest.embedding_effect_execution import KernelEmbeddingEffectExecutionPort
+from forest.embeddings import (
+    SILICONFLOW_VL_MODEL,
+    EmbeddingProfile,
+    prepare_embedding_request,
+)
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import (
@@ -56,15 +61,67 @@ def default_memory_configuration() -> dict:
 
 
 class _RoutedEmbeddingProvider:
-    def __init__(self, encode) -> None:
-        self._encode = encode
+    def __init__(self, bind, effects) -> None:
+        self._bind = bind
+        self._effects = effects
 
     @property
     def route(self):
-        return self._encode.route
+        return self._bind.route
 
-    async def encode(self, *args, **values):
-        return await self._encode(*args, **values)
+    async def encode(
+        self,
+        inputs,
+        *,
+        request_id,
+        transport_attempt_id,
+        purpose,
+        expected_profile,
+        producer_generation_id,
+        permits,
+        handoff_operation_id,
+    ):
+        profile_value = await self._bind.invoke(
+            {"protocol": "forest.embedding-bind-request/1", "request_id": request_id},
+            operation_id="embedding-bind:" + digest_json(request_id)[7:],
+            causal_root_kind="memory.embedding",
+            causal_root_id=request_id,
+        )
+        route = self._bind.route
+        try:
+            profile = EmbeddingProfile(**profile_value["profile"])
+        except (KeyError, TypeError, ValueError, ForestError) as exc:
+            raise ForestError(
+                "EMBEDDING_PROFILE_INVALID", "Embedding profile response is invalid", 502
+            ) from exc
+        if (
+            profile != expected_profile
+            or profile.space_id != profile_value["space_id"]
+            or profile_value["component_id"] != route.provider_component_id
+            or profile_value["generation_id"] != route.provider_generation_id
+        ):
+            raise ForestError(
+                "EMBEDDING_ROUTE_MISMATCH",
+                "Memory and Embedding Provider are bound to different spaces",
+                409,
+            )
+        prepared = prepare_embedding_request(
+            profile,
+            tuple(inputs),
+            request_id=request_id,
+            transport_attempt_id=transport_attempt_id,
+            purpose=purpose,
+        )
+        return await self._effects.dispatch(
+            prepared,
+            inputs=tuple(inputs),
+            provider_component_id=route.provider_component_id,
+            provider_generation_id=route.provider_generation_id,
+            profile_ref=profile_value["profile_ref"],
+            producer_generation_id=producer_generation_id,
+            permits=permits,
+            handoff_operation_id=handoff_operation_id,
+        )
 
 
 class _RoutedVectorIndex:
@@ -142,12 +199,18 @@ async def bootstrap_clean_memory(
         grantee_kind="component",
         grantee_id="memory.graph",
         entries=tuple(
-            CapabilityGrant(capability, "bot", store.bot_id)
+            CapabilityGrant(
+                capability,
+                "bot",
+                store.bot_id,
+                delegable=capability == "embedding.invoke",
+            )
             for capability in (
                 "memory.read",
                 "memory.write",
                 "memory.embed",
                 "memory.forget",
+                "embedding.invoke",
             )
         ),
         expected_policy_revision=policy_revision,
@@ -184,6 +247,21 @@ async def bootstrap_clean_memory(
         )
 
     def factory(_runtime, contracts):
+        embedding_bind = contracts.service(
+            "embedding.profile.bind", 1, owned_work=True
+        )
+        embedding_dispatch = contracts.service(
+            "embedding.encode", 1, owned_work=True
+        )
+        embedding_effects = KernelEmbeddingEffectExecutionPort(
+            retrieval=retrieval,
+            effects=kernel.effect,
+            payloads=kernel.payload,
+            runtime=kernel.runtime,
+            authorization=kernel.authorization,
+            memory_grants=grants,
+            service=embedding_dispatch,
+        )
         runtime = CleanMemoryRuntime(
             repository=repository,
             retrieval=retrieval,
@@ -194,7 +272,8 @@ async def bootstrap_clean_memory(
             generation_admission_verifier=kernel.runtime.verify_active_generation_in,
             generation_member_verifier=kernel.runtime.verify_generation_member_in,
             embedding_provider=_RoutedEmbeddingProvider(
-                contracts.service("embedding.encode", 1, owned_work=True)
+                embedding_bind,
+                embedding_effects,
             ),
             vector_index=_RoutedVectorIndex(
                 upsert=contracts.service("vector.index.upsert", 1, owned_work=True),

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "request_id", "component_id", "generation_id", "profile_ref", "space_id", "profile"],
+  "properties": {
+    "protocol": {"const": "forest.embedding-profile/1"},
+    "request_id": {"type": "string"},
+    "component_id": {"const": "embedding.multimodal"},
+    "generation_id": {"type": "string"},
+    "profile_ref": {"type": "string", "pattern": "^profile:[0-9a-f]{64}$"},
+    "space_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["deployment_id", "model_revision", "model", "dimensions"],
+      "properties": {
+        "deployment_id": {"type": "string"}, "model_revision": {"type": "string"},
+        "model": {"type": "string"}, "dimensions": {"type": "integer"}
+      }
+    }
+  }
+}

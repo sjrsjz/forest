@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "endpoint", "credential_ref", "timeout_seconds", "max_connections", "profile"],
+  "properties": {
+    "protocol": {"const": "forest.embedding.multimodal/1"},
+    "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+    "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300},
+    "max_connections": {"type": "integer", "minimum": 1, "maximum": 32},
+    "profile": {"$ref": "#/$defs/profile"}
+  },
+  "$defs": {
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["deployment_id", "model_revision", "model", "dimensions"],
+      "properties": {
+        "deployment_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "model_revision": {"type": "string", "minLength": 1, "maxLength": 256},
+        "model": {"enum": ["jina-clip-v2", "Qwen/Qwen3-VL-Embedding-8B"]},
+        "dimensions": {"type": "integer", "minimum": 1, "maximum": 4096}
+      }
+    }
+  }
+}

@@ -18,7 +18,7 @@ from psycopg import sql
 from forest.agent_protocol import CORE_PROMPT_SHA256
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.clean_management_app import create_clean_management_app
-from forest.embeddings import EmbeddingInput, EmbeddingResult, EmbeddingVector
+from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.runtime_modules import ModuleLifecycleState
@@ -755,44 +755,6 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         ("IMAGE", 1),
                         ("TEXT", 2),
                     ]
-                    permitted = False
-
-                    async def permit_in(_conn, *, request):
-                        nonlocal permitted
-                        permitted = request.component_id == "embedding.multimodal"
-
-                    result = await memory_runtime.embedding_provider.encode(
-                        (
-                            EmbeddingInput(
-                                "test-facet",
-                                text="Forest multimodal route",
-                                source_json=(
-                                    '{"source_revision":1,"part_id":"part/text",'
-                                    '"trunk_id":"trunk/test","author_ref":"qq:test"}'
-                                ),
-                            ),
-                        ),
-                        request_id="test-request",
-                        transport_attempt_id="test-attempt",
-                        purpose="document",
-                        permit_in=permit_in,
-                    )
-                    assert permitted is True and result.status == "RESPONDED"
-                    embedding_runtime = host.registry.get("embedding.multimodal")
-                    async with host.store.pool.connection() as conn:
-                        attempt = await (
-                            await conn.execute(
-                                sql.SQL(
-                                    "SELECT state,result_payload_id,usage_json FROM {}."
-                                    "embedding_transport_attempts WHERE bot_id=%s "
-                                    "AND attempt_id=%s"
-                                ).format(sql.Identifier(embedding_runtime.repository.namespace)),
-                                (settings.bot_id, "test-attempt"),
-                            )
-                        ).fetchone()
-                    assert attempt["state"] == "RESPONDED"
-                    assert attempt["result_payload_id"] is not None
-                    assert attempt["usage_json"] == '{"total_tokens":1}'
                     payload_source = PayloadSource(
                         "adapter.onebot", "test.event", "test-memory-event", 1
                     )

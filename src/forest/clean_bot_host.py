@@ -20,7 +20,6 @@ from forest.chat_completions_effect_driver import (
 )
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
-from forest.clean_embedding_module import bootstrap_clean_embedding
 from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
@@ -32,6 +31,8 @@ from forest.clean_vector_index_module import (
     default_vector_index_configuration,
 )
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.embedding_builtin import embedding_configuration_validator_factory
+from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.models import ModelCapabilities
@@ -504,10 +505,6 @@ class CleanBotHost:
             "model": self.settings.embedding_model,
             "dimensions": self.settings.embedding_dimensions,
         }
-        embedding_options = {}
-        if self._embedding_client_factory is not None:
-            embedding_options["client_factory"] = self._embedding_client_factory
-
         async def resolve_embedding_secret(secret_ref, _revision):
             if secret_ref != self.settings.embedding_credential_ref:
                 raise ForestError(
@@ -517,11 +514,15 @@ class CleanBotHost:
                 )
             return self.settings.embedding_api_key
 
-        embedding = await bootstrap_clean_embedding(
+        embedding_driver_options = {}
+        if self._embedding_client_factory is not None:
+            embedding_driver_options["client_factory"] = self._embedding_client_factory
+        embedding = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/embedding_multimodal"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            credential_resolver=resolve_embedding_secret,
             initial_configuration={
                 "protocol": "forest.embedding.multimodal/1",
                 "endpoint": self.settings.embedding_endpoint,
@@ -530,7 +531,21 @@ class CleanBotHost:
                 "max_connections": self.settings.embedding_max_connections,
                 "profile": embedding_profile,
             },
-            **embedding_options,
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "embedding.multimodal.http": (
+                        multimodal_embedding_effect_driver_factory(
+                            effects=self._kernel.effect,
+                            runtime=self._kernel.runtime,
+                            credential_resolver=resolve_embedding_secret,
+                            **embedding_driver_options,
+                        )
+                    )
+                }
+            ),
+            configuration_validator_factory=(
+                embedding_configuration_validator_factory(self.store)
+            ),
         )
 
         async def resolve_vector_index_token(secret_ref, _revision):

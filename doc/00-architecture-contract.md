@@ -88,7 +88,7 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 所有普通插件（包括 builtin）必须完整支持 `drain` 热重载。唯一合法路径为：捕获新源码形成不同内容摘要 → 静态校验 manifest/schema/依赖/能力 → 创建新 Worker 与新 Generation → 在无生产写权限下 prepare/start/health → 冻结旧路由准入 → 排空旧代在途调用和持久安全点 → 原子提交新 route/registry/config effective → 本地开放新代 admission → 停止并回收旧 Worker、任务、连接与临时环境。候选在提交前任一步失败时，必须销毁候选并恢复旧代准入；提交后不得把旧对象重新激活为当前代，回退也要创建新的 Generation。
 
-热重载的单位是不可变包/Worker/Generation，不是 Python module 对象。配置生效、UI 工件、服务路由、命令、订阅、Job、状态 schema 和能力授予都绑定同一 Generation，不能分别切换。内核或不可卸载 bootstrap 代码只允许受控宿主重启，不能借“builtin”身份绕过该规则。
+热重载的单位是不可变包/Worker/Generation，不是 Python module 对象。配置生效、UI 工件、服务路由、命令、订阅、Job、状态 schema 和能力授予都绑定同一 Generation，不能分别切换。`prepare_generation` 必须对将要启动的准确 desired revision 重跑声明 schema 与模块领域 validator；WebUI、Shell、直接 authority 写入或恢复路径都不能绕过候选代门禁。内核或不可卸载 bootstrap 代码只允许受控宿主重启，不能借“builtin”身份绕过该规则。
 
 ## 3. 权威执行链
 

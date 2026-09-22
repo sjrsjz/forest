@@ -36,7 +36,6 @@ from forest.chat_completions_effect_driver import (
 )
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
-from forest.clean_embedding_module import bootstrap_clean_embedding
 from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
@@ -46,6 +45,11 @@ from forest.clean_vector_index_module import (
     default_vector_index_configuration,
 )
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.embedding_builtin import (
+    default_embedding_configuration,
+    embedding_configuration_validator_factory,
+)
+from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.models import ModelResult
@@ -401,12 +405,26 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             }
         ),
     )
-    embedding = await bootstrap_clean_embedding(
+    embedding = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/embedding_multimodal",
+        package_catalog,
         store,
         installer,
         kernel=kernel,
-        credential_resolver=lambda *_args: "test-embedding-key",
-        client_factory=FakeEmbeddingClient,
+        initial_configuration=default_embedding_configuration(),
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "embedding.multimodal.http": (
+                    multimodal_embedding_effect_driver_factory(
+                        effects=kernel.effect,
+                        runtime=kernel.runtime,
+                        credential_resolver=lambda *_args: "test-embedding-key",
+                        client_factory=FakeEmbeddingClient,
+                    )
+                )
+            }
+        ),
+        configuration_validator_factory=embedding_configuration_validator_factory(store),
     )
     embedding_profile = EmbeddingProfile(
         deployment_id="embedding.multimodal/qiyu-vl/default",

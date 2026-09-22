@@ -298,24 +298,16 @@ class MemoryEmbeddingWorker:
                 raise
         handoff_id = _operation("embedding-batch-handoff:", batch_attempt_id)
 
-        async def permit_in(conn, *, request):
-            if request.prepared.space_id != self.profile.space_id:
-                raise ForestError(
-                    "EMBEDDING_ROUTE_MISMATCH",
-                    "Embedding Provider returned another Bot space",
-                    409,
-                )
-            await self.retrieval.mark_batch_handoff(
-                tuple(permits), batch_operation_id=handoff_id, _connection=conn
-            )
-
         try:
             result = await self.provider.encode(
                 inputs,
                 request_id="request:" + batch_attempt_id,
                 transport_attempt_id=batch_attempt_id,
                 purpose=next(iter(purposes)),
-                permit_in=permit_in,
+                expected_profile=self.profile,
+                producer_generation_id=self.generation_id,
+                permits=tuple(permits),
+                handoff_operation_id=handoff_id,
             )
         except EmbeddingCancelled as exc:
             await asyncio.shield(

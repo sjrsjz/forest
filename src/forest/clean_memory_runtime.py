@@ -71,6 +71,7 @@ class CleanMemoryRuntime:
             {"service_id": "shell.memory.inspect", "version": 1},
         ],
         "requires": [
+            {"service_id": "embedding.profile.bind", "version": 1},
             {"service_id": "embedding.encode", "version": 1},
             {"service_id": "vector.index.upsert", "version": 1},
             {"service_id": "vector.index.search", "version": 1},

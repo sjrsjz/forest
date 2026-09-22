@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,7 @@ async def bootstrap_builtin_package(
     resolved_contracts: dict[str, str] | None = None,
     startup_components: tuple[str, ...] = (),
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
+    configuration_validator_factory: Callable[[str], Callable] | None = None,
 ) -> BuiltinPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
@@ -108,6 +110,13 @@ async def bootstrap_builtin_package(
         payloads=kernel.payload,
     )
     configuration_schema = snapshot.schema(snapshot.component["config_schema"])
+    configuration_validator = (
+        configuration_validator_factory(storage.spec.namespace)
+        if configuration_validator_factory is not None
+        else None
+    )
+    if configuration_validator is not None:
+        await configuration_validator(initial_configuration)
     await configuration.ensure_initialized(
         operation_id=f"bootstrap:{component_id}:configuration",
         value=initial_configuration,
@@ -130,6 +139,7 @@ async def bootstrap_builtin_package(
     management_contract = CleanModuleConfigurationContract(
         configuration,
         schema=configuration_schema,
+        validator=configuration_validator,
     )
     effect_driver_factories = effect_driver_registry.resolve(
         tuple(snapshot.component.get("effect_services", ()))
@@ -164,6 +174,7 @@ async def bootstrap_builtin_package(
             kernel.runtime,
             kernel.payload,
         ),
+        configuration_validator=configuration_validator,
         effect_driver_factories=effect_driver_factories,
         storage=storage,
         management=(configuration_management_contribution(component_id),),

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["status", "request_id", "transport_attempt_id", "payload_digest", "space_id", "vectors", "usage", "error_code", "http_status"],
+  "properties": {
+    "status": {"enum": ["RESPONDED", "REJECTED", "NOT_SENT", "UNKNOWN"]},
+    "request_id": {"type": "string"},
+    "transport_attempt_id": {"type": "string"},
+    "payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "space_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "vectors": {"type": "array", "maxItems": 32, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["facet_id", "index", "values"],
+      "properties": {
+        "facet_id": {"type": "string"}, "index": {"type": "integer", "minimum": 0},
+        "values": {"type": "array", "maxItems": 4096, "items": {"type": "number"}}
+      }
+    }},
+    "usage": {"type": ["object", "null"]},
+    "error_code": {"type": ["string", "null"]},
+    "http_status": {"type": ["integer", "null"]}
+  }
+}
