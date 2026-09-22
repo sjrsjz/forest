@@ -485,6 +485,10 @@ class CleanOneBotRuntime:
             body_b64=base64.b64encode(body).decode("ascii"),
             self_id=connection.self_id,
             operation_id="onebot-codec-normalize:" + normalize_digest,
+            causal_root_kind="adapter.binding-frame",
+            causal_root_id=(
+                f"{connection.binding_id}:{connection.connection_epoch}:{normalize_digest}"
+            ),
         )
         normalized = codec_result["message"]
         if normalized is None:
@@ -698,6 +702,8 @@ class CleanOneBotRuntime:
             classified = await self.trigger_policy.invoke(
                 normalized=projected,
                 operation_id="onebot-trigger-classify:" + event_hash,
+                causal_root_kind="adapter.platform-event",
+                causal_root_id=event_hash,
             )
             classification = IngressClassification(
                 decision=classified["decision"],
@@ -750,6 +756,8 @@ class CleanOneBotRuntime:
             channel_id=channel_ref,
             segments=parts,
             operation_id=operation_id,
+            causal_root_kind="delivery.attempt",
+            causal_root_id=operation_id,
         )
         prepared = PreparedSend.from_codec_result(codec_result)
         return PreparedAdapterSend(

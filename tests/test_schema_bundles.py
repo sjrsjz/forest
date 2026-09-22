@@ -285,7 +285,8 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
             "generations",
             "routes",
             "lifecycle_operations",
-            "calls",
+            "service_operations",
+            "service_call_attempts",
             "state_heads",
             "runtime_graphs",
             "runtime_graph_modules",
@@ -799,18 +800,40 @@ async def test_builtin_package_state_runs_only_through_kernel_gateway(
         )
         first = await endpoint.invoke_routed(
             route,
-            RuntimeServiceInvocation("counter:service:1", 10),
+            RuntimeServiceInvocation(
+                "counter:service:1", 10, "test.counter", "source:counter:1"
+            ),
             ({"increment": 1},),
             {},
         )
         second = await endpoint.invoke_routed(
             route,
-            RuntimeServiceInvocation("counter:service:2", 10),
+            RuntimeServiceInvocation(
+                "counter:service:2", 10, "test.counter", "source:counter:2"
+            ),
+            ({"increment": 1},),
+            {},
+        )
+        replay = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "counter:service:1", 10, "test.counter", "source:counter:1"
+            ),
+            ({"increment": 1},),
+            {},
+        )
+        third = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "counter:service:3", 10, "test.counter", "source:counter:3"
+            ),
             ({"increment": 1},),
             {},
         )
         assert first == {"value": 2, "revision": 1, "label": "计数"}
         assert second == {"value": 4, "revision": 2, "label": "计数"}
+        assert replay == first
+        assert third == {"value": 6, "revision": 3, "label": "计数"}
     finally:
         assert await registry.close() == []
 

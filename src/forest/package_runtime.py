@@ -6,6 +6,7 @@ host process; only the selected RuntimeDriver may do that inside its Worker.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -17,7 +18,13 @@ from jsonschema import Draft202012Validator
 
 from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
 from forest.errors import ForestError
-from forest.package_capabilities import PackageCallScope, PackageCapabilityGateway
+from forest.package_capabilities import (
+    PackageCallScope,
+    PackageCapabilityGateway,
+    PackageServiceError,
+    PackageServiceOperationLedger,
+    PackageServiceRoute,
+)
 from forest.packages import PackageSnapshot, contract_range
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -86,6 +93,7 @@ class PackageGenerationAdapter:
         generation_verifier: GenerationVerifier,
         generation_member_verifier: GenerationVerifier,
         capability_gateway: PackageCapabilityGateway,
+        service_operation_ledger: PackageServiceOperationLedger,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
     ) -> None:
         self.snapshot = snapshot
@@ -99,6 +107,7 @@ class PackageGenerationAdapter:
         self._generation_verifier = generation_verifier
         self._generation_member_verifier = generation_member_verifier
         self._capability_gateway = capability_gateway
+        self._service_operation_ledger = service_operation_ledger
         self._worker_factory = worker_factory
         self._worker: PythonWorker | None = None
         self._configuration: dict[str, Any] | None = None
@@ -116,6 +125,16 @@ class PackageGenerationAdapter:
         self._requested_capabilities = frozenset(
             self.component.get("capabilities", {}).get("requests", ())
         )
+        self._durable_service_results = any(
+            item == "state.write"
+            or item.startswith("event.publish:")
+            or item.startswith("job.schedule:")
+            or item.startswith("service.call:")
+            for item in self._requested_capabilities
+        )
+        self._service_inflight = 0
+        self._services_drained = asyncio.Event()
+        self._services_drained.set()
         self._granted_capabilities = frozenset(
             item.capability
             for item in self.grants.entries
@@ -200,24 +219,107 @@ class PackageGenerationAdapter:
                     "Package invocation route does not identify this Generation",
                     409,
                 )
-            result = await self._worker.invoke(
-                service_id,
-                payload,
-                # A call identifies one execution attempt.  Idempotency belongs
-                # to operation_id, so retries and concurrent duplicate delivery
-                # must never contend for the same live call slot.
-                call_id="call:" + uuid4().hex,
-                operation_id=invocation.operation_id,
-                timeout=invocation.timeout_seconds,
-                before_send=lambda: self._verify_dispatch(route),
+            call_id = "call:" + uuid4().hex
+            scope = PackageCallScope(
+                bot_id=self.bot_id,
+                component_id=self.component_id,
+                generation_id=self.generation_identity.generation_id,
+                instance_id=self._prepared_binding.instance_id,
+                worker_incarnation=self._prepared_binding.worker_incarnation,
+                call_id=call_id,
+                call_operation_id=invocation.operation_id,
+                causal_root_kind=invocation.causal_root_kind,
+                causal_root_id=invocation.causal_root_id,
             )
-            if not output_validator.is_valid(result):
-                raise ForestError(
-                    "RUNTIME_SERVICE_OUTPUT_INVALID",
-                    "Plugin service result violates its immutable schema",
-                    502,
-                )
-            return result
+            service_route = PackageServiceRoute(
+                service_id=service_id,
+                graph_id=route.graph_id,
+                graph_revision=route.graph_revision,
+                admission_lane=route.admission_lane,
+                owned_work=route.owned_work,
+                parent_call_id=invocation.parent_call_id,
+                timeout_seconds=invocation.timeout_seconds,
+            )
+            self._service_inflight += 1
+            self._services_drained.clear()
+            try:
+                if self._durable_service_results:
+                    admission = await self._service_operation_ledger.begin(
+                        scope, service_route, payload
+                    )
+                    if not admission.execute:
+                        if admission.error is not None:
+                            raise ForestError(
+                                admission.error.code,
+                                admission.error.message,
+                                admission.error.status,
+                                details=admission.error.details,
+                            )
+                        if not output_validator.is_valid(admission.result):
+                            raise ForestError(
+                                "SERVICE_OPERATION_CORRUPT",
+                                "Stored plugin service result violates its schema",
+                                500,
+                            )
+                        return admission.result
+                try:
+                    result = await self._worker.invoke(
+                        service_id,
+                        payload,
+                        call_id=call_id,
+                        operation_id=invocation.operation_id,
+                        causal_root_kind=invocation.causal_root_kind,
+                        causal_root_id=invocation.causal_root_id,
+                        timeout=invocation.timeout_seconds,
+                        before_send=lambda: self._verify_dispatch(route),
+                    )
+                except ForestError as error:
+                    if self._durable_service_results:
+                        await self._service_operation_ledger.fail(
+                            scope,
+                            service_route,
+                            PackageServiceError(
+                                error.code,
+                                error.message,
+                                error.status,
+                                error.details if isinstance(error.details, dict) else None,
+                            ),
+                        )
+                    raise
+                except Exception:
+                    if self._durable_service_results:
+                        await self._service_operation_ledger.fail(
+                            scope,
+                            service_route,
+                            PackageServiceError(
+                                "PLUGIN_SERVICE_FAILED",
+                                "Plugin service failed without a typed error",
+                                500,
+                            ),
+                        )
+                    raise
+                if not output_validator.is_valid(result):
+                    error = ForestError(
+                        "RUNTIME_SERVICE_OUTPUT_INVALID",
+                        "Plugin service result violates its immutable schema",
+                        502,
+                    )
+                    if self._durable_service_results:
+                        await self._service_operation_ledger.fail(
+                            scope,
+                            service_route,
+                            PackageServiceError(error.code, error.message, error.status),
+                        )
+                    raise error
+                if self._durable_service_results:
+                    await self._service_operation_ledger.succeed(
+                        scope, service_route, result
+                    )
+                return result
+            finally:
+                self._service_inflight -= 1
+                if self._service_inflight == 0:
+                    self._services_drained.set()
 
         async def routed(route, invocation, *args, **kwargs):
             return await invoke(route, invocation, *args, **kwargs)
@@ -247,7 +349,7 @@ class PackageGenerationAdapter:
     async def _service_gateway(
         self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
-        self._call_scope(identity, call_id)
+        scope = self._call_scope(identity, call_id)
         service_id = request["service"]
         route = self._service_routes.get(service_id)
         contract = self._resolved_contracts.get(service_id)
@@ -268,6 +370,8 @@ class PackageGenerationAdapter:
             operation_id=request["operation_id"],
             timeout_seconds=timeout,
             parent_call_id=call_id,
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
         )
 
     def _has_capability(self, capability: str) -> bool:
@@ -292,6 +396,7 @@ class PackageGenerationAdapter:
                 "Package capability request has no bound Generation",
                 409,
             )
+        causal_root_kind, causal_root_id = worker.call_causal_root(call_id)
         return PackageCallScope(
             bot_id=self.bot_id,
             component_id=self.component_id,
@@ -300,6 +405,8 @@ class PackageGenerationAdapter:
             worker_incarnation=prepared.worker_incarnation,
             call_id=call_id,
             call_operation_id=worker.call_operation_id(call_id),
+            causal_root_kind=causal_root_kind,
+            causal_root_id=causal_root_id,
         )
 
     async def _state_gateway(
@@ -476,9 +583,10 @@ class PackageGenerationAdapter:
             )
         self.state = PackageGenerationState.QUIESCING
         try:
-            await self._worker.quiesce(
-                timeout=_timeout(self.component, "drain_timeout_s", 10)
-            )
+            timeout = _timeout(self.component, "drain_timeout_s", 10)
+            async with asyncio.timeout(timeout):
+                await self._worker.quiesce(timeout=timeout)
+                await self._services_drained.wait()
         except BaseException:
             self.state = PackageGenerationState.FAILED
             raise
@@ -528,6 +636,7 @@ def package_runtime_descriptor(
     generation_verifier: GenerationVerifier,
     generation_member_verifier: GenerationVerifier,
     capability_gateway: PackageCapabilityGateway,
+    service_operation_ledger: PackageServiceOperationLedger,
     storage=None,
     management=(),
     management_contract=None,
@@ -577,6 +686,7 @@ def package_runtime_descriptor(
             generation_verifier=generation_verifier,
             generation_member_verifier=generation_member_verifier,
             capability_gateway=capability_gateway,
+            service_operation_ledger=service_operation_ledger,
             worker_factory=worker_factory,
         )
         if management_contract is not None:

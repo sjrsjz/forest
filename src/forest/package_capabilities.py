@@ -15,6 +15,34 @@ class PackageCallScope:
     worker_incarnation: str
     call_id: str
     call_operation_id: str
+    causal_root_kind: str
+    causal_root_id: str
+
+
+@dataclass(frozen=True)
+class PackageServiceRoute:
+    service_id: str
+    graph_id: str
+    graph_revision: int
+    admission_lane: str
+    owned_work: bool
+    parent_call_id: str | None
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class PackageServiceError:
+    code: str
+    message: str
+    status: int
+    details: dict | None = None
+
+
+@dataclass(frozen=True)
+class PackageServiceAdmission:
+    execute: bool
+    result: Any = None
+    error: PackageServiceError | None = None
 
 
 class PackageCapabilityGateway(Protocol):
@@ -35,3 +63,26 @@ class PackageCapabilityGateway(Protocol):
     async def publish_event(self, scope: PackageCallScope, request: dict) -> dict: ...
 
     async def schedule_job(self, scope: PackageCallScope, request: dict) -> dict: ...
+
+
+class PackageServiceOperationLedger(Protocol):
+    async def begin(
+        self,
+        scope: PackageCallScope,
+        route: PackageServiceRoute,
+        input_value: dict,
+    ) -> PackageServiceAdmission: ...
+
+    async def succeed(
+        self,
+        scope: PackageCallScope,
+        route: PackageServiceRoute,
+        result: Any,
+    ) -> None: ...
+
+    async def fail(
+        self,
+        scope: PackageCallScope,
+        route: PackageServiceRoute,
+        error: PackageServiceError,
+    ) -> None: ...

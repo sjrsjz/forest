@@ -15,6 +15,10 @@ class NoCapabilities:
     supported_capabilities = frozenset()
 
 
+class NoServiceLedger:
+    pass
+
+
 class Configuration:
     async def desired(self, *, include_value=False):
         value = {
@@ -49,6 +53,7 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
         generation_verifier=verify,
         generation_member_verifier=verify,
         capability_gateway=NoCapabilities(),
+        service_operation_ledger=NoServiceLedger(),
     )
     context = PreparedGenerationContext(
         activation_id="9be186b5-667b-4f48-8051-4b360c087632",
@@ -91,7 +96,12 @@ async def test_package_generation_uses_isolated_worker_and_explicit_reload_state
         admission_lane="DATA",
         owned_work=False,
     )
-    invocation = RuntimeServiceInvocation("classify:package-runtime:1", 10)
+    invocation = RuntimeServiceInvocation(
+        "classify:package-runtime:1",
+        10,
+        "test.package-runtime",
+        "source:package-runtime:1",
+    )
     assert not callable(handler)
     assert "trigger_policy" not in sys.modules
     normalized = {

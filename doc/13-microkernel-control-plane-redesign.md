@@ -103,11 +103,15 @@ Python 插件接入 RuntimeGraph 的唯一桥梁是内核拥有的 `PackageGener
 
 Adapter 不得把插件类、方法、Repository 或客户端返回给 Registry。Registry 看到的实例永远是通用 Driver 句柄；Worker 才能 import `entrypoint`。插件代码若需要调用另一服务，只能经 `ctx.services.call` 发 IPC 回宿主，由宿主 Contract Router 在调用者 Generation 下解析；插件不能读取 Registry，也不能请求按组件 ID取得对象。
 
-每次跨 Worker 调用必须同时携带两种不可混用的身份：`operation_id` 稳定标识业务操作并承担幂等语义，`call_id` 唯一标识一次执行尝试并承担运行中占用、取消和父子调用关系。重试和重复投递复用 `operation_id`，但每次尝试创建新的 `call_id`；不得根据业务幂等键派生可重复的执行调用号。Contract Router 把冻结 route 与不可变 invocation 显式交给路由感知 endpoint，不使用线程局部或隐式进程上下文。Worker 发起嵌套服务调用时必须声明自己的稳定 `operation_id`，宿主记录当前 `call_id` 为父调用，并把子调用期限限制在父调用剩余期限内；插件不能延长调用树的 deadline，也不能绕过 Router 自行取得服务对象。缺少这些事实的插件调用在边界直接拒绝，不由 Provider、业务模块或兼容分支猜测补齐。
+每次跨 Worker 调用必须同时携带两种不可混用的身份：`operation_id` 稳定标识业务操作并承担幂等语义，`call_id` 唯一标识一次执行尝试并承担运行中占用、取消和父子调用关系。调用还必须携带不可变 `causal_root_kind/causal_root_id`；顶层入口从平台事件、Delivery attempt、Job 或管理请求产生，嵌套调用只能继承父根。重试和重复投递复用 `operation_id` 与因果根，但每次尝试创建新的 `call_id`；不得根据业务幂等键派生可重复的执行调用号。Contract Router 把冻结 route 与不可变 invocation 显式交给路由感知 endpoint，不使用线程局部或隐式进程上下文。Worker 发起嵌套服务调用时必须声明自己的稳定 `operation_id`，宿主记录当前 `call_id` 为父调用，并把子调用期限限制在父调用剩余期限内；插件不能延长调用树的 deadline、改写因果根，也不能绕过 Router 自行取得服务对象。缺少这些事实的插件调用在边界直接拒绝，不由 Provider、业务模块或兼容分支猜测补齐。
 
 Worker 的宿主能力只能汇入一个内核拥有的 `PackageCapabilityGateway`，Adapter 不接受任意 `state_handler/event_handler/job_handler` 回调。Adapter 负责核对不可变包声明、准确 grant、Worker 身份和活动调用作用域；网关按能力种类转入独立权威。`State Query` 与 `State Command` 是两个端口：Query 只读取现有 head 与受管 Payload，缺失时返回 revision 0，不能顺便初始化；Command 在一个 Bot 数据库事务中复核准确 Generation 成员、按 `(component_id,state_key)` 串行、检查 expected revision、保存 Payload、追加以 `(component_id,operation_id)` 唯一的不可变 step 并推进 head。同一操作同一输入跨 `call_id` 返回原回执，输入不同则冲突；并发写同一 revision 只能一个提交。事件发布和任务调度也必须各自接入持久 authority；网关未安装对应 authority 时，声明该能力的包在构图前失败，不能用空实现、进程内队列或组合根回调降级。
 
+只读纯服务直接执行，不为每条 Codec/分类调用制造数据库写放大。获得 `state.write`、Event/Job 发布或下游服务调用能力的组件，其服务先进入 `kernel.runtime` 的持久操作账本：`service_operations` 以 `(component_id,operation_id)` 固定服务、输入摘要和因果根，`service_call_attempts` 保存唯一 call、准确 Generation/Worker/RuntimeGraph、父调用和 deadline。同一操作最多派发一次；成功结果和类型化失败均保存为受管 Payload，重复请求只追加 replay attempt 并返回原终态。原 attempt 超过 deadline 而没有终态时只收敛为 `UNKNOWN`，不得重新执行来猜测。Adapter 的在途计数覆盖账本准入、Worker 执行和终态提交，Generation 排空必须等到三段全部结束后才能发布新图。
+
 配置读取是 Query；配置计划/提交是 Command；Worker 调用、状态提交和外部效果各有独立端口。`prepare_generation` 只能读取冻结配置、声明和授权事实，不得写业务状态或执行网络副作用。Worker 的 `prepare/start/health` 只建立候选资源；即使 Worker 内部已进入可接受 IPC 的待命态，Adapter 的本地 admission gate 与持久 route 在 publication 前保持关闭。`activate_generation` 只同步翻转本地 gate，不做 IPC、网络或数据库操作。
+
+Python 只用于降低模块实现与部署成本，不降低内核正确性要求。正确性必须由封闭状态机、构造时完整的身份类型、单一事实所有者、能力端口和最终事务围栏建立；不得依赖调用方约定、运行时猜测或测试样例补足协议。Query 只能读取既有事实，缺省值也不能在查询路径中落库；Command 只能通过所属 authority 修改状态，并在一个事务中完成其声明的原子事实。外部副作用、持久状态写入和跨模块调用必须分别进入类型化端口，禁止把可选回调、共享可变对象或隐藏 I/O 注入领域逻辑。测试只验证跨进程、并发、故障和协议边界是否兑现这些不变量，不能作为引入读写合一、散落副作用或非法状态补偿分支的理由。
 
 ### 3.2 完整热重载与回滚
 
@@ -201,7 +205,7 @@ dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph
 
 控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；实际 Kernel call 使用其冻结 Generation；尚未执行的 Event/Job/Delivery 不借用当前 head 伪造代际。外部发送逐 part 显示 `PENDING/CLAIMED/PREPARED/DISPATCHING/SENT/FAILED/UNKNOWN/CANCELLED`；`CANCELLED` 只适用于未交接 attempt，`UNKNOWN` 只能由带 evidence 的显式 resolution 收敛，不提供跳过 lane 的状态。Trace 只返回身份、状态、摘要、时间和因果引用，不返回消息正文、事件/任务载荷、wire body 或平台 receipt 正文。
 
-每个 Kernel 根调用在准入时固化 `causal_root_kind/causal_root_id`，嵌套调用继承同一根；允许的根是 Kernel operation、业务命令请求、消息 Handler chain 和 Conversation Run。Event 与 Job 的后继调用继承发布/调度调用的根，Agent 工具调用由 Agent 准入证明强制绑定 Conversation Run，调用者不能自行换根。`bot_calls_causal_root_idx` 和各权威事实表上的关联键让组件、代际与结果筛选先在数据库中精确选出消息根，不再扫描最近若干消息后做进程内猜测，也不再返回 `candidate_scan_truncated`。
+每个 Kernel 根调用在准入时固化 `causal_root_kind/causal_root_id`，嵌套调用继承同一根；允许的根是 Kernel operation、业务命令请求、消息 Handler chain 和 Conversation Run。Event 与 Job 的后继调用继承发布/调度调用的根，Agent 工具调用由 Agent 准入证明强制绑定 Conversation Run，调用者不能自行换根。`service_call_attempts_causal_root` 和各权威事实表上的关联键让组件、代际与结果筛选先在数据库中精确选出消息根，不再扫描最近若干消息后做进程内猜测，也不再返回 `candidate_scan_truncated`。
 
 单次因果展开必须同时限制深度和节点数，并在截断时显式返回 `causal_truncated`；循环通过稳定对象身份去重。数十万消息查询不能依赖无界递归或把大量消息载入浏览器过滤。查询按 `(received_at,event_id)` 倒序读取精确命中的消息根，并返回绑定其余筛选条件的 `next_before` 游标；游标不能换筛选条件后复用，WebUI 逐页追加而不要求浏览器先取得全部历史。验收必须覆盖十万级数据上的索引计划、延迟和单页因果展开上限。控制台始终只读，不能拖拽 trace 改变生产路由。
 

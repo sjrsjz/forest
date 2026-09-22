@@ -59,11 +59,15 @@ class FakeServiceHandle:
         self,
         *args,
         operation_id,
+        causal_root_kind,
+        causal_root_id,
         timeout_seconds=30,
         parent_call_id=None,
         **kwargs,
     ):
         assert isinstance(operation_id, str) and operation_id
+        assert isinstance(causal_root_kind, str) and causal_root_kind
+        assert isinstance(causal_root_id, str) and causal_root_id
         assert timeout_seconds == 30
         assert parent_call_id is None
         self.operations.append(operation_id)

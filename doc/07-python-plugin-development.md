@@ -104,6 +104,8 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 `ctx.state.get` 是纯 Query：键不存在时返回 `value=None, revision=0`，不会创建记录。`ctx.state.commit` 是单键 Command，必须提交上次读取的 expected revision 和从逻辑调用身份派生的稳定 operation ID；内核在同一事务中完成 Generation 围栏、revision CAS、Payload 保存、不可变操作 step 与 head 推进。相同 operation ID 和输入跨执行尝试返回原回执，输入变化报冲突。同一次服务需要修改多个业务事实、同时发布 outbox 或形成更复杂不变量时，应贡献专用 Repository/UnitOfWork 契约，不能把多个 `ctx.state.commit` 假装成原子事务。
 
+拥有写入、事件、任务或下游调用能力的服务由宿主持久化整个操作终态。相同服务 operation ID、输入和因果根只允许一次 Worker 派发；响应丢失后的重复调用返回原结果或原类型化失败。原调用超过 deadline 且没有可证明终态时返回 `UNKNOWN`，作者必须提供业务查询/对账路径，不能换 call ID 或 operation ID 自动再执行。无副作用的纯服务不写该账本，包不得靠未声明能力产生副作用来逃避此约束。
+
 Context 只在当前调用及其受监督子调用中有效，不能存入 `self` 后交给下一条消息使用。跨服务只声明契约，不 `import other_plugin`；同包 `helpers.py` 可正常相对 import，因为它随整个包一起形成同一不可变版本。
 
 持久事件的 payload 正文进入受来源与删除 epoch 约束的内容存储。消费 envelope 明确携带发布组件、原契约与 event ID；同一订阅串行、不同订阅可并行。发布幂等、ACK 丢失恢复、热重载接续和死信边界由[03 的持久事件协议](03-communication-scheduling.md#7-持久事件与消费者)、[02 的 Generation 生命周期](02-kernel-lifecycle.md)和[14 的载荷所有权](14-clean-schema-and-payload-provenance.md)共同裁决。

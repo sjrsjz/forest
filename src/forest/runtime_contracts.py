@@ -38,6 +38,8 @@ class RuntimeServiceInvocation:
 
     operation_id: str
     timeout_seconds: float
+    causal_root_kind: str
+    causal_root_id: str
     parent_call_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -47,6 +49,10 @@ class RuntimeServiceInvocation:
             or isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
             or not 0 < self.timeout_seconds <= 120
+            or not isinstance(self.causal_root_kind, str)
+            or not 1 <= len(self.causal_root_kind) <= 128
+            or not isinstance(self.causal_root_id, str)
+            or not 1 <= len(self.causal_root_id) <= 256
             or (
                 self.parent_call_id is not None
                 and (
@@ -155,6 +161,8 @@ class RuntimeServiceHandle:
         self,
         *args,
         operation_id: str,
+        causal_root_kind: str,
+        causal_root_id: str,
         timeout_seconds: float = 30,
         parent_call_id: str | None = None,
         **kwargs,
@@ -162,6 +170,8 @@ class RuntimeServiceHandle:
         invocation = RuntimeServiceInvocation(
             operation_id=operation_id,
             timeout_seconds=timeout_seconds,
+            causal_root_kind=causal_root_kind,
+            causal_root_id=causal_root_id,
             parent_call_id=parent_call_id,
         )
         return await self._router.invoke(self._request_key, invocation, args, kwargs)

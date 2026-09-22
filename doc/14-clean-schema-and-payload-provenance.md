@@ -15,7 +15,7 @@
 | 所有者 | 可以持久化的内容 | 禁止持久化的内容 |
 |---|---|---|
 | Kernel bootstrap (`forest_kernel`) | Bot 身份、schema bundle 账本 | RuntimeGraph、业务配置、调用、授权、效果、审计正文 |
-| `kernel.runtime` | Bot 运行封印、host/module lease、Generation、Route、Lifecycle、通用 Call、状态引用、RuntimeGraph | Agent/Adapter/Memory/Shell/Job 业务字段、业务 payload 正文 |
+| `kernel.runtime` | Bot 运行封印、host/module lease、Generation、Route、Lifecycle、服务操作/attempt、状态引用、RuntimeGraph | Agent/Adapter/Memory/Shell/Job 业务字段、业务 payload 正文 |
 | `kernel.payload` | Payload header/body、SourceManifest、派生父边、payload capability、删除 epoch 与 revoke/scrub 状态 | Memory 图、Context 顺序、业务可检索索引、模块私有配置 head |
 | `kernel.authorization` | 精确能力授予集、短寿命票据、一次性消费、撤销事实、通用批准与授权 revision | 模块私有策略正文、Web 会话、平台账号、Shell 管理员名单 |
 | `kernel.effect` | 通用 Effect identity、dispatch fence、attempt/outcome 与 UNKNOWN 对账 | Delivery SendIntent、OneBot wire body、Agent 工具上下文副本 |
@@ -31,7 +31,7 @@
 
 模块表放入由 bundle 分配的独占 PostgreSQL schema。模块运行角色只拥有该 schema 的 DML 权限和明确批准的内核函数；第三方 Worker 不获得数据库连接。官方受信模块也必须经自己的 Repository 访问，不能借同进程身份跨模块 join。跨模块原子流程使用内核主持的类型化 transaction participant 或 outbox/effect 协议；不能靠某模块直接更新另一模块的表来“方便地”完成事务。
 
-`kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用 Call、组件状态 payload 引用和 RuntimeGraph。Call 的来源种类、服务名和 payload 身份是有界通用字段；该 bundle 不因“都是内核功能”而吞并 payload、authorization、effect 或 audit 的表。任何 kernel 模块表都不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让对应 kernel 模块提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
+`kernel.runtime` 的干净 bundle 只包含 Bot 运行封印、Host lease/incarnation、模块资源租约、Generation、接纳路由、生命周期操作、通用服务操作/attempt、组件状态 payload 引用和 RuntimeGraph。`service_operations` 固定稳定业务操作、服务、输入摘要、因果根和唯一终态；`service_call_attempts` 固定每次 call 的 Generation、Worker、RuntimeGraph、父调用、deadline 与执行/重放观察。结果和错误正文仍由 `kernel.payload` 持有。该 bundle 不因“都是内核功能”而吞并 payload、authorization、effect 或 audit 的表。任何 kernel 模块表都不得出现 `agent_tool_id`、写死 `adapter.onebot` 的控制服务约束或 Agent、Memory、Binding、Job 外键。业务模块通过注册端口证明自己的业务前置条件，再让对应 kernel 模块提交通用事实。运行图中的 storage 身份必须冻结 schema ID、version、namespace、baseline digest、Repository contract 和 execution profile，并与该 Generation 的 package digest 同时保存。
 
 `kernel.authorization` 只回答“某个稳定主体凭哪一组当前能力，能否对精确资源执行精确动作”。授予集按主体、可选目标组件代际、能力键、资源种类和资源 ID 规范化并以摘要寻址；模块自身仍解释管理员名单、群 Shell 规则、工具策略、可见性和业务审批含义。模块先通过自己的策略端口形成能力请求，授权模块再签发最长 30 秒且绑定 `ticket_id + operation_id + subject + audience + action + resource + input_digest + plan_digest + grant_set_digest + policy_revision` 的票据。消费记录是不可变的一次性事实；相同 operation 的精确重放返回原回执，不同输入或目标复用身份必须拒绝。
 

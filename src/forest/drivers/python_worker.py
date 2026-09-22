@@ -137,6 +137,7 @@ class PythonWorker:
         self._pending: dict[str, asyncio.Future] = {}
         self._calls: dict[str, str] = {}
         self._call_operations: dict[str, str] = {}
+        self._call_roots: dict[str, tuple[str, str]] = {}
         self._call_deadlines: dict[str, float] = {}
         self._reserved_calls: set[str] = set()
         self._invocation_tasks: dict[str, asyncio.Task] = {}
@@ -682,12 +683,15 @@ class PythonWorker:
         *,
         call_id: str | None = None,
         operation_id: str | None = None,
+        causal_root_kind: str | None = None,
+        causal_root_id: str | None = None,
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
         return await self._invoke(
             "invoke", "service", service, payload,
-            call_id=call_id, operation_id=operation_id, timeout=timeout,
+            call_id=call_id, operation_id=operation_id,
+            causal_root_kind=causal_root_kind, causal_root_id=causal_root_id, timeout=timeout,
             before_send=before_send,
         )
 
@@ -698,12 +702,15 @@ class PythonWorker:
         *,
         call_id: str,
         operation_id: str,
+        causal_root_kind: str | None = None,
+        causal_root_id: str | None = None,
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
         return await self._invoke(
             "invoke_event", "subscriber_id", subscriber_id, event,
-            call_id=call_id, operation_id=operation_id, timeout=timeout,
+            call_id=call_id, operation_id=operation_id,
+            causal_root_kind=causal_root_kind, causal_root_id=causal_root_id, timeout=timeout,
             before_send=before_send,
         )
 
@@ -714,12 +721,15 @@ class PythonWorker:
         *,
         call_id: str,
         operation_id: str,
+        causal_root_kind: str | None = None,
+        causal_root_id: str | None = None,
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
         return await self._invoke(
             "invoke_job", "handler_id", handler_id, task,
-            call_id=call_id, operation_id=operation_id, timeout=timeout,
+            call_id=call_id, operation_id=operation_id,
+            causal_root_kind=causal_root_kind, causal_root_id=causal_root_id, timeout=timeout,
             before_send=before_send,
         )
 
@@ -730,6 +740,8 @@ class PythonWorker:
         *,
         call_id: str,
         operation_id: str,
+        causal_root_kind: str | None = None,
+        causal_root_id: str | None = None,
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
@@ -740,6 +752,8 @@ class PythonWorker:
             event,
             call_id=call_id,
             operation_id=operation_id,
+            causal_root_kind=causal_root_kind,
+            causal_root_id=causal_root_id,
             timeout=timeout,
             before_send=before_send,
         )
@@ -751,6 +765,8 @@ class PythonWorker:
         *,
         call_id: str,
         operation_id: str,
+        causal_root_kind: str | None = None,
+        causal_root_id: str | None = None,
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> Any:
@@ -761,6 +777,8 @@ class PythonWorker:
             event,
             call_id=call_id,
             operation_id=operation_id,
+            causal_root_kind=causal_root_kind,
+            causal_root_id=causal_root_id,
             timeout=timeout,
             before_send=before_send,
         )
@@ -774,6 +792,8 @@ class PythonWorker:
         *,
         call_id: str | None,
         operation_id: str | None,
+        causal_root_kind: str | None,
+        causal_root_id: str | None,
         timeout: float,
         before_send: Callable[[], Awaitable[None]] | None,
     ) -> Any:
@@ -806,6 +826,8 @@ class PythonWorker:
             )
         call_id = call_id or str(uuid4())
         operation_id = operation_id or call_id
+        causal_root_kind = causal_root_kind or "worker.operation"
+        causal_root_id = causal_root_id or operation_id
         if (
             not isinstance(call_id, str)
             or not 1 <= len(call_id) <= 128
@@ -820,6 +842,17 @@ class PythonWorker:
                 "Business operation identifier must contain 1 to 256 characters",
                 422,
             )
+        if (
+            not isinstance(causal_root_kind, str)
+            or not 1 <= len(causal_root_kind) <= 128
+            or not isinstance(causal_root_id, str)
+            or not 1 <= len(causal_root_id) <= 256
+        ):
+            raise ForestError(
+                "CAUSAL_ROOT_INVALID",
+                "Invocation causal root identity is invalid",
+                422,
+            )
         request_id = str(uuid4())
         # Validate before waiting for capacity, without retaining unbounded payloads.
         encoded = encode_frame({"wire_version": 1, "payload": payload}, self.limits.max_frame_bytes)
@@ -829,6 +862,7 @@ class PythonWorker:
         self._invocation_tasks[call_id] = asyncio.current_task()
         deadline = time.monotonic() + timeout
         self._call_operations[call_id] = operation_id
+        self._call_roots[call_id] = (causal_root_kind, causal_root_id)
         self._call_deadlines[call_id] = deadline
         sent = False
         try:
@@ -881,6 +915,7 @@ class PythonWorker:
             await self._close_state_calls(call_id)
             self._calls.pop(call_id, None)
             self._call_operations.pop(call_id, None)
+            self._call_roots.pop(call_id, None)
             self._call_deadlines.pop(call_id, None)
             self._reserved_calls.discard(call_id)
             self._invocation_tasks.pop(call_id, None)
@@ -897,6 +932,16 @@ class PythonWorker:
                 403,
             )
         return operation_id
+
+    def call_causal_root(self, call_id: str) -> tuple[str, str]:
+        root = self._call_roots.get(call_id)
+        if call_id not in self._calls or root is None:
+            raise ForestError(
+                "CALL_CONTEXT_REQUIRED",
+                "Capability request has no live causal root",
+                403,
+            )
+        return root
 
     def remaining_timeout(
         self, call_id: str, requested: float | None = None

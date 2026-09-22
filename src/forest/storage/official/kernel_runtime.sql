@@ -105,59 +105,91 @@ CREATE TABLE lifecycle_operations (
     )
 );
 
-CREATE TABLE calls (
+CREATE TABLE service_operations (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
-    call_id text NOT NULL,
-    operation_id text NOT NULL,
     component_id text NOT NULL,
-    generation_id text NOT NULL,
-    route_epoch bigint NOT NULL CHECK (route_epoch >= 0),
-    admission_lane text NOT NULL CHECK (admission_lane IN ('DATA', 'CONTROL')),
-    service_name text,
-    worker_incarnation text NOT NULL,
-    host_id text NOT NULL,
-    host_incarnation text NOT NULL,
-    owner_epoch bigint NOT NULL CHECK (owner_epoch > 0),
-    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
-    maintenance_epoch bigint NOT NULL CHECK (maintenance_epoch > 0),
-    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
-    cancel_epoch bigint NOT NULL DEFAULT 0 CHECK (cancel_epoch >= 0),
-    deadline_at timestamptz NOT NULL,
-    input_payload_id text NOT NULL,
+    operation_id text NOT NULL,
+    service_name text NOT NULL,
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     causal_root_kind text NOT NULL CHECK (causal_root_kind <> '' AND length(causal_root_kind) <= 128),
     causal_root_id text NOT NULL CHECK (causal_root_id <> '' AND length(causal_root_id) <= 256),
-    parent_call_id text,
-    root_call_id text NOT NULL,
-    call_depth integer NOT NULL DEFAULT 0 CHECK (call_depth BETWEEN 0 AND 32),
-    dependency_components text[] NOT NULL DEFAULT '{}',
-    status text NOT NULL DEFAULT 'ADMITTED' CHECK (
-        status IN ('ADMITTED', 'COMPLETED', 'FAILED', 'CANCELLED')
-    ),
-    result_payload_id text,
-    result_digest text,
+    status text NOT NULL CHECK (status IN ('ACTIVE','SUCCEEDED','FAILED','UNKNOWN')),
+    active_call_id text NOT NULL,
+    active_generation_id text NOT NULL,
+    deadline_at timestamptz NOT NULL,
+    outcome_payload_id text,
+    outcome_digest text,
+    outcome_owner_id text,
     error_code text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (bot_id, call_id),
-    FOREIGN KEY (bot_id, generation_id, component_id)
+    completed_at timestamptz,
+    PRIMARY KEY (bot_id, component_id, operation_id),
+    FOREIGN KEY (bot_id, active_generation_id, component_id)
         REFERENCES generations(bot_id, generation_id, component_id),
-    FOREIGN KEY (bot_id, parent_call_id) REFERENCES calls(bot_id, call_id),
-    FOREIGN KEY (bot_id, root_call_id) REFERENCES calls(bot_id, call_id),
     CHECK (
-        (parent_call_id IS NULL AND root_call_id = call_id AND call_depth = 0)
-        OR (parent_call_id IS NOT NULL AND root_call_id <> call_id AND call_depth > 0)
+        (status='ACTIVE' AND outcome_payload_id IS NULL AND outcome_digest IS NULL
+            AND outcome_owner_id IS NULL AND error_code IS NULL AND completed_at IS NULL)
+        OR (status='SUCCEEDED' AND outcome_payload_id IS NOT NULL
+            AND outcome_digest IS NOT NULL AND outcome_owner_id IS NOT NULL
+            AND error_code IS NULL AND completed_at IS NOT NULL)
+        OR (status='FAILED' AND outcome_payload_id IS NOT NULL
+            AND outcome_digest IS NOT NULL AND outcome_owner_id IS NOT NULL
+            AND error_code IS NOT NULL AND completed_at IS NOT NULL)
+        OR (status='UNKNOWN' AND outcome_payload_id IS NULL AND outcome_digest IS NULL
+            AND outcome_owner_id IS NULL AND error_code IS NOT NULL
+            AND completed_at IS NOT NULL)
     ),
-    CHECK ((result_payload_id IS NULL) = (result_digest IS NULL)),
-    CHECK (status <> 'COMPLETED' OR result_payload_id IS NOT NULL),
-    CHECK ((admission_lane = 'DATA' AND service_name IS NULL) OR service_name IS NOT NULL)
+    CHECK ((outcome_payload_id IS NULL) = (outcome_digest IS NULL)),
+    CHECK ((outcome_payload_id IS NULL) = (outcome_owner_id IS NULL))
 );
 
-CREATE INDEX calls_drain ON calls(bot_id, component_id, status);
-CREATE INDEX calls_operation ON calls(bot_id, operation_id, created_at, call_id);
-CREATE INDEX calls_parent ON calls(bot_id, parent_call_id);
-CREATE INDEX calls_root ON calls(bot_id, root_call_id, call_depth, call_id);
-CREATE INDEX calls_causal_root ON calls(
-    bot_id, causal_root_kind, causal_root_id, component_id, generation_id, status
+CREATE INDEX service_operations_status ON service_operations(
+    bot_id, component_id, status, deadline_at
+);
+
+CREATE TABLE service_call_attempts (
+    bot_id text NOT NULL,
+    call_id text NOT NULL,
+    component_id text NOT NULL,
+    operation_id text NOT NULL,
+    generation_id text NOT NULL,
+    worker_incarnation text NOT NULL,
+    service_name text NOT NULL,
+    graph_id text NOT NULL,
+    graph_revision bigint NOT NULL CHECK (graph_revision > 0),
+    admission_lane text NOT NULL CHECK (admission_lane IN ('DATA','CONTROL')),
+    owned_work boolean NOT NULL,
+    parent_call_id text,
+    causal_root_kind text NOT NULL CHECK (causal_root_kind <> '' AND length(causal_root_kind) <= 128),
+    causal_root_id text NOT NULL CHECK (causal_root_id <> '' AND length(causal_root_id) <= 256),
+    deadline_at timestamptz NOT NULL,
+    status text NOT NULL CHECK (
+        status IN ('ACTIVE','SUCCEEDED','FAILED','UNKNOWN','REPLAYED','REJECTED')
+    ),
+    error_code text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz,
+    PRIMARY KEY (bot_id, call_id),
+    FOREIGN KEY (bot_id, component_id, operation_id)
+        REFERENCES service_operations(bot_id, component_id, operation_id),
+    FOREIGN KEY (bot_id, generation_id, component_id)
+        REFERENCES generations(bot_id, generation_id, component_id),
+    CHECK (
+        (status='ACTIVE' AND error_code IS NULL AND completed_at IS NULL)
+        OR (status='SUCCEEDED' AND error_code IS NULL AND completed_at IS NOT NULL)
+        OR (status='REPLAYED' AND completed_at IS NOT NULL)
+        OR (status IN ('FAILED','UNKNOWN','REJECTED') AND error_code IS NOT NULL
+            AND completed_at IS NOT NULL)
+    )
+);
+CREATE INDEX service_call_attempts_operation ON service_call_attempts(
+    bot_id, component_id, operation_id, created_at, call_id
+);
+CREATE INDEX service_call_attempts_generation ON service_call_attempts(
+    bot_id, generation_id, status
+);
+CREATE INDEX service_call_attempts_causal_root ON service_call_attempts(
+    bot_id, causal_root_kind, causal_root_id, component_id, created_at, call_id
 );
 
 CREATE TABLE state_heads (
@@ -365,27 +397,55 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION call_identity_guard() RETURNS trigger
+CREATE FUNCTION service_operation_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Forest service operation cannot be deleted' USING ERRCODE = '55000';
+    END IF;
     IF ROW(
-        OLD.bot_id, OLD.call_id, OLD.operation_id, OLD.component_id,
-        OLD.generation_id, OLD.route_epoch, OLD.admission_lane, OLD.service_name,
-        OLD.worker_incarnation, OLD.host_id, OLD.host_incarnation, OLD.owner_epoch,
-        OLD.storage_generation, OLD.maintenance_epoch, OLD.policy_revision,
-        OLD.deadline_at, OLD.input_payload_id, OLD.input_digest,
-        OLD.causal_root_kind, OLD.causal_root_id, OLD.parent_call_id,
-        OLD.root_call_id, OLD.call_depth, OLD.dependency_components, OLD.created_at
+        OLD.bot_id, OLD.component_id, OLD.operation_id, OLD.service_name,
+        OLD.input_digest, OLD.causal_root_kind, OLD.causal_root_id,
+        OLD.active_call_id, OLD.active_generation_id,
+        OLD.deadline_at, OLD.created_at
     ) IS DISTINCT FROM ROW(
-        NEW.bot_id, NEW.call_id, NEW.operation_id, NEW.component_id,
-        NEW.generation_id, NEW.route_epoch, NEW.admission_lane, NEW.service_name,
-        NEW.worker_incarnation, NEW.host_id, NEW.host_incarnation, NEW.owner_epoch,
-        NEW.storage_generation, NEW.maintenance_epoch, NEW.policy_revision,
-        NEW.deadline_at, NEW.input_payload_id, NEW.input_digest,
-        NEW.causal_root_kind, NEW.causal_root_id, NEW.parent_call_id,
-        NEW.root_call_id, NEW.call_depth, NEW.dependency_components, NEW.created_at
+        NEW.bot_id, NEW.component_id, NEW.operation_id, NEW.service_name,
+        NEW.input_digest, NEW.causal_root_kind, NEW.causal_root_id,
+        NEW.active_call_id, NEW.active_generation_id,
+        NEW.deadline_at, NEW.created_at
     ) THEN
-        RAISE EXCEPTION 'Forest call identity is immutable' USING ERRCODE = '55000';
+        RAISE EXCEPTION 'Forest service operation identity is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.status <> 'ACTIVE' OR NEW.status NOT IN ('SUCCEEDED','FAILED','UNKNOWN') THEN
+        RAISE EXCEPTION 'Illegal Forest service operation transition' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION service_call_attempt_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Forest service call attempt cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF ROW(
+        OLD.bot_id, OLD.call_id, OLD.component_id, OLD.operation_id,
+        OLD.generation_id, OLD.worker_incarnation, OLD.service_name,
+        OLD.graph_id, OLD.graph_revision, OLD.admission_lane, OLD.owned_work,
+        OLD.parent_call_id, OLD.causal_root_kind, OLD.causal_root_id,
+        OLD.deadline_at, OLD.created_at
+    ) IS DISTINCT FROM ROW(
+        NEW.bot_id, NEW.call_id, NEW.component_id, NEW.operation_id,
+        NEW.generation_id, NEW.worker_incarnation, NEW.service_name,
+        NEW.graph_id, NEW.graph_revision, NEW.admission_lane, NEW.owned_work,
+        NEW.parent_call_id, NEW.causal_root_kind, NEW.causal_root_id,
+        NEW.deadline_at, NEW.created_at
+    ) THEN
+        RAISE EXCEPTION 'Forest service call attempt identity is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.status <> 'ACTIVE' OR NEW.status NOT IN ('SUCCEEDED','FAILED','UNKNOWN') THEN
+        RAISE EXCEPTION 'Illegal Forest service call attempt transition' USING ERRCODE = '55000';
     END IF;
     RETURN NEW;
 END;
@@ -440,8 +500,11 @@ CREATE TRIGGER host_incarnations_immutable BEFORE UPDATE OR DELETE ON host_incar
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER generation_identity BEFORE UPDATE ON generations
     FOR EACH ROW EXECUTE FUNCTION generation_identity_guard();
-CREATE TRIGGER call_identity BEFORE UPDATE ON calls
-    FOR EACH ROW EXECUTE FUNCTION call_identity_guard();
+CREATE TRIGGER service_operation_transition BEFORE UPDATE OR DELETE ON service_operations
+    FOR EACH ROW EXECUTE FUNCTION service_operation_guard();
+CREATE TRIGGER service_call_attempt_transition
+    BEFORE UPDATE OR DELETE ON service_call_attempts
+    FOR EACH ROW EXECUTE FUNCTION service_call_attempt_guard();
 CREATE TRIGGER runtime_graph_identity BEFORE UPDATE ON runtime_graphs
     FOR EACH ROW EXECUTE FUNCTION runtime_graph_identity_guard();
 CREATE TRIGGER graph_replacement_transition BEFORE UPDATE OR DELETE ON graph_replacement_requests
