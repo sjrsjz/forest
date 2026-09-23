@@ -1,0 +1,12 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+  "properties":{
+    "normalized":{"type":"object"},"binding_ref":{"type":"string"},
+    "binding_epoch":{"type":"integer","minimum":1},"connection_epoch":{"type":"integer","minimum":1},
+    "client_incarnation":{"type":"string"},"adapter_generation_id":{"type":"string"},
+    "executor_fence_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},
+    "conversation_ref":{"type":"string"},"event_ref":{"type":"string"},"principal_ref":{"type":"string"}
+  },
+  "required":["normalized","binding_ref","binding_epoch","connection_epoch","client_incarnation","adapter_generation_id","executor_fence_digest","conversation_ref","event_ref","principal_ref"],
+  "additionalProperties":false
+}

@@ -15,5 +15,6 @@ config_schema = "schemas/config.json"
 [[components.provides]]
 name = "reply.respond"
 contract = "1.0"
+semantics = "read"
 input_schema = "schemas/input.json"
 output_schema = "schemas/output.json"

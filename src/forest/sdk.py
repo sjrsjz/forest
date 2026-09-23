@@ -56,9 +56,18 @@ def plugin(
     return decorate
 
 
-def service(name: str, *, contract: str = "1.0", input_schema=None, output_schema=None):
+def service(
+    name: str,
+    *,
+    semantics: str,
+    contract: str = "1.0",
+    input_schema=None,
+    output_schema=None,
+):
     if not isinstance(name, str) or not name or len(name) > 128:
         raise ValueError("Service name must contain 1 to 128 characters")
+    if semantics not in {"at-most-once", "idempotent", "read"}:
+        raise ValueError("Service semantics must be at-most-once, idempotent or read")
 
     def decorate(function):
         if not inspect.iscoroutinefunction(function):
@@ -67,6 +76,7 @@ def service(name: str, *, contract: str = "1.0", input_schema=None, output_schem
         function.__forest_service_manifest__ = {
             "name": name,
             "contract": contract,
+            "semantics": semantics,
             "input_schema": input_schema,
             "output_schema": output_schema,
         }

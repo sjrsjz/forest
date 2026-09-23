@@ -10,6 +10,7 @@ from forest.sdk import Plugin, service
 class OneBotCodec(Plugin):
     @service(
         "onebot.codec.normalize",
+        semantics="read",
         contract="1.0",
         input_schema="schemas/normalize.json",
         output_schema="schemas/normalize-result.json",
@@ -26,6 +27,7 @@ class OneBotCodec(Plugin):
 
     @service(
         "onebot.codec.prepare-send",
+        semantics="read",
         contract="1.0",
         input_schema="schemas/prepare.json",
         output_schema="schemas/prepare-result.json",

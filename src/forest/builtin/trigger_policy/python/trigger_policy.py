@@ -29,6 +29,7 @@ class TriggerPolicy(Plugin):
 
     @service(
         "conversation.trigger.classify",
+        semantics="read",
         contract="1.0",
         input_schema="schemas/input.json",
         output_schema="schemas/output.json",

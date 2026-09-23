@@ -562,6 +562,10 @@ CREATE FUNCTION delivery_create_control_intent(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog
 AS $$ SELECT __forest_module_schema__.delivery_create_intent(context,input) $$;
 
+CREATE FUNCTION delivery_create_control_intent_uow(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog
+AS $$ SELECT __forest_module_schema__.delivery_create_intent(context,envelope->'input') $$;
+
 CREATE TABLE owned_work_settlements (
     claim_token text PRIMARY KEY,
     input_payload jsonb NOT NULL,

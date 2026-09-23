@@ -411,14 +411,20 @@ async def test_platform_event_and_conversation_inbox_commit_atomically_and_dedup
             operation_id="event/admit/a",
             binding_id="binding/main",
             expected_binding_epoch=publication["resulting_binding_epoch"],
+            connection_epoch=publication["resulting_connection_epoch"],
             client_incarnation="client/main/1",
+            adapter_generation_id="generation/adapter/1",
+            executor_fence_digest="sha256:" + "b" * 64,
             event=event,
         ),
         ingress.admit(
             operation_id="event/admit/b",
             binding_id="binding/main",
             expected_binding_epoch=publication["resulting_binding_epoch"],
+            connection_epoch=publication["resulting_connection_epoch"],
             client_incarnation="client/main/1",
+            adapter_generation_id="generation/adapter/1",
+            executor_fence_digest="sha256:" + "b" * 64,
             event=event,
         ),
     )
@@ -463,7 +469,10 @@ async def test_failed_conversation_participant_rolls_back_adapter_event(clean_on
             operation_id="event/admit/fail",
             binding_id="binding/main",
             expected_binding_epoch=publication["resulting_binding_epoch"],
+            connection_epoch=publication["resulting_connection_epoch"],
             client_incarnation="client/main/1",
+            adapter_generation_id="generation/adapter/1",
+            executor_fence_digest="sha256:" + "b" * 64,
             event=event,
         )
     assert caught.value.code == "TEST_PARTICIPANT_FAILED"

@@ -53,7 +53,7 @@ def _json(value: Any) -> Any:
 
 
 class KernelAuthorizationUnitOfWorkParticipant:
-    """Issue tickets only from the caller Generation's sealed capability grant set."""
+    """Issue and consume tickets for an exact caller Generation."""
 
     component_id = "kernel.authorization"
 
@@ -79,7 +79,7 @@ class KernelAuthorizationUnitOfWorkParticipant:
         payload: dict,
         **_invocation,
     ) -> dict:
-        if name != "authorization.issue":
+        if name not in {"authorization.issue", "authorization.consume"}:
             raise ForestError(
                 "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
                 "Authorization participant operation is undeclared",
@@ -93,6 +93,53 @@ class KernelAuthorizationUnitOfWorkParticipant:
                 422,
             )
         caller = _object(envelope["caller"], {"component_id", "generation_id"})
+        if name == "authorization.consume":
+            request = _object(
+                envelope["input"],
+                {
+                    "protocol",
+                    "ticket_id",
+                    "operation_id",
+                    "action",
+                    "resource_kind",
+                    "resource_id",
+                    "input_digest",
+                    "plan_digest",
+                    "audience_component_id",
+                    "audience_generation_id",
+                },
+            )
+            if request["protocol"] != "forest.authorization-consume/1":
+                raise ForestError(
+                    "AUTHORIZATION_UOW_INPUT_INVALID",
+                    "Authorization consume protocol is invalid",
+                    422,
+                )
+            if (
+                request["audience_component_id"] != caller["component_id"]
+                or request["audience_generation_id"] != caller["generation_id"]
+            ):
+                raise ForestError(
+                    "AUTHORIZATION_UOW_INPUT_INVALID",
+                    "Authorization ticket audience differs from the caller Generation",
+                    422,
+                )
+            consumed = await self.service.consume_ticket_in(
+                conn,
+                ticket_id=request["ticket_id"],
+                operation_id=request["operation_id"],
+                action=request["action"],
+                resource_kind=request["resource_kind"],
+                resource_id=request["resource_id"],
+                input_digest=request["input_digest"],
+                plan_digest=request["plan_digest"],
+                audience_component_id=request["audience_component_id"],
+                audience_generation_id=request["audience_generation_id"],
+            )
+            return {
+                "protocol": "forest.authorization-consumed/1",
+                "consumption": _json(consumed),
+            }
         request = _object(
             envelope["input"],
             {

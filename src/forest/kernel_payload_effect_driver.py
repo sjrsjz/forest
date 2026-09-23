@@ -21,7 +21,7 @@ def _canonical(value: object) -> bytes:
 
 
 class KernelPayloadJsonEffectDriver:
-    """Read exact JSON references or materialize Effect-owned JSON bytes."""
+    """Read exact JSON references or materialize Generation-owned JSON bytes."""
 
     def __init__(
         self,
@@ -35,6 +35,7 @@ class KernelPayloadJsonEffectDriver:
     ) -> None:
         if declaration.get("kind") != "kernel.payload-json" or declaration.get("name") not in {
             "kernel.payload.json-read",
+            "kernel.payload.json-write",
             "kernel.effect.json-materialize",
         }:
             raise ForestError(
@@ -68,6 +69,8 @@ class KernelPayloadJsonEffectDriver:
         )
         if self.declaration["name"] == "kernel.payload.json-read":
             return await self._read(payload, invocation.operation_id)
+        if self.declaration["name"] == "kernel.payload.json-write":
+            return await self._write(payload, scope.component_id, invocation.operation_id)
         return await self._materialize(payload, invocation.operation_id)
 
     async def _read(self, payload: dict, operation_id: str) -> dict:
@@ -132,6 +135,39 @@ class KernelPayloadJsonEffectDriver:
                 "payload_id": saved.payload_id,
                 "digest": saved.content_digest,
                 "owner_component_id": "kernel.effect",
+                "owner_kind": payload["owner_kind"],
+                "owner_id": payload["owner_id"],
+            },
+        }
+
+    async def _write(
+        self, payload: dict, owner_component_id: str, operation_id: str
+    ) -> dict:
+        if (
+            set(payload) != {"protocol", "owner_kind", "owner_id", "value"}
+            or payload.get("protocol") != "forest.payload-json-write/1"
+            or not isinstance(payload.get("owner_kind"), str)
+            or not 1 <= len(payload["owner_kind"].encode("utf-8")) <= 128
+            or not isinstance(payload.get("owner_id"), str)
+            or not 1 <= len(payload["owner_id"].encode("utf-8")) <= 512
+        ):
+            raise ForestError("PAYLOAD_JSON_INPUT_INVALID", "Payload write input is invalid", 422)
+        epoch = await self.payloads.epoch()
+        saved = await self.payloads.put_bytes(
+            owner_component_id=owner_component_id,
+            owner_kind=payload["owner_kind"],
+            owner_id=payload["owner_id"],
+            media_type="application/json",
+            content=_canonical(payload["value"]),
+            expected_deletion_epoch=epoch,
+        )
+        return {
+            "protocol": "forest.payload-json-written/1",
+            "operation_id": operation_id,
+            "payload": {
+                "payload_id": saved.payload_id,
+                "digest": saved.content_digest,
+                "owner_component_id": owner_component_id,
                 "owner_kind": payload["owner_kind"],
                 "owner_id": payload["owner_id"],
             },

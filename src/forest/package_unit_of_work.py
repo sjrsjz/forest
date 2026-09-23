@@ -97,6 +97,18 @@ class PostgresPackageUnitOfWorkCoordinator:
                             raise TimeoutError
                         participant = participants[step["component_id"]]
                         projected = self._pointer(payload, step.get("input_path"))
+                        generation_field = step.get("participant_generation_field")
+                        if generation_field is not None:
+                            if generation_field in projected:
+                                raise ForestError(
+                                    "PACKAGE_UOW_INPUT_INVALID",
+                                    "UnitOfWork input cannot provide a participant Generation",
+                                    422,
+                                )
+                            projected = {
+                                **projected,
+                                generation_field: participant.generation_id,
+                            }
                         result = await participant.invoke_in(
                             conn,
                             step["participant"],

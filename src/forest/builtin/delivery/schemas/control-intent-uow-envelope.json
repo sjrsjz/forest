@@ -1,0 +1,9 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+  "properties":{"protocol":{"const":"forest.uow-step/1"},"caller":{"type":"object"},"prior":{"type":"object"},
+    "input":{"type":"object","required":["protocol","intent_id","binding_ref","lane_kind","ordering_key","conversation_ref","channel_kind","channel_ref","cause_component_id","cause_kind","cause_id","delivery_generation_id","reply_ref","parts"],"properties":{
+      "protocol":{"const":"forest.delivery-intent/1"},"intent_id":{"type":"string","minLength":1,"maxLength":256},"binding_ref":{"type":"string","minLength":1,"maxLength":256},"lane_kind":{"const":"CONTROL"},"ordering_key":{"type":"string","minLength":1,"maxLength":256},"conversation_ref":{"type":["string","null"]},"channel_kind":{"enum":["GROUP","PRIVATE"]},"channel_ref":{"type":"string"},"cause_component_id":{"const":"shell.command"},"cause_kind":{"const":"shell.request"},"cause_id":{"type":"string"},"delivery_generation_id":{"type":"string"},"reply_ref":{"type":"null"},
+      "parts":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","required":["part_operation_id","effect_operation_ref","payload"],"properties":{"part_operation_id":{"type":"string"},"effect_operation_ref":{"type":"string"},"payload":{"type":"object","required":["payload_id","digest","owner_component_id","owner_kind","owner_id"],"properties":{"payload_id":{"type":"string"},"digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"owner_component_id":{"const":"shell.command"},"owner_kind":{"const":"shell.result"},"owner_id":{"type":"string"}},"additionalProperties":false}},"additionalProperties":false}}
+    },"additionalProperties":false}
+  },"required":["protocol","caller","input","prior"],"additionalProperties":false
+}

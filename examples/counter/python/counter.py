@@ -2,7 +2,7 @@ from forest.sdk import Plugin, service
 
 
 class Counter(Plugin):
-    @service("counter.increment")
+    @service("counter.increment", semantics="at-most-once")
     async def increment(self, payload, ctx):
         current = await ctx.state.get("counter")
         value = (current["value"] or 0) + payload["increment"]

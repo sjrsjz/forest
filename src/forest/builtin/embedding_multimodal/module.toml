@@ -37,6 +37,7 @@ repository_contract = "forest.embedding-identity.repository/1"
 [[components.provides]]
 name = "embedding.profile.bind"
 contract = "1.0"
+semantics = "read"
 input_schema = "schemas/bind-input.json"
 output_schema = "schemas/bind-output.json"
 

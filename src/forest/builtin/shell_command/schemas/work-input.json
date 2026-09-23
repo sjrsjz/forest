@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+  "properties":{"request_id":{"type":"string"},"claim_token":{"type":"string"},"binding_ref":{"type":"string"},"binding_epoch":{"type":"integer"},"connection_epoch":{"type":"integer"},"client_incarnation":{"type":"string"},"adapter_generation_id":{"type":"string"},"executor_fence_digest":{"type":"string"},"conversation_ref":{"type":"string"},"principal_ref":{"type":"string"},"command_id":{"type":"string"},"command_version":{"type":"integer"},"arguments":{"type":"object"},"target_component_id":{"type":"string"},"target_generation_id":{"type":"string"},"target_service_id":{"type":"string"},"target_service_version":{"type":"integer"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":900}},
+  "required":["request_id","claim_token","binding_ref","binding_epoch","connection_epoch","client_incarnation","adapter_generation_id","executor_fence_digest","conversation_ref","principal_ref","command_id","command_version","arguments","target_component_id","target_generation_id","target_service_id","target_service_version","timeout_seconds"],"additionalProperties":false
+}

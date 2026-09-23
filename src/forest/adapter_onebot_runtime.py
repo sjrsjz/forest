@@ -26,7 +26,11 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPayloadRef,
     OneBotPlatformEvent,
 )
-from forest.storage.ingress_unit_of_work import IngressClassification, IngressMemoryCapture
+from forest.storage.ingress_unit_of_work import (
+    IngressClassification,
+    IngressMemoryCapture,
+    ShellIngressCommand,
+)
 from forest.storage.memory_graph_authority import (
     MemoryPart,
     MemoryPayloadRef,
@@ -777,7 +781,7 @@ class CleanOneBotRuntime:
             sent_at=sent_at,
         )
         projected = {**normalized, "segments": context_parts}
-        shell_command = await self.shell_inspector(
+        shell_projection = await self.shell_inspector.invoke(
             normalized=projected,
             binding_ref=connection.binding_id,
             binding_epoch=connection.binding_epoch,
@@ -788,6 +792,22 @@ class CleanOneBotRuntime:
             conversation_ref=conversation_ref,
             event_ref=event_id,
             principal_ref=author_subject_ref,
+            operation_id="onebot-shell-inspect:" + event_hash,
+            causal_root_kind="adapter.platform-event",
+            causal_root_id=event_id,
+            timeout_seconds=10,
+        )
+        shell_command = (
+            None
+            if shell_projection is None
+            else ShellIngressCommand(
+                request_id=shell_projection["request_id"],
+                shell_generation_id=shell_projection["shell_generation_id"],
+                command_id=shell_projection["command_id"],
+                command_version=shell_projection["command_version"],
+                arguments=shell_projection["arguments"],
+                rejection=shell_projection["rejection"],
+            )
         )
         classification = None
         if shell_command is None:
@@ -808,7 +828,10 @@ class CleanOneBotRuntime:
             operation_id="onebot-admit:" + event_hash,
             binding_id=connection.binding_id,
             expected_binding_epoch=connection.binding_epoch,
+            connection_epoch=connection.connection_epoch,
             client_incarnation=connection.client_incarnation,
+            adapter_generation_id=self.generation_identity.generation_id,
+            executor_fence_digest=connection.executor_fence_digest,
             event=event,
             memory_capture=memory_capture,
             media_capture=media_capture,

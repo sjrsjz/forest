@@ -16,6 +16,7 @@ from forest.clean_management_contract import (
     CleanModuleConfigurationContract,
 )
 from forest.errors import ForestError
+from forest.kernel_audit_participant import KernelAuditUnitOfWorkParticipant
 from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
@@ -128,10 +129,6 @@ _MODULES = {
             "kernel.uow.conversation.session-handoff",
             "kernel.uow.conversation.defer-approval",
             "kernel.uow.onebot.ingress",
-            "kernel.uow.shell.result",
-            "kernel.uow.shell.binding-fence",
-            "kernel.uow.shell.route-fence",
-            "kernel.uow.shell.authorization.consume",
             "kernel.uow.agent.cancel-wake",
             "shell.core-runtime.execute",
             "agent.tool.runtime-status",
@@ -258,6 +255,9 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
             ("audit.query", 1): self.service.scan,
             ("shell.audit.execute", 1): self._shell_execute,
         }
+
+    def unit_of_work_participant(self):
+        return KernelAuditUnitOfWorkParticipant(self, self.service)
 
 
 class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):

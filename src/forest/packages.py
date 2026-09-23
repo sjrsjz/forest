@@ -218,6 +218,7 @@ MANIFEST_SCHEMA = {
                                 "cancellation_query": {"type": "string"},
                                 "synchronization_command": {"type": "string"},
                                 "cleanup_command": {"type": "string"},
+                                "synchronize_configuration": {"type": "boolean"},
                                 "max_execution_timeout_s": {
                                     "type": "integer",
                                     "minimum": 1,
@@ -231,10 +232,21 @@ MANIFEST_SCHEMA = {
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["name", "contract", "input_schema", "output_schema"],
+                            "required": [
+                                "name",
+                                "contract",
+                                "semantics",
+                                "input_schema",
+                                "output_schema",
+                            ],
                             "properties": {
                                 key: {"type": "string"}
                                 for key in ("name", "contract", "input_schema", "output_schema")
+                            }
+                            | {
+                                "semantics": {
+                                    "enum": ["at-most-once", "idempotent", "read"]
+                                }
                             },
                         },
                     },
@@ -597,6 +609,9 @@ MANIFEST_SCHEMA = {
                                             "component_id": {"type": "string"},
                                             "participant": {"type": "string"},
                                             "input_path": {"type": "string"},
+                                            "participant_generation_field": {
+                                                "type": "string"
+                                            },
                                         },
                                     },
                                 },
@@ -1221,12 +1236,22 @@ def _manifest(files: dict[str, bytes]) -> dict:
             component_id = step.get("component_id", "")
             participant = step.get("participant", "")
             input_path = step.get("input_path")
+            participant_generation_field = step.get(
+                "participant_generation_field"
+            )
             if (
                 not IDENTIFIER.fullmatch(step_id)
                 or step_id in step_ids
                 or not IDENTIFIER.fullmatch(component_id)
                 or not IDENTIFIER.fullmatch(participant)
                 or (input_path is not None and not _valid_json_pointer(input_path))
+                or (
+                    participant_generation_field is not None
+                    and not re.fullmatch(
+                        r"[a-z][a-z0-9_]{0,63}",
+                        participant_generation_field,
+                    )
+                )
                 or (component_id == component["id"] and participant not in participant_names)
             ):
                 _fail(
@@ -1308,6 +1333,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
             or (
                 kind == "shell-commands"
                 and "cancellation_query" in declaration
+            )
+            or (
+                "synchronize_configuration" in declaration
+                and type(declaration["synchronize_configuration"]) is not bool
             )
         ):
             _fail(

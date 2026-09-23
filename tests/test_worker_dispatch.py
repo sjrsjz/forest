@@ -111,7 +111,7 @@ async def test_typed_state_repair_metadata_survives_both_ipc_directions(tmp_path
     (snapshot.module_root / "probe.py").write_text('''from forest.errors import ForestError
 from forest.sdk import Plugin, service
 class MetadataProbe(Plugin):
-    @service("probe.echo")
+    @service("probe.echo", semantics="read")
     async def metadata(self, payload, ctx):
         if payload.get("local"):
             raise ForestError("KERNEL_CONTENT_REVOKED", "Plugin failure", 409,

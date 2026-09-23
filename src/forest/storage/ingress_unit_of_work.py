@@ -18,21 +18,16 @@ from forest.storage.memory_graph_authority import (
     MemoryPayloadRef,
     MemorySourceIdentity,
 )
-from forest.storage.shell_command_authority import (
-    ShellAdmissionProof,
-    ShellPayloadRef,
-)
 
 
 @dataclass(frozen=True)
 class ShellIngressCommand:
     request_id: str
-    proof: ShellAdmissionProof
+    shell_generation_id: str
     command_id: str
     command_version: int
-    arguments: ShellPayloadRef
-    idempotency_key: str
-    rejection: ShellPayloadRef | None = None
+    arguments: dict
+    rejection: dict
 
 
 @dataclass(frozen=True)
@@ -89,8 +84,8 @@ class OneBotIngressUnitOfWork:
             reference.owner_id,
         )
 
-    @staticmethod
     def _guard_shell_identity(
+        self,
         command: ShellIngressCommand,
         *,
         event: OneBotPlatformEvent,
@@ -100,18 +95,21 @@ class OneBotIngressUnitOfWork:
     ) -> None:
         if type(command) is not ShellIngressCommand:
             raise ForestError("SHELL_INPUT_INVALID", "Invalid Shell ingress command", 422)
-        proof = command.proof
         if (
-            type(proof) is not ShellAdmissionProof
-            or proof.binding_ref != binding_id
-            or proof.binding_epoch != expected_binding_epoch
-            or proof.client_incarnation != client_incarnation
-            or proof.conversation_ref != event.conversation_ref
-            or proof.event_ref != event.event_id
-            or proof.principal_ref != event.author_subject_ref
+            command.shell_generation_id != self.shell.generation_id
+            or command.request_id
+            != "shell:request:"
+            + hashlib.sha256(event.event_id.encode("utf-8")).hexdigest()
+            or not isinstance(command.arguments, dict)
+            or not isinstance(command.rejection, dict)
+            or set(command.rejection) != {"owner_id", "value"}
+            or not isinstance(command.rejection["owner_id"], str)
+            or not isinstance(command.rejection["value"], dict)
         ):
             raise ForestError(
-                "SHELL_PROOF_INVALID", "Shell proof differs from the authenticated event", 403
+                "SHELL_INGRESS_INVALID",
+                "Shell ingress projection differs from the authenticated event",
+                403,
             )
 
     async def admit(
@@ -120,7 +118,10 @@ class OneBotIngressUnitOfWork:
         operation_id: str,
         binding_id: str,
         expected_binding_epoch: int,
+        connection_epoch: int,
         client_incarnation: str,
+        adapter_generation_id: str,
+        executor_fence_digest: str,
         event: OneBotPlatformEvent,
         memory_capture: IngressMemoryCapture | None = None,
         media_capture: IngressMediaCapture | None = None,
@@ -285,17 +286,46 @@ class OneBotIngressUnitOfWork:
                     principal_ref=event.author_subject_ref if is_trigger else None,
                 )
             if shell_command is not None:
-                shell_result = await self.shell.admit_command_in(
+                shell_operation_id = "onebot-shell:" + event.event_id
+                shell_result = await self.shell.invoke_in(
                     conn,
-                    operation_id="onebot-shell:" + event.event_id,
-                    request_id=shell_command.request_id,
-                    proof=shell_command.proof,
-                    command_id=shell_command.command_id,
-                    command_version=shell_command.command_version,
-                    arguments=shell_command.arguments,
-                    idempotency_key=shell_command.idempotency_key,
-                    received_at=event.received_at,
-                    admission_deadline=event.classification_deadline,
+                    "shell.admit-ingress",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {
+                            "component_id": "adapter.onebot",
+                            "generation_id": self.adapter.generation_id,
+                        },
+                        "input": {
+                            "protocol": "forest.shell-admission/2",
+                            "request_id": shell_command.request_id,
+                            "shell_generation_id": shell_command.shell_generation_id,
+                            "binding_ref": binding_id,
+                            "binding_epoch": expected_binding_epoch,
+                            "connection_epoch": connection_epoch,
+                            "client_incarnation": client_incarnation,
+                            "adapter_generation_id": adapter_generation_id,
+                            "executor_fence_digest": executor_fence_digest,
+                            "conversation_ref": event.conversation_ref,
+                            "event_ref": event.event_id,
+                            "principal_ref": event.author_subject_ref,
+                            "command_id": shell_command.command_id,
+                            "command_version": shell_command.command_version,
+                            "arguments": shell_command.arguments,
+                            "rejection": shell_command.rejection,
+                            "received_at": event.received_at.isoformat(),
+                            "admission_deadline": event.classification_deadline.isoformat(),
+                        },
+                        "prior": {},
+                    },
+                    operation_id=shell_operation_id,
+                    causal_root_kind="adapter.platform-event",
+                    causal_root_id=event.event_id,
+                    parent_call_id=(
+                        "call:onebot-shell:"
+                        + hashlib.sha256(shell_operation_id.encode()).hexdigest()
+                    ),
+                    timeout_seconds=10,
                 )
                 classification_result = await self.conversation.complete_classification_in(
                     conn,
@@ -305,15 +335,13 @@ class OneBotIngressUnitOfWork:
                     event_id=scheduler_event_id,
                     decision="CONTROL_COMMAND",
                     classifier_component_id="shell.command",
-                    classifier_generation_id=(
-                        shell_result["owner_generation_id"] or "shell.command/builtin"
-                    ),
+                    classifier_generation_id=shell_result["shell_generation_id"],
                     rule_revision="shell-policy:" + str(shell_result["policy_revision"]),
-                    reason_code=shell_result["rejection_code"],
+                    reason_code=shell_result["rejection_code"] or "SHELL_ACCEPTED",
                     route_ref=shell_result["request_id"],
                 )
                 if shell_result["state"] == "REJECTED":
-                    if self.delivery is None or shell_command.rejection is None:
+                    if self.delivery is None or self.payloads is None:
                         raise ForestError(
                             "SHELL_CONTROL_DELIVERY_MISSING",
                             "Rejected Shell command has no CONTROL delivery participant",
@@ -322,6 +350,16 @@ class OneBotIngressUnitOfWork:
                     delivery_generation_id = self.delivery.generation_id
                     identity = shell_result["request_id"]
                     part_id = "shell-rejection-part:" + identity[-64:]
+                    rejection_owner_id = shell_command.rejection["owner_id"]
+                    deletion_epoch = await self.payloads.epoch_in(conn)
+                    rejection = await self.payloads.put_json_in(
+                        conn,
+                        owner_component_id="shell.command",
+                        owner_kind="shell.result",
+                        owner_id=rejection_owner_id,
+                        value=shell_command.rejection["value"],
+                        expected_deletion_epoch=deletion_epoch,
+                    )
                     await create_delivery_intent_in(
                         self.delivery,
                         conn,
@@ -343,11 +381,11 @@ class OneBotIngressUnitOfWork:
                                 part_id,
                                 "shell-rejection-effect:" + identity[-64:],
                                 DeliveryPayloadRef(
-                                    shell_command.rejection.payload_id,
-                                    shell_command.rejection.digest,
-                                    shell_command.rejection.owner_component_id,
-                                    shell_command.rejection.owner_kind,
-                                    shell_command.rejection.owner_id,
+                                    rejection.payload_id,
+                                    rejection.content_digest,
+                                    "shell.command",
+                                    "shell.result",
+                                    rejection_owner_id,
                                 ),
                             ),
                         ),

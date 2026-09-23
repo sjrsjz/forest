@@ -135,29 +135,34 @@ lease_seconds = 20
 [[components.provides]]
 name = "counter.increment"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/input.json"
 output_schema = "schemas/output.json"
 
 [[components.provides]]
 name = "counter.defer"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/defer-input.json"
 output_schema = "schemas/defer-output.json"
 
 [[components.provides]]
 name = "counter.transaction"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/domain-set-input.json"
 output_schema = "schemas/domain-set-output.json"
 
 [[components.provides]]
 name = "counter.transaction-reject"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/domain-set-input.json"
 output_schema = "schemas/domain-set-output.json"
 
 [[components.provides]]
 name = "counter.cross-component-probe"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/uow-cross-input.json"
 output_schema = "schemas/domain-set-output.json"

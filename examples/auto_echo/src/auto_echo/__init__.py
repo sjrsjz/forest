@@ -14,6 +14,7 @@ from forest.sdk import plugin, service
 class AutoEcho:
     @service(
         "auto-echo.echo",
+        semantics="read",
         contract="1.0",
         input_schema={
             "type": "object",

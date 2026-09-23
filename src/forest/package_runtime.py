@@ -237,6 +237,9 @@ class PackageGenerationAdapter:
                 *self.component.get("unit_of_work_plans", ()),
             )
         }
+        self._provided_services = {
+            item["name"]: item for item in self.component.get("provides", ())
+        }
         self._participant_declarations = {
             item["name"]: (
                 item,
@@ -280,14 +283,6 @@ class PackageGenerationAdapter:
         }
         self._requested_capabilities = frozenset(
             self.component.get("capabilities", {}).get("requests", ())
-        )
-        self._durable_service_results = any(
-            item == "state.write"
-            or item.startswith("domain.command:")
-            or item.startswith("event.publish:")
-            or item.startswith("job.schedule:")
-            or item.startswith("service.call:")
-            for item in self._requested_capabilities
         )
         self._service_inflight = 0
         self._services_drained = asyncio.Event()
@@ -618,8 +613,14 @@ class PackageGenerationAdapter:
             item["name"]: item
             for item in self.component.get("domain_commands", ())
         }
+        if self._configuration is None:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Contribution directory synchronization has no frozen configuration",
+                500,
+            )
         for command_name, payload in self._contribution_directories.synchronization_requests(
-            identity
+            identity, configuration=self._configuration
         ):
             declaration = declarations[command_name]
             input_validator, output_validator = self._service_schemas[command_name]
@@ -891,7 +892,10 @@ class PackageGenerationAdapter:
                 invocation=invocation,
                 service_id=service_id,
                 input_value=payload,
-                durable=self._durable_service_results,
+                durable=(
+                    self._provided_services[service_id]["semantics"]
+                    == "at-most-once"
+                ),
                 dispatch=lambda worker, _scope, call_id: worker.invoke(
                         service_id,
                         payload,

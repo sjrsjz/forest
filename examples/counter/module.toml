@@ -18,5 +18,6 @@ requests = ["state.read", "state.write"]
 [[components.provides]]
 name = "counter.increment"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/input.json"
 output_schema = "schemas/output.json"

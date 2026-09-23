@@ -46,7 +46,7 @@ class Probe(Plugin):
             if marker := self.ctx.config.get("cleanup_marker"):
                 Path(marker).write_text("cancelled", encoding="utf-8")
 
-    @service("probe.echo")
+    @service("probe.echo", semantics="read")
     async def echo(self, payload, ctx):
         print("Plugin stdout cannot become an IPC frame")
         return {
@@ -67,7 +67,7 @@ class Probe(Plugin):
             },
         }
 
-    @service("probe.counter")
+    @service("probe.counter", semantics="at-most-once")
     async def counter(self, payload, ctx):
         current = await ctx.state.get("counter")
         return await ctx.state.commit(
@@ -77,12 +77,12 @@ class Probe(Plugin):
             ctx.operations.stable("counter:v1"),
         )
 
-    @service("probe.wait")
+    @service("probe.wait", semantics="read")
     async def wait(self, payload, ctx):
         await ctx.state.get("gate")
         return {"done": True}
 
-    @service("probe.child")
+    @service("probe.child", semantics="at-most-once")
     async def child(self, payload, ctx):
         async def finish():
             await ctx.state.get("gate")
@@ -91,7 +91,7 @@ class Probe(Plugin):
         ctx.tasks.spawn_owned(finish())
         return {"handler_returned": True}
 
-    @service("probe.failchild")
+    @service("probe.failchild", semantics="idempotent")
     async def failchild(self, payload, ctx):
         async def fail():
             raise ValueError("synthetic child failure")
@@ -99,30 +99,30 @@ class Probe(Plugin):
         ctx.tasks.spawn_owned(fail())
         return None
 
-    @service("probe.block")
+    @service("probe.block", semantics="read")
     async def block(self, payload, ctx):
         await ctx.state.get("started")
         time.sleep(60)
 
-    @service("probe.crash")
+    @service("probe.crash", semantics="read")
     async def crash(self, payload, ctx):
         os._exit(19)
 
-    @service("probe.badreturn")
+    @service("probe.badreturn", semantics="read")
     async def badreturn(self, payload, ctx):
         return {"not": {"a", "json", "value"}}
 
-    @service("probe.large")
+    @service("probe.large", semantics="read")
     async def large(self, payload, ctx):
         return {"value": "x" * payload["size"]}
 
-    @service("probe.forge")
+    @service("probe.forge", semantics="read")
     async def forge(self, payload, ctx):
         return await ctx.state._rpc(
             payload.get("call_id", ctx.call_id), "get", payload.get("request", {"key": "counter"})
         )
 
-    @service("probe.latecommit")
+    @service("probe.latecommit", semantics="at-most-once")
     async def latecommit(self, payload, ctx):
         # Deliberately bypass the SDK to exercise the host protocol boundary.
         runtime = ctx.state._rpc.__self__
@@ -134,7 +134,7 @@ class Probe(Plugin):
         )
         await ctx.state.commit("late", "must-not-commit", 0, ctx.operations.stable("late:v1"))
 
-    @service("probe.config")
+    @service("probe.config", semantics="read")
     async def config(self, payload, ctx):
         try:
             ctx.config["nested"]["value"] = "changed"
@@ -142,7 +142,7 @@ class Probe(Plugin):
             return {"immutable": True}
         return {"immutable": False}
 
-    @service("probe.cache")
+    @service("probe.cache", semantics="idempotent")
     async def cache(self, payload, ctx):
         if payload["action"] == "save":
             self.cached = ctx
@@ -177,7 +177,7 @@ class Probe(Plugin):
         results["fresh_state"] = await ctx.state.get("counter")
         return results
 
-    @service("probe.resources")
+    @service("probe.resources", semantics="idempotent")
     async def resources(self, payload, ctx):
         marker = payload["marker"]
         ctx.resources.register(_SyncMarker(marker, "call-first"))

@@ -10,8 +10,6 @@ from jsonschema import Draft202012Validator
 
 from forest.bootstrap_contributions import BootstrapConfigurationContribution
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
-from forest.clean_shell_module import SHELL_CONFIGURATION_SCHEMA, default_shell_configuration
-from forest.clean_shell_runtime import CleanShellRuntime
 from forest.embedding_builtin import (
     EMBEDDING_CONFIGURATION_SCHEMA,
     default_embedding_configuration,
@@ -36,6 +34,30 @@ TRIGGER_POLICY_CONFIGURATION_SCHEMA = json.loads(
     .joinpath("builtin/trigger_policy/schemas/config.json")
     .read_text(encoding="utf-8")
 )
+SHELL_CONFIGURATION_SCHEMA = json.loads(
+    files("forest")
+    .joinpath("builtin/shell_command/schemas/config.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def default_shell_configuration() -> dict:
+    return {
+        "protocol": "forest.shell.command/2",
+        "binding_ref": "binding/main",
+        "administrator_principals": [],
+    }
+
+
+def validate_shell_configuration(value: object) -> dict:
+    if not Draft202012Validator(SHELL_CONFIGURATION_SCHEMA).is_valid(value):
+        raise ForestError(
+            "SHELL_CONFIGURATION_INVALID", "Shell configuration is invalid", 422
+        )
+    return {
+        **value,
+        "administrator_principals": tuple(value["administrator_principals"]),
+    }
 
 
 def default_trigger_policy_configuration() -> dict:
@@ -159,7 +181,7 @@ def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContributi
             "Group Shell",
             "Binding and administrator principals allowed to invoke control commands.",
             default_shell_configuration(),
-            CleanShellRuntime._parse_profile,
+            validate_shell_configuration,
         ),
         (
             "agent.runtime",
@@ -277,10 +299,10 @@ class OfficialBotSettingsResolver:
         trigger = validate_trigger_policy_configuration(
             components["conversation.trigger-policy"].config
         )
-        shell = CleanShellRuntime._parse_profile(components["shell.command"].config)
+        shell = validate_shell_configuration(components["shell.command"].config)
         agent = components["agent.runtime"].config
         onebot = components["adapter.onebot"].config
-        if shell.binding_ref != onebot["binding_id"]:
+        if shell["binding_ref"] != onebot["binding_id"]:
             raise ForestError(
                 "OFFICIAL_BOOTSTRAP_BINDING_MISMATCH",
                 "Shell and OneBot binding references differ",
@@ -326,7 +348,8 @@ class OfficialBotSettingsResolver:
             group_trigger_mode=trigger["group_trigger_mode"],
             private_enabled=trigger["private_enabled"],
             shell_administrator_ids=tuple(
-                principal.removeprefix("qq:") for principal in shell.administrator_principals
+                principal.removeprefix("qq:")
+                for principal in shell["administrator_principals"]
             ),
             agent_system_prompt="",
             model_credential_ref=provider["credential_ref"],

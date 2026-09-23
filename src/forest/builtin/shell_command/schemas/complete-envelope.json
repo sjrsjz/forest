@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+  "properties":{"protocol":{"const":"forest.uow-step/1"},"caller":{"type":"object"},"prior":{"type":"object"},
+    "input":{"type":"object","properties":{"protocol":{"const":"forest.shell-complete-claim/1"},"request_id":{"type":"string"},"claim_token":{"type":"string"},"resulting_state":{"enum":["SUCCEEDED","FAILED","UNKNOWN"]},"result":{"type":"object","properties":{"payload_id":{"type":"string"},"digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"owner_component_id":{"const":"shell.command"},"owner_kind":{"const":"shell.result"},"owner_id":{"type":"string"}},"required":["payload_id","digest","owner_component_id","owner_kind","owner_id"],"additionalProperties":false},"error_code":{"type":["string","null"]}},"required":["protocol","request_id","claim_token","resulting_state","result","error_code"],"additionalProperties":false}
+  },"required":["protocol","caller","input","prior"],"additionalProperties":false
+}

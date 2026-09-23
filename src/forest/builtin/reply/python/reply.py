@@ -4,7 +4,7 @@ from forest.sdk import Plugin, service
 class Reply(Plugin):
     """A deterministic command-style responder; it is not an LLM or image captioner."""
 
-    @service("reply.respond")
+    @service("reply.respond", semantics="read")
     async def respond(self, payload, ctx):
         text = payload["template"]
         # Substitute only fixed tokens; user text never becomes Python format syntax.

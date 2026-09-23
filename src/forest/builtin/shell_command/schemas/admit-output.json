@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+  "properties":{"request_id":{"type":"string"},"state":{"enum":["QUEUED","REJECTED"]},"shell_generation_id":{"type":"string"},"policy_revision":{"type":"integer","minimum":1},"rejection_code":{"type":["string","null"]},"rejection":{"type":"object"},"service_class":{"type":["string","null"]}},
+  "required":["request_id","state","shell_generation_id","policy_revision","rejection_code","rejection","service_class"],"additionalProperties":false
+}

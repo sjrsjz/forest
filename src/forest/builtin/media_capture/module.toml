@@ -68,6 +68,7 @@ startup_dependency = true
 [[components.provides]]
 name = "media.context.resolve"
 contract = "1.0"
+semantics = "read"
 input_schema = "schemas/context-resolve-input.json"
 output_schema = "schemas/context-resolve-output.json"
 

@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"protocol":{"const":"forest.payload-json-write/1"},"owner_kind":{"const":"shell.result"},"owner_id":{"type":"string","minLength":1,"maxLength":512},"value":{"type":"object"}},"required":["protocol","owner_kind","owner_id","value"],"additionalProperties":false}

@@ -16,13 +16,15 @@ FROM build AS test
 COPY tests ./tests
 COPY examples ./examples
 COPY doc ./doc
+COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    HOME=/tmp
+    HOME=/tmp \
+    FOREST_PACKAGE_CATALOG_ROOT=/tmp/forest-packages
 USER 10001:10001
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 

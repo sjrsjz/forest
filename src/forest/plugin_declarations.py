@@ -371,12 +371,23 @@ def synthesize_manifest(source_files: dict[str, bytes]) -> dict[str, bytes]:
     for index, (values, node, _) in enumerate(
         sorted(handlers["service"], key=lambda item: item[0]["name"])
     ):
-        unknown = sorted(set(values) - {"name", "contract", "input_schema", "output_schema"})
+        unknown = sorted(
+            set(values)
+            - {"name", "contract", "semantics", "input_schema", "output_schema"}
+        )
         if unknown:
             _error(f"Unsupported @service arguments: {', '.join(unknown)}", path, node)
+        semantics = values.get("semantics")
+        if semantics not in {"at-most-once", "idempotent", "read"}:
+            _error(
+                "@service requires explicit at-most-once, idempotent or read semantics",
+                path,
+                node,
+            )
         services.append({
             "name": values["name"],
             "contract": values.get("contract", "1.0"),
+            "semantics": semantics,
             "input_schema": _schema(files, values.get("input_schema"), f"service-{index}-input", path, node),
             "output_schema": _schema(files, values.get("output_schema"), f"service-{index}-output", path, node),
         })

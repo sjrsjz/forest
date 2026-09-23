@@ -62,6 +62,7 @@ class MultimodalEmbeddingProvider(Plugin):
 
     @service(
         "embedding.profile.bind",
+        semantics="read",
         contract="1.0",
         input_schema="schemas/bind-input.json",
         output_schema="schemas/bind-output.json",

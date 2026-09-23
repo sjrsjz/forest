@@ -63,6 +63,7 @@ execution_profile = "official"
 [[components.provides]]
 name = "shell.jobs.execute"
 contract = "1.0"
+semantics = "at-most-once"
 input_schema = "schemas/shell-input.json"
 output_schema = "schemas/shell-output.json"
 

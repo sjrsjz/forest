@@ -68,6 +68,7 @@ module-root = "src"
 class Plugin:
     @service(
         "{service_name}",
+        semantics="read",
         contract="1.0",
         input_schema={{
             "type": "object",

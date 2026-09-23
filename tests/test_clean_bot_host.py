@@ -613,7 +613,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 assert [item.command_id for item in audit_descriptor.shell_commands] == [
                     "audit.tail"
                 ]
-                audit_route = host.registry.get("shell.command").command_routes[
+                audit_route = host.registry.get(
+                    "shell.command"
+                )._contribution_directories._shell_routes[
                     ("audit.tail", 1)
                 ]
                 assert audit_route[0] == "kernel.audit"

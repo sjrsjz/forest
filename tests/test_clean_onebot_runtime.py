@@ -68,7 +68,7 @@ class FakeServiceHandle:
         assert isinstance(operation_id, str) and operation_id
         assert isinstance(causal_root_kind, str) and causal_root_kind
         assert isinstance(causal_root_id, str) and causal_root_id
-        assert timeout_seconds == 30
+        assert 0 < timeout_seconds <= 30
         assert parent_call_id is None
         self.operations.append(operation_id)
         return await self.handler(*args, **kwargs)
@@ -176,7 +176,7 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         secret_resolver=resolve_secret,
         ingress_port=ingress,
         trigger_policy=FakeServiceHandle(classify),
-        shell_inspector=inspect_shell,
+        shell_inspector=FakeServiceHandle(inspect_shell),
         normalize_codec=FakeServiceHandle(normalize_codec),
         prepare_send_codec=FakeServiceHandle(prepare_send_codec),
         websocket_client_factory=create_client,
@@ -254,7 +254,7 @@ async def test_clean_onebot_generation_buffers_then_admits_and_quiesces(clean_on
         secret_resolver=resolve_secret,
         ingress_port=ingress,
         trigger_policy=FakeServiceHandle(classify),
-        shell_inspector=inspect_shell,
+        shell_inspector=FakeServiceHandle(inspect_shell),
         normalize_codec=FakeServiceHandle(normalize_codec),
         prepare_send_codec=FakeServiceHandle(prepare_send_codec),
         websocket_client_factory=create_client,

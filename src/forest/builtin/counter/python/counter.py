@@ -7,7 +7,7 @@ class Counter(Plugin):
         self.label = config["label"]
         self.multiplier = config["multiplier"]
 
-    @service("counter.increment")
+    @service("counter.increment", semantics="at-most-once")
     async def increment(self, payload, ctx):
         current = await ctx.queries.call("counter.current", {})
         value = (current["value"] or 0) + payload["increment"] * self.multiplier
@@ -18,7 +18,7 @@ class Counter(Plugin):
         )
         return {"value": value, "revision": receipt["revision"], "label": self.label}
 
-    @service("counter.defer")
+    @service("counter.defer", semantics="at-most-once")
     async def defer(self, payload, ctx):
         return await ctx.commands.call(
             "counter.enqueue",
@@ -26,7 +26,7 @@ class Counter(Plugin):
             operation_id=ctx.operations.stable("enqueue:v1"),
         )
 
-    @service("counter.transaction")
+    @service("counter.transaction", semantics="at-most-once")
     async def transaction(self, payload, ctx):
         return await ctx.uow.call(
             "counter.atomic-set",
@@ -34,7 +34,7 @@ class Counter(Plugin):
             operation_id=ctx.operations.stable("atomic-set:v1"),
         )
 
-    @service("counter.transaction-reject")
+    @service("counter.transaction-reject", semantics="at-most-once")
     async def transaction_reject(self, payload, ctx):
         return await ctx.uow.call(
             "counter.atomic-set-reject",
@@ -42,7 +42,7 @@ class Counter(Plugin):
             operation_id=ctx.operations.stable("atomic-set-reject:v1"),
         )
 
-    @service("counter.cross-component-probe")
+    @service("counter.cross-component-probe", semantics="at-most-once")
     async def cross_component_reject(self, payload, ctx):
         return await ctx.uow.call(
             "counter.cross-component-reject",

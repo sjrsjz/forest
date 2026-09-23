@@ -63,7 +63,6 @@ _DEFINITIONS = {
             "conversation.trigger-policy",
             "memory.graph",
             "media.capture",
-            "shell.command",
         ),
         "capabilities": ("adapter.onebot.ingress", "adapter.onebot.send"),
     },

@@ -29,5 +29,6 @@ stop_timeout_s = 5
 [[components.provides]]
 name = "conversation.trigger.classify"
 contract = "1.0"
+semantics = "read"
 input_schema = "schemas/input.json"
 output_schema = "schemas/output.json"

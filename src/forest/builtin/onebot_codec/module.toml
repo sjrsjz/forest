@@ -29,11 +29,13 @@ stop_timeout_s = 5
 [[components.provides]]
 name = "onebot.codec.normalize"
 contract = "1.0"
+semantics = "read"
 input_schema = "schemas/normalize.json"
 output_schema = "schemas/normalize-result.json"
 
 [[components.provides]]
 name = "onebot.codec.prepare-send"
 contract = "1.0"
+semantics = "read"
 input_schema = "schemas/prepare.json"
 output_schema = "schemas/prepare-result.json"

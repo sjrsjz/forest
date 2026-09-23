@@ -676,7 +676,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 "private_enabled": True,
             },
             "shell.command": {
-                "protocol": "forest.shell.command/1",
+                "protocol": "forest.shell.command/2",
                 "binding_ref": "binding/main",
                 "administrator_principals": ["qq:10001"],
             },

@@ -37,7 +37,6 @@ from forest.chat_completions_effect_driver import (
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
-from forest.clean_shell_module import bootstrap_clean_shell
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.delivery_participant import create_delivery_intent_in
 from forest.delivery_protocol import DeliveryPart, DeliveryPayloadRef
@@ -554,15 +553,28 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             CapabilityGrant("delivery.send", "bot", store.bot_id, delegable=True),
         ),
     )
-    shell = await bootstrap_clean_shell(
+    shell = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/shell_command",
+        package_catalog,
         store,
         installer,
         kernel=kernel,
         initial_configuration={
-            "protocol": "forest.shell.command/1",
+            "protocol": "forest.shell.command/2",
             "binding_ref": "binding/main",
             "administrator_principals": ["qq:42"],
         },
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                    runtime=kernel.runtime,
+                    payloads=kernel.payload,
+                )
+            }
+        ),
+        additional_grants=(
+            CapabilityGrant("management.invoke", "bot", store.bot_id, delegable=True),
+        ),
     )
     display = await _payload(
         kernel.payload,
@@ -661,7 +673,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         )
         assert runtime_descriptor.shell_commands == RUNTIME_SHELL_COMMANDS
         assert shell.descriptor.shell_commands == ()
-        assert set(shell_runtime.command_routes) == {
+        assert set(shell_runtime._contribution_directories._shell_routes) == {
             (item.command_id, item.command_version)
             for item in (
                 *RUNTIME_SHELL_COMMANDS,
@@ -670,11 +682,11 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                 *MEMORY_SHELL_COMMANDS,
             )
         }
-        for owner, _contribution, service in shell_runtime.command_routes.values():
+        for owner, _contribution, service in shell_runtime._contribution_directories._shell_routes.values():
             assert service.route.provider_component_id == owner
         assert {
             service.route.provider_component_id
-            for key, (_, _, service) in shell_runtime.command_routes.items()
+            for key, (_, _, service) in shell_runtime._contribution_directories._shell_routes.items()
             if key[0].startswith("memory.")
         } == {"memory.graph"}
         assert adapter_runtime.generation_identity.generation_id == (
@@ -1307,9 +1319,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                 await conn.execute(
                     sql.SQL(
                         "SELECT request_id,state,rejection_code,command_id,policy_revision,"
-                        "registry_revision FROM {}.shell_requests WHERE bot_id=%s "
+                        "shell_generation_id FROM {}.shell_requests WHERE bot_id=%s "
                         "ORDER BY received_at DESC LIMIT 1"
-                    ).format(sql.Identifier(shell_runtime.repository.namespace)),
+                    ).format(sql.Identifier(shell.configuration.namespace)),
                     (store.bot_id,),
                 )
             ).fetchone()
@@ -1435,7 +1447,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                     sql.SQL(
                         "SELECT state,rejection_code FROM {}.shell_requests "
                         "WHERE bot_id=%s AND principal_ref=%s"
-                    ).format(sql.Identifier(shell_runtime.repository.namespace)),
+                    ).format(sql.Identifier(shell.configuration.namespace)),
                     (store.bot_id, "qq:43"),
                 )
             ).fetchone()
@@ -1448,7 +1460,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                     (store.bot_id, "90"),
                 )
             ).fetchone()
-        assert dict(denied) == {"state": "REJECTED", "rejection_code": "SHELL_FORBIDDEN"}
+        assert dict(denied) == {
+            "state": "REJECTED",
+            "rejection_code": "SHELL_PRINCIPAL_DENIED",
+        }
         assert denied_message["trigger_decision"] == "CONTROL_COMMAND"
         resume_body = json.dumps(
             {

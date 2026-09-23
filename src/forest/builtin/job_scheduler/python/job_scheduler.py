@@ -24,7 +24,7 @@ class JobScheduler(Plugin):
                 422,
             )
 
-    @service("shell.jobs.execute")
+    @service("shell.jobs.execute", semantics="at-most-once")
     async def shell(self, payload, ctx):
         command_id = payload["command_id"]
         arguments = payload["arguments"]

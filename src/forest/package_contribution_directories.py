@@ -108,11 +108,22 @@ class FrozenContributionDirectories:
         }
         return {"contribution_directories": directories} if directories else {}
 
-    def synchronization_requests(self, graph_identity) -> tuple[tuple[str, dict], ...]:
+    def synchronization_requests(
+        self, graph_identity, *, configuration: dict
+    ) -> tuple[tuple[str, dict], ...]:
         return tuple(
             (
                 self._declarations[kind]["synchronization_command"],
-                self._directory_fact(kind, graph_identity),
+                {
+                    **self._directory_fact(kind, graph_identity),
+                    **(
+                        {"consumer_configuration": configuration}
+                        if self._declarations[kind].get(
+                            "synchronize_configuration", False
+                        )
+                        else {}
+                    ),
+                },
             )
             for kind in self.kinds
         )

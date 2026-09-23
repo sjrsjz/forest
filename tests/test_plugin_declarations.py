@@ -33,6 +33,7 @@ def auto_source(tmp_path: Path, *, module: str = "demo") -> Path:
 class Echo:
     @service(
         "echo.call",
+        semantics="read",
         contract="1.2",
         input_schema={"type": "object", "required": ["value"]},
         output_schema={"type": "object", "required": ["value"]},
@@ -65,6 +66,7 @@ def test_auto_declaration_build_is_static_complete_and_deterministic(tmp_path):
         {
             "name": "echo.call",
             "contract": "1.2",
+            "semantics": "read",
             "input_schema": "forest_generated/service-0-input.json",
             "output_schema": "forest_generated/service-0-output.json",
         }
@@ -178,7 +180,7 @@ def test_takeover_declaration_requires_handlers_and_known_mode(tmp_path, mode):
     message_handler_takeover="{mode}",
 )
 class Handlers:
-    @service("echo.call")
+    @service("echo.call", semantics="read")
     async def echo(self, payload, ctx):
         return payload
 ''',
@@ -276,7 +278,7 @@ async def test_event_and_job_declarations_generate_the_existing_worker_contract(
     }],
 )
 class Worker:
-    @service("echo.call")
+    @service("echo.call", semantics="read")
     async def echo(self, payload, ctx):
         return payload
 
@@ -365,7 +367,7 @@ def test_dynamic_declaration_is_rejected_with_source_location(tmp_path):
 VERSION = "0.1.0"
 @plugin(id="example.auto", version=VERSION)
 class Echo:
-    @service("echo.call")
+    @service("echo.call", semantics="read")
     async def echo(self, payload, ctx):
         return payload
 ''',
@@ -442,7 +444,7 @@ def test_static_declarations_follow_forest_sdk_import_aliases(
         f'''{imports}
 @{plugin_name}(id="example.auto", version="0.1.0")
 class Echo:
-    @{service_name}("echo.call")
+    @{service_name}("echo.call", semantics="read")
     async def echo(self, payload, ctx):
         return payload
 ''',
@@ -508,7 +510,10 @@ def test_development_version_refreshes_generated_checksums(tmp_path):
 def test_runtime_plugin_decorator_adapts_plain_class_without_changing_handlers():
     @plugin(id="example.runtime", version="0.1.0")
     class Plain:
-        @service("echo.call", contract="1.2", input_schema={}, output_schema={})
+        @service(
+            "echo.call", semantics="read", contract="1.2",
+            input_schema={}, output_schema={}
+        )
         async def echo(self, payload, ctx):
             return payload, ctx
 

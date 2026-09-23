@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.2.1"
+version = "0.2.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -80,7 +80,7 @@ order = 20
 schema_id = "forest.delivery"
 schema_version = "2.0.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "3d463f4583ba44751ed60cb9129004892d0364a2f7a7a1161d8df7be6b24f3b1"
+baseline_sha256 = "fc365d7d46a996b4b99a88e8df73f5d1ce178e25272c36fa8ad35b6ca9561cf4"
 scope = "bot"
 repository_contract = "forest.delivery.repository/2"
 execution_profile = "official"
@@ -216,3 +216,16 @@ path = "/parts/*/payload"
 owner_component = "shell.command"
 owner_kind = "shell.result"
 owner_id_path = "/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-control-intent-uow"
+contract = "1.0"
+function = "delivery_create_control_intent_uow"
+input_schema = "schemas/control-intent-uow-envelope.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/parts/*/payload"
+owner_component = "shell.command"
+owner_kind = "shell.result"
+owner_id_path = "/input/parts/*/payload/owner_id"

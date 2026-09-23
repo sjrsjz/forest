@@ -21,7 +21,6 @@ from forest.chat_completions_effect_driver import (
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
-from forest.clean_shell_module import bootstrap_clean_shell
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
@@ -752,17 +751,32 @@ class CleanBotHost:
                 ),
             ),
         )
-        shell = await bootstrap_clean_shell(
+        shell = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/shell_command"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
             initial_configuration={
-                "protocol": "forest.shell.command/1",
+                "protocol": "forest.shell.command/2",
                 "binding_ref": "binding/main",
                 "administrator_principals": [
                     "qq:" + value for value in self.settings.shell_administrator_ids
                 ],
             },
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                        runtime=self._kernel.runtime,
+                        payloads=self._kernel.payload,
+                    )
+                }
+            ),
+            additional_grants=(
+                CapabilityGrant(
+                    "management.invoke", "bot", self.store.bot_id, delegable=True
+                ),
+            ),
         )
         descriptors = (
             self._kernel.descriptors

@@ -83,7 +83,7 @@ from forest.sdk import Plugin, service
 import forest_demo_dependency
 
 class Counter(Plugin):
-    @service("counter.increment")
+    @service("counter.increment", semantics="read")
     async def increment(self, payload, ctx):
         return {"version": forest_demo_dependency.VERSION,
                 "dependency_file": forest_demo_dependency.__file__,

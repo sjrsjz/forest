@@ -27,6 +27,7 @@ class MediaCapture(Plugin):
 
     @service(
         "media.context.resolve",
+        semantics="read",
         contract="1.0",
         input_schema="schemas/context-resolve-input.json",
         output_schema="schemas/context-resolve-output.json",
