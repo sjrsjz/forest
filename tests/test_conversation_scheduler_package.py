@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -208,6 +210,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "input": {
                 "actor": actor,
                 "boundary": "IDLE",
+                "selection_mode": "ANY",
                 "session_ref": "session/1",
                 "run_ref": "run/1",
                 "next_run_ref": None,
@@ -269,5 +272,110 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "author_subject_ref": "qq:42",
             "trigger_decision": "TRIGGER",
         }
+
+        silent_event_id = "event/onebot/silent-1"
+        silent_content = await _payload(
+            kernel.payload,
+            owner_kind="onebot.normalized-event",
+            event_id=silent_event_id,
+            content=b'{"segments":[{"type":"text","text":"ordinary"}]}',
+        )
+        silent_author = await _payload(
+            kernel.payload,
+            owner_kind="onebot.author-snapshot",
+            event_id=silent_event_id,
+            content=b'{"subject_ref":"qq:43","display_name":"ordinary"}',
+        )
+        silent_admission = copy.deepcopy(admission)
+        silent_admission["input"].update(
+            {
+                "conversation_id": "conversation/onebot/group/silent",
+                "channel_ref": "silent",
+                "event_id": silent_event_id,
+                "source_event_ref": "onebot-message/silent-1",
+                "platform_message_ref": "message/silent-1",
+                "author_subject_ref": "qq:43",
+                "content": silent_content,
+                "author": silent_author,
+            }
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn,
+                "conversation.admit-message",
+                silent_admission,
+                operation_id="uow-step:conversation-admit/silent-1",
+                causal_root_kind="onebot.ingress",
+                causal_root_id=silent_event_id,
+                parent_call_id="call:ingress/silent-1",
+                timeout_seconds=10,
+            )
+        silent_classification = copy.deepcopy(classification)
+        silent_classification["input"].update(
+            {
+                "conversation_id": "conversation/onebot/group/silent",
+                "event_id": silent_event_id,
+                "decision": "NO_TRIGGER",
+                "reason_code": "ordinary",
+                "trigger_id": None,
+                "principal_ref": None,
+            }
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn,
+                "conversation.complete-classification",
+                silent_classification,
+                operation_id="uow-step:conversation-classify/silent-1",
+                causal_root_kind="onebot.ingress",
+                causal_root_id=silent_event_id,
+                parent_call_id="call:ingress/silent-1",
+                timeout_seconds=10,
+            )
+        silent_state = None
+        for _attempt in range(100):
+            async with store.pool.connection() as conn:
+                silent_state = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT context_applied_seq,actor_owner_id,active_session_ref "
+                            "FROM {}.conversation_lanes WHERE bot_id=%s "
+                            "AND conversation_id=%s"
+                        ).format(sql.Identifier(namespace)),
+                        (store.bot_id, "conversation/onebot/group/silent"),
+                    )
+                ).fetchone()
+            if silent_state["context_applied_seq"] == 1 and silent_state["actor_owner_id"] is None:
+                break
+            await asyncio.sleep(0.05)
+        assert dict(silent_state) == {
+            "context_applied_seq": 1,
+            "actor_owner_id": None,
+            "active_session_ref": None,
+        }
+        async with store.pool.connection() as conn:
+            silent_unit = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT event_id,author_subject_ref,trigger_decision "
+                        "FROM {}.context_units WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchone()
+            settlements = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS count FROM "
+                        "{}.conversation_silent_drain_settlements"
+                    ).format(sql.Identifier(namespace))
+                )
+            ).fetchone()
+        assert dict(silent_unit) == {
+            "event_id": silent_event_id,
+            "author_subject_ref": "qq:43",
+            "trigger_decision": "NO_TRIGGER",
+        }
+        assert settlements["count"] == 1
     finally:
         assert await registry.close() == []

@@ -28,13 +28,13 @@ drain_timeout_s = 960
 stop_timeout_s = 10
 
 [components.capabilities]
-requests = []
+requests = ["uow.execute:conversation.commit-silent-input"]
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
 schema_version = "2.0.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "71e1631ac01c28376dd3f946e5949d1022b1c6a1213b390d2236b38a761195ad"
+baseline_sha256 = "77e6ac7049913e83693d290e389494fd231fc8cf67d0837aa3bc31260a62ab6f"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/2"
 execution_profile = "official"
@@ -71,3 +71,29 @@ contract = "1.0"
 function = "conversation_select_input"
 input_schema = "schemas/select-input-envelope.json"
 output_schema = "schemas/select-input-output.json"
+
+[[components.unit_of_work_plans]]
+name = "conversation.commit-silent-input"
+contract = "1.0"
+input_schema = "schemas/silent-drain-input.json"
+output_schema = "schemas/select-input-output.json"
+timeout_s = 20
+steps = [
+  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.select-input" }
+]
+
+[[components.owned_work_handlers]]
+name = "conversation.silent-drain.pending"
+contract = "1.0"
+handler = "conversation.silent-drain"
+claim_function = "conversation_claim_silent_drain"
+settle_function = "conversation_settle_silent_drain"
+input_schema = "schemas/silent-drain-input.json"
+output_schema = "schemas/select-input-output.json"
+max_concurrency = 16
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 30
+settle_timeout_s = 5
+lease_seconds = 45
+drain_policy = "inflight"

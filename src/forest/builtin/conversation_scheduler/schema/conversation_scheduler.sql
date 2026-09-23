@@ -1008,6 +1008,7 @@ DECLARE
     requested_owner text := actor->>'owner_id';
     requested_epoch bigint := (actor->>'epoch')::bigint;
     requested_boundary text := body->>'boundary';
+    requested_mode text := body->>'selection_mode';
     requested_session text := body->>'session_ref';
     requested_run text := body->>'run_ref';
     requested_next_run text := body->>'next_run_ref';
@@ -1123,6 +1124,15 @@ BEGIN
       AND status='PENDING' AND ingress_seq<=lane.classified_through_seq;
     has_gap := lane.classified_through_seq < lane.next_ingress_seq - 1;
     IF pending_count > 0 THEN
+        IF requested_mode='SILENT_ONLY' THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_TRIGGER_PENDING',
+                    'message','Silent drain cannot claim a pending trigger','status',409
+                )
+            );
+        END IF;
         IF requested_session IS NULL OR requested_run IS NULL THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
@@ -1339,5 +1349,181 @@ BEGIN
             requested_bot,requested_operation
         )
     );
+END;
+$$;
+
+CREATE TABLE conversation_silent_drain_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TRIGGER conversation_silent_drain_settlements_immutable
+    BEFORE UPDATE OR DELETE ON conversation_silent_drain_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+
+CREATE FUNCTION conversation_claim_silent_drain(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    lane record;
+    next_epoch bigint;
+    operation_id text;
+    identity_digest text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 3600 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_CLAIM_INPUT_INVALID',
+                'message','Conversation silent-drain claim is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND actor_owner_id=requested_token
+      AND actor_expires_at>clock_timestamp()
+    FOR UPDATE;
+    IF lane IS NULL THEN
+        SELECT l.* INTO lane
+        FROM __forest_module_schema__.conversation_lanes l
+        WHERE l.bot_id=requested_bot
+          AND l.active_session_ref IS NULL
+          AND (l.resume_not_before IS NULL OR l.resume_not_before<=clock_timestamp())
+          AND l.context_applied_seq<l.classified_through_seq
+          AND (l.actor_owner_id IS NULL OR l.actor_expires_at<=clock_timestamp())
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.conversation_triggers t
+              WHERE t.bot_id=l.bot_id AND t.conversation_id=l.conversation_id
+                AND t.status='PENDING' AND t.ingress_seq<=l.classified_through_seq
+          )
+        ORDER BY l.updated_at,l.conversation_id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1;
+        IF lane IS NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',true,'value',NULL
+            );
+        END IF;
+        next_epoch := lane.actor_epoch+1;
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET actor_owner_id=requested_token,actor_epoch=next_epoch,
+            actor_expires_at=clock_timestamp()+(requested_lease*interval '1 second'),
+            resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=lane.conversation_id
+        RETURNING * INTO lane;
+    END IF;
+    identity_digest := encode(sha256(convert_to(jsonb_build_array(
+        requested_bot,lane.conversation_id,lane.actor_epoch
+    )::text,'UTF8')),'hex');
+    operation_id := 'conversation-silent:' || identity_digest;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',lane.conversation_id,
+            'claim_token',requested_token,
+            'attempt',lane.actor_epoch,
+            'operation_id',operation_id,
+            'causal_root_kind','conversation.silent-drain',
+            'causal_root_id',lane.conversation_id,
+            'payload',jsonb_build_object(
+                'actor',jsonb_build_object(
+                    'conversation_id',lane.conversation_id,
+                    'owner_id',requested_token,
+                    'epoch',lane.actor_epoch
+                ),
+                'boundary','IDLE',
+                'selection_mode','SILENT_ONLY',
+                'session_ref','silent-session:' || identity_digest,
+                'run_ref','silent-run:' || identity_digest,
+                'next_run_ref',NULL
+            )
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION conversation_settle_silent_drain(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_work text := input->>'work_id';
+    requested_token text := input->>'claim_token';
+    requested_attempt bigint := (input->>'attempt')::bigint;
+    existing record;
+    lane record;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_work IS NULL OR requested_token IS NULL
+       OR requested_attempt IS NULL OR requested_attempt<1
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SETTLEMENT_INPUT_INVALID',
+                'message','Conversation silent-drain settlement is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO existing
+    FROM __forest_module_schema__.conversation_silent_drain_settlements
+    WHERE claim_token=requested_token;
+    IF existing IS NOT NULL THEN
+        IF existing.input_payload=input THEN
+            RETURN existing.result_payload;
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SETTLEMENT_CONFLICT',
+                'message','Conversation claim was settled with another outcome','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_work
+    FOR UPDATE;
+    IF lane IS NULL
+       OR lane.actor_owner_id IS DISTINCT FROM requested_token
+       OR lane.actor_epoch IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_CONVERSATION_ACTOR',
+                'message','Conversation actor no longer owns this lane','status',409
+            )
+        );
+    END IF;
+    UPDATE __forest_module_schema__.conversation_lanes
+    SET actor_owner_id=NULL,actor_expires_at=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_work;
+    result_value := jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-settled/1','work_id',requested_work
+        )
+    );
+    INSERT INTO __forest_module_schema__.conversation_silent_drain_settlements(
+        claim_token,input_payload,result_payload
+    ) VALUES (requested_token,input,result_value);
+    RETURN result_value;
 END;
 $$;

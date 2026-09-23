@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["actor", "boundary", "selection_mode", "session_ref", "run_ref", "next_run_ref"],
+  "properties": {
+    "actor": {
+      "type": "object",
+      "required": ["conversation_id", "owner_id", "epoch"],
+      "properties": {
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "epoch": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "boundary": {"const": "IDLE"},
+    "selection_mode": {"const": "SILENT_ONLY"},
+    "session_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "next_run_ref": {"type": "null"}
+  },
+  "additionalProperties": false
+}

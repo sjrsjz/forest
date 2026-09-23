@@ -15,7 +15,7 @@
     },
     "input": {
       "type": "object",
-      "required": ["actor", "boundary", "session_ref", "run_ref", "next_run_ref"],
+      "required": ["actor", "boundary", "selection_mode", "session_ref", "run_ref", "next_run_ref"],
       "properties": {
         "actor": {
           "type": "object",
@@ -28,6 +28,7 @@
           "additionalProperties": false
         },
         "boundary": {"enum": ["IDLE", "MODEL_SAFE_POINT", "SESSION_END"]},
+        "selection_mode": {"enum": ["ANY", "SILENT_ONLY"]},
         "session_ref": {"type": ["string", "null"], "maxLength": 256},
         "run_ref": {"type": ["string", "null"], "maxLength": 256},
         "next_run_ref": {"type": ["string", "null"], "maxLength": 256}

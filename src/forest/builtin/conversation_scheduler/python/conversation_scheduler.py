@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 
 from forest.errors import ForestError
-from forest.sdk import Plugin
+from forest.sdk import Plugin, job
 
 
 class ConversationScheduler(Plugin):
@@ -31,3 +31,18 @@ class ConversationScheduler(Plugin):
                 "Conversation Context view configuration is invalid",
                 422,
             )
+
+    @job("conversation.silent-drain")
+    async def silent_drain(self, task, ctx):
+        result = await ctx.uow.call(
+            "conversation.commit-silent-input",
+            task["payload"],
+            operation_id=ctx.operations.stable("commit-silent-input:v1"),
+        )
+        if result.get("status") != "BATCH" or result.get("kind") != "SILENT_DRAIN":
+            raise ForestError(
+                "CONVERSATION_SILENT_DRAIN_INVALID",
+                "Silent drain did not commit an input batch",
+                409,
+            )
+        return result
