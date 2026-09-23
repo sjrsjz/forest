@@ -212,7 +212,12 @@ def main() -> None:
             )
         )
     except ForestError as exc:
-        raise SystemExit(f"{exc.code}: {exc.message}") from None
+        details = (
+            " " + json.dumps(exc.details, ensure_ascii=False, sort_keys=True)
+            if exc.details is not None
+            else ""
+        )
+        raise SystemExit(f"{exc.code}: {exc.message}{details}") from None
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from importlib.resources import files
 from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator
@@ -11,14 +9,12 @@ from jsonschema import Draft202012Validator
 from forest.bootstrap_contributions import BootstrapConfigurationContribution
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embedding_builtin import (
-    EMBEDDING_CONFIGURATION_SCHEMA,
     default_embedding_configuration,
     validate_embedding_configuration,
 )
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.provider_builtin import (
-    PROVIDER_CONFIGURATION_SCHEMA,
     default_provider_configuration,
     validate_provider_configuration,
 )
@@ -29,11 +25,69 @@ from forest.vector_index_builtin import (
     validate_vector_index_configuration,
 )
 
-TRIGGER_POLICY_CONFIGURATION_SCHEMA = json.loads(
-    files("forest")
-    .joinpath("builtin/trigger_policy/schemas/config.json")
-    .read_text(encoding="utf-8")
-)
+PROVIDER_BOOTSTRAP_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "protocol",
+        "base_url",
+        "credential_ref",
+        "timeout_seconds",
+        "max_connections",
+        "capabilities",
+    ],
+    "properties": {
+        "protocol": {"const": "forest.provider.chat-completions/1"},
+        "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
+        "max_connections": {"type": "integer", "minimum": 1, "maximum": 128},
+        "capabilities": {"type": "object"},
+    },
+    "additionalProperties": False,
+}
+EMBEDDING_BOOTSTRAP_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "protocol",
+        "endpoint",
+        "credential_ref",
+        "timeout_seconds",
+        "max_connections",
+        "profile",
+    ],
+    "properties": {
+        "protocol": {"const": "forest.embedding.multimodal/1"},
+        "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300},
+        "max_connections": {"type": "integer", "minimum": 1, "maximum": 32},
+        "profile": {"type": "object"},
+    },
+    "additionalProperties": False,
+}
+TRIGGER_POLICY_BOOTSTRAP_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "protocol",
+        "allowed_group_ids",
+        "group_trigger_mode",
+        "private_enabled",
+    ],
+    "properties": {
+        "protocol": {"const": "forest.conversation.trigger-policy/1"},
+        "allowed_group_ids": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[0-9]+$"},
+            "uniqueItems": True,
+        },
+        "group_trigger_mode": {"enum": ["MENTION", "ALL", "DISABLED"]},
+        "private_enabled": {"type": "boolean"},
+    },
+    "additionalProperties": False,
+}
 SHELL_BOOTSTRAP_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -80,7 +134,7 @@ def default_trigger_policy_configuration() -> dict:
 
 
 def validate_trigger_policy_configuration(value: object) -> dict:
-    if not Draft202012Validator(TRIGGER_POLICY_CONFIGURATION_SCHEMA).is_valid(value):
+    if not Draft202012Validator(TRIGGER_POLICY_BOOTSTRAP_SCHEMA).is_valid(value):
         raise ForestError(
             "TRIGGER_POLICY_CONFIGURATION_INVALID",
             "Trigger policy configuration is invalid",
@@ -127,10 +181,10 @@ ONEBOT_BOOTSTRAP_SCHEMA = {
 }
 
 OFFICIAL_BOOTSTRAP_SCHEMAS = {
-    "provider.chat-completions": PROVIDER_CONFIGURATION_SCHEMA,
-    "embedding.multimodal": EMBEDDING_CONFIGURATION_SCHEMA,
+    "provider.chat-completions": PROVIDER_BOOTSTRAP_SCHEMA,
+    "embedding.multimodal": EMBEDDING_BOOTSTRAP_SCHEMA,
     "vector.index": VECTOR_INDEX_CONFIGURATION_SCHEMA,
-    "conversation.trigger-policy": TRIGGER_POLICY_CONFIGURATION_SCHEMA,
+    "conversation.trigger-policy": TRIGGER_POLICY_BOOTSTRAP_SCHEMA,
     "shell.command": SHELL_BOOTSTRAP_SCHEMA,
     "agent.runtime": AGENT_BOOTSTRAP_SCHEMA,
     "adapter.onebot": ONEBOT_BOOTSTRAP_SCHEMA,
@@ -288,8 +342,32 @@ class OfficialBotSettingsResolver:
                     details={"component_id": component_id},
                 )
 
+        provider_seed = components["provider.chat-completions"].config
+        capability_fields = {
+            "deployment_id",
+            "model",
+            "capability_revision",
+            "model_revision",
+            "input_modalities",
+            "supports_tools",
+            "supports_streaming",
+            "stream_usage",
+            "max_output_tokens",
+            "image_roles",
+            "image_detail",
+            "system_role",
+            "output_token_parameter",
+            "tool_image_mapping",
+        }
         provider, capabilities = validate_provider_configuration(
-            components["provider.chat-completions"].config
+            {
+                **provider_seed,
+                "capabilities": {
+                    key: value
+                    for key, value in provider_seed["capabilities"].items()
+                    if key in capability_fields
+                },
+            }
         )
         embedding, embedding_profile = validate_embedding_configuration(
             components["embedding.multimodal"].config
