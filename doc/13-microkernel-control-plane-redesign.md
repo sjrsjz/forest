@@ -144,6 +144,14 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 内核与旧模块也只能通过窄 participant façade 加入 plan。`kernel.effect` façade 固定提供 prepare、handoff、observe、abandon 四种 Effect 账本操作，并从协调器封存的 caller 身份取得 producer Generation；`adapter.onebot` façade 只提供平台入站记录与 transport fence 校验。二者都不暴露 Repository、连接池、运行实例或私表读取能力。Delivery 的 participant 因此只能组合自己的状态转换、Adapter fence 和 Kernel Effect DTO，不能把旧 `DeliveryRepository` 包进宿主 effect driver。
 
+消费其他模块贡献的目录同样属于包协议，而不是宿主构造器注入。包通过 `contribution_directories` 声明所消费的目录；内核在 RuntimeGraph 构建期解析贡献并冻结贡献者、契约、schema 摘要、目标组件与目标 Generation。Worker 只能读取这一代的目录投影，并用队列记录中已经冻结的目标身份发起调用；目标不一致时返回 typed stale rejection，禁止重新按名称猜测路由。`job-types` 目录的协作取消由调度包声明的只读 Domain Query 决定，内核仅把该查询包装为执行器的 cancellation callback，不读取 Job 私表。消费声明同时固定该 Scheduler 能承诺的最大执行时间，超预算贡献在构图时失败，不能在入队或执行时静默截短。
+
+目录物化是消费模块的 Generation 私有资源。候选 Worker 健康后、图发布前，Package Adapter 通过 manifest 声明的 preparation Command 把整份冻结目录写入候选 Generation 分区；该事务必须同时通过 PREPARED graph、准确成员和当前 HostLease 围栏。发布不会再等待后台轮询建立目录，旧活动代也始终读取自己的分区。关闭或启动回滚时，Registry 先关闭该 Generation 的持久入口并排空 owned work，Adapter 再通过独立 cleanup Command 删除准确 Generation 的目录分区；cleanup authority 必须在同一写事务中确认当前 HostLease 仍拥有该 Generation，且它没有开放的 DATA/CONTROL route。随后才能停止 Worker 和效果驱动。同步与清理端口均由消费包拥有，内核不读取其目录表，也不向 claim 注入随调用变化的目录副本。
+
+群聊 Shell 贡献也属于包工件。包内 `shell_commands` 必须同时冻结 command/version、参数 schema、权限集合、服务等级、输出策略和准确执行 service；执行 service 必须由同包 Worker 实现。Shell dispatcher 只消费 RuntimeGraph 目录并构造类型化请求，Package Adapter 在跨 Worker 前再次用该命令 schema 校验，Worker 返回的 JSON 只有通过 service 输出 schema 后才投影为 Shell 结果。不得在宿主保留 `builtin_*_shell.py` 业务处理器，也不得让 Web 壳按组件 ID 导入同一套命令逻辑。
+
+`job.scheduler` 的包内队列把 Job 输入和结果作为有界 JSONB 私有状态保存，因为这些值只属于 Job 聚合，不是跨模块共享 Payload。候选 Generation 在发布前通过受 PREPARED graph、准确 Generation 和当前 Host lease 约束的 preparation Command，把目录写入按 scheduler Generation 分区的私表；它不会覆盖旧活动代的目录。图发布后 Query 与入队立即读取新代快照，无需等待后台 poll。领取按新目录冻结 owner component、target Generation、service/version 和执行预算；新图不再提供的排队类型显式终结为 `FAILED/JOB_TYPE_RETIRED`，不能永久悬挂。包 Worker 只能通过 `ctx.job_types.execute` 提交包含上述完整身份的请求；Adapter 对冻结事实、动态输入 schema、deadline 和 cancellation Query 全部复核后才调用目标。租约失效只证明调度器失去所有权，不能证明执行器没有产生副作用，因此任务直接进入 `UNKNOWN/JOB_RESULT_UNKNOWN_AFTER_LEASE`，保留冻结目标用于对账，绝不自动改回 `QUEUED`。热替换先关闭 owned-work 领取门，等待已领取调用和结算完成，再停止 Worker；候选图发布失败时旧代恢复原门，成功时旧代直接回收，队列表不迁移、不双写。
+
 写端口若接收 `kernel.payload` 的持久引用，manifest 必须在该端口声明 `payload_refs`：引用所在 JSON Pointer、固定 owner component/kind，以及从同一输入取得 owner ID 的 JSON Pointer。通用 Domain Authority 在调用包 SQL 前于同一事务验证引用的五元身份、正文仍为 ACTIVE、owner 与声明完全一致；SQL 只会看到已经通过内核权威验证的引用。Worker 不能把 effect receipt 中的 PayloadRef 替换为自造对象，包 SQL 也不能跨 namespace 读取 Payload 表。这个栅栏属于通用写端口 ABI，不允许为 Media、Agent 或 Memory 增加专用宿主 Repository 回调。
 
 `media.capture` 已按这条边界完成包化：Adapter 只在 ingress UoW 中提交 `media.register-ingress` participant DTO；Media 包私有 SQL 独占 capture、part、asset、claim 和 settlement 表；通用 owned-work supervisor 只执行 claim → 包内 `@job` → settle。包内 Worker 决定逐 part 获取、失败分类、重试结果和 Memory 发布内容，网络与像素验证仅经 `media.image.fetch` 受限 effect；该 effect 保存 owner 为 `media.capture/media.asset/<media_ref>` 的 Payload 并返回引用，不写 Media 私有表。`media.publish-image` Command 在通用 `payload_refs` 栅栏与不可变内容一致性校验后写入 asset。`media.context.resolve/1` 只返回不可变 asset 引用和元数据；Agent 投影边界读取 Payload 并构造 `MediaSnapshot`，不得把字节搬入包 Worker JSON IPC。宿主 `CleanMediaCaptureRuntime`、`MediaCaptureRepository` 与旧 official baseline 已删除，没有双领取或 fallback。
@@ -228,7 +236,7 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 - 当前非敏感值、字段级继承来源及读权限；
 - desired/effective/observed 状态和最近操作的脱敏摘要。
 
-模块 UI 只能发送 `ready`、`resize`、`set-draft`、`validate`、`request-plan` 和 `discard-draft`。所有消息有 schema、大小、频率和字段路径限制。宿主执行服务端校验、CAS 计划和最终提交；iframe 永远不能提供 URL、HTTP 方法、权限名或任意控制调用。密钥字段由宿主原生控件覆盖，模块 UI 只看 `secret_ref` 是否已设置。
+模块 UI 只能发送 `ready`、`resize`、`set-draft`、`validate`、`request-plan`、`discard-draft`，以及调用本 Generation 已声明 management operation 的 `query/action`。操作消息只能给出 operation ID、稳定 request ID 和 JSON 输入，不能提供 URL、HTTP 方法、组件 ID、权限名或任意控制调用；壳层把请求固定路由到当前 iframe 所属组件，并对 action 生成幂等键。所有消息有 schema、大小和频率限制，服务端仍按 manifest 的输入 schema、当前 Generation、权限和事务栅栏执行。密钥字段由宿主原生控件覆盖，模块 UI 只看 `secret_ref` 是否已设置。
 
 未声明 UI、UI 协议不兼容、资源校验失败或脚本崩溃时，控制台使用通用 schema 表单。自定义 UI 是呈现插件，不是配置权威，也不能成为模块可运行的必要条件。
 
@@ -304,6 +312,8 @@ ComponentJob 的兼容接管要求相同 `handler_id`、输入 schema digest 和
 模块除配置 UI 外可声明只读管理视图和类型化管理动作。视图查询不是任意 SQL，而是组件注册的 management query contract；返回 DTO 经宿主字段授权、分页上限和脱敏后传给 iframe。动作必须映射到已注册 operation type，并走计划、授权、幂等、审计和生命周期执行器。
 
 可安装包通过 manifest 的 `management_queries` 与 `management_actions` 把管理操作绑定到同一包内已声明的 Domain Query/Command，不能在宿主中挂接按 `component_id` 分支的 Python handler。每项声明冻结公开 operation ID、私有端口名、输入/输出 schema、分页上限或优先级；Action 还可用 JSON Pointer 声明授权计划投影。管理网关从当前 Generation 的 management contract 枚举这些操作，Query 在该 Generation 的只读快照中执行；Action 必须在一次 Bot 数据库事务内依次完成 CONTROL admission 栅栏、Web authority ticket/策略复核、PayloadRef 栅栏和包 Command。任一步失败都整体回滚。包替换后旧 contract、旧 UI 与旧 Domain 端口同时失效，不得由宿主保留可继续写旧 schema 的管理兼容层。
+
+业务命令若需要记录操作者，manifest 用 `actor_field` 声明一个命令输入中的必填字符串字段。该字段从公开 Web 输入 schema 中移除，浏览器提交同名字段会被拒绝；management contract 在授权完成后从 ticket 注入 `web_subject_ref`，共享管理令牌路径注入固定主体 `management:shared-token`。授权票据仍绑定浏览器实际提交正文的摘要，注入后的完整命令才交给包 Domain Command。这样呈现代码不能伪造审计主体，包也不需要认识 HTTP 会话。
 
 Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模块提供 session/run/model-turn/tool-call 视图；Adapter 提供连接和协议事件；Scheduler 提供作业与 lease。控制台壳仅呈现模块给出的视图目录和通用状态，不为这些类型写专用顶层页面。
 

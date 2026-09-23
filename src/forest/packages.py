@@ -174,19 +174,58 @@ MANIFEST_SCHEMA = {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            key: {"type": "number", "exclusiveMinimum": 0, "maximum": 120}
-                            for key in (
-                                "prepare_timeout_s",
-                                "start_timeout_s",
-                                "drain_timeout_s",
-                                "stop_timeout_s",
-                            )
+                            "prepare_timeout_s": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 120,
+                            },
+                            "start_timeout_s": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 120,
+                            },
+                            "drain_timeout_s": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 86400,
+                            },
+                            "stop_timeout_s": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 120,
+                            },
                         },
                     },
                     "capabilities": {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {"requests": {"type": "array", "items": {"type": "string"}}},
+                    },
+                    "contribution_directories": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "kind",
+                                "cancellation_query",
+                                "max_execution_timeout_s",
+                                "synchronization_command",
+                                "cleanup_command",
+                            ],
+                            "properties": {
+                                "kind": {"const": "job-types"},
+                                "cancellation_query": {"type": "string"},
+                                "synchronization_command": {"type": "string"},
+                                "cleanup_command": {"type": "string"},
+                                "max_execution_timeout_s": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 86400,
+                                },
+                            },
+                        },
                     },
                     "provides": {
                         "type": "array",
@@ -328,6 +367,73 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "shell_commands": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "command_id",
+                                "command_version",
+                                "service_id",
+                                "service_version",
+                                "argument_schema",
+                                "management_operation_id",
+                                "target_scope",
+                                "service_class",
+                                "required_capabilities",
+                                "output_policy",
+                                "timeout_s",
+                            ],
+                            "properties": {
+                                "command_id": {"type": "string"},
+                                "command_version": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 2147483647,
+                                },
+                                "service_id": {"type": "string"},
+                                "service_version": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 2147483647,
+                                },
+                                "argument_schema": {"type": "string"},
+                                "management_operation_id": {"type": "string"},
+                                "target_scope": {
+                                    "enum": ["CONVERSATION", "BINDING", "BOT", "DEPLOYMENT"]
+                                },
+                                "service_class": {"enum": ["P0", "P1"]},
+                                "required_capabilities": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 32,
+                                    "uniqueItems": True,
+                                    "items": {"type": "string"},
+                                },
+                                "option_aliases": {
+                                    "type": "array",
+                                    "maxItems": 32,
+                                    "uniqueItems": True,
+                                    "items": {
+                                        "type": "array",
+                                        "minItems": 2,
+                                        "maxItems": 2,
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "output_policy": {
+                                    "enum": ["SHORT", "ARTIFACT", "SILENT"]
+                                },
+                                "timeout_s": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 900,
+                                },
+                            },
+                        },
+                    },
                     "owned_work_handlers": {
                         "type": "array",
                         "maxItems": 32,
@@ -442,6 +548,7 @@ MANIFEST_SCHEMA = {
                                 "port": {"type": "string"},
                                 "priority": {"enum": ["P0", "P1", "P2"]},
                                 "authorization_path": {"type": "string"},
+                                "actor_field": {"type": "string"},
                                 "replace_runtime_graph": {"type": "boolean"},
                                 "timeout_s": {
                                     "type": "number",
@@ -999,6 +1106,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     unit_of_work_participants = component.get("unit_of_work_participants", [])
     unit_of_work_plans = component.get("unit_of_work_plans", [])
     job_types = component.get("job_types", [])
+    shell_commands = component.get("shell_commands", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
@@ -1017,6 +1125,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         and not unit_of_work_participants
         and not unit_of_work_plans
         and not job_types
+        and not shell_commands
         and not owned_work_handlers
         and not commands
         and not message_handlers
@@ -1157,6 +1266,46 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_MANAGEMENT_OPERATIONS",
                 "Management authorization_path must be an exact JSON pointer",
             )
+        actor_field = declaration.get("actor_field")
+        if actor_field is not None:
+            port = next(
+                item for item in domain_commands if item["name"] == declaration["port"]
+            )
+            input_schema = _schema(files, port["input_schema"])
+            properties = input_schema.get("properties", {})
+            actor_schema = properties.get(actor_field)
+            if (
+                not IDENTIFIER.fullmatch(actor_field)
+                or actor_field not in input_schema.get("required", ())
+                or not isinstance(actor_schema, dict)
+                or actor_schema.get("type") != "string"
+            ):
+                _fail(
+                    "INVALID_MANAGEMENT_OPERATIONS",
+                    "Management actor_field must name one required string command field",
+                )
+            if pointer == "/" + actor_field.replace("~", "~0").replace("/", "~1"):
+                _fail(
+                    "INVALID_MANAGEMENT_OPERATIONS",
+                    "Management authorization_path cannot reference an injected actor field",
+                )
+    directory_kinds = set()
+    for declaration in component.get("contribution_directories", []):
+        kind = declaration.get("kind")
+        if (
+            kind in directory_kinds
+            or kind != "job-types"
+            or declaration.get("cancellation_query") not in query_ports
+            or declaration.get("synchronization_command") not in command_ports
+            or declaration.get("cleanup_command") not in command_ports
+            or declaration.get("cleanup_command")
+            == declaration.get("synchronization_command")
+        ):
+            _fail(
+                "INVALID_CONTRIBUTION_DIRECTORY",
+                "Job directory consumption requires distinct synchronization, cleanup, and cancellation ports",
+            )
+        directory_kinds.add(kind)
     contributed_job_types = set()
     contributed_job_handlers = set()
     for definition in job_types:
@@ -1171,6 +1320,50 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_JOB_TYPES", "Job type identities must be valid and unique")
         contributed_job_types.add(job_type)
         contributed_job_handlers.add(handler)
+    service_contracts = {
+        (item["name"], contract_range(item["contract"])[0][0])
+        for item in services
+    }
+    shell_command_keys = set()
+    for declaration in shell_commands:
+        key = (declaration.get("command_id"), declaration.get("command_version"))
+        target = (
+            declaration.get("service_id"),
+            declaration.get("service_version"),
+        )
+        argument_schema = _schema(files, declaration.get("argument_schema"))
+        properties = argument_schema.get("properties", {})
+        argument_properties = properties.get("arguments", {}).get("properties", {})
+        aliases = declaration.get("option_aliases", [])
+        capabilities = declaration.get("required_capabilities", [])
+        if (
+            key in shell_command_keys
+            or not IDENTIFIER.fullmatch(declaration.get("command_id", ""))
+            or target not in service_contracts
+            or not re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,255}",
+                declaration.get("management_operation_id", ""),
+            )
+            or properties.get("protocol", {}).get("const")
+            != "forest.shell.arguments/1"
+            or properties.get("command_id", {}).get("const")
+            != declaration.get("command_id")
+            or not isinstance(properties.get("arguments"), dict)
+            or any(
+                not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,199}", capability)
+                for capability in capabilities
+            )
+            or any(
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", alias[0])
+                for alias in aliases
+            )
+            or any(alias[1] not in argument_properties for alias in aliases)
+        ):
+            _fail(
+                "INVALID_SHELL_COMMAND",
+                "Shell command must bind one declared service and matching argument schema",
+            )
+        shell_command_keys.add(key)
     for definition in owned_work_handlers:
         handler = definition["handler"]
         if handler in contributed_job_handlers:

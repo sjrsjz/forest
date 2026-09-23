@@ -931,6 +931,72 @@ class JobsHandle:
         )
 
 
+class JobTypesDirectoryHandle:
+    """Read and invoke the RuntimeGraph-frozen durable Job type directory."""
+
+    def __init__(
+        self,
+        rpc: Callable[[str, dict], Awaitable[Any]] | None,
+        scope: CallScope | None,
+    ) -> None:
+        self._rpc = rpc
+        self._scope = scope
+
+    async def list(self) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED", "No contribution directory gateway is available", 403
+            )
+        return await self._rpc(
+            scope.call_id,
+            {"kind": "job-types", "action": "list"},
+        )
+
+    async def execute(
+        self,
+        *,
+        job_id: str,
+        job_type: str,
+        job_version: int,
+        attempt: int,
+        requested_by: str,
+        input: dict,
+        claim_token: str,
+        target_component_id: str,
+        target_generation_id: str,
+        target_service_id: str,
+        target_service_version: int,
+        operation_id: str,
+        timeout: float,
+    ) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED", "No contribution directory gateway is available", 403
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "kind": "job-types",
+                "action": "execute",
+                "job_id": job_id,
+                "job_type": job_type,
+                "job_version": job_version,
+                "attempt": attempt,
+                "requested_by": requested_by,
+                "input": input,
+                "claim_token": claim_token,
+                "target_component_id": target_component_id,
+                "target_generation_id": target_generation_id,
+                "target_service_id": target_service_id,
+                "target_service_version": target_service_version,
+                "operation_id": operation_id,
+                "timeout": timeout,
+            },
+        )
+
+
 class PluginContext:
     def __init__(
         self,
@@ -948,6 +1014,7 @@ class PluginContext:
         unit_of_work_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         job_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        contribution_directory_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         identity: Mapping | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
@@ -960,6 +1027,7 @@ class PluginContext:
         self._unit_of_work_rpc = unit_of_work_rpc
         self._event_rpc = event_rpc
         self._job_rpc = job_rpc
+        self._contribution_directory_rpc = contribution_directory_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
         self._resource_owner = (
             resource_owner if resource_owner is not None else OwnedResources(resource_limit)
@@ -974,6 +1042,7 @@ class PluginContext:
         self.uow = UnitOfWorkPlansHandle(unit_of_work_rpc, scope)
         self.events = EventsHandle(event_rpc, scope)
         self.jobs = JobsHandle(job_rpc, scope)
+        self.job_types = JobTypesDirectoryHandle(contribution_directory_rpc, scope)
 
     def _for_call(self, scope: CallScope) -> PluginContext:
         return PluginContext(
@@ -988,6 +1057,7 @@ class PluginContext:
             unit_of_work_rpc=self._unit_of_work_rpc,
             event_rpc=self._event_rpc,
             job_rpc=self._job_rpc,
+            contribution_directory_rpc=self._contribution_directory_rpc,
             identity=self.identity,
         )
 

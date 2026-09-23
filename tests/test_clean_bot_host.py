@@ -21,6 +21,7 @@ from forest.clean_management_app import create_clean_management_app
 from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
+from forest.packages import PackageCatalog
 from forest.runtime_modules import ModuleLifecycleState
 from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.memory_graph_authority import (
@@ -523,7 +524,7 @@ async def test_reload_recovery_releases_agent_and_exact_conversation_blocker():
 
 
 @pytest.mark.postgres
-async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
+async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -557,6 +558,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
         agent_system_prompt="You are the production-host integration test Bot.",
     )
     clients = []
+    package_catalog = PackageCatalog(tmp_path / "host-packages")
 
     async def create_websocket(_url, _token, **_limits):
         client = FakeWebSocketClient(settings.onebot_self_id)
@@ -576,6 +578,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 media_client_factory=FakeMediaClient,
                 vector_index_client_factory=FakeMilvusClient,
                 websocket_client_factory=create_websocket,
+                package_catalog=package_catalog,
             )
             await host.start()
             try:
@@ -624,20 +627,27 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 )
                 if index == 0:
                     jobs = host.registry.get("job.scheduler")
-                    queued = await jobs.enqueue(
-                        job_type="runtime.health-snapshot",
+                    queued_result = await jobs.management_contract.action(
+                        "jobs.run",
                         operation_id="host-test:runtime-health",
-                        requested_by="test:operator",
-                        input_value={},
+                        payload={
+                            "job_type": "runtime.health-snapshot",
+                            "source_conversation_ref": None,
+                            "input": {},
+                        },
                     )
-                    jobs.notify()
+                    queued = queued_result.value
                     async with asyncio.timeout(5):
                         while True:
-                            job = await jobs.inspect(queued["job_id"])
+                            job = await jobs.management_contract.query(
+                                "jobs.read", {"job_id": queued["job_id"]}
+                            )
                             if job["state"] == "SUCCEEDED":
                                 break
                             await asyncio.sleep(0.05)
-                    assert job["result_payload_id"]
+                    assert job["result"]["protocol"] == (
+                        "forest.runtime-health-snapshot/1"
+                    )
                     await clients[-1].handler(
                         json.dumps(
                             {
@@ -1136,8 +1146,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert (
                             await web.get("/static/clean-authorization-policy.js")
                         ).status_code == 200
-                        assert (await web.get("/static/modules/clean-jobs.html")).status_code == 200
-                        assert (await web.get("/static/clean-jobs.js")).status_code == 200
+                        assert (await web.get("/static/modules/clean-jobs.html")).status_code == 404
+                        assert (await web.get("/static/clean-jobs.js")).status_code == 404
                         assert index.headers["x-frame-options"] == "DENY"
                         assert "default-src 'none'" in index.headers["content-security-policy"]
                         unauthorized = await web.get("/management/v1/runtime")
@@ -1244,11 +1254,25 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                         assert [
                             item["contribution_id"]
                             for item in job_view["management_contributions"]
-                        ] == ["job-control", "configuration"]
+                        ] == ["jobs.workspace"]
+                        assert job_view["management_contributions"][0]["surface"][
+                            "kind"
+                        ] == "sandboxed-package"
+                        assert job_view["management_contract"]["protocol"] == (
+                            "forest.package-management/1"
+                        )
                         assert {
                             item["query_id"]
                             for item in job_view["management_contract"]["queries"]
                         } == {"jobs.types", "jobs.query", "jobs.read"}
+                        run_action = next(
+                            item
+                            for item in job_view["management_contract"]["actions"]
+                            if item["action_id"] == "jobs.run"
+                        )
+                        assert "requested_by" not in run_action["input_schema"][
+                            "properties"
+                        ]
                         delivery_view = next(
                             item
                             for item in runtime_view.json()["modules"]
@@ -1289,7 +1313,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                                     json={
                                         "states": ["SUCCEEDED"],
                                         "job_type": "runtime.health-snapshot",
-                                        "requested_by": "management.web",
+                                        "requested_by": "management:shared-token",
                                         "limit": 25,
                                     },
                                 )
@@ -1580,6 +1604,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
             media_client_factory=FakeMediaClient,
             vector_index_client_factory=FakeMilvusClient,
             websocket_client_factory=create_websocket,
+            package_catalog=package_catalog,
         )
         with pytest.raises(ForestError) as caught:
             await rejected.start()

@@ -75,6 +75,7 @@ async function mountSandboxedPackage(root, row, contribution) {
   let draft = structuredClone(configuration.desired.value);
   let plan = null;
   let messages = [];
+  const operationReplies = new Map();
   const nonce = crypto.randomUUID();
   const channel = new MessageChannel();
   const blobUrl = URL.createObjectURL(new Blob([html], {type: 'text/html'}));
@@ -155,6 +156,46 @@ async function mountSandboxedPackage(root, row, contribution) {
         discard.click();
       } else if (message.type === 'resize') {
         send('resize-assigned', {height: frame.clientHeight});
+      } else if (message.type === 'query' || message.type === 'action') {
+        const requestId = message.request_id;
+        const operationId = message.operation_id;
+        if (
+          typeof requestId !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(requestId)
+          || typeof operationId !== 'string'
+          || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(operationId)
+          || !message.value || Array.isArray(message.value) || typeof message.value !== 'object'
+        ) throw new Error('模块 UI 操作请求无效');
+        const prior = operationReplies.get(requestId);
+        if (prior) {
+          send(prior.type, prior.payload);
+          return;
+        }
+        const kind = message.type === 'query' ? 'queries' : 'actions';
+        const options = {method: 'POST', body: JSON.stringify(message.value)};
+        if (message.type === 'action') {
+          options.headers = {'idempotency-key': `package-ui:${nonce}:${requestId}`};
+        }
+        try {
+          const value = await api(
+            `/management/v1/modules/${encodeURIComponent(row.component_id)}/${kind}/${encodeURIComponent(operationId)}`,
+            options,
+          );
+          const reply = {
+            type: message.type === 'query' ? 'query-result' : 'action-result',
+            payload: {request_id: requestId, operation_id: operationId, value},
+          };
+          if (operationReplies.size >= 64) {
+            operationReplies.delete(operationReplies.keys().next().value);
+          }
+          operationReplies.set(requestId, reply);
+          send(reply.type, reply.payload);
+        } catch (error) {
+          send('operation-error', {
+            request_id: requestId,
+            operation_id: operationId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     } catch (error) {
       fail(error);

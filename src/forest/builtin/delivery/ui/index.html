@@ -28,16 +28,15 @@
   <script>
     (() => {
       'use strict';
-      const protocol = 'forest.management-ui/1';
       let port = null, nonce = null;
-      const send = (type, payload = {}) => port?.postMessage({protocol, nonce, type, ...payload});
+      const send = (type, payload = {}) => port?.postMessage({protocol:'forest.management-ui-channel/1', nonce, type, ...payload});
       addEventListener('message', event => {
         const message = event.data || {};
-        if (event.source !== parent || !event.ports[0] || message.protocol !== protocol || message.type !== 'forest:init' || typeof message.nonce !== 'string') return;
+        if (event.source !== parent || !event.ports[0] || message.protocol !== 'forest.management-ui-connect/1' || message.type !== 'connect' || typeof message.nonce !== 'string') return;
         port = event.ports[0]; nonce = message.nonce;
-        send('module:set-draft', {values:{protocol:'forest.delivery/1'}});
-        send('module:ready'); send('module:resize', {height:document.documentElement.scrollHeight});
-      });
+        port.onmessage = event => { const value=event.data||{}; if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return; if(value.type==='initialize'){send('set-draft',{value:{protocol:'forest.delivery/1'}});send('resize',{height:document.documentElement.scrollHeight});} };
+        port.start(); send('ready');
+      }, {once:true});
     })();
   </script>
 </body>

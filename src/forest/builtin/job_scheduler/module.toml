@@ -1,0 +1,223 @@
+manifest_version = 1
+package_id = "forest.job-scheduler"
+version = "1.0.2"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "job_scheduler:JobScheduler"
+
+[[components]]
+id = "job.scheduler"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 64
+max_state_inflight = 16
+max_owned_tasks = 8
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 3700
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = [
+  "domain.query:jobs.query",
+  "domain.query:jobs.read",
+  "domain.query:jobs.types",
+  "domain.query:job.cancellation-requested",
+  "domain.command:jobs.enqueue",
+  "domain.command:jobs.cancel"
+]
+
+[[components.contribution_directories]]
+kind = "job-types"
+cancellation_query = "job.cancellation-requested"
+max_execution_timeout_s = 3660
+synchronization_command = "job-types.synchronize"
+cleanup_command = "job-types.cleanup"
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "jobs.workspace"
+label = "\u6301\u4e45\u4efb\u52a1"
+group = "runtime"
+order = 10
+
+[components.storage]
+schema_id = "forest.job.scheduler"
+schema_version = "1.0.0"
+baseline = "schema/job_scheduler.sql"
+baseline_sha256 = "7fd13a21324b46c819914ac0f5987dcfb760a9802752a1f07877ab15aa685bb2"
+scope = "bot"
+repository_contract = "forest.job-scheduler.repository/1"
+execution_profile = "official"
+
+[[components.provides]]
+name = "shell.jobs.execute"
+contract = "1.0"
+input_schema = "schemas/shell-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.shell_commands]]
+command_id = "jobs.list"
+command_version = 1
+service_id = "shell.jobs.execute"
+service_version = 1
+argument_schema = "schemas/shell-list.json"
+management_operation_id = "job.read"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["job.read"]
+output_policy = "SHORT"
+timeout_s = 10
+
+[[components.shell_commands]]
+command_id = "jobs.inspect"
+command_version = 1
+service_id = "shell.jobs.execute"
+service_version = 1
+argument_schema = "schemas/shell-inspect.json"
+management_operation_id = "job.read"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["job.read"]
+output_policy = "SHORT"
+timeout_s = 10
+
+[[components.shell_commands]]
+command_id = "jobs.run"
+command_version = 1
+service_id = "shell.jobs.execute"
+service_version = 1
+argument_schema = "schemas/shell-run.json"
+management_operation_id = "job.run"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["job.run"]
+option_aliases = [["type", "job_type"], ["input", "input_json"]]
+output_policy = "SHORT"
+timeout_s = 15
+
+[[components.shell_commands]]
+command_id = "jobs.cancel"
+command_version = 1
+service_id = "shell.jobs.execute"
+service_version = 1
+argument_schema = "schemas/shell-cancel.json"
+management_operation_id = "job.cancel"
+target_scope = "BOT"
+service_class = "P0"
+required_capabilities = ["job.cancel"]
+option_aliases = [["expect-revision", "expected_revision"], ["reason", "reason_code"]]
+output_policy = "SHORT"
+timeout_s = 10
+
+[[components.domain_queries]]
+name = "jobs.types"
+contract = "1.0"
+function = "jobs_types"
+input_schema = "schemas/empty-input.json"
+output_schema = "schemas/types-output.json"
+
+[[components.domain_queries]]
+name = "jobs.query"
+contract = "1.0"
+function = "jobs_query"
+input_schema = "schemas/query-input.json"
+output_schema = "schemas/query-output.json"
+
+[[components.domain_queries]]
+name = "jobs.read"
+contract = "1.0"
+function = "jobs_read"
+input_schema = "schemas/read-input.json"
+output_schema = "schemas/job-output.json"
+
+[[components.domain_queries]]
+name = "job.cancellation-requested"
+contract = "1.0"
+function = "job_cancellation_requested"
+input_schema = "schemas/cancellation-query-input.json"
+output_schema = "schemas/cancellation-query-output.json"
+
+[[components.domain_commands]]
+name = "job-types.synchronize"
+contract = "1.0"
+function = "job_types_synchronize"
+input_schema = "schemas/directory-input.json"
+output_schema = "schemas/directory-output.json"
+
+[[components.domain_commands]]
+name = "job-types.cleanup"
+contract = "1.0"
+function = "job_types_cleanup"
+input_schema = "schemas/directory-cleanup-input.json"
+output_schema = "schemas/directory-cleanup-output.json"
+
+[[components.domain_commands]]
+name = "jobs.enqueue"
+contract = "1.0"
+function = "jobs_enqueue"
+input_schema = "schemas/enqueue-input.json"
+output_schema = "schemas/job-output.json"
+
+[[components.domain_commands]]
+name = "jobs.cancel"
+contract = "1.0"
+function = "jobs_cancel"
+input_schema = "schemas/cancel-input.json"
+output_schema = "schemas/cancel-output.json"
+
+[[components.management_queries]]
+id = "jobs.types"
+port = "jobs.types"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "jobs.query"
+port = "jobs.query"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "jobs.read"
+port = "jobs.read"
+timeout_s = 10
+
+[[components.management_actions]]
+id = "jobs.run"
+port = "jobs.enqueue"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "jobs.cancel"
+port = "jobs.cancel"
+priority = "P0"
+actor_field = "requested_by"
+timeout_s = 10
+
+[[components.owned_work_handlers]]
+name = "job.scheduler.pending"
+contract = "1.0"
+handler = "job.scheduler.execute"
+claim_function = "job_claim_work"
+settle_function = "job_settle_work"
+input_schema = "schemas/work-input.json"
+output_schema = "schemas/work-output.json"
+max_concurrency = 4
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 3670
+settle_timeout_s = 10
+lease_seconds = 3690

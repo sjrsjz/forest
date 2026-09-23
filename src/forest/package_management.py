@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from forest.clean_management_contract import (
     CleanManagementActionResult,
     CleanModuleConfigurationContract,
@@ -66,7 +68,7 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             {
                 "action_id": operation_id,
                 "priority": declaration["priority"],
-                "input_schema": self.adapter.snapshot.schema(port["input_schema"]),
+                "input_schema": self._public_action_schema(declaration, port),
                 "output_schema": self.adapter.snapshot.schema(port["output_schema"]),
             }
             for operation_id, (declaration, port) in self._actions.items()
@@ -119,13 +121,32 @@ class PackageManagementContract(CleanModuleConfigurationContract):
                 "Package management action does not exist",
                 404,
             ) from None
+        if not isinstance(payload, dict):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Management action input must be an object",
+                422,
+            )
         plan_digest = self.authorization_plan_digest(action_id, payload)
+        actor_field = declaration.get("actor_field")
+        if actor_field is not None and actor_field in payload:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Authenticated actor fields are supplied by the management gateway",
+                422,
+            )
+        command_payload = dict(payload)
+        if actor_field is not None:
+            command_payload[actor_field] = getattr(
+                authorization, "web_subject_ref", "management:shared-token"
+            )
         result = await self.adapter.invoke_management_action(
             port,
-            payload,
+            command_payload,
             action_id=action_id,
             operation_id=operation_id,
             plan_digest=plan_digest,
+            request_digest=digest_json(payload),
             timeout_seconds=float(declaration.get("timeout_s", 30)),
             authorization=authorization,
             authorization_guard=authorization_guard,
@@ -134,6 +155,19 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             result,
             replace_runtime_graph=declaration.get("replace_runtime_graph", False),
         )
+
+    def _public_action_schema(self, declaration: dict, port: dict) -> dict:
+        schema = deepcopy(self.adapter.snapshot.schema(port["input_schema"]))
+        actor_field = declaration.get("actor_field")
+        if actor_field is None:
+            return schema
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop(actor_field, None)
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [item for item in required if item != actor_field]
+        return schema
 
     @staticmethod
     def _pointer(value: object, pointer: str) -> object:

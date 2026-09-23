@@ -6,7 +6,7 @@
   <style>
     :root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
     body{margin:0;padding:16px}form{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(8rem,.6fr);gap:14px}
-    label{display:grid;gap:5px;color:#a9c1b2}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit}
+    label{display:grid;gap:5px;color:#a9c1b2}input,button{box-sizing:border-box;width:100%;padding:10px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit}button{grid-column:1/-1;background:#255844;cursor:pointer}
     p{grid-column:1/-1;margin:0;color:#8da497}@media(max-width:560px){form{grid-template-columns:1fr}}
   </style>
 </head>
@@ -14,35 +14,37 @@
   <form id="config">
     <label>计数器名称<input name="label" required maxlength="80"></label>
     <label>递增倍率<input name="multiplier" type="number" min="1" max="1000" required></label>
+    <button id="plan" type="button">校验并生成计划</button>
     <p>该界面由 forest.counter 包提供。更改只形成宿主草稿，预览和提交仍由控制台执行。</p>
   </form>
   <script>
     (() => {
       'use strict';
-      const protocol = 'forest.management-ui/1';
       let port = null, nonce = null, draft = {};
       const form = document.getElementById('config');
-      const send = (type, payload = {}) => port?.postMessage({protocol, nonce, type, ...payload});
-      addEventListener('message', event => {
-        if (event.source !== parent || !event.ports[0]) return;
-        const message = event.data || {};
-        if (message.protocol !== protocol || message.type !== 'forest:init' || typeof message.nonce !== 'string') return;
-        port = event.ports[0]; nonce = message.nonce; draft = structuredClone(message.values || {});
+      const send = (type, payload = {}) => port?.postMessage({protocol:'forest.management-ui-channel/1', nonce, type, ...payload});
+      const render = values => {
+        draft = structuredClone(values || {});
         form.elements.label.value = typeof draft.label === 'string' ? draft.label : '';
         form.elements.multiplier.value = Number.isInteger(draft.multiplier) ? draft.multiplier : 1;
+      };
+      addEventListener('message', event => {
+        const message = event.data || {};
+        if (event.source !== parent || !event.ports[0] || message.protocol !== 'forest.management-ui-connect/1' || message.type !== 'connect' || typeof message.nonce !== 'string') return;
+        port = event.ports[0]; nonce = message.nonce;
         port.onmessage = incoming => {
           const update = incoming.data || {};
-          if (update.protocol !== protocol || update.nonce !== nonce || update.type !== 'forest:replace-values') return;
-          draft = structuredClone(update.values || {});
-          form.elements.label.value = typeof draft.label === 'string' ? draft.label : '';
-          form.elements.multiplier.value = Number.isInteger(draft.multiplier) ? draft.multiplier : 1;
+          if (update.protocol !== 'forest.management-ui-channel/1' || update.nonce !== nonce) return;
+          if (update.type === 'initialize') { render(update.configuration.desired.value); send('resize', {height:document.documentElement.scrollHeight}); }
+          else if (update.type === 'reset') render(update.value);
         };
-        send('module:ready'); send('module:resize', {height: document.documentElement.scrollHeight});
-      });
+        port.start(); send('ready');
+      }, {once:true});
       form.addEventListener('input', () => {
         draft = {label: form.elements.label.value, multiplier: Number(form.elements.multiplier.value)};
-        send('module:set-draft', {values: draft});
+        send('set-draft', {value: draft});
       });
+      document.getElementById('plan').onclick = () => send('request-plan');
     })();
   </script>
 </body>

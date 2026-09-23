@@ -108,6 +108,26 @@ class PackageDomainCommands(Protocol):
         before_write=None,
     ) -> Any: ...
 
+    async def invoke_preparation_command(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
+    async def invoke_cleanup_command(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
 
 class PackageUnitOfWorkAuthority(Protocol):
     async def invoke_participant_in(

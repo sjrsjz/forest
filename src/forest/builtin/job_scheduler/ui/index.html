@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{color-scheme:dark;font:14px/1.4 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
+    *{box-sizing:border-box}body{margin:0;padding:12px}.toolbar,.filters,.run{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    button,input,select,textarea{border:1px solid #345244;border-radius:7px;background:#102019;color:inherit;padding:7px 9px}button{background:#255844;cursor:pointer}button:disabled{opacity:.5}
+    input,select{min-width:9rem}textarea{width:100%;min-height:76px;resize:vertical;font:12px ui-monospace,monospace}.layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(18rem,.8fr);gap:10px;margin-top:10px}
+    section{border:1px solid #29493a;border-radius:9px;background:#102019;padding:10px;min-width:0}h2{font-size:15px;margin:0 0 8px}.list{max-height:310px;overflow:auto;border-top:1px solid #29493a;margin-top:8px}.row{display:grid;grid-template-columns:minmax(12rem,1.4fr) 7rem 5rem 8rem auto;gap:8px;align-items:center;padding:7px 2px;border-bottom:1px solid #203d30}.row small{display:block;color:#8cab9a}.state{color:#7fe0b5;font-weight:650}.detail{white-space:pre-wrap;overflow:auto;max-height:230px;font:12px/1.45 ui-monospace,monospace;color:#b8d3c4}.notice{min-height:20px;color:#8dd7b4}.muted{color:#8cab9a}@media(max-width:900px){.layout{grid-template-columns:1fr}.row{grid-template-columns:minmax(10rem,1fr) 7rem 4rem auto}.when{display:none}}
+  </style>
+</head>
+<body>
+  <div class="toolbar"><strong>&#25345;&#20037;&#20219;&#21153;</strong><button id="refresh">&#21047;&#26032;</button><span id="catalog" class="muted"></span><span id="notice" class="notice"></span></div>
+  <div class="layout">
+    <section>
+      <div class="filters"><select id="state"><option value="">&#20840;&#37096;&#29366;&#24577;</option><option>QUEUED</option><option>RUNNING</option><option>SUCCEEDED</option><option>FAILED</option><option>CANCELLED</option><option>UNKNOWN</option></select><select id="filter-type"><option value="">&#20840;&#37096;&#31867;&#22411;</option></select><input id="principal" placeholder="&#35831;&#27714;&#20027;&#20307;"><button id="search">&#26597;&#35810;</button></div>
+      <div id="list" class="list"></div>
+    </section>
+    <section>
+      <h2>&#21019;&#24314;&#20219;&#21153;</h2>
+      <div class="run"><select id="run-type"></select><button id="run">&#20837;&#38431;</button></div>
+      <p id="type-owner" class="muted"></p><textarea id="input">{}</textarea>
+      <h2>&#20219;&#21153;&#35814;&#24773;</h2><div id="detail" class="detail">&#36873;&#25321;&#20219;&#21153;&#26597;&#30475;&#23436;&#25972;&#35760;&#24405;&#12290;</div>
+    </section>
+  </div>
+  <script>
+  (()=>{'use strict';
+    let port,nonce,sequence=0;const pending=new Map();
+    const $=id=>document.getElementById(id);const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',type,nonce,...payload});
+    const call=(type,operation_id,value={})=>new Promise((resolve,reject)=>{const request_id=`ui:${++sequence}`;pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value});});
+    const notice=value=>$('notice').textContent=value||'';const stamp=value=>value?new Date(value).toLocaleString():'-';let types=[];
+    async function loadTypes(){const data=await call('query','jobs.types',{});types=data.items||[];$('catalog').textContent=data.graph_revision?`RuntimeGraph r${data.graph_revision}`:'Waiting for type directory';for(const select of [$('filter-type'),$('run-type')]){const first=select.id==='filter-type'?'All types':'No available types';select.replaceChildren(Object.assign(document.createElement('option'),{value:'',textContent:first}));for(const item of types)select.append(Object.assign(document.createElement('option'),{value:item.job_type,textContent:`${item.job_type} v${item.job_version}`}));}showType();}
+    function showType(){const item=types.find(value=>value.job_type===$('run-type').value);$('type-owner').textContent=item?`${item.owner_component_id} / timeout ${item.timeout_seconds}s / concurrency ${item.max_concurrency}`:'';}
+    async function inspect(job_id){const value=await call('query','jobs.read',{job_id});$('detail').textContent=JSON.stringify(value,null,2);}
+    async function cancel(item,button){button.disabled=true;try{await call('action','jobs.cancel',{job_id:item.job_id,expected_revision:item.revision,reason_code:'ADMIN_REQUESTED'});await loadJobs();notice(`Cancellation requested: ${item.job_id}`);}catch(error){notice(error.message);}finally{button.disabled=false;}}
+    function render(items){const list=$('list');list.replaceChildren();for(const item of items){const row=document.createElement('div');row.className='row';const identity=document.createElement('span');const strong=document.createElement('strong');strong.textContent=item.job_id;const small=document.createElement('small');small.textContent=item.job_type;identity.append(strong,small);const state=document.createElement('span');state.className='state';state.textContent=item.state;const attempts=document.createElement('code');attempts.textContent=`${item.attempt_count}/${item.max_attempts}`;const when=document.createElement('span');when.className='when';when.textContent=stamp(item.updated_at);const actions=document.createElement('span');const detail=document.createElement('button');detail.textContent='Details';detail.onclick=()=>inspect(item.job_id).catch(error=>notice(error.message));const stop=document.createElement('button');stop.textContent='Cancel';stop.disabled=!['QUEUED','RUNNING'].includes(item.state)||Boolean(item.cancel_requested_at);stop.onclick=()=>cancel(item,stop);actions.append(detail,stop);row.append(identity,state,attempts,when,actions);list.append(row);}}
+    async function loadJobs(){const payload={limit:50};if($('state').value)payload.states=[$('state').value];if($('filter-type').value)payload.job_type=$('filter-type').value;if($('principal').value.trim())payload.requested_by=$('principal').value.trim();const page=await call('query','jobs.query',payload);render(page.items);}
+    async function run(){let input;try{input=JSON.parse($('input').value);}catch{throw new Error('Input must be a JSON object');}if(!input||Array.isArray(input)||typeof input!=='object')throw new Error('Input must be a JSON object');if(!$('run-type').value)throw new Error('No executable job type is available');const saved=await call('action','jobs.run',{job_type:$('run-type').value,source_conversation_ref:null,input});notice(`Queued: ${saved.job_id}`);await loadJobs();await inspect(saved.job_id);}
+    addEventListener('message',event=>{const message=event.data||{};if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect')return;port=event.ports[0];nonce=message.nonce;port.onmessage=async event=>{const data=event.data||{};if(data.protocol!=='forest.management-ui-channel/1'||data.nonce!==nonce)return;if(data.type==='initialize'){send('set-draft',{value:{protocol:'forest.job.scheduler/1'}});try{await loadTypes();await loadJobs();}catch(error){notice(error.message);}send('resize',{height:620});return;}const waiter=pending.get(data.request_id);if(!waiter)return;pending.delete(data.request_id);if(data.type==='operation-error')waiter.reject(new Error(data.message||'Operation failed'));else waiter.resolve(data.value);};port.start();send('ready');});
+    $('refresh').onclick=async()=>{try{await loadTypes();await loadJobs();notice('Refreshed');}catch(error){notice(error.message);}};$('search').onclick=()=>loadJobs().catch(error=>notice(error.message));$('run').onclick=()=>run().catch(error=>notice(error.message));$('run-type').onchange=showType;
+  })();
+  </script>
+</body>
+</html>

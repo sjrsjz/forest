@@ -11,8 +11,8 @@ from uuid import uuid4
 from forest.errors import ForestError
 from forest.package_capabilities import (
     PackageCallScope,
-    PackageOwnedWorkCallScope,
     PackageOwnedWorkAuthority,
+    PackageOwnedWorkCallScope,
     PackageServiceError,
     PackageServiceOperationLedger,
     PackageServiceRoute,

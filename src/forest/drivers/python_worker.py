@@ -97,6 +97,7 @@ StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
 ServiceHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 EventHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 JobHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+ContributionDirectoryHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 DomainHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 UnitOfWorkHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 
@@ -116,6 +117,7 @@ class PythonWorker:
         unit_of_work_handler: UnitOfWorkHandler | None = None,
         event_handler: EventHandler | None = None,
         job_handler: JobHandler | None = None,
+        contribution_directory_handler: ContributionDirectoryHandler | None = None,
     ):
         self.package = snapshot
         self.identity = identity
@@ -126,6 +128,7 @@ class PythonWorker:
         self.unit_of_work_handler = unit_of_work_handler
         self.event_handler = event_handler
         self.job_handler = job_handler
+        self.contribution_directory_handler = contribution_directory_handler
         self.limits = limits or WorkerLimits()
         self.python_executable = python_executable
         self.environment = None
@@ -457,6 +460,7 @@ class PythonWorker:
                     "unit_of_work",
                     "event",
                     "job",
+                    "contribution_directory",
                 }:
                     request_id = message.get("id")
                     if (
@@ -616,6 +620,22 @@ class PythonWorker:
                 if self.job_handler is None:
                     raise ForestError("CAPABILITY_DENIED", "No job gateway is available", 403)
                 value = await self.job_handler(self.identity, call_id, payload)
+            elif kind == "contribution_directory":
+                if not isinstance(payload, dict):
+                    raise ForestError(
+                        "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                        "Contribution directory request must be an object",
+                        422,
+                    )
+                if self.contribution_directory_handler is None:
+                    raise ForestError(
+                        "CAPABILITY_DENIED",
+                        "No contribution directory gateway is available",
+                        403,
+                    )
+                value = await self.contribution_directory_handler(
+                    self.identity, call_id, payload
+                )
             else:
                 expected = (
                     {"key"}
@@ -1037,7 +1057,7 @@ class PythonWorker:
         if requested is not None and (
             isinstance(requested, bool)
             or not isinstance(requested, (int, float))
-            or not 0 < requested <= 120
+            or not 0 < requested <= 86_400
         ):
             raise ForestError(
                 "INVALID_SERVICE_REQUEST", "Nested service timeout is invalid", 422

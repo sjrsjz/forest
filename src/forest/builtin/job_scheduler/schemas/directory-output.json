@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"graph_id":{"type":"string","minLength":1,"maxLength":256},"graph_revision":{"type":"integer","minimum":1},"item_count":{"type":"integer","minimum":0,"maximum":128}},"required":["graph_id","graph_revision","item_count"],"additionalProperties":false}

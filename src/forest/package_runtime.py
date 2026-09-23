@@ -25,8 +25,8 @@ from forest.package_capabilities import (
     PackageDomainCommands,
     PackageDomainQueries,
     PackageJobCallScope,
-    PackageOwnedWorkCallScope,
     PackageOwnedWorkAuthority,
+    PackageOwnedWorkCallScope,
     PackageServiceError,
     PackageServiceOperationLedger,
     PackageServiceRoute,
@@ -35,13 +35,14 @@ from forest.package_capabilities import (
     PackageUnitOfWorkAuthority,
     PackageUnitOfWorkCoordinator,
 )
+from forest.package_contribution_directories import FrozenContributionDirectories
 from forest.package_effects import (
     PackageEffectDriver,
     PackageEffectDriverFactory,
     PackageServiceEffectDriver,
 )
 from forest.package_owned_work import PackageOwnedWorkSupervisor
-from forest.packages import PackageSnapshot, contract_range, digest_json
+from forest.packages import PackageSnapshot, contract_range
 from forest.routing_protocol import (
     DurableComponentJobRequest,
     DurableEventDeliveryRequest,
@@ -62,6 +63,11 @@ from forest.runtime_modules import (
     RuntimeEventSubscriptionContribution,
     RuntimeJobTypeContribution,
     RuntimeModuleDescriptor,
+    RuntimeShellCommandContribution,
+)
+from forest.shell_command_protocol import (
+    ShellCommandExecutionRequest,
+    ShellCommandExecutionResult,
 )
 
 
@@ -177,6 +183,7 @@ class PackageGenerationAdapter:
         effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
         event_publisher=None,
         component_job_scheduler=None,
+        contribution_directories: Mapping[str, tuple] | None = None,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
     ) -> None:
         self.snapshot = snapshot
@@ -203,6 +210,12 @@ class PackageGenerationAdapter:
         self._owned_work_calls: set[str] = set()
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
+        self._contribution_directories = FrozenContributionDirectories(
+            declarations=self.component.get("contribution_directories", ()),
+            routes=contribution_directories or {},
+            domain_queries=domain_queries,
+            domain_query_declarations=self.component.get("domain_queries", ()),
+        )
         self._worker_factory = worker_factory
         self._worker: PythonWorker | None = None
         self._configuration: dict[str, Any] | None = None
@@ -257,6 +270,13 @@ class PackageGenerationAdapter:
                 _handler_service_id("job", self.component_id, item["handler_id"]),
             )
             for item in self.component.get("jobs", ())
+        }
+        self._shell_commands = {
+            (item["command_id"], item["command_version"]): (
+                item,
+                Draft202012Validator(self.snapshot.schema(item["argument_schema"])),
+            )
+            for item in self.component.get("shell_commands", ())
         }
         self._requested_capabilities = frozenset(
             self.component.get("capabilities", {}).get("requests", ())
@@ -341,6 +361,13 @@ class PackageGenerationAdapter:
             requirements.append(
                 {"service_id": "routing.component-job.schedule", "version": 1}
             )
+        requirements.extend(self._contribution_directories.requirements())
+        requirements = list(
+            {
+                (item["service_id"], item["version"]): item
+                for item in requirements
+            }.values()
+        )
         self.runtime_contract = {
             "protocol": "forest.runtime-services/1",
             "services": services,
@@ -383,6 +410,9 @@ class PackageGenerationAdapter:
                 }
                 for item in self._owned_work_declarations
             ],
+            "contribution_directories": sorted(
+                self._contribution_directories.kinds
+            ),
         }
         self.state_schema = self.component["state_schema"]
         state_schema_ref = self.component.get("state_value_schema")
@@ -432,6 +462,14 @@ class PackageGenerationAdapter:
                 for handler_id, (_item, _validator, service_id) in (
                     self._component_jobs.items()
                 )
+            }
+        )
+        handlers.update(
+            {
+                (item["service_id"], item["service_version"]): (
+                    self._shell_command_handler(item["service_id"])
+                )
+                for item in self.component.get("shell_commands", ())
             }
         )
         return handlers
@@ -564,12 +602,121 @@ class PackageGenerationAdapter:
     def _owned_work_failed(self, code: str) -> None:
         self.failure = code
 
+    async def _synchronize_contribution_directories(self) -> None:
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        if not self._contribution_directories.kinds:
+            return
+        if identity is None or prepared is None or self._domain_commands is None:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Contribution directory synchronization authority is unavailable",
+                500,
+            )
+        declarations = {
+            item["name"]: item
+            for item in self.component.get("domain_commands", ())
+        }
+        for command_name, payload in self._contribution_directories.synchronization_requests(
+            identity
+        ):
+            declaration = declarations[command_name]
+            input_validator, output_validator = self._service_schemas[command_name]
+            if not input_validator.is_valid(payload):
+                raise ForestError(
+                    "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                    "Frozen contribution directory violates its synchronization port",
+                    500,
+                )
+            operation_id = "directory-sync:" + hashlib.sha256(
+                f"{identity.generation_id}\0{payload['kind']}".encode("utf-8")
+            ).hexdigest()
+            call_id = "call:" + uuid4().hex
+            result = await self._domain_commands.invoke_preparation_command(
+                PackageCallScope(
+                    bot_id=self.bot_id,
+                    component_id=self.component_id,
+                    generation_id=identity.generation_id,
+                    instance_id=prepared.instance_id,
+                    worker_incarnation=prepared.worker_incarnation,
+                    call_id=call_id,
+                    call_operation_id=operation_id,
+                    causal_root_kind="runtime.generation",
+                    causal_root_id=identity.generation_id,
+                ),
+                declaration,
+                payload,
+                parent_call_id=call_id,
+                timeout_seconds=_timeout(self.component, "start_timeout_s", 10),
+            )
+            if not output_validator.is_valid(result):
+                raise ForestError(
+                    "CONTRIBUTION_DIRECTORY_SYNCHRONIZATION_INVALID",
+                    "Contribution directory synchronization returned an invalid result",
+                    502,
+                )
+
+    async def _release_contribution_directories(self) -> None:
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        if not self._contribution_directories.kinds:
+            return
+        if identity is None or prepared is None or self._domain_commands is None:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Contribution directory cleanup authority is unavailable",
+                500,
+            )
+        declarations = {
+            item["name"]: item
+            for item in self.component.get("domain_commands", ())
+        }
+        for command_name, payload in self._contribution_directories.cleanup_requests(
+            identity
+        ):
+            declaration = declarations[command_name]
+            input_validator, output_validator = self._service_schemas[command_name]
+            if not input_validator.is_valid(payload):
+                raise ForestError(
+                    "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                    "Frozen contribution directory violates its cleanup port",
+                    500,
+                )
+            operation_id = "directory-cleanup:" + hashlib.sha256(
+                f"{identity.generation_id}\0{payload['kind']}".encode("utf-8")
+            ).hexdigest()
+            call_id = "call:" + uuid4().hex
+            result = await self._domain_commands.invoke_cleanup_command(
+                PackageCallScope(
+                    bot_id=self.bot_id,
+                    component_id=self.component_id,
+                    generation_id=identity.generation_id,
+                    instance_id=prepared.instance_id,
+                    worker_incarnation=prepared.worker_incarnation,
+                    call_id=call_id,
+                    call_operation_id=operation_id,
+                    causal_root_kind="runtime.generation",
+                    causal_root_id=identity.generation_id,
+                ),
+                declaration,
+                payload,
+                parent_call_id=call_id,
+                timeout_seconds=_timeout(self.component, "stop_timeout_s", 5),
+            )
+            if not output_validator.is_valid(result):
+                raise ForestError(
+                    "CONTRIBUTION_DIRECTORY_CLEANUP_INVALID",
+                    "Contribution directory cleanup returned an invalid result",
+                    502,
+                )
+
     def notify(self) -> None:
         if self._owned_work is not None:
             self._owned_work.notify()
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
         return self._owned_work.owned_tasks() if self._owned_work is not None else ()
+
     def _check_route(self, route: FrozenServiceRoute) -> None:
         identity = self.generation_identity
         if self.state is not PackageGenerationState.ACTIVE or self._worker is None:
@@ -760,6 +907,73 @@ class PackageGenerationAdapter:
 
         async def routed(route, invocation, *args, **kwargs):
             return await invoke(route, invocation, *args, **kwargs)
+
+        return RoutedServiceEndpoint(routed=routed)
+
+    def _shell_command_handler(self, service_id: str) -> RoutedServiceEndpoint:
+        async def routed(route, invocation, request):
+            if type(request) is not ShellCommandExecutionRequest:
+                raise ForestError(
+                    "SHELL_EXECUTION_INPUT_INVALID",
+                    "Shell command request is invalid",
+                    422,
+                )
+            entry = self._shell_commands.get(
+                (request.command_id, request.command_version)
+            )
+            if entry is None or entry[0]["service_id"] != service_id:
+                raise ForestError(
+                    "SHELL_ROUTE_UNSUPPORTED",
+                    "Shell command is not owned by this package service",
+                    409,
+                )
+            declaration, argument_validator = entry
+            payload = {
+                "protocol": "forest.shell.arguments/1",
+                "command_id": request.command_id,
+                "arguments": request.arguments,
+                "request_id": request.request_id,
+                "principal_ref": request.principal_ref,
+                "conversation_ref": request.conversation_ref,
+            }
+            argument_payload = {
+                key: payload[key]
+                for key in ("protocol", "command_id", "arguments")
+            }
+            input_validator, output_validator = self._service_schemas[service_id]
+            if (
+                not argument_validator.is_valid(argument_payload)
+                or not input_validator.is_valid(payload)
+            ):
+                raise ForestError(
+                    "SHELL_ARGUMENTS_INVALID",
+                    "Shell command arguments violate the package contract",
+                    422,
+                )
+
+            result = await self._run_service_operation(
+                route=route,
+                invocation=invocation,
+                service_id=service_id,
+                input_value=payload,
+                durable=False,
+                dispatch=lambda worker, _scope, call_id: worker.invoke(
+                    service_id,
+                    payload,
+                    call_id=call_id,
+                    operation_id=invocation.operation_id,
+                    causal_root_kind=invocation.causal_root_kind,
+                    causal_root_id=invocation.causal_root_id,
+                    timeout=min(
+                        invocation.timeout_seconds,
+                        float(declaration["timeout_s"]),
+                    ),
+                    before_send=lambda: self._verify_dispatch(route),
+                ),
+                normalize=lambda value: value,
+                result_valid=output_validator.is_valid,
+            )
+            return ShellCommandExecutionResult(result["text"])
 
         return RoutedServiceEndpoint(routed=routed)
 
@@ -1265,6 +1479,7 @@ class PackageGenerationAdapter:
         action_id: str,
         operation_id: str,
         plan_digest: str | None,
+        request_digest: str,
         timeout_seconds: float,
         authorization=None,
         authorization_guard=None,
@@ -1298,7 +1513,7 @@ class PackageGenerationAdapter:
                 component_id=self.component_id,
                 operation_id=operation_id,
                 action_key=action_id,
-                input_digest=digest_json(payload),
+                input_digest=request_digest,
                 plan_digest=plan_digest,
             )
 
@@ -1510,6 +1725,25 @@ class PackageGenerationAdapter:
             parent_call_id=call_id,
         )
 
+    async def _contribution_directory_gateway(
+        self, identity: WorkerIdentity, call_id: str, request: dict
+    ) -> Any:
+        scope = self._call_scope(identity, call_id)
+        worker = self._worker
+        if worker is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Contribution directory requires an active Worker",
+                409,
+            )
+        return await self._contribution_directories.invoke(
+            request,
+            graph_identity=self.generation_identity,
+            scope=scope,
+            parent_call_id=call_id,
+            remaining_timeout=lambda limit: worker.remaining_timeout(call_id, limit),
+        )
+
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         if self.state is not PackageGenerationState.NEW:
             raise ForestError(
@@ -1616,6 +1850,7 @@ class PackageGenerationAdapter:
             unit_of_work_handler=self._unit_of_work_gateway,
             event_handler=self._event_gateway,
             job_handler=self._job_gateway,
+            contribution_directory_handler=self._contribution_directory_gateway,
         )
         self._worker = worker
         started_drivers: list[PackageEffectDriver] = []
@@ -1631,6 +1866,7 @@ class PackageGenerationAdapter:
                 raise ForestError(
                     "WORKER_UNHEALTHY", "Candidate Worker failed its health contract", 503
                 )
+            await self._synchronize_contribution_directories()
             # The Worker may now dispatch, but the Adapter gate and persistent
             # route remain closed until activate_generation runs after commit.
             await worker.activate(_timeout(self.component, "start_timeout_s", 10))
@@ -1660,6 +1896,7 @@ class PackageGenerationAdapter:
             if self._owned_work is not None:
                 await self._owned_work.close()
             cleanup_results = await asyncio.gather(
+                self._release_contribution_directories(),
                 *(driver.close() for driver in reversed(started_drivers)),
                 worker.terminate(),
                 return_exceptions=True,
@@ -1741,7 +1978,10 @@ class PackageGenerationAdapter:
         if self._owned_work is not None:
             await self._owned_work.close()
         worker = self._worker
-        close_operations = [driver.close() for driver in self._effect_drivers.values()]
+        close_operations = [
+            self._release_contribution_directories(),
+            *(driver.close() for driver in self._effect_drivers.values()),
+        ]
         if worker is not None:
             close_operations.append(
                 worker.stop(timeout=_timeout(self.component, "stop_timeout_s", 5))
@@ -1927,6 +2167,25 @@ def package_runtime_descriptor(
         )
         for item in component.get("job_types", ())
     )
+    shell_commands = tuple(
+        RuntimeShellCommandContribution(
+            command_id=item["command_id"],
+            command_version=item["command_version"],
+            service_id=item["service_id"],
+            service_version=item["service_version"],
+            argument_schema=snapshot.schema(item["argument_schema"]),
+            management_operation_id=item["management_operation_id"],
+            target_scope=item["target_scope"],
+            service_class=item["service_class"],
+            required_capabilities=tuple(item["required_capabilities"]),
+            option_aliases=tuple(
+                tuple(alias) for alias in item.get("option_aliases", ())
+            ),
+            output_policy=item["output_policy"],
+            timeout_seconds=item["timeout_s"],
+        )
+        for item in component.get("shell_commands", ())
+    )
 
     def factory(_runtime, contracts):
         routes = {
@@ -1955,6 +2214,10 @@ def package_runtime_descriptor(
             if any(item.startswith("job.schedule:") for item in requested)
             else None
         )
+        contribution_directories = {
+            declaration["kind"]: contracts.job_types()
+            for declaration in component.get("contribution_directories", ())
+        }
         participant_components = sorted(
             {
                 step["component_id"]
@@ -1995,6 +2258,7 @@ def package_runtime_descriptor(
             effect_driver_factories=effect_driver_factories,
             event_publisher=event_publisher,
             component_job_scheduler=component_job_scheduler,
+            contribution_directories=contribution_directories,
             worker_factory=worker_factory,
         )
         if management_contract is not None:
@@ -2042,6 +2306,7 @@ def package_runtime_descriptor(
         event_subscriptions=event_subscriptions,
         component_jobs=component_jobs,
         job_types=job_types,
+        shell_commands=shell_commands,
         wakes_on_work=bool(component.get("owned_work_handlers")),
         owned_work_lifecycle=(
             OwnedWorkLifecycle.FREEZE_DRAIN

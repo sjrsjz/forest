@@ -19,7 +19,6 @@ from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
 from forest.clean_agent_module import bootstrap_clean_agent
-from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_shell_module import bootstrap_clean_shell
@@ -673,10 +672,18 @@ class CleanBotHost:
             kernel=self._kernel,
             initial_configuration={},
         )
-        jobs = await bootstrap_clean_job(
+        jobs = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/job_scheduler"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
+            initial_configuration={"protocol": "forest.job.scheduler/1"},
+            additional_grants=(
+                CapabilityGrant("job.read", "bot", self.store.bot_id),
+                CapabilityGrant("job.run", "bot", self.store.bot_id),
+                CapabilityGrant("job.cancel", "bot", self.store.bot_id),
+            ),
         )
         process_executor = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/process_executor"))),

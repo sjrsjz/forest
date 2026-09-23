@@ -210,6 +210,42 @@ class PostgresPackageDomainAuthority:
             before_write=before_write,
         )
 
+    async def invoke_preparation_command(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any:
+        return await self._invoke(
+            "preparation_command",
+            scope,
+            declaration,
+            payload,
+            parent_call_id=parent_call_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def invoke_cleanup_command(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any:
+        return await self._invoke(
+            "cleanup_command",
+            scope,
+            declaration,
+            payload,
+            parent_call_id=parent_call_id,
+            timeout_seconds=timeout_seconds,
+        )
+
     async def invoke_participant_in(
         self,
         conn,
@@ -303,6 +339,18 @@ class PostgresPackageDomainAuthority:
                             generation_id=scope.generation_id,
                             admission_lane="CONTROL",
                         )
+                    elif kind == "preparation_command":
+                        await self.runtime.verify_prepared_generation_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                        )
+                    elif kind == "cleanup_command":
+                        await self.runtime.verify_generation_cleanup_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                        )
                     else:
                         await self.runtime.verify_generation_member_in(
                             conn,
@@ -313,7 +361,16 @@ class PostgresPackageDomainAuthority:
                         guarded = before_write(conn)
                         if inspect.isawaitable(guarded):
                             await guarded
-                    port_kind = "command" if kind == "management_action" else kind
+                    port_kind = (
+                        "command"
+                        if kind
+                        in {
+                            "management_action",
+                            "preparation_command",
+                            "cleanup_command",
+                        }
+                        else kind
+                    )
                     return await self._invoke_in(
                         conn,
                         port_kind,

@@ -692,6 +692,153 @@ class KernelRuntimeRepository:
             lock=True,
         )
 
+    async def _host_owned_generation_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+    ):
+        if (
+            not isinstance(component_id, str)
+            or _IDENTIFIER.fullmatch(component_id) is None
+            or not isinstance(generation_id, str)
+            or not generation_id
+            or len(generation_id) > 512
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_FENCE_INVALID",
+                "Generation fence identity is invalid",
+                422,
+            )
+        await self._identity_in(conn)
+        runtime = await self._runtime_state_in(conn, lock=True)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT graph.graph_id,graph.graph_revision,graph.graph_digest,"
+                    "graph.activation_id,graph.state,generation.status "
+                    "FROM {} member JOIN {} graph ON graph.bot_id=member.bot_id "
+                    "AND graph.graph_id=member.graph_id JOIN {} generation "
+                    "ON generation.bot_id=member.bot_id "
+                    "AND generation.component_id=member.component_id "
+                    "AND generation.generation_id=member.generation_id "
+                    "JOIN {} host ON host.bot_id=generation.bot_id "
+                    "AND host.incarnation=generation.host_incarnation "
+                    "AND host.owner_epoch=generation.host_owner_epoch "
+                    "WHERE member.bot_id=%s AND member.component_id=%s "
+                    "AND member.generation_id=%s AND host.host_id IS NOT NULL "
+                    "AND host.expires_at>clock_timestamp() "
+                    "FOR SHARE OF member,graph,generation,host"
+                ).format(
+                    self._table("runtime_graph_modules"),
+                    self._table("runtime_graphs"),
+                    self._table("generations"),
+                    self._table("host_lease"),
+                ),
+                (self.store.bot_id, component_id, generation_id),
+            )
+        ).fetchone()
+        graph = None
+        if row is not None:
+            members = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,generation_id FROM {} WHERE bot_id=%s "
+                        "AND graph_id=%s ORDER BY component_id FOR SHARE"
+                    ).format(self._table("runtime_graph_modules")),
+                    (self.store.bot_id, row["graph_id"]),
+                )
+            ).fetchall()
+            graph = RuntimeGenerationGraph(
+                graph_id=row["graph_id"],
+                graph_revision=row["graph_revision"],
+                graph_digest=row["graph_digest"],
+                activation_id=row["activation_id"],
+                generations={
+                    item["component_id"]: item["generation_id"] for item in members
+                },
+            )
+        return runtime, row, graph
+
+    async def verify_prepared_generation_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+    ) -> RuntimeGenerationGraph:
+        """Fence a package preparation write to one live host-owned candidate graph."""
+
+        runtime, row, graph = await self._host_owned_generation_in(
+            conn,
+            component_id=component_id,
+            generation_id=generation_id,
+        )
+        if (
+            runtime is None
+            or runtime["status"] != "ACTIVE"
+            or row is None
+            or row["state"] != "PREPARED"
+            or row["status"] != "READY"
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_PREPARED",
+                "The Generation is not a live prepared RuntimeGraph member",
+                409,
+                details={
+                    "component_id": component_id,
+                    "generation_id": generation_id,
+                },
+            )
+        return graph
+
+    async def verify_generation_cleanup_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+    ) -> RuntimeGenerationGraph:
+        """Fence cleanup to a live host-owned Generation with closed admission."""
+
+        runtime, row, graph = await self._host_owned_generation_in(
+            conn,
+            component_id=component_id,
+            generation_id=generation_id,
+        )
+        route = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT generation_id,data_admission,control_admission FROM {} "
+                    "WHERE bot_id=%s AND component_id=%s FOR UPDATE"
+                ).format(self._table("routes")),
+                (self.store.bot_id, component_id),
+            )
+        ).fetchone()
+        admitted = (
+            route is not None
+            and route["generation_id"] == generation_id
+            and (route["data_admission"] or route["control_admission"])
+        )
+        if (
+            runtime is None
+            or runtime["status"] != "ACTIVE"
+            or row is None
+            or row["status"] == "PREPARING"
+            or admitted
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_CLEANUP_FORBIDDEN",
+                "Generation cleanup requires current host ownership and closed admission",
+                409,
+                details={
+                    "component_id": component_id,
+                    "generation_id": generation_id,
+                },
+            )
+        return graph
+
     async def verify_generation_member_snapshot_in(
         self,
         conn,

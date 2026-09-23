@@ -102,7 +102,7 @@ class KernelServiceOperationLedger:
             or type(route.owned_work) is not bool
             or isinstance(route.timeout_seconds, bool)
             or not isinstance(route.timeout_seconds, (int, float))
-            or not 0 < route.timeout_seconds <= 120
+            or not 0 < route.timeout_seconds <= 86_400
         ):
             raise ForestError(
                 "SERVICE_OPERATION_INPUT_INVALID",
