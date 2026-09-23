@@ -112,7 +112,7 @@ flowchart LR
   U1 --> S[shell.command 可选 participant]
   C --> R[message.router 冻结分类]
   R -->|trigger cut| C
-  C -->|经内核 Contract Router 调 agent.execute/1| G[agent.runtime]
+  C -->|经内核 Contract Router 调 agent.execute/2| G[agent.runtime]
   G -->|memory.query| M[memory.graph]
   G -->|tool intent| E[Effect Gateway]
   G -->|FinalCandidate| C
