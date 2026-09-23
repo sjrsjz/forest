@@ -179,16 +179,95 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "classified_through_seq": 1,
             "duplicate": False,
         }
+        actor = {
+            "conversation_id": first["conversation_id"],
+            "owner_id": "claim/conversation/1",
+            "epoch": 1,
+        }
+        namespace = package.descriptor.storage.spec.namespace
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.conversation_lanes SET actor_owner_id=%s,actor_epoch=%s,"
+                    "actor_expires_at=clock_timestamp()+interval '5 minutes' "
+                    "WHERE bot_id=%s AND conversation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (
+                    actor["owner_id"],
+                    actor["epoch"],
+                    store.bot_id,
+                    actor["conversation_id"],
+                ),
+            )
+        selection = {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "conversation.scheduler",
+                "generation_id": participant.generation_id,
+            },
+            "input": {
+                "actor": actor,
+                "boundary": "IDLE",
+                "session_ref": "session/1",
+                "run_ref": "run/1",
+                "next_run_ref": None,
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            selected = await participant.invoke_in(
+                conn,
+                "conversation.select-input",
+                selection,
+                operation_id="uow-step:conversation-select/1",
+                causal_root_kind="conversation.actor",
+                causal_root_id=actor["conversation_id"],
+                parent_call_id="call:conversation/1",
+                timeout_seconds=10,
+            )
+        async with store.pool.connection() as conn, conn.transaction():
+            selected_replay = await participant.invoke_in(
+                conn,
+                "conversation.select-input",
+                selection,
+                operation_id="uow-step:conversation-select/1",
+                causal_root_kind="conversation.actor",
+                causal_root_id=actor["conversation_id"],
+                parent_call_id="call:conversation/replay",
+                timeout_seconds=10,
+            )
+        assert selected_replay == selected
+        assert selected["status"] == "BATCH"
+        assert selected["kind"] == "TRIGGER_INPUT"
+        assert selected["event_ids"] == [event_id]
+        assert selected["trigger_ids"] == ["trigger/1"]
+        assert selected["session_ref"] == "session/1"
+        assert selected["run_ref"] == "run/1"
+        assert selected["selected_input_end_seq"] == 1
         async with store.pool.connection() as conn:
             row = await (
                 await conn.execute(
                     sql.SQL(
                         "SELECT status,principal_ref FROM {}.conversation_triggers "
                         "WHERE bot_id=%s AND trigger_id=%s"
-                    ).format(sql.Identifier(package.descriptor.storage.spec.namespace)),
+                    ).format(sql.Identifier(namespace)),
                     (store.bot_id, "trigger/1"),
                 )
             ).fetchone()
-        assert dict(row) == {"status": "PENDING", "principal_ref": "qq:42"}
+            context = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT event_id,author_subject_ref,trigger_decision "
+                        "FROM {}.context_units WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"]),
+                )
+            ).fetchone()
+        assert dict(row) == {"status": "CLAIMED", "principal_ref": "qq:42"}
+        assert dict(context) == {
+            "event_id": event_id,
+            "author_subject_ref": "qq:42",
+            "trigger_decision": "TRIGGER",
+        }
     finally:
         assert await registry.close() == []

@@ -917,3 +917,427 @@ BEGIN
     );
 END;
 $$;
+
+CREATE FUNCTION conversation_selection_result(requested_bot text, requested_operation text)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    receipt record;
+    batch record;
+    event_ids jsonb;
+    trigger_ids jsonb;
+    triggers jsonb;
+BEGIN
+    SELECT * INTO receipt
+    FROM __forest_module_schema__.selection_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF receipt IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF receipt.input_batch_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'status',receipt.result_status,
+            'operation_id',receipt.operation_id,
+            'conversation_id',receipt.conversation_id,
+            'classified_through_seq',receipt.observed_classified_through_seq,
+            'selected_input_end_seq',receipt.selected_input_end_seq,
+            'mailbox_revision',receipt.observed_mailbox_revision
+        );
+    END IF;
+    SELECT * INTO batch
+    FROM __forest_module_schema__.input_batches
+    WHERE bot_id=requested_bot AND input_batch_id=receipt.input_batch_id;
+    SELECT COALESCE(jsonb_agg(event_id ORDER BY event_index),'[]'::jsonb)
+    INTO event_ids
+    FROM __forest_module_schema__.input_batch_events
+    WHERE bot_id=requested_bot AND input_batch_id=receipt.input_batch_id;
+    SELECT
+        COALESCE(jsonb_agg(m.trigger_id ORDER BY m.trigger_index),'[]'::jsonb),
+        COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'trigger_id',t.trigger_id,
+                'principal_ref',t.principal_ref,
+                'ingress_seq',t.ingress_seq
+            ) ORDER BY m.trigger_index
+        ),'[]'::jsonb)
+    INTO trigger_ids,triggers
+    FROM __forest_module_schema__.input_batch_triggers m
+    JOIN __forest_module_schema__.conversation_triggers t
+      ON t.bot_id=m.bot_id AND t.trigger_id=m.trigger_id
+    WHERE m.bot_id=requested_bot AND m.input_batch_id=receipt.input_batch_id;
+    RETURN jsonb_build_object(
+        'status','BATCH',
+        'operation_id',receipt.operation_id,
+        'conversation_id',receipt.conversation_id,
+        'classified_through_seq',receipt.observed_classified_through_seq,
+        'selected_input_end_seq',receipt.selected_input_end_seq,
+        'mailbox_revision',receipt.observed_mailbox_revision,
+        'input_batch_id',batch.input_batch_id,
+        'boundary',batch.boundary,
+        'kind',batch.kind,
+        'start_seq',batch.start_seq,
+        'end_seq',batch.end_seq,
+        'trigger_cut_seq',batch.trigger_cut_seq,
+        'session_ref',batch.session_ref,
+        'run_ref',batch.run_ref,
+        'context_revision',batch.context_revision,
+        'context_view_revision',batch.context_view_revision,
+        'event_ids',event_ids,
+        'trigger_ids',trigger_ids,
+        'triggers',triggers
+    );
+END;
+$$;
+
+CREATE FUNCTION conversation_select_input(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    actor jsonb := body->'actor';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_conversation text := actor->>'conversation_id';
+    requested_owner text := actor->>'owner_id';
+    requested_epoch bigint := (actor->>'epoch')::bigint;
+    requested_boundary text := body->>'boundary';
+    requested_session text := body->>'session_ref';
+    requested_run text := body->>'run_ref';
+    requested_next_run text := body->>'next_run_ref';
+    selected_run text;
+    selected_session text;
+    lane record;
+    replay record;
+    pending_count integer;
+    trigger_cut bigint;
+    has_gap boolean;
+    selection_status text;
+    selection_mailbox_revision bigint;
+    selection_kind text;
+    selection_start bigint;
+    selection_end bigint;
+    selection_trigger_cut bigint;
+    selection_context_revision bigint;
+    batch_id text;
+    event_count integer;
+    final_event_count integer;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR body IS NULL OR actor IS NULL
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SELECTION_INVALID',
+                'message','Conversation input selection envelope is invalid','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.conversation.scheduler/select/' || requested_bot || '/' || requested_operation,
+        0
+    ));
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+    FOR UPDATE;
+    IF lane IS NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_NOT_FOUND',
+                'message','Conversation lane does not exist','status',404
+            )
+        );
+    END IF;
+    IF lane.actor_owner_id IS DISTINCT FROM requested_owner
+       OR lane.actor_epoch IS DISTINCT FROM requested_epoch
+       OR lane.actor_expires_at IS NULL
+       OR lane.actor_expires_at <= clock_timestamp() THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_CONVERSATION_ACTOR',
+                'message','Conversation actor is stale','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO replay
+    FROM __forest_module_schema__.selection_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay IS NOT NULL THEN
+        IF replay.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','SELECTION_OPERATION_CONFLICT',
+                    'message','Selection operation input differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',__forest_module_schema__.conversation_selection_result(
+                requested_bot,requested_operation
+            )
+        );
+    END IF;
+    IF requested_boundary='IDLE' THEN
+        IF lane.active_session_ref IS NOT NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_SESSION_ACTIVE',
+                    'message','Conversation already has an active Session','status',409
+                )
+            );
+        END IF;
+    ELSIF lane.active_session_ref IS DISTINCT FROM requested_session
+       OR lane.active_run_ref IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SESSION_CONFLICT',
+                'message','Session or Run fence differs','status',409
+            )
+        );
+    END IF;
+    PERFORM trigger_id
+    FROM __forest_module_schema__.conversation_triggers
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND status='PENDING' AND ingress_seq<=lane.classified_through_seq
+    ORDER BY ingress_seq,trigger_id
+    FOR UPDATE;
+    SELECT count(*)::integer,max(ingress_seq)
+    INTO pending_count,trigger_cut
+    FROM __forest_module_schema__.conversation_triggers
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND status='PENDING' AND ingress_seq<=lane.classified_through_seq;
+    has_gap := lane.classified_through_seq < lane.next_ingress_seq - 1;
+    IF pending_count > 0 THEN
+        IF requested_session IS NULL OR requested_run IS NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_SESSION_REQUIRED',
+                    'message','A trigger cut requires Session and Run references','status',409
+                )
+            );
+        END IF;
+        selected_session := requested_session;
+        selected_run := requested_run;
+        IF requested_boundary='SESSION_END' THEN
+            IF requested_next_run IS NULL THEN
+                RETURN jsonb_build_object(
+                    'protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object(
+                        'code','CONVERSATION_SUCCESSOR_RUN_REQUIRED',
+                        'message','A pending trigger after a reply needs a successor Run','status',409
+                    )
+                );
+            END IF;
+            selected_run := requested_next_run;
+        END IF;
+        selection_trigger_cut := trigger_cut;
+        IF trigger_cut > lane.context_applied_seq THEN
+            selection_kind := 'TRIGGER_INPUT';
+            selection_start := lane.context_applied_seq + 1;
+            selection_end := trigger_cut;
+        ELSE
+            selection_kind := 'RECOVERY_CLAIM';
+            selection_start := NULL;
+            selection_end := NULL;
+        END IF;
+    ELSIF requested_boundary='MODEL_SAFE_POINT' THEN
+        selection_status := CASE WHEN has_gap THEN 'WAIT_INPUT' ELSE 'CONTINUE' END;
+        INSERT INTO __forest_module_schema__.selection_operations(
+            bot_id,operation_id,conversation_id,input_digest,boundary,result_status,
+            input_batch_id,observed_mailbox_revision,observed_classified_through_seq,
+            selected_input_end_seq,actor_owner_id,actor_epoch
+        ) VALUES (
+            requested_bot,requested_operation,requested_conversation,requested_digest,
+            requested_boundary,selection_status,NULL,lane.mailbox_revision,
+            lane.classified_through_seq,lane.context_applied_seq,requested_owner,requested_epoch
+        );
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',__forest_module_schema__.conversation_selection_result(
+                requested_bot,requested_operation
+            )
+        );
+    ELSIF lane.classified_through_seq > lane.context_applied_seq THEN
+        selection_kind := 'SILENT_DRAIN';
+        selection_start := lane.context_applied_seq + 1;
+        selection_end := lane.classified_through_seq;
+        selection_trigger_cut := NULL;
+        selected_session := NULL;
+        selected_run := NULL;
+    ELSE
+        selection_status := CASE WHEN has_gap THEN 'WAIT_INPUT' ELSE 'IDLE' END;
+        selection_mailbox_revision := lane.mailbox_revision;
+        IF requested_boundary='SESSION_END' AND selection_status='IDLE' THEN
+            UPDATE __forest_module_schema__.conversation_lanes
+            SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
+                resume_reason_code=NULL,resume_reason_ref=NULL,
+                mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+            selection_mailbox_revision := selection_mailbox_revision + 1;
+        END IF;
+        INSERT INTO __forest_module_schema__.selection_operations(
+            bot_id,operation_id,conversation_id,input_digest,boundary,result_status,
+            input_batch_id,observed_mailbox_revision,observed_classified_through_seq,
+            selected_input_end_seq,actor_owner_id,actor_epoch
+        ) VALUES (
+            requested_bot,requested_operation,requested_conversation,requested_digest,
+            requested_boundary,selection_status,NULL,selection_mailbox_revision,
+            lane.classified_through_seq,lane.context_applied_seq,requested_owner,requested_epoch
+        );
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',__forest_module_schema__.conversation_selection_result(
+                requested_bot,requested_operation
+            )
+        );
+    END IF;
+
+    SELECT count(*)::integer,
+           count(*) FILTER (WHERE classification_state='FINAL')::integer
+    INTO event_count,final_event_count
+    FROM __forest_module_schema__.inbox_messages
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND selection_start IS NOT NULL
+      AND ingress_seq BETWEEN selection_start AND selection_end;
+    IF selection_start IS NOT NULL AND (
+        event_count <> selection_end-selection_start+1
+        OR final_event_count <> event_count
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SEQUENCE_CORRUPT',
+                'message','Selected input is not a final prefix','status',500
+            )
+        );
+    END IF;
+    selection_context_revision := lane.context_revision + CASE
+        WHEN selection_start IS NULL THEN 0 ELSE 1 END;
+    IF selection_context_revision <= 0 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SEQUENCE_CORRUPT',
+                'message','Recovery claim has no committed Context','status',500
+            )
+        );
+    END IF;
+    batch_id := 'batch:' || encode(sha256(convert_to(
+        jsonb_build_array(requested_bot,requested_operation)::text,'UTF8'
+    )),'hex');
+    INSERT INTO __forest_module_schema__.input_batches(
+        bot_id,conversation_id,input_batch_id,operation_id,input_digest,boundary,kind,
+        start_seq,end_seq,trigger_cut_seq,selected_input_end_seq,session_ref,run_ref,
+        actor_owner_id,actor_epoch,context_revision,context_view_revision
+    ) VALUES (
+        requested_bot,requested_conversation,batch_id,requested_operation,requested_digest,
+        requested_boundary,selection_kind,selection_start,selection_end,
+        selection_trigger_cut,COALESCE(selection_end,lane.context_applied_seq),
+        selected_session,selected_run,requested_owner,requested_epoch,
+        selection_context_revision,lane.context_view_revision
+    );
+    IF selection_start IS NOT NULL THEN
+        INSERT INTO __forest_module_schema__.input_batch_events(
+            bot_id,input_batch_id,event_index,conversation_id,event_id,ingress_seq
+        )
+        SELECT requested_bot,batch_id,
+               row_number() OVER (ORDER BY ingress_seq)-1,
+               requested_conversation,event_id,ingress_seq
+        FROM __forest_module_schema__.inbox_messages
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND ingress_seq BETWEEN selection_start AND selection_end
+        ORDER BY ingress_seq;
+        INSERT INTO __forest_module_schema__.context_units(
+            bot_id,conversation_id,unit_id,context_revision,unit_index,kind,
+            source_component_id,source_kind,source_id,input_batch_id,event_id,ingress_seq,
+            payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,
+            payload_owner_id,author_payload_id,author_payload_digest,
+            author_owner_component_id,author_owner_kind,author_owner_id,
+            author_subject_ref,trigger_decision
+        )
+        SELECT requested_bot,requested_conversation,
+               'input:' || encode(sha256(convert_to(jsonb_build_array(
+                   requested_bot,requested_conversation,event_id
+               )::text,'UTF8')),'hex'),
+               selection_context_revision,
+               row_number() OVER (ORDER BY ingress_seq)-1,
+               'INPUT',source_component_id,'conversation.input',event_id,batch_id,
+               event_id,ingress_seq,content_payload_id,content_payload_digest,
+               content_owner_component_id,content_owner_kind,content_owner_id,
+               author_payload_id,author_payload_digest,author_owner_component_id,
+               author_owner_kind,author_owner_id,author_subject_ref,trigger_decision
+        FROM __forest_module_schema__.inbox_messages
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND ingress_seq BETWEEN selection_start AND selection_end
+        ORDER BY ingress_seq;
+    END IF;
+    IF pending_count > 0 THEN
+        UPDATE __forest_module_schema__.conversation_triggers
+        SET status='CLAIMED',claimed_session_ref=selected_session,
+            claimed_run_ref=selected_run,input_batch_id=batch_id,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND status='PENDING' AND ingress_seq<=lane.classified_through_seq;
+        INSERT INTO __forest_module_schema__.input_batch_triggers(
+            bot_id,input_batch_id,trigger_index,trigger_id
+        )
+        SELECT requested_bot,batch_id,
+               row_number() OVER (ORDER BY ingress_seq,trigger_id)-1,trigger_id
+        FROM __forest_module_schema__.conversation_triggers
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND status='CLAIMED' AND input_batch_id=batch_id
+        ORDER BY ingress_seq,trigger_id;
+    END IF;
+    selection_mailbox_revision := lane.mailbox_revision + 1;
+    UPDATE __forest_module_schema__.conversation_lanes
+    SET context_applied_seq=COALESCE(selection_end,context_applied_seq),
+        context_revision=selection_context_revision,
+        context_view_unit_count=context_view_unit_count+COALESCE(event_count,0),
+        active_session_ref=CASE
+            WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
+                THEN NULL
+            ELSE COALESCE(selected_session,active_session_ref)
+        END,
+        active_run_ref=CASE
+            WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
+                THEN NULL
+            ELSE COALESCE(selected_run,active_run_ref)
+        END,
+        mailbox_revision=mailbox_revision+1,
+        resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    INSERT INTO __forest_module_schema__.selection_operations(
+        bot_id,operation_id,conversation_id,input_digest,boundary,result_status,
+        input_batch_id,observed_mailbox_revision,observed_classified_through_seq,
+        selected_input_end_seq,actor_owner_id,actor_epoch
+    ) VALUES (
+        requested_bot,requested_operation,requested_conversation,requested_digest,
+        requested_boundary,'BATCH',batch_id,selection_mailbox_revision,
+        lane.classified_through_seq,COALESCE(selection_end,lane.context_applied_seq),
+        requested_owner,requested_epoch
+    );
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',__forest_module_schema__.conversation_selection_result(
+            requested_bot,requested_operation
+        )
+    );
+END;
+$$;

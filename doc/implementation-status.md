@@ -41,7 +41,7 @@
 
 Agent、Memory 与 Conversation 仍由宿主 `bootstrap_clean_*` 或等价宿主组合根构造，因此整张生产图仍不是完整可安装插件图，当前实现仍禁止发布。Routing、Delivery、Media、Job、Shell 与 Adapter 已经切到包级隔离 Worker 和各自所需的 Domain/UoW/Effect ABI；其旧宿主业务 Repository、Runtime、dispatcher、Management 与静态 UI 实现已按各自完成范围物理删除。OneBot 入站的跨模块事务当前仍由固定的 `kernel.uow.onebot.ingress` 协调器承接，因为 Conversation 与 Memory participant 尚未全部包化；它不是 Adapter 宿主运行时，也不允许读取 Adapter 私表。剩余迁移必须把 Agent、Memory、Conversation 的实际端口、SQL、Worker handler 与管理 UI 声明进包，并把该固定协调器收敛为 manifest `unit_of_work_plans`，不能把公共 ABI 已存在误报为模块已经迁移。
 
-Conversation 包化正在按最终 ABI 前进：`builtin/conversation_scheduler` 已能由通用包构建器捕获为独立 `forest.python-worker/1` 工件，其私有 baseline 已实现 `conversation.admit-message/1` 与 `conversation.complete-classification/1` 两个事务 participant；Payload 声明可以从受类型约束的输入路径解析 owner component/kind，因此不同 Adapter 的受管内容仍由内核逐项复核，Conversation 不需要硬编码 OneBot 或取得 Payload Repository。真实 PostgreSQL 已验证消息接纳、幂等重放、分类、trigger 与连续水位只写包 namespace。该候选尚未进入生产 RuntimeGraph：actor/InputBatch/Context/Session participant、owned-work handler 和 `agent.execute/2` 仍未迁完，现有宿主 Conversation 不能因此标为已替换。
+Conversation 包化正在按最终 ABI 前进：`builtin/conversation_scheduler` 已能由通用包构建器捕获为独立 `forest.python-worker/1` 工件，其私有 baseline 已实现 `conversation.admit-message/1`、`conversation.complete-classification/1` 与 `conversation.select-input/1` 三个事务 participant；Payload 声明可以从受类型约束的输入路径解析 owner component/kind，因此不同 Adapter 的受管内容仍由内核逐项复核，Conversation 不需要硬编码 OneBot 或取得 Payload Repository。输入选择在包事务内复核 actor epoch 与 Session/Run fence，按连续分类水位只截取到最后一个待处理 trigger，原子建立 InputBatch、带真实作者的 Context 单元和 trigger claim，并以稳定 operation 重放原结果。真实 PostgreSQL 已验证上述事实只写包 namespace。该候选尚未进入生产 RuntimeGraph：actor owned-work claim、Context 裁剪/归档、回复/Session participant 和 `agent.execute/2` 仍未迁完，现有宿主 Conversation 不能因此标为已替换。
 
 ## 已落地但尚未接入插件 Worker 的运行时切片
 
