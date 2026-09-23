@@ -18,6 +18,7 @@ from forest.adapters.onebot import (
     verify_signature,
 )
 from forest.errors import ForestError
+from forest.media_capture_contract import IngressMediaCapture, MediaImageCapture
 from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.storage.adapter_onebot_authority import (
@@ -26,7 +27,6 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPlatformEvent,
 )
 from forest.storage.ingress_unit_of_work import IngressClassification, IngressMemoryCapture
-from forest.storage.media_capture_authority import IngressMediaCapture, MediaImageCapture
 from forest.storage.memory_graph_authority import (
     MemoryPart,
     MemoryPayloadRef,

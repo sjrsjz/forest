@@ -21,7 +21,6 @@ from forest.chat_completions_effect_driver import (
 from forest.clean_agent_module import bootstrap_clean_agent
 from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_job_module import bootstrap_clean_job
-from forest.clean_media_module import bootstrap_clean_media
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_shell_module import bootstrap_clean_shell
@@ -30,6 +29,7 @@ from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
+from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
 from forest.models import ModelCapabilities
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
@@ -602,14 +602,36 @@ class CleanBotHost:
             kernel=self._kernel,
             initial_configuration=memory_configuration,
         )
-        media_options = {}
+        media_driver_options = {}
         if self._media_client_factory is not None:
-            media_options["client_factory"] = self._media_client_factory
-        media = await bootstrap_clean_media(
+            media_driver_options["client_factory"] = self._media_client_factory
+        media = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/media_capture"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            **media_options,
+            initial_configuration={
+                "protocol": "forest.media.capture/1",
+                "timeout_seconds": 15,
+                "max_connections": 4,
+                "max_attempts": 3,
+                "context_wait_seconds": 3,
+            },
+            resolved_contracts={
+                "memory.source.capture": "1.0",
+                "memory.source.unavailable": "1.0",
+            },
+            startup_components=("memory.graph",),
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "media.public-image": media_image_fetch_effect_driver_factory(
+                        runtime=self._kernel.runtime,
+                        payloads=self._kernel.payload,
+                        **media_driver_options,
+                    )
+                }
+            ),
         )
         agent = await bootstrap_clean_agent(
             self.store,

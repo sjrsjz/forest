@@ -161,6 +161,7 @@ async def bootstrap_builtin_package(
             storage_spec=storage.spec,
             storage_package_digest=storage.package_digest,
             storage_execution_profile=storage.execution_profile,
+            payloads=kernel.payload,
         )
         if has_domain_authority
         else None

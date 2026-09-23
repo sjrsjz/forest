@@ -216,6 +216,7 @@ def _build_onebot_ingress(context):
         conversation=context.participant("conversation.scheduler"),
         memory=context.participant("memory.graph"),
         media=context.participant("media.capture"),
+        payloads=context.participant("kernel.payload").service,
         shell=context.participant("shell.command"),
         delivery=context.participant("delivery"),
     )
@@ -460,6 +461,7 @@ async def bootstrap_clean_messaging(
                             "conversation.scheduler",
                             "memory.graph",
                             "media.capture",
+                            "kernel.payload",
                             "shell.command",
                             "delivery",
                         ),

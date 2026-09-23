@@ -30,6 +30,7 @@ class PostgresPackageDomainAuthority:
         storage_spec,
         storage_package_digest: str,
         storage_execution_profile: str,
+        payloads=None,
     ) -> None:
         self.store = store
         self.runtime = runtime
@@ -38,6 +39,63 @@ class PostgresPackageDomainAuthority:
         self.storage_spec = storage_spec
         self.storage_package_digest = storage_package_digest
         self.storage_execution_profile = storage_execution_profile
+        self.payloads = payloads
+
+    @staticmethod
+    def _pointer(value: object, pointer: str) -> object:
+        current = value
+        for encoded in pointer[1:].split("/"):
+            token = encoded.replace("~1", "/").replace("~0", "~")
+            if not isinstance(current, dict) or token not in current:
+                raise ForestError(
+                    "DOMAIN_PAYLOAD_REFERENCE_INVALID",
+                    "Managed payload reference path is absent from the command input",
+                    422,
+                )
+            current = current[token]
+        return current
+
+    async def _verify_payload_refs(self, conn, declaration: dict, payload: dict) -> None:
+        references = declaration.get("payload_refs", ())
+        if not references:
+            return
+        if self.payloads is None:
+            raise ForestError(
+                "DOMAIN_PAYLOAD_AUTHORITY_UNAVAILABLE",
+                "Managed payload references require the kernel payload authority",
+                503,
+            )
+        for declaration_ref in references:
+            reference = self._pointer(payload, declaration_ref["path"])
+            owner_id = self._pointer(payload, declaration_ref["owner_id_path"])
+            if (
+                not isinstance(reference, dict)
+                or set(reference)
+                != {
+                    "payload_id",
+                    "digest",
+                    "owner_component_id",
+                    "owner_kind",
+                    "owner_id",
+                }
+                or reference.get("owner_component_id")
+                != declaration_ref["owner_component"]
+                or reference.get("owner_kind") != declaration_ref["owner_kind"]
+                or reference.get("owner_id") != owner_id
+            ):
+                raise ForestError(
+                    "DOMAIN_PAYLOAD_REFERENCE_INVALID",
+                    "Managed payload reference differs from its frozen port declaration",
+                    409,
+                )
+            await self.payloads.verify_in(
+                conn,
+                payload_id=reference.get("payload_id"),
+                digest=reference.get("digest"),
+                owner_component_id=reference["owner_component_id"],
+                owner_kind=reference["owner_kind"],
+                owner_id=reference["owner_id"],
+            )
 
     async def invoke_query(
         self,
@@ -231,6 +289,7 @@ class PostgresPackageDomainAuthority:
             )
         await self._verify_storage(conn)
         await self._verify_function(conn, function, query=kind == "query")
+        await self._verify_payload_refs(conn, declaration, payload)
         context = {
             "protocol": "forest.domain-context/1",
             "port_kind": kind,

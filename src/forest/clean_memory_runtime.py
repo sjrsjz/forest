@@ -19,6 +19,12 @@ from forest.packages import digest_json
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.storage.agent_runtime_authority import AgentPayloadRef
 from forest.storage.memory_embedding_budget import MemoryEmbeddingBudgetRepository
+from forest.storage.memory_graph_authority import (
+    MemoryOccurrence,
+    MemoryPart,
+    MemoryPayloadRef,
+    MemorySourceIdentity,
+)
 from forest.storage.payload_authority import PayloadSource
 
 _STATE_CONTRACT = {
@@ -118,8 +124,8 @@ class CleanMemoryRuntime:
             ("memory.graph.relations.query", 1): self.query_relations,
             ("memory.recall", 1): self.recall,
             (MEMORY_EXACT_RECALL_TOOL.service_id, 1): self.execute_exact_recall_tool,
-            ("memory.source.capture", 1): self.capture_ingress_source,
-            ("memory.source.unavailable", 1): self.mark_source_unavailable,
+            ("memory.source.capture", 1): self.capture_ingress_source_json,
+            ("memory.source.unavailable", 1): self.mark_source_unavailable_json,
             ("shell.memory.inspect", 1): self.execute_shell_command,
         }
 
@@ -832,6 +838,56 @@ class CleanMemoryRuntime:
         self.notify()
         return {"source": source, "capture": captured}
 
+    async def capture_ingress_source_json(self, payload: dict) -> dict:
+        """Decode the public JSON service contract at the Memory ownership boundary."""
+
+        try:
+            identity = MemorySourceIdentity(**payload["identity"])
+            author = MemoryPayloadRef(**payload["author"])
+            parts = tuple(
+                MemoryPart(
+                    part["part_id"],
+                    part["part_index"],
+                    part["part_kind"],
+                    part["media_type"],
+                    MemoryPayloadRef(**part["payload"]),
+                    width=part["width"],
+                    height=part["height"],
+                    byte_length=part["byte_length"],
+                )
+                for part in payload["parts"]
+            )
+            occurrence_value = payload["occurrence"]
+            occurrence = MemoryOccurrence(
+                occurrence_value["occurrence_id"],
+                occurrence_value["binding_ref"],
+                occurrence_value["conversation_ref"],
+                occurrence_value["event_ref"],
+                occurrence_value["ingress_seq"],
+                datetime.fromisoformat(occurrence_value["observed_at"]),
+            )
+            occurred_at = datetime.fromisoformat(payload["occurred_at"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ForestError(
+                "MEMORY_INPUT_INVALID", "Memory source service payload is invalid", 422
+            ) from exc
+        await self.capture_ingress_source(
+            operation_id=payload["operation_id"],
+            identity=identity,
+            source_unit_id=payload["source_unit_id"],
+            source_revision=payload["source_revision"],
+            unit_kind=payload["unit_kind"],
+            author_subject_ref=payload["author_subject_ref"],
+            author=author,
+            parts=parts,
+            occurrence=occurrence,
+            occurred_at=occurred_at,
+        )
+        return {
+            "protocol": "forest.memory-source-captured/1",
+            "source_unit_id": payload["source_unit_id"],
+        }
+
     async def mark_source_unavailable(
         self,
         *,
@@ -845,6 +901,15 @@ class CleanMemoryRuntime:
             event_ref=event_ref,
             error_code=error_code,
         )
+
+    async def mark_source_unavailable_json(self, payload: dict) -> dict | None:
+        if not isinstance(payload, dict):
+            raise ForestError("MEMORY_INPUT_INVALID", "Memory unavailable input is invalid", 422)
+        await self.mark_source_unavailable(**payload)
+        return {
+            "protocol": "forest.memory-source-unavailable/1",
+            "event_ref": payload["event_ref"],
+        }
 
     async def _admit_in(
         self, conn, *, owned_work: bool, admission_lane: str = "DATA"

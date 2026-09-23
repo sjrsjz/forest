@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "media_ref", "locator", "provenance"],
+  "properties": {
+    "protocol": {"const": "forest.media-image-fetch/1"},
+    "media_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "locator": {
+      "type": "object", "required": ["kind", "uri", "platform_file"],
+      "properties": {"kind": {"const": "onebot-source"}, "uri": {"type": ["string", "null"], "maxLength": 8192}, "platform_file": {"type": ["string", "null"], "maxLength": 8192}},
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["source_component_id", "source_kind", "source_id", "source_revision", "part_id", "source_trunk_id", "conversation_ref", "binding_ref", "author_subject_ref", "occurred_at"],
+      "properties": {
+        "source_component_id": {"type": "string"}, "source_kind": {"type": "string"}, "source_id": {"type": "string"},
+        "source_revision": {"type": "integer", "minimum": 1}, "part_id": {"type": "string"},
+        "source_trunk_id": {"type": ["string", "null"]}, "conversation_ref": {"type": "string"},
+        "binding_ref": {"type": "string"}, "author_subject_ref": {"type": "string"},
+        "occurred_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -58,6 +58,19 @@ IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 SQL_FUNCTION = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
+
+
+def _valid_json_pointer(value: object) -> bool:
+    if not isinstance(value, str) or not 2 <= len(value.encode("utf-8")) <= 1024:
+        return False
+    if not value.startswith("/"):
+        return False
+    for token in value[1:].split("/"):
+        if not token or re.search(r"~(?![01])", token):
+            return False
+    return True
+
+
 MANIFEST_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -229,14 +242,36 @@ MANIFEST_SCHEMA = {
                                     "output_schema",
                                 ],
                                 "properties": {
-                                    key: {"type": "string"}
-                                    for key in (
-                                        "name",
-                                        "contract",
-                                        "function",
-                                        "input_schema",
-                                        "output_schema",
-                                    )
+                                    **{
+                                        key: {"type": "string"}
+                                        for key in (
+                                            "name",
+                                            "contract",
+                                            "function",
+                                            "input_schema",
+                                            "output_schema",
+                                        )
+                                    },
+                                    "payload_refs": {
+                                        "type": "array",
+                                        "maxItems": 32,
+                                        "items": {
+                                            "type": "object",
+                                            "additionalProperties": False,
+                                            "required": [
+                                                "path",
+                                                "owner_component",
+                                                "owner_kind",
+                                                "owner_id_path",
+                                            ],
+                                            "properties": {
+                                                "path": {"type": "string"},
+                                                "owner_component": {"type": "string"},
+                                                "owner_kind": {"type": "string"},
+                                                "owner_id_path": {"type": "string"},
+                                            },
+                                        },
+                                    },
                                 },
                             },
                         }
@@ -931,6 +966,23 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_DOMAIN_AUTHORITY",
                 "Domain authority functions must be portable unqualified SQL identifiers",
             )
+        payload_refs = service.get("payload_refs", [])
+        if payload_refs and service not in (*domain_commands, *unit_of_work_participants):
+            _fail(
+                "INVALID_DOMAIN_AUTHORITY",
+                "Managed payload references are only valid on write ports",
+            )
+        for reference in payload_refs:
+            if (
+                not _valid_json_pointer(reference.get("path"))
+                or not _valid_json_pointer(reference.get("owner_id_path"))
+                or not IDENTIFIER.fullmatch(reference.get("owner_component", ""))
+                or not IDENTIFIER.fullmatch(reference.get("owner_kind", ""))
+            ):
+                _fail(
+                    "INVALID_DOMAIN_AUTHORITY",
+                    "Managed payload reference declarations must use exact JSON pointers and owners",
+                )
         if service in owned_work_handlers and (
             not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
             or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))

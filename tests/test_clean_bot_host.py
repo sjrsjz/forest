@@ -617,6 +617,11 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                 assert audit_route[2].route.provider_component_id == "kernel.audit"
                 graph_ids.append(host.registry.graph_identity.graph_id)
                 assert clients[-1].handler is not None
+                media_namespace = next(
+                    item.storage.spec.namespace
+                    for item in host.registry.descriptors
+                    if item.component_id == "media.capture"
+                )
                 if index == 0:
                     jobs = host.registry.get("job.scheduler")
                     queued = await jobs.enqueue(
@@ -665,21 +670,36 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             separators=(",", ":"),
                         ).encode()
                     )
-                    media_runtime = host.registry.get("media.capture")
-                    async with asyncio.timeout(5):
+                    event_hash = hashlib.sha256(b"binding/main\x004242").hexdigest()
+                    media_ref = (
+                        "media:"
+                        + hashlib.sha256(
+                            ("onebot-event:" + event_hash + "\x001").encode()
+                        ).hexdigest()
+                    )
+                    media_input = {
+                        "units": [
+                            {
+                                "unit_id": "input:image-test",
+                                "parts": [
+                                    {
+                                        "part_id": "input:image-test:0",
+                                        "type": "image",
+                                        "media_ref": media_ref,
+                                        "media_revision": 1,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                    async with asyncio.timeout(10):
                         while True:
-                            async with host.store.pool.connection() as conn:
-                                capture = await (
-                                    await conn.execute(
-                                        sql.SQL(
-                                            "SELECT * FROM {}.media_captures WHERE bot_id=%s"
-                                        ).format(
-                                            sql.Identifier(media_runtime.repository.namespace)
-                                        ),
-                                        (settings.bot_id,),
-                                    )
-                                ).fetchone()
-                            if capture is not None and capture["state"] == "READY":
+                            media_failure = host.registry.get("media.capture").failure
+                            assert media_failure is None, media_failure
+                            resolved_media = await host.registry.get(
+                                "agent.runtime"
+                            ).media.resolve_context(media_input)
+                            if resolved_media:
                                 break
                             await asyncio.sleep(0.05)
                     assert FakeMediaClient.fetched == [
@@ -689,32 +709,6 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                             "platform_file": "onebot-file-id",
                         }
                     ]
-                    event_hash = hashlib.sha256(b"binding/main\x004242").hexdigest()
-                    media_ref = (
-                        "media:"
-                        + hashlib.sha256(
-                            ("onebot-event:" + event_hash + "\x001").encode()
-                        ).hexdigest()
-                    )
-                    assets = await media_runtime.repository.asset_rows((media_ref,))
-                    assert len(assets) == 1
-                    resolved_media = await media_runtime.resolve_context(
-                        {
-                            "units": [
-                                {
-                                    "unit_id": "input:image-test",
-                                    "parts": [
-                                        {
-                                            "part_id": "input:image-test:0",
-                                            "type": "image",
-                                            "media_ref": media_ref,
-                                            "media_revision": 1,
-                                        }
-                                    ],
-                                }
-                            ]
-                        }
-                    )
                     image = resolved_media[("input:image-test", "input:image-test:0")]
                     assert image.content == b"fake-png-bytes"
                     assert (image.width, image.height) == (2, 3)
@@ -740,16 +734,26 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     assert b"private-token" not in normalized_body
                     assert media_ref.encode() in normalized_body
                     memory_runtime = host.registry.get("memory.graph")
-                    async with host.store.pool.connection() as conn:
-                        stored_parts = await (
-                            await conn.execute(
-                                sql.SQL(
-                                    "SELECT part_kind,part_index FROM {}.source_parts "
-                                    "WHERE bot_id=%s AND source_unit_id=%s ORDER BY part_index"
-                                ).format(sql.Identifier(memory_runtime.repository.namespace)),
-                                (settings.bot_id, capture["source_unit_id"]),
-                            )
-                        ).fetchall()
+                    async with asyncio.timeout(5):
+                        while True:
+                            async with host.store.pool.connection() as conn:
+                                stored_parts = await (
+                                    await conn.execute(
+                                        sql.SQL(
+                                            "SELECT part_kind,part_index FROM {}.source_parts "
+                                            "WHERE bot_id=%s AND source_unit_id=%s "
+                                            "ORDER BY part_index"
+                                        ).format(
+                                            sql.Identifier(memory_runtime.repository.namespace)
+                                        ),
+                                        (settings.bot_id, "onebot-unit:" + event_hash),
+                                    )
+                                ).fetchall()
+                            if stored_parts:
+                                break
+                            media_failure = host.registry.get("media.capture").failure
+                            assert media_failure is None, media_failure
+                            await asyncio.sleep(0.05)
                     assert [(part["part_kind"], part["part_index"]) for part in stored_parts] == [
                         ("TEXT", 0),
                         ("IMAGE", 1),
@@ -1013,7 +1017,21 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     retry_capture_id = "media-capture:" + retry_event_hash
                     async with asyncio.timeout(8):
                         while True:
-                            retry_capture = await media_runtime.repository.load(retry_capture_id)
+                            async with host.store.pool.connection() as conn:
+                                retry_capture = await (
+                                    await conn.execute(
+                                        sql.SQL(
+                                            "SELECT state,attempt_count,settlement,error_code "
+                                            "FROM {}.media_captures "
+                                            "WHERE capture_id=%s"
+                                        ).format(sql.Identifier(media_namespace)),
+                                        (retry_capture_id,),
+                                    )
+                                ).fetchone()
+                            assert host.registry.get("media.capture").failure is None
+                            if retry_capture is None:
+                                await asyncio.sleep(0.05)
+                                continue
                             if retry_capture["state"] == "READY":
                                 break
                             await asyncio.sleep(0.05)
@@ -1058,9 +1076,20 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph():
                     duplicate_capture_id = "media-capture:" + duplicate_event_hash
                     async with asyncio.timeout(5):
                         while True:
-                            duplicate_capture = await media_runtime.repository.load(
-                                duplicate_capture_id
-                            )
+                            async with host.store.pool.connection() as conn:
+                                duplicate_capture = await (
+                                    await conn.execute(
+                                        sql.SQL(
+                                            "SELECT state FROM {}.media_captures "
+                                            "WHERE capture_id=%s"
+                                        ).format(sql.Identifier(media_namespace)),
+                                        (duplicate_capture_id,),
+                                    )
+                                ).fetchone()
+                            assert host.registry.get("media.capture").failure is None
+                            if duplicate_capture is None:
+                                await asyncio.sleep(0.05)
+                                continue
                             if duplicate_capture["state"] == "READY":
                                 break
                             await asyncio.sleep(0.05)

@@ -13,7 +13,7 @@ from forest.clean_agent_management import CleanAgentManagementContract
 from forest.clean_agent_runtime import CleanAgentRuntime
 from forest.errors import ForestError
 from forest.model_effect_execution import KernelModelEffectExecutionPort
-from forest.models import ModelCapabilities, prepare_model_request
+from forest.models import MediaSnapshot, ModelCapabilities, prepare_model_request
 from forest.packages import digest_json
 from forest.provider_protocol import BoundProviderRequest
 from forest.runtime_contracts import RuntimeKernelServiceSpec
@@ -119,11 +119,76 @@ class _RoutedMemory:
 
 
 class _RoutedMedia:
-    def __init__(self, resolve_context) -> None:
+    def __init__(self, resolve_context, payloads, bot_id: str) -> None:
         self._resolve_context = resolve_context
+        self._payloads = payloads
+        self._bot_id = bot_id
 
     async def resolve_context(self, snapshot):
-        return await self._resolve_context(snapshot)
+        items = []
+        for unit in snapshot.get("units", ()):
+            if not isinstance(unit, dict) or not isinstance(unit.get("unit_id"), str):
+                continue
+            for part in unit.get("parts", ()):
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "image"
+                    and isinstance(part.get("part_id"), str)
+                    and isinstance(part.get("media_ref"), str)
+                    and type(part.get("media_revision")) is int
+                    and part["media_revision"] > 0
+                ):
+                    items.append(
+                        {
+                            "source_unit_id": unit["unit_id"],
+                            "part_id": part["part_id"],
+                            "media_ref": part["media_ref"],
+                            "media_revision": part["media_revision"],
+                        }
+                    )
+        if not items:
+            return {}
+        request = {"items": items}
+        resolved = await self._resolve_context.invoke(
+            request,
+            operation_id="media-resolve:" + digest_json(request)[7:],
+            causal_root_kind="agent.model-view",
+            causal_root_id="media:" + digest_json(request)[7:],
+            timeout_seconds=20,
+        )
+        result = {}
+        async with self._payloads.store.pool.connection() as conn, conn.transaction():
+            epoch = await self._payloads.epoch_in(conn)
+            for asset in resolved["assets"]:
+                reference = asset["payload"]
+                await self._payloads.verify_in(
+                    conn,
+                    payload_id=reference["payload_id"],
+                    digest=reference["digest"],
+                    owner_component_id=reference["owner_component_id"],
+                    owner_kind=reference["owner_kind"],
+                    owner_id=reference["owner_id"],
+                )
+                content = await self._payloads.read_bytes_in(
+                    conn,
+                    reference["payload_id"],
+                    expected_deletion_epoch=epoch,
+                )
+                image = MediaSnapshot(
+                    self._bot_id,
+                    asset["media_ref"],
+                    asset["media_revision"],
+                    asset["source_unit_id"],
+                    asset["part_id"],
+                    asset["media_type"],
+                    content,
+                    reference["digest"],
+                    asset["width"],
+                    asset["height"],
+                )
+                result[(asset["source_unit_id"], asset["part_id"])] = image
+                result[asset["media_ref"]] = image
+        return result
 
 
 class _RoutedToolService:
@@ -325,6 +390,8 @@ async def bootstrap_clean_agent(
             ),
             media=_RoutedMedia(
                 contracts.service("media.context.resolve", 1, owned_work=True),
+                kernel.payload,
+                store.bot_id,
             ),
             cancel_wake=contracts.service(
                 "kernel.uow.agent.cancel-wake",

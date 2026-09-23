@@ -603,48 +603,69 @@ class KernelRuntimeRepository:
                 422,
             )
         await self._identity_in(conn)
-        row = await (
-            await conn.execute(
-                sql.SQL(
-                    "SELECT r.component_id,r.generation_id,r.route_epoch,"
-                    "r.data_admission,r.control_admission,g.status AS generation_status,"
-                    "s.status AS runtime_status,s.data_admission AS runtime_data_admission,"
-                    "s.control_admission AS runtime_control_admission,h.graph_id,"
-                    "h.graph_revision,rg.state AS graph_state "
-                    "FROM {} s JOIN {} r ON r.bot_id=s.bot_id "
-                    "JOIN {} g ON g.bot_id=r.bot_id AND g.generation_id=r.generation_id "
-                    "AND g.component_id=r.component_id "
-                    "JOIN {} h ON h.bot_id=s.bot_id "
-                    "JOIN {} rg ON rg.bot_id=h.bot_id AND rg.graph_id=h.graph_id "
-                    "JOIN {} gm ON gm.bot_id=rg.bot_id AND gm.graph_id=rg.graph_id "
-                    "AND gm.component_id=r.component_id AND gm.generation_id=r.generation_id "
-                    "WHERE s.bot_id=%s AND r.component_id=%s AND r.generation_id=%s "
-                    "FOR SHARE OF s,r,g,h,rg,gm"
-                ).format(
-                    self._table("runtime_state"),
-                    self._table("routes"),
-                    self._table("generations"),
-                    self._table("runtime_graph_head"),
-                    self._table("runtime_graphs"),
-                    self._table("runtime_graph_modules"),
-                ),
-                (self.store.bot_id, component_id, generation_id),
-            )
-        ).fetchone()
+        runtime = await self._runtime_state_in(conn, lock=True)
+        head = await self._graph_head_in(conn, lock=True)
+        graph = None
+        member = None
+        generation = None
+        route = None
+        if head is not None and head["graph_id"] is not None:
+            graph = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT graph_id,state FROM {} WHERE bot_id=%s AND graph_id=%s FOR SHARE"
+                    ).format(self._table("runtime_graphs")),
+                    (self.store.bot_id, head["graph_id"]),
+                )
+            ).fetchone()
+            member = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,generation_id FROM {} WHERE bot_id=%s "
+                        "AND graph_id=%s AND component_id=%s AND generation_id=%s FOR SHARE"
+                    ).format(self._table("runtime_graph_modules")),
+                    (self.store.bot_id, head["graph_id"], component_id, generation_id),
+                )
+            ).fetchone()
+            generation = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,generation_id,status FROM {} WHERE bot_id=%s "
+                        "AND component_id=%s AND generation_id=%s FOR SHARE"
+                    ).format(self._table("generations")),
+                    (self.store.bot_id, component_id, generation_id),
+                )
+            ).fetchone()
+            route = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,generation_id,route_epoch,data_admission,"
+                        "control_admission FROM {} WHERE bot_id=%s AND component_id=%s "
+                        "AND generation_id=%s FOR SHARE"
+                    ).format(self._table("routes")),
+                    (self.store.bot_id, component_id, generation_id),
+                )
+            ).fetchone()
         lane_open = (
-            row is not None
+            route is not None
+            and runtime is not None
             and (
-                row["data_admission"]
-                and row["runtime_data_admission"]
+                route["data_admission"]
+                and runtime["data_admission"]
                 if admission_lane == "DATA"
-                else row["control_admission"] and row["runtime_control_admission"]
+                else route["control_admission"] and runtime["control_admission"]
             )
         )
         if (
-            row is None
-            or row["runtime_status"] != "ACTIVE"
-            or row["generation_status"] != "ACTIVE"
-            or row["graph_state"] != "ACTIVE"
+            runtime is None
+            or head is None
+            or graph is None
+            or member is None
+            or generation is None
+            or route is None
+            or runtime["status"] != "ACTIVE"
+            or generation["status"] != "ACTIVE"
+            or graph["state"] != "ACTIVE"
             or not lane_open
         ):
             raise ForestError(
@@ -658,12 +679,12 @@ class KernelRuntimeRepository:
                 },
             )
         return ActiveGenerationRoute(
-            component_id=row["component_id"],
-            generation_id=row["generation_id"],
-            route_epoch=row["route_epoch"],
+            component_id=route["component_id"],
+            generation_id=route["generation_id"],
+            route_epoch=route["route_epoch"],
             admission_lane=admission_lane,
-            graph_id=row["graph_id"],
-            graph_revision=row["graph_revision"],
+            graph_id=head["graph_id"],
+            graph_revision=head["graph_revision"],
         )
 
     async def verify_generation_member_in(
@@ -720,35 +741,52 @@ class KernelRuntimeRepository:
                 422,
             )
         await self._identity_in(conn, lock=lock)
-        lock_clause = sql.SQL("FOR SHARE OF s,h,rg,gm,g" if lock else "")
-        row = await (
-            await conn.execute(
-                sql.SQL(
-                    "SELECT h.graph_id,h.graph_revision,rg.graph_digest,rg.activation_id,"
-                    "rg.state,g.status AS generation_status,s.status AS runtime_status "
-                    "FROM {} s JOIN {} h ON h.bot_id=s.bot_id "
-                    "JOIN {} rg ON rg.bot_id=h.bot_id AND rg.graph_id=h.graph_id "
-                    "JOIN {} gm ON gm.bot_id=rg.bot_id AND gm.graph_id=rg.graph_id "
-                    "JOIN {} g ON g.bot_id=gm.bot_id AND g.generation_id=gm.generation_id "
-                    "AND g.component_id=gm.component_id WHERE s.bot_id=%s "
-                    "AND gm.component_id=%s AND gm.generation_id=%s "
-                    "{}"
-                ).format(
-                    self._table("runtime_state"),
-                    self._table("runtime_graph_head"),
-                    self._table("runtime_graphs"),
-                    self._table("runtime_graph_modules"),
-                    self._table("generations"),
-                    lock_clause,
-                ),
-                (self.store.bot_id, component_id, generation_id),
-            )
-        ).fetchone()
+        runtime = await self._runtime_state_in(conn, lock=lock)
+        head = await self._graph_head_in(conn, lock=lock)
+        graph = None
+        member = None
+        generation = None
+        lock_clause = sql.SQL(" FOR SHARE" if lock else "")
+        if head is not None and head["graph_id"] is not None:
+            graph = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT graph_id,graph_digest,activation_id,state FROM {} "
+                        "WHERE bot_id=%s AND graph_id=%s"
+                    ).format(self._table("runtime_graphs"))
+                    + lock_clause,
+                    (self.store.bot_id, head["graph_id"]),
+                )
+            ).fetchone()
+            member = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,generation_id FROM {} WHERE bot_id=%s "
+                        "AND graph_id=%s AND component_id=%s AND generation_id=%s"
+                    ).format(self._table("runtime_graph_modules"))
+                    + lock_clause,
+                    (self.store.bot_id, head["graph_id"], component_id, generation_id),
+                )
+            ).fetchone()
+            generation = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,generation_id,status FROM {} WHERE bot_id=%s "
+                        "AND component_id=%s AND generation_id=%s"
+                    ).format(self._table("generations"))
+                    + lock_clause,
+                    (self.store.bot_id, component_id, generation_id),
+                )
+            ).fetchone()
         if (
-            row is None
-            or row["runtime_status"] != "ACTIVE"
-            or row["generation_status"] != "ACTIVE"
-            or row["state"] != "ACTIVE"
+            runtime is None
+            or head is None
+            or graph is None
+            or member is None
+            or generation is None
+            or runtime["status"] != "ACTIVE"
+            or generation["status"] != "ACTIVE"
+            or graph["state"] != "ACTIVE"
         ):
             raise ForestError(
                 "RUNTIME_GENERATION_NOT_CURRENT",
@@ -759,12 +797,12 @@ class KernelRuntimeRepository:
                     "generation_id": generation_id,
                 },
             )
-        members = await self._members_for_id_in(conn, row["graph_id"], lock=False)
+        members = await self._members_for_id_in(conn, head["graph_id"], lock=False)
         return RuntimeGenerationGraph(
-            graph_id=row["graph_id"],
-            graph_revision=row["graph_revision"],
-            graph_digest=row["graph_digest"],
-            activation_id=row["activation_id"],
+            graph_id=head["graph_id"],
+            graph_revision=head["graph_revision"],
+            graph_digest=graph["graph_digest"],
+            activation_id=graph["activation_id"],
             generations={item["component_id"]: item["generation_id"] for item in members},
         )
 
@@ -931,15 +969,8 @@ class KernelRuntimeRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
+            head = await self._graph_head_in(conn, lock=True, update=True)
             saved = await self._graph_in(conn, graph, lock=True)
-            head = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
-                        self._table("runtime_graph_head")
-                    ),
-                    (self.store.bot_id,),
-                )
-            ).fetchone()
             if head is not None and head["graph_id"] == graph.graph_id:
                 if saved["state"] != "ACTIVE":
                     raise ForestError(
@@ -1101,15 +1132,8 @@ class KernelRuntimeRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
+            head = await self._graph_head_in(conn, lock=True, update=True)
             await self._graph_in(conn, graph, lock=True)
-            head = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
-                        self._table("runtime_graph_head")
-                    ),
-                    (self.store.bot_id,),
-                )
-            ).fetchone()
             if head is None or head["graph_id"] != graph.graph_id:
                 raise ForestError(
                     "RUNTIME_GRAPH_NOT_CURRENT",
@@ -1135,15 +1159,8 @@ class KernelRuntimeRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
+            head = await self._graph_head_in(conn, lock=True, update=True)
             saved = await self._graph_in(conn, graph, lock=True)
-            head = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
-                        self._table("runtime_graph_head")
-                    ),
-                    (self.store.bot_id,),
-                )
-            ).fetchone()
             if (
                 head is None
                 or head["graph_id"] != graph.graph_id
@@ -1189,15 +1206,8 @@ class KernelRuntimeRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
+            head = await self._graph_head_in(conn, lock=True, update=True)
             await self._graph_in(conn, graph, lock=True)
-            head = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
-                        self._table("runtime_graph_head")
-                    ),
-                    (self.store.bot_id,),
-                )
-            ).fetchone()
             if head is None or head["graph_id"] != graph.graph_id:
                 return head["graph_revision"] if head is not None else 0
             clock = await (
@@ -1332,6 +1342,32 @@ class KernelRuntimeRepository:
         ).fetchone()
         if row is None or row["bot_id"] != self.store.bot_id:
             raise ForestError("BOT_SCOPE_MISMATCH", "Runtime authority belongs to another Bot", 403)
+
+    async def _runtime_state_in(self, conn, *, lock: bool):
+        suffix = sql.SQL(" FOR SHARE") if lock else sql.SQL("")
+        return await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s").format(
+                    self._table("runtime_state")
+                )
+                + suffix,
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+
+    async def _graph_head_in(self, conn, *, lock: bool, update: bool = False):
+        if update and not lock:
+            raise ValueError("an update graph-head lock must be enabled")
+        suffix = sql.SQL(" FOR UPDATE" if update else " FOR SHARE" if lock else "")
+        return await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s").format(
+                    self._table("runtime_graph_head")
+                )
+                + suffix,
+                (self.store.bot_id,),
+            )
+        ).fetchone()
 
     async def _storage_in(self, conn, binding: PreparedGenerationBinding) -> None:
         storage = binding.storage

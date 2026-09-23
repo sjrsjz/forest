@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["assets"],
+  "properties": {
+    "assets": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": ["source_unit_id", "part_id", "media_ref", "media_revision", "payload", "media_type", "width", "height", "byte_length"],
+        "properties": {
+          "source_unit_id": {"type": "string"},
+          "part_id": {"type": "string"},
+          "media_ref": {"type": "string"},
+          "media_revision": {"type": "integer", "minimum": 1},
+          "payload": {
+            "type": "object",
+            "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+            "properties": {
+              "payload_id": {"type": "string"}, "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+              "owner_component_id": {"const": "media.capture"}, "owner_kind": {"const": "media.asset"}, "owner_id": {"type": "string"}
+            },
+            "additionalProperties": false
+          },
+          "media_type": {"enum": ["image/png", "image/jpeg", "image/webp", "image/gif"]},
+          "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1},
+          "byte_length": {"type": "integer", "minimum": 1, "maximum": 8388608}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

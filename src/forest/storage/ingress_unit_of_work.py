@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 
 from forest.errors import ForestError
+from forest.media_capture_contract import IngressMediaCapture
 from forest.storage.adapter_onebot_authority import OneBotPlatformEvent
 from forest.storage.conversation_scheduler import SchedulerPayloadRef
 from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
-from forest.storage.media_capture_authority import IngressMediaCapture
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
     MemoryPart,
@@ -57,13 +58,23 @@ class OneBotIngressUnitOfWork:
     """Coordinate participant ports without taking ownership of their facts."""
 
     def __init__(
-        self, store, *, adapter, conversation, memory=None, media=None, shell=None, delivery=None
+        self,
+        store,
+        *,
+        adapter,
+        conversation,
+        memory=None,
+        media=None,
+        payloads=None,
+        shell=None,
+        delivery=None,
     ) -> None:
         self.store = store
         self.adapter = adapter
         self.conversation = conversation
         self.memory = memory
         self.media = media
+        self.payloads = payloads
         self.shell = shell
         self.delivery = delivery
 
@@ -198,7 +209,7 @@ class OneBotIngressUnitOfWork:
                 memory_result = {"source": source, "capture": captured}
             media_result = None
             if media_capture is not None:
-                if self.media is None:
+                if self.media is None or self.payloads is None:
                     raise ForestError(
                         "MEDIA_CAPTURE_AUTHORITY_MISSING",
                         "Media capture participant is unavailable",
@@ -208,17 +219,46 @@ class OneBotIngressUnitOfWork:
                     raise ForestError(
                         "MEDIA_CAPTURE_INPUT_INVALID", "Invalid ingress media capture", 422
                     )
-                media_result = await self.media.register_capture_in(
+                media_capture.validate()
+                await self.payloads.verify_in(
                     conn,
-                    admission_lane=admission_lane,
+                    payload_id=media_capture.author.payload_id,
+                    digest=media_capture.author.digest,
+                    owner_component_id=media_capture.author.owner_component_id,
+                    owner_kind=media_capture.author.owner_kind,
+                    owner_id=media_capture.author.owner_id,
+                )
+                for part in media_capture.text_parts:
+                    await self.payloads.verify_in(
+                        conn,
+                        payload_id=part.payload.payload_id,
+                        digest=part.payload.digest,
+                        owner_component_id=part.payload.owner_component_id,
+                        owner_kind=part.payload.owner_kind,
+                        owner_id=part.payload.owner_id,
+                    )
+                payload = {
+                    **media_capture.canonical(),
+                    "author_subject_ref": event.author_subject_ref,
+                    "binding_ref": binding_id,
+                    "conversation_ref": event.conversation_ref,
+                    "event_ref": scheduler_event_id,
+                    "ingress_seq": conversation_result["ingress_seq"],
+                    "observed_at": event.received_at.isoformat(),
+                }
+                media_operation_id = "onebot-media-capture:" + event.event_id
+                media_result = await self.media.invoke_in(
+                    conn,
+                    "media.register-ingress",
+                    payload,
                     operation_id="onebot-media-capture:" + event.event_id,
-                    capture=media_capture,
-                    author_subject_ref=event.author_subject_ref,
-                    binding_ref=binding_id,
-                    conversation_ref=event.conversation_ref,
-                    event_ref=scheduler_event_id,
-                    ingress_seq=conversation_result["ingress_seq"],
-                    observed_at=event.received_at,
+                    causal_root_kind="adapter.platform-event",
+                    causal_root_id=event.event_id,
+                    parent_call_id=(
+                        "call:onebot-ingress:"
+                        + hashlib.sha256(media_operation_id.encode()).hexdigest()
+                    ),
+                    timeout_seconds=10,
                 )
             shell_result = None
             classification_result = None

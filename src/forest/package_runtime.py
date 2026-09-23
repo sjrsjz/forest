@@ -442,6 +442,8 @@ class PackageGenerationAdapter:
             or identity is None
             or self._prepared_binding is None
             or self.state not in {
+                PackageGenerationState.BOUND,
+                PackageGenerationState.WORKER_READY,
                 PackageGenerationState.ACTIVE,
                 PackageGenerationState.QUIESCING,
             }
