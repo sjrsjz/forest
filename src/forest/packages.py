@@ -214,7 +214,13 @@ MANIFEST_SCHEMA = {
                                 "cleanup_command",
                             ],
                             "properties": {
-                                "kind": {"enum": ["job-types", "shell-commands"]},
+                                "kind": {
+                                    "enum": [
+                                        "job-types",
+                                        "shell-commands",
+                                        "routing-routes",
+                                    ]
+                                },
                                 "cancellation_query": {"type": "string"},
                                 "synchronization_command": {"type": "string"},
                                 "cleanup_command": {"type": "string"},
@@ -1321,7 +1327,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         kind = declaration.get("kind")
         if (
             kind in directory_kinds
-            or kind not in {"job-types", "shell-commands"}
+            or kind not in {"job-types", "shell-commands", "routing-routes"}
             or declaration.get("synchronization_command") not in command_ports
             or declaration.get("cleanup_command") not in command_ports
             or declaration.get("cleanup_command")

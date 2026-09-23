@@ -36,7 +36,6 @@ from forest.process_executor_builtin import (
     process_executor_configuration_validator_factory,
 )
 from forest.process_executor_effect_driver import native_process_effect_driver_factory
-from forest.routing_graph_module import bootstrap_routing_graph
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.authorization_authority import CapabilityGrant
@@ -645,10 +644,13 @@ class CleanBotHost:
                 )
             ),
         )
-        routing = await bootstrap_routing_graph(
+        routing = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/routing_graph"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
+            initial_configuration={"protocol": "forest.routing.graph/2"},
         )
         trigger = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/trigger_policy"))),

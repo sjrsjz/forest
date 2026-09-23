@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -10,6 +11,10 @@ from jsonschema import Draft202012Validator
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_capabilities import PackageCallScope, PackageDomainQueries
+from forest.routing_protocol import (
+    DurableComponentJobRequest,
+    DurableEventDeliveryRequest,
+)
 from forest.shell_command_protocol import (
     ShellCommandExecutionRequest,
     ShellCommandExecutionResult,
@@ -23,12 +28,19 @@ class FrozenContributionDirectories:
         self,
         *,
         declarations: Iterable[dict],
-        routes: Mapping[str, tuple],
+        routes: Mapping[str, Any],
         domain_queries: PackageDomainQueries | None,
         domain_query_declarations: Iterable[dict],
     ) -> None:
         self._declarations = {item["kind"]: item for item in declarations}
-        self._routes = {kind: tuple(items) for kind, items in routes.items()}
+        self._routes = {
+            kind: (
+                {name: tuple(values) for name, values in items.items()}
+                if kind == "routing-routes"
+                else tuple(items)
+            )
+            for kind, items in routes.items()
+        }
         self._domain_queries = domain_queries
         self._query_declarations = {
             item["name"]: item for item in domain_query_declarations
@@ -39,13 +51,30 @@ class FrozenContributionDirectories:
                 "Declared contribution directories require exact frozen route bindings",
                 500,
             )
-        if set(self._declarations) - {"job-types", "shell-commands"}:
+        if set(self._declarations) - {
+            "job-types",
+            "shell-commands",
+            "routing-routes",
+        }:
             raise ForestError(
                 "CONTRIBUTION_DIRECTORY_UNSUPPORTED",
                 "Contribution directory kind is unsupported",
                 500,
             )
         for kind, declaration in self._declarations.items():
+            if kind == "routing-routes":
+                routed_jobs = self._routes[kind]["component_jobs"]
+                if any(
+                    contribution.timeout_seconds
+                    > declaration["max_execution_timeout_s"]
+                    for _owner, contribution, _service in routed_jobs
+                ):
+                    raise ForestError(
+                        "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                        "A routing contribution exceeds the consumer execution budget",
+                        500,
+                    )
+                continue
             if any(
                 contribution.timeout_seconds
                 > declaration["max_execution_timeout_s"]
@@ -86,20 +115,62 @@ class FrozenContributionDirectories:
                 "Frozen Shell command routes must be unique",
                 500,
             )
+        routing = self._routes.get("routing-routes", {})
+        publication_routes = routing.get("publications", ())
+        self._event_publications = {
+            (owner, contribution.topic, contribution.contract): (
+                contribution,
+                generation,
+            )
+            for owner, contribution, generation in publication_routes
+        }
+        subscription_routes = routing.get("subscriptions", ())
+        self._event_subscriptions = {
+            (contribution.subscriber_id, contribution.contract_major): (
+                owner,
+                contribution,
+                service,
+            )
+            for owner, contribution, service in subscription_routes
+        }
+        component_job_routes = routing.get("component_jobs", ())
+        self._component_jobs = {
+            (owner, contribution.handler_id): (contribution, service)
+            for owner, contribution, service in component_job_routes
+        }
+        if (
+            len(self._event_publications) != len(publication_routes)
+            or len(self._event_subscriptions) != len(subscription_routes)
+            or len(self._component_jobs) != len(component_job_routes)
+        ):
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Frozen routing contribution identities must be unique",
+                500,
+            )
 
     @property
     def kinds(self) -> tuple[str, ...]:
         return tuple(sorted(self._declarations))
 
     def requirements(self) -> tuple[dict, ...]:
-        return tuple(
-            {
-                "service_id": contribution.service_id,
-                "version": contribution.service_version,
-            }
-            for routes in self._routes.values()
-            for _owner, contribution, _service in routes
-        )
+        required = []
+        for kind, routes in self._routes.items():
+            if kind == "routing-routes":
+                routed = (
+                    *routes["subscriptions"],
+                    *routes["component_jobs"],
+                )
+            else:
+                routed = routes
+            required.extend(
+                {
+                    "service_id": contribution.service_id,
+                    "version": contribution.service_version,
+                }
+                for _owner, contribution, _service in routed
+            )
+        return tuple(required)
 
     def projection(self, graph_identity) -> dict:
         directories = {
@@ -186,6 +257,13 @@ class FrozenContributionDirectories:
                 parent_call_id=parent_call_id,
                 remaining_timeout=remaining_timeout,
             )
+        if kind == "routing-routes":
+            return await self._invoke_routing(
+                request,
+                scope=scope,
+                parent_call_id=parent_call_id,
+                remaining_timeout=remaining_timeout,
+            )
         raise ForestError(
             "CONTRIBUTION_DIRECTORY_UNSUPPORTED",
             "Contribution directory kind is unsupported",
@@ -199,6 +277,8 @@ class FrozenContributionDirectories:
                 "Contribution directory has no RuntimeGraph identity",
                 409,
             )
+        if kind == "routing-routes":
+            return self._routing_directory_fact(graph_identity)
         return {
             "protocol": "forest.contribution-directory/1",
             "kind": kind,
@@ -211,6 +291,48 @@ class FrozenContributionDirectories:
                     "target_generation_id": service.route.provider_generation_id,
                 }
                 for owner, contribution, service in self._routes[kind]
+            ],
+        }
+
+    def _routing_directory_fact(self, graph_identity) -> dict:
+        return {
+            "protocol": "forest.routing-directory/2",
+            "kind": "routing-routes",
+            "graph_id": graph_identity.graph_id,
+            "graph_revision": graph_identity.graph_revision,
+            "publications": [
+                {
+                    **contribution.as_fact(),
+                    "owner_component_id": owner,
+                    "owner_generation_id": generation.generation_id,
+                }
+                for (owner, _topic, _contract), (
+                    contribution,
+                    generation,
+                ) in sorted(self._event_publications.items())
+            ],
+            "subscriptions": [
+                {
+                    **contribution.as_fact(),
+                    "owner_component_id": owner,
+                    "target_generation_id": service.route.provider_generation_id,
+                }
+                for (_subscriber, _major), (
+                    owner,
+                    contribution,
+                    service,
+                ) in sorted(self._event_subscriptions.items())
+            ],
+            "component_jobs": [
+                {
+                    **contribution.as_fact(),
+                    "owner_component_id": owner,
+                    "target_generation_id": service.route.provider_generation_id,
+                }
+                for (owner, _handler), (
+                    contribution,
+                    service,
+                ) in sorted(self._component_jobs.items())
             ],
         }
 
@@ -481,3 +603,166 @@ class FrozenContributionDirectories:
                 502,
             )
         return {"text": result.text}
+
+    async def _invoke_routing(
+        self,
+        request: dict,
+        *,
+        scope: PackageCallScope,
+        parent_call_id: str,
+        remaining_timeout: Callable[[float], float],
+    ) -> dict:
+        action = request.get("action")
+        if action == "deliver-event":
+            return await self._deliver_event(
+                request,
+                scope=scope,
+                parent_call_id=parent_call_id,
+                remaining_timeout=remaining_timeout,
+            )
+        if action == "deliver-component-job":
+            return await self._deliver_component_job(
+                request,
+                scope=scope,
+                parent_call_id=parent_call_id,
+                remaining_timeout=remaining_timeout,
+            )
+        raise ForestError(
+            "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+            "Routing directory action is invalid",
+            422,
+        )
+
+    async def _deliver_event(
+        self,
+        request: dict,
+        *,
+        scope: PackageCallScope,
+        parent_call_id: str,
+        remaining_timeout: Callable[[float], float],
+    ) -> dict:
+        expected = {
+            "kind", "action", "event_id", "delivery_id", "subscriber_id",
+            "topic", "contract", "publisher_component_id",
+            "publisher_generation_id", "attempt", "payload",
+            "target_component_id", "target_generation_id", "target_service_id",
+            "target_service_version", "operation_id", "timeout",
+        }
+        if set(request) != expected:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                "Event delivery request contains unsupported fields",
+                422,
+            )
+        contract = request.get("contract")
+        if not isinstance(contract, str) or re.fullmatch(
+            r"[1-9][0-9]*\.[0-9]+", contract
+        ) is None:
+            raise ForestError(
+                "EVENT_DELIVERY_INPUT_INVALID", "Event contract is invalid", 422
+            )
+        selected = self._event_subscriptions.get(
+            (request["subscriber_id"], int(contract.split(".", 1)[0]))
+        )
+        if selected is None:
+            raise ForestError("EVENT_ROUTE_UNAVAILABLE", "Event route is unavailable", 409)
+        owner, contribution, service = selected
+        route = service.route
+        target = (
+            request["target_component_id"], request["target_generation_id"],
+            request["target_service_id"], request["target_service_version"],
+        )
+        if target != (
+            owner, route.provider_generation_id, route.service_id, route.version
+        ) or (
+            request["topic"], request["contract"]
+        ) != (contribution.topic, contribution.contract):
+            raise ForestError("EVENT_ROUTE_STALE", "Event delivery route is stale", 409)
+        if not Draft202012Validator(contribution.event_schema).is_valid(
+            request["payload"]
+        ):
+            raise ForestError("EVENT_DELIVERY_INPUT_INVALID", "Event payload is invalid", 422)
+        timeout = request["timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120:
+            raise ForestError("EVENT_DELIVERY_INPUT_INVALID", "Event timeout is invalid", 422)
+        result = await service.invoke(
+            DurableEventDeliveryRequest(
+                request["event_id"], request["delivery_id"],
+                request["subscriber_id"], request["topic"], request["contract"],
+                request["publisher_component_id"],
+                request["publisher_generation_id"], request["attempt"],
+                request["payload"],
+            ),
+            operation_id=request["operation_id"],
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
+            timeout_seconds=min(float(timeout), remaining_timeout(float(timeout))),
+            parent_call_id=parent_call_id,
+        )
+        if result != {"acknowledged": True}:
+            raise ForestError("EVENT_DELIVERY_RESULT_INVALID", "Event handler returned an invalid acknowledgement", 502)
+        return result
+
+    async def _deliver_component_job(
+        self,
+        request: dict,
+        *,
+        scope: PackageCallScope,
+        parent_call_id: str,
+        remaining_timeout: Callable[[float], float],
+    ) -> dict:
+        expected = {
+            "kind", "action", "job_id", "handler_id",
+            "scheduled_by_component_id", "scheduled_by_generation_id", "attempt",
+            "payload", "target_component_id", "target_generation_id",
+            "target_service_id", "target_service_version", "operation_id", "timeout",
+        }
+        if set(request) != expected:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                "ComponentJob delivery request contains unsupported fields",
+                422,
+            )
+        selected = self._component_jobs.get(
+            (request["target_component_id"], request["handler_id"])
+        )
+        if selected is None:
+            raise ForestError(
+                "COMPONENT_JOB_ROUTE_UNAVAILABLE",
+                "ComponentJob route is unavailable",
+                409,
+            )
+        contribution, service = selected
+        route = service.route
+        if (
+            request["target_generation_id"], request["target_service_id"],
+            request["target_service_version"],
+        ) != (route.provider_generation_id, route.service_id, route.version):
+            raise ForestError("COMPONENT_JOB_ROUTE_STALE", "ComponentJob route is stale", 409)
+        if not Draft202012Validator(contribution.input_schema).is_valid(
+            request["payload"]
+        ):
+            raise ForestError("COMPONENT_JOB_INPUT_INVALID", "ComponentJob input is invalid", 422)
+        timeout = request["timeout"]
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 0 < timeout <= contribution.timeout_seconds
+        ):
+            raise ForestError("COMPONENT_JOB_INPUT_INVALID", "ComponentJob timeout is invalid", 422)
+        result = await service.invoke(
+            DurableComponentJobRequest(
+                request["job_id"], request["handler_id"],
+                request["scheduled_by_component_id"],
+                request["scheduled_by_generation_id"], request["attempt"],
+                request["payload"],
+            ),
+            operation_id=request["operation_id"],
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
+            timeout_seconds=min(float(timeout), remaining_timeout(float(timeout))),
+            parent_call_id=parent_call_id,
+        )
+        if not isinstance(result, dict):
+            raise ForestError("COMPONENT_JOB_RESULT_INVALID", "ComponentJob handler returned no object", 502)
+        return result

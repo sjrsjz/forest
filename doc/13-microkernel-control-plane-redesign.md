@@ -284,7 +284,11 @@ Event 发布是一个 Command。它在单个短事务中复核调用方准确 Ge
 
 稳定 operation 的输入摘要只包含发布者稳定组件身份、topic/contract、业务 Payload、延迟和 causal root 等业务事实，不包含 RuntimeGraph、调用方 Generation 或目标 Route。首次 Command 在同一事务内从当前冻结目录选择准确图和订阅/handler 集合，并把这些执行事实不可变保存；换代后的同组件以相同业务输入恢复同一 operation 时返回首次 Event/ComponentJob，不按新图重复创建，也不因 Generation 改变制造伪冲突。
 
-存储边界按命令域拆分：`RoutingDirectoryCommands` 只发布不可变目录，`ComponentEventCommands` 只负责 Event 创建、delivery claim 与结算，`ComponentJobCommands` 只负责 ComponentJob 创建、claim 与结算；共享文件只含不可变 Route/Claim 值。Runtime 仅编排这些端口和冻结的 Contract Handle。每个 claim 同时固化领取者 `routing_generation_id`、目标插件 Generation、token、attempt 和 lease；结算必须同时匹配全部所有权事实。成功与失败使用不同的公共 Command，调用方不能通过一组互斥可选参数拼出含糊结果。
+`routing.graph` 必须是普通可安装 builtin 包，不得由宿主组合根构造专用 Runtime、dispatcher 或 Repository。包 manifest 声明 Event 发布与 ComponentJob 调度服务、路由贡献目录、私有 Domain Query/Command、两个 owned-work handler、管理契约和 UI；包内 SQL 独占路由目录、Event、delivery、Job、attempt 及其状态机，隔离 Worker 独占发布/调度规则、重试判定和投递流程。宿主只实现通用的 RuntimeGraph 冻结目录传输：把当前图的 publication/subscription/ComponentJob contribution 投影给 `routing.graph` Generation，并按 claim 中已经冻结的组件、Generation、服务和版本调用目标 Contract Handle。该传输层不得查询路由私有表、决定重试、制造业务 ID 或解释队列状态。
+
+路由贡献目录与包 Generation 同生命周期。候选 Worker 启动时把准确 `graph_id/graph_revision` 及所有路由事实写入候选包 namespace；RuntimeGraph publication 事务只接受该候选 Generation 已经准备好的目录摘要。新图提交后才开放两个 owned-work gate；替换时先冻结发布/调度入口，再按包声明排空已领取工作，旧目录、Worker 和目标句柄作为一个 Generation 整体退役。目录同步、Worker 启动或图发布任一失败都回收候选资源并恢复旧 Generation，不允许保留宿主 dispatcher 接管积压，也不允许以 Python import 路径或 `builtin_*` 文件名冒充插件化。
+
+存储边界按包端口拆分：目录同步 Command 只发布不可变目录，Event Command 只负责 Event 创建和 delivery 派生，ComponentJob Command 只负责 Job 创建；两个 owned-work claim/settle 函数分别封闭领取、attempt 与结算。共享协议只含不可变 Route/Claim 值。每个 claim 同时固化领取者 `routing_generation_id`、目标插件 Generation、token、attempt 和 lease；结算必须同时匹配全部所有权事实。成功与失败通过类型化 outcome 收敛，调用方不能越过包端口直接更新队列表。
 
 每个 delivery 以 `(event_id, subscriber_id, contract_major)` 唯一，状态机为：
 

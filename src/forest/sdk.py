@@ -1071,6 +1071,47 @@ class ShellCommandsDirectoryHandle:
         )
 
 
+class RoutingRoutesDirectoryHandle:
+    """Invoke targets from the RuntimeGraph-frozen routing contribution directory."""
+
+    def __init__(
+        self,
+        rpc: Callable[[str, dict], Awaitable[Any]] | None,
+        scope: CallScope | None,
+    ) -> None:
+        self._rpc = rpc
+        self._scope = scope
+
+    async def list(self) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No routing directory is available", 403)
+        return await self._rpc(
+            scope.call_id, {"kind": "routing-routes", "action": "list"}
+        )
+
+    async def deliver_event(self, **request) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No routing directory is available", 403)
+        return await self._rpc(
+            scope.call_id,
+            {"kind": "routing-routes", "action": "deliver-event", **request},
+        )
+
+    async def deliver_component_job(self, **request) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No routing directory is available", 403)
+        return await self._rpc(
+            scope.call_id,
+            {
+                "kind": "routing-routes",
+                "action": "deliver-component-job",
+                **request,
+            },
+        )
+
 class PluginContext:
     def __init__(
         self,
@@ -1118,6 +1159,9 @@ class PluginContext:
         self.jobs = JobsHandle(job_rpc, scope)
         self.job_types = JobTypesDirectoryHandle(contribution_directory_rpc, scope)
         self.shell_commands = ShellCommandsDirectoryHandle(
+            contribution_directory_rpc, scope
+        )
+        self.routing_routes = RoutingRoutesDirectoryHandle(
             contribution_directory_rpc, scope
         )
 

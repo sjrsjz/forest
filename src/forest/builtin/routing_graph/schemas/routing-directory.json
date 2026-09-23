@@ -1,0 +1,15 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$defs":{
+    "id":{"type":"string","pattern":"^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "generation":{"type":"string","minLength":1,"maxLength":512},
+    "digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},
+    "publication":{"type":"object","properties":{"protocol":{"const":"forest.event-publication-contribution/1"},"topic":{"$ref":"#/$defs/id"},"contract":{"type":"string","pattern":"^[1-9][0-9]*\\.[0-9]+$"},"event_schema":{"type":"object"},"event_schema_digest":{"$ref":"#/$defs/digest"},"owner_component_id":{"$ref":"#/$defs/id"},"owner_generation_id":{"$ref":"#/$defs/generation"}},"required":["protocol","topic","contract","event_schema","event_schema_digest","owner_component_id","owner_generation_id"],"additionalProperties":false},
+    "subscription":{"type":"object","properties":{"protocol":{"const":"forest.event-subscription-contribution/1"},"subscriber_id":{"$ref":"#/$defs/id"},"topic":{"$ref":"#/$defs/id"},"contract":{"type":"string","pattern":"^[1-9][0-9]*\\.[0-9]+$"},"contract_major":{"type":"integer","minimum":1},"event_schema":{"type":"object"},"event_schema_digest":{"$ref":"#/$defs/digest"},"service_id":{"$ref":"#/$defs/id"},"service_version":{"type":"integer","minimum":1},"max_attempts":{"type":"integer","minimum":1,"maximum":32},"owner_component_id":{"$ref":"#/$defs/id"},"target_generation_id":{"$ref":"#/$defs/generation"}},"required":["protocol","subscriber_id","topic","contract","contract_major","event_schema","event_schema_digest","service_id","service_version","max_attempts","owner_component_id","target_generation_id"],"additionalProperties":false},
+    "job":{"type":"object","properties":{"protocol":{"const":"forest.component-job-contribution/1"},"handler_id":{"$ref":"#/$defs/id"},"input_schema":{"type":"object"},"input_schema_digest":{"$ref":"#/$defs/digest"},"service_id":{"$ref":"#/$defs/id"},"service_version":{"type":"integer","minimum":1},"max_attempts":{"type":"integer","minimum":1,"maximum":32},"timeout_seconds":{"type":"number","exclusiveMinimum":0,"maximum":120},"max_concurrency":{"type":"integer","minimum":1,"maximum":16},"owner_component_id":{"$ref":"#/$defs/id"},"target_generation_id":{"$ref":"#/$defs/generation"}},"required":["protocol","handler_id","input_schema","input_schema_digest","service_id","service_version","max_attempts","timeout_seconds","max_concurrency","owner_component_id","target_generation_id"],"additionalProperties":false}
+  },
+  "type":"object",
+  "properties":{"protocol":{"const":"forest.routing-directory/2"},"kind":{"const":"routing-routes"},"graph_id":{"type":"string","minLength":1,"maxLength":512},"graph_revision":{"type":"integer","minimum":1},"publications":{"type":"array","maxItems":1024,"items":{"$ref":"#/$defs/publication"}},"subscriptions":{"type":"array","maxItems":1024,"items":{"$ref":"#/$defs/subscription"}},"component_jobs":{"type":"array","maxItems":1024,"items":{"$ref":"#/$defs/job"}}},
+  "required":["protocol","kind","graph_id","graph_revision","publications","subscriptions","component_jobs"],
+  "additionalProperties":false
+}

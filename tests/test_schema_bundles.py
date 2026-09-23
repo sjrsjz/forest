@@ -55,7 +55,6 @@ from forest.storage.authorization_authority import (
     KernelAuthorizationRepository,
 )
 from forest.storage.clean_bot_store import CleanBotStore
-from forest.storage.component_event_authority import ComponentEventCommands
 from forest.storage.component_state import ComponentStateCommands, ComponentStateQueries
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
@@ -65,11 +64,6 @@ from forest.storage.payload_authority import (
     KernelPayloadRepository,
     PayloadSource,
     SourceTarget,
-)
-from forest.storage.routing_graph_directory import RoutingDirectoryCommands
-from forest.storage.routing_graph_types import (
-    EventPublicationRoute,
-    EventSubscriptionRoute,
 )
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.tool_authorization import KernelToolAuthorizationPort
@@ -3882,123 +3876,100 @@ async def test_bundle_rejects_unregistered_occupied_namespace(clean_authority):
 
 
 @pytest.mark.postgres
-async def test_routing_event_command_atomically_freezes_all_deliveries(clean_authority):
+async def test_routing_builtin_owns_worker_storage_and_lifecycle(
+    clean_authority, tmp_path
+):
     store, installer = clean_authority
-    await installer.initialize_kernel()
-    payload_storage = official_storage_bundle(
-        "kernel.payload",
-        "forest.kernel.payload",
-        "forest.kernel-payload.repository/1",
-        "storage/official/kernel_payload.sql",
+    core = await bootstrap_clean_kernel(store, installer)
+    lease = await core.runtime.claim_host("host-routing-package", "inc-routing-package")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
     )
-    routing_storage = official_storage_bundle(
-        "routing.graph",
-        "forest.routing.graph",
-        "forest.routing-graph.repository/1",
-        "storage/official/routing_graph.sql",
-    )
-    for storage in (payload_storage, routing_storage):
-        await installer.install(
-            storage.spec,
-            storage.baseline,
-            storage.package_digest,
-            execution_profile=storage.execution_profile,
-        )
-    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
-
-    async def member(_conn, *, component_id, generation_id):
-        assert component_id == "example.publisher"
-        graph_id = {
-            "generation:publisher": "graph:routing:1",
-            "generation:publisher:2": "graph:routing:2",
-        }[generation_id]
-        return SimpleNamespace(graph_id=graph_id)
-
-    directory = RoutingDirectoryCommands(
+    routing = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/routing_graph"))),
+        PackageCatalog(tmp_path / "routing-packages"),
         store,
-        namespace=routing_storage.spec.namespace,
+        installer,
+        kernel=core,
+        initial_configuration={"protocol": "forest.routing.graph/2"},
     )
-    events = ComponentEventCommands(
+    component = await bootstrap_builtin_package(
+        Path(__file__).parent / "fixtures" / "routing_component",
+        PackageCatalog(tmp_path / "component-packages"),
         store,
-        payloads=payloads,
-        generation_member_verifier=member,
-        namespace=routing_storage.spec.namespace,
+        installer,
+        kernel=core,
+        initial_configuration={},
     )
-    publication = EventPublicationRoute(
-        "example.publisher",
-        "generation:publisher",
-        "example.ready",
-        "1.0",
-        "sha256:" + "1" * 64,
+    registry = RuntimeModuleRegistry(
+        host, core.descriptors + (routing.descriptor, component.descriptor)
     )
-    subscriptions = (
-        EventSubscriptionRoute(
-            "example.projection",
-            1,
-            "example.ready",
-            "1.0",
-            publication.event_schema_digest,
-            "example.consumer",
-            "generation:consumer",
-            "component.event." + "3" * 64,
-            1,
-            3,
-        ),
+    await registry.start()
+    instance = registry.get("routing.graph")
+    assert instance.snapshot.module_root.name == "python"
+    assert instance.state.value == "ACTIVE"
+    assert len(instance.owned_tasks()) == 16
+    component_instance = registry.get("tests.routing-component")
+    component_generation = component_instance.generation_identity
+    event_service = component_instance._event_publisher
+    job_service = component_instance._component_job_scheduler
+    published = await event_service.invoke(
+        {
+            "protocol": "forest.event-publication/1",
+            "publisher_component_id": "tests.routing-component",
+            "publisher_generation_id": component_generation.generation_id,
+            "topic": "tests.ready",
+            "contract": "1.0",
+            "payload": {"value": 7},
+        },
+        operation_id="routing-test:event",
+        causal_root_kind="test",
+        causal_root_id="routing-test",
     )
-    async with store.pool.connection() as conn, conn.transaction():
-        await directory.publish_directory_in(
-            conn,
-            graph_id="graph:routing:1",
-            graph_digest="sha256:" + "4" * 64,
-            routing_generation_id="generation:routing",
-            publications=(publication,),
-            subscriptions=subscriptions,
-        )
-    created = await events.publish_event(
-        publisher_component_id=publication.publisher_component_id,
-        publisher_generation_id=publication.publisher_generation_id,
-        topic=publication.topic,
-        contract=publication.contract,
-        operation_id="event:publish:1",
-        causal_root_kind="test.operation",
-        causal_root_id="root:1",
-        payload={"value": 7},
+    scheduled = await job_service.invoke(
+        {
+            "protocol": "forest.component-job-schedule/1",
+            "owner_component_id": "tests.routing-component",
+            "owner_generation_id": component_generation.generation_id,
+            "handler_id": "tests.echo",
+            "payload": {"value": 9},
+            "delay_seconds": 0,
+        },
+        operation_id="routing-test:job",
+        causal_root_kind="test",
+        causal_root_id="routing-test",
     )
-    replacement_publication = replace(
-        publication, publisher_generation_id="generation:publisher:2"
-    )
-    replacement_subscription = replace(
-        subscriptions[0], owner_generation_id="generation:consumer:2"
-    )
-    async with store.pool.connection() as conn, conn.transaction():
-        await directory.publish_directory_in(
-            conn,
-            graph_id="graph:routing:2",
-            graph_digest="sha256:" + "5" * 64,
-            routing_generation_id="generation:routing:2",
-            publications=(replacement_publication,),
-            subscriptions=(replacement_subscription,),
-        )
-    replay = await events.publish_event(
-        publisher_component_id=publication.publisher_component_id,
-        publisher_generation_id=replacement_publication.publisher_generation_id,
-        topic=publication.topic,
-        contract=publication.contract,
-        operation_id="event:publish:1",
-        causal_root_kind="test.operation",
-        causal_root_id="root:1",
-        payload={"value": 7},
-    )
-    assert created["delivery_count"] == 1 and created["replayed"] is False
-    assert replay == {"event_id": created["event_id"], "replayed": True}
-    async with store.pool.connection() as conn:
-        delivery_count = (
-            await (
+    assert published["delivery_count"] == 1
+    assert scheduled["state"] == "WAITING"
+    registry.notify_work()
+    namespace = routing.descriptor.storage.spec.namespace
+    states = None
+    for _ in range(100):
+        async with store.pool.connection() as conn:
+            states = await (
                 await conn.execute(
-                    sql.SQL("SELECT count(*) AS count FROM {}.event_deliveries").format(
-                        sql.Identifier(routing_storage.spec.namespace)
+                    sql.SQL(
+                        "SELECT (SELECT state FROM {}.event_deliveries LIMIT 1) AS event_state,"
+                        "(SELECT state FROM {}.component_jobs LIMIT 1) AS job_state,"
+                        "(SELECT result_payload FROM {}.component_jobs LIMIT 1) AS job_result"
+                    ).format(
+                        sql.Identifier(namespace),
+                        sql.Identifier(namespace),
+                        sql.Identifier(namespace),
                     )
                 )
             ).fetchone()
-        )["count"]
-    assert delivery_count == 1
+        if states["event_state"] == states["job_state"] == "SUCCEEDED":
+            break
+        await asyncio.sleep(0.05)
+    assert states == {
+        "event_state": "SUCCEEDED",
+        "job_state": "SUCCEEDED",
+        "job_result": {"echo": 9},
+    }
+    await registry.close()
+    assert instance.state.value == "STOPPED"

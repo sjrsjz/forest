@@ -43,12 +43,7 @@ from forest.package_effects import (
 )
 from forest.package_owned_work import PackageOwnedWorkSupervisor
 from forest.packages import PackageSnapshot, contract_range
-from forest.routing_protocol import (
-    DurableComponentJobRequest,
-    DurableEventDeliveryRequest,
-    PublishComponentEvent,
-    ScheduleComponentJob,
-)
+from forest.routing_protocol import DurableComponentJobRequest, DurableEventDeliveryRequest
 from forest.runtime_contracts import (
     FrozenServiceRoute,
     RoutedServiceEndpoint,
@@ -1689,13 +1684,14 @@ class PackageGenerationAdapter:
         if self._event_publisher is None:
             raise ForestError("CAPABILITY_UNAVAILABLE", "Event authority is unavailable", 503)
         return await self._event_publisher.invoke(
-            PublishComponentEvent(
-                scope.component_id,
-                scope.generation_id,
-                request["topic"],
-                request["contract"],
-                request["payload"],
-            ),
+            {
+                "protocol": "forest.event-publication/1",
+                "publisher_component_id": scope.component_id,
+                "publisher_generation_id": scope.generation_id,
+                "topic": request["topic"],
+                "contract": request["contract"],
+                "payload": request["payload"],
+            },
             operation_id=request["operation_id"],
             causal_root_kind=scope.causal_root_kind,
             causal_root_id=scope.causal_root_id,
@@ -1714,13 +1710,14 @@ class PackageGenerationAdapter:
         if self._component_job_scheduler is None:
             raise ForestError("CAPABILITY_UNAVAILABLE", "ComponentJob authority is unavailable", 503)
         return await self._component_job_scheduler.invoke(
-            ScheduleComponentJob(
-                scope.component_id,
-                scope.generation_id,
-                request["handler_id"],
-                request["payload"],
-                request["delay_seconds"],
-            ),
+            {
+                "protocol": "forest.component-job-schedule/1",
+                "owner_component_id": scope.component_id,
+                "owner_generation_id": scope.generation_id,
+                "handler_id": request["handler_id"],
+                "payload": request["payload"],
+                "delay_seconds": request["delay_seconds"],
+            },
             operation_id=request["operation_id"],
             causal_root_kind=scope.causal_root_kind,
             causal_root_id=scope.causal_root_id,
@@ -2219,14 +2216,19 @@ def package_runtime_descriptor(
             if any(item.startswith("job.schedule:") for item in requested)
             else None
         )
-        contribution_directories = {
-            declaration["kind"]: (
-                contracts.job_types()
-                if declaration["kind"] == "job-types"
-                else contracts.shell_commands()
-            )
-            for declaration in component.get("contribution_directories", ())
-        }
+        contribution_directories = {}
+        for declaration in component.get("contribution_directories", ()):
+            kind = declaration["kind"]
+            if kind == "job-types":
+                contribution_directories[kind] = contracts.job_types()
+            elif kind == "shell-commands":
+                contribution_directories[kind] = contracts.shell_commands()
+            elif kind == "routing-routes":
+                contribution_directories[kind] = {
+                    "publications": contracts.event_publications(),
+                    "subscriptions": contracts.event_subscriptions(),
+                    "component_jobs": contracts.component_jobs(),
+                }
         participant_components = sorted(
             {
                 step["component_id"]
