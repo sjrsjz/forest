@@ -407,6 +407,7 @@ class PackageGenerationAdapter:
                     "version": _major(item["contract"]),
                     "handler": item["handler"],
                     "max_concurrency": item["max_concurrency"],
+                    "drain_policy": item.get("drain_policy", "inflight"),
                 }
                 for item in self._owned_work_declarations
             ],

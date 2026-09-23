@@ -489,6 +489,9 @@ MANIFEST_SCHEMA = {
                                     "minimum": 3,
                                     "maximum": 86400,
                                 },
+                                "drain_policy": {
+                                    "enum": ["inflight", "backlog"]
+                                },
                             },
                         },
                     },
@@ -1375,6 +1378,16 @@ def _manifest(files: dict[str, bytes]) -> dict:
         if handler in contributed_job_handlers:
             _fail("INVALID_OWNED_WORK", "Owned work handlers must be package-unique")
         contributed_job_handlers.add(handler)
+    if len(
+        {
+            definition.get("drain_policy", "inflight")
+            for definition in owned_work_handlers
+        }
+    ) > 1:
+        _fail(
+            "INVALID_OWNED_WORK",
+            "One package Generation must use one owned-work drain policy",
+        )
     published_topics = set()
     for publication in component.get("publishes", []):
         topic = publication.get("topic", "")

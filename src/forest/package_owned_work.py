@@ -51,6 +51,21 @@ class PackageOwnedWorkSupervisor:
         self.failed = failed
         self.call_started = call_started
         self.call_finished = call_finished
+        policies = {
+            declaration.get("drain_policy", "inflight")
+            for declaration in declarations
+        }
+        if len(policies) != 1:
+            raise ForestError(
+                "OWNED_WORK_DRAIN_POLICY_INVALID",
+                "A package Generation must have one owned-work drain policy",
+                500,
+            )
+        self.drain_policy = policies.pop()
+        self._handler_names = {declaration["name"] for declaration in declarations}
+        self._drain_empty: set[str] = set()
+        self._drained = asyncio.Event()
+        self.draining = False
         self.inflight = 0
         self.idle = asyncio.Event()
         self.idle.set()
@@ -67,10 +82,21 @@ class PackageOwnedWorkSupervisor:
         return tuple(self.tasks)
 
     def freeze_admission(self) -> None:
-        self.admission.clear()
+        self.draining = True
+        self._drain_empty.clear()
+        self._drained.clear()
+        if self.drain_policy == "inflight":
+            self.admission.clear()
+        else:
+            self.admission.set()
         self.wake.set()
 
     async def drain(self) -> None:
+        if self.drain_policy == "inflight":
+            await self.idle.wait()
+            return
+        await self._drained.wait()
+        self.admission.clear()
         await self.idle.wait()
 
     def open_admission(self) -> None:
@@ -80,6 +106,9 @@ class PackageOwnedWorkSupervisor:
                 "Package owned work cannot open outside a healthy active Generation",
                 409,
             )
+        self.draining = False
+        self._drain_empty.clear()
+        self._drained.clear()
         self.admission.set()
         self.wake.set()
 
@@ -340,6 +369,8 @@ class PackageOwnedWorkSupervisor:
                 try:
                     claim = await self._claim(declaration)
                     if claim is not None:
+                        if self.draining:
+                            self._drain_empty.discard(declaration["name"])
                         await self._execute(declaration, claim)
                 except ForestError as error:
                     if error.code == "RUNTIME_GENERATION_NOT_ACTIVE" and not self.admission.is_set():
@@ -354,6 +385,16 @@ class PackageOwnedWorkSupervisor:
                     self.inflight -= 1
                     if self.inflight == 0:
                         self.idle.set()
+                    if self.draining and self.drain_policy == "backlog":
+                        if claim is None:
+                            self._drain_empty.add(declaration["name"])
+                        else:
+                            self._drain_empty.discard(declaration["name"])
+                        if (
+                            self.inflight == 0
+                            and self._drain_empty == self._handler_names
+                        ):
+                            self._drained.set()
                 if claim is None or not self.admission.is_set():
                     await self._wait(declaration["poll_interval_ms"])
         except asyncio.CancelledError:

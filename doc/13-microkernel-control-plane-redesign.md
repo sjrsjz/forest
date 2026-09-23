@@ -150,7 +150,7 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 群聊 Shell 贡献也属于包工件。包内 `shell_commands` 必须同时冻结 command/version、参数 schema、权限集合、服务等级、输出策略和准确执行 service；执行 service 必须由同包 Worker 实现。Shell dispatcher 只消费 RuntimeGraph 目录并构造类型化请求，Package Adapter 在跨 Worker 前再次用该命令 schema 校验，Worker 返回的 JSON 只有通过 service 输出 schema 后才投影为 Shell 结果。不得在宿主保留 `builtin_*_shell.py` 业务处理器，也不得让 Web 壳按组件 ID 导入同一套命令逻辑。
 
-`shell.command` 自身也是普通 builtin 包。它的 Worker 拥有保留前缀识别、schema 驱动的参数解析、命令结果解释和 owned-work 执行循环；包私有 Domain/UnitOfWork participant 拥有管理员策略、按 Shell Generation 分区的命令目录、请求、claim、执行和终态。候选代在发布前物化自己的配置策略与 `shell-commands` 目录，启动回滚或退役时只回收该代目录和策略快照；请求及终态作为审计依据保留。新入站绑定准确 Shell Generation，旧代必须先停止接纳并排空已领取请求，不能让新 Worker 解释旧 claim。
+`shell.command` 自身也是普通 builtin 包。它的 Worker 拥有保留前缀识别、schema 驱动的参数解析、命令结果解释和 owned-work 执行循环；包私有 Domain/UnitOfWork participant 拥有管理员策略、按 Shell Generation 分区的命令目录、请求、claim、执行和终态。候选代在发布前物化自己的配置策略与 `shell-commands` 目录，启动回滚或退役时只回收该代目录和策略快照；请求及终态作为审计依据保留。新入站绑定准确 Shell Generation。图入口冻结后，旧 Shell 以 `backlog` 排空策略继续领取冻结前已经接纳的全部请求，直到每个 handler 在无在途工作时观察到空队列才允许发布新图；排空超时必须中止替换并恢复旧代。新 Worker 不解释旧 claim，也不把冻结到旧目标 Generation 的命令改绑到新目录。
 
 Shell 入站不使用不可恢复的进程内 nonce 或隐藏 proof cache。Adapter 通过冻结的 CONTROL service route 调用准确 Shell Generation；Shell 返回含事件、Binding、主体、命令、参数 PayloadRef 和 Shell Generation 的类型化检查结果。`kernel.uow.onebot.ingress` 在同一事务中复核准确 Adapter/Shell participant、平台事件身份、Binding fence 和 Shell PayloadRef，再由 Shell participant 按该代策略与目录接纳或拒绝。命令执行前的 package UnitOfWork 顺序固定为 Adapter transport fence、Kernel Authorization ticket 签发与消费、Shell claim/policy/route 复核；结果提交顺序固定为 Shell 终态、CONTROL Delivery intent 和 Kernel Audit envelope。任一步失败均整体回滚。Kernel coordinator 不读取 Shell 私表、不解析命令，也不持有 Shell Repository。
 
