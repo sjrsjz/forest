@@ -262,9 +262,10 @@ class PostgresPackageDomainAuthority:
                         guarded = before_write(conn)
                         if inspect.isawaitable(guarded):
                             await guarded
+                    port_kind = "command" if kind == "management_action" else kind
                     return await self._invoke_in(
                         conn,
-                        kind,
+                        port_kind,
                         scope,
                         declaration,
                         payload,
