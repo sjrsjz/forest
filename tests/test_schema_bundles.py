@@ -1074,6 +1074,107 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
 
 
 @pytest.mark.postgres
+async def test_delivery_builtin_owns_transactional_intent_creation(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    delivery = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/delivery"))),
+        PackageCatalog(tmp_path / "delivery-packages"),
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={"protocol": "forest.delivery/1"},
+    )
+    lease = await kernel.runtime.claim_host("delivery-host", "delivery-incarnation")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=kernel.runtime,
+    )
+    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, delivery.descriptor))
+    await registry.start()
+    try:
+        instance = registry.get("delivery")
+        reply_ref = "reply/1"
+        epoch = await kernel.payload.epoch()
+        saved = await kernel.payload.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="final.reply",
+            owner_id=reply_ref,
+            media_type="application/json",
+            content=b'{"text":"A"}',
+            expected_deletion_epoch=epoch,
+        )
+        request = {
+            "protocol": "forest.delivery-intent/1",
+            "intent_id": "intent/1",
+            "binding_ref": "binding/main",
+            "lane_kind": "CHAT",
+            "ordering_key": "conversation/1",
+            "conversation_ref": "conversation/1",
+            "channel_kind": "GROUP",
+            "channel_ref": "933179609",
+            "cause_component_id": "conversation.scheduler",
+            "cause_kind": "context.reply",
+            "cause_id": reply_ref,
+            "delivery_generation_id": instance.generation_identity.generation_id,
+            "reply_ref": reply_ref,
+            "parts": [
+                {
+                    "part_operation_id": "part/1",
+                    "effect_operation_ref": "effect/1",
+                    "payload": {
+                        "payload_id": saved.payload_id,
+                        "digest": saved.content_digest,
+                        "owner_component_id": "agent.runtime",
+                        "owner_kind": "final.reply",
+                        "owner_id": reply_ref,
+                    },
+                }
+            ],
+        }
+        participant = instance.unit_of_work_participant()
+        async with store.pool.connection() as conn, conn.transaction():
+            created = await participant.invoke_in(
+                conn,
+                "delivery.create-chat-intent",
+                request,
+                operation_id="delivery:create:1",
+                causal_root_kind="context.reply",
+                causal_root_id=reply_ref,
+                parent_call_id="call:delivery:create:1",
+                timeout_seconds=10,
+            )
+        assert created == {
+            "intent_id": "intent/1",
+            "state": "QUEUED",
+            "lane_sequence": 1,
+            "part_count": 1,
+        }
+        namespace = delivery.descriptor.storage.spec.namespace
+        async with store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT i.state,p.state AS part_state,p.payload_id "
+                        "FROM {}.send_intents i JOIN {}.send_parts p USING(bot_id,intent_id) "
+                        "WHERE i.bot_id=%s AND i.intent_id=%s"
+                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                    (store.bot_id, "intent/1"),
+                )
+            ).fetchone()
+        assert dict(row) == {
+            "state": "QUEUED",
+            "part_state": "QUEUED",
+            "payload_id": saved.payload_id,
+        }
+    finally:
+        assert await registry.close() == []
+
+
+@pytest.mark.postgres
 async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_authority):
     store, installer = clean_authority
     await installer.initialize_kernel()

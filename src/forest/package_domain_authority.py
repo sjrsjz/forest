@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
+from forest.packages import digest_json
 
 _FUNCTION = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 _ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
@@ -43,18 +44,70 @@ class PostgresPackageDomainAuthority:
         self.payloads = payloads
 
     @staticmethod
-    def _pointer(value: object, pointer: str) -> object:
+    def _pointer(value: object, pointer: str, bindings: tuple[str, ...] = ()) -> object:
         current = value
+        wildcard = iter(bindings)
         for encoded in pointer[1:].split("/"):
             token = encoded.replace("~1", "/").replace("~0", "~")
-            if not isinstance(current, dict) or token not in current:
+            if token == "*":
+                token = next(wildcard, None)
+            if isinstance(current, dict) and token in current:
+                current = current[token]
+            elif isinstance(current, list) and isinstance(token, str) and token.isdecimal():
+                index = int(token)
+                if index >= len(current):
+                    raise ForestError(
+                        "DOMAIN_PAYLOAD_REFERENCE_INVALID",
+                        "Managed payload reference path is absent from the command input",
+                        422,
+                    )
+                current = current[index]
+            else:
                 raise ForestError(
                     "DOMAIN_PAYLOAD_REFERENCE_INVALID",
                     "Managed payload reference path is absent from the command input",
                     422,
                 )
-            current = current[token]
         return current
+
+    @classmethod
+    def _pointer_bindings(cls, value: object, pointer: str) -> tuple[tuple[str, ...], ...]:
+        tokens = pointer[1:].split("/")
+        results: list[tuple[str, ...]] = []
+
+        def walk(current: object, offset: int, bindings: tuple[str, ...]) -> None:
+            if offset == len(tokens):
+                results.append(bindings)
+                return
+            token = tokens[offset].replace("~1", "/").replace("~0", "~")
+            if token == "*":
+                if isinstance(current, list):
+                    for index, item in enumerate(current):
+                        walk(item, offset + 1, (*bindings, str(index)))
+                    return
+                if isinstance(current, dict):
+                    for key in sorted(current):
+                        walk(current[key], offset + 1, (*bindings, key))
+                    return
+                raise ForestError(
+                    "DOMAIN_PAYLOAD_REFERENCE_INVALID",
+                    "Managed payload wildcard does not select a collection",
+                    422,
+                )
+            if isinstance(current, dict) and token in current:
+                walk(current[token], offset + 1, bindings)
+                return
+            if isinstance(current, list) and token.isdecimal() and int(token) < len(current):
+                walk(current[int(token)], offset + 1, bindings)
+                return
+            raise ForestError(
+                "DOMAIN_PAYLOAD_REFERENCE_INVALID",
+                "Managed payload reference path is absent from the command input",
+                422,
+            )
+
+        walk(value, 0, ())
+        return tuple(results)
 
     async def _verify_payload_refs(self, conn, declaration: dict, payload: dict) -> None:
         references = declaration.get("payload_refs", ())
@@ -67,36 +120,37 @@ class PostgresPackageDomainAuthority:
                 503,
             )
         for declaration_ref in references:
-            reference = self._pointer(payload, declaration_ref["path"])
-            owner_id = self._pointer(payload, declaration_ref["owner_id_path"])
-            if (
-                not isinstance(reference, dict)
-                or set(reference)
-                != {
-                    "payload_id",
-                    "digest",
-                    "owner_component_id",
-                    "owner_kind",
-                    "owner_id",
-                }
-                or reference.get("owner_component_id")
-                != declaration_ref["owner_component"]
-                or reference.get("owner_kind") != declaration_ref["owner_kind"]
-                or reference.get("owner_id") != owner_id
-            ):
-                raise ForestError(
-                    "DOMAIN_PAYLOAD_REFERENCE_INVALID",
-                    "Managed payload reference differs from its frozen port declaration",
-                    409,
+            bindings_set = self._pointer_bindings(payload, declaration_ref["path"])
+            for bindings in bindings_set:
+                reference = self._pointer(payload, declaration_ref["path"], bindings)
+                owner_id = self._pointer(payload, declaration_ref["owner_id_path"], bindings)
+                if (
+                    not isinstance(reference, dict)
+                    or set(reference)
+                    != {
+                        "payload_id",
+                        "digest",
+                        "owner_component_id",
+                        "owner_kind",
+                        "owner_id",
+                    }
+                    or reference.get("owner_component_id") != declaration_ref["owner_component"]
+                    or reference.get("owner_kind") != declaration_ref["owner_kind"]
+                    or reference.get("owner_id") != owner_id
+                ):
+                    raise ForestError(
+                        "DOMAIN_PAYLOAD_REFERENCE_INVALID",
+                        "Managed payload reference differs from its frozen port declaration",
+                        409,
+                    )
+                await self.payloads.verify_in(
+                    conn,
+                    payload_id=reference.get("payload_id"),
+                    digest=reference.get("digest"),
+                    owner_component_id=reference["owner_component_id"],
+                    owner_kind=reference["owner_kind"],
+                    owner_id=reference["owner_id"],
                 )
-            await self.payloads.verify_in(
-                conn,
-                payload_id=reference.get("payload_id"),
-                digest=reference.get("digest"),
-                owner_component_id=reference["owner_component_id"],
-                owner_kind=reference["owner_kind"],
-                owner_id=reference["owner_id"],
-            )
 
     async def invoke_query(
         self,
@@ -198,9 +252,7 @@ class PostgresPackageDomainAuthority:
         timeout_seconds: float,
     ) -> Any:
         if phase not in {"claim", "settle"}:
-            raise ForestError(
-                "OWNED_WORK_PHASE_INVALID", "Owned work phase is invalid", 422
-            )
+            raise ForestError("OWNED_WORK_PHASE_INVALID", "Owned work phase is invalid", 422)
         function = declaration.get(f"{phase}_function")
         port = {
             "name": f"{declaration.get('name', '')}.{phase}",
@@ -342,6 +394,7 @@ class PostgresPackageDomainAuthority:
             "causal_root_kind": scope.causal_root_kind,
             "causal_root_id": scope.causal_root_id,
             "timeout_seconds": timeout_seconds,
+            "input_digest": digest_json(payload),
             "runtime_package_digest": self.runtime_package_digest,
             "storage_package_digest": self.storage_package_digest,
         }
@@ -422,7 +475,8 @@ class PostgresPackageDomainAuthority:
             envelope.get("ok") is not False
             or set(envelope) != {"protocol", "ok", "error"}
             or not isinstance(error, dict)
-            or set(error) not in (
+            or set(error)
+            not in (
                 {"code", "message", "status"},
                 {"code", "message", "status", "details"},
             )

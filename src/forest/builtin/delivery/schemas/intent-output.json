@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["intent_id", "state", "lane_sequence", "part_count"],
+  "properties": {
+    "intent_id": {"type": "string"},
+    "state": {"enum": ["QUEUED", "SENDING", "SENT", "FAILED", "UNKNOWN", "CANCELLED"]},
+    "lane_sequence": {"type": "integer", "minimum": 1},
+    "part_count": {"type": "integer", "minimum": 1, "maximum": 64}
+  },
+  "additionalProperties": false
+}

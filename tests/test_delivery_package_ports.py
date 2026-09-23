@@ -1,3 +1,5 @@
+from importlib.resources import files
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock
 
@@ -9,6 +11,21 @@ from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
 from forest.kernel_payload_effect_driver import KernelPayloadJsonEffectDriver
+from forest.package_domain_authority import PostgresPackageDomainAuthority
+from forest.packages import PackageCatalog
+
+
+def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
+    snapshot = PackageCatalog(tmp_path / "catalog").build(
+        Path(str(files("forest").joinpath("builtin/delivery")))
+    )
+    assert snapshot.component["id"] == "delivery"
+    assert snapshot.manifest["runtime"] == "python-worker"
+    assert {item["name"] for item in snapshot.component["unit_of_work_participants"]} == {
+        "delivery.create-chat-intent",
+        "delivery.create-control-intent",
+    }
+    assert snapshot.management_ui() is not None
 
 
 @pytest.mark.asyncio
@@ -153,3 +170,51 @@ async def test_effect_payload_materializer_seals_kernel_effect_ownership():
         content=b'{"message":"A"}',
         expected_deletion_epoch=7,
     )
+
+
+@pytest.mark.asyncio
+async def test_domain_authority_verifies_every_payload_in_declared_array():
+    payloads = SimpleNamespace(verify_in=AsyncMock())
+    authority = PostgresPackageDomainAuthority(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        component_id="delivery",
+        runtime_package_digest="sha256:" + "1" * 64,
+        storage_spec=SimpleNamespace(),
+        storage_package_digest="sha256:" + "2" * 64,
+        storage_execution_profile="official",
+        payloads=payloads,
+    )
+    references = [
+        {
+            "payload_id": f"payload/{index}",
+            "digest": "sha256:" + str(index) * 64,
+            "owner_component_id": "agent.runtime",
+            "owner_kind": "agent.reply",
+            "owner_id": f"reply/{index}",
+        }
+        for index in (3, 4)
+    ]
+    await authority._verify_payload_refs(
+        object(),
+        {
+            "payload_refs": [
+                {
+                    "path": "/parts/*/payload",
+                    "owner_id_path": "/parts/*/reply_ref",
+                    "owner_component": "agent.runtime",
+                    "owner_kind": "agent.reply",
+                }
+            ]
+        },
+        {
+            "parts": [
+                {"reply_ref": f"reply/{index}", "payload": reference}
+                for index, reference in zip((3, 4), references, strict=True)
+            ]
+        },
+    )
+    assert [call.kwargs["payload_id"] for call in payloads.verify_in.await_args_list] == [
+        "payload/3",
+        "payload/4",
+    ]

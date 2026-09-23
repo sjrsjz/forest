@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "intent_id", "binding_ref", "lane_kind", "ordering_key", "conversation_ref", "channel_kind", "channel_ref", "cause_component_id", "cause_kind", "cause_id", "delivery_generation_id", "reply_ref", "parts"],
+  "properties": {
+    "protocol": {"const": "forest.delivery-intent/1"},
+    "intent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "binding_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "lane_kind": {"enum": ["CHAT", "CONTROL"]},
+    "ordering_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "conversation_ref": {"type": ["string", "null"], "maxLength": 256},
+    "channel_kind": {"enum": ["GROUP", "PRIVATE"]},
+    "channel_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "cause_component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "cause_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+    "cause_id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "delivery_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "reply_ref": {"type": ["string", "null"], "maxLength": 512},
+    "parts": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["part_operation_id", "effect_operation_ref", "payload"],
+        "properties": {
+          "part_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "effect_operation_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+          "payload": {
+            "type": "object",
+            "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+            "properties": {
+              "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+              "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+              "owner_component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+              "owner_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+              "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

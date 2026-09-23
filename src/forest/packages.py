@@ -60,13 +60,15 @@ ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
 
 
-def _valid_json_pointer(value: object) -> bool:
+def _valid_json_pointer(value: object, *, wildcards: bool = False) -> bool:
     if not isinstance(value, str) or not 2 <= len(value.encode("utf-8")) <= 1024:
         return False
     if not value.startswith("/"):
         return False
     for token in value[1:].split("/"):
         if not token or re.search(r"~(?![01])", token):
+            return False
+        if token == "*" and not wildcards:
             return False
     return True
 
@@ -114,9 +116,11 @@ MANIFEST_SCHEMA = {
                     "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
                     "state_value_schema": {"type": "string"},
                     "state_migrations": {
-                        "type": "array", "maxItems": 64,
+                        "type": "array",
+                        "maxItems": 64,
                         "items": {
-                            "type": "object", "additionalProperties": False,
+                            "type": "object",
+                            "additionalProperties": False,
                             "required": ["from_schema", "to_schema"],
                             "properties": {
                                 key: {"type": "integer", "minimum": 1, "maximum": 2147483647}
@@ -221,9 +225,7 @@ MANIFEST_SCHEMA = {
                                         "output_schema",
                                     )
                                 },
-                                "semantics": {
-                                    "enum": ["at-most-once", "idempotent", "read"]
-                                },
+                                "semantics": {"enum": ["at-most-once", "idempotent", "read"]},
                             },
                         },
                     },
@@ -312,16 +314,16 @@ MANIFEST_SCHEMA = {
                                     )
                                 },
                                 "job_version": {
-                                    "type": "integer", "minimum": 1, "maximum": 2147483647
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 2147483647,
                                 },
-                                "max_attempts": {
-                                    "type": "integer", "minimum": 1, "maximum": 32
-                                },
-                                "timeout_s": {
-                                    "type": "integer", "minimum": 1, "maximum": 86400
-                                },
+                                "max_attempts": {"type": "integer", "minimum": 1, "maximum": 32},
+                                "timeout_s": {"type": "integer", "minimum": 1, "maximum": 86400},
                                 "max_concurrency": {
-                                    "type": "integer", "minimum": 1, "maximum": 128
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 128,
                                 },
                             },
                         },
@@ -360,23 +362,27 @@ MANIFEST_SCHEMA = {
                                         "output_schema",
                                     )
                                 },
-                                "max_concurrency": {
-                                    "type": "integer", "minimum": 1, "maximum": 32
-                                },
+                                "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 32},
                                 "poll_interval_ms": {
-                                    "type": "integer", "minimum": 50, "maximum": 60000
+                                    "type": "integer",
+                                    "minimum": 50,
+                                    "maximum": 60000,
                                 },
-                                "claim_timeout_s": {
-                                    "type": "integer", "minimum": 1, "maximum": 60
-                                },
+                                "claim_timeout_s": {"type": "integer", "minimum": 1, "maximum": 60},
                                 "handler_timeout_s": {
-                                    "type": "integer", "minimum": 1, "maximum": 86400
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 86400,
                                 },
                                 "settle_timeout_s": {
-                                    "type": "integer", "minimum": 1, "maximum": 60
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 60,
                                 },
                                 "lease_seconds": {
-                                    "type": "integer", "minimum": 3, "maximum": 86400
+                                    "type": "integer",
+                                    "minimum": 3,
+                                    "maximum": 86400,
                                 },
                             },
                         },
@@ -392,16 +398,12 @@ MANIFEST_SCHEMA = {
                                 "type": "string",
                                 "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
                             },
-                            "label": {
-                                "type": "string", "minLength": 1, "maxLength": 128
-                            },
+                            "label": {"type": "string", "minLength": 1, "maxLength": 128},
                             "group": {
                                 "type": "string",
                                 "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
                             },
-                            "order": {
-                                "type": "integer", "minimum": -10000, "maximum": 10000
-                            },
+                            "order": {"type": "integer", "minimum": -10000, "maximum": 10000},
                         },
                     },
                     "management_queries": {
@@ -415,13 +417,15 @@ MANIFEST_SCHEMA = {
                                 "id": {"type": "string"},
                                 "port": {"type": "string"},
                                 "default_limit": {
-                                    "type": "integer", "minimum": 1, "maximum": 10000
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 10000,
                                 },
-                                "max_limit": {
-                                    "type": "integer", "minimum": 1, "maximum": 10000
-                                },
+                                "max_limit": {"type": "integer", "minimum": 1, "maximum": 10000},
                                 "timeout_s": {
-                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 120,
                                 },
                             },
                         },
@@ -440,7 +444,9 @@ MANIFEST_SCHEMA = {
                                 "authorization_path": {"type": "string"},
                                 "replace_runtime_graph": {"type": "boolean"},
                                 "timeout_s": {
-                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 120,
                                 },
                             },
                         },
@@ -465,7 +471,9 @@ MANIFEST_SCHEMA = {
                                 "input_schema": {"type": "string"},
                                 "output_schema": {"type": "string"},
                                 "timeout_s": {
-                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 120,
                                 },
                                 "steps": {
                                     "type": "array",
@@ -504,9 +512,7 @@ MANIFEST_SCHEMA = {
                             "baseline_sha256": {"type": "string"},
                             "scope": {"const": "bot"},
                             "repository_contract": {"type": "string"},
-                            "execution_profile": {
-                                "enum": ["declarative", "official"]
-                            },
+                            "execution_profile": {"enum": ["declarative", "official"]},
                         },
                     },
                     "publishes": {
@@ -517,8 +523,7 @@ MANIFEST_SCHEMA = {
                             "additionalProperties": False,
                             "required": ["topic", "contract", "schema"],
                             "properties": {
-                                key: {"type": "string"}
-                                for key in ("topic", "contract", "schema")
+                                key: {"type": "string"} for key in ("topic", "contract", "schema")
                             },
                         },
                     },
@@ -534,9 +539,7 @@ MANIFEST_SCHEMA = {
                                     key: {"type": "string"}
                                     for key in ("subscriber_id", "topic", "contract", "schema")
                                 },
-                                "max_attempts": {
-                                    "type": "integer", "minimum": 1, "maximum": 32
-                                },
+                                "max_attempts": {"type": "integer", "minimum": 1, "maximum": 32},
                             },
                         },
                     },
@@ -550,15 +553,13 @@ MANIFEST_SCHEMA = {
                             "properties": {
                                 "handler_id": {"type": "string"},
                                 "input_schema": {"type": "string"},
-                                "max_attempts": {
-                                    "type": "integer", "minimum": 1, "maximum": 32
-                                },
+                                "max_attempts": {"type": "integer", "minimum": 1, "maximum": 32},
                                 "timeout_s": {
-                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                    "type": "number",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 120,
                                 },
-                                "max_concurrency": {
-                                    "type": "integer", "minimum": 1, "maximum": 16
-                                },
+                                "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 16},
                             },
                         },
                     },
@@ -589,9 +590,7 @@ MANIFEST_SCHEMA = {
                                         "input_schema",
                                     )
                                 },
-                                "priority": {
-                                    "type": "integer", "minimum": -100, "maximum": 100
-                                },
+                                "priority": {"type": "integer", "minimum": -100, "maximum": 100},
                             },
                         },
                     },
@@ -605,9 +604,7 @@ MANIFEST_SCHEMA = {
                             "properties": {
                                 "handler_id": {"type": "string"},
                                 "handler": {"type": "string"},
-                                "priority": {
-                                    "type": "integer", "minimum": -100, "maximum": 100
-                                },
+                                "priority": {"type": "integer", "minimum": -100, "maximum": 100},
                             },
                         },
                     },
@@ -679,9 +676,9 @@ def _capture(root: Path) -> dict[str, bytes]:
 
 def source_fingerprint(source: Path) -> str:
     """Watch/build share one complete, portable capture and exclusion policy."""
-    return digest_json({
-        name: hashlib.sha256(value).hexdigest() for name, value in _capture(source).items()
-    })
+    return digest_json(
+        {name: hashlib.sha256(value).hexdigest() for name, value in _capture(source).items()}
+    )
 
 
 def _prepared_source(source_files: dict[str, bytes]) -> dict[str, bytes]:
@@ -973,10 +970,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _schema(files, component["state_value_schema"])
     migration_sources = set()
     for migration in component.get("state_migrations", []):
-        if (migration["to_schema"] != component["state_schema"]
-                or migration["from_schema"] == migration["to_schema"]
-                or migration["from_schema"] in migration_sources):
-            _fail("INVALID_STATE_MIGRATION", "Migration sources must uniquely target candidate state")
+        if (
+            migration["to_schema"] != component["state_schema"]
+            or migration["from_schema"] == migration["to_schema"]
+            or migration["from_schema"] in migration_sources
+        ):
+            _fail(
+                "INVALID_STATE_MIGRATION", "Migration sources must uniquely target candidate state"
+            )
         migration_sources.add(migration["from_schema"])
     dependencies = component.get("requires", [])
     dependency_names = set()
@@ -1047,9 +1048,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_SERVICES", "A service contract major.minor is required")
         _schema(files, service.get("input_schema"))
         _schema(files, service.get("output_schema"))
-        if service in effect_services and not IDENTIFIER.fullmatch(
-            service.get("kind", "")
-        ):
+        if service in effect_services and not IDENTIFIER.fullmatch(service.get("kind", "")):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
         if service in (
             *domain_queries,
@@ -1068,8 +1067,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
             )
         for reference in payload_refs:
             if (
-                not _valid_json_pointer(reference.get("path"))
-                or not _valid_json_pointer(reference.get("owner_id_path"))
+                not _valid_json_pointer(reference.get("path"), wildcards=True)
+                or not _valid_json_pointer(reference.get("owner_id_path"), wildcards=True)
+                or reference.get("path", "").split("/").count("*")
+                != reference.get("owner_id_path", "").split("/").count("*")
                 or not IDENTIFIER.fullmatch(reference.get("owner_component", ""))
                 or not IDENTIFIER.fullmatch(reference.get("owner_kind", ""))
             ):
@@ -1089,15 +1090,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Owned work requires valid functions, handler, and a lease beyond execution",
             )
     if (
-        domain_queries
-        or domain_commands
-        or unit_of_work_participants
-        or owned_work_handlers
+        domain_queries or domain_commands or unit_of_work_participants or owned_work_handlers
     ) and component.get("storage") is None:
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority ports require package storage")
     functions = [
-        item["function"]
-        for item in (*domain_queries, *domain_commands, *unit_of_work_participants)
+        item["function"] for item in (*domain_queries, *domain_commands, *unit_of_work_participants)
     ] + [
         function
         for item in owned_work_handlers
@@ -1120,10 +1117,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 or not IDENTIFIER.fullmatch(component_id)
                 or not IDENTIFIER.fullmatch(participant)
                 or (input_path is not None and not _valid_json_pointer(input_path))
-                or (
-                    component_id == component["id"]
-                    and participant not in participant_names
-                )
+                or (component_id == component["id"] and participant not in participant_names)
             ):
                 _fail(
                     "INVALID_UNIT_OF_WORK_PLAN",
@@ -1271,18 +1265,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
         message_handler_ids.add(handler_id)
         message_handler_methods.add(handler)
     capabilities = component.get("capabilities", {}).get("requests", [])
-    allowed_capabilities = {"state.read", "state.write"} | {
-        "service.call:" + name
-        for name in dependency_names | {item["name"] for item in effect_services}
-    } | {
-        "domain.query:" + item["name"] for item in domain_queries
-    } | {
-        "domain.command:" + item["name"] for item in domain_commands
-    } | {
-        "uow.execute:" + item["name"] for item in unit_of_work_plans
-    } | {"event.publish:" + topic for topic in published_topics} | {
-        "job.schedule:" + handler_id for handler_id in job_ids
-    }
+    allowed_capabilities = (
+        {"state.read", "state.write"}
+        | {
+            "service.call:" + name
+            for name in dependency_names | {item["name"] for item in effect_services}
+        }
+        | {"domain.query:" + item["name"] for item in domain_queries}
+        | {"domain.command:" + item["name"] for item in domain_commands}
+        | {"uow.execute:" + item["name"] for item in unit_of_work_plans}
+        | {"event.publish:" + topic for topic in published_topics}
+        | {"job.schedule:" + handler_id for handler_id in job_ids}
+    )
     if any(item not in allowed_capabilities for item in capabilities) or len(capabilities) != len(
         set(capabilities)
     ):
@@ -1296,9 +1290,15 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 compile(source, relative, "exec", dont_inherit=True)
             except (SyntaxError, ValueError) as exc:
                 raise ForestError(
-                    "PACKAGE_SYNTAX_ERROR", f"Invalid Python in {relative}", 422,
-                    details={"file": relative, "line": getattr(exc, "lineno", None),
-                             "column": getattr(exc, "offset", None), "phase": "syntax"},
+                    "PACKAGE_SYNTAX_ERROR",
+                    f"Invalid Python in {relative}",
+                    422,
+                    details={
+                        "file": relative,
+                        "line": getattr(exc, "lineno", None),
+                        "column": getattr(exc, "offset", None),
+                        "phase": "syntax",
+                    },
                 ) from exc
     if "dependency_lock" in manifest:
         from forest.environments import validate_lock
@@ -1390,7 +1390,10 @@ class PackageCatalog:
         return self._publish(captured)
 
     def import_archive(
-        self, data: bytes, *, check_manifest: Callable[[dict], None] | None = None,
+        self,
+        data: bytes,
+        *,
+        check_manifest: Callable[[dict], None] | None = None,
         bind_version: bool = True,
     ) -> PackageSnapshot:
         """Validate a complete ZIP before publishing any package file."""
@@ -1424,8 +1427,9 @@ class PackageCatalog:
             _fail("INVALID_PACKAGE_DIGEST", "Package digest must be SHA-256")
         rows = self._rows("SELECT digest FROM packages WHERE digest=?", (digest,))
         if not rows:
-            rows = self._rows("SELECT digest FROM artifacts WHERE digest=?", (digest,),
-                              table="artifacts")
+            rows = self._rows(
+                "SELECT digest FROM artifacts WHERE digest=?", (digest,), table="artifacts"
+            )
         if not rows:
             raise ForestError("PACKAGE_NOT_FOUND", "Package artifact is not registered", 404)
         root = self.root / digest.removeprefix("sha256:")
@@ -1443,17 +1447,21 @@ class PackageCatalog:
         return self.get(rows[0][0])
 
     def list(self) -> list[PackageSnapshot]:
-        return [self.get(row[0]) for row in self._rows(
-            "SELECT DISTINCT digest FROM packages ORDER BY package_id,version", ()
-        )]
+        return [
+            self.get(row[0])
+            for row in self._rows(
+                "SELECT DISTINCT digest FROM packages ORDER BY package_id,version", ()
+            )
+        ]
 
     def _rows(self, query: str, parameters: tuple, *, table: str = "packages") -> list[tuple]:
         path = self.root / "catalog.sqlite3"
         if not path.exists():
             return []
         with sqlite3.connect(path, timeout=10) as db:
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                              (table,)).fetchone():
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone():
                 return []
             return db.execute(query, parameters).fetchall()
 
@@ -1520,8 +1528,12 @@ class PackageCatalog:
 
 
 def archive_files(
-    data: bytes, *, max_files: int = MAX_PACKAGE_FILES, max_bytes: int = MAX_PACKAGE_BYTES,
-    max_file_bytes: int = MAX_FILE_BYTES, allow_wheels: bool = True,
+    data: bytes,
+    *,
+    max_files: int = MAX_PACKAGE_FILES,
+    max_bytes: int = MAX_PACKAGE_BYTES,
+    max_file_bytes: int = MAX_FILE_BYTES,
+    allow_wheels: bool = True,
 ) -> dict[str, bytes]:
     """Bounded portable ZIP decoder, shared by package and wheel admission.
 
@@ -1543,16 +1555,24 @@ def archive_files(
                 directory = entry.is_dir()
                 relative = name[:-1] if directory else name
                 parts = relative.split("/")
-                if (not relative or len(name) > 1024 or entry.orig_filename != name
-                        or len(parts) > MAX_PACKAGE_DEPTH):
+                if (
+                    not relative
+                    or len(name) > 1024
+                    or entry.orig_filename != name
+                    or len(parts) > MAX_PACKAGE_DEPTH
+                ):
                     _fail("PACKAGE_FILE_REJECTED", "ZIP contains an invalid path")
                 for part in parts:
                     stem = part.split(".", 1)[0].upper()
-                    if (not part or part in {".", ".."} or part.startswith(".env")
-                            or re.search(r'[<>:"\\|?*\x00-\x1f]', part)
-                            or part.endswith((".", " "))
-                            or stem in {"CON", "PRN", "AUX", "NUL"}
-                            or re.fullmatch(r"(?:COM|LPT)[1-9]", stem)):
+                    if (
+                        not part
+                        or part in {".", ".."}
+                        or part.startswith(".env")
+                        or re.search(r'[<>:"\\|?*\x00-\x1f]', part)
+                        or part.endswith((".", " "))
+                        or stem in {"CON", "PRN", "AUX", "NUL"}
+                        or re.fullmatch(r"(?:COM|LPT)[1-9]", stem)
+                    ):
                         _fail("PACKAGE_FILE_REJECTED", "ZIP contains a nonportable/private path")
                 if any(part in SKIPPED for part in (parts if directory else parts[:-1])):
                     _fail("PACKAGE_FILE_REJECTED", "ZIP contains excluded source/cache directories")
@@ -1581,14 +1601,17 @@ def archive_files(
                 if file_type not in ({0, stat.S_IFDIR} if directory else {0, stat.S_IFREG}):
                     _fail("PACKAGE_LINK_REJECTED", "ZIP links and special files are rejected")
                 if entry.flag_bits & 1 or entry.compress_type not in {
-                    zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED,
+                    zipfile.ZIP_STORED,
+                    zipfile.ZIP_DEFLATED,
                 }:
                     _fail("INVALID_PACKAGE_ARCHIVE", "Unsupported ZIP encryption/compression")
                 if directory:
                     if entry.file_size:
                         _fail("INVALID_PACKAGE_ARCHIVE", "ZIP directory contains file content")
                     continue
-                limit = MAX_WHEEL_BYTES if allow_wheels and name.endswith(".whl") else max_file_bytes
+                limit = (
+                    MAX_WHEEL_BYTES if allow_wheels and name.endswith(".whl") else max_file_bytes
+                )
                 if len(files) >= max_files or entry.file_size > limit:
                     _fail("PACKAGE_TOO_LARGE", "ZIP exceeds file limits")
                 total += entry.file_size

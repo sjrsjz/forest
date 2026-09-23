@@ -1,0 +1,74 @@
+manifest_version = 1
+package_id = "forest.delivery"
+version = "0.1.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "delivery:Delivery"
+
+[[components]]
+id = "delivery"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+provides = []
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 64
+max_state_inflight = 4
+max_owned_tasks = 4
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 120
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = []
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "delivery.workspace"
+label = "Delivery"
+group = "runtime"
+order = 20
+
+[components.storage]
+schema_id = "forest.delivery"
+schema_version = "2.0.0"
+baseline = "schema/delivery.sql"
+baseline_sha256 = "44cb8cc120f0d2f4874210a74a43e3266830e1da547dca40958a162cb3bdb794"
+scope = "bot"
+repository_contract = "forest.delivery.repository/2"
+execution_profile = "official"
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-chat-intent"
+contract = "1.0"
+function = "delivery_create_chat_intent"
+input_schema = "schemas/intent-input.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/parts/*/payload"
+owner_component = "agent.runtime"
+owner_kind = "final.reply"
+owner_id_path = "/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-control-intent"
+contract = "1.0"
+function = "delivery_create_control_intent"
+input_schema = "schemas/intent-input.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/parts/*/payload"
+owner_component = "shell.command"
+owner_kind = "shell.result"
+owner_id_path = "/parts/*/payload/owner_id"
