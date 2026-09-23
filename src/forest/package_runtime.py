@@ -39,7 +39,7 @@ from forest.package_effects import (
     PackageServiceEffectDriver,
 )
 from forest.package_owned_work import PackageOwnedWorkSupervisor
-from forest.packages import PackageSnapshot, contract_range
+from forest.packages import PackageSnapshot, contract_range, digest_json
 from forest.routing_protocol import (
     DurableComponentJobRequest,
     DurableEventDeliveryRequest,
@@ -1091,6 +1091,138 @@ class PackageGenerationAdapter:
             )
         return result
 
+    def _management_scope(self, operation_id: str) -> tuple[PackageCallScope, str]:
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        if (
+            self.state is not PackageGenerationState.ACTIVE
+            or identity is None
+            or prepared is None
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE",
+                "Package management requires the active Generation",
+                409,
+            )
+        parent_call_id = "management:" + uuid4().hex
+        return (
+            PackageCallScope(
+                bot_id=self.bot_id,
+                component_id=self.component_id,
+                generation_id=identity.generation_id,
+                instance_id=prepared.instance_id,
+                worker_incarnation=prepared.worker_incarnation,
+                call_id="call:" + uuid4().hex,
+                call_operation_id=operation_id,
+                causal_root_kind="web.management",
+                causal_root_id=operation_id,
+            ),
+            parent_call_id,
+        )
+
+    async def invoke_management_query(
+        self,
+        declaration: dict,
+        payload: dict,
+        *,
+        timeout_seconds: float,
+    ) -> Any:
+        if declaration not in self.component.get("domain_queries", ()):
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Management query is not bound to this package Generation",
+                409,
+            )
+        authority = self._domain_queries
+        if authority is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "Domain query authority is unavailable", 503
+            )
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Management query input violates its immutable package schema",
+                422,
+            )
+        operation_id = "management-query:" + uuid4().hex
+        scope, parent_call_id = self._management_scope(operation_id)
+        result = await authority.invoke_query(
+            scope,
+            declaration,
+            payload,
+            parent_call_id=parent_call_id,
+            timeout_seconds=timeout_seconds,
+        )
+        if not output_validator.is_valid(result):
+            raise ForestError(
+                "MODULE_MANAGEMENT_OUTPUT_INVALID",
+                "Management query result violates its immutable package schema",
+                502,
+            )
+        return result
+
+    async def invoke_management_action(
+        self,
+        declaration: dict,
+        payload: dict,
+        *,
+        action_id: str,
+        operation_id: str,
+        plan_digest: str | None,
+        timeout_seconds: float,
+        authorization=None,
+        authorization_guard=None,
+    ) -> Any:
+        if declaration not in self.component.get("domain_commands", ()):
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Management action is not bound to this package Generation",
+                409,
+            )
+        authority = self._domain_commands
+        if authority is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "Domain command authority is unavailable", 503
+            )
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Management action input violates its immutable package schema",
+                422,
+            )
+        scope, parent_call_id = self._management_scope(operation_id)
+
+        async def before_write(conn) -> None:
+            if authorization_guard is None:
+                return
+            await authorization_guard(
+                conn,
+                ticket=authorization,
+                component_id=self.component_id,
+                operation_id=operation_id,
+                action_key=action_id,
+                input_digest=digest_json(payload),
+                plan_digest=plan_digest,
+            )
+
+        result = await authority.invoke_management_action(
+            scope,
+            declaration,
+            payload,
+            parent_call_id=parent_call_id,
+            timeout_seconds=timeout_seconds,
+            before_write=before_write,
+        )
+        if not output_validator.is_valid(result):
+            raise ForestError(
+                "MODULE_MANAGEMENT_OUTPUT_INVALID",
+                "Management action result violates its immutable package schema",
+                502,
+            )
+        return result
+
     async def _invoke_local_effect(
         self,
         identity: WorkerIdentity,
@@ -1549,12 +1681,19 @@ def package_runtime_descriptor(
     storage=None,
     management=(),
     management_contract=None,
+    management_contract_factory: Callable[[PackageGenerationAdapter], Any] | None = None,
     worker_factory: Callable[..., PythonWorker] = PythonWorker,
     trust_level: str = "installed",
 ) -> RuntimeModuleDescriptor:
     """Compile one package snapshot without importing its Python entrypoint."""
 
     snapshot.verify()
+    if management_contract is not None and management_contract_factory is not None:
+        raise ForestError(
+            "PACKAGE_MANAGEMENT_BINDING_INVALID",
+            "A package may bind one Generation-owned management contract source",
+            500,
+        )
     component = snapshot.component
     if (
         component.get("storage", {}).get("execution_profile") == "official"
@@ -1726,6 +1865,8 @@ def package_runtime_descriptor(
         )
         if management_contract is not None:
             adapter.management_contract = management_contract
+        elif management_contract_factory is not None:
+            adapter.management_contract = management_contract_factory(adapter)
         return adapter
 
     return RuntimeModuleDescriptor(

@@ -388,6 +388,10 @@ MANIFEST_SCHEMA = {
                         "properties": {
                             "entrypoint": {"type": "string"},
                             "protocol": {"const": "forest.management-ui/1"},
+                            "contribution_id": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                            },
                             "label": {
                                 "type": "string", "minLength": 1, "maxLength": 128
                             },
@@ -397,6 +401,47 @@ MANIFEST_SCHEMA = {
                             },
                             "order": {
                                 "type": "integer", "minimum": -10000, "maximum": 10000
+                            },
+                        },
+                    },
+                    "management_queries": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "port"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "port": {"type": "string"},
+                                "default_limit": {
+                                    "type": "integer", "minimum": 1, "maximum": 10000
+                                },
+                                "max_limit": {
+                                    "type": "integer", "minimum": 1, "maximum": 10000
+                                },
+                                "timeout_s": {
+                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                },
+                            },
+                        },
+                    },
+                    "management_actions": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "port", "priority"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "port": {"type": "string"},
+                                "priority": {"enum": ["P0", "P1", "P2"]},
+                                "authorization_path": {"type": "string"},
+                                "replace_runtime_graph": {"type": "boolean"},
+                                "timeout_s": {
+                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                },
                             },
                         },
                     },
@@ -907,6 +952,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
     effect_services = component.get("effect_services", [])
     domain_queries = component.get("domain_queries", [])
     domain_commands = component.get("domain_commands", [])
+    management_queries = component.get("management_queries", [])
+    management_actions = component.get("management_actions", [])
     unit_of_work_participants = component.get("unit_of_work_participants", [])
     job_types = component.get("job_types", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
@@ -1011,6 +1058,40 @@ def _manifest(files: dict[str, bytes]) -> dict:
     ]
     if len(functions) != len(set(functions)):
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
+    query_ports = {item["name"] for item in domain_queries}
+    command_ports = {item["name"] for item in domain_commands}
+    management_ids = set()
+    for declaration in (*management_queries, *management_actions):
+        operation_id = declaration.get("id", "")
+        if not IDENTIFIER.fullmatch(operation_id) or operation_id in management_ids:
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management operation identities must be valid and unique",
+            )
+        management_ids.add(operation_id)
+    for declaration in management_queries:
+        if declaration.get("port") not in query_ports:
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management queries must bind an exact declared Domain Query port",
+            )
+        if declaration.get("default_limit", 1) > declaration.get("max_limit", 10000):
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management query default_limit cannot exceed max_limit",
+            )
+    for declaration in management_actions:
+        if declaration.get("port") not in command_ports:
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management actions must bind an exact declared Domain Command port",
+            )
+        pointer = declaration.get("authorization_path")
+        if pointer is not None and not _valid_json_pointer(pointer):
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management authorization_path must be an exact JSON pointer",
+            )
     contributed_job_types = set()
     contributed_job_handlers = set()
     for definition in job_types:

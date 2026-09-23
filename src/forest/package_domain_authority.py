@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 from typing import Any
 
@@ -133,6 +134,28 @@ class PostgresPackageDomainAuthority:
             timeout_seconds=timeout_seconds,
         )
 
+    async def invoke_management_action(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+        before_write=None,
+    ) -> Any:
+        """Run one package Command behind the current CONTROL route and Web fence."""
+
+        return await self._invoke(
+            "management_action",
+            scope,
+            declaration,
+            payload,
+            parent_call_id=parent_call_id,
+            timeout_seconds=timeout_seconds,
+            before_write=before_write,
+        )
+
     async def invoke_participant_in(
         self,
         conn,
@@ -201,6 +224,7 @@ class PostgresPackageDomainAuthority:
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        before_write=None,
     ) -> Any:
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -221,12 +245,23 @@ class PostgresPackageDomainAuthority:
                             generation_id=scope.generation_id,
                             admission_lane="DATA",
                         )
+                    elif kind == "management_action":
+                        await self.runtime.verify_active_generation_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                            admission_lane="CONTROL",
+                        )
                     else:
                         await self.runtime.verify_generation_member_in(
                             conn,
                             component_id=self.component_id,
                             generation_id=scope.generation_id,
                         )
+                    if before_write is not None:
+                        guarded = before_write(conn)
+                        if inspect.isawaitable(guarded):
+                            await guarded
                     return await self._invoke_in(
                         conn,
                         kind,
@@ -271,6 +306,7 @@ class PostgresPackageDomainAuthority:
             not in {
                 "query",
                 "command",
+                "management_action",
                 "participant",
                 "owned_claim",
                 "owned_settle",

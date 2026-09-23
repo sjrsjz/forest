@@ -919,6 +919,39 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
             "attempt_count": 1,
             "result_payload": {"value": 10, "revision": 5},
         }
+        contract = instance.management_contract
+        description = contract.describe()
+        assert [item["query_id"] for item in description["queries"]] == [
+            "counter.current"
+        ]
+        assert [item["action_id"] for item in description["actions"]] == [
+            "counter.set"
+        ]
+        assert await contract.query("counter.current", {}) == {
+            "value": 10,
+            "revision": 5,
+        }
+
+        async def reject_management_write(_conn, **_kwargs):
+            raise ForestError("WEB_POLICY_DENIED", "denied", 403)
+
+        with pytest.raises(ForestError, match="denied"):
+            await contract.action(
+                "counter.set",
+                operation_id="management:counter:set:denied",
+                payload={"value": 11, "expected_revision": 5},
+                authorization_guard=reject_management_write,
+            )
+        assert await contract.query("counter.current", {}) == {
+            "value": 10,
+            "revision": 5,
+        }
+        changed = await contract.action(
+            "counter.set",
+            operation_id="management:counter:set:accepted",
+            payload={"value": 12, "expected_revision": 5},
+        )
+        assert changed.value == {"value": 12, "revision": 6}
         async with store.pool.connection() as conn:
             domain_row = await (
                 await conn.execute(
@@ -936,7 +969,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
                     (store.bot_id, "forest.counter"),
                 )
             ).fetchone()
-        assert dict(domain_row) == {"value": 10, "revision": 5}
+        assert dict(domain_row) == {"value": 12, "revision": 6}
         assert generic_state["count"] == 0
     finally:
         assert await registry.close() == []

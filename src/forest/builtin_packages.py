@@ -8,12 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_effects import (
     EMPTY_PACKAGE_EFFECT_DRIVERS,
     PackageEffectDriverRegistry,
 )
+from forest.package_management import PackageManagementContract
 from forest.package_runtime import package_runtime_descriptor
 from forest.package_service_ledger import KernelPackageServiceOperationLedger
 from forest.package_state_ports import (
@@ -138,11 +138,6 @@ async def bootstrap_builtin_package(
         ),
         expected_policy_revision=policy_revision,
     )
-    management_contract = CleanModuleConfigurationContract(
-        configuration,
-        schema=configuration_schema,
-        validator=configuration_validator,
-    )
     effect_driver_factories = effect_driver_registry.resolve(
         tuple(snapshot.component.get("effect_services", ()))
     )
@@ -174,7 +169,7 @@ async def bootstrap_builtin_package(
         ui_declaration = snapshot.component["management_ui"]
         management = (
             RuntimePackageManagementContribution(
-                "configuration",
+                ui_declaration.get("contribution_id", "configuration"),
                 ui_declaration.get("label", component_id),
                 ("bot",),
                 component_id,
@@ -221,7 +216,12 @@ async def bootstrap_builtin_package(
         effect_driver_factories=effect_driver_factories,
         storage=storage,
         management=management,
-        management_contract=management_contract,
+        management_contract_factory=lambda adapter: PackageManagementContract(
+            configuration,
+            adapter=adapter,
+            schema=configuration_schema,
+            validator=configuration_validator,
+        ),
         trust_level="official",
     )
     return BuiltinPackageModule(snapshot, descriptor, configuration, grants)

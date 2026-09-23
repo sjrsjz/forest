@@ -92,6 +92,17 @@ class PackageDomainCommands(Protocol):
         timeout_seconds: float,
     ) -> Any: ...
 
+    async def invoke_management_action(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+        before_write=None,
+    ) -> Any: ...
+
 
 class PackageUnitOfWorkAuthority(Protocol):
     async def invoke_participant_in(

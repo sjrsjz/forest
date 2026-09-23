@@ -299,6 +299,8 @@ ComponentJob 的兼容接管要求相同 `handler_id`、输入 schema digest 和
 
 模块除配置 UI 外可声明只读管理视图和类型化管理动作。视图查询不是任意 SQL，而是组件注册的 management query contract；返回 DTO 经宿主字段授权、分页上限和脱敏后传给 iframe。动作必须映射到已注册 operation type，并走计划、授权、幂等、审计和生命周期执行器。
 
+可安装包通过 manifest 的 `management_queries` 与 `management_actions` 把管理操作绑定到同一包内已声明的 Domain Query/Command，不能在宿主中挂接按 `component_id` 分支的 Python handler。每项声明冻结公开 operation ID、私有端口名、输入/输出 schema、分页上限或优先级；Action 还可用 JSON Pointer 声明授权计划投影。管理网关从当前 Generation 的 management contract 枚举这些操作，Query 在该 Generation 的只读快照中执行；Action 必须在一次 Bot 数据库事务内依次完成 CONTROL admission 栅栏、Web authority ticket/策略复核、PayloadRef 栅栏和包 Command。任一步失败都整体回滚。包替换后旧 contract、旧 UI 与旧 Domain 端口同时失效，不得由宿主保留可继续写旧 schema 的管理兼容层。
+
 Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模块提供 session/run/model-turn/tool-call 视图；Adapter 提供连接和协议事件；Scheduler 提供作业与 lease。控制台壳仅呈现模块给出的视图目录和通用状态，不为这些类型写专用顶层页面。
 
 运行时模块使用 `forest.module-management/1` 声明管理契约。每个 operation 必须由模块固定声明 `operation_id`、`query | action`、权限名、输入模型和 handler；需要签发不同于执行正文的权限证明时，还要声明确定性的 `authorization_payload` 投影。模块描述符只向控制台投影 operation 目录，不把 Python handler 或密钥正文暴露到浏览器。

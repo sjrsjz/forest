@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.counter"
-version = "0.5.0"
+version = "0.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "counter:Counter"
@@ -15,6 +15,21 @@ config_schema = "schemas/config.json"
 [components.management_ui]
 entrypoint = "ui/index.html"
 protocol = "forest.management-ui/1"
+contribution_id = "counter.workspace"
+label = "Counter"
+group = "diagnostics"
+order = 10
+
+[[components.management_queries]]
+id = "counter.current"
+port = "counter.current"
+timeout_s = 10
+
+[[components.management_actions]]
+id = "counter.set"
+port = "counter.set"
+priority = "P1"
+timeout_s = 10
 
 [components.capabilities]
 requests = ["domain.query:counter.current", "domain.command:counter.set", "domain.command:counter.enqueue"]
