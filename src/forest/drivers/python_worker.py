@@ -175,8 +175,14 @@ class PythonWorker:
             raise ForestError(
                 "COMPONENT_COUNT_UNSUPPORTED", "P0 packages must contain exactly one component", 422
             )
-        provided = components[0].get("provides", [])
-        names = [item["name"] for item in provided]
+        component = components[0]
+        provided = component.get("provides", [])
+        effect_ingress = [
+            item["ingress"]["name"]
+            for item in component.get("effect_services", [])
+            if item.get("ingress") is not None
+        ]
+        names = [item["name"] for item in provided] + effect_ingress
         if len(names) != len(set(names)):
             raise ForestError(
                 "SERVICE_DECLARATION_INVALID", "Manifest contains duplicate services", 422

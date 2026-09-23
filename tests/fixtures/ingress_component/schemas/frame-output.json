@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["frame_id","generation_id"],"properties":{"frame_id":{"type":"string"},"generation_id":{"type":"string"}},"additionalProperties":false}

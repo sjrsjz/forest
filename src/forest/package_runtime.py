@@ -39,6 +39,7 @@ from forest.package_contribution_directories import FrozenContributionDirectorie
 from forest.package_effects import (
     PackageEffectDriver,
     PackageEffectDriverFactory,
+    PackageIngressEffectDriver,
     PackageServiceEffectDriver,
 )
 from forest.package_owned_work import PackageOwnedWorkSupervisor
@@ -201,6 +202,11 @@ class PackageGenerationAdapter:
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
         self._effect_drivers: dict[str, PackageEffectDriver] = {}
+        self._effect_ingress = {
+            item["ingress"]["name"]: (item, item["ingress"])
+            for item in self.component.get("effect_services", ())
+            if item.get("ingress") is not None
+        }
         self._job_cancellations: dict[str, Callable[[], Awaitable[bool]]] = {}
         self._owned_work_calls: set[str] = set()
         self._event_publisher = event_publisher
@@ -232,6 +238,15 @@ class PackageGenerationAdapter:
                 *self.component.get("unit_of_work_plans", ()),
             )
         }
+        self._service_schemas.update(
+            {
+                ingress["name"]: (
+                    Draft202012Validator(self.snapshot.schema(ingress["input_schema"])),
+                    Draft202012Validator(self.snapshot.schema(ingress["output_schema"])),
+                )
+                for _effect, ingress in self._effect_ingress.values()
+            }
+        )
         self._provided_services = {
             item["name"]: item for item in self.component.get("provides", ())
         }
@@ -1604,6 +1619,85 @@ class PackageGenerationAdapter:
             ),
         )
 
+    async def _invoke_effect_ingress(
+        self,
+        service_id: str,
+        payload: dict,
+        *,
+        operation_id: str,
+        causal_root_kind: str,
+        causal_root_id: str,
+    ) -> dict:
+        """Deliver one external frame to the exact Worker owned by this Generation."""
+
+        binding = self._effect_ingress.get(service_id)
+        identity = self.generation_identity
+        if binding is None or identity is None:
+            raise ForestError(
+                "PACKAGE_EFFECT_INGRESS_UNAVAILABLE",
+                "Effect ingress is not bound to this Package Generation",
+                503,
+            )
+        _effect, declaration = binding
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(operation_id, str)
+            or not 1 <= len(operation_id) <= 256
+            or not isinstance(causal_root_kind, str)
+            or not 1 <= len(causal_root_kind) <= 64
+            or not isinstance(causal_root_id, str)
+            or not 1 <= len(causal_root_id) <= 256
+        ):
+            raise ForestError(
+                "PACKAGE_EFFECT_INGRESS_INPUT_INVALID",
+                "Effect ingress identity or payload is invalid",
+                422,
+            )
+        input_validator, output_validator = self._service_schemas[service_id]
+        if not input_validator.is_valid(payload):
+            raise ForestError(
+                "PACKAGE_EFFECT_INGRESS_INPUT_INVALID",
+                "Effect ingress payload violates its immutable schema",
+                422,
+            )
+        graph_id = identity.graph_id
+        route = FrozenServiceRoute(
+            service_id=service_id,
+            version=1,
+            caller_component_id=self.component_id,
+            provider_component_id=self.component_id,
+            provider_generation_id=identity.generation_id,
+            graph_id=graph_id,
+            graph_revision=identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        invocation = RuntimeServiceInvocation(
+            operation_id,
+            float(declaration["timeout_s"]),
+            causal_root_kind,
+            causal_root_id,
+        )
+        return await self._run_service_operation(
+            route=route,
+            invocation=invocation,
+            service_id=service_id,
+            input_value=payload,
+            durable=declaration["semantics"] == "at-most-once",
+            dispatch=lambda worker, _scope, call_id: worker.invoke(
+                service_id,
+                payload,
+                call_id=call_id,
+                operation_id=operation_id,
+                causal_root_kind=causal_root_kind,
+                causal_root_id=causal_root_id,
+                timeout=float(declaration["timeout_s"]),
+                before_send=lambda: self._verify_dispatch(route),
+            ),
+            normalize=lambda result: result,
+            result_valid=output_validator.is_valid,
+        )
+
     def _has_capability(self, capability: str) -> bool:
         return (
             capability in self._requested_capabilities
@@ -1889,6 +1983,26 @@ class PackageGenerationAdapter:
                         details={"service_id": service_id},
                     )
                 started_drivers.append(driver)
+                ingress = declaration.get("ingress")
+                if ingress is not None:
+                    if not isinstance(driver, PackageIngressEffectDriver):
+                        raise ForestError(
+                            "PACKAGE_EFFECT_INGRESS_BINDING_INVALID",
+                            "Effect driver does not implement its declared ingress port",
+                            500,
+                            details={"service_id": service_id},
+                        )
+                    ingress_name = ingress["name"]
+                    driver.bind_ingress(
+                        lambda payload, *, operation_id, causal_root_kind,
+                        causal_root_id, name=ingress_name: self._invoke_effect_ingress(
+                            name,
+                            payload,
+                            operation_id=operation_id,
+                            causal_root_kind=causal_root_kind,
+                            causal_root_id=causal_root_id,
+                        )
+                    )
                 await driver.start()
                 self._effect_drivers[service_id] = driver
             if self._owned_work is not None:
@@ -1928,6 +2042,13 @@ class PackageGenerationAdapter:
                 "LIFECYCLE_INVALID", "Only a ready Package Generation can activate", 409
             )
         self.state = PackageGenerationState.ACTIVE
+        try:
+            for driver in self._effect_drivers.values():
+                if isinstance(driver, PackageIngressEffectDriver):
+                    driver.activate_ingress()
+        except BaseException:
+            self.state = PackageGenerationState.FAILED
+            raise
 
     async def quiesce(self) -> None:
         if self.state is not PackageGenerationState.ACTIVE or self._worker is None:
@@ -1938,6 +2059,9 @@ class PackageGenerationAdapter:
         try:
             timeout = _timeout(self.component, "drain_timeout_s", 10)
             async with asyncio.timeout(timeout):
+                for driver in self._effect_drivers.values():
+                    if isinstance(driver, PackageIngressEffectDriver):
+                        await driver.freeze_ingress()
                 await self._worker.quiesce(timeout=timeout)
                 await self._services_drained.wait()
                 for driver in self._effect_drivers.values():
@@ -1953,8 +2077,6 @@ class PackageGenerationAdapter:
                 "LIFECYCLE_INVALID", "Only a quiescent Package Generation can resume", 409
             )
         try:
-            for driver in self._effect_drivers.values():
-                await driver.resume()
             await self._worker.resume(_timeout(self.component, "start_timeout_s", 10))
             health = await self._worker.health(
                 _timeout(self.component, "start_timeout_s", 10)
@@ -1963,6 +2085,8 @@ class PackageGenerationAdapter:
                 raise ForestError(
                     "WORKER_UNHEALTHY", "Resumed Worker failed its health contract", 503
                 )
+            for driver in self._effect_drivers.values():
+                await driver.resume()
         except BaseException:
             self.state = PackageGenerationState.FAILED
             raise

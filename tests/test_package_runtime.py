@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import sys
@@ -302,6 +303,152 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
     await adapter.quiesce()
     await adapter.close()
     assert events[-2:] == ["quiesce", "close"]
+
+
+async def test_duplex_effect_ingress_is_generation_bound_and_drained(tmp_path):
+    source = Path(__file__).parent / "fixtures/ingress_component"
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+
+    class Configuration:
+        async def desired(self, *, include_value=False):
+            return SimpleNamespace(
+                revision=1,
+                payload_id="payload:ingress:1",
+                payload_digest=digest_json({}),
+                value={} if include_value else None,
+            )
+
+    events = []
+    drivers = []
+
+    class Driver:
+        def __init__(self):
+            self.handler = None
+            self.accepting = False
+
+        def bind_ingress(self, handler):
+            assert self.handler is None
+            self.handler = handler
+            events.append("bind")
+
+        async def start(self):
+            assert self.handler is not None
+            events.append("start")
+
+        def activate_ingress(self):
+            self.accepting = True
+            events.append("activate")
+
+        async def emit(self, frame_id, *, delay_ms=0):
+            if not self.accepting:
+                raise RuntimeError("ingress closed")
+            return await self.handler(
+                {"frame_id": frame_id, "delay_ms": delay_ms},
+                operation_id="fixture-frame:" + frame_id,
+                causal_root_kind="fixture.frame",
+                causal_root_id=frame_id,
+            )
+
+        async def freeze_ingress(self):
+            self.accepting = False
+            events.append("freeze")
+
+        async def invoke(self, _payload, *, scope, invocation):
+            return {"accepted": True}
+
+        async def quiesce(self):
+            events.append("quiesce")
+
+        async def resume(self):
+            events.append("resume")
+
+        async def close(self):
+            self.accepting = False
+            events.append("close")
+
+    def create_driver(*_values):
+        driver = Driver()
+        drivers.append(driver)
+        return driver
+
+    async def verify(**_identity):
+        return None
+
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={},
+        resolved_contracts={},
+        generation_verifier=verify,
+        generation_member_verifier=verify,
+        state_queries=None,
+        state_commands=None,
+        service_operation_ledger=EffectServiceLedger(),
+        effect_driver_factories={"fixture.transport.send": create_driver},
+    )
+    assert ("fixture.transport.frame", 1) not in adapter.runtime_service_handlers()
+    assert all(
+        item["service_id"] != "fixture.transport.frame"
+        for item in adapter.runtime_contract["services"]
+    )
+    context = PreparedGenerationContext(
+        activation_id="ingress-generation",
+        component_id="fixture.ingress",
+        requires=(),
+        package_id=snapshot.manifest["package_id"],
+        package_version=snapshot.manifest["version"],
+        package_digest=snapshot.digest,
+        driver="forest.python-worker/1",
+        trust_level="official",
+        descriptor_digest="sha256:" + "2" * 64,
+        route_contract_digest=digest_json(adapter.runtime_contract),
+        management_contract_digest=digest_json(None),
+        management_ui_digest=digest_json([]),
+        state_schema=1,
+        state_contract_digest=digest_json(adapter.state_contract),
+        storage=None,
+    )
+    await adapter.prepare_generation(context)
+    await adapter.bind_generation(
+        BoundGenerationIdentity(
+            "fixture.ingress",
+            "generation:ingress:1",
+            "graph:ingress:1",
+            1,
+            "sha256:" + "3" * 64,
+            context.activation_id,
+        )
+    )
+    await adapter.start()
+    driver = drivers[0]
+    assert events == ["bind", "start"]
+    with pytest.raises(RuntimeError, match="ingress closed"):
+        await driver.emit("before-publication")
+
+    adapter.activate_generation()
+    assert await driver.emit("frame-1") == {
+        "frame_id": "frame-1",
+        "generation_id": "generation:ingress:1",
+    }
+    in_flight = asyncio.create_task(driver.emit("frame-drain", delay_ms=100))
+    await asyncio.sleep(0.02)
+    await adapter.quiesce()
+    assert (await in_flight)["frame_id"] == "frame-drain"
+    assert events[-2:] == ["freeze", "quiesce"]
+    with pytest.raises(RuntimeError, match="ingress closed"):
+        await driver.emit("after-freeze")
+
+    await adapter.resume()
+    assert events[-1] == "resume"
+    with pytest.raises(RuntimeError, match="ingress closed"):
+        await driver.emit("before-reactivation")
+    adapter.activate_generation()
+    assert (await driver.emit("frame-2"))["generation_id"] == "generation:ingress:1"
+    await adapter.quiesce()
+    await adapter.close()
+    assert events[-3:] == ["freeze", "quiesce", "close"]
 
 
 async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_path):

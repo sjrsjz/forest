@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["frame_id"],"properties":{"frame_id":{"type":"string","minLength":1},"delay_ms":{"type":"integer","minimum":0,"maximum":1000}},"additionalProperties":false}

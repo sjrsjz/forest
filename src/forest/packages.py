@@ -282,6 +282,30 @@ MANIFEST_SCHEMA = {
                                     )
                                 },
                                 "semantics": {"enum": ["at-most-once", "idempotent", "read"]},
+                                "ingress": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": [
+                                        "name",
+                                        "semantics",
+                                        "input_schema",
+                                        "output_schema",
+                                        "timeout_s",
+                                    ],
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "semantics": {
+                                            "enum": ["at-most-once", "idempotent", "read"]
+                                        },
+                                        "input_schema": {"type": "string"},
+                                        "output_schema": {"type": "string"},
+                                        "timeout_s": {
+                                            "type": "number",
+                                            "exclusiveMinimum": 0,
+                                            "maximum": 86400,
+                                        },
+                                    },
+                                },
                             },
                         },
                     },
@@ -1182,6 +1206,17 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _schema(files, service.get("output_schema"))
         if service in effect_services and not IDENTIFIER.fullmatch(service.get("kind", "")):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
+        if service in effect_services and service.get("ingress") is not None:
+            ingress = service["ingress"]
+            ingress_name = ingress.get("name", "")
+            if not IDENTIFIER.fullmatch(ingress_name) or ingress_name in names:
+                _fail(
+                    "INVALID_SERVICES",
+                    "Effect ingress ports require a unique valid service name",
+                )
+            names.add(ingress_name)
+            _schema(files, ingress.get("input_schema"))
+            _schema(files, ingress.get("output_schema"))
         if service in (
             *domain_queries,
             *domain_commands,

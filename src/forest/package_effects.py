@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -35,6 +35,26 @@ class PackageServiceEffectDriver(PackageEffectDriver, Protocol):
         scope: PackageCallScope,
         invocation: RuntimeServiceInvocation,
     ) -> dict: ...
+
+
+PackageIngressHandler = Callable[..., Awaitable[dict]]
+
+
+@runtime_checkable
+class PackageIngressEffectDriver(PackageServiceEffectDriver, Protocol):
+    """Generation-owned external source that feeds one private Worker port.
+
+    ``start`` may connect and buffer, but the driver cannot deliver frames until
+    ``activate_ingress``. ``freeze_ingress`` must close the producer gate before
+    its first suspension; the package then waits for callbacks already handed to
+    the Worker.
+    """
+
+    def bind_ingress(self, handler: PackageIngressHandler) -> None: ...
+
+    def activate_ingress(self) -> None: ...
+
+    async def freeze_ingress(self) -> None: ...
 
 
 PackageEffectDriverFactory = Callable[

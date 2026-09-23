@@ -1,0 +1,43 @@
+manifest_version = 1
+package_id = "fixture.ingress-component"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "ingress_component:IngressComponent"
+
+[[components]]
+id = "fixture.ingress"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+provides = []
+
+[components.resources]
+max_frame_bytes = 65536
+max_inflight = 4
+max_queue_items = 8
+max_state_inflight = 1
+max_owned_tasks = 1
+max_owned_resources = 1
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 10
+stop_timeout_s = 5
+
+[[components.effect_services]]
+name = "fixture.transport.send"
+contract = "1.0"
+kind = "fixture.duplex-transport"
+semantics = "at-most-once"
+input_schema = "schemas/send-input.json"
+output_schema = "schemas/send-output.json"
+
+[components.effect_services.ingress]
+name = "fixture.transport.frame"
+semantics = "at-most-once"
+input_schema = "schemas/frame-input.json"
+output_schema = "schemas/frame-output.json"
+timeout_s = 10
