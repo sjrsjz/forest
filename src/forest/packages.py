@@ -445,6 +445,47 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "unit_of_work_plans": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "name",
+                                "contract",
+                                "input_schema",
+                                "output_schema",
+                                "timeout_s",
+                                "steps",
+                            ],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "contract": {"type": "string"},
+                                "input_schema": {"type": "string"},
+                                "output_schema": {"type": "string"},
+                                "timeout_s": {
+                                    "type": "number", "exclusiveMinimum": 0, "maximum": 120
+                                },
+                                "steps": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 16,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "required": ["id", "component_id", "participant"],
+                                        "properties": {
+                                            "id": {"type": "string"},
+                                            "component_id": {"type": "string"},
+                                            "participant": {"type": "string"},
+                                            "input_path": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
                     "storage": {
                         "type": "object",
                         "additionalProperties": False,
@@ -955,6 +996,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     management_queries = component.get("management_queries", [])
     management_actions = component.get("management_actions", [])
     unit_of_work_participants = component.get("unit_of_work_participants", [])
+    unit_of_work_plans = component.get("unit_of_work_plans", [])
     job_types = component.get("job_types", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
     commands = component.get("commands", [])
@@ -969,6 +1011,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
     if len(services) > 32 or (
         not services
         and not effect_services
+        and not domain_queries
+        and not domain_commands
+        and not unit_of_work_participants
+        and not unit_of_work_plans
         and not job_types
         and not owned_work_handlers
         and not commands
@@ -987,6 +1033,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         *domain_queries,
         *domain_commands,
         *unit_of_work_participants,
+        *unit_of_work_plans,
         *job_types,
         *owned_work_handlers,
     ):
@@ -1058,6 +1105,37 @@ def _manifest(files: dict[str, bytes]) -> dict:
     ]
     if len(functions) != len(set(functions)):
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
+    participant_names = {item["name"] for item in unit_of_work_participants}
+    for plan in unit_of_work_plans:
+        step_ids = set()
+        step_order = []
+        for step in plan["steps"]:
+            step_id = step.get("id", "")
+            component_id = step.get("component_id", "")
+            participant = step.get("participant", "")
+            input_path = step.get("input_path")
+            if (
+                not IDENTIFIER.fullmatch(step_id)
+                or step_id in step_ids
+                or not IDENTIFIER.fullmatch(component_id)
+                or not IDENTIFIER.fullmatch(participant)
+                or (input_path is not None and not _valid_json_pointer(input_path))
+                or (
+                    component_id == component["id"]
+                    and participant not in participant_names
+                )
+            ):
+                _fail(
+                    "INVALID_UNIT_OF_WORK_PLAN",
+                    "UnitOfWork steps must name unique IDs and declared participants",
+                )
+            step_ids.add(step_id)
+            step_order.append((component_id, step_id))
+        if step_order != sorted(step_order):
+            _fail(
+                "INVALID_UNIT_OF_WORK_PLAN",
+                "UnitOfWork steps must use global component and step lock order",
+            )
     query_ports = {item["name"] for item in domain_queries}
     command_ports = {item["name"] for item in domain_commands}
     management_ids = set()
@@ -1200,6 +1278,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
         "domain.query:" + item["name"] for item in domain_queries
     } | {
         "domain.command:" + item["name"] for item in domain_commands
+    } | {
+        "uow.execute:" + item["name"] for item in unit_of_work_plans
     } | {"event.publish:" + topic for topic in published_topics} | {
         "job.schedule:" + handler_id for handler_id in job_ids
     }

@@ -204,6 +204,39 @@ class RuntimeGenerationHandle:
         return graph.generations[self.component_id]
 
 
+class RuntimeUnitOfWorkParticipantHandle:
+    """Late-bound participant handle sealed to this Registry's RuntimeGraph."""
+
+    __slots__ = ("_router", "component_id")
+
+    def __init__(self, router: RuntimeContractRouter, component_id: str) -> None:
+        self._router = router
+        self.component_id = component_id
+
+    def resolve(self):
+        graph = self._router.registry.graph_identity
+        instance = self._router.registry.instances.get(self.component_id)
+        resolver = getattr(instance, "unit_of_work_participant", None)
+        if graph is None or self.component_id not in graph.generations or resolver is None:
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_UNAVAILABLE",
+                "RuntimeGraph does not publish the declared UnitOfWork participant",
+                503,
+            )
+        participant = resolver()
+        if (
+            getattr(participant, "component_id", None) != self.component_id
+            or getattr(participant, "generation_id", None)
+            != graph.generations[self.component_id]
+        ):
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_STALE",
+                "UnitOfWork participant differs from the sealed RuntimeGraph",
+                409,
+            )
+        return participant
+
+
 class RuntimeModuleFactoryContext:
     """The only cross-module facility available to a contract-aware factory."""
 
@@ -228,6 +261,11 @@ class RuntimeModuleFactoryContext:
             admission_lane=admission_lane,
             owned_work=owned_work,
         )
+
+    def unit_of_work_participant(
+        self, component_id: str
+    ) -> RuntimeUnitOfWorkParticipantHandle:
+        return RuntimeUnitOfWorkParticipantHandle(self._router, component_id)
 
     @property
     def graph_admission(self) -> asyncio.Event:

@@ -16,6 +16,7 @@ from forest.clean_management_contract import (
     CleanModuleConfigurationContract,
 )
 from forest.errors import ForestError
+from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
@@ -251,6 +252,13 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
         )
 
 
+class PreparedEffectAuthorityModule(PreparedAuthorityModule):
+    """Publish only the typed Kernel Effect UnitOfWork participant ABI."""
+
+    def unit_of_work_participant(self):
+        return KernelEffectUnitOfWorkParticipant(self)
+
+
 @dataclass(frozen=True)
 class CleanKernelModules:
     runtime: KernelRuntimeRepository
@@ -384,6 +392,8 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                     if identity == "kernel.audit"
                     else PreparedAuthorizationAuthorityModule
                     if identity == "kernel.authorization"
+                    else PreparedEffectAuthorityModule
+                    if identity == "kernel.effect"
                     else PreparedAuthorityModule
                 )(
                     identity,

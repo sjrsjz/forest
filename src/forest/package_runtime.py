@@ -32,6 +32,7 @@ from forest.package_capabilities import (
     PackageStateCommands,
     PackageStateQueries,
     PackageUnitOfWorkAuthority,
+    PackageUnitOfWorkCoordinator,
 )
 from forest.package_effects import (
     PackageEffectDriver,
@@ -168,6 +169,7 @@ class PackageGenerationAdapter:
         domain_queries: PackageDomainQueries | None = None,
         domain_commands: PackageDomainCommands | None = None,
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
+        unit_of_work_coordinator: PackageUnitOfWorkCoordinator | None = None,
         owned_work_authority: PackageOwnedWorkAuthority | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
@@ -191,6 +193,7 @@ class PackageGenerationAdapter:
         self._domain_queries = domain_queries
         self._domain_commands = domain_commands
         self._unit_of_work_authority = unit_of_work_authority
+        self._unit_of_work_coordinator = unit_of_work_coordinator
         self._service_operation_ledger = service_operation_ledger
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
@@ -216,6 +219,7 @@ class PackageGenerationAdapter:
                 *self.component.get("domain_queries", ()),
                 *self.component.get("domain_commands", ()),
                 *self.component.get("job_types", ()),
+                *self.component.get("unit_of_work_plans", ()),
             )
         }
         self._participant_declarations = {
@@ -357,6 +361,14 @@ class PackageGenerationAdapter:
                     "function": item["function"],
                 }
                 for item in self.component.get("unit_of_work_participants", ())
+            ],
+            "unit_of_work_plans": [
+                {
+                    "name": item["name"],
+                    "version": _major(item["contract"]),
+                    "steps": [dict(step) for step in item["steps"]],
+                }
+                for item in self.component.get("unit_of_work_plans", ())
             ],
             "owned_work_handlers": [
                 {
@@ -1010,6 +1022,68 @@ class PackageGenerationAdapter:
     ) -> Any:
         return await self._domain_gateway("command", identity, call_id, request)
 
+    async def _unit_of_work_gateway(
+        self, identity: WorkerIdentity, parent_call_id: str, request: dict
+    ) -> Any:
+        outer = self._call_scope(identity, parent_call_id)
+        declaration = next(
+            (
+                item
+                for item in self.component.get("unit_of_work_plans", ())
+                if item["name"] == request["name"]
+            ),
+            None,
+        )
+        if (
+            declaration is None
+            or request["contract_major"] != _major(declaration["contract"])
+            or not self._has_capability(f"uow.execute:{request['name']}")
+        ):
+            raise ForestError(
+                "CAPABILITY_DENIED",
+                "Worker requested an undeclared UnitOfWork plan",
+                403,
+            )
+        coordinator = self._unit_of_work_coordinator
+        if coordinator is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "UnitOfWork coordinator is unavailable", 503
+            )
+        payload = request["payload"]
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "PACKAGE_UOW_INPUT_INVALID",
+                "UnitOfWork input violates its immutable package schema",
+                422,
+            )
+        timeout = self._worker.remaining_timeout(parent_call_id, request["timeout"])
+        scope = PackageCallScope(
+            bot_id=outer.bot_id,
+            component_id=outer.component_id,
+            generation_id=outer.generation_id,
+            instance_id=outer.instance_id,
+            worker_incarnation=outer.worker_incarnation,
+            call_id="call:" + uuid4().hex,
+            call_operation_id=request["operation_id"],
+            causal_root_kind=outer.causal_root_kind,
+            causal_root_id=outer.causal_root_id,
+        )
+        result = await coordinator.execute(
+            scope,
+            declaration,
+            payload,
+            parent_call_id=parent_call_id,
+            timeout_seconds=min(timeout, float(declaration["timeout_s"])),
+        )
+        if not output_validator.is_valid(result):
+            raise ForestError(
+                "PACKAGE_UOW_OUTPUT_INVALID",
+                "UnitOfWork result violates its immutable package schema",
+                502,
+            )
+        return result
+
     async def _domain_gateway(
         self,
         kind: str,
@@ -1514,6 +1588,7 @@ class PackageGenerationAdapter:
             service_handler=self._service_gateway,
             domain_query_handler=self._domain_query_gateway,
             domain_command_handler=self._domain_command_gateway,
+            unit_of_work_handler=self._unit_of_work_gateway,
             event_handler=self._event_gateway,
             job_handler=self._job_gateway,
         )
@@ -1674,6 +1749,10 @@ def package_runtime_descriptor(
     domain_queries: PackageDomainQueries | None = None,
     domain_commands: PackageDomainCommands | None = None,
     unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
+    unit_of_work_coordinator_factory: Callable[
+        [str, Mapping[str, Any]], PackageUnitOfWorkCoordinator
+    ]
+    | None = None,
     owned_work_authority: PackageOwnedWorkAuthority | None = None,
     service_operation_ledger: PackageServiceOperationLedger,
     configuration_validator: Callable[[object], Any] | None = None,
@@ -1744,6 +1823,10 @@ def package_runtime_descriptor(
         f"domain.command:{item['name']}"
         for item in component.get("domain_commands", ())
         if domain_commands is not None
+    ) | frozenset(
+        f"uow.execute:{item['name']}"
+        for item in component.get("unit_of_work_plans", ())
+        if unit_of_work_coordinator_factory is not None
     )
     unsupported = gateway_capabilities - installed_capabilities
     if unsupported:
@@ -1757,6 +1840,12 @@ def package_runtime_descriptor(
         raise ForestError(
             "PACKAGE_UOW_AUTHORITY_UNAVAILABLE",
             "Package declares UnitOfWork participants without an installed authority",
+            503,
+        )
+    if component.get("unit_of_work_plans") and unit_of_work_coordinator_factory is None:
+        raise ForestError(
+            "PACKAGE_UOW_COORDINATOR_UNAVAILABLE",
+            "Package declares UnitOfWork plans without an installed coordinator",
             503,
         )
     if component.get("owned_work_handlers") and owned_work_authority is None:
@@ -1841,6 +1930,25 @@ def package_runtime_descriptor(
             if any(item.startswith("job.schedule:") for item in requested)
             else None
         )
+        participant_components = sorted(
+            {
+                step["component_id"]
+                for plan in component.get("unit_of_work_plans", ())
+                for step in plan["steps"]
+            }
+        )
+        unit_of_work_coordinator = (
+            unit_of_work_coordinator_factory(
+                component["id"],
+                {
+                    component_id: contracts.unit_of_work_participant(component_id)
+                    for component_id in participant_components
+                },
+            )
+            if unit_of_work_coordinator_factory is not None
+            and component.get("unit_of_work_plans")
+            else None
+        )
         adapter = PackageGenerationAdapter(
             snapshot=snapshot,
             bot_id=bot_id,
@@ -1855,6 +1963,7 @@ def package_runtime_descriptor(
             domain_queries=domain_queries,
             domain_commands=domain_commands,
             unit_of_work_authority=unit_of_work_authority,
+            unit_of_work_coordinator=unit_of_work_coordinator,
             owned_work_authority=owned_work_authority,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,
@@ -1875,6 +1984,12 @@ def package_runtime_descriptor(
             dict.fromkeys(
                 (
                     *startup_components,
+                    *(
+                        step["component_id"]
+                        for plan in component.get("unit_of_work_plans", ())
+                        for step in plan["steps"]
+                        if step["component_id"] != component["id"]
+                    ),
                     *(
                         ("routing.graph",)
                         if (

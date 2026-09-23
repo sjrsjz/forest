@@ -799,6 +799,40 @@ class DomainCommandsHandle:
         )
 
 
+class UnitOfWorkPlansHandle:
+    def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
+        self._rpc = rpc
+        self._scope = scope
+
+    async def call(
+        self,
+        plan: str,
+        payload: Any,
+        *,
+        operation_id: str,
+        contract_major: int = 1,
+        timeout: float | None = None,
+    ) -> Any:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No UnitOfWork gateway is available", 403)
+        _validate_domain_request(plan, contract_major, timeout)
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ForestError(
+                "INVALID_UNIT_OF_WORK", "A stable UnitOfWork operation ID is required", 422
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "name": plan,
+                "payload": payload,
+                "contract_major": contract_major,
+                "operation_id": operation_id,
+                "timeout": timeout,
+            },
+        )
+
+
 def _validate_domain_request(name: str, contract_major: int, timeout: float | None) -> None:
     if not isinstance(name, str) or not 1 <= len(name) <= 128:
         raise ForestError("INVALID_DOMAIN_REQUEST", "A bounded domain port name is required", 422)
@@ -911,6 +945,7 @@ class PluginContext:
         service_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         domain_query_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         domain_command_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        unit_of_work_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         job_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         identity: Mapping | None = None,
@@ -922,6 +957,7 @@ class PluginContext:
         self._service_rpc = service_rpc
         self._domain_query_rpc = domain_query_rpc
         self._domain_command_rpc = domain_command_rpc
+        self._unit_of_work_rpc = unit_of_work_rpc
         self._event_rpc = event_rpc
         self._job_rpc = job_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
@@ -935,6 +971,7 @@ class PluginContext:
         self.services = ServicesHandle(service_rpc, scope)
         self.queries = DomainQueriesHandle(domain_query_rpc, scope)
         self.commands = DomainCommandsHandle(domain_command_rpc, scope)
+        self.uow = UnitOfWorkPlansHandle(unit_of_work_rpc, scope)
         self.events = EventsHandle(event_rpc, scope)
         self.jobs = JobsHandle(job_rpc, scope)
 
@@ -948,6 +985,7 @@ class PluginContext:
             service_rpc=self._service_rpc,
             domain_query_rpc=self._domain_query_rpc,
             domain_command_rpc=self._domain_command_rpc,
+            unit_of_work_rpc=self._unit_of_work_rpc,
             event_rpc=self._event_rpc,
             job_rpc=self._job_rpc,
             identity=self.identity,

@@ -26,6 +26,30 @@ class Counter(Plugin):
             operation_id=ctx.operations.stable("enqueue:v1"),
         )
 
+    @service("counter.transaction")
+    async def transaction(self, payload, ctx):
+        return await ctx.uow.call(
+            "counter.atomic-set",
+            payload,
+            operation_id=ctx.operations.stable("atomic-set:v1"),
+        )
+
+    @service("counter.transaction-reject")
+    async def transaction_reject(self, payload, ctx):
+        return await ctx.uow.call(
+            "counter.atomic-set-reject",
+            payload,
+            operation_id=ctx.operations.stable("atomic-set-reject:v1"),
+        )
+
+    @service("counter.cross-component-probe")
+    async def cross_component_reject(self, payload, ctx):
+        return await ctx.uow.call(
+            "counter.cross-component-reject",
+            payload,
+            operation_id=ctx.operations.stable("cross-component-reject:v1"),
+        )
+
     @job("counter.apply")
     async def apply(self, task, ctx):
         payload = task["payload"]

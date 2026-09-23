@@ -100,6 +100,9 @@ class WorkerRuntime:
     async def domain_command_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("domain_command", call_id, payload)
 
+    async def unit_of_work_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("unit_of_work", call_id, payload)
+
     async def event_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("event", call_id, payload)
 
@@ -325,6 +328,7 @@ class WorkerRuntime:
                     service_rpc=self.service_rpc,
                     domain_query_rpc=self.domain_query_rpc,
                     domain_command_rpc=self.domain_command_rpc,
+                    unit_of_work_rpc=self.unit_of_work_rpc,
                     event_rpc=self.event_rpc,
                     job_rpc=self.job_rpc,
                     identity=self.bootstrap["identity"],
@@ -466,6 +470,7 @@ class WorkerRuntime:
                     "service_result",
                     "domain_query_result",
                     "domain_command_result",
+                    "unit_of_work_result",
                     "event_result",
                     "job_result",
                 }:

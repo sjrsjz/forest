@@ -952,6 +952,104 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
             payload={"value": 12, "expected_revision": 5},
         )
         assert changed.value == {"value": 12, "revision": 6}
+        transaction_endpoint = instance.runtime_service_handlers()[
+            ("counter.transaction", 1)
+        ]
+        transaction_route = FrozenServiceRoute(
+            service_id="counter.transaction",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="forest.counter",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        transaction_result = await transaction_endpoint.invoke_routed(
+            transaction_route,
+            RuntimeServiceInvocation(
+                "counter:uow:1", 10, "test.counter", "source:counter:uow"
+            ),
+            ({"value": 14, "expected_revision": 6},),
+            {},
+        )
+        assert transaction_result == {"value": 14, "revision": 7}
+        reject_endpoint = instance.runtime_service_handlers()[
+            ("counter.transaction-reject", 1)
+        ]
+        reject_route = FrozenServiceRoute(
+            service_id="counter.transaction-reject",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="forest.counter",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        with pytest.raises(ForestError) as rejected:
+            await reject_endpoint.invoke_routed(
+                reject_route,
+                RuntimeServiceInvocation(
+                    "counter:uow:reject:1",
+                    10,
+                    "test.counter",
+                    "source:counter:uow:reject",
+                ),
+                ({"value": 16, "expected_revision": 7},),
+                {},
+            )
+        assert rejected.value.code == "COUNTER_UOW_REJECTED"
+        assert await contract.query("counter.current", {}) == {
+            "value": 14,
+            "revision": 7,
+        }
+        cross_endpoint = instance.runtime_service_handlers()[
+            ("counter.cross-component-probe", 1)
+        ]
+        cross_route = FrozenServiceRoute(
+            service_id="counter.cross-component-probe",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="forest.counter",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        with pytest.raises(ForestError) as cross_rejected:
+            await cross_endpoint.invoke_routed(
+                cross_route,
+                RuntimeServiceInvocation(
+                    "counter:uow:cross:1",
+                    10,
+                    "test.counter",
+                    "source:counter:uow:cross",
+                ),
+                (
+                    {
+                        "counter": {"value": 18, "expected_revision": 7},
+                        "effect": {
+                            "protocol": "forest.effect-observe/1",
+                            "effect_operation_id": "effect:absent",
+                            "attempt_id": "attempt:absent",
+                            "observation_operation_id": "observation:absent",
+                            "status": "UNKNOWN",
+                            "evidence_kind": "executor",
+                            "evidence_payload": None,
+                        },
+                    },
+                ),
+                {},
+            )
+        assert cross_rejected.value.code == "EFFECT_ATTEMPT_NOT_FOUND"
+        assert await contract.query("counter.current", {}) == {
+            "value": 14,
+            "revision": 7,
+        }
         async with store.pool.connection() as conn:
             domain_row = await (
                 await conn.execute(
@@ -969,7 +1067,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
                     (store.bot_id, "forest.counter"),
                 )
             ).fetchone()
-        assert dict(domain_row) == {"value": 12, "revision": 6}
+        assert dict(domain_row) == {"value": 14, "revision": 7}
         assert generic_state["count"] == 0
     finally:
         assert await registry.close() == []

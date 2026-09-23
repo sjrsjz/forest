@@ -98,6 +98,7 @@ ServiceHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 EventHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 JobHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 DomainHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+UnitOfWorkHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 
 
 class PythonWorker:
@@ -112,6 +113,7 @@ class PythonWorker:
         service_handler: ServiceHandler | None = None,
         domain_query_handler: DomainHandler | None = None,
         domain_command_handler: DomainHandler | None = None,
+        unit_of_work_handler: UnitOfWorkHandler | None = None,
         event_handler: EventHandler | None = None,
         job_handler: JobHandler | None = None,
     ):
@@ -121,6 +123,7 @@ class PythonWorker:
         self.service_handler = service_handler
         self.domain_query_handler = domain_query_handler
         self.domain_command_handler = domain_command_handler
+        self.unit_of_work_handler = unit_of_work_handler
         self.event_handler = event_handler
         self.job_handler = job_handler
         self.limits = limits or WorkerLimits()
@@ -451,6 +454,7 @@ class PythonWorker:
                     "service",
                     "domain_query",
                     "domain_command",
+                    "unit_of_work",
                     "event",
                     "job",
                 }:
@@ -573,6 +577,25 @@ class PythonWorker:
                         "CAPABILITY_DENIED", "No domain command gateway is available", 403
                     )
                 value = await self.domain_command_handler(self.identity, call_id, payload)
+            elif kind == "unit_of_work":
+                expected = {
+                    "name",
+                    "payload",
+                    "contract_major",
+                    "operation_id",
+                    "timeout",
+                }
+                if not isinstance(payload, dict) or payload.keys() != expected:
+                    raise ForestError(
+                        "UNIT_OF_WORK_REQUEST_INVALID",
+                        "UnitOfWork request contains unsupported fields",
+                        422,
+                    )
+                if self.unit_of_work_handler is None:
+                    raise ForestError(
+                        "CAPABILITY_DENIED", "No UnitOfWork gateway is available", 403
+                    )
+                value = await self.unit_of_work_handler(self.identity, call_id, payload)
             elif kind == "event":
                 expected = {"topic", "payload", "contract", "operation_id"}
                 if not isinstance(payload, dict) or payload.keys() != expected:
@@ -644,6 +667,8 @@ class PythonWorker:
                             if kind == "domain_query"
                             else "DOMAIN_COMMAND_RESULT_INVALID"
                             if kind == "domain_command"
+                            else "UNIT_OF_WORK_RESULT_INVALID"
+                            if kind == "unit_of_work"
                             else "EVENT_RESULT_INVALID"
                             if kind == "event"
                             else "JOB_RESULT_INVALID"

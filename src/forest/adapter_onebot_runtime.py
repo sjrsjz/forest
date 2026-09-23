@@ -111,6 +111,88 @@ class PreparedAdapterSend:
     prepared: PreparedSend
 
 
+class OneBotUnitOfWorkParticipant:
+    """Expose the exact Binding transport fence without exposing Adapter storage."""
+
+    component_id = "adapter.onebot"
+
+    def __init__(self, runtime) -> None:
+        self.runtime = runtime
+
+    @property
+    def generation_id(self) -> str:
+        identity = self.runtime.generation_identity
+        if identity is None:
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_UNAVAILABLE",
+                "OneBot Generation is not bound",
+                503,
+            )
+        return identity.generation_id
+
+    async def invoke_in(
+        self,
+        conn,
+        name: str,
+        payload: dict,
+        **_invocation,
+    ) -> dict:
+        if name != "adapter.transport-fence" or not isinstance(payload, dict) or set(
+            payload
+        ) != {"protocol", "caller", "input", "prior"}:
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
+                "OneBot UnitOfWork operation is invalid",
+                422,
+            )
+        value = payload["input"]
+        fields = {
+            "protocol",
+            "binding_ref",
+            "binding_epoch",
+            "connection_epoch",
+            "client_incarnation",
+            "adapter_generation_id",
+            "executor_fence_digest",
+        }
+        if (
+            payload["protocol"] != "forest.uow-step/1"
+            or not isinstance(value, dict)
+            or set(value) != fields
+            or value["protocol"] != "forest.onebot-transport-fence/1"
+            or value["adapter_generation_id"] != self.generation_id
+        ):
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
+                "OneBot transport fence input is invalid",
+                422,
+            )
+        result = await self.runtime.verify_transport_fence_in(
+            conn,
+            **{key: value[key] for key in fields - {"protocol"}},
+        )
+        return {
+            "protocol": "forest.onebot-transport-fence-result/1",
+            **result,
+        }
+
+    async def verify_transport_fence_in(self, conn, **values):
+        """Expose the same typed fence operation to fixed kernel coordinators."""
+
+        if values.get("adapter_generation_id") != self.generation_id:
+            raise ForestError(
+                "RUNTIME_UOW_PARTICIPANT_STALE",
+                "OneBot transport fence names another Generation",
+                409,
+            )
+        return await self.runtime.verify_transport_fence_in(conn, **values)
+
+    async def record_platform_event_in(self, conn, **values):
+        """Expose Adapter's ingress participant operation to the kernel coordinator."""
+
+        return await self.runtime.record_platform_event_in(conn, **values)
+
+
 class CleanOneBotRuntime:
     """One Generation of Adapter transport resources and typed ingress/send ports."""
 
@@ -144,6 +226,9 @@ class CleanOneBotRuntime:
 
     async def verify_transport_fence_in(self, conn, **values):
         return await self.repository.verify_transport_fence_in(conn, **values)
+
+    def unit_of_work_participant(self):
+        return OneBotUnitOfWorkParticipant(self)
 
     def __init__(
         self,

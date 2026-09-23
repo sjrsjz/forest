@@ -145,6 +145,47 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION counter_set_from_plan(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR jsonb_typeof(input->'input') IS DISTINCT FROM 'object'
+       OR jsonb_typeof(input->'prior') IS DISTINCT FROM 'object' THEN
+        RETURN jsonb_build_object(
+            'protocol', 'forest.domain-result/1', 'ok', false,
+            'error', jsonb_build_object(
+                'code', 'COUNTER_UOW_INPUT_INVALID',
+                'message', 'Counter UnitOfWork envelope is invalid',
+                'status', 422
+            )
+        );
+    END IF;
+    RETURN __forest_module_schema__.counter_set(context, input->'input');
+END;
+$$;
+
+CREATE FUNCTION counter_reject_plan(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    RETURN jsonb_build_object(
+        'protocol', 'forest.domain-result/1', 'ok', false,
+        'error', jsonb_build_object(
+            'code', 'COUNTER_UOW_REJECTED',
+            'message', 'Counter rollback probe rejected the transaction',
+            'status', 409
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION counter_enqueue(context jsonb, input jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

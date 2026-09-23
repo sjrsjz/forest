@@ -117,6 +117,18 @@ class PackageUnitOfWorkAuthority(Protocol):
     ) -> Any: ...
 
 
+class PackageUnitOfWorkCoordinator(Protocol):
+    async def execute(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
+
 class PackageOwnedWorkAuthority(Protocol):
     async def invoke_owned_work(
         self,

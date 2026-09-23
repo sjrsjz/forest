@@ -20,6 +20,7 @@ from forest.package_state_ports import (
     KernelPackageStateCommands,
     KernelPackageStateQueries,
 )
+from forest.package_unit_of_work import package_uow_coordinator_factory
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
@@ -207,6 +208,10 @@ async def bootstrap_builtin_package(
         domain_queries=domain_authority,
         domain_commands=domain_authority,
         unit_of_work_authority=domain_authority,
+        unit_of_work_coordinator_factory=package_uow_coordinator_factory(
+            store=store,
+            runtime=kernel.runtime,
+        ),
         owned_work_authority=domain_authority,
         service_operation_ledger=KernelPackageServiceOperationLedger(
             kernel.runtime,
