@@ -137,9 +137,11 @@ class OneBotUnitOfWorkParticipant:
         payload: dict,
         **_invocation,
     ) -> dict:
-        if name != "adapter.transport-fence" or not isinstance(payload, dict) or set(
-            payload
-        ) != {"protocol", "caller", "input", "prior"}:
+        if (
+            name != "adapter.transport-fence"
+            or not isinstance(payload, dict)
+            or set(payload) != {"protocol", "caller", "input", "prior"}
+        ):
             raise ForestError(
                 "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
                 "OneBot UnitOfWork operation is invalid",
@@ -202,6 +204,8 @@ class CleanOneBotRuntime:
             {"service_id": "adapter.onebot.ingress", "version": 1},
             {"service_id": "adapter.onebot.prepare-send", "version": 1},
             {"service_id": "adapter.onebot.dispatch", "version": 1},
+            {"service_id": "adapter.onebot.delivery.prepare", "version": 1},
+            {"service_id": "adapter.onebot.delivery.dispatch", "version": 1},
         ],
         "requires": [
             {"service_id": "kernel.uow.onebot.ingress", "version": 1},
@@ -219,6 +223,8 @@ class CleanOneBotRuntime:
             ("adapter.onebot.ingress", 1): self.admit_http_event,
             ("adapter.onebot.prepare-send", 1): self.prepare_delivery,
             ("adapter.onebot.dispatch", 1): self.dispatch,
+            ("adapter.onebot.delivery.prepare", 1): self.prepare_delivery_json,
+            ("adapter.onebot.delivery.dispatch", 1): self.dispatch_json,
         }
 
     async def record_platform_event_in(self, conn, **values):
@@ -855,6 +861,38 @@ class CleanOneBotRuntime:
             prepared,
         )
 
+    async def prepare_delivery_json(self, payload: dict) -> dict:
+        """Stable JSON ABI consumed by isolated package Workers."""
+
+        fields = {"binding_ref", "channel_kind", "channel_ref", "parts", "operation_id"}
+        if not isinstance(payload, dict) or set(payload) != fields:
+            raise ForestError(
+                "DELIVERY_ADAPTER_INPUT_INVALID",
+                "Delivery prepare input is invalid",
+                422,
+            )
+        prepared = await self.prepare_delivery(
+            binding_id=payload["binding_ref"],
+            channel_kind=payload["channel_kind"],
+            channel_ref=payload["channel_ref"],
+            parts=payload["parts"],
+            operation_id=payload["operation_id"],
+        )
+        return {
+            "protocol": "forest.onebot-delivery-prepared/1",
+            "binding_ref": prepared.binding_id,
+            "client_incarnation": prepared.client_incarnation,
+            "binding_epoch": prepared.binding_epoch,
+            "connection_epoch": prepared.connection_epoch,
+            "adapter_generation_id": prepared.adapter_generation_id,
+            "executor_fence_digest": prepared.executor_fence_digest,
+            "prepared": {
+                "action": prepared.prepared.action,
+                "wire_body_b64": base64.b64encode(prepared.prepared.wire_body).decode("ascii"),
+                "wire_digest": prepared.prepared.wire_digest,
+            },
+        }
+
     async def dispatch(
         self,
         *,
@@ -887,6 +925,48 @@ class CleanOneBotRuntime:
             executor_fence_digest=executor_fence_digest,
         )
         return await connection.client.send(prepared, timeout=timeout)
+
+    async def dispatch_json(self, payload: dict) -> dict:
+        """Dispatch a package-owned permit through an exact Adapter Generation fence."""
+
+        fields = {
+            "binding_ref",
+            "client_incarnation",
+            "binding_epoch",
+            "connection_epoch",
+            "adapter_generation_id",
+            "executor_fence_digest",
+            "prepared",
+            "timeout_seconds",
+        }
+        if not isinstance(payload, dict) or set(payload) != fields:
+            raise ForestError(
+                "DELIVERY_ADAPTER_INPUT_INVALID",
+                "Delivery dispatch input is invalid",
+                422,
+            )
+        timeout = payload["timeout_seconds"]
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 0 < timeout <= 30
+        ):
+            raise ForestError(
+                "DELIVERY_ADAPTER_INPUT_INVALID",
+                "Delivery dispatch timeout is invalid",
+                422,
+            )
+        result = await self.dispatch(
+            binding_id=payload["binding_ref"],
+            client_incarnation=payload["client_incarnation"],
+            binding_epoch=payload["binding_epoch"],
+            connection_epoch=payload["connection_epoch"],
+            adapter_generation_id=payload["adapter_generation_id"],
+            executor_fence_digest=payload["executor_fence_digest"],
+            prepared=PreparedSend.from_codec_result(payload["prepared"]),
+            timeout=float(timeout),
+        )
+        return {"protocol": "forest.onebot-delivery-result/1", **result.as_dict()}
 
     async def quiesce(self) -> None:
         self._accepting = False

@@ -170,9 +170,7 @@ class KernelAuthorizationRepository:
             "audience_generation_id": audience_generation_id,
             "policy_revision": revision,
             "delegation_depth": delegation_depth,
-            "expires_at": expires_at.astimezone(timezone.utc).isoformat()
-            if expires_at
-            else None,
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat() if expires_at else None,
             "entries": [asdict(item) for item in grants],
         }
         digest = _digest(canonical)
@@ -260,6 +258,59 @@ class KernelAuthorizationRepository:
     async def create_grant_set(self, **values) -> GrantSetRef:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.create_grant_set_in(conn, **values)
+
+    async def grant_set_by_digest_in(
+        self,
+        conn,
+        *,
+        grantee_kind: str,
+        grantee_id: str,
+        grant_set_digest: str,
+    ) -> GrantSetRef:
+        """Resolve an immutable grant set without letting a caller select its authority."""
+
+        _bounded(grantee_kind, "grantee_kind", 64)
+        _bounded(grantee_id, "grantee_id", 256)
+        _validated_digest(grant_set_digest, "grant_set_digest")
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT grant_set_id,grant_set_digest,policy_revision FROM {} "
+                    "WHERE bot_id=%s AND grant_set_digest=%s AND grantee_kind=%s "
+                    "AND grantee_id=%s"
+                ).format(self._table("grant_sets")),
+                (self.store.bot_id, grant_set_digest, grantee_kind, grantee_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError(
+                "GRANT_SET_NOT_FOUND",
+                "The Generation grant set is unavailable",
+                409,
+            )
+        entries = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT capability,resource_kind,resource_id,delegable FROM {} "
+                    "WHERE bot_id=%s AND grant_set_id=%s ORDER BY entry_index"
+                ).format(self._table("grant_entries")),
+                (self.store.bot_id, row["grant_set_id"]),
+            )
+        ).fetchall()
+        return GrantSetRef(
+            row["grant_set_id"],
+            row["grant_set_digest"],
+            row["policy_revision"],
+            tuple(
+                CapabilityGrant(
+                    item["capability"],
+                    item["resource_kind"],
+                    item["resource_id"],
+                    delegable=item["delegable"],
+                )
+                for item in entries
+            ),
+        )
 
     async def issue_ticket_in(
         self,
@@ -516,8 +567,7 @@ class KernelAuthorizationRepository:
         existing = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT * FROM {} WHERE bot_id=%s AND "
-                    "(ticket_id=%s OR operation_id=%s)"
+                    "SELECT * FROM {} WHERE bot_id=%s AND (ticket_id=%s OR operation_id=%s)"
                 ).format(self._table("ticket_consumptions")),
                 (self.store.bot_id, ticket_id, operation_id),
             )
@@ -551,8 +601,7 @@ class KernelAuthorizationRepository:
         existing = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT * FROM {} WHERE bot_id=%s AND "
-                    "(ticket_id=%s OR operation_id=%s)"
+                    "SELECT * FROM {} WHERE bot_id=%s AND (ticket_id=%s OR operation_id=%s)"
                 ).format(self._table("ticket_consumptions")),
                 (self.store.bot_id, ticket_id, operation_id),
             )
@@ -604,15 +653,11 @@ class KernelAuthorizationRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.consume_ticket_in(conn, **values)
 
-    async def accept_web_authority_ticket_in(
-        self, conn, *, ticket: WebAuthorityTicket
-    ) -> dict:
+    async def accept_web_authority_ticket_in(self, conn, *, ticket: WebAuthorityTicket) -> dict:
         if not isinstance(ticket, WebAuthorityTicket):
             raise ForestError("WEB_AUTHORITY_TICKET_INVALID", "Invalid Web authority ticket", 403)
         await self._operation_lock_in(conn, ticket.target_operation_ref)
-        ticket_digest = _digest(
-            {"payload": ticket.payload(), "signature": ticket.signature}
-        )
+        ticket_digest = _digest({"payload": ticket.payload(), "signature": ticket.signature})
         expected = {
             "issuer_id": ticket.issuer_id,
             "web_subject_ref": ticket.web_subject_ref,
@@ -632,8 +677,7 @@ class KernelAuthorizationRepository:
         existing = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT * FROM {} WHERE bot_id=%s AND "
-                    "(ticket_id=%s OR target_operation_ref=%s)"
+                    "SELECT * FROM {} WHERE bot_id=%s AND (ticket_id=%s OR target_operation_ref=%s)"
                 ).format(self._table("web_authority_receipts")),
                 (self.store.bot_id, ticket.ticket_id, ticket.target_operation_ref),
             )
@@ -646,9 +690,7 @@ class KernelAuthorizationRepository:
                     409,
                 )
             return dict(existing)
-        now = (
-            await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
-        )["value"]
+        now = (await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone())["value"]
         if ticket.expires_at <= now:
             raise ForestError(
                 "WEB_AUTHORITY_TICKET_EXPIRED", "Web authority ticket has expired", 403
@@ -734,7 +776,9 @@ class KernelAuthorizationRepository:
         _validated_digest(input_digest, "input_digest")
         _validated_digest(plan_digest, "plan_digest", optional=True)
         if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
-            raise ForestError("AUTHORIZATION_INPUT_INVALID", "Approval expiry needs a timezone", 422)
+            raise ForestError(
+                "AUTHORIZATION_INPUT_INVALID", "Approval expiry needs a timezone", 422
+            )
         now = datetime.now(timezone.utc)
         if not now < expires_at <= now + timedelta(hours=24):
             raise ForestError("AUTHORIZATION_INPUT_INVALID", "Approval lifetime is invalid", 422)
@@ -854,9 +898,7 @@ class KernelAuthorizationRepository:
             ("authorization_ticket_id", authorization_ticket_id, 256),
         ):
             _bounded(value, field, limit)
-        decision_digest = self.approval_decision_digest(
-            approval_id=approval_id, decision=decision
-        )
+        decision_digest = self.approval_decision_digest(approval_id=approval_id, decision=decision)
         row = await (
             await conn.execute(
                 sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND approval_id=%s FOR UPDATE").format(
@@ -883,9 +925,7 @@ class KernelAuthorizationRepository:
                             "SELECT t.subject_kind,t.subject_id FROM {} c JOIN {} t "
                             "USING (bot_id,ticket_id) WHERE c.bot_id=%s AND c.ticket_id=%s "
                             "AND c.operation_id=%s"
-                        ).format(
-                            self._table("ticket_consumptions"), self._table("tickets")
-                        ),
+                        ).format(self._table("ticket_consumptions"), self._table("tickets")),
                         (self.store.bot_id, authorization_ticket_id, decision_operation_id),
                     )
                 ).fetchone()
@@ -917,9 +957,9 @@ class KernelAuthorizationRepository:
         )
         ticket = await (
             await conn.execute(
-                sql.SQL("SELECT subject_kind,subject_id FROM {} WHERE bot_id=%s AND ticket_id=%s").format(
-                    self._table("tickets")
-                ),
+                sql.SQL(
+                    "SELECT subject_kind,subject_id FROM {} WHERE bot_id=%s AND ticket_id=%s"
+                ).format(self._table("tickets")),
                 (self.store.bot_id, authorization_ticket_id),
             )
         ).fetchone()
@@ -1045,9 +1085,7 @@ class KernelAuthorizationRepository:
         _bounded(operation_id, "operation_id", 256)
         _bounded(selector_kind, "selector_kind", 64)
         _bounded(selector_id, "selector_id", 512)
-        input_digest = _digest(
-            [expected_policy_revision, selector_kind, selector_id]
-        )
+        input_digest = _digest([expected_policy_revision, selector_kind, selector_id])
         existing = await (
             await conn.execute(
                 sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s").format(

@@ -16,6 +16,9 @@ from forest.clean_management_contract import (
     CleanModuleConfigurationContract,
 )
 from forest.errors import ForestError
+from forest.kernel_authorization_participant import (
+    KernelAuthorizationUnitOfWorkParticipant,
+)
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
@@ -251,6 +254,9 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
             validator=validate_web_operation_policy,
         )
 
+    def unit_of_work_participant(self):
+        return KernelAuthorizationUnitOfWorkParticipant(self, self.service)
+
 
 class PreparedEffectAuthorityModule(PreparedAuthorityModule):
     """Publish only the typed Kernel Effect UnitOfWork participant ABI."""
@@ -458,9 +464,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 if component_id == "kernel.runtime"
                 else ()
             ),
-            agent_tools=(
-                (RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()
-            ),
+            agent_tools=((RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()),
             shell_commands=(
                 RUNTIME_SHELL_COMMANDS
                 if component_id == "kernel.runtime"
@@ -468,11 +472,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 if component_id == "kernel.audit"
                 else ()
             ),
-            job_types=(
-                (RUNTIME_HEALTH_SNAPSHOT_JOB,)
-                if component_id == "kernel.runtime"
-                else ()
-            ),
+            job_types=((RUNTIME_HEALTH_SNAPSHOT_JOB,) if component_id == "kernel.runtime" else ()),
         )
         for component_id, definition in _MODULES.items()
     )

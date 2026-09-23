@@ -106,9 +106,7 @@ class KernelRuntimeRepository:
 
         for value, field in ((operation_id, "operation_id"), (requested_by, "requested_by")):
             if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
-                raise ForestError(
-                    "RUNTIME_REPLACEMENT_INPUT_INVALID", f"Invalid {field}", 422
-                )
+                raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", f"Invalid {field}", 422)
         if type(expected_graph_revision) is not int or expected_graph_revision <= 0:
             raise ForestError(
                 "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid expected graph revision", 422
@@ -158,9 +156,7 @@ class KernelRuntimeRepository:
                     "RUNTIME_GRAPH_REVISION_CONFLICT",
                     "RuntimeGraph revision changed",
                     409,
-                    details={
-                        "graph_revision": None if head is None else head["graph_revision"]
-                    },
+                    details={"graph_revision": None if head is None else head["graph_revision"]},
                 )
             saved = await (
                 await conn.execute(
@@ -188,9 +184,7 @@ class KernelRuntimeRepository:
         lease_seconds: int = 120,
     ) -> dict | None:
         if type(lease_seconds) is not int or not 10 <= lease_seconds <= 600:
-            raise ForestError(
-                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid replacement lease", 422
-            )
+            raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid replacement lease", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
@@ -250,9 +244,7 @@ class KernelRuntimeRepository:
         error_code: str,
     ) -> dict:
         if not isinstance(error_code, str) or not 1 <= len(error_code.encode()) <= 128:
-            raise ForestError(
-                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid replacement error", 422
-            )
+            raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid replacement error", 422)
         return await self._settle_graph_replacement(
             lease,
             operation_id=operation_id,
@@ -275,9 +267,9 @@ class KernelRuntimeRepository:
             await self._host_in(conn, lease)
             row = await (
                 await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s FOR UPDATE").format(
-                        self._table("graph_replacement_requests")
-                    ),
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s FOR UPDATE"
+                    ).format(self._table("graph_replacement_requests")),
                     (self.store.bot_id, operation_id),
                 )
             ).fetchone()
@@ -356,9 +348,7 @@ class KernelRuntimeRepository:
 
     async def graph_replacement(self, operation_id: str) -> dict:
         if not isinstance(operation_id, str) or not 1 <= len(operation_id.encode()) <= 256:
-            raise ForestError(
-                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid operation_id", 422
-            )
+            raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid operation_id", 422)
         async with self.store.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -650,8 +640,7 @@ class KernelRuntimeRepository:
             route is not None
             and runtime is not None
             and (
-                route["data_admission"]
-                and runtime["data_admission"]
+                route["data_admission"] and runtime["data_admission"]
                 if admission_lane == "DATA"
                 else route["control_admission"] and runtime["control_admission"]
             )
@@ -718,6 +707,37 @@ class KernelRuntimeRepository:
             generation_id=generation_id,
             lock=False,
         )
+
+    async def generation_capability_grants_digest_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+    ) -> str:
+        """Return the immutable grant-set digest sealed into one current Generation."""
+
+        await self.verify_generation_member_in(
+            conn,
+            component_id=component_id,
+            generation_id=generation_id,
+        )
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT capability_grants_digest FROM {} WHERE bot_id=%s "
+                    "AND component_id=%s AND generation_id=%s"
+                ).format(self._table("generations")),
+                (self.store.bot_id, component_id, generation_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_CURRENT",
+                "The Generation is not a current RuntimeGraph member",
+                409,
+            )
+        return row["capability_grants_digest"]
 
     async def _verify_generation_member_in(
         self,
@@ -820,9 +840,7 @@ class KernelRuntimeRepository:
             }
         )
         generations = {
-            item.component_id: (
-                f"generation:{activation_id}:{digest_json(item.as_fact())[-24:]}"
-            )
+            item.component_id: (f"generation:{activation_id}:{digest_json(item.as_fact())[-24:]}")
             for item in ordered
         }
         graph_id = f"runtime-graph:{activation_id}"
@@ -954,9 +972,7 @@ class KernelRuntimeRepository:
                         ).format(self._table("runtime_graph_dependencies")),
                         (self.store.bot_id, graph_id, item.component_id, required),
                     )
-        return RuntimeGenerationGraph(
-            graph_id, revision, graph_digest, activation_id, generations
-        )
+        return RuntimeGenerationGraph(graph_id, revision, graph_digest, activation_id, generations)
 
     async def publish_graph(
         self,
@@ -1014,9 +1030,7 @@ class KernelRuntimeRepository:
                         )
                     await activate(
                         conn,
-                        operation_id=(
-                            f"runtime-publish:{graph.graph_id}:{item['component_id']}"
-                        ),
+                        operation_id=(f"runtime-publish:{graph.graph_id}:{item['component_id']}"),
                         revision=item["config_revision"],
                         generation_id=item["generation_id"],
                         expected_payload_id=item["config_payload_id"],
@@ -1030,9 +1044,7 @@ class KernelRuntimeRepository:
                         "Runtime publication participant is not a graph member",
                         503,
                     )
-                members_by_component = {
-                    item["component_id"]: item for item in members
-                }
+                members_by_component = {item["component_id"]: item for item in members}
                 for component_id in sorted(publication_participants):
                     participant = publication_participants[component_id]
                     publish = getattr(participant, "publish_generation_in", None)
@@ -1080,9 +1092,9 @@ class KernelRuntimeRepository:
             for item in members:
                 new_components.add(item["component_id"])
                 await conn.execute(
-                    sql.SQL("UPDATE {} SET status='ACTIVE' WHERE bot_id=%s AND generation_id=%s").format(
-                        self._table("generations")
-                    ),
+                    sql.SQL(
+                        "UPDATE {} SET status='ACTIVE' WHERE bot_id=%s AND generation_id=%s"
+                    ).format(self._table("generations")),
                     (self.store.bot_id, item["generation_id"]),
                 )
                 await conn.execute(
@@ -1124,9 +1136,7 @@ class KernelRuntimeRepository:
             )
             return graph.graph_revision
 
-    async def freeze_graph_admission(
-        self, lease: HostLease, graph: RuntimeGenerationGraph
-    ) -> None:
+    async def freeze_graph_admission(self, lease: HostLease, graph: RuntimeGenerationGraph) -> None:
         """Stop new route admission while keeping the exact graph current for draining work."""
 
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -1151,9 +1161,7 @@ class KernelRuntimeRepository:
                     (self.store.bot_id, item["component_id"], item["generation_id"]),
                 )
 
-    async def resume_graph_admission(
-        self, lease: HostLease, graph: RuntimeGenerationGraph
-    ) -> None:
+    async def resume_graph_admission(self, lease: HostLease, graph: RuntimeGenerationGraph) -> None:
         """Reopen a still-current graph after a replacement aborts before publication."""
 
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -1161,11 +1169,7 @@ class KernelRuntimeRepository:
             await self._host_in(conn, lease)
             head = await self._graph_head_in(conn, lock=True, update=True)
             saved = await self._graph_in(conn, graph, lock=True)
-            if (
-                head is None
-                or head["graph_id"] != graph.graph_id
-                or saved["state"] != "ACTIVE"
-            ):
+            if head is None or head["graph_id"] != graph.graph_id or saved["state"] != "ACTIVE":
                 raise ForestError(
                     "RUNTIME_GRAPH_NOT_CURRENT",
                     "Only the current active RuntimeGraph can resume admission",
@@ -1200,9 +1204,7 @@ class KernelRuntimeRepository:
                         409,
                     )
 
-    async def retire_graph(
-        self, lease: HostLease, graph: RuntimeGenerationGraph
-    ) -> int:
+    async def retire_graph(self, lease: HostLease, graph: RuntimeGenerationGraph) -> int:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
@@ -1230,8 +1232,7 @@ class KernelRuntimeRepository:
                 if item["status"] == "ACTIVE":
                     await conn.execute(
                         sql.SQL(
-                            "UPDATE {} SET status='QUIESCING' "
-                            "WHERE bot_id=%s AND generation_id=%s"
+                            "UPDATE {} SET status='QUIESCING' WHERE bot_id=%s AND generation_id=%s"
                         ).format(self._table("generations")),
                         (self.store.bot_id, item["generation_id"]),
                     )
@@ -1347,9 +1348,7 @@ class KernelRuntimeRepository:
         suffix = sql.SQL(" FOR SHARE") if lock else sql.SQL("")
         return await (
             await conn.execute(
-                sql.SQL("SELECT * FROM {} WHERE bot_id=%s").format(
-                    self._table("runtime_state")
-                )
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s").format(self._table("runtime_state"))
                 + suffix,
                 (self.store.bot_id,),
             )
@@ -1403,8 +1402,7 @@ class KernelRuntimeRepository:
         row = await (
             await conn.execute(
                 sql.SQL(
-                    "SELECT *,clock_timestamp() AS current_time FROM {} "
-                    "WHERE bot_id=%s FOR SHARE"
+                    "SELECT *,clock_timestamp() AS current_time FROM {} WHERE bot_id=%s FOR SHARE"
                 ).format(self._table("host_lease")),
                 (self.store.bot_id,),
             )
