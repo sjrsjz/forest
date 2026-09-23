@@ -124,6 +124,16 @@ class PostgresPackageDomainAuthority:
             for bindings in bindings_set:
                 reference = self._pointer(payload, declaration_ref["path"], bindings)
                 owner_id = self._pointer(payload, declaration_ref["owner_id_path"], bindings)
+                owner_component = declaration_ref.get("owner_component")
+                if owner_component is None:
+                    owner_component = self._pointer(
+                        payload, declaration_ref["owner_component_path"], bindings
+                    )
+                owner_kind = declaration_ref.get("owner_kind")
+                if owner_kind is None:
+                    owner_kind = self._pointer(
+                        payload, declaration_ref["owner_kind_path"], bindings
+                    )
                 if (
                     not isinstance(reference, dict)
                     or set(reference)
@@ -134,8 +144,8 @@ class PostgresPackageDomainAuthority:
                         "owner_kind",
                         "owner_id",
                     }
-                    or reference.get("owner_component_id") != declaration_ref["owner_component"]
-                    or reference.get("owner_kind") != declaration_ref["owner_kind"]
+                    or reference.get("owner_component_id") != owner_component
+                    or reference.get("owner_kind") != owner_kind
                     or reference.get("owner_id") != owner_id
                 ):
                     raise ForestError(
@@ -451,6 +461,13 @@ class PostgresPackageDomainAuthority:
             "causal_root_id": scope.causal_root_id,
             "timeout_seconds": timeout_seconds,
             "input_digest": digest_json(payload),
+            "participant_input_digest": (
+                digest_json(payload["input"])
+                if kind == "participant"
+                and payload.get("protocol") == "forest.uow-step/1"
+                and isinstance(payload.get("input"), dict)
+                else None
+            ),
             "runtime_package_digest": self.runtime_package_digest,
             "storage_package_digest": self.storage_package_digest,
         }

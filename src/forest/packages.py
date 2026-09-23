@@ -340,18 +340,29 @@ MANIFEST_SCHEMA = {
                                         "items": {
                                             "type": "object",
                                             "additionalProperties": False,
-                                            "required": [
-                                                "path",
-                                                "owner_component",
-                                                "owner_kind",
-                                                "owner_id_path",
-                                            ],
+                                            "required": ["path", "owner_id_path"],
                                             "properties": {
                                                 "path": {"type": "string"},
                                                 "owner_component": {"type": "string"},
+                                                "owner_component_path": {"type": "string"},
                                                 "owner_kind": {"type": "string"},
+                                                "owner_kind_path": {"type": "string"},
                                                 "owner_id_path": {"type": "string"},
                                             },
+                                            "allOf": [
+                                                {
+                                                    "oneOf": [
+                                                        {"required": ["owner_component"]},
+                                                        {"required": ["owner_component_path"]},
+                                                    ]
+                                                },
+                                                {
+                                                    "oneOf": [
+                                                        {"required": ["owner_kind"]},
+                                                        {"required": ["owner_kind_path"]},
+                                                    ]
+                                                },
+                                            ],
                                         },
                                     },
                                 },
@@ -1233,13 +1244,30 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Managed payload references are only valid on write ports",
             )
         for reference in payload_refs:
+            path = reference.get("path")
+            owner_paths = [reference.get("owner_id_path")]
+            owner_component = reference.get("owner_component")
+            component_path = reference.get("owner_component_path")
+            owner_kind = reference.get("owner_kind")
+            owner_kind_path = reference.get("owner_kind_path")
+            owner_paths.extend(
+                value for value in (component_path, owner_kind_path) if value is not None
+            )
             if (
-                not _valid_json_pointer(reference.get("path"), wildcards=True)
-                or not _valid_json_pointer(reference.get("owner_id_path"), wildcards=True)
-                or reference.get("path", "").split("/").count("*")
-                != reference.get("owner_id_path", "").split("/").count("*")
-                or not IDENTIFIER.fullmatch(reference.get("owner_component", ""))
-                or not IDENTIFIER.fullmatch(reference.get("owner_kind", ""))
+                not _valid_json_pointer(path, wildcards=True)
+                or any(
+                    not _valid_json_pointer(owner_path, wildcards=True)
+                    or path.split("/").count("*")
+                    != owner_path.split("/").count("*")
+                    for owner_path in owner_paths
+                )
+                or (owner_component is None) == (component_path is None)
+                or (owner_kind is None) == (owner_kind_path is None)
+                or (
+                    owner_component is not None
+                    and not IDENTIFIER.fullmatch(owner_component)
+                )
+                or (owner_kind is not None and not IDENTIFIER.fullmatch(owner_kind))
             ):
                 _fail(
                     "INVALID_DOMAIN_AUTHORITY",

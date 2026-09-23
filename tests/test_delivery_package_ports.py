@@ -164,8 +164,9 @@ async def test_domain_authority_verifies_every_payload_in_declared_array():
         }
         for index in (3, 4)
     ]
+    conn = object()
     await authority._verify_payload_refs(
-        object(),
+        conn,
         {
             "payload_refs": [
                 {
@@ -187,3 +188,55 @@ async def test_domain_authority_verifies_every_payload_in_declared_array():
         "payload/3",
         "payload/4",
     ]
+
+
+@pytest.mark.asyncio
+async def test_domain_authority_resolves_payload_owner_from_the_port_input():
+    payloads = SimpleNamespace(verify_in=AsyncMock())
+    authority = PostgresPackageDomainAuthority(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        component_id="conversation.scheduler",
+        runtime_package_digest="sha256:" + "1" * 64,
+        storage_spec=SimpleNamespace(),
+        storage_package_digest="sha256:" + "2" * 64,
+        storage_execution_profile="official",
+        payloads=payloads,
+    )
+    reference = {
+        "payload_id": "payload/event",
+        "digest": "sha256:" + "3" * 64,
+        "owner_component_id": "adapter.onebot",
+        "owner_kind": "onebot.normalized-event",
+        "owner_id": "event/1",
+    }
+    conn = object()
+    await authority._verify_payload_refs(
+        conn,
+        {
+            "payload_refs": [
+                {
+                    "path": "/input/content",
+                    "owner_id_path": "/input/event_id",
+                    "owner_component_path": "/input/source_component_id",
+                    "owner_kind_path": "/input/content_owner_kind",
+                }
+            ]
+        },
+        {
+            "input": {
+                "event_id": "event/1",
+                "source_component_id": "adapter.onebot",
+                "content_owner_kind": "onebot.normalized-event",
+                "content": reference,
+            }
+        },
+    )
+    payloads.verify_in.assert_awaited_once_with(
+        conn,
+        payload_id="payload/event",
+        digest="sha256:" + "3" * 64,
+        owner_component_id="adapter.onebot",
+        owner_kind="onebot.normalized-event",
+        owner_id="event/1",
+    )
