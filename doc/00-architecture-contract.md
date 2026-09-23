@@ -86,6 +86,8 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 包级 UnitOfWork participant 只能由内核 coordinator 在调用方拥有的单一事务中解析和执行。participant 句柄必须绑定准确组件与 Generation，只允许调用 manifest 冻结的函数和 schema；它不是 Worker 服务、通用 SQL 接口或模块运行实例。协调器的 participant 集合在 RuntimeGraph 中固定，运行时计划只能为这些 participant 提供各自子载荷和稳定 operation，不能动态选择新的组件、跨 namespace 写入或在部分成功后做业务补偿。
 
+拥有私有持久后台工作的包必须声明 `owned_work_handlers`，不能在宿主 `clean_*` 对象中保留业务循环。每个 handler 冻结 claim/settle SQL 函数、Worker handler、输入/输出 schema、并发、轮询、执行 deadline 与覆盖执行和结算的 lease。Package Adapter 只运行统一的生命周期泵：整图开放后才领取，claim 在同一事务中复核 active Generation，已领取调用以稳定 work operation 进入隔离 Worker 和持久调用账本，settle 以 claim token 和 member fence 在包 namespace 内幂等收敛。包 SQL 决定队列状态和重试，Worker 决定业务处理，Adapter 不解释业务字段。替换时先同步关闭领取门，再等待所有已领取项写入终态；旧 Generation 排空前不得回收 Worker 或效果驱动。
+
 需要 Secret、网络、文件或进程能力的 builtin 仍必须是完整插件包。包在 manifest 中声明有界 `effect_service`，持久任务执行器同时以 `job_type` 声明 Job 身份、服务契约、输入/输出 schema、超时、重试与并发上限；部署环境只按 `effect kind` 安装通用宿主驱动工厂。`PackageGenerationAdapter` 用同一冻结配置和准确 Generation 身份创建驱动，驱动与 Worker 共同经历 start、quiesce、resume、close，服务和 Job 路由也指向该 Generation。驱动不是可独立启动的宿主业务模块，不能脱离包路由长期存活；Worker 不接触 Secret 明文或原始客户端。
 
 每个 `effect_service` 必须声明 `semantics`：`at-most-once` 表示不可安全重复的外部效果，必须先进入持久操作账本并在不确定交接后停止自动重试；`idempotent` 表示目标由稳定业务键收敛，可在准确 Generation fence 下重复执行；`read` 表示无业务写入的查询。调用方不能用宿主私有约定猜测语义，Package Adapter 也不能把所有效果一律写成最多一次，从而永久缓存派生索引的瞬时失败。

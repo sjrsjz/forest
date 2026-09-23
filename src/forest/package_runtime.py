@@ -25,6 +25,7 @@ from forest.package_capabilities import (
     PackageDomainCommands,
     PackageDomainQueries,
     PackageJobCallScope,
+    PackageOwnedWorkAuthority,
     PackageServiceError,
     PackageServiceOperationLedger,
     PackageServiceRoute,
@@ -37,6 +38,7 @@ from forest.package_effects import (
     PackageEffectDriverFactory,
     PackageServiceEffectDriver,
 )
+from forest.package_owned_work import PackageOwnedWorkSupervisor
 from forest.packages import PackageSnapshot, contract_range
 from forest.routing_protocol import (
     DurableComponentJobRequest,
@@ -51,6 +53,7 @@ from forest.runtime_contracts import (
 )
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.runtime_modules import (
+    OwnedWorkLifecycle,
     RuntimeArtifactIdentity,
     RuntimeComponentJobContribution,
     RuntimeEventPublicationContribution,
@@ -165,6 +168,7 @@ class PackageGenerationAdapter:
         domain_queries: PackageDomainQueries | None = None,
         domain_commands: PackageDomainCommands | None = None,
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
+        owned_work_authority: PackageOwnedWorkAuthority | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
         effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -222,6 +226,16 @@ class PackageGenerationAdapter:
             )
             for item in self.component.get("unit_of_work_participants", ())
         }
+        self._owned_work_declarations = tuple(
+            self.component.get("owned_work_handlers", ())
+        )
+        self._owned_work_schemas = {
+            item["name"]: (
+                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
+                Draft202012Validator(self.snapshot.schema(item["output_schema"])),
+            )
+            for item in self._owned_work_declarations
+        }
         self._event_subscriptions = {
             item["subscriber_id"]: (
                 item,
@@ -252,6 +266,30 @@ class PackageGenerationAdapter:
         self._service_inflight = 0
         self._services_drained = asyncio.Event()
         self._services_drained.set()
+        self.failure: str | None = None
+        self._owned_work: PackageOwnedWorkSupervisor | None = None
+        if self._owned_work_declarations:
+            if owned_work_authority is None:
+                raise ForestError(
+                    "PACKAGE_OWNED_WORK_AUTHORITY_UNAVAILABLE",
+                    "Package owned work authority is unavailable",
+                    503,
+                )
+            self._owned_work = PackageOwnedWorkSupervisor(
+                bot_id=self.bot_id,
+                component_id=self.component_id,
+                declarations=self._owned_work_declarations,
+                schemas=self._owned_work_schemas,
+                authority=owned_work_authority,
+                operation_ledger=self._service_operation_ledger,
+                binding=self._owned_work_binding,
+                generation_member_verifier=self._generation_member_verifier,
+                active=lambda: self.state is PackageGenerationState.ACTIVE,
+                failed=self._owned_work_failed,
+            )
+            self.freeze_owned_admission = self._owned_work.freeze_admission
+            self.drain_owned_work = self._owned_work.drain
+            self.open_owned_admission = self._owned_work.open_admission
         self._granted_capabilities = frozenset(
             item.capability
             for item in self.grants.entries
@@ -319,6 +357,15 @@ class PackageGenerationAdapter:
                     "function": item["function"],
                 }
                 for item in self.component.get("unit_of_work_participants", ())
+            ],
+            "owned_work_handlers": [
+                {
+                    "name": item["name"],
+                    "version": _major(item["contract"]),
+                    "handler": item["handler"],
+                    "max_concurrency": item["max_concurrency"],
+                }
+                for item in self._owned_work_declarations
             ],
         }
         self.state_schema = self.component["state_schema"]
@@ -484,6 +531,27 @@ class PackageGenerationAdapter:
             if self._service_inflight == 0:
                 self._services_drained.set()
 
+    def _owned_work_binding(self):
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        worker = self._worker
+        if identity is None or prepared is None or worker is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_BOUND",
+                "Package owned work has no bound Generation and Worker",
+                409,
+            )
+        return identity, prepared, worker
+
+    def _owned_work_failed(self, code: str) -> None:
+        self.failure = code
+
+    def notify(self) -> None:
+        if self._owned_work is not None:
+            self._owned_work.notify()
+
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        return self._owned_work.owned_tasks() if self._owned_work is not None else ()
     def _check_route(self, route: FrozenServiceRoute) -> None:
         identity = self.generation_identity
         if self.state is not PackageGenerationState.ACTIVE or self._worker is None:
@@ -1351,8 +1419,12 @@ class PackageGenerationAdapter:
                 started_drivers.append(driver)
                 await driver.start()
                 self._effect_drivers[service_id] = driver
+            if self._owned_work is not None:
+                self._owned_work.start()
         except BaseException as start_error:
             self.state = PackageGenerationState.FAILED
+            if self._owned_work is not None:
+                await self._owned_work.close()
             cleanup_results = await asyncio.gather(
                 *(driver.close() for driver in reversed(started_drivers)),
                 worker.terminate(),
@@ -1432,6 +1504,8 @@ class PackageGenerationAdapter:
                 "An active Package Generation must quiesce before cleanup",
                 409,
             )
+        if self._owned_work is not None:
+            await self._owned_work.close()
         worker = self._worker
         close_operations = [driver.close() for driver in self._effect_drivers.values()]
         if worker is not None:
@@ -1466,6 +1540,7 @@ def package_runtime_descriptor(
     domain_queries: PackageDomainQueries | None = None,
     domain_commands: PackageDomainCommands | None = None,
     unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
+    owned_work_authority: PackageOwnedWorkAuthority | None = None,
     service_operation_ledger: PackageServiceOperationLedger,
     configuration_validator: Callable[[object], Any] | None = None,
     effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -1541,6 +1616,12 @@ def package_runtime_descriptor(
         raise ForestError(
             "PACKAGE_UOW_AUTHORITY_UNAVAILABLE",
             "Package declares UnitOfWork participants without an installed authority",
+            503,
+        )
+    if component.get("owned_work_handlers") and owned_work_authority is None:
+        raise ForestError(
+            "PACKAGE_OWNED_WORK_AUTHORITY_UNAVAILABLE",
+            "Package declares owned work without an installed authority",
             503,
         )
 
@@ -1633,6 +1714,7 @@ def package_runtime_descriptor(
             domain_queries=domain_queries,
             domain_commands=domain_commands,
             unit_of_work_authority=unit_of_work_authority,
+            owned_work_authority=owned_work_authority,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,
             effect_driver_factories=effect_driver_factories,
@@ -1677,4 +1759,10 @@ def package_runtime_descriptor(
         event_subscriptions=event_subscriptions,
         component_jobs=component_jobs,
         job_types=job_types,
+        wakes_on_work=bool(component.get("owned_work_handlers")),
+        owned_work_lifecycle=(
+            OwnedWorkLifecycle.FREEZE_DRAIN
+            if component.get("owned_work_handlers")
+            else OwnedWorkLifecycle.NONE
+        ),
     )

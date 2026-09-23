@@ -25,6 +25,8 @@
 
 包级领域状态现已具备独立 Query/Command ABI。manifest 冻结端口名、契约、SQL 函数和输入/输出 schema；Worker 只能分别通过 `ctx.queries` 与 `ctx.commands` 请求已声明且已授权的端口。宿主的 PostgreSQL Domain Authority Driver 不导入包 Python、不识别业务 DTO 或表名，只校验准确 Generation/member、storage identity、函数签名/波动性/`SECURITY INVOKER`/固定 `search_path`，然后调用包 namespace 内的二参数 JSONB 函数。Query 在 repeatable-read 只读快照中执行；Command 使用稳定 operation ID 并由包私有表封闭幂等语义。只有 official 包可启用函数型 storage baseline。`forest.counter` 已完成该路径切换，并证明领域状态只写入包 namespace，内核通用 `state_heads` 保持为空；这一路径是后续有状态 builtin 迁移的基础机制，不是总 Repository Gateway。
 
+包级私有持久工作现已具备独立 `owned_work_handlers` ABI。manifest 冻结 claim/settle SQL 函数、包内 `@job` handler、业务输入/输出 schema、并发、轮询、三段 deadline 与覆盖执行/结算的 lease；Package Adapter 自动声明 `FREEZE_DRAIN` 并运行与业务无关的通用泵。claim 在同一事务复核 active Generation，返回固定 claim envelope；Worker 调用以 work 的稳定 operation 进入持久服务调用账本，settle 按 claim token 和 member fence 在包 namespace 内幂等收敛。Adapter 不读取队列表、不决定重试或终态。`forest.counter` 参考包已在真实 PostgreSQL 中完成后台入队、领取、隔离 Worker `@job` 执行、嵌套 domain Command、账本落地、包内结算和 Registry 关闭排空；这条机制尚未等同于 Media/Memory 已完成迁移，它们仍需把现有表和循环改写为各自包声明后删除宿主实现。
+
 包级 Event subscription 与 ComponentJob 使用不同的封闭 contribution、内容寻址 handler service 和 Worker 投递协议；PackageAdapter 只持有冻结的 `routing.event.publish/1`、`routing.component-job.schedule/1` 服务句柄，不持有 routing Repository。双向运行关系不进入启动 DAG：发布/调度组件单向依赖 `routing.graph` authority，dispatcher 到 handler 依靠持久 claim 和冻结 Contract Route。Registry 已实现描述符声明的两阶段 owned-work 排空；局部 Generation 激活不开放领取，整张图 ACTIVE 且 Router 开放后才由 Registry 统一打开 owned-work gate。失败恢复先恢复模块和本地门，最后开放持久 graph admission，FAILED/STOPPED 的半恢复图不能重新接纳工作。Event/ComponentJob 没有映射到通用 `job.scheduler`。
 
 `routing.graph` 的干净存储 baseline 已定义不可变 Route publication、发布/订阅/ComponentJob 路由、Event 与逐订阅 delivery/attempt、ComponentJob 与逐次 attempt；数据库 trigger 封闭 delivery、Job 和 attempt 的合法转移。claim 现在同时保存 routing 所有者 Generation 与目标插件 Generation，结算必须匹配 token、attempt、routing Generation、目标 Generation 和未过期 lease。过期且无法证明外部结果的 attempt 只进入 `UNKNOWN`，不自动重复副作用。目录发布、Event 和 ComponentJob 分属三个 Command authority，共享层只有不可变 Route/Claim 值。
@@ -33,7 +35,7 @@
 
 该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
 
-其余 Agent、Memory、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。包级 domain Query/Command 已落地；Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 仍缺少声明式 UnitOfWork participant，Adapter transport 与 Media 仍需按现有包级 `effect_service` 模式接入 Secret lease 和受限 Effect executor。它们必须经过同一 Package Generation 路径迁移并物理删除旧宿主实现，不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
+其余 Agent、Memory、Adapter transport、Shell、Job、Delivery 等组件仍由宿主 `bootstrap_clean_*` 构造，因此整张生产图仍不是可安装插件图，当前实现仍禁止发布。包级 domain Query/Command、UnitOfWork participant 与私有持久工作 ABI 已落地；Agent、Memory、Conversation、Shell、Job、Delivery 与 routing 仍需把各自实际端口、SQL 和 Worker handler 声明进包并删除宿主实现，不能把公共 ABI 已存在误报为模块已经迁移。Adapter transport 与 Media 还需按现有包级 `effect_service` 模式接入 Secret lease 和受限 Effect executor。迁移不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。
 
 ## 已落地但尚未接入插件 Worker 的运行时切片
 

@@ -106,6 +106,18 @@ class PackageUnitOfWorkAuthority(Protocol):
     ) -> Any: ...
 
 
+class PackageOwnedWorkAuthority(Protocol):
+    async def invoke_owned_work(
+        self,
+        phase: str,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        timeout_seconds: float,
+    ) -> Any: ...
+
+
 class PackageServiceOperationLedger(Protocol):
     async def begin(
         self,

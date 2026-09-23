@@ -876,6 +876,49 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
                 timeout_seconds=10,
             )
         assert committed == {"value": 8, "revision": 4}
+        deferred_endpoint = instance.runtime_service_handlers()[("counter.defer", 1)]
+        deferred_route = FrozenServiceRoute(
+            service_id="counter.defer",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="forest.counter",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=True,
+        )
+        deferred = await deferred_endpoint.invoke_routed(
+            deferred_route,
+            RuntimeServiceInvocation(
+                "counter:defer:1", 10, "test.counter", "source:counter:defer"
+            ),
+            ({"work_id": "work-1", "value": 10, "expected_revision": 4},),
+            {},
+        )
+        assert deferred == {"work_id": "work-1", "state": "PENDING"}
+        work_row = None
+        for _attempt in range(100):
+            async with store.pool.connection() as conn:
+                work_row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT state,attempt_count,result_payload "
+                            "FROM {}.counter_work WHERE work_id=%s"
+                        ).format(
+                            sql.Identifier(counter.descriptor.storage.spec.namespace)
+                        ),
+                        ("work-1",),
+                    )
+                ).fetchone()
+            if work_row is not None and work_row["state"] == "SUCCEEDED":
+                break
+            await asyncio.sleep(0.05)
+        assert dict(work_row) == {
+            "state": "SUCCEEDED",
+            "attempt_count": 1,
+            "result_payload": {"value": 10, "revision": 5},
+        }
         async with store.pool.connection() as conn:
             domain_row = await (
                 await conn.execute(
@@ -893,7 +936,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
                     (store.bot_id, "forest.counter"),
                 )
             ).fetchone()
-        assert dict(domain_row) == {"value": 8, "revision": 4}
+        assert dict(domain_row) == {"value": 10, "revision": 5}
         assert generic_state["count"] == 0
     finally:
         assert await registry.close() == []

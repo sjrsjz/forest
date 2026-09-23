@@ -1,4 +1,4 @@
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 class Counter(Plugin):
@@ -17,3 +17,20 @@ class Counter(Plugin):
             operation_id=ctx.operations.stable("increment:v1"),
         )
         return {"value": value, "revision": receipt["revision"], "label": self.label}
+
+    @service("counter.defer")
+    async def defer(self, payload, ctx):
+        return await ctx.commands.call(
+            "counter.enqueue",
+            payload,
+            operation_id=ctx.operations.stable("enqueue:v1"),
+        )
+
+    @job("counter.apply")
+    async def apply(self, task, ctx):
+        payload = task["payload"]
+        return await ctx.commands.call(
+            "counter.set",
+            payload,
+            operation_id=ctx.operations.stable("apply:v1"),
+        )

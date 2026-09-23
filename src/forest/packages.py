@@ -291,6 +291,61 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "owned_work_handlers": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "name",
+                                "contract",
+                                "handler",
+                                "claim_function",
+                                "settle_function",
+                                "input_schema",
+                                "output_schema",
+                                "max_concurrency",
+                                "poll_interval_ms",
+                                "claim_timeout_s",
+                                "handler_timeout_s",
+                                "settle_timeout_s",
+                                "lease_seconds",
+                            ],
+                            "properties": {
+                                **{
+                                    key: {"type": "string"}
+                                    for key in (
+                                        "name",
+                                        "contract",
+                                        "handler",
+                                        "claim_function",
+                                        "settle_function",
+                                        "input_schema",
+                                        "output_schema",
+                                    )
+                                },
+                                "max_concurrency": {
+                                    "type": "integer", "minimum": 1, "maximum": 32
+                                },
+                                "poll_interval_ms": {
+                                    "type": "integer", "minimum": 50, "maximum": 60000
+                                },
+                                "claim_timeout_s": {
+                                    "type": "integer", "minimum": 1, "maximum": 60
+                                },
+                                "handler_timeout_s": {
+                                    "type": "integer", "minimum": 1, "maximum": 86400
+                                },
+                                "settle_timeout_s": {
+                                    "type": "integer", "minimum": 1, "maximum": 60
+                                },
+                                "lease_seconds": {
+                                    "type": "integer", "minimum": 3, "maximum": 86400
+                                },
+                            },
+                        },
+                    },
                     "management_ui": {
                         "type": "object",
                         "additionalProperties": False,
@@ -819,6 +874,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     domain_commands = component.get("domain_commands", [])
     unit_of_work_participants = component.get("unit_of_work_participants", [])
     job_types = component.get("job_types", [])
+    owned_work_handlers = component.get("owned_work_handlers", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
     if component.get("message_handler_takeover", "none") == "compatible" and not message_handlers:
@@ -832,6 +888,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         not services
         and not effect_services
         and not job_types
+        and not owned_work_handlers
         and not commands
         and not message_handlers
         and not subscriptions
@@ -849,6 +906,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         *domain_commands,
         *unit_of_work_participants,
         *job_types,
+        *owned_work_handlers,
     ):
         name = service.get("name", "")
         if not IDENTIFIER.fullmatch(name) or name in names:
@@ -873,13 +931,31 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_DOMAIN_AUTHORITY",
                 "Domain authority functions must be portable unqualified SQL identifiers",
             )
+        if service in owned_work_handlers and (
+            not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
+            or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))
+            or not IDENTIFIER.fullmatch(service.get("handler", ""))
+            or service["lease_seconds"]
+            <= service["handler_timeout_s"] + service["settle_timeout_s"]
+        ):
+            _fail(
+                "INVALID_OWNED_WORK",
+                "Owned work requires valid functions, handler, and a lease beyond execution",
+            )
     if (
-        domain_queries or domain_commands or unit_of_work_participants
+        domain_queries
+        or domain_commands
+        or unit_of_work_participants
+        or owned_work_handlers
     ) and component.get("storage") is None:
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority ports require package storage")
     functions = [
         item["function"]
         for item in (*domain_queries, *domain_commands, *unit_of_work_participants)
+    ] + [
+        function
+        for item in owned_work_handlers
+        for function in (item["claim_function"], item["settle_function"])
     ]
     if len(functions) != len(set(functions)):
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
@@ -896,6 +972,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
         ):
             _fail("INVALID_JOB_TYPES", "Job type identities must be valid and unique")
         contributed_job_types.add(job_type)
+        contributed_job_handlers.add(handler)
+    for definition in owned_work_handlers:
+        handler = definition["handler"]
+        if handler in contributed_job_handlers:
+            _fail("INVALID_OWNED_WORK", "Owned work handlers must be package-unique")
         contributed_job_handlers.add(handler)
     published_topics = set()
     for publication in component.get("publishes", []):
@@ -920,7 +1001,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
     job_ids = set()
     for definition in component.get("jobs", []):
         handler_id = definition.get("handler_id", "")
-        if not IDENTIFIER.fullmatch(handler_id) or handler_id in job_ids:
+        if (
+            not IDENTIFIER.fullmatch(handler_id)
+            or handler_id in job_ids
+            or handler_id in contributed_job_handlers
+        ):
             _fail("INVALID_JOBS", "Durable job handler identities must be valid and unique")
         job_ids.add(handler_id)
         _schema(files, definition.get("input_schema"))

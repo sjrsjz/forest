@@ -201,8 +201,13 @@ class PythonWorker:
     def _expected_jobs(self) -> list[str]:
         jobs = self.package.manifest["components"][0].get("jobs", [])
         job_types = self.package.manifest["components"][0].get("job_types", [])
+        owned_work = self.package.manifest["components"][0].get(
+            "owned_work_handlers", []
+        )
         identities = [item["handler_id"] for item in jobs] + [
             item["handler"] for item in job_types
+        ] + [
+            item["handler"] for item in owned_work
         ]
         if len(identities) != len(set(identities)):
             raise ForestError(

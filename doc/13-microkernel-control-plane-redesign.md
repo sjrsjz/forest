@@ -140,6 +140,10 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 `unit_of_work_participants` 使用与 domain Command 相同的固定 JSONB 函数 ABI，但不是 Worker capability，也不经 `ctx.commands`。每项声明冻结 participant 名、契约、函数与输入/输出 schema。RuntimeGraph 绑定后，Package Adapter 只能向内核 participant resolver 提供一个不透明句柄；句柄仅包含 `component_id`、准确 `generation_id` 和 `invoke_in(conn, ...)`，不暴露 Adapter、Worker、Repository、配置对象或生命周期方法。内核 coordinator 的声明必须预先列出完整参与组件，resolver 不接受运行时新增组件；coordinator 以组件 ID 排序取得锁，在同一 caller-owned PostgreSQL transaction 中逐项传入稳定 operation、因果根和 plan 子载荷。每个句柄在写入前再次校验本 Generation member、完整 storage identity、函数 ABI 和输入 schema，输出必须通过 `forest.domain-result/1` 与声明 schema；任一 participant 拒绝、超时或异常都会使整个外层事务回滚。participant 不得自行提交、另开连接、调用外部 Effect，coordinator 也不得读取 participant 私有表或根据部分结果补偿另一模块。
 
+包私有持久工作使用 `owned_work_handlers`，不是宿主回调或通用 Scheduler Job。声明冻结唯一 work 名、claim/settle JSONB 函数、包内 `@job` handler、业务输入/输出 schema、`max_concurrency`、`poll_interval_ms`、claim/handler/settle deadline 与 lease；lease 必须覆盖 handler 和 settle 的最大时间。claim 函数接收由宿主生成的唯一 claim token，只能在 active Generation fence 的事务中从本包 namespace 领取一项，并返回固定 `forest.owned-work-claim/1` envelope，其中包含 work ID、token、attempt、稳定 operation、因果根和业务 payload。Package Adapter 以该稳定 operation 进入持久服务调用账本后投递准确 Worker handler；Worker 重放只会重取原调用结果或以相同 operation 重放其受管 Effect。settle 函数接收成功结果或类型化失败，必须在 member fence 下按 token 幂等推进本包状态；包自行决定重试时间和终态，Adapter 不按错误字符串修改队列表。
+
+`owned_work_handlers` 使 Package Adapter 自动声明 `FREEZE_DRAIN`：候选 start 只创建等待中的通用泵，整张 RuntimeGraph 发布并统一开门后才允许 claim。冻结先同步关闭本地 gate，而持久 graph admission 已在此前关闭，因此越过本地检查的竞争 claim 仍会被数据库 active fence 拒绝；drain 等待已经计入的 claim、Worker 调用、嵌套 Effect、调用账本终态和包 settle 全部结束。崩溃时未 settle 项只能由包 lease 过期规则重新出现；新的 Generation 使用同一稳定 work operation 查询原调用账本，不能凭超时假定旧 handler 未执行。
+
 因此迁移顺序由缺失机制决定：纯计算/策略服务直接进入 `python-worker`；有领域状态的模块先补齐 package domain authority/participant 协议；有外部 I/O 的模块再补齐 Secret lease 与类型化 Effect executor 协议。不得为了提前移动目录而把宿主回调、客户端或 Repository 塞进 Adapter。
 
 ### 3.3 完整热重载与回滚

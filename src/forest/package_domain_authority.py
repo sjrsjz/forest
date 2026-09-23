@@ -107,6 +107,33 @@ class PostgresPackageDomainAuthority:
                 "DOMAIN_AUTHORITY_FAILED", "Domain authority transaction failed", 503
             ) from exc
 
+    async def invoke_owned_work(
+        self,
+        phase: str,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        timeout_seconds: float,
+    ) -> Any:
+        if phase not in {"claim", "settle"}:
+            raise ForestError(
+                "OWNED_WORK_PHASE_INVALID", "Owned work phase is invalid", 422
+            )
+        function = declaration.get(f"{phase}_function")
+        port = {
+            "name": f"{declaration.get('name', '')}.{phase}",
+            "function": function,
+        }
+        return await self._invoke(
+            f"owned_{phase}",
+            scope,
+            port,
+            payload,
+            parent_call_id=None,
+            timeout_seconds=timeout_seconds,
+        )
+
     async def _invoke(
         self,
         kind: str,
@@ -128,6 +155,13 @@ class PostgresPackageDomainAuthority:
                             conn,
                             component_id=self.component_id,
                             generation_id=scope.generation_id,
+                        )
+                    elif kind == "owned_claim":
+                        await self.runtime.verify_active_generation_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                            admission_lane="DATA",
                         )
                     else:
                         await self.runtime.verify_generation_member_in(
@@ -175,7 +209,14 @@ class PostgresPackageDomainAuthority:
             or not isinstance(name, str)
             or not isinstance(function, str)
             or _FUNCTION.fullmatch(function) is None
-            or kind not in {"query", "command", "participant"}
+            or kind
+            not in {
+                "query",
+                "command",
+                "participant",
+                "owned_claim",
+                "owned_settle",
+            }
         ):
             raise ForestError(
                 "DOMAIN_AUTHORITY_BINDING_INVALID",

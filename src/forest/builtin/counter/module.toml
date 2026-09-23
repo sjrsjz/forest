@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.counter"
-version = "0.4.0"
+version = "0.5.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "counter:Counter"
@@ -17,13 +17,13 @@ entrypoint = "ui/index.html"
 protocol = "forest.management-ui/1"
 
 [components.capabilities]
-requests = ["domain.query:counter.current", "domain.command:counter.set"]
+requests = ["domain.query:counter.current", "domain.command:counter.set", "domain.command:counter.enqueue"]
 
 [components.storage]
 schema_id = "forest.counter"
 schema_version = "1.0.0"
 baseline = "schema/counter.sql"
-baseline_sha256 = "44d5b2a14724550bd6b31927f930d2c56ec95afc163dd0ae2e9e0bbd1ce14ac0"
+baseline_sha256 = "00859298279232cb5a772250ab90b2e420e0c894ff2889b381cf3ec4dd16dba0"
 scope = "bot"
 repository_contract = "forest.counter.repository/1"
 execution_profile = "official"
@@ -42,6 +42,13 @@ function = "counter_set"
 input_schema = "schemas/domain-set-input.json"
 output_schema = "schemas/domain-set-output.json"
 
+[[components.domain_commands]]
+name = "counter.enqueue"
+contract = "1.0"
+function = "counter_enqueue"
+input_schema = "schemas/defer-input.json"
+output_schema = "schemas/defer-output.json"
+
 [[components.unit_of_work_participants]]
 name = "counter.set-in-transaction"
 contract = "1.0"
@@ -49,8 +56,29 @@ function = "counter_set_in_transaction"
 input_schema = "schemas/domain-set-input.json"
 output_schema = "schemas/domain-set-output.json"
 
+[[components.owned_work_handlers]]
+name = "counter.deferred-apply"
+contract = "1.0"
+handler = "counter.apply"
+claim_function = "counter_claim_work"
+settle_function = "counter_settle_work"
+input_schema = "schemas/domain-set-input.json"
+output_schema = "schemas/domain-set-output.json"
+max_concurrency = 1
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 10
+settle_timeout_s = 5
+lease_seconds = 20
+
 [[components.provides]]
 name = "counter.increment"
 contract = "1.0"
 input_schema = "schemas/input.json"
 output_schema = "schemas/output.json"
+
+[[components.provides]]
+name = "counter.defer"
+contract = "1.0"
+input_schema = "schemas/defer-input.json"
+output_schema = "schemas/defer-output.json"
