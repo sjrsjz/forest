@@ -209,13 +209,12 @@ MANIFEST_SCHEMA = {
                             "additionalProperties": False,
                             "required": [
                                 "kind",
-                                "cancellation_query",
                                 "max_execution_timeout_s",
                                 "synchronization_command",
                                 "cleanup_command",
                             ],
                             "properties": {
-                                "kind": {"const": "job-types"},
+                                "kind": {"enum": ["job-types", "shell-commands"]},
                                 "cancellation_query": {"type": "string"},
                                 "synchronization_command": {"type": "string"},
                                 "cleanup_command": {"type": "string"},
@@ -1294,16 +1293,23 @@ def _manifest(files: dict[str, bytes]) -> dict:
         kind = declaration.get("kind")
         if (
             kind in directory_kinds
-            or kind != "job-types"
-            or declaration.get("cancellation_query") not in query_ports
+            or kind not in {"job-types", "shell-commands"}
             or declaration.get("synchronization_command") not in command_ports
             or declaration.get("cleanup_command") not in command_ports
             or declaration.get("cleanup_command")
             == declaration.get("synchronization_command")
+            or (
+                kind == "job-types"
+                and declaration.get("cancellation_query") not in query_ports
+            )
+            or (
+                kind == "shell-commands"
+                and "cancellation_query" in declaration
+            )
         ):
             _fail(
                 "INVALID_CONTRIBUTION_DIRECTORY",
-                "Job directory consumption requires distinct synchronization, cleanup, and cancellation ports",
+                "Contribution directory lifecycle and query ports are invalid",
             )
         directory_kinds.add(kind)
     contributed_job_types = set()

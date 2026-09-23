@@ -2215,7 +2215,11 @@ def package_runtime_descriptor(
             else None
         )
         contribution_directories = {
-            declaration["kind"]: contracts.job_types()
+            declaration["kind"]: (
+                contracts.job_types()
+                if declaration["kind"] == "job-types"
+                else contracts.shell_commands()
+            )
             for declaration in component.get("contribution_directories", ())
         }
         participant_components = sorted(

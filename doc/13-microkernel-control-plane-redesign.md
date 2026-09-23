@@ -150,6 +150,10 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 群聊 Shell 贡献也属于包工件。包内 `shell_commands` 必须同时冻结 command/version、参数 schema、权限集合、服务等级、输出策略和准确执行 service；执行 service 必须由同包 Worker 实现。Shell dispatcher 只消费 RuntimeGraph 目录并构造类型化请求，Package Adapter 在跨 Worker 前再次用该命令 schema 校验，Worker 返回的 JSON 只有通过 service 输出 schema 后才投影为 Shell 结果。不得在宿主保留 `builtin_*_shell.py` 业务处理器，也不得让 Web 壳按组件 ID 导入同一套命令逻辑。
 
+`shell.command` 自身也是普通 builtin 包。它的 Worker 拥有保留前缀识别、schema 驱动的参数解析、命令结果解释和 owned-work 执行循环；包私有 Domain/UnitOfWork participant 拥有管理员策略、按 Shell Generation 分区的命令目录、请求、claim、执行和终态。候选代在发布前物化自己的配置策略与 `shell-commands` 目录，启动回滚或退役时只回收该代目录和策略快照；请求及终态作为审计依据保留。新入站绑定准确 Shell Generation，旧代必须先停止接纳并排空已领取请求，不能让新 Worker 解释旧 claim。
+
+Shell 入站不使用不可恢复的进程内 nonce 或隐藏 proof cache。Adapter 通过冻结的 CONTROL service route 调用准确 Shell Generation；Shell 返回含事件、Binding、主体、命令、参数 PayloadRef 和 Shell Generation 的类型化检查结果。`kernel.uow.onebot.ingress` 在同一事务中复核准确 Adapter/Shell participant、平台事件身份、Binding fence 和 Shell PayloadRef，再由 Shell participant 按该代策略与目录接纳或拒绝。命令执行前的 package UnitOfWork 顺序固定为 Adapter transport fence、Kernel Authorization ticket 签发与消费、Shell claim/policy/route 复核；结果提交顺序固定为 Shell 终态、CONTROL Delivery intent 和 Kernel Audit envelope。任一步失败均整体回滚。Kernel coordinator 不读取 Shell 私表、不解析命令，也不持有 Shell Repository。
+
 `job.scheduler` 的包内队列把 Job 输入和结果作为有界 JSONB 私有状态保存，因为这些值只属于 Job 聚合，不是跨模块共享 Payload。候选 Generation 在发布前通过受 PREPARED graph、准确 Generation 和当前 Host lease 约束的 preparation Command，把目录写入按 scheduler Generation 分区的私表；它不会覆盖旧活动代的目录。图发布后 Query 与入队立即读取新代快照，无需等待后台 poll。领取按新目录冻结 owner component、target Generation、service/version 和执行预算；新图不再提供的排队类型显式终结为 `FAILED/JOB_TYPE_RETIRED`，不能永久悬挂。包 Worker 只能通过 `ctx.job_types.execute` 提交包含上述完整身份的请求；Adapter 对冻结事实、动态输入 schema、deadline 和 cancellation Query 全部复核后才调用目标。租约失效只证明调度器失去所有权，不能证明执行器没有产生副作用，因此任务直接进入 `UNKNOWN/JOB_RESULT_UNKNOWN_AFTER_LEASE`，保留冻结目标用于对账，绝不自动改回 `QUEUED`。热替换先关闭 owned-work 领取门，等待已领取调用和结算完成，再停止 Worker；候选图发布失败时旧代恢复原门，成功时旧代直接回收，队列表不迁移、不双写。
 
 写端口若接收 `kernel.payload` 的持久引用，manifest 必须在该端口声明 `payload_refs`：引用所在 JSON Pointer、固定 owner component/kind，以及从同一输入取得 owner ID 的 JSON Pointer。通用 Domain Authority 在调用包 SQL 前于同一事务验证引用的五元身份、正文仍为 ACTIVE、owner 与声明完全一致；SQL 只会看到已经通过内核权威验证的引用。Worker 不能把 effect receipt 中的 PayloadRef 替换为自造对象，包 SQL 也不能跨 namespace 读取 Payload 表。这个栅栏属于通用写端口 ABI，不允许为 Media、Agent 或 Memory 增加专用宿主 Repository 回调。
@@ -248,7 +252,7 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 `routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径必须持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service、runtime graph clock；它用四类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，runtime module 及其依赖边也从持久 head 投影；WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。
 
-组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。ShellGate 的保留管理命令先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
+组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。`shell.command` 对保留管理前缀的检查先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 
 dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。它再沿不可变身份扩展 Kernel call 的 parent/root 树、调用发布的 component event、每个 subscriber delivery、调用创建的 component job、Job/Event 实际生成的后续 call，以及外部 SendIntent/SendPart/transport attempt/resolution。每条扩展记录必须携带类型化 `caused_by={kind,id}`；发送意图必须在创建事务中保存 `cause_kind/cause_id`，禁止用 operation 字符串前缀、正文或时间邻近猜测来源。
 

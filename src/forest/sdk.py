@@ -997,6 +997,70 @@ class JobTypesDirectoryHandle:
         )
 
 
+class ShellCommandsDirectoryHandle:
+    """Read and invoke the RuntimeGraph-frozen Shell command directory."""
+
+    def __init__(
+        self,
+        rpc: Callable[[str, dict], Awaitable[Any]] | None,
+        scope: CallScope | None,
+    ) -> None:
+        self._rpc = rpc
+        self._scope = scope
+
+    async def list(self) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED", "No contribution directory gateway is available", 403
+            )
+        return await self._rpc(
+            scope.call_id,
+            {"kind": "shell-commands", "action": "list"},
+        )
+
+    async def execute(
+        self,
+        *,
+        command_id: str,
+        command_version: int,
+        arguments: dict,
+        request_id: str,
+        principal_ref: str,
+        conversation_ref: str,
+        target_component_id: str,
+        target_generation_id: str,
+        target_service_id: str,
+        target_service_version: int,
+        operation_id: str,
+        timeout: float,
+    ) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED", "No contribution directory gateway is available", 403
+            )
+        return await self._rpc(
+            scope.call_id,
+            {
+                "kind": "shell-commands",
+                "action": "execute",
+                "command_id": command_id,
+                "command_version": command_version,
+                "arguments": arguments,
+                "request_id": request_id,
+                "principal_ref": principal_ref,
+                "conversation_ref": conversation_ref,
+                "target_component_id": target_component_id,
+                "target_generation_id": target_generation_id,
+                "target_service_id": target_service_id,
+                "target_service_version": target_service_version,
+                "operation_id": operation_id,
+                "timeout": timeout,
+            },
+        )
+
+
 class PluginContext:
     def __init__(
         self,
@@ -1043,6 +1107,9 @@ class PluginContext:
         self.events = EventsHandle(event_rpc, scope)
         self.jobs = JobsHandle(job_rpc, scope)
         self.job_types = JobTypesDirectoryHandle(contribution_directory_rpc, scope)
+        self.shell_commands = ShellCommandsDirectoryHandle(
+            contribution_directory_rpc, scope
+        )
 
     def _for_call(self, scope: CallScope) -> PluginContext:
         return PluginContext(
