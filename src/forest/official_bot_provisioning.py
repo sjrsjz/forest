@@ -34,23 +34,33 @@ TRIGGER_POLICY_CONFIGURATION_SCHEMA = json.loads(
     .joinpath("builtin/trigger_policy/schemas/config.json")
     .read_text(encoding="utf-8")
 )
-SHELL_CONFIGURATION_SCHEMA = json.loads(
-    files("forest")
-    .joinpath("builtin/shell_command/schemas/config.json")
-    .read_text(encoding="utf-8")
-)
+SHELL_BOOTSTRAP_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "protocol": {"const": "forest.shell.command/1"},
+        "binding_ref": {"type": "string"},
+        "administrator_principals": {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": True,
+        },
+    },
+    "required": ["protocol", "binding_ref", "administrator_principals"],
+    "additionalProperties": False,
+}
 
 
 def default_shell_configuration() -> dict:
     return {
-        "protocol": "forest.shell.command/2",
+        "protocol": "forest.shell.command/1",
         "binding_ref": "binding/main",
         "administrator_principals": [],
     }
 
 
 def validate_shell_configuration(value: object) -> dict:
-    if not Draft202012Validator(SHELL_CONFIGURATION_SCHEMA).is_valid(value):
+    if not Draft202012Validator(SHELL_BOOTSTRAP_SCHEMA).is_valid(value):
         raise ForestError(
             "SHELL_CONFIGURATION_INVALID", "Shell configuration is invalid", 422
         )
@@ -121,7 +131,7 @@ OFFICIAL_BOOTSTRAP_SCHEMAS = {
     "embedding.multimodal": EMBEDDING_CONFIGURATION_SCHEMA,
     "vector.index": VECTOR_INDEX_CONFIGURATION_SCHEMA,
     "conversation.trigger-policy": TRIGGER_POLICY_CONFIGURATION_SCHEMA,
-    "shell.command": SHELL_CONFIGURATION_SCHEMA,
+    "shell.command": SHELL_BOOTSTRAP_SCHEMA,
     "agent.runtime": AGENT_BOOTSTRAP_SCHEMA,
     "adapter.onebot": ONEBOT_BOOTSTRAP_SCHEMA,
 }

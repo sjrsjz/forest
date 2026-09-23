@@ -675,8 +675,8 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 "group_trigger_mode": "MENTION",
                 "private_enabled": True,
             },
-            "shell.command": {
-                "protocol": "forest.shell.command/2",
+                "shell.command": {
+                    "protocol": "forest.shell.command/1",
                 "binding_ref": "binding/main",
                 "administrator_principals": ["qq:10001"],
             },
