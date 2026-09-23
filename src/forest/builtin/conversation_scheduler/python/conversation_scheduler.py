@@ -31,12 +31,20 @@ class ConversationScheduler(Plugin):
                 "Conversation Context view configuration is invalid",
                 422,
             )
+        self._context_view = view
 
     @job("conversation.silent-drain")
     async def silent_drain(self, task, ctx):
         result = await ctx.uow.call(
             "conversation.commit-silent-input",
-            task["payload"],
+            {
+                "selection": task["payload"],
+                "context_view": self._context_view,
+                "payload": {
+                    "protocol": "forest.payload-json-from-prior/1",
+                    "prior_step_id": "prepare",
+                },
+            },
             operation_id=ctx.operations.stable("commit-silent-input:v1"),
         )
         if result.get("status") != "BATCH" or result.get("kind") != "SILENT_DRAIN":

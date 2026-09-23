@@ -1352,6 +1352,436 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_prepare_context_compaction(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    selected jsonb := envelope#>'{prior,select}';
+    policy jsonb := body->'context_view';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_conversation text := selected->>'conversation_id';
+    high_watermark integer := (policy->>'high_watermark_units')::integer;
+    retain_units integer := (policy->>'retain_units')::integer;
+    policy_revision text := policy->>'policy_revision';
+    lane record;
+    replay record;
+    archive_target bigint;
+    units jsonb;
+    archived_count bigint;
+    first_revision bigint;
+    last_revision bigint;
+    source_set_digest text;
+    published_view_revision bigint;
+    cumulative_count bigint;
+    resulting_count bigint;
+    compaction_id text;
+    archive_value jsonb;
+    commit_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR selected IS NULL OR policy IS NULL
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR high_watermark NOT BETWEEN 2 AND 1000000
+       OR retain_units NOT BETWEEN 1 AND high_watermark-1
+       OR policy_revision IS DISTINCT FROM 'context-view-unit-window-v1' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_COMPACTION_INPUT_INVALID',
+                'message','Context compaction input is invalid','status',422
+            )
+        );
+    END IF;
+    IF selected->>'status' <> 'BATCH' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.payload-json-plan/1','status','SKIP'
+            )
+        );
+    END IF;
+    SELECT * INTO replay
+    FROM __forest_module_schema__.context_compactions
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay IS NOT NULL THEN
+        IF replay.input_digest IS DISTINCT FROM requested_digest
+           OR replay.conversation_id IS DISTINCT FROM requested_conversation THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONTEXT_COMPACTION_OPERATION_CONFLICT',
+                    'message','Context compaction operation differs','status',409
+                )
+            );
+        END IF;
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'unit_id',u.unit_id,
+            'context_revision',u.context_revision,
+            'unit_index',u.unit_index,
+            'payload_digest',u.payload_digest,
+            'author_payload_digest',u.author_payload_digest,
+            'event_id',u.event_id,
+            'input_batch_id',u.input_batch_id
+        ) ORDER BY cu.archived_index),'[]'::jsonb)
+        INTO units
+        FROM __forest_module_schema__.context_compaction_units cu
+        JOIN __forest_module_schema__.context_units u
+          ON u.bot_id=cu.bot_id AND u.conversation_id=cu.conversation_id
+         AND u.unit_id=cu.unit_id
+        WHERE cu.bot_id=requested_bot AND cu.compaction_id=replay.compaction_id;
+        archive_value := jsonb_build_object(
+            'protocol','forest.context-archive-reference/1',
+            'conversation_id',replay.conversation_id,
+            'compaction_id',replay.compaction_id,
+            'published_view_revision',replay.published_view_revision,
+            'policy_revision',replay.policy_revision,
+            'archived_unit_count',replay.archived_unit_count,
+            'cumulative_archived_unit_count',replay.cumulative_archived_unit_count,
+            'source_set_digest',replay.source_set_digest,
+            'coverage',jsonb_build_object(
+                'first_context_revision',replay.first_context_revision,
+                'last_context_revision',replay.last_context_revision
+            ),
+            'authority','conversation.scheduler/context_compaction_units'
+        );
+        commit_value := jsonb_build_object(
+            'operation_id',replay.operation_id,'input_digest',replay.input_digest,
+            'conversation_id',replay.conversation_id,'compaction_id',replay.compaction_id,
+            'base_view_revision',replay.base_view_revision,
+            'published_view_revision',replay.published_view_revision,
+            'source_set_digest',replay.source_set_digest,
+            'policy_revision',replay.policy_revision,
+            'archived_unit_count',replay.archived_unit_count,
+            'resulting_view_unit_count',replay.resulting_view_unit_count,
+            'cumulative_archived_unit_count',replay.cumulative_archived_unit_count,
+            'first_context_revision',replay.first_context_revision,
+            'last_context_revision',replay.last_context_revision,'units',units
+        );
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.payload-json-plan/1','status','WRITE',
+                'payload',jsonb_build_object(
+                    'owner_kind','context.archive','owner_id',replay.compaction_id,
+                    'value',archive_value,'parents','[]'::jsonb,
+                    'sources',jsonb_build_array(jsonb_build_object(
+                        'source_component_id','conversation.scheduler',
+                        'source_kind','context.archive','source_id',replay.compaction_id,
+                        'source_revision',replay.published_view_revision,'part_id','*',
+                        'source_trunk_id',NULL,'observation_conversation_id',replay.conversation_id,
+                        'observation_binding_id',NULL,'author_subject_id',NULL,
+                        'occurred_at',NULL,'propagation_class','bot'
+                    ))
+                ),
+                'commit',commit_value
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+    FOR UPDATE;
+    IF lane IS NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_NOT_FOUND',
+                'message','Conversation lane does not exist','status',404
+            )
+        );
+    END IF;
+    IF lane.context_view_unit_count <= high_watermark THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.payload-json-plan/1','status','SKIP'
+            )
+        );
+    END IF;
+    archive_target := lane.context_view_unit_count-retain_units;
+    WITH active AS (
+        SELECT u.*,
+               row_number() OVER (
+                   ORDER BY u.context_revision DESC,u.unit_index DESC
+               ) AS recent_rank
+        FROM __forest_module_schema__.context_units u
+        WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
+              WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
+                AND cu.unit_id=u.unit_id
+          )
+    ), candidates AS (
+        SELECT a.* FROM active a
+        WHERE a.recent_rank>retain_units
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.conversation_triggers t
+              WHERE t.bot_id=a.bot_id AND t.conversation_id=a.conversation_id
+                AND t.event_id=a.event_id AND t.status IN ('PENDING','CLAIMED')
+          )
+          AND NOT (
+              lane.active_session_ref IS NOT NULL AND (
+                  EXISTS (
+                      SELECT 1 FROM __forest_module_schema__.input_batches b
+                      WHERE b.bot_id=a.bot_id AND b.input_batch_id=a.input_batch_id
+                        AND b.session_ref=lane.active_session_ref
+                  ) OR EXISTS (
+                      SELECT 1 FROM __forest_module_schema__.context_append_operations op
+                      WHERE op.bot_id=a.bot_id AND op.conversation_id=a.conversation_id
+                        AND op.context_revision=a.context_revision
+                        AND op.session_ref=lane.active_session_ref
+                  )
+              )
+          )
+        ORDER BY a.context_revision,a.unit_index
+        LIMIT archive_target
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+               'unit_id',unit_id,'context_revision',context_revision,
+               'unit_index',unit_index,'payload_digest',payload_digest,
+               'author_payload_digest',author_payload_digest,'event_id',event_id,
+               'input_batch_id',input_batch_id
+           ) ORDER BY context_revision,unit_index),'[]'::jsonb),
+           count(*)::bigint,min(context_revision),max(context_revision)
+    INTO units,archived_count,first_revision,last_revision
+    FROM candidates;
+    IF archived_count=0 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.payload-json-plan/1','status','SKIP'
+            )
+        );
+    END IF;
+    source_set_digest := 'sha256:' || encode(
+        sha256(convert_to(units::text,'UTF8')),'hex'
+    );
+    published_view_revision := lane.context_view_revision+1;
+    resulting_count := lane.context_view_unit_count-archived_count;
+    cumulative_count := lane.context_archived_unit_count+archived_count;
+    compaction_id := 'compaction:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_bot,requested_conversation,published_view_revision,
+        source_set_digest,policy_revision
+    )::text,'UTF8')),'hex');
+    archive_value := jsonb_build_object(
+        'protocol','forest.context-archive-reference/1',
+        'conversation_id',requested_conversation,'compaction_id',compaction_id,
+        'published_view_revision',published_view_revision,
+        'policy_revision',policy_revision,'archived_unit_count',archived_count,
+        'cumulative_archived_unit_count',cumulative_count,
+        'source_set_digest',source_set_digest,
+        'coverage',jsonb_build_object(
+            'first_context_revision',first_revision,
+            'last_context_revision',last_revision
+        ),
+        'authority','conversation.scheduler/context_compaction_units'
+    );
+    commit_value := jsonb_build_object(
+        'operation_id',requested_operation,'input_digest',requested_digest,
+        'conversation_id',requested_conversation,'compaction_id',compaction_id,
+        'base_view_revision',lane.context_view_revision,
+        'published_view_revision',published_view_revision,
+        'source_set_digest',source_set_digest,'policy_revision',policy_revision,
+        'archived_unit_count',archived_count,
+        'resulting_view_unit_count',resulting_count,
+        'cumulative_archived_unit_count',cumulative_count,
+        'first_context_revision',first_revision,'last_context_revision',last_revision,
+        'units',units
+    );
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.payload-json-plan/1','status','WRITE',
+            'payload',jsonb_build_object(
+                'owner_kind','context.archive','owner_id',compaction_id,
+                'value',archive_value,'parents','[]'::jsonb,
+                'sources',jsonb_build_array(jsonb_build_object(
+                    'source_component_id','conversation.scheduler',
+                    'source_kind','context.archive','source_id',compaction_id,
+                    'source_revision',published_view_revision,'part_id','*',
+                    'source_trunk_id',NULL,
+                    'observation_conversation_id',requested_conversation,
+                    'observation_binding_id',NULL,'author_subject_id',NULL,
+                    'occurred_at',NULL,'propagation_class','bot'
+                ))
+            ),
+            'commit',commit_value
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION conversation_commit_context_compaction(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    selected jsonb := envelope#>'{prior,select}';
+    plan jsonb := envelope#>'{prior,prepare}';
+    payload_result jsonb := envelope#>'{prior,payload}';
+    commit_value jsonb;
+    payload_ref jsonb;
+    requested_bot text := context->>'bot_id';
+    lane record;
+    existing record;
+    unit_count integer;
+    event_refs jsonb;
+    result_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR selected IS NULL OR plan IS NULL OR payload_result IS NULL
+       OR plan->>'protocol' IS DISTINCT FROM 'forest.payload-json-plan/1'
+       OR payload_result->>'protocol' IS DISTINCT FROM 'forest.payload-json-put/1' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_COMPACTION_COMMIT_INVALID',
+                'message','Context compaction commit is invalid','status',422
+            )
+        );
+    END IF;
+    IF plan->>'status'='SKIP' THEN
+        IF payload_result->>'status' IS DISTINCT FROM 'SKIPPED' THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONTEXT_COMPACTION_COMMIT_INVALID',
+                    'message','Skipped compaction wrote a Payload','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,'value',selected
+        );
+    END IF;
+    commit_value := plan->'commit';
+    payload_ref := payload_result->'payload';
+    IF plan->>'status' IS DISTINCT FROM 'WRITE'
+       OR payload_result->>'status' IS DISTINCT FROM 'WRITTEN'
+       OR commit_value IS NULL OR payload_ref IS NULL
+       OR payload_ref->>'owner_component_id' IS DISTINCT FROM 'conversation.scheduler'
+       OR payload_ref->>'owner_kind' IS DISTINCT FROM 'context.archive'
+       OR payload_ref->>'owner_id' IS DISTINCT FROM commit_value->>'compaction_id'
+       OR payload_ref->>'digest' !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_COMPACTION_COMMIT_INVALID',
+                'message','Context archive Payload differs from its plan','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO existing
+    FROM __forest_module_schema__.context_compactions
+    WHERE bot_id=requested_bot AND operation_id=commit_value->>'operation_id';
+    IF existing IS NULL THEN
+        SELECT * INTO lane
+        FROM __forest_module_schema__.conversation_lanes
+        WHERE bot_id=requested_bot
+          AND conversation_id=commit_value->>'conversation_id'
+        FOR UPDATE;
+        IF lane IS NULL
+           OR lane.context_view_revision IS DISTINCT FROM
+              (commit_value->>'base_view_revision')::bigint
+           OR lane.context_view_unit_count <
+              (commit_value->>'archived_unit_count')::bigint THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONTEXT_COMPACTION_STALE',
+                    'message','Context view changed before compaction commit','status',409
+                )
+            );
+        END IF;
+        SELECT count(*)::integer INTO unit_count
+        FROM jsonb_array_elements(commit_value->'units');
+        IF unit_count<>(commit_value->>'archived_unit_count')::bigint THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONTEXT_COMPACTION_COMMIT_INVALID',
+                    'message','Context compaction membership is incomplete','status',422
+                )
+            );
+        END IF;
+        INSERT INTO __forest_module_schema__.context_compactions(
+            bot_id,conversation_id,compaction_id,operation_id,input_digest,
+            base_view_revision,published_view_revision,source_set_digest,policy_revision,
+            archive_payload_id,archive_payload_digest,archived_unit_count,
+            resulting_view_unit_count,cumulative_archived_unit_count,
+            first_context_revision,last_context_revision
+        ) VALUES (
+            requested_bot,commit_value->>'conversation_id',commit_value->>'compaction_id',
+            commit_value->>'operation_id',commit_value->>'input_digest',
+            (commit_value->>'base_view_revision')::bigint,
+            (commit_value->>'published_view_revision')::bigint,
+            commit_value->>'source_set_digest',commit_value->>'policy_revision',
+            payload_ref->>'payload_id',payload_ref->>'digest',
+            (commit_value->>'archived_unit_count')::bigint,
+            (commit_value->>'resulting_view_unit_count')::bigint,
+            (commit_value->>'cumulative_archived_unit_count')::bigint,
+            (commit_value->>'first_context_revision')::bigint,
+            (commit_value->>'last_context_revision')::bigint
+        );
+        INSERT INTO __forest_module_schema__.context_compaction_units(
+            bot_id,conversation_id,compaction_id,archived_index,unit_id,
+            context_revision,unit_index,payload_digest,author_payload_digest
+        )
+        SELECT requested_bot,commit_value->>'conversation_id',
+               commit_value->>'compaction_id',u.ordinality-1,u.item->>'unit_id',
+               (u.item->>'context_revision')::bigint,
+               (u.item->>'unit_index')::integer,u.item->>'payload_digest',
+               u.item->>'author_payload_digest'
+        FROM jsonb_array_elements(commit_value->'units')
+             WITH ORDINALITY AS u(item,ordinality);
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET context_view_revision=(commit_value->>'published_view_revision')::bigint,
+            context_view_unit_count=(commit_value->>'resulting_view_unit_count')::bigint,
+            context_archived_unit_count=
+                (commit_value->>'cumulative_archived_unit_count')::bigint,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot
+          AND conversation_id=commit_value->>'conversation_id';
+    ELSIF existing.input_digest IS DISTINCT FROM commit_value->>'input_digest'
+       OR existing.compaction_id IS DISTINCT FROM commit_value->>'compaction_id'
+       OR existing.archive_payload_id IS DISTINCT FROM payload_ref->>'payload_id'
+       OR existing.archive_payload_digest IS DISTINCT FROM payload_ref->>'digest' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_COMPACTION_OPERATION_CONFLICT',
+                'message','Context compaction replay differs','status',409
+            )
+        );
+    END IF;
+    SELECT COALESCE(jsonb_agg(item->>'event_id' ORDER BY ordinality)
+                    FILTER (WHERE item->>'event_id' IS NOT NULL),'[]'::jsonb)
+    INTO event_refs
+    FROM jsonb_array_elements(commit_value->'units') WITH ORDINALITY AS u(item,ordinality);
+    result_value := jsonb_set(
+        selected,'{context_view_revision}',
+        to_jsonb((commit_value->>'published_view_revision')::bigint),true
+    ) || jsonb_build_object(
+        'memory_archive',jsonb_build_object(
+            'compaction_ref',commit_value->>'compaction_id',
+            'event_refs',event_refs
+        )
+    );
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,'value',result_value
+    );
+END;
+$$;
+
 CREATE TABLE conversation_silent_drain_settlements (
     claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
     input_payload jsonb NOT NULL,

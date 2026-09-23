@@ -21,6 +21,7 @@ from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
+from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
@@ -297,6 +298,13 @@ class PreparedEffectAuthorityModule(PreparedAuthorityModule):
         return KernelEffectUnitOfWorkParticipant(self)
 
 
+class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
+    """Publish only the generic caller-owned Payload write participant ABI."""
+
+    def unit_of_work_participant(self):
+        return KernelPayloadUnitOfWorkParticipant(self, self.service)
+
+
 @dataclass(frozen=True)
 class CleanKernelModules:
     runtime: KernelRuntimeRepository
@@ -428,6 +436,8 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 (
                     PreparedAuditAuthorityModule
                     if identity == "kernel.audit"
+                    else PreparedPayloadAuthorityModule
+                    if identity == "kernel.payload"
                     else PreparedAuthorizationAuthorityModule
                     if identity == "kernel.authorization"
                     else PreparedEffectAuthorityModule

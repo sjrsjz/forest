@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["selection", "context_view", "payload"],
+  "properties": {
+    "selection": {"$ref": "#/$defs/selection"},
+    "context_view": {"$ref": "#/$defs/context_view"},
+    "payload": {
+      "type": "object",
+      "required": ["protocol", "prior_step_id"],
+      "properties": {
+        "protocol": {"const": "forest.payload-json-from-prior/1"},
+        "prior_step_id": {"const": "prepare"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "required": ["actor", "boundary", "selection_mode", "session_ref", "run_ref", "next_run_ref"],
+      "properties": {
+        "actor": {
+          "type": "object",
+          "required": ["conversation_id", "owner_id", "epoch"],
+          "properties": {
+            "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "epoch": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "boundary": {"enum": ["IDLE", "MODEL_SAFE_POINT", "SESSION_END"]},
+        "selection_mode": {"enum": ["ANY", "SILENT_ONLY"]},
+        "session_ref": {"type": ["string", "null"], "maxLength": 256},
+        "run_ref": {"type": ["string", "null"], "maxLength": 256},
+        "next_run_ref": {"type": ["string", "null"], "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "context_view": {
+      "type": "object",
+      "required": ["high_watermark_units", "retain_units", "policy_revision"],
+      "properties": {
+        "high_watermark_units": {"type": "integer", "minimum": 2, "maximum": 1000000},
+        "retain_units": {"type": "integer", "minimum": 1, "maximum": 999999},
+        "policy_revision": {"const": "context-view-unit-window-v1"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

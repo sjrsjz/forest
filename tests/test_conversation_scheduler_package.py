@@ -50,8 +50,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         initial_configuration={
             "protocol": "forest.conversation.scheduler/2",
             "context_view": {
-                "high_watermark_units": 512,
-                "retain_units": 256,
+                "high_watermark_units": 2,
+                "retain_units": 1,
                 "policy_revision": "context-view-unit-window-v1",
             },
         },
@@ -377,5 +377,126 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "trigger_decision": "NO_TRIGGER",
         }
         assert settlements["count"] == 1
+
+        for index in (2, 3):
+            next_event_id = f"event/onebot/silent-{index}"
+            next_content = await _payload(
+                kernel.payload,
+                owner_kind="onebot.normalized-event",
+                event_id=next_event_id,
+                content=(f'{{"segments":[{{"type":"text","text":"ordinary-{index}"}}]}}').encode(),
+            )
+            next_author = await _payload(
+                kernel.payload,
+                owner_kind="onebot.author-snapshot",
+                event_id=next_event_id,
+                content=b'{"subject_ref":"qq:43","display_name":"ordinary"}',
+            )
+            next_admission = copy.deepcopy(silent_admission)
+            next_admission["input"].update(
+                {
+                    "event_id": next_event_id,
+                    "source_event_ref": f"onebot-message/silent-{index}",
+                    "platform_message_ref": f"message/silent-{index}",
+                    "content": next_content,
+                    "author": next_author,
+                }
+            )
+            async with store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn,
+                    "conversation.admit-message",
+                    next_admission,
+                    operation_id=f"uow-step:conversation-admit/silent-{index}",
+                    causal_root_kind="onebot.ingress",
+                    causal_root_id=next_event_id,
+                    parent_call_id=f"call:ingress/silent-{index}",
+                    timeout_seconds=10,
+                )
+            next_classification = copy.deepcopy(silent_classification)
+            next_classification["input"].update({"event_id": next_event_id})
+            async with store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn,
+                    "conversation.complete-classification",
+                    next_classification,
+                    operation_id=f"uow-step:conversation-classify/silent-{index}",
+                    causal_root_kind="onebot.ingress",
+                    causal_root_id=next_event_id,
+                    parent_call_id=f"call:ingress/silent-{index}",
+                    timeout_seconds=10,
+                )
+
+        compacted = None
+        for _attempt in range(100):
+            async with store.pool.connection() as conn:
+                compacted = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT context_applied_seq,context_view_revision,"
+                            "context_view_unit_count,context_archived_unit_count,actor_owner_id "
+                            "FROM {}.conversation_lanes WHERE bot_id=%s "
+                            "AND conversation_id=%s"
+                        ).format(sql.Identifier(namespace)),
+                        (store.bot_id, "conversation/onebot/group/silent"),
+                    )
+                ).fetchone()
+            if (
+                compacted["context_applied_seq"] == 3
+                and compacted["context_view_revision"] == 1
+                and compacted["actor_owner_id"] is None
+            ):
+                break
+            await asyncio.sleep(0.05)
+        assert dict(compacted) == {
+            "context_applied_seq": 3,
+            "context_view_revision": 1,
+            "context_view_unit_count": 1,
+            "context_archived_unit_count": 2,
+            "actor_owner_id": None,
+        }
+        async with store.pool.connection() as conn:
+            archive = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT compaction_id,archive_payload_id,archive_payload_digest,"
+                        "archived_unit_count,resulting_view_unit_count "
+                        "FROM {}.context_compactions WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchone()
+            archived_units = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS count FROM {}.context_compaction_units "
+                        "WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchone()
+            original_authors = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT array_agg(author_subject_ref ORDER BY ingress_seq) AS authors "
+                        "FROM {}.context_units WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchone()
+        assert archive["archived_unit_count"] == 2
+        assert archive["resulting_view_unit_count"] == 1
+        assert archived_units["count"] == 2
+        assert original_authors["authors"] == ["qq:43", "qq:43", "qq:43"]
+        async with store.pool.connection() as conn, conn.transaction():
+            verified = await kernel.payload.verify_in(
+                conn,
+                payload_id=archive["archive_payload_id"],
+                digest=archive["archive_payload_digest"],
+                owner_component_id="conversation.scheduler",
+                owner_kind="context.archive",
+                owner_id=archive["compaction_id"],
+            )
+        assert verified.content_digest == archive["archive_payload_digest"]
     finally:
         assert await registry.close() == []

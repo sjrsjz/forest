@@ -34,7 +34,7 @@ requests = ["uow.execute:conversation.commit-silent-input"]
 schema_id = "forest.conversation.scheduler"
 schema_version = "2.0.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "77e6ac7049913e83693d290e389494fd231fc8cf67d0837aa3bc31260a62ab6f"
+baseline_sha256 = "e2db7e5a8557d08ca43519793f7d5e0e0d7816a407ee19ab0759c7fe95ddcbbd"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/2"
 execution_profile = "official"
@@ -72,14 +72,31 @@ function = "conversation_select_input"
 input_schema = "schemas/select-input-envelope.json"
 output_schema = "schemas/select-input-output.json"
 
+[[components.unit_of_work_participants]]
+name = "conversation.prepare-context-compaction"
+contract = "1.0"
+function = "conversation_prepare_context_compaction"
+input_schema = "schemas/compact-prepare-envelope.json"
+output_schema = "schemas/compact-prepare-output.json"
+
+[[components.unit_of_work_participants]]
+name = "conversation.commit-context-compaction"
+contract = "1.0"
+function = "conversation_commit_context_compaction"
+input_schema = "schemas/compact-commit-envelope.json"
+output_schema = "schemas/select-input-output.json"
+
 [[components.unit_of_work_plans]]
 name = "conversation.commit-silent-input"
 contract = "1.0"
-input_schema = "schemas/silent-drain-input.json"
+input_schema = "schemas/commit-input-plan.json"
 output_schema = "schemas/select-input-output.json"
 timeout_s = 20
 steps = [
-  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.select-input" }
+  { id = "select", component_id = "conversation.scheduler", participant = "conversation.select-input", input_path = "/selection" },
+  { id = "prepare", component_id = "conversation.scheduler", participant = "conversation.prepare-context-compaction" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
+  { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" }
 ]
 
 [[components.owned_work_handlers]]
