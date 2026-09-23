@@ -173,6 +173,8 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
     assert not client.active
     driver.activate_ingress()
     assert client.active
+    await client.emit(b'{"post_type":"message","message_id":1}')
+    assert frames[1] == frames[0]
 
     transport = driver._bindings["binding/main"]
     payload = {

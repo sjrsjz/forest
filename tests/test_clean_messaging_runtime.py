@@ -50,17 +50,18 @@ from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
 from forest.models import ModelResult
+from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
 from forest.provider_builtin import default_provider_configuration
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
-from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.agent_runtime_authority import (
     AgentInputBatch,
     AgentPayloadRef,
     AgentTriggerInput,
 )
 from forest.storage.authorization_authority import CapabilityGrant
+from forest.storage.ingress_unit_of_work import OneBotPayloadRef
 from forest.storage.payload_authority import PayloadSource
 from forest.vector_index_builtin import (
     default_vector_index_configuration,
@@ -93,6 +94,16 @@ class FakeWebSocketClient:
 
     async def aclose(self):
         self.closed = True
+
+    @property
+    def is_closed(self):
+        return self.closed
+
+    async def freeze_events(self):
+        return None
+
+    def resume_events(self):
+        return None
 
     def owned_tasks(self):
         return ()
@@ -516,17 +527,14 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         clients.append(client)
         return client
 
-    async def resolve_secret(*, secret_ref, expected_digest):
+    async def resolve_secret(secret_ref, _revision):
         assert secret_ref == "secret://onebot/main/1"
-        assert expected_digest == "sha256:" + "a" * 64
-        return {"access_token": "test-access-token"}
+        return "test-access-token"
 
     messaging = await bootstrap_clean_messaging(
         store,
         installer,
         kernel=kernel,
-        secret_resolver=resolve_secret,
-        websocket_client_factory=create_client,
     )
     delivery = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/delivery",
@@ -536,8 +544,8 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         kernel=kernel,
         initial_configuration={"protocol": "forest.delivery/1"},
         resolved_contracts={
-            "adapter.onebot.delivery.prepare": "1.0",
-            "adapter.onebot.delivery.dispatch": "1.0",
+            "adapter.onebot.delivery.prepare": "2.0",
+            "adapter.onebot.delivery.dispatch": "2.0",
         },
         startup_components=("adapter.onebot",),
         effect_driver_registry=PackageEffectDriverRegistry(
@@ -576,42 +584,50 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             CapabilityGrant("management.invoke", "bot", store.bot_id, delegable=True),
         ),
     )
-    display = await _payload(
-        kernel.payload,
-        owner_kind="binding.display",
-        owner_id="binding/main",
-        value={"display_name": "Forest"},
-    )
-    await messaging.adapter.register_binding(
-        operation_id="binding/register/main",
-        binding_id="binding/main",
-        self_id="123456789",
-        display=display,
-    )
-    config = await _payload(
-        kernel.payload,
-        owner_kind="binding.config",
-        owner_id="binding/config/1",
-        value={
-            "transport": "FORWARD_WEBSOCKET",
-            "websocket_url": "ws://127.0.0.1:3001/",
+    adapter = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/adapter_onebot",
+        package_catalog,
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={
+            "protocol": "forest.adapter.onebot/2",
+            "bindings": [
+                {
+                    "binding_ref": "binding/main",
+                    "binding_epoch": 1,
+                    "self_id": "123456789",
+                    "credential_ref": "secret://onebot/main/1",
+                    "websocket_url": "ws://127.0.0.1:3001/",
+                    "timeout_seconds": 30,
+                    "event_capacity": 64,
+                    "pending_capacity": 16,
+                    "enabled": True,
+                }
+            ],
         },
-    )
-    await messaging.adapter.plan_configuration(
-        plan_id="binding/config/1",
-        binding_id="binding/main",
-        expected_revision=0,
-        enabled=True,
-        receive_enabled=True,
-        transport="FORWARD_WEBSOCKET",
-        config=config,
-        secret_ref="secret://onebot/main/1",
-        secret_digest="sha256:" + "a" * 64,
-        actor_principal_ref="admin/root",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-    )
-    await messaging.adapter.apply_configuration(
-        operation_id="binding/apply/1", plan_id="binding/config/1"
+        resolved_contracts={
+            "onebot.codec.normalize": "1.0",
+            "onebot.codec.prepare-send": "1.0",
+            "conversation.trigger.classify": "1.0",
+            "shell.ingress.inspect": "1.0",
+            "kernel.uow.onebot.ingress": "1.0",
+        },
+        startup_components=("codec.onebot", "conversation.trigger-policy"),
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "onebot.websocket-v11": onebot_transport_effect_driver_factory(
+                    effects=kernel.effect,
+                    runtime=kernel.runtime,
+                    credential_resolver=resolve_secret,
+                    client_factory=create_client,
+                ),
+                "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
+                    runtime=kernel.runtime,
+                    payloads=kernel.payload,
+                ),
+            }
+        ),
     )
 
     lease = await kernel.runtime.claim_host("host-a", "inc-a")
@@ -635,6 +651,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             trigger_policy.descriptor,
             onebot_codec.descriptor,
             shell.descriptor,
+            adapter.descriptor,
         )
         + messaging.descriptors
         + (delivery.descriptor,),
@@ -790,10 +807,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         input_uow_route = conversation_runtime.input_selection_port._select_input.route
         assert input_uow_route.provider_component_id == "kernel.runtime"
         assert input_uow_route.owned_work is True
-        assert adapter_runtime.ingress_port is not messaging.conversation
-        ingress_route = adapter_runtime.ingress_port._data_admit.route
-        assert ingress_route.provider_component_id == "kernel.runtime"
-        assert ingress_route.owned_work is False
+        transport_driver = adapter_runtime._effect_drivers[
+            "adapter.onebot.transport.send"
+        ]
+        assert transport_driver._ingress is not None
         delivery_route = delivery_runtime._service_routes[
             "adapter.onebot.delivery.dispatch"
         ].route
@@ -857,7 +874,40 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             if delivery_state == "SENT":
                 break
             await asyncio.sleep(0.01)
-        assert len(clients[0].sends) == 1, (delivery_runtime.failure, delivery_state)
+        async with store.pool.connection() as conn:
+            runtime_namespace = next(
+                item.storage.spec.namespace
+                for item in kernel.descriptors
+                if item.component_id == "kernel.runtime"
+            )
+            diagnostics = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT component_id,service_name,status,error_code,outcome_payload_id "
+                        "FROM {}.service_operations "
+                        "WHERE bot_id=%s AND component_id IN "
+                        "('delivery','adapter.onebot') ORDER BY created_at"
+                    ).format(sql.Identifier(runtime_namespace)),
+                    (store.bot_id,),
+                )
+            ).fetchall()
+        for item in diagnostics:
+            if item["outcome_payload_id"] is not None:
+                item["outcome"] = json.loads(
+                    await kernel.payload.read_bytes(item["outcome_payload_id"])
+                )
+        if len(clients[0].sends) != 1:
+            raise AssertionError(
+                json.dumps(
+                    {
+                        "runtime_failure": delivery_runtime.failure,
+                        "owned_work_failure": delivery_runtime._owned_work.failure,
+                        "delivery_state": delivery_state,
+                        "operations": diagnostics,
+                    },
+                    default=str,
+                )
+            )
         prepared_send, timeout = clients[0].sends[0]
         assert timeout == 20.0
         assert prepared_send.action == "send_group_msg"
@@ -1410,10 +1460,10 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             paused_event = await (
                 await conn.execute(
                     sql.SQL(
-                        "SELECT count(*) AS count FROM {}.platform_events "
-                        "WHERE bot_id=%s AND platform_message_ref=%s"
-                    ).format(sql.Identifier(messaging.adapter.namespace)),
-                    (store.bot_id, "91"),
+                            "SELECT count(*) AS count FROM {}.platform_events "
+                            "WHERE platform_message_ref=%s"
+                        ).format(sql.Identifier(adapter.configuration.namespace)),
+                        ("91",),
                 )
             ).fetchone()
         assert paused_event["count"] == 0

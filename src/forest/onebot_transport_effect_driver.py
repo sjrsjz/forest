@@ -9,7 +9,6 @@ import inspect
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from forest.adapters.onebot import OneBotWebSocketClient, PreparedSend
 from forest.errors import ForestError
@@ -98,6 +97,10 @@ class OneBotTransportEffectDriver:
         self._bindings: dict[str, _BindingTransport] = {}
         self._send_admission = False
         self._ingress_admission = False
+        self._frame_lock = asyncio.Lock()
+        self._inflight_frames: dict[str, asyncio.Future] = {}
+        self._frames_drained = asyncio.Event()
+        self._frames_drained.set()
 
     def bind_ingress(self, handler) -> None:
         if self._ingress is not None or not callable(handler):
@@ -197,25 +200,48 @@ class OneBotTransportEffectDriver:
             + body
         ).hexdigest()
         frame_id = "onebot-frame:" + frame_hash
-        await self._ingress(
-            {
-                "protocol": "forest.onebot-frame/2",
-                "frame_id": frame_id,
-                "binding_ref": transport.declaration["binding_ref"],
-                "binding_epoch": transport.declaration["binding_epoch"],
-                "connection_epoch": transport.connection_epoch,
-                "client_incarnation": transport.client_incarnation,
-                "adapter_generation_id": self.identity.generation_id,
-                "graph_id": self.identity.graph_id,
-                "graph_revision": self.identity.graph_revision,
-                "transport_digest": transport.transport_digest,
-                "received_at": datetime.now(UTC).isoformat(),
-                "body_base64": base64.b64encode(body).decode("ascii"),
-            },
-            operation_id=frame_id,
-            causal_root_kind="adapter.platform-frame",
-            causal_root_id=frame_id,
-        )
+        async with self._frame_lock:
+            future = self._inflight_frames.get(frame_id)
+            leader = future is None
+            if leader:
+                future = asyncio.get_running_loop().create_future()
+                self._inflight_frames[frame_id] = future
+                self._frames_drained.clear()
+        assert future is not None
+        if not leader:
+            await asyncio.shield(future)
+            return
+        try:
+            result = await self._ingress(
+                {
+                    "protocol": "forest.onebot-frame/2",
+                    "frame_id": frame_id,
+                    "binding_ref": transport.declaration["binding_ref"],
+                    "binding_epoch": transport.declaration["binding_epoch"],
+                    "connection_epoch": transport.connection_epoch,
+                    "client_incarnation": transport.client_incarnation,
+                    "adapter_generation_id": self.identity.generation_id,
+                    "graph_id": self.identity.graph_id,
+                    "graph_revision": self.identity.graph_revision,
+                    "transport_digest": transport.transport_digest,
+                    "body_base64": base64.b64encode(body).decode("ascii"),
+                },
+                operation_id=frame_id,
+                causal_root_kind="adapter.platform-frame",
+                causal_root_id=frame_id,
+            )
+        except BaseException as exc:
+            future.set_exception(exc)
+            future.exception()
+            raise
+        else:
+            future.set_result(result)
+        finally:
+            async with self._frame_lock:
+                if self._inflight_frames.get(frame_id) is future:
+                    del self._inflight_frames[frame_id]
+                if not self._inflight_frames:
+                    self._frames_drained.set()
 
     async def freeze_ingress(self) -> None:
         self._ingress_admission = False
@@ -226,6 +252,7 @@ class OneBotTransportEffectDriver:
                 if transport.events_activated
             )
         )
+        await self._frames_drained.wait()
 
     async def _verify_effect(self, payload: dict, transport: _BindingTransport) -> None:
         await self.runtime.verify_generation_member(

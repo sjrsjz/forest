@@ -40,6 +40,16 @@ class FakeModelClient:
     async def aclose(self) -> None:
         self.closed = True
 
+    @property
+    def is_closed(self):
+        return self.closed
+
+    async def freeze_events(self):
+        return None
+
+    def resume_events(self):
+        return None
+
 
 class FakeEmbeddingClient(FakeModelClient):
     endpoints = []
@@ -181,6 +191,16 @@ class FakeWebSocketClient:
 
     def activate_events(self, handler) -> None:
         self.handler = handler
+
+    @property
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def freeze_events(self) -> None:
+        return None
+
+    def resume_events(self) -> None:
+        return None
 
     async def aclose(self) -> None:
         self.closed = True
@@ -349,7 +369,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
 
     async def assemble():
         events.append("assemble-candidate")
-        return candidate, object()
+        return candidate
 
     host._assemble_registry = assemble
     result = await host.replace_runtime_graph()
@@ -457,7 +477,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     host.registry = previous
 
     async def assemble():
-        return candidate, object()
+        return candidate
 
     host._assemble_registry = assemble
     with pytest.raises(RuntimeError, match="publication failed"):
@@ -1215,7 +1235,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         assert [
                             item["contribution_id"]
                             for item in adapter_view["management_contributions"]
-                        ] == ["onebot-bindings"]
+                        ] == ["adapter.onebot.workspace"]
                         memory_view = next(
                             item
                             for item in runtime_view.json()["modules"]
@@ -1440,7 +1460,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                                 "expected_desired_revision": current["desired"]["revision"],
                             },
                         )
-                        assert applied.status_code == 200
+                        assert applied.status_code == 200, applied.text
                         assert applied.json()["replaced"] is True
                         agent_configuration = await web.get(
                             "/management/v1/modules/agent.runtime/configuration",
@@ -1503,47 +1523,57 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                             agent_profile["preset_context"]
                         )
                         assert active_agent._profile.max_steps == 24
-                        bindings = await web.post(
-                            "/management/v1/modules/adapter.onebot/queries/onebot.bindings.list",
+                        adapter_configuration = await web.get(
+                            "/management/v1/modules/adapter.onebot/configuration",
                             headers=headers,
-                            json={},
                         )
-                        assert bindings.status_code == 200
-                        binding = bindings.json()["items"][0]
-                        assert binding["binding_id"] == "binding/main"
-                        assert binding["state"] == "ONLINE"
-                        assert binding["config"]["websocket_url"] == (
+                        assert adapter_configuration.status_code == 200
+                        adapter_configuration = adapter_configuration.json()
+                        binding_config = deepcopy(
+                            adapter_configuration["desired"]["value"]
+                        )
+                        assert binding_config["bindings"][0]["binding_ref"] == (
+                            "binding/main"
+                        )
+                        assert binding_config["bindings"][0]["websocket_url"] == (
                             "ws://127.0.0.1:3001/"
                         )
-                        binding_config = deepcopy(binding["config"])
-                        binding_config["websocket_url"] = "ws://127.0.0.1:3002/"
+                        binding_config["bindings"][0]["websocket_url"] = (
+                            "ws://127.0.0.1:3002/"
+                        )
                         binding_plan = await web.post(
-                            "/management/v1/modules/adapter.onebot/actions/onebot.binding.plan",
+                            "/management/v1/modules/adapter.onebot/configuration/plans",
                             headers={**headers, "idempotency-key": "onebot-binding-plan"},
                             json={
-                                "binding_id": binding["binding_id"],
-                                "expected_revision": binding["desired_revision"],
-                                "enabled": binding["desired_enabled"],
-                                "receive_enabled": binding["receive_enabled"],
-                                "transport": binding["transport"],
-                                "config": binding_config,
-                                "secret_ref": binding["secret_ref"],
-                                "secret_digest": binding["secret_digest"],
+                                "expected_desired_revision": adapter_configuration[
+                                    "desired"
+                                ]["revision"],
+                                "value": binding_config,
                             },
                         )
                         assert binding_plan.status_code == 200
                         binding_applied = await web.post(
-                            "/management/v1/modules/adapter.onebot/actions/onebot.binding.apply",
+                            "/management/v1/modules/adapter.onebot/configuration/apply",
                             headers={**headers, "idempotency-key": "onebot-binding-apply"},
-                            json={"plan_id": binding_plan.json()["plan_id"]},
+                            json={
+                                "plan_id": binding_plan.json()["plan_id"],
+                                "expected_desired_revision": adapter_configuration[
+                                    "desired"
+                                ]["revision"],
+                            },
                         )
                         assert binding_applied.status_code == 200
                         assert binding_applied.json()["replaced"] is True
                         assert clients[-1].url == "ws://127.0.0.1:3002/"
                         binding_replay = await web.post(
-                            "/management/v1/modules/adapter.onebot/actions/onebot.binding.apply",
+                            "/management/v1/modules/adapter.onebot/configuration/apply",
                             headers={**headers, "idempotency-key": "onebot-binding-apply"},
-                            json={"plan_id": binding_plan.json()["plan_id"]},
+                            json={
+                                "plan_id": binding_plan.json()["plan_id"],
+                                "expected_desired_revision": adapter_configuration[
+                                    "desired"
+                                ]["revision"],
+                            },
                         )
                         assert binding_replay.status_code == 200
                         assert binding_replay.json()["replaced"] is False

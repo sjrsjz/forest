@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from forest.adapter_onebot_runtime import CleanOneBotRuntime
 from forest.approval_wait_uow import ApprovalWaitUnitOfWork
 from forest.clean_management_contract import CleanModuleConfigurationContract
-from forest.clean_onebot_management import CleanOneBotManagementContract
 from forest.conversation_reply_planner import DurableFinalReplyPlanner
 from forest.conversation_runtime import (
     CONVERSATION_CONFIGURATION_SCHEMA,
@@ -22,18 +20,20 @@ from forest.final_reply_uow import FinalReplyUnitOfWork, RuntimeParticipant
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
-    RuntimeManagementContribution,
     RuntimeModuleDescriptor,
     configuration_management_contribution,
     official_artifact,
     official_storage_bundle,
 )
 from forest.session_handoff_uow import SessionHandoffUnitOfWork
-from forest.storage.adapter_onebot_authority import OneBotAdapterRepository
 from forest.storage.authorization_authority import CapabilityGrant, GrantSetRef
 from forest.storage.conversation_memory_uow import ConversationMemoryInputUnitOfWork
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
-from forest.storage.ingress_unit_of_work import OneBotIngressUnitOfWork
+from forest.storage.ingress_unit_of_work import (
+    OneBotIngressJsonPort,
+    OneBotIngressUnitOfWork,
+    PackageOneBotIngressParticipant,
+)
 from forest.storage.module_configuration import ModuleConfigurationRepository
 
 _DEFINITIONS = {
@@ -50,28 +50,11 @@ _DEFINITIONS = {
         ),
         "capabilities": ("conversation.admit", "conversation.classify"),
     },
-    "adapter.onebot": {
-        "schema_id": "forest.adapter.onebot",
-        "repository_contract": "forest.adapter-onebot.repository/1",
-        "resource": "storage/official/adapter_onebot.sql",
-        "requires": (
-            "kernel.runtime",
-            "kernel.payload",
-            "kernel.authorization",
-            "codec.onebot",
-            "conversation.scheduler",
-            "conversation.trigger-policy",
-            "memory.graph",
-            "media.capture",
-        ),
-        "capabilities": ("adapter.onebot.ingress", "adapter.onebot.send"),
-    },
 }
 
 
 @dataclass(frozen=True)
 class CleanMessagingModules:
-    adapter: OneBotAdapterRepository
     conversation: ConversationSchedulerRepository
     descriptors: tuple[RuntimeModuleDescriptor, ...]
     configurations: dict[str, ModuleConfigurationRepository]
@@ -116,22 +99,6 @@ class _RoutedApprovalWait:
 
     async def defer(self, actor, **values):
         return await self._defer(actor, **values)
-
-
-class _RoutedIngress:
-    def __init__(self, data_admit, control_admit, on_change=None) -> None:
-        self._data_admit = data_admit
-        self._control_admit = control_admit
-        self._on_change = on_change
-
-    async def admit(self, **values):
-        handler = (
-            self._control_admit if values.get("shell_command") is not None else self._data_admit
-        )
-        result = await handler(**values)
-        if self._on_change is not None:
-            self._on_change()
-        return result
 
 
 def _build_final_reply_commit(context):
@@ -209,9 +176,10 @@ def _build_approval_wait(context):
 
 
 def _build_onebot_ingress(context):
+    adapter = PackageOneBotIngressParticipant(context.participant("adapter.onebot"))
     port = OneBotIngressUnitOfWork(
         context.store,
-        adapter=context.participant("adapter.onebot"),
+        adapter=adapter,
         conversation=context.participant("conversation.scheduler"),
         memory=context.participant("memory.graph"),
         media=context.participant("media.capture"),
@@ -219,7 +187,7 @@ def _build_onebot_ingress(context):
         shell=context.participant("shell.command"),
         delivery=context.participant("delivery"),
     )
-    return port.admit
+    return OneBotIngressJsonPort(port).admit
 
 
 async def bootstrap_clean_messaging(
@@ -227,10 +195,6 @@ async def bootstrap_clean_messaging(
     installer,
     *,
     kernel,
-    secret_resolver,
-    http_client_factory=None,
-    websocket_client_factory=None,
-    register_effect_fence: bool = True,
 ) -> CleanMessagingModules:
     """Create module-owned authorities and descriptor factories for one Bot."""
 
@@ -302,18 +266,6 @@ async def bootstrap_clean_messaging(
         payload_verifier=kernel.payload.verify_in,
         payloads=kernel.payload,
     )
-    adapter_repository = OneBotAdapterRepository(
-        store,
-        namespace=bundles["adapter.onebot"].spec.namespace,
-        payload_verifier=kernel.payload.verify_in,
-        generation_verifier=kernel.runtime.verify_active_generation_in,
-        generation_member_verifier=kernel.runtime.verify_generation_member_in,
-    )
-    if register_effect_fence:
-        kernel.effect.register_fence_verifier(
-            "adapter.binding", adapter_repository.verify_effect_fence_in
-        )
-
     def conversation_factory(_runtime, contracts):
         runtime = CleanConversationSchedulerRuntime(
             repository=conversation_repository,
@@ -345,72 +297,15 @@ async def bootstrap_clean_messaging(
         )
         return runtime
 
-    def adapter_factory(_runtime, contracts):
-        values = {
-            "repository": adapter_repository,
-            "module_configuration": configurations["adapter.onebot"],
-            "grants": grants["adapter.onebot"],
-            "payloads": kernel.payload,
-            "secret_resolver": secret_resolver,
-            "ingress_port": _RoutedIngress(
-                contracts.service("kernel.uow.onebot.ingress", 1),
-                contracts.service("kernel.uow.onebot.ingress", 1, admission_lane="CONTROL"),
-                getattr(_runtime, "notify", None),
-            ),
-            "trigger_policy": contracts.service("conversation.trigger.classify", 1),
-            "shell_inspector": contracts.service(
-                "shell.ingress.inspect", 1, admission_lane="CONTROL"
-            ),
-            "normalize_codec": contracts.service(
-                "onebot.codec.normalize", 1, owned_work=True
-            ),
-            "prepare_send_codec": contracts.service(
-                "onebot.codec.prepare-send",
-                1,
-                admission_lane="CONTROL",
-                owned_work=True,
-            ),
-        }
-        if http_client_factory is not None:
-            values["http_client_factory"] = http_client_factory
-        if websocket_client_factory is not None:
-            values["websocket_client_factory"] = websocket_client_factory
-        runtime = CleanOneBotRuntime(**values)
-        runtime.management_contract = CleanOneBotManagementContract(
-            configurations["adapter.onebot"],
-            repository=adapter_repository,
-            payloads=kernel.payload,
-            runtime=runtime,
-        )
-        return runtime
-
     artifact = official_artifact("bot")
-    factories = {
-        "conversation.scheduler": conversation_factory,
-        "adapter.onebot": adapter_factory,
-    }
+    factories = {"conversation.scheduler": conversation_factory}
     descriptors = tuple(
         RuntimeModuleDescriptor(
             component_id,
             definition["requires"],
             factories[component_id],
             artifact,
-            management=(
-                RuntimeManagementContribution(
-                    "onebot-bindings",
-                    "OneBot Binding",
-                    ("bot",),
-                    "/static/modules/clean-onebot.html",
-                    "/static/clean-onebot.js",
-                    style="/static/modules/clean-onebot.css",
-                    group="transport",
-                    order=5,
-                ),
-            )
-            if component_id == "adapter.onebot"
-            else (configuration_management_contribution("Context View"),)
-            if component_id == "conversation.scheduler"
-            else (),
+            management=(configuration_management_contribution("Context View"),),
             storage=bundles[component_id],
             wakes_on_work=component_id == "conversation.scheduler",
             work_notify_order=10 if component_id == "conversation.scheduler" else 100,
@@ -449,9 +344,6 @@ async def bootstrap_clean_messaging(
                         ),
                         _build_approval_wait,
                     ),
-                )
-                if component_id == "conversation.scheduler"
-                else (
                     RuntimeKernelServiceSpec(
                         "kernel.uow.onebot.ingress",
                         1,
@@ -467,14 +359,11 @@ async def bootstrap_clean_messaging(
                         _build_onebot_ingress,
                     ),
                 )
-                if component_id == "adapter.onebot"
-                else ()
             ),
         )
         for component_id, definition in _DEFINITIONS.items()
     )
     return CleanMessagingModules(
-        adapter_repository,
         conversation_repository,
         descriptors,
         configurations,

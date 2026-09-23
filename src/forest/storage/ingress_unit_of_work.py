@@ -9,8 +9,7 @@ from datetime import datetime
 from forest.delivery_participant import create_delivery_intent_in
 from forest.delivery_protocol import DeliveryPart, DeliveryPayloadRef
 from forest.errors import ForestError
-from forest.media_capture_contract import IngressMediaCapture
-from forest.storage.adapter_onebot_authority import OneBotPlatformEvent
+from forest.media_capture_contract import IngressMediaCapture, MediaImageCapture
 from forest.storage.conversation_scheduler import SchedulerPayloadRef
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
@@ -18,6 +17,32 @@ from forest.storage.memory_graph_authority import (
     MemoryPayloadRef,
     MemorySourceIdentity,
 )
+
+
+@dataclass(frozen=True)
+class OneBotPayloadRef:
+    payload_id: str
+    digest: str
+    owner_component_id: str
+    owner_kind: str
+    owner_id: str
+
+
+@dataclass(frozen=True)
+class OneBotPlatformEvent:
+    event_id: str
+    platform_message_ref: str
+    event_kind: str
+    channel_kind: str
+    channel_ref: str
+    conversation_ref: str
+    author_subject_ref: str
+    raw: OneBotPayloadRef
+    normalized: OneBotPayloadRef
+    author: OneBotPayloadRef
+    received_at: datetime
+    classification_deadline: datetime
+    sent_at: datetime
 
 
 @dataclass(frozen=True)
@@ -48,6 +73,219 @@ class IngressClassification:
     classifier_generation_id: str
     rule_revision: str
     reason_code: str
+
+
+class PackageOneBotIngressParticipant:
+    """Project Adapter facts into its package-owned SQL participant."""
+
+    component_id = "adapter.onebot"
+
+    def __init__(self, participant) -> None:
+        self.participant = participant
+        self.generation_id = participant.generation_id
+
+    async def record_platform_event_in(
+        self,
+        conn,
+        *,
+        operation_id,
+        binding_id,
+        expected_binding_epoch,
+        client_incarnation,
+        event,
+        **_values,
+    ):
+        def reference(value):
+            return {
+                "payload_id": value.payload_id,
+                "digest": value.digest,
+                "owner_component_id": value.owner_component_id,
+                "owner_kind": value.owner_kind,
+                "owner_id": value.owner_id,
+            }
+        payload = {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "adapter.onebot",
+                "generation_id": self.generation_id,
+            },
+            "input": {
+                "operation_id": operation_id,
+                "binding_ref": binding_id,
+                "binding_epoch": expected_binding_epoch,
+                "client_incarnation": client_incarnation,
+                "event": {
+                    "event_id": event.event_id,
+                    "platform_message_ref": event.platform_message_ref,
+                    "event_kind": event.event_kind,
+                    "channel_kind": event.channel_kind,
+                    "channel_ref": event.channel_ref,
+                    "conversation_ref": event.conversation_ref,
+                    "author_subject_ref": event.author_subject_ref,
+                    "raw": reference(event.raw),
+                    "normalized": reference(event.normalized),
+                    "author": reference(event.author),
+                    "received_at": event.received_at.isoformat(),
+                    "classification_deadline": event.classification_deadline.isoformat(),
+                    "sent_at": event.sent_at.isoformat(),
+                },
+            },
+            "prior": {},
+        }
+        return await self.participant.invoke_in(
+            conn,
+            "adapter.record-ingress",
+            payload,
+            operation_id=operation_id,
+            causal_root_kind="adapter.platform-event",
+            causal_root_id=event.event_id,
+            parent_call_id=None,
+            timeout_seconds=10,
+        )
+
+
+class OneBotIngressJsonPort:
+    """Decode the package JSON plan at the fixed Kernel coordinator boundary."""
+
+    def __init__(self, unit_of_work: "OneBotIngressUnitOfWork") -> None:
+        self.unit_of_work = unit_of_work
+
+    @staticmethod
+    def _payload(value, cls):
+        if not isinstance(value, dict):
+            raise ForestError("ONEBOT_INGRESS_INPUT_INVALID", "Payload reference is invalid", 422)
+        return cls(
+            value["payload_id"],
+            value["digest"],
+            value["owner_component_id"],
+            value["owner_kind"],
+            value["owner_id"],
+        )
+
+    @classmethod
+    def _memory_capture(cls, value):
+        if value is None:
+            return None
+        identity = MemorySourceIdentity(**value["identity"])
+        return IngressMemoryCapture(
+            identity=identity,
+            source_unit_id=value["source_unit_id"],
+            source_revision=value["source_revision"],
+            unit_kind=value["unit_kind"],
+            author=cls._payload(value["author"], MemoryPayloadRef),
+            parts=tuple(
+                MemoryPart(
+                    item["part_id"],
+                    item["part_index"],
+                    item["part_kind"],
+                    item["media_type"],
+                    cls._payload(item["payload"], MemoryPayloadRef),
+                    item["width"],
+                    item["height"],
+                    item["byte_length"],
+                )
+                for item in value["parts"]
+            ),
+            occurred_at=datetime.fromisoformat(value["occurred_at"]),
+        )
+
+    @classmethod
+    def _media_capture(cls, value):
+        if value is None:
+            return None
+        return IngressMediaCapture(
+            capture_id=value["capture_id"],
+            identity=MemorySourceIdentity(**value["identity"]),
+            source_unit_id=value["source_unit_id"],
+            source_revision=value["source_revision"],
+            unit_kind=value["unit_kind"],
+            author=cls._payload(value["author"], MemoryPayloadRef),
+            text_parts=tuple(
+                MemoryPart(
+                    item["part_id"],
+                    item["part_index"],
+                    item["part_kind"],
+                    item["media_type"],
+                    cls._payload(item["payload"], MemoryPayloadRef),
+                    item["width"],
+                    item["height"],
+                    item["byte_length"],
+                )
+                for item in value["text_parts"]
+            ),
+            image_parts=tuple(MediaImageCapture(**item) for item in value["image_parts"]),
+            occurred_at=datetime.fromisoformat(value["occurred_at"]),
+        )
+
+    async def admit(self, payload: dict):
+        if (
+            not isinstance(payload, dict)
+            or payload.get("protocol") != "forest.onebot-ingress-plan/2"
+        ):
+            raise ForestError(
+                "ONEBOT_INGRESS_INPUT_INVALID", "OneBot ingress plan is invalid", 422
+            )
+        event = payload["event"]
+        platform_event = OneBotPlatformEvent(
+            event_id=event["event_id"],
+            platform_message_ref=event["platform_message_ref"],
+            event_kind=event["event_kind"],
+            channel_kind=event["channel_kind"],
+            channel_ref=event["channel_ref"],
+            conversation_ref=event["conversation_ref"],
+            author_subject_ref=event["author_subject_ref"],
+            raw=self._payload(event["raw"], OneBotPayloadRef),
+            normalized=self._payload(event["normalized"], OneBotPayloadRef),
+            author=self._payload(event["author"], OneBotPayloadRef),
+            received_at=datetime.fromisoformat(event["received_at"]),
+            classification_deadline=datetime.fromisoformat(
+                event["classification_deadline"]
+            ),
+            sent_at=datetime.fromisoformat(event["sent_at"]),
+        )
+        classification = payload["classification"]
+        shell = payload["shell_command"]
+        if shell is not None:
+            if (
+                not isinstance(shell, dict)
+                or shell.get("protocol") != "forest.shell-ingress/2"
+            ):
+                raise ForestError(
+                    "ONEBOT_INGRESS_INPUT_INVALID",
+                    "Shell ingress projection is invalid",
+                    422,
+                )
+            shell_command = ShellIngressCommand(
+                request_id=shell["request_id"],
+                shell_generation_id=shell["shell_generation_id"],
+                command_id=shell["command_id"],
+                command_version=shell["command_version"],
+                arguments=shell["arguments"],
+                rejection=shell["rejection"],
+            )
+        else:
+            shell_command = None
+        await self.unit_of_work.admit(
+            operation_id=payload["operation_id"],
+            binding_id=payload["binding_ref"],
+            expected_binding_epoch=payload["binding_epoch"],
+            connection_epoch=payload["connection_epoch"],
+            client_incarnation=payload["client_incarnation"],
+            adapter_generation_id=payload["adapter_generation_id"],
+            executor_fence_digest=payload["transport_digest"],
+            event=platform_event,
+            memory_capture=self._memory_capture(payload["memory_capture"]),
+            media_capture=self._media_capture(payload["media_capture"]),
+            classification=(
+                None if classification is None else IngressClassification(**classification)
+            ),
+            shell_command=shell_command,
+        )
+        return {
+            "protocol": "forest.onebot-ingress-result/2",
+            "event_id": event["event_id"],
+            "status": "ADMITTED",
+        }
 
 
 class OneBotIngressUnitOfWork:

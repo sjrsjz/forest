@@ -5,8 +5,6 @@ from unittest.mock import ANY, AsyncMock
 
 import pytest
 
-from forest.adapter_onebot_runtime import CleanOneBotRuntime, PreparedAdapterSend
-from forest.adapters.onebot import PreparedSend, SendResult
 from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
@@ -42,51 +40,6 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.abandon",
     ]
     assert snapshot.management_ui() is not None
-
-
-@pytest.mark.asyncio
-async def test_onebot_delivery_json_abi_preserves_exact_prepared_bytes():
-    runtime = object.__new__(CleanOneBotRuntime)
-    prepared = PreparedSend(
-        "send_group_msg",
-        b'{"group_id":123,"message":[{"data":{"text":"A"},"type":"text"}],"auto_escape":true}',
-        "77426935a2351da33e63d672c3b1a9cb9de43349cf07e422c6e80697c644d609",
-    )
-    runtime.prepare_delivery = AsyncMock(
-        return_value=PreparedAdapterSend(
-            "binding/main", "client/1", 2, 3, "generation/adapter", "sha256:fence", prepared
-        )
-    )
-    output = await runtime.prepare_delivery_json(
-        {
-            "binding_ref": "binding/main",
-            "channel_kind": "GROUP",
-            "channel_ref": "123",
-            "parts": [{"type": "text", "text": "A"}],
-            "operation_id": "prepare/1",
-        }
-    )
-    assert PreparedSend.from_codec_result(output["prepared"]) == prepared
-
-    runtime.dispatch = AsyncMock(return_value=SendResult("SENT", message_id="456"))
-    result = await runtime.dispatch_json(
-        {
-            "binding_ref": output["binding_ref"],
-            "client_incarnation": output["client_incarnation"],
-            "binding_epoch": output["binding_epoch"],
-            "connection_epoch": output["connection_epoch"],
-            "adapter_generation_id": output["adapter_generation_id"],
-            "executor_fence_digest": output["executor_fence_digest"],
-            "prepared": output["prepared"],
-            "timeout_seconds": 10,
-        }
-    )
-    assert result == {
-        "protocol": "forest.onebot-delivery-result/1",
-        "status": "SENT",
-        "message_id": "456",
-        "error_code": None,
-    }
 
 
 @pytest.mark.asyncio

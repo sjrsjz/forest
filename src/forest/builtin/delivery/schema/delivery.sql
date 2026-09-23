@@ -742,7 +742,7 @@ BEGIN
        AND part_index=(work->>'part_index')::integer FOR UPDATE;
     IF NOT FOUND OR part.state<>'CLAIMED' OR part.owner_id<>work->>'attempt_id'
        OR part.owner_epoch<>(work->>'owner_epoch')::bigint
-       OR input->'prior'->'transport-fence'->>'binding_ref' IS DISTINCT FROM work->>'binding_ref'
+       OR adapter->>'binding_ref' IS DISTINCT FROM work->>'binding_ref'
        OR auth->'ticket'->>'ticket_id' IS DISTINCT FROM plan->'authorization'->>'ticket_id'
        OR permit->>'effect_operation_id' IS DISTINCT FROM work->>'effect_operation_ref'
        OR permit->>'attempt_id' IS DISTINCT FROM work->>'attempt_id' THEN
@@ -761,7 +761,7 @@ BEGIN
       permit->>'attempt_id',(permit->>'attempt_no')::integer,adapter->'prepared'->>'action',
       wire->>'payload_id',wire->>'digest',(adapter->>'binding_epoch')::bigint,
       (adapter->>'connection_epoch')::bigint,adapter->>'client_incarnation',
-      adapter->>'adapter_generation_id',adapter->>'executor_fence_digest',
+      adapter->>'adapter_generation_id',adapter->>'transport_digest',
       plan->'authorization'->>'ticket_id',plan->>'plan_digest',
       (plan->'effect'->>'deadline_at')::timestamptz);
     UPDATE __forest_module_schema__.send_parts SET state='PREPARED',current_attempt_id=work->>'attempt_id',

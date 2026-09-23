@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.2.2"
+version = "0.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -42,13 +42,13 @@ requests = [
 
 [[components.requires]]
 name = "adapter.onebot.delivery.prepare"
-contract = ">=1.0,<2.0"
+contract = ">=2.0,<3.0"
 required = true
 startup_dependency = true
 
 [[components.requires]]
 name = "adapter.onebot.delivery.dispatch"
-contract = ">=1.0,<2.0"
+contract = ">=2.0,<3.0"
 required = true
 startup_dependency = true
 
@@ -78,11 +78,11 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "2.0.0"
+schema_version = "3.0.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "fc365d7d46a996b4b99a88e8df73f5d1ce178e25272c36fa8ad35b6ca9561cf4"
+baseline_sha256 = "b7320f43c99c12604602a135d4384a8ab3a53e00ff6ac5c95e6be0704c3c4309"
 scope = "bot"
-repository_contract = "forest.delivery.repository/2"
+repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
 
 [[components.unit_of_work_participants]]
@@ -140,7 +140,6 @@ input_schema = "schemas/prepare-plan.json"
 output_schema = "schemas/attempt-output.json"
 timeout_s = 10
 steps = [
-  { id = "transport-fence", component_id = "adapter.onebot", participant = "adapter.transport-fence", input_path = "/transport" },
   { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
   { id = "effect", component_id = "kernel.effect", participant = "effect.prepare", input_path = "/effect" },
   { id = "delivery", component_id = "delivery", participant = "delivery.record-prepare" }

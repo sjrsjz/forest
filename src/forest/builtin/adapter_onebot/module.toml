@@ -1,0 +1,147 @@
+manifest_version = 1
+package_id = "forest.adapter-onebot"
+version = "2.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "adapter_onebot:AdapterOneBot"
+
+[[components]]
+id = "adapter.onebot"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 256
+max_state_inflight = 1
+max_owned_tasks = 4
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 15
+start_timeout_s = 15
+drain_timeout_s = 180
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = [
+  "service.call:onebot.codec.normalize",
+  "service.call:onebot.codec.prepare-send",
+  "service.call:conversation.trigger.classify",
+  "service.call:shell.ingress.inspect",
+  "service.call:kernel.uow.onebot.ingress",
+  "service.call:kernel.payload.bytes-write",
+  "service.call:adapter.onebot.transport.send"
+]
+
+[[components.requires]]
+name = "onebot.codec.normalize"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "onebot.codec.prepare-send"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "conversation.trigger.classify"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "shell.ingress.inspect"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "kernel.uow.onebot.ingress"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.provides]]
+name = "adapter.onebot.delivery.prepare"
+contract = "2.0"
+semantics = "idempotent"
+input_schema = "schemas/delivery-prepare-input.json"
+output_schema = "schemas/delivery-prepared.json"
+
+[[components.provides]]
+name = "adapter.onebot.delivery.dispatch"
+contract = "2.0"
+semantics = "at-most-once"
+input_schema = "schemas/send-input.json"
+output_schema = "schemas/send-output.json"
+
+[[components.effect_services]]
+name = "adapter.onebot.transport.send"
+contract = "2.0"
+kind = "onebot.websocket-v11"
+semantics = "at-most-once"
+input_schema = "schemas/send-input.json"
+output_schema = "schemas/send-output.json"
+
+[components.effect_services.ingress]
+name = "adapter.onebot.transport.frame"
+semantics = "at-most-once"
+input_schema = "schemas/frame-input.json"
+output_schema = "schemas/frame-output.json"
+timeout_s = 120
+
+[[components.effect_services]]
+name = "kernel.payload.bytes-write"
+contract = "1.0"
+kind = "kernel.payload-bytes"
+semantics = "idempotent"
+input_schema = "schemas/payload-write-input.json"
+output_schema = "schemas/payload-write-output.json"
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "adapter.onebot.workspace"
+label = "OneBot Adapter"
+group = "transport"
+order = 5
+
+[components.storage]
+schema_id = "forest.adapter.onebot"
+schema_version = "2.0.0"
+baseline = "schema/adapter_onebot.sql"
+baseline_sha256 = "113f170d1195102bb792008fbaf71440c968dd1ff92f23cb69bd41a9b0631cbf"
+scope = "bot"
+repository_contract = "forest.adapter-onebot.repository/2"
+execution_profile = "official"
+
+[[components.unit_of_work_participants]]
+name = "adapter.record-ingress"
+contract = "1.0"
+function = "adapter_record_ingress"
+input_schema = "schemas/record-ingress-envelope.json"
+output_schema = "schemas/record-ingress-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/event/raw"
+owner_component = "adapter.onebot"
+owner_kind = "onebot.raw-event"
+owner_id_path = "/input/event/event_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/event/normalized"
+owner_component = "adapter.onebot"
+owner_kind = "onebot.normalized-event"
+owner_id_path = "/input/event/event_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/event/author"
+owner_component = "adapter.onebot"
+owner_kind = "onebot.author-snapshot"
+owner_id_path = "/input/event/event_id"

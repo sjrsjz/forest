@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import signal
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -29,6 +27,7 @@ from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
 from forest.models import ModelCapabilities
+from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
 from forest.process_executor_builtin import (
@@ -37,10 +36,8 @@ from forest.process_executor_builtin import (
 )
 from forest.process_executor_effect_driver import native_process_effect_driver_factory
 from forest.runtime_modules import RuntimeModuleRegistry
-from forest.storage.adapter_onebot_authority import OneBotPayloadRef
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
-from forest.storage.payload_authority import PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.vector_index_builtin import (
     default_vector_index_configuration,
@@ -364,100 +361,9 @@ class CleanBotHost:
             # loss; this callback is only the low-latency wake path.
             return
 
-    async def _json_payload(self, *, owner_kind: str, owner_id: str, value: dict):
-        epoch = await self._kernel.payload.epoch()
-        saved = await self._kernel.payload.put_bytes(
-            owner_component_id="adapter.onebot",
-            owner_kind=owner_kind,
-            owner_id=owner_id,
-            media_type="application/json",
-            content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
-            sources=(
-                PayloadSource(
-                    source_component_id="adapter.onebot",
-                    source_kind="bootstrap.configuration",
-                    source_id=owner_id,
-                    source_revision=1,
-                ),
-            ),
-            expected_deletion_epoch=epoch,
-        )
-        return OneBotPayloadRef(
-            saved.payload_id,
-            saved.content_digest,
-            "adapter.onebot",
-            owner_kind,
-            owner_id,
-        )
-
-    async def _configure_binding(self, adapter) -> None:
-        binding_id = "binding/main"
-        try:
-            current = await adapter.load_binding(binding_id)
-        except ForestError as exc:
-            if exc.code != "BINDING_NOT_FOUND":
-                raise
-            current = None
-        if current is None:
-            display = await self._json_payload(
-                owner_kind="binding.display",
-                owner_id=binding_id,
-                value={"display_name": self.settings.bot_id},
-            )
-            await adapter.register_binding(
-                operation_id="bootstrap:binding/main:register",
-                binding_id=binding_id,
-                self_id=self.settings.onebot_self_id,
-                display=display,
-            )
-            current = await adapter.load_binding(binding_id)
-        if current["self_id"] != self.settings.onebot_self_id:
-            raise ForestError(
-                "BINDING_IDENTITY_CONFLICT", "Configured OneBot identity differs", 409
-            )
-        if current["desired_revision"] == 0:
-            plan_id = "bootstrap:binding/main:configuration:1"
-            config = await self._json_payload(
-                owner_kind="binding.config",
-                owner_id=plan_id,
-                value={
-                    "transport": "FORWARD_WEBSOCKET",
-                    "websocket_url": self.settings.onebot_websocket_url,
-                },
-            )
-            await adapter.plan_configuration(
-                plan_id=plan_id,
-                binding_id=binding_id,
-                expected_revision=0,
-                enabled=True,
-                receive_enabled=True,
-                transport="FORWARD_WEBSOCKET",
-                config=config,
-                secret_ref=self.settings.onebot_secret_ref,
-                secret_digest="sha256:"
-                + hashlib.sha256(self.settings.onebot_access_token.encode()).hexdigest(),
-                actor_principal_ref="bootstrap/local",
-                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-            )
-            await adapter.apply_configuration(
-                operation_id="bootstrap:binding/main:apply:1", plan_id=plan_id
-            )
-
-    async def _reconcile_abandoned_clients(self, adapter) -> None:
-        for row in await adapter.list_desired_bindings():
-            incarnation = row["current_client_incarnation"]
-            if incarnation is not None:
-                await adapter.observe_client(
-                    operation_id="host-recovery:"
-                    + hashlib.sha256(incarnation.encode()).hexdigest(),
-                    client_incarnation=incarnation,
-                    observed_state="FAILED",
-                    error_code="HOST_RESTARTED",
-                )
-
     async def _assemble_registry(
         self, activation_id: str | None = None
-    ) -> tuple[RuntimeModuleRegistry, object]:
+    ) -> RuntimeModuleRegistry:
         capabilities = self.settings.model_capabilities or ModelCapabilities(
             deployment_id=self.settings.model_deployment_id,
             model=self.settings.model,
@@ -706,25 +612,19 @@ class CleanBotHost:
             ),
         )
 
-        token_digest = (
-            "sha256:" + hashlib.sha256(self.settings.onebot_access_token.encode()).hexdigest()
-        )
+        async def resolve_onebot_secret(secret_ref, _configuration_revision):
+            if secret_ref != self.settings.onebot_secret_ref:
+                raise ForestError(
+                    "ONEBOT_CREDENTIAL_UNAVAILABLE",
+                    "OneBot credential reference differs",
+                    409,
+                )
+            return self.settings.onebot_access_token
 
-        async def resolve_onebot_secret(*, secret_ref, expected_digest):
-            if secret_ref != self.settings.onebot_secret_ref or expected_digest != token_digest:
-                raise ForestError("BINDING_SECRET_INVALID", "OneBot secret reference differs", 409)
-            return {"access_token": self.settings.onebot_access_token}
-
-        messaging_options = {}
-        if self._websocket_client_factory is not None:
-            messaging_options["websocket_client_factory"] = self._websocket_client_factory
         messaging = await bootstrap_clean_messaging(
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            secret_resolver=resolve_onebot_secret,
-            register_effect_fence=self.registry is None,
-            **messaging_options,
         )
         delivery = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/delivery"))),
@@ -734,8 +634,8 @@ class CleanBotHost:
             kernel=self._kernel,
             initial_configuration={"protocol": "forest.delivery/1"},
             resolved_contracts={
-                "adapter.onebot.delivery.prepare": "1.0",
-                "adapter.onebot.delivery.dispatch": "1.0",
+                "adapter.onebot.delivery.prepare": "2.0",
+                "adapter.onebot.delivery.dispatch": "2.0",
             },
             startup_components=("adapter.onebot",),
             effect_driver_registry=PackageEffectDriverRegistry(
@@ -780,6 +680,57 @@ class CleanBotHost:
                 ),
             ),
         )
+        adapter_driver_options = {}
+        if self._websocket_client_factory is not None:
+            adapter_driver_options["client_factory"] = self._websocket_client_factory
+        adapter = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/adapter_onebot"))),
+            self.package_catalog,
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={
+                "protocol": "forest.adapter.onebot/2",
+                "bindings": [
+                    {
+                        "binding_ref": "binding/main",
+                        "binding_epoch": 1,
+                        "self_id": self.settings.onebot_self_id,
+                        "credential_ref": self.settings.onebot_secret_ref,
+                        "websocket_url": self.settings.onebot_websocket_url,
+                        "timeout_seconds": 30,
+                        "event_capacity": 512,
+                        "pending_capacity": 64,
+                        "enabled": True,
+                    }
+                ],
+            },
+            resolved_contracts={
+                "onebot.codec.normalize": "1.0",
+                "onebot.codec.prepare-send": "1.0",
+                "conversation.trigger.classify": "1.0",
+                "shell.ingress.inspect": "1.0",
+                "kernel.uow.onebot.ingress": "1.0",
+            },
+            startup_components=(
+                "codec.onebot",
+                "conversation.trigger-policy",
+            ),
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "onebot.websocket-v11": onebot_transport_effect_driver_factory(
+                        effects=self._kernel.effect,
+                        runtime=self._kernel.runtime,
+                        credential_resolver=resolve_onebot_secret,
+                        **adapter_driver_options,
+                    ),
+                    "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
+                        runtime=self._kernel.runtime,
+                        payloads=self._kernel.payload,
+                    ),
+                }
+            ),
+        )
         descriptors = (
             self._kernel.descriptors
             + (
@@ -795,14 +746,12 @@ class CleanBotHost:
                 process_executor.descriptor,
                 jobs.descriptor,
                 shell.descriptor,
+                adapter.descriptor,
             )
             + messaging.descriptors
             + (delivery.descriptor,)
         )
-        return (
-            RuntimeModuleRegistry(self, descriptors, activation_id=activation_id),
-            messaging.adapter,
-        )
+        return RuntimeModuleRegistry(self, descriptors, activation_id=activation_id)
 
     async def start(self) -> None:
         await self.store.open()
@@ -810,10 +759,8 @@ class CleanBotHost:
             self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
             self.generation_authority = self._kernel.runtime
             self._replacement_lock = asyncio.Lock()
-            registry, adapter = await self._assemble_registry()
-            await self._configure_binding(adapter)
+            registry = await self._assemble_registry()
             self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
-            await self._reconcile_abandoned_clients(adapter)
             await registry.start()
             self.registry = registry
             await self._resume_reload_waits(registry)
@@ -843,8 +790,7 @@ class CleanBotHost:
         await self.store.open()
         try:
             self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
-            registry, adapter = await self._assemble_registry()
-            await self._configure_binding(adapter)
+            registry = await self._assemble_registry()
             return tuple(descriptor.component_id for descriptor in registry.descriptors)
         finally:
             await self.store.close()
@@ -896,7 +842,7 @@ class CleanBotHost:
                     "RuntimeGraph revision changed before replacement",
                     409,
                 )
-            candidate, _adapter = (
+            candidate = (
                 await self._assemble_registry()
                 if activation_id is None
                 else await self._assemble_registry(activation_id)

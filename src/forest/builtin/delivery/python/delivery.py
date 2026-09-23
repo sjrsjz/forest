@@ -70,6 +70,7 @@ class Delivery(Plugin):
                     "operation_id": ctx.operations.stable("wire-prepare"),
                 },
                 operation_id=ctx.operations.stable("adapter-prepare"),
+                contract_major=2,
             )
             wire_value = json.loads(base64.b64decode(adapter["prepared"]["wire_body_b64"]))
             wire = await ctx.services.call(
@@ -91,6 +92,9 @@ class Delivery(Plugin):
                     "binding_ref": work["binding_ref"],
                     "connection_epoch": adapter["connection_epoch"],
                     "adapter_generation_id": adapter["adapter_generation_id"],
+                    "graph_id": adapter["graph_id"],
+                    "graph_revision": adapter["graph_revision"],
+                    "transport_digest": adapter["transport_digest"],
                 }
             )
             ticket_id = ctx.operations.stable("authorization-ticket")
@@ -134,9 +138,9 @@ class Delivery(Plugin):
                 "executor": {
                     "component_id": "adapter.onebot",
                     "generation_id": adapter["adapter_generation_id"],
-                    "fence_kind": "adapter.binding",
-                    "fence_id": adapter["client_incarnation"],
-                    "fence_epoch": adapter["connection_epoch"],
+                    "fence_kind": "runtime.graph",
+                    "fence_id": adapter["graph_id"],
+                    "fence_epoch": adapter["graph_revision"],
                 },
                 "deadline_at": deadline_at,
             }
@@ -144,15 +148,6 @@ class Delivery(Plugin):
                 "delivery.prepare",
                 {
                     "work": work,
-                    "transport": {
-                        "protocol": "forest.onebot-transport-fence/1",
-                        "binding_ref": work["binding_ref"],
-                        "binding_epoch": adapter["binding_epoch"],
-                        "connection_epoch": adapter["connection_epoch"],
-                        "client_incarnation": adapter["client_incarnation"],
-                        "adapter_generation_id": adapter["adapter_generation_id"],
-                        "executor_fence_digest": adapter["executor_fence_digest"],
-                    },
                     "authorization": authorization,
                     "effect": effect,
                     "adapter": adapter,
@@ -179,17 +174,23 @@ class Delivery(Plugin):
             result = await ctx.services.call(
                 "adapter.onebot.delivery.dispatch",
                 {
+                    "protocol": "forest.onebot-send/2",
+                    "effect_operation_id": work["effect_operation_ref"],
+                    "attempt_id": work["attempt_id"],
                     "binding_ref": adapter["binding_ref"],
                     "client_incarnation": adapter["client_incarnation"],
                     "binding_epoch": adapter["binding_epoch"],
                     "connection_epoch": adapter["connection_epoch"],
                     "adapter_generation_id": adapter["adapter_generation_id"],
-                    "executor_fence_digest": adapter["executor_fence_digest"],
+                    "graph_id": adapter["graph_id"],
+                    "graph_revision": adapter["graph_revision"],
+                    "transport_digest": adapter["transport_digest"],
                     "prepared": adapter["prepared"],
                     "timeout_seconds": 20,
                 },
                 operation_id=ctx.operations.stable("adapter-dispatch"),
                 timeout=25,
+                contract_major=2,
             )
         except ForestError:
             if handed_off:

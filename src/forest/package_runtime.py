@@ -1226,6 +1226,14 @@ class PackageGenerationAdapter:
                 "CAPABILITY_DENIED",
                 "Worker requested an undeclared service capability",
                 403,
+                details={
+                    "service_id": service_id,
+                    "declared_contract": contract,
+                    "requested_contract_major": request["contract_major"],
+                    "capability_granted": self._has_capability(
+                        f"service.call:{service_id}"
+                    ),
+                },
             )
         timeout = self._worker.remaining_timeout(call_id, request["timeout"])
         if local is not None:
