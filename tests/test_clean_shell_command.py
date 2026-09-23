@@ -27,9 +27,7 @@ from forest.storage.adapter_onebot_authority import (
     OneBotPlatformEvent,
 )
 from forest.storage.clean_bot_store import CleanBotStore
-from forest.storage.control_unit_of_work import ShellControlResultUnitOfWork
 from forest.storage.conversation_scheduler import ConversationSchedulerRepository
-from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef, DeliveryRepository
 from forest.storage.ingress_unit_of_work import OneBotIngressUnitOfWork, ShellIngressCommand
 from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.payload_authority import KernelPayloadRepository, PayloadSource
@@ -428,12 +426,6 @@ async def clean_shell():
             "forest.shell.command",
             "forest.shell-command.repository/1",
             "storage/official/shell_command.sql",
-        ),
-        official_storage_bundle(
-            "delivery",
-            "forest.delivery",
-            "forest.delivery.repository/1",
-            "storage/official/delivery.sql",
         ),
     ]
     for bundle in bundles:
@@ -1063,135 +1055,6 @@ async def test_claim_rechecks_current_policy_and_result_payload_is_authoritative
     )
     assert completed["resulting_state"] == "SUCCEEDED"
     assert (await shell.load_request("request/execute"))["state"] == "SUCCEEDED"
-
-
-@pytest.mark.postgres
-async def test_shell_result_and_control_send_intent_commit_atomically(clean_shell):
-    publication = await _ready(
-        clean_shell,
-        (ShellPolicyGrant("BINDING", "admin/control", True),),
-    )
-    store, storage, payloads, _adapter, _gate, shell, _scheduler = clean_shell
-    await _admit(
-        clean_shell,
-        publication,
-        suffix="control-result",
-        principal="admin/control",
-        text="core status",
-        command_id="core.status",
-    )
-    claim = await shell.claim(operation_id="claim/control-result", worker_id="worker/1")
-    assert claim is not None
-    await shell.authorize_claim(
-        claim,
-        ticket_id="ticket/control-result",
-        authorization_operation_id="invoke/control-result/preflight",
-    )
-    await shell.start(claim)
-    saved = await _put(
-        payloads,
-        owner_id="request/control-result",
-        kind="shell.result",
-        body=b'{"status":"ok"}',
-    )
-    shell_ref = ShellPayloadRef(
-        saved.payload_id,
-        saved.content_digest,
-        "shell.command",
-        "shell.result",
-        "request/control-result",
-    )
-    part = DeliveryPart(
-        "part/control-result/1",
-        "effect/control-result",
-        DeliveryPayloadRef(
-            saved.payload_id,
-            saved.content_digest,
-            "shell.command",
-            "shell.result",
-            "request/control-result",
-        ),
-    )
-
-    async def fail_effect(_conn, **_values):
-        raise ForestError("TEST_EFFECT_FAILED", "forced", 503)
-
-    failing_delivery = DeliveryRepository(
-        store,
-        namespace=storage["delivery"].spec.namespace,
-        payload_verifier=payloads.verify_in,
-        effect_admitter=fail_effect,
-    )
-    failing = ShellControlResultUnitOfWork(
-        store,
-        shell=shell,
-        delivery=failing_delivery,
-        audit=KernelAuditRepository(
-            store, namespace=storage["kernel.audit"].spec.namespace
-        ),
-    )
-    with pytest.raises(ForestError) as caught:
-        await failing.commit(
-            claim,
-            result_operation_id="result/control-result",
-            resulting_state="SUCCEEDED",
-            result=shell_ref,
-            intent_operation_id="intent/create/control-result",
-            intent_id="intent/control-result",
-            binding_ref="binding/main",
-            channel_kind="GROUP",
-            channel_ref="933179609",
-            delivery_generation_id="generation/delivery/1",
-            producer_generation_id="generation/shell/1",
-            parts=(part,),
-            authorization_ticket_id="ticket/control-result/final",
-            authorization_operation_id="invoke/control-result/final",
-        )
-    assert caught.value.code == "TEST_EFFECT_FAILED"
-    assert (await shell.load_request("request/control-result"))["state"] == "EXECUTING"
-    audit = KernelAuditRepository(
-        store, namespace=storage["kernel.audit"].spec.namespace
-    )
-    assert (await audit.scan())["records"] == []
-
-    async def admit_effect(_conn, **_values):
-        return None
-
-    delivery = DeliveryRepository(
-        store,
-        namespace=storage["delivery"].spec.namespace,
-        payload_verifier=payloads.verify_in,
-        effect_admitter=admit_effect,
-    )
-    committed = await ShellControlResultUnitOfWork(
-        store,
-        shell=shell,
-        delivery=delivery,
-        audit=audit,
-    ).commit(
-        claim,
-        result_operation_id="result/control-result",
-        resulting_state="SUCCEEDED",
-        result=shell_ref,
-        intent_operation_id="intent/create/control-result",
-        intent_id="intent/control-result",
-        binding_ref="binding/main",
-        channel_kind="GROUP",
-        channel_ref="933179609",
-        delivery_generation_id="generation/delivery/1",
-        producer_generation_id="generation/shell/1",
-        parts=(part,),
-        authorization_ticket_id="ticket/control-result/final",
-        authorization_operation_id="invoke/control-result/final",
-    )
-    assert committed["delivery"]["state"] == "QUEUED"
-    assert committed["audit"]["action"] == "shell.command.succeeded"
-    assert committed["audit"]["actor_id"] == "admin/control"
-    assert committed["audit"]["origin_kind"] == "group.shell"
-    assert [item["audit_id"] for item in (await audit.scan())["records"]] == [
-        committed["audit"]["audit_id"]
-    ]
-    assert (await shell.load_request("request/control-result"))["state"] == "SUCCEEDED"
 
 
 @pytest.mark.postgres

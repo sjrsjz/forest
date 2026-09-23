@@ -6,6 +6,7 @@ import hashlib
 import inspect
 from dataclasses import dataclass
 
+from forest.delivery_participant import create_delivery_intent_in
 from forest.errors import ForestError
 
 
@@ -125,7 +126,8 @@ class FinalReplyUnitOfWork:
                 answer_trigger_ids=plan.answered_trigger_ids,
                 reply_ref=plan.reply_ref,
             )
-            delivery_result = await self.delivery_participant.create_intent_in(
+            delivery_result = await create_delivery_intent_in(
+                self.delivery_participant,
                 conn,
                 operation_id=plan.delivery_operation_id,
                 intent_id=plan.intent_id,

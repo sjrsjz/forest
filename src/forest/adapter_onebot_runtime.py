@@ -175,7 +175,8 @@ class OneBotUnitOfWorkParticipant:
         )
         return {
             "protocol": "forest.onebot-transport-fence-result/1",
-            **result,
+            "binding_ref": result["binding_id"],
+            "client_incarnation": result["client_incarnation"],
         }
 
     async def verify_transport_fence_in(self, conn, **values):

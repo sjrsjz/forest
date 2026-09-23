@@ -7,6 +7,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+from forest.delivery_protocol import DeliveryPart, DeliveryPayloadRef
 from forest.errors import ForestError
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.shell_command_parser import ShellCommandParser, direct_shell_text, ingress_command
@@ -15,7 +16,6 @@ from forest.shell_command_protocol import (
     ShellCommandExecutionResult,
 )
 from forest.shell_gate import CoreShellGate
-from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
 from forest.storage.payload_authority import PayloadSource
 from forest.storage.shell_command_authority import (
     ShellCommandRoute,

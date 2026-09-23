@@ -6,11 +6,12 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 
+from forest.delivery_participant import create_delivery_intent_in
+from forest.delivery_protocol import DeliveryPart, DeliveryPayloadRef
 from forest.errors import ForestError
 from forest.media_capture_contract import IngressMediaCapture
 from forest.storage.adapter_onebot_authority import OneBotPlatformEvent
 from forest.storage.conversation_scheduler import SchedulerPayloadRef
-from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
 from forest.storage.memory_graph_authority import (
     MemoryOccurrence,
     MemoryPart,
@@ -318,16 +319,11 @@ class OneBotIngressUnitOfWork:
                             "Rejected Shell command has no CONTROL delivery participant",
                             503,
                         )
-                    delivery_generation = self.delivery.generation_identity
-                    if delivery_generation is None:
-                        raise ForestError(
-                            "SHELL_CONTROL_DELIVERY_MISSING",
-                            "Delivery Generation is unavailable",
-                            503,
-                        )
+                    delivery_generation_id = self.delivery.generation_id
                     identity = shell_result["request_id"]
                     part_id = "shell-rejection-part:" + identity[-64:]
-                    await self.delivery.create_intent_in(
+                    await create_delivery_intent_in(
+                        self.delivery,
                         conn,
                         operation_id="shell-rejection-delivery:" + identity[-64:],
                         intent_id="shell-rejection-intent:" + identity[-64:],
@@ -340,7 +336,7 @@ class OneBotIngressUnitOfWork:
                         cause_component_id="shell.command",
                         cause_kind="shell.request",
                         cause_id=identity,
-                        delivery_generation_id=delivery_generation.generation_id,
+                        delivery_generation_id=delivery_generation_id,
                         reply_ref=None,
                         parts=(
                             DeliveryPart(

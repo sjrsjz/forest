@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 
 from forest.conversation_transaction_ports import PreparedFinalReplyCommit
+from forest.delivery_protocol import DeliveryPart, DeliveryPayloadRef
 from forest.errors import ForestError
 from forest.final_reply_uow import FinalReplyPlan
-from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
 
 
 def _stable(kind: str, *parts: object) -> str:
@@ -50,8 +50,7 @@ class DurableFinalReplyPlanner:
             input_batch_refs = tuple(
                 item["input_batch_ref"] for item in run.get("inputs", ())
             )
-            generation = self.delivery.generation_identity
-            if generation is None or generation.component_id != "delivery":
+            if self.delivery.component_id != "delivery":
                 raise ForestError(
                     "FINAL_REPLY_ROUTE_INVALID",
                     "Delivery Generation is unavailable",
@@ -87,7 +86,7 @@ class DurableFinalReplyPlanner:
                     ordering_key=request.conversation_id,
                     channel_kind=lane["channel_kind"],
                     channel_ref=lane["channel_ref"],
-                    delivery_generation_id=generation.generation_id,
+                    delivery_generation_id=self.delivery.generation_id,
                     parts=(part,),
                     association_input_batch_refs=input_batch_refs,
                 ),

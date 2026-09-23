@@ -47,6 +47,8 @@
 
 Delivery 队列只能由包声明的 owned-work supervisor 领取。Generation 替换先关闭领取入口，等待已经领取的 handler 到达 settlement 边界，再排空 Worker 调用和 effect driver，最后退休旧 Generation。新 Generation 只有在整个 RuntimeGraph 原子发布后才能领取工作。
 
+准入与所有权必须是两条不同的栅栏。普通 Worker 调用和新建 UnitOfWork 先检查对应 DATA/CONTROL admission；一旦 owned-work supervisor 已经领取任务，调用作用域就变为 `PackageOwnedWorkCallScope`，该身份必须沿 Service、Effect 和 UnitOfWork 子调用完整传播。后续步骤只复核该 Generation 仍属于当前 RuntimeGraph，不再重新检查 DATA admission。这样暂停新业务或热重载冻结入口时，已领取的 CONTROL 回执和外部副作用账本仍能收敛到确定终态。宿主不得根据 Provider、Payload 或错误字符串猜测是否放行，也不得在子调用处把 owned-work 作用域降级为普通调用。
+
 未领取意图属于组件的持久业务状态，可由契约相同的新 Generation 继续领取。已领取项绑定 claim token、attempt 和原 Generation；旧 Generation 必须完成、明确失败或进入 UNKNOWN，禁止新 Generation 偷接一个可能已经产生外部副作用的 attempt。
 
 ## 删除旧实现的完成条件

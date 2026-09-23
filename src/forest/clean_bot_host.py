@@ -19,7 +19,6 @@ from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
 from forest.clean_agent_module import bootstrap_clean_agent
-from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_job_module import bootstrap_clean_job
 from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
@@ -29,6 +28,7 @@ from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
+from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
 from forest.models import ModelCapabilities
 from forest.package_effects import PackageEffectDriverRegistry
@@ -41,6 +41,7 @@ from forest.process_executor_effect_driver import native_process_effect_driver_f
 from forest.routing_graph_module import bootstrap_routing_graph
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.adapter_onebot_authority import OneBotPayloadRef
+from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.payload_authority import PayloadSource
 from forest.storage.schema_bundles import SchemaBundleInstaller
@@ -717,11 +718,32 @@ class CleanBotHost:
             register_effect_fence=self.registry is None,
             **messaging_options,
         )
-        delivery = await bootstrap_clean_delivery(
+        delivery = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/delivery"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            adapter=messaging.adapter,
+            initial_configuration={"protocol": "forest.delivery/1"},
+            resolved_contracts={
+                "adapter.onebot.delivery.prepare": "1.0",
+                "adapter.onebot.delivery.dispatch": "1.0",
+            },
+            startup_components=("adapter.onebot",),
+            effect_driver_registry=PackageEffectDriverRegistry(
+                {
+                    "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                        runtime=self._kernel.runtime,
+                        payloads=self._kernel.payload,
+                    )
+                }
+            ),
+            additional_grants=(
+                CapabilityGrant("delivery.intent", "bot", self.store.bot_id),
+                CapabilityGrant(
+                    "delivery.send", "bot", self.store.bot_id, delegable=True
+                ),
+            ),
         )
         shell = await bootstrap_clean_shell(
             self.store,

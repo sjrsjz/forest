@@ -95,11 +95,6 @@ def _result_commit(context):
     )
 
     async def commit(claim, **values):
-        generation = delivery.generation_identity
-        if generation is None:
-            raise ForestError(
-                "SHELL_RESULT_ROUTE_INVALID", "Delivery Generation is unavailable", 503
-            )
         shell_generation = shell.generation_identity
         if shell_generation is None:
             raise ForestError(
@@ -107,7 +102,7 @@ def _result_commit(context):
             )
         return await unit.commit(
             claim,
-            delivery_generation_id=generation.generation_id,
+            delivery_generation_id=delivery.generation_id,
             producer_generation_id=shell_generation.generation_id,
             **values,
         )

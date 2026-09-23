@@ -82,7 +82,7 @@ class KernelPayloadJsonEffectDriver:
         if not isinstance(reference, dict) or set(reference) != fields:
             raise ForestError("PAYLOAD_JSON_INPUT_INVALID", "Payload reference is invalid", 422)
         async with self.payloads.store.pool.connection() as conn, conn.transaction():
-            await self.payloads.verify_in(
+            verified = await self.payloads.verify_in(
                 conn,
                 payload_id=reference["payload_id"],
                 digest=reference["digest"],
@@ -90,7 +90,11 @@ class KernelPayloadJsonEffectDriver:
                 owner_kind=reference["owner_kind"],
                 owner_id=reference["owner_id"],
             )
-            content = await self.payloads.read_bytes_in(conn, reference["payload_id"])
+            content = await self.payloads.read_bytes_in(
+                conn,
+                reference["payload_id"],
+                expected_deletion_epoch=verified.accepted_deletion_epoch,
+            )
         try:
             value = json.loads(content)
         except (UnicodeError, json.JSONDecodeError) as exc:

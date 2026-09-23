@@ -11,7 +11,7 @@ from typing import Any
 import psycopg
 
 from forest.errors import ForestError
-from forest.package_capabilities import PackageCallScope
+from forest.package_capabilities import PackageCallScope, PackageOwnedWorkCallScope
 
 
 def _step_operation(operation_id: str, plan_name: str, step_id: str) -> str:
@@ -56,12 +56,19 @@ class PostgresPackageUnitOfWorkCoordinator:
         try:
             async with asyncio.timeout(timeout_seconds):
                 async with self.store.pool.connection() as conn, conn.transaction():
-                    await self.runtime.verify_active_generation_in(
-                        conn,
-                        component_id=self.component_id,
-                        generation_id=scope.generation_id,
-                        admission_lane="DATA",
-                    )
+                    if isinstance(scope, PackageOwnedWorkCallScope):
+                        await self.runtime.verify_generation_member_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                        )
+                    else:
+                        await self.runtime.verify_active_generation_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                            admission_lane="DATA",
+                        )
                     participants = {
                         component_id: self._resolve(component_id)
                         for component_id in sorted(

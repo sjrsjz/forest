@@ -117,10 +117,7 @@ class Delivery(Plugin):
                 "effect_kind": "onebot.send",
                 "target_kind": work["channel_kind"].lower(),
                 "target_id": work["channel_ref"],
-                "input_payload": {
-                    "payload_id": work["payload"]["payload_id"],
-                    "digest": work["payload"]["digest"],
-                },
+                "input_payload": None,
                 "attempt_id": work["attempt_id"],
                 "permit_operation_id": permit_operation,
                 "wire_payload": {

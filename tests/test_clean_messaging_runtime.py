@@ -35,11 +35,12 @@ from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
 from forest.clean_agent_module import bootstrap_clean_agent
-from forest.clean_delivery_module import bootstrap_clean_delivery
 from forest.clean_memory_module import bootstrap_clean_memory
 from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.clean_shell_module import bootstrap_clean_shell
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.delivery_participant import create_delivery_intent_in
+from forest.delivery_protocol import DeliveryPart, DeliveryPayloadRef
 from forest.embedding_builtin import (
     default_embedding_configuration,
     embedding_configuration_validator_factory,
@@ -47,6 +48,7 @@ from forest.embedding_builtin import (
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
+from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
 from forest.models import ModelResult
 from forest.package_effects import PackageEffectDriverRegistry
@@ -59,7 +61,7 @@ from forest.storage.agent_runtime_authority import (
     AgentPayloadRef,
     AgentTriggerInput,
 )
-from forest.storage.delivery_authority import DeliveryPart, DeliveryPayloadRef
+from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.payload_authority import PayloadSource
 from forest.vector_index_builtin import (
     default_vector_index_configuration,
@@ -527,11 +529,30 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         secret_resolver=resolve_secret,
         websocket_client_factory=create_client,
     )
-    delivery = await bootstrap_clean_delivery(
+    delivery = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/delivery",
+        package_catalog,
         store,
         installer,
         kernel=kernel,
-        adapter=messaging.adapter,
+        initial_configuration={"protocol": "forest.delivery/1"},
+        resolved_contracts={
+            "adapter.onebot.delivery.prepare": "1.0",
+            "adapter.onebot.delivery.dispatch": "1.0",
+        },
+        startup_components=("adapter.onebot",),
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                    runtime=kernel.runtime,
+                    payloads=kernel.payload,
+                )
+            }
+        ),
+        additional_grants=(
+            CapabilityGrant("delivery.intent", "bot", store.bot_id),
+            CapabilityGrant("delivery.send", "bot", store.bot_id, delegable=True),
+        ),
     )
     shell = await bootstrap_clean_shell(
         store,
@@ -738,7 +759,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         assert memory_runtime.profile.embedding.model == "Qwen/Qwen3-VL-Embedding-8B"
         assert memory_runtime.profile.embedding.dimensions == 4096
         assert await memory_runtime.list_trunks() == []
-        assert delivery_runtime.active is True
+        assert delivery_runtime.state.value == "ACTIVE"
         assert agent_runtime.provider is not provider_runtime
         provider_route = agent_runtime.provider._bind.route
         assert provider_route.caller_component_id == "agent.runtime"
@@ -761,8 +782,9 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         ingress_route = adapter_runtime.ingress_port._data_admit.route
         assert ingress_route.provider_component_id == "kernel.runtime"
         assert ingress_route.owned_work is False
-        assert delivery_runtime.adapter is not adapter_runtime
-        delivery_route = delivery_runtime.adapter._dispatch.route
+        delivery_route = delivery_runtime._service_routes[
+            "adapter.onebot.delivery.dispatch"
+        ].route
         assert delivery_route.provider_component_id == "adapter.onebot"
         assert delivery_route.owned_work is True
         assert len(clients) == 1 and clients[0].handler is not None
@@ -773,50 +795,59 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             owner_id="reply:delivery-worker:test",
             value={"text": "delivery worker reply"},
         )
-        await delivery.repository.create_intent(
-            operation_id="intent:create:delivery-worker:test",
-            intent_id="intent:delivery-worker:test",
-            binding_ref="binding/main",
-            lane_kind="CHAT",
-            ordering_key="onebot:group:933179609",
-            conversation_ref="onebot:group:933179609",
-            channel_kind="GROUP",
-            channel_ref="933179609",
-            cause_component_id="conversation.scheduler",
-            cause_kind="context.reply",
-            cause_id="reply:delivery-worker:test",
-            delivery_generation_id=delivery_runtime.generation_identity.generation_id,
-            reply_ref="reply:delivery-worker:test",
-            parts=(
-                DeliveryPart(
-                    "part:delivery-worker:test",
-                    "effect:delivery-worker:test",
-                    DeliveryPayloadRef(
-                        reply.payload_id,
-                        reply.digest,
-                        reply.owner_component_id,
-                        reply.owner_kind,
-                        reply.owner_id,
+        delivery_generation_id = delivery_runtime.generation_identity.generation_id
+        async with store.pool.connection() as conn, conn.transaction():
+            await create_delivery_intent_in(
+                delivery_runtime.unit_of_work_participant(),
+                conn,
+                operation_id="intent:create:delivery-worker:test",
+                intent_id="intent:delivery-worker:test",
+                binding_ref="binding/main",
+                lane_kind="CHAT",
+                ordering_key="onebot:group:933179609",
+                conversation_ref="onebot:group:933179609",
+                channel_kind="GROUP",
+                channel_ref="933179609",
+                cause_component_id="conversation.scheduler",
+                cause_kind="context.reply",
+                cause_id="reply:delivery-worker:test",
+                delivery_generation_id=delivery_generation_id,
+                reply_ref="reply:delivery-worker:test",
+                parts=(
+                    DeliveryPart(
+                        "part:delivery-worker:test",
+                        "effect:delivery-worker:test",
+                        DeliveryPayloadRef(
+                            reply.payload_id,
+                            reply.digest,
+                            reply.owner_component_id,
+                            reply.owner_kind,
+                            reply.owner_id,
+                        ),
                     ),
                 ),
-            ),
-        )
-        delivery_runtime.worker.wake()
+            )
+        delivery_runtime.notify()
+        delivery_namespace = delivery.descriptor.storage.spec.namespace
         delivery_state = None
         for _ in range(500):
-            delivery_state = (
-                await delivery.repository.load_intent("intent:delivery-worker:test")
-            )["state"]
+            async with store.pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT state FROM {}.send_intents "
+                            "WHERE bot_id=%s AND intent_id=%s"
+                        ).format(sql.Identifier(delivery_namespace)),
+                        (store.bot_id, "intent:delivery-worker:test"),
+                    )
+                ).fetchone()
+            delivery_state = row["state"]
             if delivery_state == "SENT":
                 break
             await asyncio.sleep(0.01)
-        assert len(clients[0].sends) == 1, (
-            delivery_runtime.worker.failure,
-            (await delivery.repository.load_intent("intent:delivery-worker:test"))["state"],
-            await delivery.repository.recoverable_attempts(),
-        )
+        assert len(clients[0].sends) == 1, (delivery_runtime.failure, delivery_state)
         prepared_send, timeout = clients[0].sends[0]
-        assert timeout is None
+        assert timeout == 20.0
         assert prepared_send.action == "send_group_msg"
         assert b"delivery worker reply" in prepared_send.wire_body
         assert delivery_state == "SENT"
@@ -1184,7 +1215,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             for request in model_clients[0].requests
         )
         automatic_send, automatic_timeout = clients[0].sends[1]
-        assert automatic_timeout is None
+        assert automatic_timeout == 20.0
         assert automatic_send.action == "send_group_msg"
         assert b"ok" in automatic_send.wire_body
         async with store.pool.connection() as conn:
@@ -1248,6 +1279,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         paused = await kernel.runtime.status()
         assert paused["maintenance_epoch"] == 2
         assert paused["data_admission"] is False
+        assert len(clients[0].sends) >= 3
         assert "已暂停" in clients[0].sends[2][0].wire_body.decode("utf-8")
         model_request_count = len(model_clients[0].requests)
         shell_body = json.dumps(
@@ -1288,14 +1320,14 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                         "FROM {}.send_intents i JOIN {}.send_parts p USING(bot_id,intent_id) "
                         "WHERE i.bot_id=%s AND i.cause_component_id='shell.command'"
                     ).format(
-                        sql.Identifier(delivery.repository.namespace),
-                        sql.Identifier(delivery.repository.namespace),
+                        sql.Identifier(delivery_namespace),
+                        sql.Identifier(delivery_namespace),
                     ),
                     (store.bot_id,),
                 )
             ).fetchone()
         assert shell_runtime.failure is None
-        assert delivery_runtime.worker.failure is None
+        assert delivery_runtime.failure is None
         assert len(clients[0].sends) == 4, {
             "request": dict(shell_request) if shell_request else None,
             "delivery": dict(shell_delivery) if shell_delivery else None,

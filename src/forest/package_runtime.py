@@ -25,6 +25,7 @@ from forest.package_capabilities import (
     PackageDomainCommands,
     PackageDomainQueries,
     PackageJobCallScope,
+    PackageOwnedWorkCallScope,
     PackageOwnedWorkAuthority,
     PackageServiceError,
     PackageServiceOperationLedger,
@@ -199,6 +200,7 @@ class PackageGenerationAdapter:
         self._effect_driver_factories = dict(effect_driver_factories or {})
         self._effect_drivers: dict[str, PackageEffectDriver] = {}
         self._job_cancellations: dict[str, Callable[[], Awaitable[bool]]] = {}
+        self._owned_work_calls: set[str] = set()
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
         self._worker_factory = worker_factory
@@ -290,6 +292,8 @@ class PackageGenerationAdapter:
                 generation_member_verifier=self._generation_member_verifier,
                 active=lambda: self.state is PackageGenerationState.ACTIVE,
                 failed=self._owned_work_failed,
+                call_started=self._owned_work_calls.add,
+                call_finished=self._owned_work_calls.discard,
             )
             self.freeze_owned_admission = self._owned_work.freeze_admission
             self.drain_owned_work = self._owned_work.drain
@@ -655,7 +659,12 @@ class PackageGenerationAdapter:
                         )
                     return admission.result
             try:
-                result = normalize(await dispatch(worker, scope, call_id))
+                if route.owned_work:
+                    self._owned_work_calls.add(call_id)
+                try:
+                    result = normalize(await dispatch(worker, scope, call_id))
+                finally:
+                    self._owned_work_calls.discard(call_id)
             except ForestError as error:
                 if durable:
                     await self._service_operation_ledger.fail(
@@ -1058,7 +1067,7 @@ class PackageGenerationAdapter:
                 422,
             )
         timeout = self._worker.remaining_timeout(parent_call_id, request["timeout"])
-        scope = PackageCallScope(
+        scope_values = dict(
             bot_id=outer.bot_id,
             component_id=outer.component_id,
             generation_id=outer.generation_id,
@@ -1068,6 +1077,18 @@ class PackageGenerationAdapter:
             call_operation_id=request["operation_id"],
             causal_root_kind=outer.causal_root_kind,
             causal_root_id=outer.causal_root_id,
+        )
+        scope = (
+            PackageJobCallScope(
+                **scope_values,
+                cancellation_requested=outer.cancellation_requested,
+            )
+            if isinstance(outer, PackageJobCallScope)
+            else (
+                PackageOwnedWorkCallScope(**scope_values)
+                if isinstance(outer, PackageOwnedWorkCallScope)
+                else PackageCallScope(**scope_values)
+            )
         )
         result = await coordinator.execute(
             scope,
@@ -1406,7 +1427,11 @@ class PackageGenerationAdapter:
         return (
             PackageJobCallScope(**values, cancellation_requested=cancellation)
             if cancellation is not None
-            else PackageCallScope(**values)
+            else (
+                PackageOwnedWorkCallScope(**values)
+                if call_id in self._owned_work_calls
+                else PackageCallScope(**values)
+            )
         )
 
     async def _state_gateway(

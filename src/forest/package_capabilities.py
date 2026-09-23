@@ -21,8 +21,13 @@ class PackageCallScope:
 
 
 @dataclass(frozen=True)
-class PackageJobCallScope(PackageCallScope):
-    """Host-only extension available to effects nested under a durable Job call."""
+class PackageOwnedWorkCallScope(PackageCallScope):
+    """A call made while completing work already owned by this Generation."""
+
+
+@dataclass(frozen=True)
+class PackageJobCallScope(PackageOwnedWorkCallScope):
+    """Owned Job call that additionally exposes cooperative cancellation."""
 
     cancellation_requested: Callable[[], Awaitable[bool]]
 

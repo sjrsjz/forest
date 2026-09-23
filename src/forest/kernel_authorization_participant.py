@@ -116,7 +116,7 @@ class KernelAuthorizationUnitOfWorkParticipant:
                 "Authorization issue protocol is invalid",
                 422,
             )
-        grant_digest = await self.runtime.service.generation_capability_grants_digest_in(
+        grant_digest = await self.runtime.generation_authority.generation_capability_grants_digest_in(
             conn,
             component_id=caller["component_id"],
             generation_id=caller["generation_id"],

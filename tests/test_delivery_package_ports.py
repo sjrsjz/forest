@@ -95,7 +95,7 @@ async def test_authorization_participant_derives_grants_from_caller_generation()
     )
     runtime = SimpleNamespace(
         generation_identity=SimpleNamespace(generation_id="generation/auth"),
-        service=runtime_repository,
+        generation_authority=runtime_repository,
     )
     grant_set = SimpleNamespace(grant_set_id="grant/derived")
     authority = SimpleNamespace(

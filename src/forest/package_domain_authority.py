@@ -291,11 +291,10 @@ class PostgresPackageDomainAuthority:
                             generation_id=scope.generation_id,
                         )
                     elif kind == "owned_claim":
-                        await self.runtime.verify_active_generation_in(
+                        await self.runtime.verify_generation_member_in(
                             conn,
                             component_id=self.component_id,
                             generation_id=scope.generation_id,
-                            admission_lane="DATA",
                         )
                     elif kind == "management_action":
                         await self.runtime.verify_active_generation_in(

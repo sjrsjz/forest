@@ -145,7 +145,7 @@ def _build_final_reply_commit(context):
         RuntimeParticipant(
             "conversation.scheduler", conversation.generation_identity.generation_id
         ),
-        RuntimeParticipant("delivery", delivery.generation_identity.generation_id),
+        RuntimeParticipant("delivery", delivery.generation_id),
         RuntimeParticipant("memory.graph", memory.generation_identity.generation_id),
     )
     port = TransactionalConversationCompletionPort(

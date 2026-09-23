@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+from forest.delivery_participant import create_delivery_intent_in
 from forest.errors import ForestError
 from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.shell_command_authority import ShellClaim, ShellPayloadRef
@@ -77,7 +78,8 @@ class ShellControlResultUnitOfWork:
                     authorization_ticket_id=authorization_ticket_id,
                     authorization_operation_id=authorization_operation_id,
                 )
-            delivery_result = await self.delivery.create_intent_in(
+            delivery_result = await create_delivery_intent_in(
+                self.delivery,
                 conn,
                 operation_id=intent_operation_id,
                 intent_id=intent_id,

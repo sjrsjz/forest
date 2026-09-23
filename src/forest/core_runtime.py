@@ -161,11 +161,13 @@ class PreparedAuthorityModule:
         configuration: ModuleConfigurationRepository,
         grants: GrantSetRef,
         services: tuple[str, ...],
+        generation_authority,
     ) -> None:
         self.component_id = component_id
         self.service = service
         self.module_configuration = configuration
         self.grants = grants
+        self.generation_authority = generation_authority
         self.runtime_contract = {
             "protocol": "forest.runtime-services/1",
             "services": [{"service_id": service_id, "version": 1} for service_id in services],
@@ -226,8 +228,23 @@ class PreparedAuthorityModule:
 class PreparedAuditAuthorityModule(PreparedAuthorityModule):
     """Expose the audit Repository and its Shell projection from its own Generation."""
 
-    def __init__(self, component_id, service, configuration, grants, services) -> None:
-        super().__init__(component_id, service, configuration, grants, services)
+    def __init__(
+        self,
+        component_id,
+        service,
+        configuration,
+        grants,
+        services,
+        generation_authority,
+    ) -> None:
+        super().__init__(
+            component_id,
+            service,
+            configuration,
+            grants,
+            services,
+            generation_authority,
+        )
         self._shell_execute = audit_shell_service(service)
         self.management_contract = CleanAuditManagementContract(
             configuration,
@@ -246,8 +263,23 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
 class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
     """Publish the Bot Web operation policy from the authorization Generation."""
 
-    def __init__(self, component_id, service, configuration, grants, services) -> None:
-        super().__init__(component_id, service, configuration, grants, services)
+    def __init__(
+        self,
+        component_id,
+        service,
+        configuration,
+        grants,
+        services,
+        generation_authority,
+    ) -> None:
+        super().__init__(
+            component_id,
+            service,
+            configuration,
+            grants,
+            services,
+            generation_authority,
+        )
         self.management_contract = CleanModuleConfigurationContract(
             configuration,
             schema=WEB_OPERATION_POLICY_SCHEMA,
@@ -392,7 +424,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         RuntimeModuleDescriptor(
             component_id,
             definition["requires"],
-            lambda _runtime, _modules, identity=component_id, service=services[component_id], configuration=configurations[component_id], grant=grants[component_id], provided_services=definition["services"]: (
+            lambda _runtime, _modules, identity=component_id, service=services[component_id], configuration=configurations[component_id], grant=grants[component_id], provided_services=definition["services"], generation_authority=runtime: (
                 (
                     PreparedAuditAuthorityModule
                     if identity == "kernel.audit"
@@ -407,6 +439,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                     configuration,
                     grant,
                     provided_services,
+                    generation_authority,
                 )
             ),
             artifact,

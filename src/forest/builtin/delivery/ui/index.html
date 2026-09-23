@@ -1,14 +1,44 @@
 <!doctype html>
 <html lang="zh-CN">
-<meta charset="utf-8">
-<style>
-  :root{color-scheme:dark;font:14px system-ui;color:#d7eee4;background:#071510}
-  body{margin:0;padding:16px}.card{border:1px solid #26513f;border-radius:12px;padding:16px;background:#0c2119}
-  h2{margin:0 0 8px;font-size:18px}p{margin:6px 0;color:#9cc8b4;line-height:1.55}code{color:#7fe0b5}
-</style>
-<div class="card">
-  <h2>Delivery</h2>
-  <p>发送意图、分片、外部副作用账本与 UNKNOWN 核对由当前包代际拥有。</p>
-  <p>当前阶段已发布事务化 Intent participant；队列和核对操作会随同一包继续接管。</p>
-  <p><code>forest.delivery/1</code></p>
-</div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
+    *{box-sizing:border-box}body{margin:0;padding:14px}.grid{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(12rem,1fr);gap:12px}
+    section{border:1px solid #29493a;border-radius:10px;padding:13px;background:#102019}h2{margin:0 0 5px;font-size:16px}p{margin:4px 0;color:#97b4a4}
+    .value{font:13px ui-monospace,monospace;color:#7fe0b5}.wide{grid-column:1/-1}@media(max-width:620px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}}
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <section>
+      <h2>发送执行器</h2>
+      <p>Intent、分片、发送尝试和外部副作用由当前 Delivery 包独占。</p>
+    </section>
+    <section>
+      <h2>协议</h2>
+      <p class="value">forest.delivery/1</p>
+    </section>
+    <section class="wide">
+      <h2>生命周期</h2>
+      <p>热重载会停止接收新任务，排空已领取工作，再原子发布新 Generation。配置通过本页面所属包提交。</p>
+    </section>
+  </div>
+  <script>
+    (() => {
+      'use strict';
+      const protocol = 'forest.management-ui/1';
+      let port = null, nonce = null;
+      const send = (type, payload = {}) => port?.postMessage({protocol, nonce, type, ...payload});
+      addEventListener('message', event => {
+        const message = event.data || {};
+        if (event.source !== parent || !event.ports[0] || message.protocol !== protocol || message.type !== 'forest:init' || typeof message.nonce !== 'string') return;
+        port = event.ports[0]; nonce = message.nonce;
+        send('module:set-draft', {values:{protocol:'forest.delivery/1'}});
+        send('module:ready'); send('module:resize', {height:document.documentElement.scrollHeight});
+      });
+    })();
+  </script>
+</body>
+</html>

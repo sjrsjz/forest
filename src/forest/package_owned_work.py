@@ -11,6 +11,7 @@ from uuid import uuid4
 from forest.errors import ForestError
 from forest.package_capabilities import (
     PackageCallScope,
+    PackageOwnedWorkCallScope,
     PackageOwnedWorkAuthority,
     PackageServiceError,
     PackageServiceOperationLedger,
@@ -35,6 +36,8 @@ class PackageOwnedWorkSupervisor:
         generation_member_verifier: Callable[..., Any],
         active: Callable[[], bool],
         failed: Callable[[str], None],
+        call_started: Callable[[str], None],
+        call_finished: Callable[[str], None],
     ) -> None:
         self.bot_id = bot_id
         self.component_id = component_id
@@ -46,6 +49,8 @@ class PackageOwnedWorkSupervisor:
         self.generation_member_verifier = generation_member_verifier
         self.active = active
         self.failed = failed
+        self.call_started = call_started
+        self.call_finished = call_finished
         self.inflight = 0
         self.idle = asyncio.Event()
         self.idle.set()
@@ -86,7 +91,7 @@ class PackageOwnedWorkSupervisor:
         causal_root_id: str | None = None,
     ) -> PackageCallScope:
         identity, prepared, _worker = self.binding()
-        return PackageCallScope(
+        return PackageOwnedWorkCallScope(
             bot_id=self.bot_id,
             component_id=self.component_id,
             generation_id=identity.generation_id,
@@ -217,24 +222,28 @@ class PackageOwnedWorkSupervisor:
             admission = await self.operation_ledger.begin(scope, route, operation_input)
             if admission.execute:
                 stage = "dispatch"
-                result = await worker.deliver_job(
-                    declaration["handler"],
-                    {
-                        "protocol": "forest.owned-work-task/1",
-                        "work_id": claim["work_id"],
-                        "attempt": claim["attempt"],
-                        "payload": claim["payload"],
-                    },
-                    call_id=scope.call_id,
-                    operation_id=scope.call_operation_id,
-                    causal_root_kind=claim["causal_root_kind"],
-                    causal_root_id=claim["causal_root_id"],
-                    timeout=declaration["handler_timeout_s"],
-                    before_send=lambda: self.generation_member_verifier(
-                        component_id=self.component_id,
-                        generation_id=identity.generation_id,
-                    ),
-                )
+                self.call_started(scope.call_id)
+                try:
+                    result = await worker.deliver_job(
+                        declaration["handler"],
+                        {
+                            "protocol": "forest.owned-work-task/1",
+                            "work_id": claim["work_id"],
+                            "attempt": claim["attempt"],
+                            "payload": claim["payload"],
+                        },
+                        call_id=scope.call_id,
+                        operation_id=scope.call_operation_id,
+                        causal_root_kind=claim["causal_root_kind"],
+                        causal_root_id=claim["causal_root_id"],
+                        timeout=declaration["handler_timeout_s"],
+                        before_send=lambda: self.generation_member_verifier(
+                            component_id=self.component_id,
+                            generation_id=identity.generation_id,
+                        ),
+                    )
+                finally:
+                    self.call_finished(scope.call_id)
                 _input_validator, output_validator = self.schemas[declaration["name"]]
                 if not output_validator.is_valid(result):
                     raise ForestError(
