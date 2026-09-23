@@ -28,7 +28,45 @@ drain_timeout_s = 120
 stop_timeout_s = 10
 
 [components.capabilities]
-requests = []
+requests = [
+  "service.call:kernel.payload.json-read",
+  "service.call:kernel.effect.json-materialize",
+  "service.call:adapter.onebot.delivery.prepare",
+  "service.call:adapter.onebot.delivery.dispatch",
+  "uow.execute:delivery.prepare",
+  "uow.execute:delivery.handoff",
+  "uow.execute:delivery.observe",
+  "uow.execute:delivery.release",
+  "uow.execute:delivery.abandon"
+]
+
+[[components.requires]]
+name = "adapter.onebot.delivery.prepare"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "adapter.onebot.delivery.dispatch"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.effect_services]]
+name = "kernel.payload.json-read"
+contract = "1.0"
+kind = "kernel.payload-json"
+semantics = "read"
+input_schema = "schemas/payload-read-input.json"
+output_schema = "schemas/payload-read-output.json"
+
+[[components.effect_services]]
+name = "kernel.effect.json-materialize"
+contract = "1.0"
+kind = "kernel.payload-json"
+semantics = "idempotent"
+input_schema = "schemas/materialize-input.json"
+output_schema = "schemas/materialize-output.json"
 
 [components.management_ui]
 entrypoint = "ui/index.html"
@@ -42,7 +80,7 @@ order = 20
 schema_id = "forest.delivery"
 schema_version = "2.0.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "44cb8cc120f0d2f4874210a74a43e3266830e1da547dca40958a162cb3bdb794"
+baseline_sha256 = "3d463f4583ba44751ed60cb9129004892d0364a2f7a7a1161d8df7be6b24f3b1"
 scope = "bot"
 repository_contract = "forest.delivery.repository/2"
 execution_profile = "official"
@@ -59,6 +97,112 @@ path = "/parts/*/payload"
 owner_component = "agent.runtime"
 owner_kind = "final.reply"
 owner_id_path = "/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "delivery.record-prepare"
+contract = "1.0"
+function = "delivery_record_prepare"
+input_schema = "schemas/uow-envelope.json"
+output_schema = "schemas/attempt-output.json"
+
+[[components.unit_of_work_participants]]
+name = "delivery.record-handoff"
+contract = "1.0"
+function = "delivery_record_handoff"
+input_schema = "schemas/uow-envelope.json"
+output_schema = "schemas/attempt-output.json"
+
+[[components.unit_of_work_participants]]
+name = "delivery.record-observe"
+contract = "1.0"
+function = "delivery_record_observe"
+input_schema = "schemas/uow-envelope.json"
+output_schema = "schemas/delivery-result.json"
+
+[[components.unit_of_work_participants]]
+name = "delivery.release-claim"
+contract = "1.0"
+function = "delivery_release_claim"
+input_schema = "schemas/uow-envelope.json"
+output_schema = "schemas/delivery-result.json"
+
+[[components.unit_of_work_participants]]
+name = "delivery.record-abandon"
+contract = "1.0"
+function = "delivery_record_abandon"
+input_schema = "schemas/uow-envelope.json"
+output_schema = "schemas/delivery-result.json"
+
+[[components.unit_of_work_plans]]
+name = "delivery.prepare"
+contract = "1.0"
+input_schema = "schemas/prepare-plan.json"
+output_schema = "schemas/attempt-output.json"
+timeout_s = 10
+steps = [
+  { id = "transport-fence", component_id = "adapter.onebot", participant = "adapter.transport-fence", input_path = "/transport" },
+  { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prepare", input_path = "/effect" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.record-prepare" }
+]
+
+[[components.unit_of_work_plans]]
+name = "delivery.handoff"
+contract = "1.0"
+input_schema = "schemas/handoff-plan.json"
+output_schema = "schemas/attempt-output.json"
+timeout_s = 10
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.handoff", input_path = "/effect" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.record-handoff" }
+]
+
+[[components.unit_of_work_plans]]
+name = "delivery.observe"
+contract = "1.0"
+input_schema = "schemas/observe-plan.json"
+output_schema = "schemas/delivery-result.json"
+timeout_s = 10
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.observe", input_path = "/effect" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.record-observe" }
+]
+
+[[components.unit_of_work_plans]]
+name = "delivery.release"
+contract = "1.0"
+input_schema = "schemas/release-plan.json"
+output_schema = "schemas/delivery-result.json"
+timeout_s = 10
+steps = [
+  { id = "delivery", component_id = "delivery", participant = "delivery.release-claim" }
+]
+
+[[components.unit_of_work_plans]]
+name = "delivery.abandon"
+contract = "1.0"
+input_schema = "schemas/abandon-plan.json"
+output_schema = "schemas/delivery-result.json"
+timeout_s = 10
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.abandon", input_path = "/effect" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.record-abandon" }
+]
+
+[[components.owned_work_handlers]]
+name = "delivery.dispatch"
+contract = "1.0"
+handler = "delivery.dispatch"
+claim_function = "delivery_claim_work"
+settle_function = "delivery_settle_work"
+input_schema = "schemas/work-input.json"
+output_schema = "schemas/work-output.json"
+max_concurrency = 4
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 45
+settle_timeout_s = 5
+lease_seconds = 60
 
 [[components.unit_of_work_participants]]
 name = "delivery.create-control-intent"

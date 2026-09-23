@@ -24,7 +24,22 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
     assert {item["name"] for item in snapshot.component["unit_of_work_participants"]} == {
         "delivery.create-chat-intent",
         "delivery.create-control-intent",
+        "delivery.record-prepare",
+        "delivery.record-handoff",
+        "delivery.record-observe",
+        "delivery.release-claim",
+        "delivery.record-abandon",
     }
+    assert [item["name"] for item in snapshot.component["owned_work_handlers"]] == [
+        "delivery.dispatch"
+    ]
+    assert [item["name"] for item in snapshot.component["unit_of_work_plans"]] == [
+        "delivery.prepare",
+        "delivery.handoff",
+        "delivery.observe",
+        "delivery.release",
+        "delivery.abandon",
+    ]
     assert snapshot.management_ui() is not None
 
 

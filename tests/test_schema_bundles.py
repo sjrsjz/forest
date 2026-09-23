@@ -24,6 +24,8 @@ from forest.agent_tool_executor import (
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
+from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
+from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -1084,94 +1086,143 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
         installer,
         kernel=kernel,
         initial_configuration={"protocol": "forest.delivery/1"},
+        effect_driver_registry=PackageEffectDriverRegistry(
+            {
+                "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                    runtime=kernel.runtime,
+                    payloads=kernel.payload,
+                )
+            }
+        ),
     )
-    lease = await kernel.runtime.claim_host("delivery-host", "delivery-incarnation")
-    host = SimpleNamespace(
-        scope_kind="bot",
-        bot=SimpleNamespace(store=store),
-        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
-        schema_bundle_installer=installer,
-        generation_authority=kernel.runtime,
+    reply_ref = "reply/1"
+    epoch = await kernel.payload.epoch()
+    saved = await kernel.payload.put_bytes(
+        owner_component_id="agent.runtime",
+        owner_kind="final.reply",
+        owner_id=reply_ref,
+        media_type="application/json",
+        content=b'{"text":"A"}',
+        expected_deletion_epoch=epoch,
     )
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, delivery.descriptor))
-    await registry.start()
-    try:
-        instance = registry.get("delivery")
-        reply_ref = "reply/1"
-        epoch = await kernel.payload.epoch()
-        saved = await kernel.payload.put_bytes(
-            owner_component_id="agent.runtime",
-            owner_kind="final.reply",
-            owner_id=reply_ref,
-            media_type="application/json",
-            content=b'{"text":"A"}',
-            expected_deletion_epoch=epoch,
-        )
-        request = {
-            "protocol": "forest.delivery-intent/1",
-            "intent_id": "intent/1",
-            "binding_ref": "binding/main",
-            "lane_kind": "CHAT",
-            "ordering_key": "conversation/1",
-            "conversation_ref": "conversation/1",
-            "channel_kind": "GROUP",
-            "channel_ref": "933179609",
-            "cause_component_id": "conversation.scheduler",
-            "cause_kind": "context.reply",
-            "cause_id": reply_ref,
-            "delivery_generation_id": instance.generation_identity.generation_id,
-            "reply_ref": reply_ref,
-            "parts": [
-                {
-                    "part_operation_id": "part/1",
-                    "effect_operation_ref": "effect/1",
-                    "payload": {
-                        "payload_id": saved.payload_id,
-                        "digest": saved.content_digest,
-                        "owner_component_id": "agent.runtime",
-                        "owner_kind": "final.reply",
-                        "owner_id": reply_ref,
-                    },
-                }
-            ],
-        }
-        participant = instance.unit_of_work_participant()
-        async with store.pool.connection() as conn, conn.transaction():
-            created = await participant.invoke_in(
-                conn,
-                "delivery.create-chat-intent",
-                request,
-                operation_id="delivery:create:1",
-                causal_root_kind="context.reply",
-                causal_root_id=reply_ref,
-                parent_call_id="call:delivery:create:1",
-                timeout_seconds=10,
-            )
-        assert created == {
+    request = {
+        "protocol": "forest.delivery-intent/1",
+        "intent_id": "intent/1",
+        "binding_ref": "binding/main",
+        "lane_kind": "CHAT",
+        "ordering_key": "conversation/1",
+        "conversation_ref": "conversation/1",
+        "channel_kind": "GROUP",
+        "channel_ref": "933179609",
+        "cause_component_id": "conversation.scheduler",
+        "cause_kind": "context.reply",
+        "cause_id": reply_ref,
+        "delivery_generation_id": "generation/delivery-test",
+        "reply_ref": reply_ref,
+        "parts": [
+            {
+                "part_operation_id": "part/1",
+                "effect_operation_ref": "effect/1",
+                "payload": {
+                    "payload_id": saved.payload_id,
+                    "digest": saved.content_digest,
+                    "owner_component_id": "agent.runtime",
+                    "owner_kind": "final.reply",
+                    "owner_id": reply_ref,
+                },
+            }
+        ],
+    }
+    context = {
+        "bot_id": store.bot_id,
+        "generation_id": "generation/delivery-test",
+        "operation_id": "delivery:create:1",
+        "input_digest": digest_json(request),
+    }
+    namespace = delivery.descriptor.storage.spec.namespace
+    async with store.pool.connection() as conn, conn.transaction():
+        envelope = (
+            await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT {}.delivery_create_chat_intent(%s::jsonb,%s::jsonb) AS value"
+                    ).format(sql.Identifier(namespace)),
+                    (psycopg.types.json.Jsonb(context), psycopg.types.json.Jsonb(request)),
+                )
+            ).fetchone()
+        )["value"]
+    assert envelope == {
+        "protocol": "forest.domain-result/1",
+        "ok": True,
+        "value": {
             "intent_id": "intent/1",
             "state": "QUEUED",
             "lane_sequence": 1,
             "part_count": 1,
-        }
-        namespace = delivery.descriptor.storage.spec.namespace
-        async with store.pool.connection() as conn:
-            row = await (
+        },
+    }
+    async with store.pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT i.state,p.state AS part_state,p.payload_id "
+                    "FROM {}.send_intents i JOIN {}.send_parts p USING(bot_id,intent_id) "
+                    "WHERE i.bot_id=%s AND i.intent_id=%s"
+                ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                (store.bot_id, "intent/1"),
+            )
+        ).fetchone()
+    assert dict(row) == {
+        "state": "QUEUED",
+        "part_state": "QUEUED",
+        "payload_id": saved.payload_id,
+    }
+    claim_request = {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "claim:delivery-test",
+        "lease_seconds": 60,
+    }
+    async with store.pool.connection() as conn, conn.transaction():
+        claimed = (
+            await (
                 await conn.execute(
-                    sql.SQL(
-                        "SELECT i.state,p.state AS part_state,p.payload_id "
-                        "FROM {}.send_intents i JOIN {}.send_parts p USING(bot_id,intent_id) "
-                        "WHERE i.bot_id=%s AND i.intent_id=%s"
-                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
-                    (store.bot_id, "intent/1"),
+                    sql.SQL("SELECT {}.delivery_claim_work(%s::jsonb,%s::jsonb) AS value").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (
+                        psycopg.types.json.Jsonb(context),
+                        psycopg.types.json.Jsonb(claim_request),
+                    ),
                 )
             ).fetchone()
-        assert dict(row) == {
-            "state": "QUEUED",
-            "part_state": "QUEUED",
-            "payload_id": saved.payload_id,
-        }
-    finally:
-        assert await registry.close() == []
+        )["value"]
+        work = claimed["value"]["payload"]
+        assert work["mode"] == "DISPATCH"
+        assert work["attempt_id"] == "claim:delivery-test"
+        released = (
+            await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.delivery_release_claim(%s::jsonb,%s::jsonb) AS value").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (
+                        psycopg.types.json.Jsonb(context),
+                        psycopg.types.json.Jsonb(
+                            {
+                                "protocol": "forest.uow-step/1",
+                                "caller": {
+                                    "component_id": "delivery",
+                                    "generation_id": "generation/delivery-test",
+                                },
+                                "input": {"work": work, "reason_code": "test-release"},
+                                "prior": {},
+                            }
+                        ),
+                    ),
+                )
+            ).fetchone()
+        )["value"]
+    assert released["value"] == {"intent_id": "intent/1", "state": "QUEUED"}
 
 
 @pytest.mark.postgres

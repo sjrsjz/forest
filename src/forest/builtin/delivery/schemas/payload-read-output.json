@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["protocol","operation_id","value"],"properties":{"protocol":{"const":"forest.payload-json/1"},"operation_id":{"type":"string"},"value":{}},"additionalProperties":false}

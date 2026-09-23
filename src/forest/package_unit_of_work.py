@@ -68,6 +68,15 @@ class PostgresPackageUnitOfWorkCoordinator:
                             {step["component_id"] for step in declaration["steps"]}
                         )
                     }
+                    # Lock participant namespaces in one global order before the
+                    # manifest's semantic step order starts taking business row locks.
+                    # This keeps composition expressive without reintroducing
+                    # cross-plan deadlocks.
+                    for component_id in sorted(participants):
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                            ("forest.uow.participant:" + component_id,),
+                        )
                     for component_id, participant in participants.items():
                         await self.runtime.verify_generation_member_in(
                             conn,

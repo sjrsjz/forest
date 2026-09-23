@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["work","attempt","effect"],"properties":{"work":{"type":"object"},"attempt":{"type":"object"},"effect":{"type":"object"}},"additionalProperties":false}

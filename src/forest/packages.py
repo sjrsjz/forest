@@ -1105,7 +1105,6 @@ def _manifest(files: dict[str, bytes]) -> dict:
     participant_names = {item["name"] for item in unit_of_work_participants}
     for plan in unit_of_work_plans:
         step_ids = set()
-        step_order = []
         for step in plan["steps"]:
             step_id = step.get("id", "")
             component_id = step.get("component_id", "")
@@ -1124,12 +1123,6 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     "UnitOfWork steps must name unique IDs and declared participants",
                 )
             step_ids.add(step_id)
-            step_order.append((component_id, step_id))
-        if step_order != sorted(step_order):
-            _fail(
-                "INVALID_UNIT_OF_WORK_PLAN",
-                "UnitOfWork steps must use global component and step lock order",
-            )
     query_ports = {item["name"] for item in domain_queries}
     command_ports = {item["name"] for item in domain_commands}
     management_ids = set()

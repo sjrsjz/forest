@@ -94,6 +94,7 @@ async def bootstrap_builtin_package(
     startup_components: tuple[str, ...] = (),
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
+    additional_grants: tuple[CapabilityGrant, ...] = (),
 ) -> BuiltinPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
@@ -136,6 +137,7 @@ async def bootstrap_builtin_package(
                 CapabilityGrant(capability, "component", component_id)
                 for capability in requested
             ),
+            *additional_grants,
         ),
         expected_policy_revision=policy_revision,
     )

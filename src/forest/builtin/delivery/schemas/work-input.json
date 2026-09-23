@@ -1,0 +1,14 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+  "required":["mode","intent_id","part_index","part_operation_id","effect_operation_ref","attempt_id","semantic_digest","binding_ref","lane_kind","ordering_key","lane_sequence","channel_kind","channel_ref","owner_epoch","owner_expires_at","payload"],
+  "properties":{
+    "mode":{"enum":["DISPATCH","RECOVER_PREPARED","RECOVER_DISPATCHING"]},
+    "intent_id":{"type":"string","minLength":1,"maxLength":256},"part_index":{"type":"integer","minimum":0,"maximum":63},
+    "part_operation_id":{"type":"string"},"effect_operation_ref":{"type":"string"},"attempt_id":{"type":"string"},
+    "semantic_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"binding_ref":{"type":"string"},
+    "lane_kind":{"enum":["CHAT","CONTROL"]},"ordering_key":{"type":"string"},"lane_sequence":{"type":"integer","minimum":1},
+    "channel_kind":{"enum":["GROUP","PRIVATE"]},"channel_ref":{"type":"string"},"owner_epoch":{"type":"integer","minimum":1},
+    "owner_expires_at":{"type":"string","format":"date-time"},
+    "payload":{"type":"object","required":["payload_id","digest","owner_component_id","owner_kind","owner_id"],"properties":{"payload_id":{"type":"string"},"digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"owner_component_id":{"type":"string"},"owner_kind":{"type":"string"},"owner_id":{"type":"string"}},"additionalProperties":false}
+  },"additionalProperties":false
+}

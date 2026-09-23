@@ -350,6 +350,8 @@ BEGIN
         RETURN NEW;
     END IF;
     IF OLD.state='UNKNOWN' AND NEW.state IN ('SENT','FAILED','QUEUED') THEN RETURN NEW; END IF;
+    IF OLD.state IN ('PREPARED','DISPATCHING') AND NEW.state=OLD.state
+       AND NEW.owner_epoch > OLD.owner_epoch THEN RETURN NEW; END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid SendPart transition' USING ERRCODE='55000';
 END;
@@ -559,3 +561,332 @@ AS $$ SELECT __forest_module_schema__.delivery_create_intent(context,input) $$;
 CREATE FUNCTION delivery_create_control_intent(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog
 AS $$ SELECT __forest_module_schema__.delivery_create_intent(context,input) $$;
+
+CREATE TABLE owned_work_settlements (
+    claim_token text PRIMARY KEY,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TRIGGER owned_work_settlements_immutable
+    BEFORE UPDATE OR DELETE ON owned_work_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+
+CREATE FUNCTION delivery_claim_work(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    selected record;
+    selected_mode text;
+    expires timestamptz;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+            jsonb_build_object('code','DELIVERY_CLAIM_INPUT_INVALID','message','Delivery claim request is invalid','status',422));
+    END IF;
+    SELECT p.*,i.binding_ref,i.lane_kind,i.ordering_key,i.lane_sequence,
+           i.channel_kind,i.channel_ref,a.attempt_id AS existing_attempt_id,a.state AS attempt_state
+      INTO selected
+      FROM __forest_module_schema__.send_parts p
+      JOIN __forest_module_schema__.send_intents i
+        ON i.bot_id=p.bot_id AND i.intent_id=p.intent_id
+      LEFT JOIN __forest_module_schema__.transport_attempts a
+        ON a.bot_id=p.bot_id AND a.attempt_id=p.current_attempt_id
+     WHERE p.bot_id=requested_bot AND p.owner_id=requested_token
+     FOR UPDATE OF p,i;
+    IF FOUND THEN
+        selected_mode := CASE selected.state WHEN 'PREPARED' THEN 'RECOVER_PREPARED'
+                         WHEN 'DISPATCHING' THEN 'RECOVER_DISPATCHING' ELSE 'DISPATCH' END;
+    ELSE
+        SELECT p.*,i.binding_ref,i.lane_kind,i.ordering_key,i.lane_sequence,
+               i.channel_kind,i.channel_ref,a.attempt_id AS existing_attempt_id,a.state AS attempt_state
+          INTO selected
+          FROM __forest_module_schema__.send_parts p
+          JOIN __forest_module_schema__.send_intents i
+            ON i.bot_id=p.bot_id AND i.intent_id=p.intent_id
+          JOIN __forest_module_schema__.transport_attempts a
+            ON a.bot_id=p.bot_id AND a.attempt_id=p.current_attempt_id
+         WHERE p.bot_id=requested_bot AND p.state IN ('PREPARED','DISPATCHING')
+           AND p.owner_expires_at<=clock_timestamp()
+         ORDER BY p.owner_expires_at,p.intent_id,p.part_index
+         FOR UPDATE OF p,i SKIP LOCKED LIMIT 1;
+        IF FOUND THEN
+            selected_mode := CASE selected.state WHEN 'PREPARED' THEN 'RECOVER_PREPARED'
+                             ELSE 'RECOVER_DISPATCHING' END;
+            expires := clock_timestamp() + requested_lease * interval '1 second';
+            UPDATE __forest_module_schema__.send_parts
+               SET owner_id=requested_token,owner_epoch=owner_epoch+1,owner_expires_at=expires,
+                   updated_at=clock_timestamp()
+             WHERE bot_id=requested_bot AND intent_id=selected.intent_id
+               AND part_index=selected.part_index
+             RETURNING owner_id,owner_epoch,owner_expires_at INTO selected.owner_id,selected.owner_epoch,selected.owner_expires_at;
+        ELSE
+            UPDATE __forest_module_schema__.send_parts p
+               SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,updated_at=clock_timestamp()
+             WHERE p.bot_id=requested_bot AND p.state='CLAIMED'
+               AND p.owner_expires_at<=clock_timestamp();
+            UPDATE __forest_module_schema__.send_intents i SET state='QUEUED',updated_at=clock_timestamp()
+             WHERE i.bot_id=requested_bot AND i.state='SENDING'
+               AND EXISTS (SELECT 1 FROM __forest_module_schema__.send_parts p
+                            WHERE p.bot_id=i.bot_id AND p.intent_id=i.intent_id
+                              AND p.part_index=i.current_part_index AND p.state='QUEUED');
+            SELECT p.*,i.binding_ref,i.lane_kind,i.ordering_key,i.lane_sequence,
+                   i.channel_kind,i.channel_ref,NULL::text AS existing_attempt_id,NULL::text AS attempt_state
+              INTO selected
+              FROM __forest_module_schema__.send_parts p
+              JOIN __forest_module_schema__.send_intents i
+                ON i.bot_id=p.bot_id AND i.intent_id=p.intent_id
+             WHERE p.bot_id=requested_bot AND p.state='QUEUED' AND i.state='QUEUED'
+               AND p.part_index=i.current_part_index
+               AND NOT EXISTS (
+                   SELECT 1 FROM __forest_module_schema__.send_intents earlier
+                    WHERE earlier.bot_id=i.bot_id AND earlier.binding_ref=i.binding_ref
+                      AND earlier.lane_kind=i.lane_kind AND earlier.ordering_key=i.ordering_key
+                      AND earlier.lane_sequence<i.lane_sequence
+                      AND earlier.state IN ('QUEUED','SENDING','UNKNOWN'))
+             ORDER BY CASE i.lane_kind WHEN 'CONTROL' THEN 0 ELSE 1 END,i.created_at,i.intent_id
+             FOR UPDATE OF p,i SKIP LOCKED LIMIT 1;
+            IF NOT FOUND THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+            END IF;
+            selected_mode := 'DISPATCH';
+            expires := clock_timestamp() + requested_lease * interval '1 second';
+            UPDATE __forest_module_schema__.send_parts
+               SET state='CLAIMED',owner_id=requested_token,owner_epoch=owner_epoch+1,
+                   owner_expires_at=expires,updated_at=clock_timestamp()
+             WHERE bot_id=requested_bot AND intent_id=selected.intent_id
+               AND part_index=selected.part_index
+             RETURNING owner_id,owner_epoch,owner_expires_at INTO selected.owner_id,selected.owner_epoch,selected.owner_expires_at;
+            UPDATE __forest_module_schema__.send_intents SET state='SENDING',updated_at=clock_timestamp()
+             WHERE bot_id=requested_bot AND intent_id=selected.intent_id;
+        END IF;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object(
+        'protocol','forest.owned-work-claim/1','work_id',selected.intent_id||':'||selected.part_index,
+        'claim_token',requested_token,'attempt',selected.owner_epoch,'operation_id',requested_token,
+        'causal_root_kind','delivery.intent','causal_root_id',selected.intent_id,
+        'payload',jsonb_build_object(
+          'mode',selected_mode,'intent_id',selected.intent_id,'part_index',selected.part_index,
+          'part_operation_id',selected.part_operation_id,'effect_operation_ref',selected.effect_operation_ref,
+          'attempt_id',COALESCE(selected.existing_attempt_id,requested_token),
+          'semantic_digest',selected.semantic_digest,'binding_ref',selected.binding_ref,
+          'lane_kind',selected.lane_kind,'ordering_key',selected.ordering_key,'lane_sequence',selected.lane_sequence,
+          'channel_kind',selected.channel_kind,'channel_ref',selected.channel_ref,
+          'owner_epoch',selected.owner_epoch,'owner_expires_at',selected.owner_expires_at,
+          'payload',jsonb_build_object('payload_id',selected.payload_id,'digest',selected.payload_digest,
+            'owner_component_id',selected.payload_owner_component_id,'owner_kind',selected.payload_owner_kind,
+            'owner_id',selected.payload_owner_id))));
+END;
+$$;
+
+CREATE FUNCTION delivery_settle_work(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE existing record; result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR input->>'claim_token' IS NULL OR input->>'work_id' IS NULL
+       OR input->'outcome'->>'status' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','DELIVERY_SETTLEMENT_INPUT_INVALID','message','Delivery settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO existing FROM __forest_module_schema__.owned_work_settlements
+     WHERE claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF existing.input_payload IS DISTINCT FROM input THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+              jsonb_build_object('code','DELIVERY_SETTLEMENT_CONFLICT','message','Claim token has another settlement','status',409));
+        END IF;
+        RETURN existing.result_payload;
+    END IF;
+    IF input->'outcome'->>'status'='FAILED' THEN
+        UPDATE __forest_module_schema__.send_parts p SET state='QUEUED',owner_id=NULL,
+               owner_expires_at=NULL,updated_at=clock_timestamp()
+         WHERE p.bot_id=context->>'bot_id' AND p.owner_id=input->>'claim_token' AND p.state='CLAIMED';
+        UPDATE __forest_module_schema__.send_intents i SET state='QUEUED',updated_at=clock_timestamp()
+         WHERE i.bot_id=context->>'bot_id' AND i.state='SENDING'
+           AND EXISTS (SELECT 1 FROM __forest_module_schema__.send_parts p
+             WHERE p.bot_id=i.bot_id AND p.intent_id=i.intent_id AND p.owner_id IS NULL
+               AND p.part_index=i.current_part_index AND p.state='QUEUED');
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('protocol','forest.owned-work-settled/1','work_id',input->>'work_id'));
+    INSERT INTO __forest_module_schema__.owned_work_settlements(claim_token,input_payload,result_payload)
+      VALUES(input->>'claim_token',input,result_value);
+    RETURN result_value;
+END;
+$$;
+
+CREATE FUNCTION delivery_record_prepare(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE plan jsonb:=input->'input'; work jsonb:=plan->'work'; adapter jsonb:=plan->'adapter';
+        wire jsonb:=plan->'wire'; permit jsonb:=input->'prior'->'effect'; auth jsonb:=input->'prior'->'authorization';
+        part record; attempt_no_value integer; existing record;
+BEGIN
+    SELECT * INTO existing FROM __forest_module_schema__.transport_attempts
+     WHERE bot_id=context->>'bot_id' AND attempt_id=work->>'attempt_id';
+    IF FOUND THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+        jsonb_build_object('attempt_id',existing.attempt_id,'state',existing.state,'permit',permit));
+    END IF;
+    SELECT * INTO part FROM __forest_module_schema__.send_parts
+     WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id'
+       AND part_index=(work->>'part_index')::integer FOR UPDATE;
+    IF NOT FOUND OR part.state<>'CLAIMED' OR part.owner_id<>work->>'attempt_id'
+       OR part.owner_epoch<>(work->>'owner_epoch')::bigint
+       OR input->'prior'->'transport-fence'->>'binding_ref' IS DISTINCT FROM work->>'binding_ref'
+       OR auth->'ticket'->>'ticket_id' IS DISTINCT FROM plan->'authorization'->>'ticket_id'
+       OR permit->>'effect_operation_id' IS DISTINCT FROM work->>'effect_operation_ref'
+       OR permit->>'attempt_id' IS DISTINCT FROM work->>'attempt_id' THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','DELIVERY_PREPARE_CONFLICT','message','Delivery claim or participant receipts differ','status',409));
+    END IF;
+    attempt_no_value := part.attempt_count+1;
+    INSERT INTO __forest_module_schema__.transport_attempts(
+      bot_id,attempt_id,intent_id,part_index,attempt_no,prepare_operation_id,input_digest,
+      effect_operation_ref,effect_attempt_ref,effect_attempt_no,transport_action,
+      wire_payload_id,wire_payload_digest,binding_epoch,connection_epoch,client_incarnation,
+      adapter_generation_id,executor_fence_digest,authorization_ticket_ref,
+      authorization_plan_digest,deadline_at)
+    VALUES(context->>'bot_id',work->>'attempt_id',work->>'intent_id',(work->>'part_index')::integer,
+      attempt_no_value,context->>'operation_id',context->>'input_digest',work->>'effect_operation_ref',
+      permit->>'attempt_id',(permit->>'attempt_no')::integer,adapter->'prepared'->>'action',
+      wire->>'payload_id',wire->>'digest',(adapter->>'binding_epoch')::bigint,
+      (adapter->>'connection_epoch')::bigint,adapter->>'client_incarnation',
+      adapter->>'adapter_generation_id',adapter->>'executor_fence_digest',
+      plan->'authorization'->>'ticket_id',plan->>'plan_digest',
+      (plan->'effect'->>'deadline_at')::timestamptz);
+    UPDATE __forest_module_schema__.send_parts SET state='PREPARED',current_attempt_id=work->>'attempt_id',
+      attempt_count=attempt_no_value,updated_at=clock_timestamp()
+     WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id'
+       AND part_index=(work->>'part_index')::integer;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('attempt_id',work->>'attempt_id','state','PREPARED','permit',permit));
+END;
+$$;
+
+CREATE FUNCTION delivery_record_handoff(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE plan jsonb:=input->'input'; work jsonb:=plan->'work'; attempt record; effect jsonb:=input->'prior'->'effect';
+BEGIN
+    SELECT * INTO attempt FROM __forest_module_schema__.transport_attempts
+     WHERE bot_id=context->>'bot_id' AND attempt_id=work->>'attempt_id' FOR UPDATE;
+    IF NOT FOUND OR (attempt.state<>'PREPARED' AND attempt.state<>'DISPATCHING')
+       OR effect->>'attempt_id' IS DISTINCT FROM attempt.effect_attempt_ref
+       OR effect->>'state' IS DISTINCT FROM 'DISPATCHING' THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','DELIVERY_HANDOFF_CONFLICT','message','Delivery handoff receipt differs','status',409));
+    END IF;
+    IF attempt.state='PREPARED' THEN
+      UPDATE __forest_module_schema__.transport_attempts SET state='DISPATCHING',
+        handoff_operation_id=plan->'effect'->>'handoff_operation_id',
+        started_at=(effect->>'started_at')::timestamptz
+       WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
+      UPDATE __forest_module_schema__.send_parts SET state='DISPATCHING',updated_at=clock_timestamp()
+       WHERE bot_id=context->>'bot_id' AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('attempt_id',attempt.attempt_id,'state','DISPATCHING','permit',plan->'attempt'->'permit'));
+END;
+$$;
+
+CREATE FUNCTION delivery_record_observe(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE plan jsonb:=input->'input'; work jsonb:=plan->'work'; attempt record; intent record;
+        requested text:=plan->>'observed_status'; resulting text; receipt jsonb:=plan->'receipt';
+BEGIN
+    SELECT * INTO attempt FROM __forest_module_schema__.transport_attempts
+     WHERE bot_id=context->>'bot_id' AND attempt_id=work->>'attempt_id' FOR UPDATE;
+    SELECT * INTO intent FROM __forest_module_schema__.send_intents
+     WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id' FOR UPDATE;
+    IF NOT FOUND OR attempt.state NOT IN ('DISPATCHING','UNKNOWN') THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Delivery attempt is not observable','status',409));
+    END IF;
+    IF requested='SENT' THEN
+      UPDATE __forest_module_schema__.transport_attempts SET state='SENT',settled_at=clock_timestamp(),
+        receipt_payload_id=receipt->>'payload_id',receipt_payload_digest=receipt->>'digest'
+       WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
+      UPDATE __forest_module_schema__.send_parts SET state='SENT',owner_id=NULL,owner_expires_at=NULL,
+        updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
+        AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+      IF attempt.part_index+1=intent.part_count THEN
+        resulting:='SENT';
+        UPDATE __forest_module_schema__.send_intents SET state='SENT',completed_at=clock_timestamp(),
+          error_code=NULL,updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
+      ELSE
+        resulting:='QUEUED';
+        UPDATE __forest_module_schema__.send_intents SET state='QUEUED',current_part_index=current_part_index+1,
+          error_code=NULL,updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
+      END IF;
+    ELSIF requested='RETRYABLE_NOT_APPLIED' THEN
+      resulting:='QUEUED';
+      UPDATE __forest_module_schema__.transport_attempts SET state='NOT_APPLIED',settled_at=clock_timestamp(),
+        error_code=plan->>'error_code' WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
+      UPDATE __forest_module_schema__.send_parts SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,
+        current_attempt_id=NULL,updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
+        AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+      UPDATE __forest_module_schema__.send_intents SET state='QUEUED',error_code=plan->>'error_code',
+        updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
+    ELSE
+      resulting:='UNKNOWN';
+      UPDATE __forest_module_schema__.transport_attempts SET state='UNKNOWN',settled_at=clock_timestamp(),
+        error_code=plan->>'error_code' WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
+      UPDATE __forest_module_schema__.send_parts SET state='UNKNOWN',owner_id=NULL,owner_expires_at=NULL,
+        updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
+        AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+      UPDATE __forest_module_schema__.send_intents SET state='UNKNOWN',error_code=plan->>'error_code',
+        updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('intent_id',intent.intent_id,'state',resulting));
+END;
+$$;
+
+CREATE FUNCTION delivery_release_claim(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE work jsonb:=input->'input'->'work'; changed integer;
+BEGIN
+  UPDATE __forest_module_schema__.send_parts SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,
+    updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id'
+    AND part_index=(work->>'part_index')::integer AND state='CLAIMED'
+    AND owner_id=work->>'attempt_id' AND owner_epoch=(work->>'owner_epoch')::bigint;
+  GET DIAGNOSTICS changed=ROW_COUNT;
+  IF changed<>1 THEN RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+    jsonb_build_object('code','DELIVERY_RELEASE_CONFLICT','message','Delivery claim is stale','status',409)); END IF;
+  UPDATE __forest_module_schema__.send_intents SET state='QUEUED',updated_at=clock_timestamp()
+   WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id';
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('intent_id',work->>'intent_id','state','QUEUED'));
+END;
+$$;
+
+CREATE FUNCTION delivery_record_abandon(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE work jsonb:=input->'input'->'work'; attempt record;
+BEGIN
+  SELECT * INTO attempt FROM __forest_module_schema__.transport_attempts
+   WHERE bot_id=context->>'bot_id' AND attempt_id=work->>'attempt_id' FOR UPDATE;
+  IF NOT FOUND OR attempt.state NOT IN ('PREPARED','ABANDONED') THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','DELIVERY_ABANDON_CONFLICT','message','Delivery attempt is not abandonable','status',409));
+  END IF;
+  IF attempt.state='PREPARED' THEN
+    UPDATE __forest_module_schema__.transport_attempts SET state='ABANDONED',settled_at=clock_timestamp()
+     WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
+    UPDATE __forest_module_schema__.send_parts SET state='CLAIMED',current_attempt_id=NULL,updated_at=clock_timestamp()
+     WHERE bot_id=context->>'bot_id' AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+    UPDATE __forest_module_schema__.send_parts SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,
+      updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
+      AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+    UPDATE __forest_module_schema__.send_intents SET state='QUEUED',updated_at=clock_timestamp()
+     WHERE bot_id=context->>'bot_id' AND intent_id=attempt.intent_id;
+  END IF;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('intent_id',attempt.intent_id,'state','QUEUED'));
+END;
+$$;
