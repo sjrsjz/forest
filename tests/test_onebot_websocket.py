@@ -143,6 +143,41 @@ async def test_event_capacity_failure_is_explicit_and_finishes_buffer(monkeypatc
         await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_event_admission_freezes_at_handler_boundary_and_resumes_in_order(monkeypatch):
+    client, socket = await create_client(monkeypatch)
+    received = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def consume(body):
+        value = json.loads(body)["message_id"]
+        if value == 1:
+            first_started.set()
+            await release_first.wait()
+        received.append(value)
+
+    try:
+        client.activate_events(consume)
+        await socket.incoming.put(json.dumps({"post_type": "message", "message_id": 1}))
+        await asyncio.wait_for(first_started.wait(), timeout=3)
+        freezing = asyncio.create_task(client.freeze_events())
+        await asyncio.sleep(0)
+        assert not freezing.done()
+        release_first.set()
+        await asyncio.wait_for(freezing, timeout=3)
+        assert received == [1]
+
+        await socket.incoming.put(json.dumps({"post_type": "message", "message_id": 2}))
+        await eventually(lambda: client._events.qsize() == 0)
+        await asyncio.sleep(0.01)
+        assert received == [1]
+        client.resume_events()
+        await eventually(lambda: received == [1, 2])
+    finally:
+        await client.aclose()
+
+
 async def _record(received, body):
     received.append(json.loads(body)["message_id"])
 

@@ -437,6 +437,8 @@ class OneBotWebSocketClient:
         self._expired: set[str] = set()
         self._expired_order: list[str] = []
         self._event_handler: Callable[[bytes], Awaitable[None]] | None = None
+        self._event_admission = asyncio.Event()
+        self._event_dispatch_lock = asyncio.Lock()
         self._socket: ClientConnection | None = None
         self._reader_task: asyncio.Task | None = None
         self._consumer_task: asyncio.Task | None = None
@@ -502,8 +504,21 @@ class OneBotWebSocketClient:
             raise ForestError("ONEBOT_WEBSOCKET_STATE", "WebSocket cannot accept events", 409)
         self._event_handler = handler
         self._activation.set()
+        self._event_admission.set()
         if self.is_closed:
             self._finish_events()
+
+    async def freeze_events(self) -> None:
+        """Close event admission and join the handler currently crossing the gate."""
+
+        self._event_admission.clear()
+        async with self._event_dispatch_lock:
+            pass
+
+    def resume_events(self) -> None:
+        if self._event_handler is None or not self._activation.is_set() or self.is_closed:
+            raise ForestError("ONEBOT_WEBSOCKET_STATE", "WebSocket events cannot resume", 409)
+        self._event_admission.set()
 
     def _finish_events(self) -> None:
         if not self._events_finished:
@@ -592,7 +607,10 @@ class OneBotWebSocketClient:
                 try:
                     if body is None:
                         return
-                    await handler(body)
+                    await self._event_admission.wait()
+                    async with self._event_dispatch_lock:
+                        await self._event_admission.wait()
+                        await handler(body)
                 finally:
                     self._events.task_done()
         except asyncio.CancelledError:

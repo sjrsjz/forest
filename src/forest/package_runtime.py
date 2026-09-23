@@ -1937,6 +1937,8 @@ class PackageGenerationAdapter:
                 self.generation_identity.generation_id,
                 self._prepared_binding.worker_incarnation,
                 self.bot_id,
+                self.generation_identity.graph_id,
+                self.generation_identity.graph_revision,
             ),
             self._state_gateway,
             limits=_worker_limits(self.component),

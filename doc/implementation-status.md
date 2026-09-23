@@ -35,6 +35,8 @@
 
 包级双向 Effect ingress 已实现：`effect_services.ingress` 声明只对所属驱动开放的私有 Worker 端口，冻结 handler、输入/输出 schema、重放语义和 deadline。候选驱动可以连接和有界缓冲，但只有 RuntimeGraph 提交后的 `activate_ingress` 才打开接纳；排空先执行 `freeze_ingress`，再等待已接纳 Worker 调用和服务账本归零，随后 quiesce 驱动并在 stop 时回收资源。恢复后的驱动仍保持待命，必须随图重新激活。隔离 Worker 双向夹具已验证发布前拒绝、准确 Generation 投递、在途帧排空、冻结后拒绝、resume 后重新激活和 close；Package/Worker 专项为 `116 passed, 1 skipped`。这是 `adapter.onebot` 移出宿主所需的通用资源边界，OneBot 包本身仍在迁移中。
 
+OneBot transport 的受限 Effect 驱动已实现但尚未切换生产描述符：凭据解析、账号探测、WebSocket、原始 frame 和 action wire 只存在于驱动；发送前同时复核准确 Adapter Generation、RuntimeGraph fence、Binding/connection/client identity、transport digest、Kernel Effect 的 `DISPATCHING` attempt、wire digest 与目标群/用户。WebSocket 事件门现在支持 `freeze_events/resume_events`，冻结先关门并等待正在跨越 handler 边界的帧，缓冲帧在重新激活后保持顺序继续；resume 本身不开放 ingress。驱动专项、真实 WebSocket 原语和全量可运行集合分别通过 `6 passed` 与 `432 passed, 128 skipped`。下一步仍是把 Adapter Worker、私有 SQL/UoW 与管理 UI 接入该驱动并删除宿主 `CleanOneBotRuntime`，当前不能据此宣称 Adapter 已迁移。
+
 该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
 
 Agent、Memory、Adapter transport 与 Conversation 仍由宿主 `bootstrap_clean_*` 或等价宿主组合根构造，因此整张生产图仍不是完整可安装插件图，当前实现仍禁止发布。Routing、Delivery、Media、Job 与 Shell 已经切到包级 Domain Query/Command、冻结贡献目录、UnitOfWork participant、私有持久工作和隔离 Worker ABI；其旧宿主业务 Repository、Runtime、dispatcher、Management 与静态 UI 实现已按各自完成范围物理删除。其余模块仍需把实际端口、SQL、Worker handler 与管理 UI 声明进包，不能把公共 ABI 已存在误报为模块已经迁移。Adapter transport 还需按现有包级 `effect_service` 模式接入 Secret lease 和受限 Effect executor。迁移不增加总 Gateway、shim、fallback、双写或第二套生命周期，也不以改 Python 导入路径冒充插件化。

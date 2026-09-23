@@ -60,11 +60,24 @@ class WorkerIdentity:
     generation_id: str
     incarnation: str
     bot_id: str
+    graph_id: str | None = None
+    graph_revision: int | None = None
 
     def __post_init__(self):
         if any(
             not isinstance(value, str) or not value or len(value) > 128
-            for value in asdict(self).values()
+            for value in (
+                self.instance_id,
+                self.generation_id,
+                self.incarnation,
+                self.bot_id,
+            )
+        ) or (
+            self.graph_id is not None
+            and (not isinstance(self.graph_id, str) or not self.graph_id or len(self.graph_id) > 128)
+        ) or (
+            self.graph_revision is not None
+            and (type(self.graph_revision) is not int or self.graph_revision < 1)
         ):
             raise ValueError("Worker identity fields must contain 1 to 128 characters")
 
