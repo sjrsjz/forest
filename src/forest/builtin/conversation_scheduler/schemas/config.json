@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "context_view"],
+  "properties": {
+    "protocol": {"const": "forest.conversation.scheduler/2"},
+    "context_view": {
+      "type": "object",
+      "required": ["high_watermark_units", "retain_units", "policy_revision"],
+      "properties": {
+        "high_watermark_units": {"type": "integer", "minimum": 2, "maximum": 1000000},
+        "retain_units": {"type": "integer", "minimum": 1, "maximum": 999999},
+        "policy_revision": {"const": "context-view-unit-window-v1"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

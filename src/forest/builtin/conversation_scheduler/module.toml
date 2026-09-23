@@ -1,0 +1,66 @@
+manifest_version = 1
+package_id = "forest.conversation-scheduler"
+version = "2.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "conversation_scheduler:ConversationScheduler"
+
+[[components]]
+id = "conversation.scheduler"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+provides = []
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 32
+max_queue_items = 256
+max_state_inflight = 1
+max_owned_tasks = 16
+max_owned_resources = 2
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 15
+drain_timeout_s = 960
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = []
+
+[components.storage]
+schema_id = "forest.conversation.scheduler"
+schema_version = "2.0.0"
+baseline = "schema/conversation_scheduler.sql"
+baseline_sha256 = "ebd54aaaca366238a9f808f7140f699432c0035adc450d97c3ea5820688727e0"
+scope = "bot"
+repository_contract = "forest.conversation-scheduler.repository/2"
+execution_profile = "official"
+
+[[components.unit_of_work_participants]]
+name = "conversation.admit-message"
+contract = "1.0"
+function = "conversation_admit_message"
+input_schema = "schemas/admit-envelope.json"
+output_schema = "schemas/admit-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/content"
+owner_component_path = "/input/source_component_id"
+owner_kind_path = "/input/content/owner_kind"
+owner_id_path = "/input/event_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/author"
+owner_component_path = "/input/source_component_id"
+owner_kind_path = "/input/author/owner_kind"
+owner_id_path = "/input/event_id"
+
+[[components.unit_of_work_participants]]
+name = "conversation.complete-classification"
+contract = "1.0"
+function = "conversation_complete_classification"
+input_schema = "schemas/classify-envelope.json"
+output_schema = "schemas/classify-output.json"

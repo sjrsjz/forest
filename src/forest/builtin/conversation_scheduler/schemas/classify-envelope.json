@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object",
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "conversation_id", "event_id", "decision", "classifier_component_id",
+        "classifier_generation_id", "rule_revision", "reason_code", "route_ref",
+        "trigger_id", "principal_ref"
+      ],
+      "properties": {
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "event_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "decision": {"enum": ["NO_TRIGGER", "TRIGGER", "CONTROL_COMMAND", "ROUTED", "FAILED"]},
+        "classifier_component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "classifier_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "rule_revision": {"type": ["string", "null"], "maxLength": 256},
+        "reason_code": {"type": ["string", "null"], "maxLength": 128},
+        "route_ref": {"type": ["string", "null"], "maxLength": 512},
+        "trigger_id": {"type": ["string", "null"], "maxLength": 256},
+        "principal_ref": {"type": ["string", "null"], "maxLength": 256}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"decision": {"const": "TRIGGER"}}},
+          "then": {
+            "properties": {
+              "trigger_id": {"type": "string", "minLength": 1},
+              "principal_ref": {"type": "string", "minLength": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "trigger_id": {"type": "null"},
+              "principal_ref": {"type": "null"}
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "prior": {"type": "object"}
+  },
+  "additionalProperties": false
+}

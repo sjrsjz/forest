@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "payload_ref": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "owner_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object",
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "conversation_id", "source_component_id", "binding_ref", "platform",
+        "channel_kind", "channel_ref", "thread_ref", "event_id", "source_event_ref",
+        "event_kind", "platform_message_ref", "author_subject_ref", "content", "author",
+        "received_at", "classification_deadline", "sent_at", "context_disposition"
+      ],
+      "properties": {
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_component_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "binding_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "platform": {"type": "string", "minLength": 1, "maxLength": 64},
+        "channel_kind": {"enum": ["GROUP", "PRIVATE", "SYSTEM"]},
+        "channel_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "thread_ref": {"type": ["string", "null"], "maxLength": 256},
+        "event_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_event_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "event_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "platform_message_ref": {"type": ["string", "null"], "maxLength": 512},
+        "author_subject_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "content": {"$ref": "#/$defs/payload_ref"},
+        "author": {"$ref": "#/$defs/payload_ref"},
+        "received_at": {"type": "string", "format": "date-time"},
+        "classification_deadline": {"type": "string", "format": "date-time"},
+        "sent_at": {"type": ["string", "null"], "format": "date-time"},
+        "context_disposition": {"enum": ["MATERIALIZE", "PLACEHOLDER"]}
+      },
+      "additionalProperties": false
+    },
+    "prior": {"type": "object"}
+  },
+  "additionalProperties": false
+}
