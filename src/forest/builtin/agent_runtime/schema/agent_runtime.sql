@@ -1666,3 +1666,370 @@ BEGIN
     RETURN result_value;
 END;
 $$;
+
+CREATE FUNCTION agent_complete_run(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    state_value jsonb := body->'state';
+    requested_bot text := context->>'bot_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_checkpoint text := body->>'checkpoint_id';
+    run_row record;
+    existing record;
+    next_sequence bigint;
+    checksum_value text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR state_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR state_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_COMPLETION_INPUT_INVALID',
+                'message','Agent completion envelope is invalid','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/checkpoint/' || requested_bot || '/' || requested_checkpoint,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.run_checkpoints
+    WHERE bot_id=requested_bot AND checkpoint_id=requested_checkpoint;
+    IF FOUND THEN
+        IF existing.run_id IS DISTINCT FROM requested_run
+           OR existing.input_digest IS DISTINCT FROM requested_digest
+           OR existing.phase IS DISTINCT FROM 'COMPLETED' THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_CHECKPOINT_CONFLICT',
+                    'message','Completion checkpoint identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN __forest_module_schema__.agent_run_snapshot(
+            context,jsonb_build_object('run_id',requested_run)
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    IF run_row.state IS DISTINCT FROM 'FINAL_READY' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_COMPLETION_CONFLICT',
+                'message','Agent Run has no final candidate ready to commit','status',409
+            )
+        );
+    END IF;
+    next_sequence := run_row.checkpoint_seq+1;
+    checksum_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_run,next_sequence,'COMPLETED',run_row.input_revision,
+        run_row.next_step_seq,state_value->>'digest',requested_epoch
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.run_checkpoints(
+        bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,phase,
+        input_revision,next_step_seq,state_payload_id,state_payload_digest,
+        state_owner_component_id,state_owner_kind,state_owner_id,
+        checkpoint_checksum,owner_epoch
+    ) VALUES (
+        requested_bot,requested_run,next_sequence,requested_checkpoint,requested_digest,
+        'COMPLETED',run_row.input_revision,run_row.next_step_seq,
+        state_value->>'payload_id',state_value->>'digest',
+        state_value->>'owner_component_id',state_value->>'owner_kind',state_value->>'owner_id',
+        checksum_value,requested_epoch
+    );
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='COMPLETED',checkpoint_seq=next_sequence,terminal_at=run_row.database_now,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_start_successor(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    batch jsonb := body->'input_batch';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_session text := body->>'session_id';
+    requested_completed text := body->>'completed_run_id';
+    requested_run text := body->>'run_id';
+    deadline_value timestamptz;
+    session_row record;
+    previous record;
+    existing record;
+    trigger_value jsonb;
+    trigger_index integer := 0;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SUCCESSOR_INPUT_INVALID',
+                'message','Agent successor envelope is invalid','status',422
+            )
+        );
+    END IF;
+    BEGIN
+        deadline_value := (body->>'absolute_deadline')::timestamptz;
+    EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SUCCESSOR_INPUT_INVALID',
+                'message','Agent successor deadline is invalid','status',422
+            )
+        );
+    END;
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(batch->'triggers') item
+        WHERE (item->>'ingress_seq')::bigint>(batch->>'selected_input_end_seq')::bigint
+    ) OR (
+        SELECT count(*)<>count(DISTINCT item->>'trigger_ref')
+        FROM jsonb_array_elements(batch->'triggers') item
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SUCCESSOR_INPUT_INVALID',
+                'message','Agent successor trigger set is invalid','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/start/' || requested_bot || '/' || requested_operation,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot
+      AND (start_operation_id=requested_operation OR run_id=requested_run)
+    FOR UPDATE;
+    IF FOUND THEN
+        IF existing.start_operation_id IS DISTINCT FROM requested_operation
+           OR existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_START_OPERATION_CONFLICT',
+                    'message','Agent successor start input differs','status',409
+                )
+            );
+        END IF;
+        RETURN __forest_module_schema__.agent_run_snapshot(
+            context,jsonb_build_object('run_id',requested_run)
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/session/' || requested_bot || '/' || requested_session,0
+    ));
+    SELECT * INTO session_row
+    FROM __forest_module_schema__.agent_sessions
+    WHERE bot_id=requested_bot AND session_id=requested_session FOR UPDATE;
+    SELECT *,clock_timestamp() AS database_now INTO previous
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_completed FOR UPDATE;
+    IF previous IS NULL OR deadline_value<=previous.database_now
+       OR deadline_value>previous.database_now+interval '24 hours' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SUCCESSOR_INPUT_INVALID',
+                'message','Agent successor deadline is outside its bound','status',422
+            )
+        );
+    END IF;
+    IF session_row IS NULL OR session_row.state IS DISTINCT FROM 'ACTIVE'
+       OR session_row.active_run_id IS DISTINCT FROM requested_completed
+       OR previous.session_id IS DISTINCT FROM requested_session
+       OR previous.state IS DISTINCT FROM 'COMPLETED' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SUCCESSOR_CONFLICT',
+                'message','Session is not ready for the requested successor Run','status',409
+            )
+        );
+    END IF;
+    INSERT INTO __forest_module_schema__.agent_runs(
+        bot_id,run_id,session_id,start_operation_id,input_digest,state,
+        agent_spec_revision,config_payload_id,config_payload_digest,
+        config_owner_component_id,config_owner_kind,config_owner_id,
+        preset_revision,preset_payload_id,preset_payload_digest,
+        preset_owner_component_id,preset_owner_kind,preset_owner_id,
+        core_protocol_id,core_protocol_version,core_prompt_digest,parser_revision,
+        absolute_deadline,input_revision,selected_input_end_seq,
+        context_revision,context_view_revision
+    ) VALUES (
+        requested_bot,requested_run,requested_session,requested_operation,requested_digest,
+        'PREPARING_MODEL',previous.agent_spec_revision,previous.config_payload_id,
+        previous.config_payload_digest,previous.config_owner_component_id,
+        previous.config_owner_kind,previous.config_owner_id,previous.preset_revision,
+        previous.preset_payload_id,previous.preset_payload_digest,
+        previous.preset_owner_component_id,previous.preset_owner_kind,previous.preset_owner_id,
+        previous.core_protocol_id,previous.core_protocol_version,previous.core_prompt_digest,
+        previous.parser_revision,deadline_value,1,
+        (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
+        (batch->>'context_view_revision')::bigint
+    );
+    INSERT INTO __forest_module_schema__.run_inputs(
+        bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
+        selected_input_end_seq,context_revision,context_view_revision,
+        source_manifest_digest,trigger_count
+    ) VALUES (
+        requested_bot,requested_run,1,batch->>'input_batch_ref',batch->>'input_batch_digest',
+        (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
+        (batch->>'context_view_revision')::bigint,batch->>'source_manifest_digest',
+        jsonb_array_length(batch->'triggers')
+    );
+    FOR trigger_value IN SELECT value FROM jsonb_array_elements(batch->'triggers') LOOP
+        INSERT INTO __forest_module_schema__.run_input_triggers(
+            bot_id,run_id,input_revision,trigger_index,trigger_ref,principal_ref,ingress_seq
+        ) VALUES (
+            requested_bot,requested_run,1,trigger_index,trigger_value->>'trigger_ref',
+            trigger_value->>'principal_ref',(trigger_value->>'ingress_seq')::bigint
+        );
+        trigger_index := trigger_index+1;
+    END LOOP;
+    UPDATE __forest_module_schema__.agent_sessions
+    SET active_run_id=requested_run,session_epoch=session_epoch+1,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND session_id=requested_session;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_close_session(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_session text := body->>'session_id';
+    requested_completed text := body->>'completed_run_id';
+    session_row record;
+    run_row record;
+    existing record;
+    closed_value timestamptz;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SESSION_CLOSE_INPUT_INVALID',
+                'message','Agent Session close envelope is invalid','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/session-close/' || requested_bot || '/' || requested_operation,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.session_close_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_SESSION_CLOSE_CONFLICT',
+                    'message','Agent Session close input differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'operation_id',existing.operation_id,'session_id',existing.session_id,
+                'completed_run_id',existing.completed_run_id,'closed_at',existing.closed_at
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/session/' || requested_bot || '/' || requested_session,0
+    ));
+    SELECT * INTO session_row
+    FROM __forest_module_schema__.agent_sessions
+    WHERE bot_id=requested_bot AND session_id=requested_session FOR UPDATE;
+    SELECT * INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_completed FOR UPDATE;
+    IF session_row IS NULL OR run_row IS NULL
+       OR session_row.state IS DISTINCT FROM 'ACTIVE'
+       OR session_row.active_run_id IS DISTINCT FROM requested_completed
+       OR run_row.session_id IS DISTINCT FROM requested_session
+       OR run_row.state IS DISTINCT FROM 'COMPLETED' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SESSION_CLOSE_CONFLICT',
+                'message','Session is not idle at the completed Run','status',409
+            )
+        );
+    END IF;
+    closed_value := clock_timestamp();
+    UPDATE __forest_module_schema__.agent_sessions
+    SET state='CLOSED',active_run_id=NULL,closed_at=closed_value,
+        updated_at=closed_value
+    WHERE bot_id=requested_bot AND session_id=requested_session;
+    INSERT INTO __forest_module_schema__.session_close_operations(
+        bot_id,operation_id,input_digest,session_id,completed_run_id,closed_at
+    ) VALUES (
+        requested_bot,requested_operation,requested_digest,
+        requested_session,requested_completed,closed_value
+    );
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'operation_id',requested_operation,'session_id',requested_session,
+            'completed_run_id',requested_completed,'closed_at',closed_value
+        )
+    );
+END;
+$$;

@@ -13,7 +13,7 @@ from forest.errors import ForestError
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
-from forest.storage.agent_runtime_authority import AgentPayloadRef
+from forest.storage.agent_runtime_authority import AgentPayloadRef, AgentRuntimeRepository
 
 
 async def _payload(kernel, *, owner_kind: str, owner_id: str, value: bytes) -> AgentPayloadRef:
@@ -31,6 +31,45 @@ async def _payload(kernel, *, owner_kind: str, owner_id: str, value: bytes) -> A
         "agent.runtime",
         owner_kind,
         owner_id,
+    )
+
+
+async def _advance_to_final_ready(repository, kernel, owner, prefix: str):
+    phase = "PREPARING_MODEL"
+    for index, target in enumerate(("MODEL_PENDING", "PARSING", "SAFE_BOUNDARY"), 1):
+        state = await _payload(
+            kernel,
+            owner_kind="checkpoint.state",
+            owner_id=f"{prefix}/phase/{index}",
+            value=(f'{{"phase":"{target}"}}').encode(),
+        )
+        await repository.transition(
+            owner,
+            checkpoint_id=state.owner_id,
+            expected_phase=phase,
+            target_phase=target,
+            state=state,
+        )
+        phase = target
+    ready = await _payload(
+        kernel,
+        owner_kind="checkpoint.state",
+        owner_id=f"{prefix}/final-ready",
+        value=b'{"phase":"FINAL_READY"}',
+    )
+    candidate = await _payload(
+        kernel,
+        owner_kind="final.candidate",
+        owner_id=f"{prefix}/candidate",
+        value=b'{"assistant":"done"}',
+    )
+    await repository.transition(
+        owner,
+        checkpoint_id=ready.owner_id,
+        expected_phase="SAFE_BOUNDARY",
+        target_phase="FINAL_READY",
+        state=ready,
+        final_candidate=candidate,
     )
 
 
@@ -65,7 +104,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "stream": True,
         },
     )
-    lease = await kernel.runtime.claim_host("agent-package-host", "agent-package-incarnation")
+    lease = await kernel.runtime.claim_host(
+        "agent-package-host",
+        "agent-package-incarnation",
+        ttl=timedelta(minutes=5),
+    )
     host = SimpleNamespace(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
@@ -414,5 +457,175 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "reload_resume_phase": None,
             "reload_generation_id": None,
         }
+
+        repository = AgentRuntimeRepository(
+            store,
+            namespace=package.configuration.namespace,
+            payload_verifier=kernel.payload.verify_in,
+        )
+        conversation_caller = {
+            "component_id": "conversation.scheduler",
+            "generation_id": "generation/conversation/package-test",
+        }
+        replacement_participant = replacement.unit_of_work_participant()
+        first_owner = await repository.acquire_run(
+            "run/agent-package/1",
+            "agent-worker/finalize/1",
+            lease_seconds=120,
+        )
+        await _advance_to_final_ready(
+            repository,
+            kernel,
+            first_owner,
+            "checkpoint/package/first",
+        )
+        first_completed_state = await _payload(
+            kernel,
+            owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/first/completed",
+            value=b'{"phase":"COMPLETED"}',
+        )
+        first_complete_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": conversation_caller,
+            "input": {
+                "owner": {
+                    "run_id": first_owner.run_id,
+                    "owner_id": first_owner.owner_id,
+                    "epoch": first_owner.epoch,
+                },
+                "checkpoint_id": first_completed_state.owner_id,
+                "state": first_completed_state.canonical(),
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            completed = await replacement_participant.invoke_in(
+                conn,
+                "agent.complete-run-record",
+                first_complete_envelope,
+                operation_id="agent-run-complete/package/1",
+                causal_root_kind="conversation.final-reply",
+                causal_root_id="run/agent-package/1",
+                parent_call_id="call:agent-package/complete-first",
+                timeout_seconds=10,
+            )
+        assert completed["state"] == "COMPLETED"
+        assert completed["session"]["active_run_id"] == "run/agent-package/1"
+        await repository.release_run(first_owner)
+
+        successor_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": conversation_caller,
+            "input": {
+                "session_id": "session/agent-package/1",
+                "completed_run_id": "run/agent-package/1",
+                "run_id": "run/agent-package/2",
+                "input_batch": {
+                    "input_batch_ref": "input-batch/agent-package/3",
+                    "input_batch_digest": digest_json({"batch": 3}),
+                    "selected_input_end_seq": 4,
+                    "context_revision": 3,
+                    "context_view_revision": 1,
+                    "source_manifest_digest": digest_json({"source": 3}),
+                    "triggers": [
+                        {
+                            "trigger_ref": "trigger/3",
+                            "principal_ref": "qq:44",
+                            "ingress_seq": 4,
+                        }
+                    ],
+                },
+                "absolute_deadline": (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat(),
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            successor = await replacement_participant.invoke_in(
+                conn,
+                "agent.start-successor-record",
+                successor_envelope,
+                operation_id="agent-run-successor/package/1",
+                causal_root_kind="conversation.session-handoff",
+                causal_root_id="session/agent-package/1",
+                parent_call_id="call:agent-package/successor",
+                timeout_seconds=10,
+            )
+        assert successor["state"] == "PREPARING_MODEL"
+        assert successor["session"]["active_run_id"] == "run/agent-package/2"
+        assert successor["session"]["session_epoch"] == 2
+        assert successor["profile"] == completed["profile"]
+
+        second_owner = await repository.acquire_run(
+            "run/agent-package/2",
+            "agent-worker/finalize/2",
+            lease_seconds=120,
+        )
+        await _advance_to_final_ready(
+            repository,
+            kernel,
+            second_owner,
+            "checkpoint/package/second",
+        )
+        second_completed_state = await _payload(
+            kernel,
+            owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/second/completed",
+            value=b'{"phase":"COMPLETED"}',
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            second_completed = await replacement_participant.invoke_in(
+                conn,
+                "agent.complete-run-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": conversation_caller,
+                    "input": {
+                        "owner": {
+                            "run_id": second_owner.run_id,
+                            "owner_id": second_owner.owner_id,
+                            "epoch": second_owner.epoch,
+                        },
+                        "checkpoint_id": second_completed_state.owner_id,
+                        "state": second_completed_state.canonical(),
+                    },
+                    "prior": {},
+                },
+                operation_id="agent-run-complete/package/2",
+                causal_root_kind="conversation.final-reply",
+                causal_root_id="run/agent-package/2",
+                parent_call_id="call:agent-package/complete-second",
+                timeout_seconds=10,
+            )
+        assert second_completed["state"] == "COMPLETED"
+        await repository.release_run(second_owner)
+
+        close_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": conversation_caller,
+            "input": {
+                "session_id": "session/agent-package/1",
+                "completed_run_id": "run/agent-package/2",
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            closed = await replacement_participant.invoke_in(
+                conn,
+                "agent.close-session-record",
+                close_envelope,
+                operation_id="agent-session-close/package/1",
+                causal_root_kind="conversation.session-handoff",
+                causal_root_id="session/agent-package/1",
+                parent_call_id="call:agent-package/close-session",
+                timeout_seconds=10,
+            )
+        assert closed["session_id"] == "session/agent-package/1"
+        assert closed["completed_run_id"] == "run/agent-package/2"
+        final_snapshot = await repository.load("run/agent-package/2")
+        assert final_snapshot["session"]["state"] == "CLOSED"
+        assert final_snapshot["session"]["active_run_id"] is None
     finally:
         assert await registry.close() == []

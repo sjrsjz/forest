@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object",
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "conversation.scheduler"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": ["session_id", "completed_run_id"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "completed_run_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "prior": {"type": "object"}
+  },
+  "additionalProperties": false
+}
