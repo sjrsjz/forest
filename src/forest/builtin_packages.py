@@ -217,6 +217,7 @@ async def bootstrap_builtin_package(
             runtime=kernel.runtime,
         ),
         owned_work_authority=domain_authority,
+        agent_tool_effects=kernel.effect,
         service_operation_ledger=KernelPackageServiceOperationLedger(
             kernel.runtime,
             kernel.payload,

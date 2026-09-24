@@ -1293,6 +1293,25 @@ class AgentToolsDirectoryHandle:
             {"kind": "agent-tools", "action": "list"},
         )
 
+    async def dispatch_prepared(self, request: dict) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED",
+                "No contribution directory gateway is available",
+                403,
+            )
+        if not isinstance(request, dict):
+            raise ForestError(
+                "AGENT_TOOL_COMMAND_INVALID",
+                "Prepared Agent tool dispatch must be an object",
+                422,
+            )
+        return await self._rpc(
+            scope.call_id,
+            {"kind": "agent-tools", "action": "dispatch-prepared", **request},
+        )
+
 
 class RoutingRoutesDirectoryHandle:
     """Invoke targets from the RuntimeGraph-frozen routing contribution directory."""

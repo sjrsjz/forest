@@ -23,6 +23,7 @@ from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLim
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_capabilities import (
+    PackageAgentToolEffectAuthority,
     PackageCallScope,
     PackageDomainCommands,
     PackageDomainQueries,
@@ -198,6 +199,7 @@ class PackageGenerationAdapter:
         event_publisher=None,
         component_job_scheduler=None,
         contribution_directories: Mapping[str, tuple] | None = None,
+        agent_tool_effects: PackageAgentToolEffectAuthority | None = None,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
     ) -> None:
         self.snapshot = snapshot
@@ -237,6 +239,7 @@ class PackageGenerationAdapter:
             routes=contribution_directories or {},
             domain_queries=domain_queries,
             domain_query_declarations=self.component.get("domain_queries", ()),
+            agent_tool_effects=agent_tool_effects,
         )
         self._worker_factory = worker_factory
         self._worker: PythonWorker | None = None
@@ -2452,6 +2455,7 @@ def package_runtime_descriptor(
     ]
     | None = None,
     owned_work_authority: PackageOwnedWorkAuthority | None = None,
+    agent_tool_effects: PackageAgentToolEffectAuthority | None = None,
     service_operation_ledger: PackageServiceOperationLedger,
     configuration_validator: Callable[[object], Any] | None = None,
     effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
@@ -2717,6 +2721,7 @@ def package_runtime_descriptor(
             event_publisher=event_publisher,
             component_job_scheduler=component_job_scheduler,
             contribution_directories=contribution_directories,
+            agent_tool_effects=agent_tool_effects,
             worker_factory=worker_factory,
         )
         if management_contract is not None:

@@ -10,7 +10,12 @@ from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
-from forest.package_capabilities import PackageCallScope, PackageDomainQueries
+from forest.package_capabilities import (
+    PackageAgentToolEffectAuthority,
+    PackageCallScope,
+    PackageDomainQueries,
+)
+from forest.packages import digest_json
 from forest.routing_protocol import (
     DurableComponentJobRequest,
     DurableEventDeliveryRequest,
@@ -31,6 +36,7 @@ class FrozenContributionDirectories:
         routes: Mapping[str, Any],
         domain_queries: PackageDomainQueries | None,
         domain_query_declarations: Iterable[dict],
+        agent_tool_effects: PackageAgentToolEffectAuthority | None = None,
     ) -> None:
         self._declarations = {item["kind"]: item for item in declarations}
         self._routes = {
@@ -42,6 +48,7 @@ class FrozenContributionDirectories:
             for kind, items in routes.items()
         }
         self._domain_queries = domain_queries
+        self._agent_tool_effects = agent_tool_effects
         self._query_declarations = {
             item["name"]: item for item in domain_query_declarations
         }
@@ -116,6 +123,17 @@ class FrozenContributionDirectories:
             raise ForestError(
                 "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
                 "Frozen Shell command routes must be unique",
+                500,
+            )
+        agent_tool_routes = self._routes.get("agent-tools", ())
+        self._agent_tool_routes = {
+            contribution.name: (owner, contribution, service)
+            for owner, contribution, service in agent_tool_routes
+        }
+        if len(self._agent_tool_routes) != len(agent_tool_routes):
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Frozen Agent tool routes must be unique",
                 500,
             )
         routing = self._routes.get("routing-routes", {})
@@ -272,11 +290,209 @@ class FrozenContributionDirectories:
                 parent_call_id=parent_call_id,
                 remaining_timeout=remaining_timeout,
             )
+        if kind == "agent-tools":
+            return await self._dispatch_agent_tool(
+                request,
+                scope=scope,
+                parent_call_id=parent_call_id,
+                remaining_timeout=remaining_timeout,
+            )
         raise ForestError(
             "CONTRIBUTION_DIRECTORY_UNSUPPORTED",
             "Contribution directory kind is unsupported",
             422,
         )
+
+    async def _dispatch_agent_tool(
+        self,
+        request: dict,
+        *,
+        scope: PackageCallScope,
+        parent_call_id: str,
+        remaining_timeout: Callable[[float], float],
+    ) -> dict:
+        expected = {
+            "kind",
+            "action",
+            "tool_name",
+            "target_component_id",
+            "target_generation_id",
+            "target_service_id",
+            "target_service_version",
+            "contract_digest",
+            "binding_digest",
+            "effect_operation_id",
+            "attempt_id",
+            "permit",
+            "command",
+            "operation_id",
+            "timeout",
+        }
+        if request.get("action") != "dispatch-prepared" or set(request) != expected:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                "Agent tool dispatch request contains unsupported fields",
+                422,
+            )
+        strings = tuple(
+            request[field]
+            for field in (
+                "tool_name",
+                "target_component_id",
+                "target_generation_id",
+                "target_service_id",
+                "contract_digest",
+                "binding_digest",
+                "effect_operation_id",
+                "attempt_id",
+                "operation_id",
+            )
+        )
+        timeout = request["timeout"]
+        if (
+            any(not isinstance(value, str) or not 1 <= len(value) <= 512 for value in strings)
+            or type(request["target_service_version"]) is not int
+            or request["target_service_version"] < 1
+            or not isinstance(request["permit"], dict)
+            or not isinstance(request["command"], dict)
+            or isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 0 < timeout <= self._declarations["agent-tools"]["max_execution_timeout_s"]
+        ):
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                "Agent tool dispatch request is invalid",
+                422,
+            )
+        selected = self._agent_tool_routes.get(request["tool_name"])
+        if selected is None:
+            raise ForestError("AGENT_TOOL_NOT_FOUND", "Agent tool is not available", 404)
+        owner, contribution, service = selected
+        route = service.route
+        binding = {
+            "name": contribution.name,
+            "component_id": owner,
+            "generation_id": route.provider_generation_id,
+            "service_id": contribution.service_id,
+            "contract_digest": contribution.contract_digest,
+            "approval_required": contribution.approval_required,
+            "supports_query": contribution.supports_query,
+        }
+        if (
+            (
+                request["target_component_id"],
+                request["target_generation_id"],
+                request["target_service_id"],
+                request["target_service_version"],
+                request["contract_digest"],
+                request["binding_digest"],
+            )
+            != (
+                owner,
+                route.provider_generation_id,
+                route.service_id,
+                route.version,
+                contribution.contract_digest,
+                digest_json(binding),
+            )
+        ):
+            raise ForestError(
+                "AGENT_TOOL_ROUTE_STALE",
+                "Agent tool dispatch differs from the frozen contribution route",
+                409,
+            )
+        command = request["command"]
+        command_fields = {
+            "protocol",
+            "tool_call_id",
+            "effect_operation_id",
+            "component_id",
+            "generation_id",
+            "service_id",
+            "contract_digest",
+            "binding_digest",
+            "authority_trigger_ref",
+            "authority_principal_ref",
+            "arguments",
+        }
+        if (
+            set(command) != command_fields
+            or command.get("protocol") != "forest.agent-tool-execute/1"
+            or command.get("effect_operation_id") != request["effect_operation_id"]
+            or command.get("component_id") != owner
+            or command.get("generation_id") != route.provider_generation_id
+            or command.get("service_id") != contribution.service_id
+            or command.get("contract_digest") != contribution.contract_digest
+            or command.get("binding_digest") != request["binding_digest"]
+            or not isinstance(command.get("arguments"), dict)
+            or any(
+                not isinstance(command.get(field), str) or not command[field]
+                for field in (
+                    "tool_call_id",
+                    "authority_trigger_ref",
+                    "authority_principal_ref",
+                )
+            )
+        ):
+            raise ForestError(
+                "AGENT_TOOL_COMMAND_INVALID",
+                "Agent tool command differs from the frozen binding",
+                422,
+            )
+        permit = request["permit"]
+        if (
+            permit.get("protocol") != "forest.effect-permit/1"
+            or permit.get("effect_operation_id") != request["effect_operation_id"]
+            or permit.get("attempt_id") != request["attempt_id"]
+            or permit.get("executor_component_id") != owner
+            or permit.get("executor_generation_id") != route.provider_generation_id
+            or permit.get("wire_payload_digest") != digest_json(command)
+            or request["operation_id"] != request["effect_operation_id"]
+        ):
+            raise ForestError(
+                "AGENT_TOOL_EFFECT_FENCE_MISMATCH",
+                "Agent tool permit differs from the prepared command",
+                409,
+            )
+        if self._agent_tool_effects is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE",
+                "Agent tool Effect authority is unavailable",
+                503,
+            )
+        loaded = await self._agent_tool_effects.load(request["effect_operation_id"])
+        effect = loaded.get("effect") if isinstance(loaded, dict) else None
+        attempt = loaded.get("attempt") if isinstance(loaded, dict) else None
+        if (
+            not isinstance(effect, dict)
+            or not isinstance(attempt, dict)
+            or effect.get("state") != "DISPATCHING"
+            or attempt.get("state") != "DISPATCHING"
+            or attempt.get("attempt_id") != request["attempt_id"]
+            or attempt.get("executor_component_id") != owner
+            or attempt.get("executor_generation_id") != route.provider_generation_id
+            or attempt.get("wire_payload_digest") != permit["wire_payload_digest"]
+        ):
+            raise ForestError(
+                "AGENT_TOOL_EFFECT_FENCE_MISMATCH",
+                "Kernel Effect no longer authorizes this tool dispatch",
+                409,
+            )
+        result = await service.invoke(
+            command,
+            operation_id=request["operation_id"],
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
+            timeout_seconds=min(float(timeout), remaining_timeout(float(timeout))),
+            parent_call_id=parent_call_id,
+        )
+        if not isinstance(result, dict):
+            raise ForestError(
+                "AGENT_TOOL_RESULT_INVALID",
+                "Agent tool executor returned no object",
+                502,
+            )
+        return result
 
     def _directory_fact(self, kind: str, graph_identity) -> dict:
         if graph_identity is None:

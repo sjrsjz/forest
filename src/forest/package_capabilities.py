@@ -86,6 +86,12 @@ class PackagePayloadAuthority(Protocol):
         max_bytes: int,
     ) -> dict: ...
 
+
+class PackageAgentToolEffectAuthority(Protocol):
+    """Read-only Kernel Effect view used to fence one prepared tool dispatch."""
+
+    async def load(self, effect_operation_id: str) -> dict: ...
+
     async def commit_bytes(
         self,
         scope: PackageCallScope,
