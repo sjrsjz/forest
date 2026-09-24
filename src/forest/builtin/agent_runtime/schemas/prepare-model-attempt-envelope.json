@@ -44,12 +44,16 @@
     },
     "input": {
       "type": "object",
-      "required": ["owner", "request_id", "attempt_id", "effect_operation_ref", "wire"],
+      "required": [
+        "owner", "request_id", "attempt_id", "effect_operation_ref",
+        "provider_service_id", "wire"
+      ],
       "properties": {
         "owner": {"$ref": "#/$defs/owner"},
         "request_id": {"$ref": "#/$defs/id"},
         "attempt_id": {"$ref": "#/$defs/id"},
         "effect_operation_ref": {"$ref": "#/$defs/id"},
+        "provider_service_id": {"const": "provider.model.dispatch"},
         "wire": {"$ref": "#/$defs/wire"}
       },
       "additionalProperties": false

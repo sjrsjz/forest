@@ -354,9 +354,21 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "request_id": "model-request/package/1",
                 "attempt_id": "model-attempt/package/1",
                 "effect_operation_ref": "model-effect/package/1",
+                "provider_service_id": "provider.model.dispatch",
                 "wire": wire.canonical(),
             },
-            "prior": {},
+            "prior": {
+                "effect": {
+                    "protocol": "forest.effect-permit/1",
+                    "effect_operation_id": "model-effect/package/1",
+                    "attempt_id": "model-attempt/package/1",
+                    "wire_payload_id": wire.payload_id,
+                    "wire_payload_digest": wire.digest,
+                    "executor_component_id": "provider.chat",
+                    "executor_generation_id": "generation/provider/package-test",
+                    "fence_kind": "runtime.graph",
+                }
+            },
         }
         async with store.pool.connection() as conn, conn.transaction():
             prepared_attempt = await participant.invoke_in(
@@ -378,7 +390,17 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "request_id": "model-request/package/1",
                 "attempt_id": "model-attempt/package/1",
             },
-            "prior": {},
+            "prior": {
+                "effect": {
+                    "effect_operation_id": "model-effect/package/1",
+                    "attempt_id": "model-attempt/package/1",
+                    "state": "DISPATCHING",
+                    "wire_payload_id": wire.payload_id,
+                    "wire_payload_digest": wire.digest,
+                    "executor_component_id": "provider.chat",
+                    "executor_generation_id": "generation/provider/package-test",
+                }
+            },
         }
         async with store.pool.connection() as conn, conn.transaction():
             handed_off = await participant.invoke_in(
@@ -427,7 +449,16 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     {"role": "RESULT", "payload": result_payload.canonical()}
                 ],
             },
-            "prior": {},
+            "prior": {
+                "effect": {
+                    "attempt_id": "model-attempt/package/1",
+                    "observation_operation_id": "model-observation/package/1",
+                    "observed_status": "SUCCEEDED",
+                    "evidence_kind": "executor",
+                    "accepted": True,
+                    "resulting_state": "SUCCEEDED",
+                }
+            },
         }
         async with store.pool.connection() as conn, conn.transaction():
             observation = await participant.invoke_in(
@@ -575,7 +606,20 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "request_id": "model-request/package/repair",
                 "attempt_id": "model-attempt/package/repair",
                 "effect_operation_ref": "model-effect/package/repair",
+                "provider_service_id": "provider.model.dispatch",
                 "wire": repair_wire.canonical(),
+            },
+            "prior": {
+                "effect": {
+                    "protocol": "forest.effect-permit/1",
+                    "effect_operation_id": "model-effect/package/repair",
+                    "attempt_id": "model-attempt/package/repair",
+                    "wire_payload_id": repair_wire.payload_id,
+                    "wire_payload_digest": repair_wire.digest,
+                    "executor_component_id": "provider.chat",
+                    "executor_generation_id": "generation/provider/package-test",
+                    "fence_kind": "runtime.graph",
+                }
             },
         }
         async with store.pool.connection() as conn, conn.transaction():
@@ -595,6 +639,17 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "owner": request_envelope["input"]["owner"],
                 "request_id": "model-request/package/repair",
                 "attempt_id": "model-attempt/package/repair",
+            },
+            "prior": {
+                "effect": {
+                    "effect_operation_id": "model-effect/package/repair",
+                    "attempt_id": "model-attempt/package/repair",
+                    "state": "DISPATCHING",
+                    "wire_payload_id": repair_wire.payload_id,
+                    "wire_payload_digest": repair_wire.digest,
+                    "executor_component_id": "provider.chat",
+                    "executor_generation_id": "generation/provider/package-test",
+                }
             },
         }
         async with store.pool.connection() as conn, conn.transaction():
@@ -626,6 +681,16 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "evidence_kind": "EXECUTOR",
                 "effect_observation_ref": "model-effect-observation/package/repair",
                 "payloads": [{"role": "RESULT", "payload": repair_result.canonical()}],
+            },
+            "prior": {
+                "effect": {
+                    "attempt_id": "model-attempt/package/repair",
+                    "observation_operation_id": "model-observation/package/repair",
+                    "observed_status": "SUCCEEDED",
+                    "evidence_kind": "executor",
+                    "accepted": True,
+                    "resulting_state": "SUCCEEDED",
+                }
             },
         }
         async with store.pool.connection() as conn, conn.transaction():

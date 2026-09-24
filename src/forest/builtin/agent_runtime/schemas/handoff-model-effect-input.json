@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["effect", "agent"],
+  "properties": {
+    "effect": {"$ref": "#/$defs/effect"},
+    "agent": {"$ref": "#/$defs/agent"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "owner": {
+      "type": "object",
+      "required": ["run_id", "owner_id", "epoch"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "permit": {
+      "type": "object",
+      "required": [
+        "protocol", "effect_operation_id", "attempt_id", "attempt_no", "wire_payload_id",
+        "wire_payload_digest", "executor_component_id", "executor_generation_id",
+        "fence_kind", "fence_id", "fence_epoch", "deadline_at"
+      ],
+      "properties": {
+        "protocol": {"const": "forest.effect-permit/1"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "attempt_no": {"type": "integer", "minimum": 1},
+        "wire_payload_id": {"$ref": "#/$defs/id"},
+        "wire_payload_digest": {"$ref": "#/$defs/digest"},
+        "executor_component_id": {"$ref": "#/$defs/id"},
+        "executor_generation_id": {"$ref": "#/$defs/id"},
+        "fence_kind": {"const": "runtime.graph"},
+        "fence_id": {"$ref": "#/$defs/id"},
+        "fence_epoch": {"type": "integer", "minimum": 1},
+        "deadline_at": {"type": "string", "minLength": 1, "maxLength": 64}
+      },
+      "additionalProperties": false
+    },
+    "effect": {
+      "type": "object",
+      "required": ["protocol", "permit", "handoff_operation_id"],
+      "properties": {
+        "protocol": {"const": "forest.effect-handoff/1"},
+        "permit": {"$ref": "#/$defs/permit"},
+        "handoff_operation_id": {"$ref": "#/$defs/id"}
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "required": ["owner", "request_id", "attempt_id"],
+      "properties": {
+        "owner": {"$ref": "#/$defs/owner"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

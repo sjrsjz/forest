@@ -68,8 +68,8 @@
 `builtin/agent_runtime` 已拥有唯一 CorePrompt 与 XML 协议解析器，并以私有 SQL 和 manifest UoW 封闭以下状态转换：
 
 - Session/Run 创建、输入追加、owner lease、释放和热重载停车/恢复；
-- Provider Generation、模型投影、wire Payload 与 Effect operation 冻结；
-- 模型 handoff、结果观察和 `UNKNOWN` 对账；
+- Provider Generation 与模型投影先冻结；授权、Kernel Effect permit、wire Payload 和 Agent Attempt 由 `agent.prepare-model-effect/1` 原子建立；
+- `agent.handoff-model-effect/1` 原子推进 Effect 与 Agent handoff，`agent.observe-model-effect/1` 原子收敛两本账及 `UNKNOWN` 对账；
 - 错误 XML 的一次协议修复、合法 ModelTurn 提交；
 - ToolCall 的准确 component/Generation/service/contract/binding 冻结；
 - 工具审批、handoff、终态观察和可查询 `UNKNOWN` 对账；

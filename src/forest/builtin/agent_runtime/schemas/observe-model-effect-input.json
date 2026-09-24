@@ -1,6 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$ref": "#/$defs/input",
+  "type": "object",
+  "required": ["effect", "agent"],
+  "properties": {
+    "effect": {"$ref": "#/$defs/effect"},
+    "agent": {"$ref": "#/$defs/agent"}
+  },
+  "additionalProperties": false,
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 256},
     "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
@@ -14,7 +20,16 @@
       },
       "additionalProperties": false
     },
-    "payload": {
+    "effect_payload": {
+      "type": "object",
+      "required": ["payload_id", "digest"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "agent_payload": {
       "type": "object",
       "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
       "properties": {
@@ -26,29 +41,35 @@
       },
       "additionalProperties": false
     },
-    "payload_entry": {
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["role", "payload"],
-          "properties": {
-            "role": {"const": "RESULT"},
-            "payload": {"$ref": "#/$defs/payload", "properties": {"owner_kind": {"const": "model.result"}}}
-          },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": ["role", "payload"],
-          "properties": {
-            "role": {"const": "USAGE"},
-            "payload": {"$ref": "#/$defs/payload", "properties": {"owner_kind": {"const": "model.usage"}}}
-          },
-          "additionalProperties": false
+    "effect": {
+      "type": "object",
+      "required": [
+        "protocol", "effect_operation_id", "attempt_id", "observation_operation_id",
+        "status", "evidence_kind", "evidence_payload"
+      ],
+      "properties": {
+        "protocol": {"const": "forest.effect-observe/1"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "observation_operation_id": {"$ref": "#/$defs/id"},
+        "status": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+        "evidence_kind": {"enum": ["executor", "reconciliation"]},
+        "evidence_payload": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/effect_payload"}]
         }
-      ]
+      },
+      "additionalProperties": false
     },
-    "input": {
+    "agent_entry": {
+      "type": "object",
+      "required": ["role", "payload"],
+      "properties": {
+        "role": {"enum": ["RESULT", "USAGE"]},
+        "payload": {"$ref": "#/$defs/agent_payload"}
+      },
+      "additionalProperties": false
+    },
+    "agent": {
       "type": "object",
       "required": [
         "owner", "observation_operation_id", "request_id", "attempt_id",
@@ -62,7 +83,11 @@
         "observed_state": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
         "evidence_kind": {"enum": ["EXECUTOR", "RECONCILIATION"]},
         "effect_observation_ref": {"$ref": "#/$defs/id"},
-        "payloads": {"type": "array", "items": {"$ref": "#/$defs/payload_entry"}, "maxItems": 2}
+        "payloads": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/agent_entry"}
+        }
       },
       "additionalProperties": false
     }

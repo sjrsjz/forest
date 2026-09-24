@@ -1321,16 +1321,24 @@ DECLARE
     requested_owner text := owner_value->>'owner_id';
     requested_epoch bigint := (owner_value->>'epoch')::bigint;
     requested_request text := body->>'request_id';
-    requested_attempt text := body->>'attempt_id';
-    requested_effect text := body->>'effect_operation_ref';
+      requested_attempt text := body->>'attempt_id';
+      requested_effect text := body->>'effect_operation_ref';
+      requested_service text := body->>'provider_service_id';
+      effect_permit jsonb := envelope->'prior'->'effect';
     run_row record;
     request_row record;
     existing record;
     attempt_no_value integer;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
-       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
-       OR wire_value->>'owner_kind' IS DISTINCT FROM 'model.wire'
+         OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+         OR requested_service IS DISTINCT FROM 'provider.model.dispatch'
+         OR effect_permit->>'protocol' IS DISTINCT FROM 'forest.effect-permit/1'
+         OR effect_permit->>'effect_operation_id' IS DISTINCT FROM requested_effect
+         OR effect_permit->>'attempt_id' IS DISTINCT FROM requested_attempt
+         OR effect_permit->>'wire_payload_id' IS DISTINCT FROM wire_value->>'payload_id'
+         OR effect_permit->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest'
+         OR wire_value->>'owner_kind' IS DISTINCT FROM 'model.wire'
        OR wire_value->>'owner_id' IS DISTINCT FROM requested_attempt THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -1396,8 +1404,13 @@ BEGIN
             )
         );
     END IF;
-    IF wire_value->>'owner_component_id'
-       IS DISTINCT FROM request_row.provider_component_id THEN
+      IF wire_value->>'owner_component_id'
+         IS DISTINCT FROM request_row.provider_component_id
+         OR effect_permit->>'executor_component_id'
+            IS DISTINCT FROM request_row.provider_component_id
+         OR effect_permit->>'executor_generation_id'
+            IS DISTINCT FROM request_row.provider_generation_id
+         OR effect_permit->>'fence_kind' IS DISTINCT FROM 'runtime.graph' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -1455,13 +1468,17 @@ DECLARE
     requested_owner text := owner_value->>'owner_id';
     requested_epoch bigint := (owner_value->>'epoch')::bigint;
     requested_request text := body->>'request_id';
-    requested_attempt text := body->>'attempt_id';
+      requested_attempt text := body->>'attempt_id';
+      effect_handoff jsonb := envelope->'prior'->'effect';
     run_row record;
     request_row record;
     attempt_row record;
 BEGIN
-    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
-       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
+      IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+         OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+         OR effect_handoff->>'effect_operation_id' IS NULL
+         OR effect_handoff->>'attempt_id' IS DISTINCT FROM requested_attempt
+         OR effect_handoff->>'state' IS DISTINCT FROM 'DISPATCHING' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -1502,15 +1519,33 @@ BEGIN
     SELECT * INTO attempt_row
     FROM __forest_module_schema__.model_transport_attempts
     WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR UPDATE;
-    IF request_row.request_id IS NULL OR attempt_row.attempt_id IS NULL
-       OR request_row.run_id IS DISTINCT FROM requested_run THEN
+      IF request_row.request_id IS NULL OR attempt_row.attempt_id IS NULL
+         OR request_row.run_id IS DISTINCT FROM requested_run THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','MODEL_ATTEMPT_NOT_FOUND','message','Model attempt does not exist','status',404
             )
         );
-    END IF;
+      END IF;
+      IF effect_handoff->>'effect_operation_id'
+            IS DISTINCT FROM attempt_row.effect_operation_ref
+         OR effect_handoff->>'wire_payload_id'
+            IS DISTINCT FROM attempt_row.wire_payload_id
+         OR effect_handoff->>'wire_payload_digest'
+            IS DISTINCT FROM attempt_row.wire_payload_digest
+         OR effect_handoff->>'executor_component_id'
+            IS DISTINCT FROM request_row.provider_component_id
+         OR effect_handoff->>'executor_generation_id'
+            IS DISTINCT FROM request_row.provider_generation_id THEN
+          RETURN jsonb_build_object(
+              'protocol','forest.domain-result/1','ok',false,
+              'error',jsonb_build_object(
+                  'code','AGENT_MODEL_HANDOFF_INPUT_INVALID',
+                  'message','Effect handoff differs from the frozen model attempt','status',409
+              )
+          );
+      END IF;
     IF request_row.current_attempt_id IS DISTINCT FROM requested_attempt
        OR attempt_row.request_id IS DISTINCT FROM requested_request THEN
         RETURN jsonb_build_object(
@@ -1594,7 +1629,8 @@ DECLARE
     conflict_value text := NULL;
     settled_value timestamptz;
     resolved_value timestamptz := NULL;
-    run_state_value text;
+      run_state_value text;
+      effect_observation jsonb := envelope->'prior'->'effect';
 BEGIN
     SELECT item->'payload' INTO result_value
     FROM jsonb_array_elements(body->'payloads') item
@@ -1603,8 +1639,18 @@ BEGIN
     FROM jsonb_array_elements(body->'payloads') item
     WHERE item->>'role'='USAGE' LIMIT 1;
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
-       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
-       OR (SELECT count(*)<>count(DISTINCT item->>'role')
+         OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+         OR effect_observation->>'attempt_id' IS DISTINCT FROM requested_attempt
+         OR effect_observation->>'observation_operation_id'
+            IS DISTINCT FROM requested_operation
+         OR effect_observation->>'observed_status'
+            IS DISTINCT FROM observed_state_value
+         OR lower(effect_observation->>'evidence_kind')
+            IS DISTINCT FROM lower(evidence_kind_value)
+         OR (effect_observation->>'accepted')::boolean IS DISTINCT FROM true
+         OR effect_observation->>'resulting_state'
+            IS DISTINCT FROM observed_state_value
+         OR (SELECT count(*)<>count(DISTINCT item->>'role')
            FROM jsonb_array_elements(body->'payloads') item)
        OR (observed_state_value='SUCCEEDED' AND result_value IS NULL)
        OR (result_value IS NOT NULL AND result_value->>'owner_kind' IS DISTINCT FROM 'model.result')
