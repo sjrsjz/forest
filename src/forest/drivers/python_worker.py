@@ -113,6 +113,8 @@ JobHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 ContributionDirectoryHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 DomainHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
 UnitOfWorkHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+PayloadHandler = Callable[[WorkerIdentity, str, dict], Awaitable[Any]]
+CallClosedHandler = Callable[[WorkerIdentity, str], Awaitable[None]]
 
 
 class PythonWorker:
@@ -131,6 +133,8 @@ class PythonWorker:
         event_handler: EventHandler | None = None,
         job_handler: JobHandler | None = None,
         contribution_directory_handler: ContributionDirectoryHandler | None = None,
+        payload_handler: PayloadHandler | None = None,
+        call_closed_handler: CallClosedHandler | None = None,
     ):
         self.package = snapshot
         self.identity = identity
@@ -142,6 +146,8 @@ class PythonWorker:
         self.event_handler = event_handler
         self.job_handler = job_handler
         self.contribution_directory_handler = contribution_directory_handler
+        self.payload_handler = payload_handler
+        self.call_closed_handler = call_closed_handler
         self.limits = limits or WorkerLimits()
         self.python_executable = python_executable
         self.environment = None
@@ -480,6 +486,7 @@ class PythonWorker:
                     "event",
                     "job",
                     "contribution_directory",
+                    "payload",
                 }:
                     request_id = message.get("id")
                     if (
@@ -655,6 +662,18 @@ class PythonWorker:
                 value = await self.contribution_directory_handler(
                     self.identity, call_id, payload
                 )
+            elif kind == "payload":
+                if not isinstance(payload, dict):
+                    raise ForestError(
+                        "PAYLOAD_REQUEST_INVALID",
+                        "Payload capability request must be an object",
+                        422,
+                    )
+                if self.payload_handler is None:
+                    raise ForestError(
+                        "CAPABILITY_DENIED", "No payload gateway is available", 403
+                    )
+                value = await self.payload_handler(self.identity, call_id, payload)
             else:
                 expected = (
                     {"key"}
@@ -711,6 +730,8 @@ class PythonWorker:
                             else "EVENT_RESULT_INVALID"
                             if kind == "event"
                             else "JOB_RESULT_INVALID"
+                            if kind == "job"
+                            else "PAYLOAD_RESULT_INVALID"
                         ),
                         "message": "Host RPC result exceeds JSON protocol limits",
                         "status": 413,
@@ -1033,6 +1054,11 @@ class PythonWorker:
             raise
         finally:
             await self._close_state_calls(call_id)
+            if self.call_closed_handler is not None:
+                try:
+                    await self.call_closed_handler(self.identity, call_id)
+                except Exception:
+                    pass
             self._calls.pop(call_id, None)
             self._call_operations.pop(call_id, None)
             self._call_roots.pop(call_id, None)

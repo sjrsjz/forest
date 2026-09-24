@@ -192,6 +192,17 @@ class Probe(Plugin):
             raise RuntimeError("synthetic resource handler failure")
         return {"registered": True}
 
+    @service("probe.payload", semantics="idempotent")
+    async def payload(self, payload, ctx):
+        content = await ctx.payloads.read_bytes(payload["source"])
+        return await ctx.payloads.put_bytes(
+            content + payload["suffix"].encode("utf-8"),
+            owner_kind="probe.output",
+            owner_id=ctx.operations.stable("payload-output:v1"),
+            media_type="application/octet-stream",
+            parents=(payload["source"],),
+        )
+
     async def resource_task(self, marker):
         try:
             await asyncio.Event().wait()

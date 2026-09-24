@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -34,6 +36,7 @@ SERVICES = [
         "config",
         "cache",
         "resources",
+        "payload",
     ]
 ]
 
@@ -107,6 +110,92 @@ async def test_real_process_identity_environment_and_stable_operations(tmp_path,
     finally:
         await worker.stop()
     assert not worker.alive and worker._temporary is None
+
+
+async def test_payload_port_moves_large_bodies_by_exact_chunked_reference(tmp_path):
+    source = (b"large-payload-segment:" * 20_000) + b"end"
+    source_ref = {
+        "payload_id": "payload:source",
+        "digest": "sha256:" + hashlib.sha256(source).hexdigest(),
+        "owner_component_id": "source.component",
+        "owner_kind": "source.body",
+        "owner_id": "source:1",
+    }
+    uploads = {}
+    committed = {}
+    closed = []
+
+    async def payload_gateway(_identity, call_id, request):
+        action = request["action"]
+        if action == "read-chunk":
+            assert request["reference"] == source_ref
+            offset = request["offset"]
+            chunk = source[offset : offset + request["max_bytes"]]
+            return {
+                "data_base64": base64.b64encode(chunk).decode("ascii"),
+                "offset": offset,
+                "byte_length": len(source),
+                "eof": offset + len(chunk) == len(source),
+            }
+        key = (call_id, request["upload_id"])
+        if action == "begin-write":
+            assert request["parents"] == [source_ref]
+            uploads[key] = {"declaration": request, "content": bytearray()}
+            return {"upload_id": request["upload_id"]}
+        if action == "append-write":
+            upload = uploads[key]
+            assert request["offset"] == len(upload["content"])
+            upload["content"].extend(
+                base64.b64decode(request["data_base64"], validate=True)
+            )
+            return {"offset": len(upload["content"])}
+        if action == "commit-write":
+            upload = uploads.pop(key)
+            body = bytes(upload["content"])
+            declaration = upload["declaration"]
+            assert len(body) == declaration["byte_length"]
+            assert "sha256:" + hashlib.sha256(body).hexdigest() == declaration["digest"]
+            committed[call_id] = body
+            return {
+                "payload_id": "payload:result",
+                "digest": declaration["digest"],
+                "owner_component_id": "probe.component",
+                "owner_kind": declaration["owner_kind"],
+                "owner_id": declaration["owner_id"],
+                "media_type": declaration["media_type"],
+                "byte_length": declaration["byte_length"],
+            }
+        if action == "abort-write":
+            uploads.pop(key, None)
+            return {"aborted": True}
+        raise AssertionError(action)
+
+    async def call_closed(_identity, call_id):
+        closed.append(call_id)
+        assert not any(key[0] == call_id for key in uploads)
+
+    worker = PythonWorker(
+        package(tmp_path),
+        identity(),
+        payload_handler=payload_gateway,
+        call_closed_handler=call_closed,
+    )
+    try:
+        await worker.launch()
+        await worker.prepare({})
+        await worker.start()
+        await worker.activate()
+        result = await worker.invoke(
+            "probe.payload",
+            {"source": source_ref, "suffix": ":worker"},
+            call_id="payload-large-call",
+            operation_id="payload-large-operation",
+        )
+        assert result["payload_id"] == "payload:result"
+        assert committed["payload-large-call"] == source + b":worker"
+        assert closed == ["payload-large-call"]
+    finally:
+        await worker.stop()
 
 
 async def test_candidate_admission_and_lifecycle_snapshot_restore(tmp_path):

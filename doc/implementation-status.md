@@ -77,6 +77,8 @@
 
 这些端口证明 Agent 状态所有权可以进入包，但当前 Worker 只提供 `agent.protocol.describe/1`、`agent.run.query/1` 和 reload-resume job。它还没有提供生产需要的 `agent.execute/2`，所以 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“包内状态端口完成”表述成“Agent 已完成生产包化”。
 
+包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
+
 ## 6. Conversation 候选包已经拥有的部分
 
 `builtin/conversation_scheduler` 已封闭消息接纳、连续分类水位、截至最后 trigger 的输入选择、带作者来源的 Context、无 LLM 摘要的窗口裁剪、静默排空和 `conversation.context.snapshot/1`。同群串行和跨群并行依靠数据库 actor lease，而不是进程锁。

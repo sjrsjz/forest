@@ -543,6 +543,53 @@ class KernelPayloadRepository:
                 )
             return tuple(result)
 
+    async def read_verified_chunk(
+        self,
+        reference,
+        *,
+        offset: int,
+        max_bytes: int,
+    ) -> tuple[bytes, int]:
+        """Read a bounded range only after verifying the complete payload identity."""
+
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(max_bytes) is not int
+            or not 1 <= max_bytes <= 96 * 1024
+        ):
+            raise ForestError(
+                "PAYLOAD_RANGE_INVALID",
+                "Payload ranges require a non-negative offset and at most 96 KiB",
+                422,
+            )
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._clock_in(conn)
+            verified = await self.verify_in(
+                conn,
+                payload_id=reference.payload_id,
+                digest=reference.digest,
+                owner_component_id=reference.owner_component_id,
+                owner_kind=reference.owner_kind,
+                owner_id=reference.owner_id,
+            )
+            if offset > verified.byte_length:
+                raise ForestError(
+                    "PAYLOAD_RANGE_INVALID", "Payload offset exceeds its byte length", 416
+                )
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT substring(content FROM %s FOR %s) AS content FROM {} "
+                        "WHERE bot_id=%s AND payload_id=%s"
+                    ).format(self._table("payload_bodies")),
+                    (offset + 1, max_bytes, self.store.bot_id, reference.payload_id),
+                )
+            ).fetchone()
+            if row is None or row["content"] is None:
+                raise ForestError("PAYLOAD_REVOKED", "Payload body is unavailable", 410)
+            return bytes(row["content"]), verified.byte_length
+
     async def forget_in(
         self,
         conn,

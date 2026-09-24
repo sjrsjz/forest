@@ -7,10 +7,12 @@ host process; only the selected RuntimeDriver may do that inside its Worker.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -27,6 +29,7 @@ from forest.package_capabilities import (
     PackageJobCallScope,
     PackageOwnedWorkAuthority,
     PackageOwnedWorkCallScope,
+    PackagePayloadAuthority,
     PackageServiceError,
     PackageServiceOperationLedger,
     PackageServiceRoute,
@@ -81,6 +84,19 @@ class PackageGenerationState(StrEnum):
 
 GenerationVerifier = Callable[..., Awaitable[Any]]
 ParticipantInvoker = Callable[..., Awaitable[Any]]
+_PAYLOAD_CHUNK_BYTES = 96 * 1024
+_PAYLOAD_STAGING_BYTES = 32 * 1024 * 1024
+
+
+@dataclass
+class _StagedPayloadWrite:
+    owner_kind: str
+    owner_id: str
+    media_type: str
+    byte_length: int
+    digest: str
+    parents: tuple[dict, ...]
+    content: bytearray = field(default_factory=bytearray)
 
 
 class PackageUnitOfWorkParticipant:
@@ -169,6 +185,7 @@ class PackageGenerationAdapter:
         generation_member_verifier: GenerationVerifier,
         state_queries: PackageStateQueries | None,
         state_commands: PackageStateCommands | None,
+        payload_authority: PackagePayloadAuthority | None = None,
         domain_queries: PackageDomainQueries | None = None,
         domain_commands: PackageDomainCommands | None = None,
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
@@ -194,6 +211,9 @@ class PackageGenerationAdapter:
         self._generation_member_verifier = generation_member_verifier
         self._state_queries = state_queries
         self._state_commands = state_commands
+        self._payload_authority = payload_authority
+        self._payload_uploads: dict[tuple[str, str], _StagedPayloadWrite] = {}
+        self._payload_reserved_bytes = 0
         self._domain_queries = domain_queries
         self._domain_commands = domain_commands
         self._unit_of_work_authority = unit_of_work_authority
@@ -1793,6 +1813,248 @@ class PackageGenerationAdapter:
             )
         raise ForestError("STATE_REQUEST_INVALID", "Unknown state operation", 422)
 
+    @staticmethod
+    def _payload_reference(value: object) -> dict:
+        fields = {
+            "payload_id",
+            "digest",
+            "owner_component_id",
+            "owner_kind",
+            "owner_id",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ForestError(
+                "PAYLOAD_REFERENCE_INVALID",
+                "Payload access requires one complete exact reference",
+                422,
+            )
+        result = dict(value)
+        for name in fields - {"digest"}:
+            item = result[name]
+            limit = 512 if name == "owner_id" else 256
+            if not isinstance(item, str) or not 1 <= len(item.encode("utf-8")) <= limit:
+                raise ForestError(
+                    "PAYLOAD_REFERENCE_INVALID", "Payload reference identity is invalid", 422
+                )
+        digest = result["digest"]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(char not in "0123456789abcdef" for char in digest[7:])
+        ):
+            raise ForestError(
+                "PAYLOAD_REFERENCE_INVALID", "Payload reference digest is invalid", 422
+            )
+        return result
+
+    @staticmethod
+    def _payload_string(value: object, name: str, limit: int) -> str:
+        if (
+            not isinstance(value, str)
+            or not 1 <= len(value.encode("utf-8")) <= limit
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ForestError(
+                "PAYLOAD_REQUEST_INVALID", f"Payload {name} is invalid", 422
+            )
+        return value
+
+    def _drop_payload_upload(self, key: tuple[str, str]) -> bool:
+        upload = self._payload_uploads.pop(key, None)
+        if upload is None:
+            return False
+        self._payload_reserved_bytes -= upload.byte_length
+        return True
+
+    async def _payload_call_closed(
+        self, identity: WorkerIdentity, call_id: str
+    ) -> None:
+        # Identity and call ownership were already verified by PythonWorker.
+        for key in tuple(self._payload_uploads):
+            if key[0] == call_id:
+                self._drop_payload_upload(key)
+
+    async def _payload_gateway(
+        self, identity: WorkerIdentity, call_id: str, request: dict
+    ) -> Any:
+        scope = self._call_scope(identity, call_id)
+        action = request.get("action")
+        if self._payload_authority is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "Payload authority is unavailable", 503
+            )
+        if action == "read-chunk":
+            if set(request) != {"action", "reference", "offset", "max_bytes"}:
+                raise ForestError(
+                    "PAYLOAD_REQUEST_INVALID", "Payload read request shape is invalid", 422
+                )
+            if not self._has_capability("payload.read"):
+                raise ForestError("CAPABILITY_DENIED", "Payload read is not granted", 403)
+            reference = self._payload_reference(request["reference"])
+            offset, max_bytes = request["offset"], request["max_bytes"]
+            if (
+                type(offset) is not int
+                or offset < 0
+                or type(max_bytes) is not int
+                or not 1 <= max_bytes <= _PAYLOAD_CHUNK_BYTES
+            ):
+                raise ForestError(
+                    "PAYLOAD_RANGE_INVALID", "Payload read range is invalid", 422
+                )
+            result = await self._payload_authority.read_chunk(
+                scope,
+                reference=reference,
+                offset=offset,
+                max_bytes=max_bytes,
+            )
+            content = result.get("content") if isinstance(result, dict) else None
+            if type(content) is not bytes or len(content) > max_bytes:
+                raise ForestError(
+                    "PAYLOAD_AUTHORITY_INVALID",
+                    "Payload authority returned an invalid chunk",
+                    500,
+                )
+            return {
+                "data_base64": base64.b64encode(content).decode("ascii"),
+                "offset": result["offset"],
+                "byte_length": result["byte_length"],
+                "eof": result["eof"],
+            }
+        if action == "begin-write":
+            expected = {
+                "action",
+                "upload_id",
+                "owner_kind",
+                "owner_id",
+                "media_type",
+                "byte_length",
+                "digest",
+                "parents",
+            }
+            if set(request) != expected:
+                raise ForestError(
+                    "PAYLOAD_REQUEST_INVALID", "Payload write declaration is invalid", 422
+                )
+            if not self._has_capability("payload.write"):
+                raise ForestError("CAPABILITY_DENIED", "Payload write is not granted", 403)
+            upload_id = self._payload_string(request["upload_id"], "upload_id", 128)
+            key = (call_id, upload_id)
+            if key in self._payload_uploads:
+                raise ForestError(
+                    "PAYLOAD_UPLOAD_CONFLICT", "Payload upload is already active", 409
+                )
+            byte_length = request["byte_length"]
+            if type(byte_length) is not int or not 0 <= byte_length <= _PAYLOAD_STAGING_BYTES:
+                raise ForestError(
+                    "PAYLOAD_TOO_LARGE", "Payload exceeds the 32 MiB limit", 413
+                )
+            digest = request["digest"]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 71
+                or not digest.startswith("sha256:")
+                or any(char not in "0123456789abcdef" for char in digest[7:])
+            ):
+                raise ForestError(
+                    "PAYLOAD_REQUEST_INVALID", "Payload digest is invalid", 422
+                )
+            parents = request["parents"]
+            if not isinstance(parents, list) or len(parents) > 256:
+                raise ForestError(
+                    "PAYLOAD_REQUEST_INVALID", "Payload parent set is invalid", 422
+                )
+            exact_parents = tuple(self._payload_reference(item) for item in parents)
+            if (
+                len(self._payload_uploads) >= 16
+                or self._payload_reserved_bytes + byte_length > _PAYLOAD_STAGING_BYTES
+            ):
+                raise ForestError(
+                    "PAYLOAD_STAGING_EXHAUSTED",
+                    "Generation payload staging capacity is exhausted",
+                    429,
+                )
+            self._payload_uploads[key] = _StagedPayloadWrite(
+                self._payload_string(request["owner_kind"], "owner_kind", 128),
+                self._payload_string(request["owner_id"], "owner_id", 512),
+                self._payload_string(request["media_type"], "media_type", 128),
+                byte_length,
+                digest,
+                exact_parents,
+            )
+            self._payload_reserved_bytes += byte_length
+            return {"upload_id": upload_id}
+        if action in {"append-write", "commit-write", "abort-write"}:
+            expected = (
+                {"action", "upload_id", "offset", "data_base64"}
+                if action == "append-write"
+                else {"action", "upload_id"}
+            )
+            if set(request) != expected:
+                raise ForestError(
+                    "PAYLOAD_REQUEST_INVALID", "Payload upload request shape is invalid", 422
+                )
+            if not self._has_capability("payload.write"):
+                raise ForestError("CAPABILITY_DENIED", "Payload write is not granted", 403)
+            upload_id = self._payload_string(request["upload_id"], "upload_id", 128)
+            key = (call_id, upload_id)
+            upload = self._payload_uploads.get(key)
+            if upload is None:
+                if action == "abort-write":
+                    return {"aborted": False}
+                raise ForestError(
+                    "PAYLOAD_UPLOAD_NOT_FOUND", "Payload upload is not active", 404
+                )
+            if action == "abort-write":
+                self._drop_payload_upload(key)
+                return {"aborted": True}
+            if action == "append-write":
+                if request["offset"] != len(upload.content):
+                    raise ForestError(
+                        "PAYLOAD_UPLOAD_OFFSET_CONFLICT",
+                        "Payload chunks must be appended in exact order",
+                        409,
+                    )
+                try:
+                    chunk = base64.b64decode(request["data_base64"], validate=True)
+                except (TypeError, ValueError) as exc:
+                    raise ForestError(
+                        "PAYLOAD_REQUEST_INVALID", "Payload chunk is not valid base64", 422
+                    ) from exc
+                if (
+                    not chunk
+                    or len(chunk) > _PAYLOAD_CHUNK_BYTES
+                    or len(upload.content) + len(chunk) > upload.byte_length
+                ):
+                    raise ForestError(
+                        "PAYLOAD_UPLOAD_RANGE_INVALID", "Payload chunk range is invalid", 422
+                    )
+                upload.content.extend(chunk)
+                return {"offset": len(upload.content)}
+            content = bytes(upload.content)
+            if (
+                len(content) != upload.byte_length
+                or "sha256:" + hashlib.sha256(content).hexdigest() != upload.digest
+            ):
+                raise ForestError(
+                    "PAYLOAD_UPLOAD_INCOMPLETE",
+                    "Payload bytes do not match the declared length and digest",
+                    409,
+                )
+            result = await self._payload_authority.commit_bytes(
+                scope,
+                owner_kind=upload.owner_kind,
+                owner_id=upload.owner_id,
+                media_type=upload.media_type,
+                content=content,
+                parents=upload.parents,
+            )
+            self._drop_payload_upload(key)
+            return result
+        raise ForestError(
+            "PAYLOAD_REQUEST_INVALID", "Unknown payload capability operation", 422
+        )
+
     async def _event_gateway(
         self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
@@ -1973,6 +2235,8 @@ class PackageGenerationAdapter:
             event_handler=self._event_gateway,
             job_handler=self._job_gateway,
             contribution_directory_handler=self._contribution_directory_gateway,
+            payload_handler=self._payload_gateway,
+            call_closed_handler=self._payload_call_closed,
         )
         self._worker = worker
         started_drivers: list[PackageEffectDriver] = []
@@ -2139,6 +2403,8 @@ class PackageGenerationAdapter:
                 worker.stop(timeout=_timeout(self.component, "stop_timeout_s", 5))
             )
         results = await asyncio.gather(*close_operations, return_exceptions=True)
+        self._payload_uploads.clear()
+        self._payload_reserved_bytes = 0
         self._effect_drivers.clear()
         self.state = PackageGenerationState.STOPPED
         failures = [type(item).__name__ for item in results if isinstance(item, BaseException)]
@@ -2163,6 +2429,7 @@ def package_runtime_descriptor(
     generation_member_verifier: GenerationVerifier,
     state_queries: PackageStateQueries | None,
     state_commands: PackageStateCommands | None,
+    payload_authority: PackagePayloadAuthority | None = None,
     domain_queries: PackageDomainQueries | None = None,
     domain_commands: PackageDomainCommands | None = None,
     unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
@@ -2230,6 +2497,8 @@ def package_runtime_descriptor(
         for capability, installed in (
             ("state.read", state_queries is not None),
             ("state.write", state_commands is not None),
+            ("payload.read", payload_authority is not None),
+            ("payload.write", payload_authority is not None),
         )
         if installed
     ) | frozenset(
@@ -2411,6 +2680,7 @@ def package_runtime_descriptor(
             generation_member_verifier=generation_member_verifier,
             state_queries=state_queries,
             state_commands=state_commands,
+            payload_authority=payload_authority,
             domain_queries=domain_queries,
             domain_commands=domain_commands,
             unit_of_work_authority=unit_of_work_authority,

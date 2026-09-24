@@ -14,6 +14,7 @@ from forest.package_effects import (
     PackageEffectDriverRegistry,
 )
 from forest.package_management import PackageManagementContract
+from forest.package_payload_ports import KernelPackagePayloadAuthority
 from forest.package_runtime import package_runtime_descriptor
 from forest.package_service_ledger import KernelPackageServiceOperationLedger
 from forest.package_state_ports import (
@@ -207,6 +208,7 @@ async def bootstrap_builtin_package(
             kernel.runtime,
             kernel.payload,
         ),
+        payload_authority=KernelPackagePayloadAuthority(kernel.payload),
         domain_queries=domain_authority,
         domain_commands=domain_authority,
         unit_of_work_authority=domain_authority,

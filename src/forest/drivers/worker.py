@@ -112,6 +112,9 @@ class WorkerRuntime:
     async def contribution_directory_rpc(self, call_id: str, payload: dict) -> Any:
         return await self._rpc("contribution_directory", call_id, payload)
 
+    async def payload_rpc(self, call_id: str, payload: dict) -> Any:
+        return await self._rpc("payload", call_id, payload)
+
     async def _rpc(
         self, kind: str, call_id: str, payload: dict, *, action: str | None = None
     ) -> Any:
@@ -335,6 +338,7 @@ class WorkerRuntime:
                     event_rpc=self.event_rpc,
                     job_rpc=self.job_rpc,
                     contribution_directory_rpc=self.contribution_directory_rpc,
+                    payload_rpc=self.payload_rpc,
                     identity=self.bootstrap["identity"],
                 )
                 await self.plugin.prepare(self.ctx, self.ctx.config, payload.get("restored_state"))
@@ -478,6 +482,7 @@ class WorkerRuntime:
                     "event_result",
                     "job_result",
                     "contribution_directory_result",
+                    "payload_result",
                 }:
                     future = self.state_pending.get(message.get("id"))
                     if future is None or future.done():

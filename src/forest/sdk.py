@@ -7,6 +7,7 @@ remain outside the SDK; per-call owned nested tasks complete before reply.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import hashlib
 import inspect
@@ -17,6 +18,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
+from uuid import uuid4
 
 from forest.command_contract import (
     command_identifier,
@@ -747,6 +749,202 @@ class ServicesHandle:
         )
 
 
+class PayloadsHandle:
+    """Chunked exact-reference payload I/O for one active package call."""
+
+    _CHUNK_BYTES = 96 * 1024
+
+    def __init__(
+        self,
+        rpc: Callable[[str, dict], Awaitable[Any]] | None,
+        scope: CallScope | None,
+    ) -> None:
+        self._rpc = rpc
+        self._scope = scope
+
+    def _call_scope(self) -> CallScope:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED", "No payload capability gateway is available", 403
+            )
+        return scope
+
+    @staticmethod
+    def _reference(value: Mapping) -> dict:
+        fields = (
+            "payload_id",
+            "digest",
+            "owner_component_id",
+            "owner_kind",
+            "owner_id",
+        )
+        if not isinstance(value, Mapping) or set(value) != set(fields):
+            raise ForestError(
+                "PAYLOAD_REFERENCE_INVALID",
+                "Payload access requires one complete exact reference",
+                422,
+            )
+        result = {field: value[field] for field in fields}
+        if any(not isinstance(item, str) or not item for item in result.values()):
+            raise ForestError(
+                "PAYLOAD_REFERENCE_INVALID", "Payload reference identity is invalid", 422
+            )
+        return result
+
+    async def read_bytes(self, reference: Mapping) -> bytes:
+        scope = self._call_scope()
+        exact = self._reference(reference)
+        chunks: list[bytes] = []
+        offset = 0
+        total: int | None = None
+        while total is None or offset < total:
+            result = await self._rpc(
+                scope.call_id,
+                {
+                    "action": "read-chunk",
+                    "reference": exact,
+                    "offset": offset,
+                    "max_bytes": self._CHUNK_BYTES,
+                },
+            )
+            if (
+                not isinstance(result, dict)
+                or set(result) != {"data_base64", "offset", "byte_length", "eof"}
+                or result["offset"] != offset
+                or type(result["byte_length"]) is not int
+                or result["byte_length"] < 0
+                or type(result["eof"]) is not bool
+            ):
+                raise ForestError(
+                    "PAYLOAD_PROTOCOL_INVALID", "Host returned an invalid payload chunk", 502
+                )
+            if total is None:
+                total = result["byte_length"]
+            elif total != result["byte_length"]:
+                raise ForestError(
+                    "PAYLOAD_PROTOCOL_INVALID", "Payload length changed during one read", 409
+                )
+            try:
+                chunk = base64.b64decode(result["data_base64"], validate=True)
+            except (TypeError, ValueError) as exc:
+                raise ForestError(
+                    "PAYLOAD_PROTOCOL_INVALID", "Host returned invalid payload bytes", 502
+                ) from exc
+            if len(chunk) > self._CHUNK_BYTES or offset + len(chunk) > total:
+                raise ForestError(
+                    "PAYLOAD_PROTOCOL_INVALID", "Host returned an invalid payload range", 502
+                )
+            if not chunk and offset < total:
+                raise ForestError(
+                    "PAYLOAD_PROTOCOL_INVALID", "Payload read made no progress", 502
+                )
+            chunks.append(chunk)
+            offset += len(chunk)
+            if result["eof"] != (offset == total):
+                raise ForestError(
+                    "PAYLOAD_PROTOCOL_INVALID", "Payload EOF marker is inconsistent", 502
+                )
+        content = b"".join(chunks)
+        if "sha256:" + hashlib.sha256(content).hexdigest() != exact["digest"]:
+            raise ForestError(
+                "PAYLOAD_DIGEST_MISMATCH", "Payload bytes do not match the exact reference", 409
+            )
+        return content
+
+    async def read_json(self, reference: Mapping) -> Any:
+        try:
+            return json.loads((await self.read_bytes(reference)).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ForestError(
+                "PAYLOAD_CONTENT_INVALID", "Payload is not valid UTF-8 JSON", 422
+            ) from exc
+
+    async def put_bytes(
+        self,
+        content: bytes,
+        *,
+        owner_kind: str,
+        owner_id: str,
+        media_type: str,
+        parents=(),
+    ) -> dict:
+        scope = self._call_scope()
+        if type(content) is not bytes or len(content) > 32 * 1024 * 1024:
+            raise ForestError(
+                "PAYLOAD_TOO_LARGE", "Payload must be bytes of at most 32 MiB", 413
+            )
+        exact_parents = [self._reference(item) for item in parents]
+        upload_id = str(uuid4())
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        await self._rpc(
+            scope.call_id,
+            {
+                "action": "begin-write",
+                "upload_id": upload_id,
+                "owner_kind": owner_kind,
+                "owner_id": owner_id,
+                "media_type": media_type,
+                "byte_length": len(content),
+                "digest": digest,
+                "parents": exact_parents,
+            },
+        )
+        try:
+            for offset in range(0, len(content), self._CHUNK_BYTES):
+                chunk = content[offset : offset + self._CHUNK_BYTES]
+                await self._rpc(
+                    scope.call_id,
+                    {
+                        "action": "append-write",
+                        "upload_id": upload_id,
+                        "offset": offset,
+                        "data_base64": base64.b64encode(chunk).decode("ascii"),
+                    },
+                )
+            return await self._rpc(
+                scope.call_id,
+                {"action": "commit-write", "upload_id": upload_id},
+            )
+        except BaseException:
+            try:
+                await self._rpc(
+                    scope.call_id,
+                    {"action": "abort-write", "upload_id": upload_id},
+                )
+            except BaseException:
+                pass
+            raise
+
+    async def put_json(
+        self,
+        value: Any,
+        *,
+        owner_kind: str,
+        owner_id: str,
+        parents=(),
+    ) -> dict:
+        try:
+            content = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, OverflowError, UnicodeError) as exc:
+            raise ForestError(
+                "PAYLOAD_CONTENT_INVALID", "Value is not canonical JSON", 422
+            ) from exc
+        return await self.put_bytes(
+            content,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            media_type="application/json",
+            parents=parents,
+        )
+
+
 class DomainQueriesHandle:
     def __init__(self, rpc: Callable[[str, dict], Awaitable[Any]] | None, scope: CallScope | None):
         self._rpc = rpc
@@ -1155,6 +1353,7 @@ class PluginContext:
         event_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         job_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         contribution_directory_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
+        payload_rpc: Callable[[str, dict], Awaitable[Any]] | None = None,
         identity: Mapping | None = None,
     ):
         self.config: Mapping[str, Any] = _freeze(config)
@@ -1168,11 +1367,13 @@ class PluginContext:
         self._event_rpc = event_rpc
         self._job_rpc = job_rpc
         self._contribution_directory_rpc = contribution_directory_rpc
+        self._payload_rpc = payload_rpc
         self._task_owner = task_owner if task_owner is not None else OwnedTasks(task_limit)
         self._resource_owner = (
             resource_owner if resource_owner is not None else OwnedResources(resource_limit)
         )
         self.state = StateHandle(rpc, scope)
+        self.payloads = PayloadsHandle(payload_rpc, scope)
         self.tasks = TasksHandle(self._task_owner, scope)
         self.resources = ResourcesHandle(self._resource_owner, scope)
         self.operations = OperationsHandle(scope)
@@ -1207,6 +1408,7 @@ class PluginContext:
             event_rpc=self._event_rpc,
             job_rpc=self._job_rpc,
             contribution_directory_rpc=self._contribution_directory_rpc,
+            payload_rpc=self._payload_rpc,
             identity=self.identity,
         )
 

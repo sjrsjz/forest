@@ -74,6 +74,30 @@ class PackageStateCommands(Protocol):
     ) -> dict: ...
 
 
+class PackagePayloadAuthority(Protocol):
+    """Exact-reference payload I/O available to an isolated package call."""
+
+    async def read_chunk(
+        self,
+        scope: PackageCallScope,
+        *,
+        reference: dict,
+        offset: int,
+        max_bytes: int,
+    ) -> dict: ...
+
+    async def commit_bytes(
+        self,
+        scope: PackageCallScope,
+        *,
+        owner_kind: str,
+        owner_id: str,
+        media_type: str,
+        content: bytes,
+        parents: tuple[dict, ...],
+    ) -> dict: ...
+
+
 class PackageDomainQueries(Protocol):
     async def invoke_query(
         self,

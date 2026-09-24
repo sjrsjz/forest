@@ -1583,7 +1583,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         message_handler_methods.add(handler)
     capabilities = component.get("capabilities", {}).get("requests", [])
     allowed_capabilities = (
-        {"state.read", "state.write"}
+        {"state.read", "state.write", "payload.read", "payload.write"}
         | {
             "service.call:" + name
             for name in dependency_names | {item["name"] for item in effect_services}
@@ -1599,7 +1599,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     ):
         _fail(
             "UNSUPPORTED_CAPABILITY",
-            "Capabilities must name an explicitly declared state, service, event, or job operation",
+            "Capabilities must name an explicitly declared payload, state, service, event, or job operation",
         )
     for relative, source in files.items():
         if relative.endswith(".py"):
