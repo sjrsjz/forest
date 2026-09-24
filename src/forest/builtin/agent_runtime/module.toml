@@ -31,6 +31,7 @@ requests = [
   "domain.query:agent.run-snapshot",
   "uow.execute:agent.start-run",
   "uow.execute:agent.append-run-input",
+  "uow.execute:agent.park-reload",
   "uow.execute:agent.acquire-run-lease",
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease"
@@ -54,7 +55,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "33377ac05fc5c4704c8df7965fdbc5742f15be44c7a28f0828c119aa9359cb39"
+baseline_sha256 = "7e87da2d0fbb5ae12d69c476406f6425fd60023318985706a97b05893289b530"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -91,6 +92,19 @@ contract = "1.0"
 function = "agent_append_run_input"
 input_schema = "schemas/append-run-input-envelope.json"
 output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.park-reload-record"
+contract = "1.0"
+function = "agent_park_reload"
+input_schema = "schemas/park-reload-envelope.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/state/owner_id"
 
 [[components.unit_of_work_participants]]
 name = "agent.acquire-run-record"
@@ -131,6 +145,16 @@ output_schema = "schemas/run-snapshot-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.append-run-input-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.park-reload"
+contract = "1.0"
+input_schema = "schemas/park-reload-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.park-reload-record" }
 ]
 
 [[components.unit_of_work_plans]]

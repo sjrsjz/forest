@@ -284,6 +284,47 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "qq:43",
         ]
 
+        checkpoint = await _payload(
+            kernel,
+            owner_kind="checkpoint.state",
+            owner_id="checkpoint/reload/agent-package/1",
+            value=b'{"phase":"RELOAD_WAIT","resume_phase":"PREPARING_MODEL"}',
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            parked = await participant.invoke_in(
+                conn,
+                "agent.park-reload-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": caller,
+                    "input": {
+                        "owner": {
+                            "run_id": owner["run_id"],
+                            "owner_id": owner["owner_id"],
+                            "epoch": owner["epoch"],
+                        },
+                        "checkpoint_id": checkpoint.owner_id,
+                        "state": checkpoint.canonical(),
+                        "reload_operation_id": "runtime-reload/agent-package/1",
+                        "resume_phase": "PREPARING_MODEL",
+                    },
+                    "prior": {},
+                },
+                operation_id="agent-run-park-reload/package/1",
+                causal_root_kind="runtime.reload",
+                causal_root_id="runtime-reload/agent-package/1",
+                parent_call_id="call:agent-package/park-reload",
+                timeout_seconds=10,
+            )
+        assert parked["state"] == "RELOAD_WAIT"
+        assert parked["progress"]["checkpoint_seq"] == 1
+        assert parked["current"] == {
+            "model_request_id": None,
+            "tool_call_id": None,
+            "reload_operation_id": "runtime-reload/agent-package/1",
+            "reload_resume_phase": "PREPARING_MODEL",
+        }
+
         release_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,

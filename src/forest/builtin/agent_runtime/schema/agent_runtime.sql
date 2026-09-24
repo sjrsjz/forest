@@ -1303,3 +1303,120 @@ BEGIN
     );
 END;
 $$;
+
+CREATE FUNCTION agent_park_reload(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    state_value jsonb := body->'state';
+    requested_bot text := context->>'bot_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_checkpoint text := body->>'checkpoint_id';
+    requested_reload text := body->>'reload_operation_id';
+    requested_resume text := body->>'resume_phase';
+    run_row record;
+    existing record;
+    next_sequence bigint;
+    checksum_value text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR state_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR state_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
+       OR requested_resume NOT IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_BOUNDARY_INVALID',
+                'message','Agent reload checkpoint is invalid','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/checkpoint/' || requested_bot || '/' || requested_checkpoint,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.run_checkpoints
+    WHERE bot_id=requested_bot AND checkpoint_id=requested_checkpoint;
+    IF FOUND THEN
+        SELECT *,clock_timestamp() AS database_now INTO run_row
+        FROM __forest_module_schema__.agent_runs
+        WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+        IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+           OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+           OR run_row.owner_expires_at IS NULL
+           OR run_row.owner_expires_at<=run_row.database_now
+           OR existing.run_id IS DISTINCT FROM requested_run
+           OR existing.input_digest IS DISTINCT FROM requested_digest
+           OR existing.phase IS DISTINCT FROM 'RELOAD_WAIT' THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_CHECKPOINT_CONFLICT',
+                    'message','Reload checkpoint identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN __forest_module_schema__.agent_run_snapshot(
+            context,jsonb_build_object('run_id',requested_run)
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    IF run_row.state IS DISTINCT FROM requested_resume THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_BOUNDARY_INVALID',
+                'message','Agent Run is not at the declared reload boundary','status',409
+            )
+        );
+    END IF;
+    next_sequence := run_row.checkpoint_seq+1;
+    checksum_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_run,next_sequence,'RELOAD_WAIT',run_row.input_revision,
+        run_row.next_step_seq,state_value->>'digest',requested_epoch
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.run_checkpoints(
+        bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,phase,
+        input_revision,next_step_seq,state_payload_id,state_payload_digest,
+        state_owner_component_id,state_owner_kind,state_owner_id,
+        checkpoint_checksum,owner_epoch
+    ) VALUES (
+        requested_bot,requested_run,next_sequence,requested_checkpoint,requested_digest,
+        'RELOAD_WAIT',run_row.input_revision,run_row.next_step_seq,
+        state_value->>'payload_id',state_value->>'digest',
+        state_value->>'owner_component_id',state_value->>'owner_kind',state_value->>'owner_id',
+        checksum_value,requested_epoch
+    );
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='RELOAD_WAIT',checkpoint_seq=next_sequence,
+        reload_operation_id=requested_reload,reload_resume_phase=requested_resume,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;
