@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.3.0"
+version = "0.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -78,9 +78,9 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "3.0.0"
+schema_version = "3.1.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "b7320f43c99c12604602a135d4384a8ab3a53e00ff6ac5c95e6be0704c3c4309"
+baseline_sha256 = "e310b6f19cf65f3cd3b36bd54e380641e53e82f91d6daa2dfdf7ad9876885352"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
@@ -97,6 +97,19 @@ path = "/parts/*/payload"
 owner_component = "agent.runtime"
 owner_kind = "final.reply"
 owner_id_path = "/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-chat-intent-uow"
+contract = "1.0"
+function = "delivery_create_chat_intent_uow"
+input_schema = "schemas/chat-intent-uow-envelope.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/parts/*/payload"
+owner_component = "agent.runtime"
+owner_kind = "final.reply"
+owner_id_path = "/input/parts/*/payload/owner_id"
 
 [[components.unit_of_work_participants]]
 name = "delivery.record-prepare"

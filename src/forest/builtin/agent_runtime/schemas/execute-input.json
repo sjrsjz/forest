@@ -12,7 +12,7 @@
     "session_ref": {"$ref": "#/$defs/id"},
     "run_ref": {"$ref": "#/$defs/id"},
     "resume": {"type": "boolean"},
-    "absolute_deadline": {"type": "string", "minLength": 1, "maxLength": 64},
+    "absolute_deadline": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
     "actor": {
       "type": "object",
       "additionalProperties": false,
@@ -24,6 +24,12 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"resume": {"const": false}}},
+      "then": {"properties": {"absolute_deadline": {"type": "string", "minLength": 1, "maxLength": 64}}}
+    }
+  ],
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 256}
   }

@@ -1,4 +1,6 @@
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+import hashlib
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -249,3 +251,225 @@ class ConversationScheduler(Plugin):
                 409,
             )
         return result
+
+    @staticmethod
+    def _stable(kind, *parts):
+        encoded = "\0".join(str(part) for part in parts).encode("utf-8")
+        return f"{kind}:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _defer(status, reason, delay):
+        return {
+            "protocol": "forest.conversation-agent-work/1",
+            "disposition": "DEFER",
+            "agent_status": status,
+            "reason_code": reason,
+            "delay_seconds": delay,
+        }
+
+    @staticmethod
+    def _release(status):
+        return {
+            "protocol": "forest.conversation-agent-work/1",
+            "disposition": "RELEASE",
+            "agent_status": status,
+            "reason_code": None,
+            "delay_seconds": None,
+        }
+
+    async def _commit_final_reply(self, task, execution, ctx):
+        reply = execution["reply"]
+        triggers = execution["answered_trigger_ids"]
+        if reply is None or not triggers or len(triggers) != len(set(triggers)):
+            raise ForestError(
+                "CONVERSATION_AGENT_RESULT_INVALID",
+                "Agent final boundary omitted its exact reply or trigger set",
+                409,
+            )
+        run_ref = execution["run_ref"]
+        reply_ref = reply["owner_id"]
+        intent_id = self._stable("delivery-intent", run_ref)
+        part_id = self._stable("delivery-part", run_ref, reply_ref)
+        await ctx.uow.call(
+            "conversation.commit-final-reply",
+            {
+                "agent": {
+                    "run_id": run_ref,
+                    "session_id": execution["session_ref"],
+                    "reply": reply,
+                },
+                "conversation": {
+                    "actor": task["actor"],
+                    "session_ref": execution["session_ref"],
+                    "run_ref": run_ref,
+                    "reply": reply,
+                    "answered_trigger_ids": triggers,
+                    "unit_id": self._stable("context-reply", run_ref),
+                },
+                "delivery": {
+                    "protocol": "forest.delivery-intent/1",
+                    "intent_id": intent_id,
+                    "binding_ref": task["binding_ref"],
+                    "lane_kind": "CHAT",
+                    "ordering_key": task["conversation_id"],
+                    "conversation_ref": task["conversation_id"],
+                    "channel_kind": task["channel_kind"],
+                    "channel_ref": task["channel_ref"],
+                    "cause_component_id": "conversation.scheduler",
+                    "cause_kind": "context.reply",
+                    "cause_id": reply_ref,
+                    "reply_ref": reply_ref,
+                    "parts": [
+                        {
+                            "part_operation_id": part_id,
+                            "effect_operation_ref": self._stable("delivery-effect", part_id),
+                            "payload": reply,
+                        }
+                    ],
+                },
+            },
+            operation_id=ctx.operations.stable(f"commit-final-reply:{run_ref}"),
+            timeout=35,
+        )
+
+    async def _handoff(self, task, execution, deadline, ctx):
+        completed = execution["run_ref"]
+        successor = self._stable(
+            "run-successor", task["conversation_id"], completed, task["actor"]["epoch"]
+        )
+        return await ctx.uow.call(
+            "conversation.session-handoff",
+            {
+                "conversation": {
+                    "actor": task["actor"],
+                    "boundary": "SESSION_END",
+                    "selection_mode": "ANY",
+                    "session_ref": execution["session_ref"],
+                    "run_ref": completed,
+                    "next_run_ref": successor,
+                },
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {
+                    "selection_step_id": "conversation",
+                    "deletion_epoch_step_id": "payload_epoch",
+                },
+                "agent": {
+                    "session_id": execution["session_ref"],
+                    "completed_run_id": completed,
+                    "successor_run_id": successor,
+                    "successor_deadline": deadline,
+                    "selection_step_id": "conversation",
+                    "memory_step_id": "memory",
+                },
+            },
+            operation_id=ctx.operations.stable(f"session-handoff:{completed}"),
+            timeout=35,
+        )
+
+    async def _commit_terminal(self, task, execution, ctx):
+        trigger_ids = execution["answered_trigger_ids"]
+        reason_code = execution["error_code"]
+        if (
+            not trigger_ids
+            or len(trigger_ids) != len(set(trigger_ids))
+            or not isinstance(reason_code, str)
+            or not reason_code
+        ):
+            raise ForestError(
+                "CONVERSATION_AGENT_RESULT_INVALID",
+                "Terminal Agent result omitted its exact trigger set or reason",
+                409,
+            )
+        await ctx.uow.call(
+            "conversation.commit-terminal-run",
+            {
+                "conversation": {
+                    "actor": task["actor"],
+                    "session_ref": execution["session_ref"],
+                    "run_ref": execution["run_ref"],
+                    "terminal_status": execution["status"],
+                    "reason_code": reason_code,
+                    "trigger_ids": trigger_ids,
+                }
+            },
+            operation_id=ctx.operations.stable(
+                f"commit-terminal-run:{execution['run_ref']}"
+            ),
+            timeout=25,
+        )
+
+    @job("conversation.agent-run")
+    async def agent_run(self, task, ctx):
+        work = task["payload"]
+        policy = await ctx.services.call(
+            "agent.execution.policy",
+            {"protocol": "forest.agent-execution-policy-query/1"},
+            operation_id=ctx.operations.stable("agent-execution-policy"),
+            timeout=10,
+        )
+        claimed_at = datetime.fromisoformat(work["claimed_at"].replace("Z", "+00:00"))
+        if claimed_at.tzinfo is None:
+            raise ForestError(
+                "CONVERSATION_AGENT_CLAIM_INVALID",
+                "Agent work claim time has no timezone",
+                409,
+            )
+        new_run_deadline = (
+            claimed_at.astimezone(UTC)
+            + timedelta(seconds=policy["run_timeout_seconds"])
+        ).isoformat()
+        run_ref = work["run_ref"]
+        resume = work["resume"]
+        while True:
+            execution = await ctx.services.call(
+                "agent.execute",
+                {
+                    "protocol": "forest.agent-execute/2",
+                    "conversation_id": work["conversation_id"],
+                    "session_ref": work["session_ref"],
+                    "run_ref": run_ref,
+                    "resume": resume,
+                    "absolute_deadline": None if resume else new_run_deadline,
+                    "actor": work["actor"],
+                },
+                operation_id=ctx.operations.stable(f"agent-execute:{run_ref}"),
+                contract_major=2,
+                timeout=540,
+            )
+            status = execution["status"]
+            if status == "IDLE":
+                return self._release("IDLE")
+            if status == "FINAL_READY":
+                await self._commit_final_reply(work, execution, ctx)
+                return self._defer("COMPLETED", "session_handoff_pending", 0.1)
+            if status == "COMPLETED":
+                handoff = await self._handoff(work, execution, new_run_deadline, ctx)
+                if handoff["action"] == "WAIT_INPUT":
+                    return self._defer("WAIT_INPUT", "classification_prefix_pending", 0.25)
+                if handoff["action"] == "CLOSED":
+                    return self._release("COMPLETED")
+                if handoff["action"] != "SUCCESSOR" or handoff["run"] is None:
+                    raise ForestError(
+                        "CONVERSATION_SESSION_HANDOFF_INVALID",
+                        "Session handoff returned an invalid action",
+                        409,
+                    )
+                run_ref = handoff["run"]["run_id"]
+                resume = True
+                continue
+            if status == "WAIT_INPUT":
+                return self._defer(status, "classification_prefix_pending", 0.25)
+            if status == "WAIT_APPROVAL":
+                return self._defer(status, "approval_pending", 1.0)
+            if status == "RELOAD_WAIT":
+                return self._defer(status, "agent_reload_pending", 0.5)
+            if status in {"WAIT_TOOL", "BLOCKED_UNKNOWN"}:
+                return self._defer(status, "agent_reconciliation_pending", 30.0)
+            if status in {"FAILED", "CANCELLED"}:
+                await self._commit_terminal(work, execution, ctx)
+                return self._release(status)
+            raise ForestError(
+                "CONVERSATION_AGENT_RESULT_INVALID",
+                "Agent execution returned an unknown state",
+                409,
+            )

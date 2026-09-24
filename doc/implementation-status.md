@@ -24,6 +24,7 @@
 - RuntimeGraph 中精确到 component/Generation/contract 的路由；
 - 候选代预热、原子发布、旧代冻结、排空、失败回滚和资源回收；
 - 包私有 Domain Query/Command、manifest UnitOfWork、durable owned work；
+- 包快照只在 descriptor 编译时完整捕获和校验一次，所有契约 schema 从该次不可变捕获批量编译；schema 数量不会造成重复遍历包内容的二次方启动开销；
 - Generation 专属 Effect Driver，Secret、socket、子进程和远端客户端不进入 Worker；
 - 包自带管理 UI 与配置贡献；
 - Job、Shell 和 Routing 三类冻结贡献目录。
@@ -60,7 +61,7 @@
 | 组件 | 当前生产入口 | 已有候选 | 缺口 |
 |---|---|---|---|
 | Agent | `bootstrap_clean_agent()` | `builtin/agent_runtime` | Worker 内 `agent.execute/2`、Provider/Tool/Payload 端口、管理贡献、Conversation 原子交接、生产切换 |
-| Conversation | `bootstrap_clean_messaging()` | `builtin/conversation_scheduler` | Agent 调度入口、final-reply/session-handoff plans、生产 poller/owned work 切换 |
+| Conversation | `bootstrap_clean_messaging()` | `builtin/conversation_scheduler` | Agent owned work、final-reply/session-handoff/terminal plans 已进入候选包；仍缺审批与不确定结果对账后的生产切换 |
 | Memory | `bootstrap_clean_memory()` | `builtin/memory_graph` | 捕获/嵌入/图召回 Worker 与端口、完整管理查询、生产切换；精确来源召回已迁入包 |
 
 `clean_*` 是重构期间遗留的宿主实现名称，不是新的模块层。对应 builtin 完成生产切换后，应直接删除这些文件和旧 baseline，不保留兼容转发。
@@ -84,7 +85,7 @@
 
 Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复、非审批 ToolCall 的 Effect 执行以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
 
-这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，handoff 后的 `UNKNOWN` 尚未通过 `query_handed_off` 对账，宿主 Runtime 状态工具尚未迁成可序列化 builtin 服务；Conversation 仍未贡献 `conversation.agent-run.pending`、最终回复和 Session 交接 owned-work。因此 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“`agent.execute/2` 已有正常非审批工具路径”表述成“生产主链已经切换”。
+这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，handoff 后的 `UNKNOWN` 尚未通过 `query_handed_off` 对账，宿主 Runtime 状态工具尚未迁成可序列化 builtin 服务。Conversation 候选包已经贡献 `conversation.agent-run.pending`，并以 manifest UnitOfWork 完成最终回复、Delivery Intent、Session 后继 Run/关闭和失败终态触发器收敛；这些端口尚未替换 `clean_bot_host.py` 的旧宿主执行器。不得把“候选包主链已闭合”表述成“生产主链已经切换”。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；提交结果由 SDK 强制收敛为五字段 PayloadRef，传输元数据不能混入跨模块引用。单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
@@ -94,7 +95,7 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 `builtin/conversation_scheduler` 已封闭消息接纳、连续分类水位、截至最后 trigger 的输入选择、带作者来源的 Context、无 LLM 摘要的窗口裁剪、静默排空和 `conversation.context.snapshot/2`。快照不再把完整历史塞进 Worker 帧：权威查询最多返回 32 个活动单元，Worker 写入带正文/作者父边的 `context.snapshot.page`，超过 128 页时构造 `context.snapshot.index` 树，服务只返回最终 manifest 的精确 PayloadRef。同群串行和跨群并行依靠数据库 actor lease，而不是进程锁。
 
-该候选尚未拥有完整 Agent 调用与回复/Session 交接，所以尚未加入生产组合根。现有 `bootstrap_clean_messaging()` 仍是旁路，应在对应端口完成后删除。
+该候选已经拥有数据库租约驱动的 `conversation.agent-run.pending`：同一群聊只允许一个 actor claim，跨群可由多个槽并行；Worker 通过 `agent.execute/2` 驱动 Run，在模型安全边界合流，随后用事务计划原子提交 Agent 完成态、Conversation 回复单元与 Delivery Intent，再在 Session 边界选择后继输入并联动 Memory 资格确认。Agent 的 `FAILED/CANCELLED` 终态由独立事务计划核对精确 trigger 集、收敛 trigger 状态并释放 Session。它仍未加入生产组合根；现有 `bootstrap_clean_messaging()` 是旁路，需在审批与不确定结果恢复闭合后直接删除。
 
 ## 7. Memory 候选包已经拥有的部分
 
@@ -109,7 +110,7 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 ## 8. 下一切换顺序
 
 1. 将 Runtime 状态工具迁成 manifest 发布的可序列化服务；补齐持久审批决策与 `query_handed_off` 恢复，禁止保留宿主 `ToolDispatchResult` 旁路。
-2. 在 `conversation_scheduler` manifest 中补齐 Agent owned-work、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
+2. 补齐持久审批决策与 handoff 后 `UNKNOWN` 对账，使现有 Agent owned-work、final-reply、terminal 和 session-handoff plans 覆盖全部恢复分支。
 3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
 4. 补齐 `memory_graph` 的捕获、嵌入、图扩散、召回和管理端口，用包内权威状态替换 `bootstrap_clean_memory()`，随后删除宿主 Memory Runtime、Repository 装配和旧 baseline。
 5. 从空开发库启动完整图，验证热重载安全点、失败回滚、群并发、Provider/Tool 不确定结果、真实 OneBot 单次低频交互和 WebUI 管理贡献。

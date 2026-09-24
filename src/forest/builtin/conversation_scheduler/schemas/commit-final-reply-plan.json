@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent", "conversation", "delivery"],
+  "properties": {
+    "agent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "session_id", "reply"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/id"}, "session_id": {"$ref": "#/$defs/id"},
+        "reply": {"$ref": "#/$defs/reply"}
+      }
+    },
+    "conversation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["actor", "session_ref", "run_ref", "reply", "answered_trigger_ids", "unit_id"],
+      "properties": {
+        "actor": {"$ref": "#/$defs/actor"},
+        "session_ref": {"$ref": "#/$defs/id"}, "run_ref": {"$ref": "#/$defs/id"},
+        "reply": {"$ref": "#/$defs/reply"},
+        "answered_trigger_ids": {
+          "type": "array", "minItems": 1, "maxItems": 4096,
+          "uniqueItems": true, "items": {"$ref": "#/$defs/id"}
+        },
+        "unit_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "delivery": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "protocol", "intent_id", "binding_ref", "lane_kind", "ordering_key",
+        "conversation_ref", "channel_kind", "channel_ref", "cause_component_id",
+        "cause_kind", "cause_id", "reply_ref", "parts"
+      ],
+      "properties": {
+        "protocol": {"const": "forest.delivery-intent/1"},
+        "intent_id": {"$ref": "#/$defs/id"}, "binding_ref": {"$ref": "#/$defs/id"},
+        "lane_kind": {"const": "CHAT"}, "ordering_key": {"$ref": "#/$defs/id"},
+        "conversation_ref": {"$ref": "#/$defs/id"},
+        "channel_kind": {"enum": ["GROUP", "PRIVATE"]}, "channel_ref": {"$ref": "#/$defs/id"},
+        "cause_component_id": {"const": "conversation.scheduler"},
+        "cause_kind": {"const": "context.reply"}, "cause_id": {"$ref": "#/$defs/id"},
+        "reply_ref": {"$ref": "#/$defs/id"},
+        "parts": {
+          "type": "array", "minItems": 1, "maxItems": 64,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["part_operation_id", "effect_operation_ref", "payload"],
+            "properties": {
+              "part_operation_id": {"$ref": "#/$defs/id"},
+              "effect_operation_ref": {"$ref": "#/$defs/id"},
+              "payload": {"$ref": "#/$defs/reply"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conversation_id", "owner_id", "epoch"],
+      "properties": {
+        "conversation_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    "reply": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_component_id": {"const": "agent.runtime"},
+        "owner_kind": {"const": "final.reply"},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    }
+  }
+}

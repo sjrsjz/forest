@@ -96,7 +96,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "source_component_id": "adapter.onebot",
                 "binding_ref": "binding/main",
                 "platform": "onebot-v11",
-                "channel_kind": "GROUP",
+                "channel_kind": "SYSTEM",
                 "channel_ref": "933179609",
                 "thread_ref": None,
                 "event_id": event_id,
@@ -275,6 +275,73 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "trigger_decision": "TRIGGER",
         }
 
+        terminal = {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "conversation.scheduler",
+                "generation_id": participant.generation_id,
+            },
+            "input": {
+                "actor": actor,
+                "session_ref": "session/1",
+                "run_ref": "run/1",
+                "terminal_status": "FAILED",
+                "reason_code": "AGENT_PROTOCOL_FAILED",
+                "trigger_ids": ["trigger/1"],
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            terminal_result = await participant.invoke_in(
+                conn,
+                "conversation.terminalize-run",
+                terminal,
+                operation_id="uow-step:conversation-terminal/1",
+                causal_root_kind="conversation.agent-run",
+                causal_root_id="run/1",
+                parent_call_id="call:conversation/terminal-1",
+                timeout_seconds=10,
+            )
+        async with store.pool.connection() as conn, conn.transaction():
+            terminal_replay = await participant.invoke_in(
+                conn,
+                "conversation.terminalize-run",
+                terminal,
+                operation_id="uow-step:conversation-terminal/1",
+                causal_root_kind="conversation.agent-run",
+                causal_root_id="run/1",
+                parent_call_id="call:conversation/terminal-replay",
+                timeout_seconds=10,
+            )
+        assert terminal_replay == terminal_result == {
+            "protocol": "forest.conversation-run-terminal/1",
+            "conversation_id": actor["conversation_id"],
+            "session_ref": "session/1",
+            "run_ref": "run/1",
+            "terminal_status": "FAILED",
+            "reason_code": "AGENT_PROTOCOL_FAILED",
+            "trigger_ids": ["trigger/1"],
+        }
+        async with store.pool.connection() as conn:
+            terminal_state = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT t.status,t.terminal_reason_code,l.active_session_ref,"
+                        "l.active_run_ref FROM {}.conversation_triggers t JOIN "
+                        "{}.conversation_lanes l ON l.bot_id=t.bot_id AND "
+                        "l.conversation_id=t.conversation_id WHERE t.bot_id=%s "
+                        "AND t.trigger_id=%s"
+                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                    (store.bot_id, "trigger/1"),
+                )
+            ).fetchone()
+        assert dict(terminal_state) == {
+            "status": "FAILED",
+            "terminal_reason_code": "AGENT_PROTOCOL_FAILED",
+            "active_session_ref": None,
+            "active_run_ref": None,
+        }
+
         silent_event_id = "event/onebot/silent-1"
         silent_content = await _payload(
             kernel.payload,
@@ -292,6 +359,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         silent_admission["input"].update(
             {
                 "conversation_id": "conversation/onebot/group/silent",
+                "channel_kind": "GROUP",
                 "channel_ref": "silent",
                 "event_id": silent_event_id,
                 "source_event_ref": "onebot-message/silent-1",

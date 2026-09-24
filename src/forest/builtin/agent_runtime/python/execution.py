@@ -164,8 +164,11 @@ class AgentExecution:
         if (
             run["session_id"] != request["session_ref"]
             or run["conversation_ref"] != request["conversation_id"]
-            or _deadline(run["absolute_deadline"])
-            != _deadline(request["absolute_deadline"])
+            or (
+                request["absolute_deadline"] is not None
+                and _deadline(run["absolute_deadline"])
+                != _deadline(request["absolute_deadline"])
+            )
         ):
             raise ForestError(
                 "AGENT_EXECUTION_FENCE_MISMATCH",
@@ -281,7 +284,12 @@ class AgentExecution:
                 "Conversation actor belongs to another conversation",
                 422,
             )
-        deadline = _deadline(request["absolute_deadline"])
+        requested_deadline = request["absolute_deadline"]
+        if not request["resume"] and requested_deadline is None:
+            raise ForestError(
+                "AGENT_EXECUTION_INPUT_INVALID", "A new Agent Run requires a deadline", 422
+            )
+        deadline = None if requested_deadline is None else _deadline(requested_deadline)
         if not request["resume"] and deadline <= datetime.now(UTC):
             raise ForestError(
                 "AGENT_EXECUTION_INPUT_INVALID",
@@ -306,6 +314,8 @@ class AgentExecution:
                 run,
                 error_code=run.get("error_code"),
             )
+        if deadline is None:
+            deadline = _deadline(run["absolute_deadline"])
         owner_record = await self.ctx.uow.call(
             "agent.acquire-run-lease",
             {

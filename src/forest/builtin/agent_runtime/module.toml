@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.0.0"
+version = "4.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -101,6 +101,13 @@ input_schema = "schemas/protocol-describe-input.json"
 output_schema = "schemas/protocol-describe-output.json"
 
 [[components.provides]]
+name = "agent.execution.policy"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/execution-policy-input.json"
+output_schema = "schemas/execution-policy-output.json"
+
+[[components.provides]]
 name = "agent.run.query"
 contract = "1.0"
 semantics = "read"
@@ -109,9 +116,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.0.0"
+schema_version = "2.1.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "a39703478ab14f8b0f0afee9a0ff6b5b561c5a80521ab6e7f27623ecd7908603"
+baseline_sha256 = "5e89e9f3eee53ca7dc1a95743d04fb16bbf2634a364f9ec5a02708b3d005d220"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -203,6 +210,19 @@ owner_kind = "checkpoint.state"
 owner_id_path = "/input/state/owner_id"
 
 [[components.unit_of_work_participants]]
+name = "agent.commit-final-run-record"
+contract = "1.0"
+function = "agent_commit_final_run"
+input_schema = "schemas/commit-final-run-envelope.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/reply"
+owner_component = "agent.runtime"
+owner_kind = "final.reply"
+owner_id_path = "/input/reply/owner_id"
+
+[[components.unit_of_work_participants]]
 name = "agent.complete-run-record"
 contract = "1.0"
 function = "agent_complete_run"
@@ -228,6 +248,13 @@ contract = "1.0"
 function = "agent_close_session"
 input_schema = "schemas/close-session-envelope.json"
 output_schema = "schemas/close-session-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.handoff-session-record"
+contract = "1.0"
+function = "agent_handoff_session"
+input_schema = "schemas/handoff-session-envelope.json"
+output_schema = "schemas/handoff-session-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.acquire-run-record"

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "3.0.0"
+version = "4.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -29,9 +29,26 @@ stop_timeout_s = 10
 [components.capabilities]
 requests = [
   "payload.write",
+  "service.call:agent.execute",
+  "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
-  "uow.execute:conversation.commit-silent-input"
+  "uow.execute:conversation.commit-silent-input",
+  "uow.execute:conversation.commit-final-reply",
+  "uow.execute:conversation.session-handoff",
+  "uow.execute:conversation.commit-terminal-run"
 ]
+
+[[components.requires]]
+name = "agent.execute"
+contract = ">=2.0,<3.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "agent.execution.policy"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
 
 [[components.provides]]
 name = "conversation.context.snapshot"
@@ -42,9 +59,9 @@ output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "3.0.0"
+schema_version = "4.1.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "aef209abbd71b26366c187f75a6ced87f6122937d19274615dca74464e8237a6"
+baseline_sha256 = "6c8a365f82082fd166c001bc32cefc5733aca4488cf3e286878ce2369e5c7d9a"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -103,6 +120,26 @@ function = "conversation_commit_context_compaction"
 input_schema = "schemas/compact-commit-envelope.json"
 output_schema = "schemas/select-input-output.json"
 
+[[components.unit_of_work_participants]]
+name = "conversation.append-final-reply"
+contract = "1.0"
+function = "conversation_append_final_reply"
+input_schema = "schemas/append-final-reply-envelope.json"
+output_schema = "schemas/append-final-reply-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/reply"
+owner_component = "agent.runtime"
+owner_kind = "final.reply"
+owner_id_path = "/input/reply/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "conversation.terminalize-run"
+contract = "1.0"
+function = "conversation_terminalize_run"
+input_schema = "schemas/terminalize-run-envelope.json"
+output_schema = "schemas/terminalize-run-output.json"
+
 [[components.unit_of_work_plans]]
 name = "conversation.commit-silent-input"
 contract = "1.0"
@@ -114,6 +151,41 @@ steps = [
   { id = "prepare", component_id = "conversation.scheduler", participant = "conversation.prepare-context-compaction" },
   { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
   { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" }
+]
+
+[[components.unit_of_work_plans]]
+name = "conversation.commit-final-reply"
+contract = "1.0"
+input_schema = "schemas/commit-final-reply-plan.json"
+output_schema = "schemas/delivery-intent-output.json"
+timeout_s = 30
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.commit-final-run-record", input_path = "/agent" },
+  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.append-final-reply", input_path = "/conversation" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.create-chat-intent-uow", input_path = "/delivery", participant_generation_field = "delivery_generation_id" }
+]
+
+[[components.unit_of_work_plans]]
+name = "conversation.session-handoff"
+contract = "1.0"
+input_schema = "schemas/session-handoff-plan.json"
+output_schema = "schemas/session-handoff-output.json"
+timeout_s = 30
+steps = [
+  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.select-input", input_path = "/conversation" },
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.qualify-input-batch", input_path = "/memory" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.handoff-session-record", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
+name = "conversation.commit-terminal-run"
+contract = "1.0"
+input_schema = "schemas/commit-terminal-run-plan.json"
+output_schema = "schemas/terminalize-run-output.json"
+timeout_s = 20
+steps = [
+  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.terminalize-run", input_path = "/conversation" }
 ]
 
 [[components.owned_work_handlers]]
@@ -130,4 +202,20 @@ claim_timeout_s = 5
 handler_timeout_s = 30
 settle_timeout_s = 5
 lease_seconds = 45
+drain_policy = "inflight"
+
+[[components.owned_work_handlers]]
+name = "conversation.agent-run.pending"
+contract = "1.0"
+handler = "conversation.agent-run"
+claim_function = "conversation_claim_agent_run"
+settle_function = "conversation_settle_agent_run"
+input_schema = "schemas/agent-work-input.json"
+output_schema = "schemas/agent-work-output.json"
+max_concurrency = 16
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 600
+settle_timeout_s = 5
+lease_seconds = 660
 drain_policy = "inflight"

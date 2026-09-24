@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["conversation", "payload_epoch", "memory", "agent"],
+  "properties": {
+    "conversation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["actor", "boundary", "selection_mode", "session_ref", "run_ref", "next_run_ref"],
+      "properties": {
+        "actor": {"$ref": "#/$defs/actor"},
+        "boundary": {"const": "SESSION_END"}, "selection_mode": {"const": "ANY"},
+        "session_ref": {"$ref": "#/$defs/id"}, "run_ref": {"$ref": "#/$defs/id"},
+        "next_run_ref": {"$ref": "#/$defs/id"}
+      }
+    },
+    "payload_epoch": {"const": {"protocol": "forest.payload-epoch-capture/1"}},
+    "memory": {"const": {"selection_step_id": "conversation", "deletion_epoch_step_id": "payload_epoch"}},
+    "agent": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "session_id", "completed_run_id", "successor_run_id", "successor_deadline",
+        "selection_step_id", "memory_step_id"
+      ],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/id"}, "completed_run_id": {"$ref": "#/$defs/id"},
+        "successor_run_id": {"$ref": "#/$defs/id"},
+        "successor_deadline": {"type": "string", "minLength": 1, "maxLength": 64},
+        "selection_step_id": {"const": "conversation"}, "memory_step_id": {"const": "memory"}
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conversation_id", "owner_id", "epoch"],
+      "properties": {
+        "conversation_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

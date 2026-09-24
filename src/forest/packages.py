@@ -1709,6 +1709,15 @@ class PackageSnapshot:
     def schema(self, reference: str) -> dict:
         return _schema(self._verified_files(), reference)
 
+    def schemas(self, references) -> dict[str, dict]:
+        """Load a set of schemas from one verified immutable package capture."""
+
+        files = self._verified_files()
+        return {
+            reference: _schema(files, reference)
+            for reference in dict.fromkeys(references)
+        }
+
     def management_ui(self) -> tuple[dict, bytes] | None:
         files = self._verified_files()
         metadata = _management_ui(files, self.component)

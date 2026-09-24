@@ -2103,3 +2103,562 @@ BEGIN
     RETURN result_value;
 END;
 $$;
+
+CREATE FUNCTION conversation_append_final_reply(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    actor jsonb := body->'actor';
+    reply_value jsonb := body->'reply';
+    agent_value jsonb := envelope#>'{prior,agent}';
+    trigger_values jsonb := body->'answered_trigger_ids';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_conversation text := actor->>'conversation_id';
+    requested_session text := body->>'session_ref';
+    requested_run text := body->>'run_ref';
+    requested_reply text := reply_value->>'owner_id';
+    requested_unit text := body->>'unit_id';
+    requested_owner text := actor->>'owner_id';
+    requested_epoch bigint := (actor->>'epoch')::bigint;
+    lane record;
+    replay record;
+    context_revision_value bigint;
+    requested_trigger_count integer;
+    matched_trigger_count integer;
+    trigger_ids_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_operation IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR jsonb_typeof(trigger_values) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(trigger_values)=0
+       OR reply_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR reply_value->>'owner_kind' IS DISTINCT FROM 'final.reply'
+       OR agent_value->>'run_id' IS DISTINCT FROM requested_run
+       OR agent_value->>'session_id' IS DISTINCT FROM requested_session
+       OR agent_value->>'conversation_ref' IS DISTINCT FROM requested_conversation
+       OR agent_value->>'state' IS DISTINCT FROM 'COMPLETED'
+       OR agent_value#>>'{final_candidate,payload_id}' IS DISTINCT FROM reply_value->>'payload_id'
+       OR agent_value#>>'{final_candidate,digest}' IS DISTINCT FROM reply_value->>'digest' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_FINAL_REPLY_INVALID',
+                'message','Final reply envelope differs from the completed Agent Run','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.conversation.scheduler/final-reply/' || requested_bot || '/' || requested_operation,0
+    ));
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation FOR UPDATE;
+    IF lane IS NULL
+       OR lane.actor_owner_id IS DISTINCT FROM requested_owner
+       OR lane.actor_epoch IS DISTINCT FROM requested_epoch
+       OR lane.actor_expires_at IS NULL OR lane.actor_expires_at<=clock_timestamp()
+       OR lane.active_session_ref IS DISTINCT FROM requested_session
+       OR lane.active_run_ref IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_CONVERSATION_ACTOR',
+                'message','Conversation actor or Session fence is stale','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO replay
+    FROM __forest_module_schema__.context_append_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay IS NOT NULL THEN
+        IF replay.input_digest IS DISTINCT FROM requested_digest
+           OR replay.reply_ref IS DISTINCT FROM requested_reply
+           OR replay.run_ref IS DISTINCT FROM requested_run THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONTEXT_APPEND_CONFLICT',
+                    'message','Final reply append replay differs','status',409
+                )
+            );
+        END IF;
+        SELECT COALESCE(jsonb_agg(t.trigger_id ORDER BY t.trigger_id),'[]'::jsonb)
+        INTO trigger_ids_value
+        FROM __forest_module_schema__.conversation_triggers t
+        WHERE t.bot_id=requested_bot AND t.answered_reply_ref=requested_reply
+          AND t.claimed_session_ref=requested_session AND t.claimed_run_ref=requested_run;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'operation_id',requested_operation,'context_revision',replay.context_revision,
+                'unit_id',requested_unit,'answered_trigger_ids',trigger_ids_value,
+                'reply_ref',requested_reply
+            )
+        );
+    END IF;
+    SELECT count(*)::integer INTO requested_trigger_count
+    FROM jsonb_array_elements_text(trigger_values);
+    SELECT count(*)::integer INTO matched_trigger_count
+    FROM __forest_module_schema__.conversation_triggers t
+    JOIN jsonb_array_elements_text(trigger_values) requested(trigger_id)
+      ON requested.trigger_id=t.trigger_id
+    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
+      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
+      AND t.claimed_run_ref=requested_run;
+    IF matched_trigger_count<>requested_trigger_count THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','TRIGGER_STATE_CONFLICT',
+                'message','A final reply trigger is not owned by this Run','status',409
+            )
+        );
+    END IF;
+    context_revision_value := lane.context_revision+1;
+    INSERT INTO __forest_module_schema__.context_append_operations(
+        bot_id,operation_id,conversation_id,input_digest,append_kind,
+        session_ref,run_ref,context_revision,unit_count,answered_trigger_count,
+        reply_ref,actor_owner_id,actor_epoch
+    ) VALUES (
+        requested_bot,requested_operation,requested_conversation,requested_digest,
+        'FINAL_REPLY',requested_session,requested_run,context_revision_value,1,
+        requested_trigger_count,requested_reply,requested_owner,requested_epoch
+    );
+    INSERT INTO __forest_module_schema__.context_units(
+        bot_id,conversation_id,unit_id,context_revision,unit_index,kind,
+        source_component_id,source_kind,source_id,input_batch_id,event_id,ingress_seq,
+        payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,
+        payload_owner_id,author_payload_id,author_payload_digest,
+        author_owner_component_id,author_owner_kind,author_owner_id,
+        author_subject_ref,trigger_decision
+    ) VALUES (
+        requested_bot,requested_conversation,requested_unit,context_revision_value,0,'REPLY',
+        'agent.runtime','final.reply',requested_reply,NULL,NULL,NULL,
+        reply_value->>'payload_id',reply_value->>'digest',
+        reply_value->>'owner_component_id',reply_value->>'owner_kind',
+        reply_value->>'owner_id',NULL,NULL,NULL,NULL,NULL,NULL,NULL
+    );
+    UPDATE __forest_module_schema__.conversation_triggers t
+    SET status='ANSWERED',answered_reply_ref=requested_reply,updated_at=clock_timestamp()
+    FROM jsonb_array_elements_text(trigger_values) requested(trigger_id)
+    WHERE t.bot_id=requested_bot AND t.trigger_id=requested.trigger_id;
+    UPDATE __forest_module_schema__.conversation_lanes
+    SET context_revision=context_revision_value,
+        context_view_unit_count=context_view_unit_count+1,
+        mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    SELECT COALESCE(jsonb_agg(value ORDER BY value),'[]'::jsonb)
+    INTO trigger_ids_value FROM jsonb_array_elements_text(trigger_values);
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'operation_id',requested_operation,'context_revision',context_revision_value,
+            'unit_id',requested_unit,'answered_trigger_ids',trigger_ids_value,
+            'reply_ref',requested_reply
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION conversation_terminalize_run(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    actor jsonb := body->'actor';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_conversation text := actor->>'conversation_id';
+    requested_owner text := actor->>'owner_id';
+    requested_epoch bigint := (actor->>'epoch')::bigint;
+    requested_session text := body->>'session_ref';
+    requested_run text := body->>'run_ref';
+    requested_status text := body->>'terminal_status';
+    requested_reason text := body->>'reason_code';
+    requested_triggers jsonb;
+    actual_triggers jsonb;
+    trigger_count_value integer;
+    lane record;
+    replay record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_conversation IS NULL OR requested_owner IS NULL
+       OR requested_epoch IS NULL OR requested_epoch<1
+       OR requested_session IS NULL OR requested_run IS NULL
+       OR requested_status NOT IN ('FAILED','CANCELLED')
+       OR requested_reason IS NULL OR octet_length(requested_reason) NOT BETWEEN 1 AND 128
+       OR jsonb_typeof(body->'trigger_ids') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(body->'trigger_ids')=0 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_TERMINAL_INPUT_INVALID',
+                'message','Conversation terminal Run envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT jsonb_agg(value ORDER BY value),count(*)::integer
+    INTO requested_triggers,trigger_count_value
+    FROM jsonb_array_elements_text(body->'trigger_ids');
+    IF trigger_count_value IS DISTINCT FROM jsonb_array_length(body->'trigger_ids')
+       OR trigger_count_value IS DISTINCT FROM (
+           SELECT count(DISTINCT value)::integer
+           FROM jsonb_array_elements_text(body->'trigger_ids')
+       ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_TERMINAL_INPUT_INVALID',
+                'message','Conversation terminal trigger set is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO replay
+    FROM __forest_module_schema__.trigger_terminal_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay IS NOT NULL THEN
+        IF replay.input_digest IS DISTINCT FROM requested_digest
+           OR replay.conversation_id IS DISTINCT FROM requested_conversation
+           OR replay.terminal_session_ref IS DISTINCT FROM requested_session
+           OR replay.terminal_run_ref IS DISTINCT FROM requested_run
+           OR replay.resulting_status IS DISTINCT FROM requested_status
+           OR replay.reason_code IS DISTINCT FROM requested_reason
+           OR replay.actor_owner_id IS DISTINCT FROM requested_owner
+           OR replay.actor_epoch IS DISTINCT FROM requested_epoch THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_TERMINAL_OPERATION_CONFLICT',
+                    'message','Conversation terminal operation differs','status',409
+                )
+            );
+        END IF;
+        SELECT jsonb_agg(trigger_id ORDER BY trigger_id) INTO actual_triggers
+        FROM __forest_module_schema__.trigger_terminal_items
+        WHERE bot_id=requested_bot AND operation_id=requested_operation;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.conversation-run-terminal/1',
+                'conversation_id',requested_conversation,'session_ref',requested_session,
+                'run_ref',requested_run,'terminal_status',requested_status,
+                'reason_code',requested_reason,'trigger_ids',actual_triggers
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation FOR UPDATE;
+    IF lane IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_owner
+       OR lane.actor_epoch IS DISTINCT FROM requested_epoch
+       OR lane.active_session_ref IS DISTINCT FROM requested_session
+       OR lane.active_run_ref IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_CONVERSATION_ACTOR',
+                'message','Conversation actor no longer owns the terminal Run','status',409
+            )
+        );
+    END IF;
+    SELECT COALESCE(jsonb_agg(trigger_id ORDER BY trigger_id),'[]'::jsonb),count(*)::integer
+    INTO actual_triggers,trigger_count_value
+    FROM __forest_module_schema__.conversation_triggers
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND claimed_session_ref=requested_session AND status='CLAIMED';
+    IF actual_triggers IS DISTINCT FROM requested_triggers OR trigger_count_value=0 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_TERMINAL_TRIGGER_CONFLICT',
+                'message','Terminal Run trigger set differs from the claimed Session','status',409
+            )
+        );
+    END IF;
+    INSERT INTO __forest_module_schema__.trigger_terminal_operations(
+        bot_id,operation_id,conversation_id,input_digest,terminal_session_ref,
+        terminal_run_ref,resulting_status,reason_code,actor_owner_id,actor_epoch,
+        trigger_count
+    ) VALUES (
+        requested_bot,requested_operation,requested_conversation,requested_digest,
+        requested_session,requested_run,requested_status,requested_reason,
+        requested_owner,requested_epoch,trigger_count_value
+    );
+    INSERT INTO __forest_module_schema__.trigger_terminal_items(
+        bot_id,operation_id,item_index,trigger_id
+    )
+    SELECT requested_bot,requested_operation,ordinality-1,value
+    FROM jsonb_array_elements_text(actual_triggers) WITH ORDINALITY;
+    UPDATE __forest_module_schema__.conversation_triggers
+    SET status=requested_status,terminal_reason_code=requested_reason,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND claimed_session_ref=requested_session AND status='CLAIMED';
+    UPDATE __forest_module_schema__.conversation_lanes
+    SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
+        resume_reason_code=NULL,resume_reason_ref=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.conversation-run-terminal/1',
+            'conversation_id',requested_conversation,'session_ref',requested_session,
+            'run_ref',requested_run,'terminal_status',requested_status,
+            'reason_code',requested_reason,'trigger_ids',actual_triggers
+        )
+    );
+END;
+$$;
+
+CREATE TABLE conversation_agent_work_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TRIGGER conversation_agent_work_settlements_immutable
+    BEFORE UPDATE OR DELETE ON conversation_agent_work_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+
+CREATE FUNCTION conversation_claim_agent_run(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    lane record;
+    next_epoch bigint;
+    identity_digest text;
+    selected_session text;
+    selected_run text;
+    resume_value boolean;
+    claimed_at_value timestamptz;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 3600 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_AGENT_CLAIM_INVALID',
+                'message','Conversation Agent claim is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND actor_owner_id=requested_token
+      AND actor_expires_at>clock_timestamp()
+    FOR UPDATE;
+    IF lane IS NULL THEN
+        SELECT l.* INTO lane
+        FROM __forest_module_schema__.conversation_lanes l
+        WHERE l.bot_id=requested_bot
+          AND l.channel_kind IN ('GROUP','PRIVATE')
+          AND (l.actor_owner_id IS NULL OR l.actor_expires_at<=clock_timestamp())
+          AND (l.resume_not_before IS NULL OR l.resume_not_before<=clock_timestamp())
+          AND (
+              (l.active_session_ref IS NOT NULL AND l.active_run_ref IS NOT NULL)
+              OR (
+                  l.active_session_ref IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM __forest_module_schema__.conversation_triggers t
+                      WHERE t.bot_id=l.bot_id AND t.conversation_id=l.conversation_id
+                        AND t.status='PENDING' AND t.ingress_seq<=l.classified_through_seq
+                  )
+              )
+          )
+        ORDER BY CASE WHEN l.active_session_ref IS NOT NULL THEN 0 ELSE 1 END,
+                 l.updated_at,l.conversation_id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1;
+        IF lane IS NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',true,'value',NULL
+            );
+        END IF;
+        next_epoch := lane.actor_epoch+1;
+        claimed_at_value := clock_timestamp();
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET actor_owner_id=requested_token,actor_epoch=next_epoch,
+            actor_expires_at=claimed_at_value+(requested_lease*interval '1 second'),
+            resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=lane.conversation_id
+        RETURNING * INTO lane;
+    ELSE
+        claimed_at_value := lane.actor_expires_at-(requested_lease*interval '1 second');
+    END IF;
+    identity_digest := encode(sha256(convert_to(jsonb_build_array(
+        requested_bot,lane.conversation_id,lane.actor_epoch
+    )::text,'UTF8')),'hex');
+    resume_value := lane.active_session_ref IS NOT NULL;
+    selected_session := COALESCE(lane.active_session_ref,'session:' || identity_digest);
+    selected_run := COALESCE(lane.active_run_ref,'run:' || identity_digest);
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1','work_id',lane.conversation_id,
+            'claim_token',requested_token,'attempt',lane.actor_epoch,
+            'operation_id','conversation-agent:' || identity_digest,
+            'causal_root_kind','conversation.agent-run',
+            'causal_root_id',lane.conversation_id,
+            'payload',jsonb_build_object(
+                'actor',jsonb_build_object(
+                    'conversation_id',lane.conversation_id,
+                    'owner_id',requested_token,'epoch',lane.actor_epoch
+                ),
+                'conversation_id',lane.conversation_id,
+                'session_ref',selected_session,'run_ref',selected_run,
+                'resume',resume_value,'claimed_at',claimed_at_value,
+                'binding_ref',lane.binding_ref,'channel_kind',lane.channel_kind,
+                'channel_ref',lane.channel_ref
+            )
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION conversation_settle_agent_run(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_work text := input->>'work_id';
+    requested_token text := input->>'claim_token';
+    requested_attempt bigint := (input->>'attempt')::bigint;
+    existing record;
+    lane record;
+    result_value jsonb;
+    work_result jsonb := input#>'{outcome,result}';
+    delay_value numeric;
+    reason_value text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_work IS NULL OR requested_token IS NULL
+       OR requested_attempt IS NULL OR requested_attempt<1
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_AGENT_SETTLEMENT_INVALID',
+                'message','Conversation Agent settlement is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO existing
+    FROM __forest_module_schema__.conversation_agent_work_settlements
+    WHERE claim_token=requested_token;
+    IF existing IS NOT NULL THEN
+        IF existing.input_payload=input THEN RETURN existing.result_payload; END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_AGENT_SETTLEMENT_CONFLICT',
+                'message','Conversation Agent claim has another settlement','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_work FOR UPDATE;
+    IF lane IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_token
+       OR lane.actor_epoch IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_CONVERSATION_ACTOR',
+                'message','Conversation actor no longer owns this Agent claim','status',409
+            )
+        );
+    END IF;
+    IF input#>>'{outcome,status}'='SUCCEEDED' THEN
+        IF work_result->>'protocol' IS DISTINCT FROM 'forest.conversation-agent-work/1'
+           OR work_result->>'disposition' NOT IN ('RELEASE','DEFER') THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_AGENT_SETTLEMENT_INVALID',
+                    'message','Conversation Agent work result is invalid','status',422
+                )
+            );
+        END IF;
+        IF work_result->>'disposition'='DEFER' THEN
+            delay_value := (work_result->>'delay_seconds')::numeric;
+            reason_value := work_result->>'reason_code';
+            IF delay_value IS NULL OR delay_value NOT BETWEEN 0.1 AND 3600
+               OR reason_value IS NULL OR octet_length(reason_value) NOT BETWEEN 1 AND 128 THEN
+                RETURN jsonb_build_object(
+                    'protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object(
+                        'code','CONVERSATION_AGENT_SETTLEMENT_INVALID',
+                        'message','Conversation Agent defer result is invalid','status',422
+                    )
+                );
+            END IF;
+            UPDATE __forest_module_schema__.conversation_lanes
+            SET actor_owner_id=NULL,actor_expires_at=NULL,
+                resume_not_before=clock_timestamp()+(delay_value*interval '1 second'),
+                resume_reason_code=reason_value,resume_reason_ref=requested_token,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND conversation_id=requested_work;
+        ELSE
+            IF lane.active_session_ref IS NOT NULL THEN
+                RETURN jsonb_build_object(
+                    'protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object(
+                        'code','CONVERSATION_AGENT_RELEASE_CONFLICT',
+                        'message','Agent work cannot release an active Session','status',409
+                    )
+                );
+            END IF;
+            UPDATE __forest_module_schema__.conversation_lanes
+            SET actor_owner_id=NULL,actor_expires_at=NULL,
+                resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND conversation_id=requested_work;
+        END IF;
+    ELSE
+        reason_value := COALESCE(input#>>'{outcome,error,code}','agent_work_failed');
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET actor_owner_id=NULL,actor_expires_at=NULL,
+            resume_not_before=CASE WHEN active_session_ref IS NULL THEN NULL
+                ELSE clock_timestamp()+interval '1 second' END,
+            resume_reason_code=CASE WHEN active_session_ref IS NULL THEN NULL ELSE reason_value END,
+            resume_reason_ref=CASE WHEN active_session_ref IS NULL THEN NULL ELSE requested_token END,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=requested_work;
+    END IF;
+    result_value := jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-settled/1','work_id',requested_work
+        )
+    );
+    INSERT INTO __forest_module_schema__.conversation_agent_work_settlements(
+        claim_token,input_payload,result_payload
+    ) VALUES (requested_token,input,result_value);
+    RETURN result_value;
+END;
+$$;

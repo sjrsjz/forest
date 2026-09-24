@@ -38,6 +38,19 @@ class AgentRuntime(Plugin):
         return await AgentExecution(ctx, self._config).execute(payload)
 
     @service(
+        "agent.execution.policy",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/execution-policy-input.json",
+        output_schema="schemas/execution-policy-output.json",
+    )
+    async def execution_policy(self, payload, ctx):
+        return {
+            "protocol": "forest.agent-execution-policy/1",
+            "run_timeout_seconds": self._config["run_timeout_seconds"],
+        }
+
+    @service(
         "agent.protocol.describe",
         semantics="read",
         contract="1.0",

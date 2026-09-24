@@ -10,7 +10,7 @@
       "additionalProperties": false,
       "required": ["component_id", "generation_id"],
       "properties": {
-        "component_id": {"const": "agent.runtime"},
+        "component_id": {"enum": ["agent.runtime", "conversation.scheduler"]},
         "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
       }
     },

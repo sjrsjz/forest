@@ -90,6 +90,43 @@ _PAYLOAD_CHUNK_BYTES = 96 * 1024
 _PAYLOAD_STAGING_BYTES = 32 * 1024 * 1024
 
 
+def _component_schema_references(component: Mapping[str, Any]) -> tuple[str, ...]:
+    references: list[str] = [component["config_schema"]]
+    state_value_schema = component.get("state_value_schema")
+    if state_value_schema is not None:
+        references.append(state_value_schema)
+    for declarations in (
+        component.get("provides", ()),
+        component.get("effect_services", ()),
+        component.get("domain_queries", ()),
+        component.get("domain_commands", ()),
+        component.get("job_types", ()),
+        component.get("unit_of_work_plans", ()),
+        component.get("unit_of_work_participants", ()),
+        component.get("owned_work_handlers", ()),
+    ):
+        for declaration in declarations:
+            references.extend(
+                (declaration["input_schema"], declaration["output_schema"])
+            )
+    for declaration in component.get("effect_services", ()):
+        ingress = declaration.get("ingress")
+        if ingress is not None:
+            references.extend((ingress["input_schema"], ingress["output_schema"]))
+    for declaration in (
+        *component.get("subscribes", ()),
+        *component.get("publishes", ()),
+    ):
+        references.append(declaration["schema"])
+    for declaration in component.get("jobs", ()):
+        references.append(declaration["input_schema"])
+    for declaration in component.get("shell_commands", ()):
+        references.append(declaration["argument_schema"])
+    for declaration in component.get("agent_tools", ()):
+        references.append(declaration["declaration_schema"])
+    return tuple(dict.fromkeys(references))
+
+
 @dataclass
 class _StagedPayloadWrite:
     owner_kind: str
@@ -200,6 +237,7 @@ class PackageGenerationAdapter:
         component_job_scheduler=None,
         contribution_directories: Mapping[str, tuple] | None = None,
         agent_tool_effects: PackageAgentToolEffectAuthority | None = None,
+        compiled_schemas: Mapping[str, dict] | None = None,
         worker_factory: Callable[..., PythonWorker] = PythonWorker,
     ) -> None:
         self.snapshot = snapshot
@@ -242,6 +280,11 @@ class PackageGenerationAdapter:
             agent_tool_effects=agent_tool_effects,
         )
         self._worker_factory = worker_factory
+        self._compiled_schemas = dict(
+            compiled_schemas
+            if compiled_schemas is not None
+            else snapshot.schemas(_component_schema_references(self.component))
+        )
         self._worker: PythonWorker | None = None
         self._configuration: dict[str, Any] | None = None
         self._configuration_revision: int | None = None
@@ -250,8 +293,8 @@ class PackageGenerationAdapter:
         self.state = PackageGenerationState.NEW
         self._service_schemas = {
             item["name"]: (
-                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
-                Draft202012Validator(self.snapshot.schema(item["output_schema"])),
+                Draft202012Validator(self._compiled_schemas[item["input_schema"]]),
+                Draft202012Validator(self._compiled_schemas[item["output_schema"]]),
             )
             for item in (
                 *self.component.get("provides", ()),
@@ -265,8 +308,8 @@ class PackageGenerationAdapter:
         self._service_schemas.update(
             {
                 ingress["name"]: (
-                    Draft202012Validator(self.snapshot.schema(ingress["input_schema"])),
-                    Draft202012Validator(self.snapshot.schema(ingress["output_schema"])),
+                    Draft202012Validator(self._compiled_schemas[ingress["input_schema"]]),
+                    Draft202012Validator(self._compiled_schemas[ingress["output_schema"]]),
                 )
                 for _effect, ingress in self._effect_ingress.values()
             }
@@ -277,8 +320,8 @@ class PackageGenerationAdapter:
         self._participant_declarations = {
             item["name"]: (
                 item,
-                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
-                Draft202012Validator(self.snapshot.schema(item["output_schema"])),
+                Draft202012Validator(self._compiled_schemas[item["input_schema"]]),
+                Draft202012Validator(self._compiled_schemas[item["output_schema"]]),
             )
             for item in self.component.get("unit_of_work_participants", ())
         }
@@ -287,15 +330,15 @@ class PackageGenerationAdapter:
         )
         self._owned_work_schemas = {
             item["name"]: (
-                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
-                Draft202012Validator(self.snapshot.schema(item["output_schema"])),
+                Draft202012Validator(self._compiled_schemas[item["input_schema"]]),
+                Draft202012Validator(self._compiled_schemas[item["output_schema"]]),
             )
             for item in self._owned_work_declarations
         }
         self._event_subscriptions = {
             item["subscriber_id"]: (
                 item,
-                Draft202012Validator(self.snapshot.schema(item["schema"])),
+                Draft202012Validator(self._compiled_schemas[item["schema"]]),
                 _handler_service_id("event", self.component_id, item["subscriber_id"]),
             )
             for item in self.component.get("subscribes", ())
@@ -303,7 +346,7 @@ class PackageGenerationAdapter:
         self._component_jobs = {
             item["handler_id"]: (
                 item,
-                Draft202012Validator(self.snapshot.schema(item["input_schema"])),
+                Draft202012Validator(self._compiled_schemas[item["input_schema"]]),
                 _handler_service_id("job", self.component_id, item["handler_id"]),
             )
             for item in self.component.get("jobs", ())
@@ -311,7 +354,7 @@ class PackageGenerationAdapter:
         self._shell_commands = {
             (item["command_id"], item["command_version"]): (
                 item,
-                Draft202012Validator(self.snapshot.schema(item["argument_schema"])),
+                Draft202012Validator(self._compiled_schemas[item["argument_schema"]]),
             )
             for item in self.component.get("shell_commands", ())
         }
@@ -447,7 +490,7 @@ class PackageGenerationAdapter:
         self.state_schema = self.component["state_schema"]
         state_schema_ref = self.component.get("state_value_schema")
         self.state_contract = (
-            self.snapshot.schema(state_schema_ref)
+            self._compiled_schemas[state_schema_ref]
             if state_schema_ref is not None
             else {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2136,7 +2179,7 @@ class PackageGenerationAdapter:
                 "LIFECYCLE_INVALID", "Package Generation was already prepared", 409
             )
         desired = await self.module_configuration.desired(include_value=True)
-        schema = self.snapshot.schema(self.component["config_schema"])
+        schema = self._compiled_schemas[self.component["config_schema"]]
         errors = sorted(
             Draft202012Validator(schema).iter_errors(desired.value),
             key=lambda item: tuple(str(part) for part in item.absolute_path),
@@ -2468,7 +2511,6 @@ def package_runtime_descriptor(
 ) -> RuntimeModuleDescriptor:
     """Compile one package snapshot without importing its Python entrypoint."""
 
-    snapshot.verify()
     if management_contract is not None and management_contract_factory is not None:
         raise ForestError(
             "PACKAGE_MANAGEMENT_BINDING_INVALID",
@@ -2476,6 +2518,7 @@ def package_runtime_descriptor(
             500,
         )
     component = snapshot.component
+    compiled_schemas = snapshot.schemas(_component_schema_references(component))
     if (
         component.get("storage", {}).get("execution_profile") == "official"
         and trust_level != "official"
@@ -2564,7 +2607,7 @@ def package_runtime_descriptor(
             subscriber_id=item["subscriber_id"],
             topic=item["topic"],
             contract=item["contract"],
-            event_schema=snapshot.schema(item["schema"]),
+            event_schema=compiled_schemas[item["schema"]],
             service_id=_handler_service_id(
                 "event", component["id"], item["subscriber_id"]
             ),
@@ -2576,14 +2619,14 @@ def package_runtime_descriptor(
         RuntimeEventPublicationContribution(
             topic=item["topic"],
             contract=item["contract"],
-            event_schema=snapshot.schema(item["schema"]),
+            event_schema=compiled_schemas[item["schema"]],
         )
         for item in component.get("publishes", ())
     )
     component_jobs = tuple(
         RuntimeComponentJobContribution(
             handler_id=item["handler_id"],
-            input_schema=snapshot.schema(item["input_schema"]),
+            input_schema=compiled_schemas[item["input_schema"]],
             service_id=_handler_service_id(
                 "job", component["id"], item["handler_id"]
             ),
@@ -2599,7 +2642,7 @@ def package_runtime_descriptor(
             job_version=item["job_version"],
             service_id=item["name"],
             service_version=_major(item["contract"]),
-            input_schema=snapshot.schema(item["input_schema"]),
+            input_schema=compiled_schemas[item["input_schema"]],
             max_attempts=item["max_attempts"],
             timeout_seconds=item["timeout_s"],
             max_concurrency=item["max_concurrency"],
@@ -2612,7 +2655,7 @@ def package_runtime_descriptor(
             command_version=item["command_version"],
             service_id=item["service_id"],
             service_version=item["service_version"],
-            argument_schema=snapshot.schema(item["argument_schema"]),
+            argument_schema=compiled_schemas[item["argument_schema"]],
             management_operation_id=item["management_operation_id"],
             target_scope=item["target_scope"],
             service_class=item["service_class"],
@@ -2630,7 +2673,7 @@ def package_runtime_descriptor(
             name=item["name"],
             service_id=item["service_id"],
             version=item["service_version"],
-            declaration=snapshot.schema(item["declaration_schema"]),
+            declaration=compiled_schemas[item["declaration_schema"]],
             approval_required=item["approval_required"],
             supports_query=item["supports_query"],
         )
@@ -2722,6 +2765,7 @@ def package_runtime_descriptor(
             component_job_scheduler=component_job_scheduler,
             contribution_directories=contribution_directories,
             agent_tool_effects=agent_tool_effects,
+            compiled_schemas=compiled_schemas,
             worker_factory=worker_factory,
         )
         if management_contract is not None:
@@ -2730,18 +2774,15 @@ def package_runtime_descriptor(
             adapter.management_contract = management_contract_factory(adapter)
         return adapter
 
+    # UnitOfWork participant handles resolve against the sealed RuntimeGraph at
+    # call time.  They are transactional peers, not lifecycle dependencies;
+    # turning plan edges into startup edges would reject valid cyclic workflows.
     return RuntimeModuleDescriptor(
         component_id=component["id"],
         requires=tuple(
             dict.fromkeys(
                 (
                     *startup_components,
-                    *(
-                        step["component_id"]
-                        for plan in component.get("unit_of_work_plans", ())
-                        for step in plan["steps"]
-                        if step["component_id"] != component["id"]
-                    ),
                     *(
                         ("routing.graph",)
                         if (
