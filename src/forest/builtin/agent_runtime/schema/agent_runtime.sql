@@ -838,6 +838,120 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_run_recovery(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_run text := input->>'run_id';
+    run_row record;
+    cancel_value jsonb := NULL;
+    request_value jsonb := NULL;
+    request_id_value text := NULL;
+    attempt_value jsonb := NULL;
+    tool_value jsonb := NULL;
+    turn_value jsonb := NULL;
+    failure_value jsonb := NULL;
+BEGIN
+    SELECT * INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_NOT_FOUND','message','Agent Run does not exist','status',404
+            )
+        );
+    END IF;
+
+    SELECT jsonb_build_object(
+        'operation_id',c.operation_id,'reason_code',c.reason_code
+    ) INTO cancel_value
+    FROM __forest_module_schema__.run_cancel_requests c
+    WHERE c.bot_id=requested_bot AND c.run_id=requested_run;
+
+    SELECT m.request_id, jsonb_build_object(
+        'request_id',m.request_id,'step_seq',m.step_seq,'request_kind',m.request_kind,
+        'provider_component_id',m.provider_component_id,'state',m.state,
+        'attempt_count',m.attempt_count
+    ) INTO request_id_value, request_value
+    FROM __forest_module_schema__.model_requests m
+    WHERE m.bot_id=requested_bot AND (
+        (run_row.current_model_request_id IS NOT NULL
+            AND m.request_id=run_row.current_model_request_id)
+        OR
+        (run_row.current_model_request_id IS NULL AND run_row.state='PREPARING_MODEL'
+            AND m.run_id=requested_run AND m.step_seq=run_row.next_step_seq)
+    )
+    ORDER BY
+        CASE WHEN m.request_id=run_row.current_model_request_id THEN 0 ELSE 1 END,
+        m.request_id
+    LIMIT 1;
+
+    IF request_id_value IS NOT NULL THEN
+        SELECT jsonb_build_object(
+            'attempt_id',a.attempt_id,'effect_operation_ref',a.effect_operation_ref,
+            'state',a.state,'result_payload_id',a.result_payload_id
+        ) INTO attempt_value
+        FROM __forest_module_schema__.model_transport_attempts a
+        JOIN __forest_module_schema__.model_requests m
+          ON m.bot_id=a.bot_id AND m.request_id=a.request_id
+        WHERE a.bot_id=requested_bot AND m.request_id=request_id_value
+          AND a.attempt_id=m.current_attempt_id;
+    END IF;
+
+    IF run_row.current_tool_call_id IS NOT NULL THEN
+        SELECT jsonb_build_object(
+            'tool_call_id',t.tool_call_id,'tool_name',t.tool_name,
+            'arguments_payload_id',t.arguments_payload_id,
+            'authority_trigger_ref',t.authority_trigger_ref,
+            'authority_principal_ref',t.authority_principal_ref,
+            'tool_contract_digest',t.tool_contract_digest,
+            'effect_operation_ref',t.effect_operation_ref,
+            'approval_ref',t.approval_ref,'state',t.state
+        ) INTO tool_value
+        FROM __forest_module_schema__.tool_calls t
+        WHERE t.bot_id=requested_bot AND t.tool_call_id=run_row.current_tool_call_id;
+    END IF;
+
+    SELECT jsonb_build_object(
+        'turn_id',t.turn_id,'request_id',t.request_id,'step_seq',t.step_seq,
+        'assistant_payload_id',t.assistant_payload_id,'terminal',t.terminal
+    ) INTO turn_value
+    FROM __forest_module_schema__.model_turns t
+    WHERE t.bot_id=requested_bot AND t.run_id=requested_run
+    ORDER BY t.step_seq DESC,t.turn_id DESC
+    LIMIT 1;
+
+    SELECT jsonb_build_object(
+        'failed_request_id',f.failed_request_id,'error_code',f.error_code,
+        'candidate_digest',f.candidate_digest,
+        'feedback_payload_id',f.feedback_payload_id,
+        'resulting_state',f.resulting_state,'repair_step_seq',f.repair_step_seq
+    ) INTO failure_value
+    FROM __forest_module_schema__.protocol_failures f
+    WHERE f.bot_id=requested_bot AND f.run_id=requested_run
+      AND f.repair_step_seq=run_row.next_step_seq
+    ORDER BY f.created_at DESC,f.failure_id DESC
+    LIMIT 1;
+
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'run_id',run_row.run_id,'state',run_row.state,
+            'next_step_seq',run_row.next_step_seq,'repair_count',run_row.repair_count,
+            'cancel_request',cancel_value,'model_request',request_value,
+            'model_attempt',attempt_value,'tool_call',tool_value,
+            'latest_turn',turn_value,'protocol_failure',failure_value
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_acquire_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

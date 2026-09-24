@@ -29,6 +29,7 @@ stop_timeout_s = 15
 [components.capabilities]
 requests = [
   "domain.query:agent.run-snapshot",
+  "domain.query:agent.run-recovery",
   "uow.execute:agent.start-run",
   "uow.execute:agent.append-run-input",
   "uow.execute:agent.park-reload",
@@ -56,7 +57,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "b812dba8216bbabc80b31a2d31f9cd14cefeaeb4a215806f3fb436f74b975ca9"
+baseline_sha256 = "f582de189787e30c10a8f4315a1bbf407d3d2e469974cc93d2b20217bcad8e1f"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -67,6 +68,13 @@ contract = "1.0"
 function = "agent_run_snapshot"
 input_schema = "schemas/run-query-input.json"
 output_schema = "schemas/run-snapshot-output.json"
+
+[[components.domain_queries]]
+name = "agent.run-recovery"
+contract = "1.0"
+function = "agent_run_recovery"
+input_schema = "schemas/run-query-input.json"
+output_schema = "schemas/run-recovery-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.start-run-record"

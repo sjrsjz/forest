@@ -210,6 +210,29 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             }
         ]
 
+        recovery_declaration = next(
+            item
+            for item in instance.component["domain_queries"]
+            if item["name"] == "agent.run-recovery"
+        )
+        recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": "run/agent-package/1"},
+            timeout_seconds=10,
+        )
+        assert recovery == {
+            "run_id": "run/agent-package/1",
+            "state": "PREPARING_MODEL",
+            "next_step_seq": 1,
+            "repair_count": 0,
+            "cancel_request": None,
+            "model_request": None,
+            "model_attempt": None,
+            "tool_call": None,
+            "latest_turn": None,
+            "protocol_failure": None,
+        }
+
         acquire_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
