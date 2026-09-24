@@ -1,0 +1,4 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,
+  "required":["protocol","conversation_ref","event_ref","error_code"],"properties":{"protocol":{"const":"forest.memory-source-unavailable/1"},"conversation_ref":{"type":"string"},"event_ref":{"type":"string"},"error_code":{"type":"string"}}
+}

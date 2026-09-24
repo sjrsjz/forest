@@ -65,6 +65,76 @@ class MemoryGraph(Plugin):
         }
 
     @service(
+        "memory.source.capture",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/capture-service-input.json",
+        output_schema="schemas/capture-output.json",
+    )
+    async def capture_source(self, payload, ctx):
+        value = _plain(payload)
+        capture = {
+            key: value[key]
+            for key in (
+                "identity",
+                "source_unit_id",
+                "source_revision",
+                "unit_kind",
+                "author_subject_ref",
+                "author",
+                "occurrence",
+                "occurred_at",
+            )
+        }
+        capture["parts"] = [
+            {
+                key: part[key]
+                for key in (
+                    "part_id",
+                    "part_index",
+                    "part_kind",
+                    "media_type",
+                    "payload",
+                    "width",
+                    "height",
+                    "byte_length",
+                )
+            }
+            for part in value["parts"]
+        ]
+        return await ctx.uow.call(
+            "memory.capture-source",
+            {
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {
+                    "capture": capture,
+                    "conversation_step_id": None,
+                    "deletion_epoch_step_id": "payload_epoch",
+                },
+            },
+            operation_id=value["operation_id"],
+            timeout=20,
+        )
+
+    @service(
+        "memory.source.unavailable",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/unavailable-input.json",
+        output_schema="schemas/unavailable-output.json",
+    )
+    async def mark_source_unavailable(self, payload, ctx):
+        value = _plain(payload)
+        return await ctx.uow.call(
+            "memory.mark-source-unavailable",
+            value,
+            operation_id=ctx.operations.stable(
+                f"memory-unavailable:{value['conversation_ref']}:{value['event_ref']}"
+            ),
+            timeout=15,
+        )
+
+    @service(
         "agent.tool.memory-exact-recall",
         semantics="idempotent",
         contract="1.0",

@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,
+  "required":["protocol","source_id","source_unit_id","occurrence_id","duplicate_source","eligibility_state"],
+  "properties":{"protocol":{"const":"forest.memory-source-captured/1"},"source_id":{"type":"string"},"source_unit_id":{"type":"string"},"occurrence_id":{"type":"string"},"duplicate_source":{"type":"boolean"},"eligibility_state":{"enum":["REGISTERED","ELIGIBLE","SUPPRESSED"]}}
+}

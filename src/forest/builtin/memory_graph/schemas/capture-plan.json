@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,
+  "required":["payload_epoch","memory"],
+  "properties":{"payload_epoch":{"type":"object","additionalProperties":false,"required":["protocol"],"properties":{"protocol":{"const":"forest.payload-epoch-capture/1"}}},"memory":{"type":"object"}}
+}

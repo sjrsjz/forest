@@ -104,11 +104,19 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         participant = instance.unit_of_work_participant()
         payload_participant = registry.get("kernel.payload").unit_of_work_participant()
         text_payload = await kernel.payload.put_bytes(
-            owner_component_id="conversation.scheduler",
+            owner_component_id="adapter.onebot",
             owner_kind="context.input",
             owner_id="unit/event/captured:text",
             media_type="text/plain; charset=utf-8",
             content="来自 933179609 群的原始消息".encode(),
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        author_payload = await kernel.payload.put_bytes(
+            owner_component_id="adapter.onebot",
+            owner_kind="message.author",
+            owner_id="event/captured",
+            media_type="application/json",
+            content=b'{"platform":"onebot-v11","user_id":"42"}',
             expected_deletion_epoch=await kernel.payload.epoch(),
         )
 
@@ -157,92 +165,98 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         }
 
         namespace = package.descriptor.storage.spec.namespace
-        digest = "sha256:" + "1" * 64
         async with store.pool.connection() as conn, conn.transaction():
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.memory_sources("
-                    "bot_id,source_id,registration_operation_id,input_digest,source_kind,"
-                    "platform,realm_id,external_group_id,identity_incarnation,identity_digest,"
-                    "trunk_id) VALUES (%s,%s,%s,%s,'GROUP','onebot-v11',%s,%s,1,%s,%s)"
-                ).format(sql.Identifier(namespace)),
-                (
-                    store.bot_id,
-                    "source/group/933179609",
-                    "register/source/group/933179609",
-                    digest,
-                    "qq",
-                    "933179609",
-                    "sha256:" + "2" * 64,
-                    "trunk/group/933179609",
-                ),
+            deletion_epoch = await payload_participant.invoke_in(
+                conn,
+                "payload.capture-deletion-epoch",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "adapter.onebot",
+                        "generation_id": generation_id,
+                    },
+                    "input": {"protocol": "forest.payload-epoch-capture/1"},
+                    "prior": {},
+                },
             )
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.memory_trunks(bot_id,trunk_id,source_id) VALUES (%s,%s,%s)"
-                ).format(sql.Identifier(namespace)),
-                (store.bot_id, "trunk/group/933179609", "source/group/933179609"),
+            captured_source = await participant.invoke_in(
+                conn,
+                "memory.capture-source-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "adapter.onebot",
+                        "generation_id": generation_id,
+                    },
+                    "input": {
+                        "capture": {
+                            "identity": {
+                                "source_id": "source/group/933179609",
+                                "source_kind": "GROUP",
+                                "identity_incarnation": 1,
+                                "platform": "onebot-v11",
+                                "realm_id": "qq",
+                                "external_group_id": "933179609",
+                                "trunk_id": "trunk/group/933179609",
+                            },
+                            "source_unit_id": "unit/event/captured",
+                            "source_revision": 1,
+                            "unit_kind": "MESSAGE",
+                            "author_subject_ref": "qq:42",
+                            "author": {
+                                "payload_id": author_payload.payload_id,
+                                "digest": author_payload.content_digest,
+                                "owner_component_id": "adapter.onebot",
+                                "owner_kind": "message.author",
+                                "owner_id": "event/captured",
+                            },
+                            "parts": [
+                                {
+                                    "part_id": "part/event/captured/text",
+                                    "part_index": 0,
+                                    "part_kind": "TEXT",
+                                    "media_type": text_payload.media_type,
+                                    "payload": {
+                                        "payload_id": text_payload.payload_id,
+                                        "digest": text_payload.content_digest,
+                                        "owner_component_id": "adapter.onebot",
+                                        "owner_kind": "context.input",
+                                        "owner_id": "unit/event/captured:text",
+                                    },
+                                    "width": None,
+                                    "height": None,
+                                    "byte_length": text_payload.byte_length,
+                                }
+                            ],
+                            "occurrence": {
+                                "occurrence_id": "occurrence/event/captured",
+                                "binding_ref": "binding/main",
+                                "conversation_ref": "onebot:group:933179609",
+                                "event_ref": "event/captured",
+                                "ingress_seq": None,
+                                "observed_at": "2026-09-25T00:00:00+00:00",
+                            },
+                            "occurred_at": "2026-09-25T00:00:00+00:00",
+                        },
+                        "conversation_step_id": "conversation",
+                        "deletion_epoch_step_id": "payload_epoch",
+                    },
+                    "prior": {
+                        "conversation": {
+                            "conversation_id": "onebot:group:933179609",
+                            "event_id": "event/captured",
+                            "ingress_seq": 1,
+                        },
+                        "payload_epoch": deletion_epoch,
+                    },
+                },
+                operation_id="capture/event/captured",
+                causal_root_kind="adapter.ingress",
+                causal_root_id="event/captured",
+                parent_call_id="call/memory/capture",
+                timeout_seconds=10,
             )
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.source_units("
-                    "bot_id,source_unit_id,capture_operation_id,input_digest,source_id,trunk_id,"
-                    "source_order_seq,source_revision,unit_kind,modality,part_count,"
-                    "content_manifest_digest,author_subject_ref,author_payload_id,"
-                    "author_payload_digest,author_owner_component_id,author_owner_kind,"
-                    "author_owner_id,accepted_deletion_epoch,occurred_at) VALUES ("
-                    "%s,%s,%s,%s,%s,%s,1,1,'MESSAGE','TEXT',1,%s,'qq:42',%s,%s,"
-                    "'adapter.onebot','message.author',%s,0,clock_timestamp())"
-                ).format(sql.Identifier(namespace)),
-                (
-                    store.bot_id,
-                    "unit/event/captured",
-                    "capture/event/captured",
-                    digest,
-                    "source/group/933179609",
-                    "trunk/group/933179609",
-                    "sha256:" + "3" * 64,
-                    "payload/author/captured",
-                    "sha256:" + "4" * 64,
-                    "event/captured",
-                ),
-            )
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.source_occurrences("
-                    "bot_id,occurrence_id,source_unit_id,binding_ref,conversation_ref,event_ref,"
-                    "ingress_seq,observed_at) VALUES (%s,%s,%s,%s,%s,%s,1,clock_timestamp())"
-                ).format(sql.Identifier(namespace)),
-                (
-                    store.bot_id,
-                    "occurrence/event/captured",
-                    "unit/event/captured",
-                    "binding/main",
-                    "onebot:group:933179609",
-                    "event/captured",
-                ),
-            )
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.source_parts("
-                    "bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
-                    "payload_id,payload_digest,payload_owner_component_id,"
-                    "payload_owner_kind,payload_owner_id,byte_length) VALUES ("
-                    "%s,%s,%s,0,'TEXT',%s,%s,%s,%s,%s,%s,%s)"
-                ).format(sql.Identifier(namespace)),
-                (
-                    store.bot_id,
-                    "unit/event/captured",
-                    "part/event/captured/text",
-                    text_payload.media_type,
-                    text_payload.payload_id,
-                    text_payload.content_digest,
-                    "conversation.scheduler",
-                    "context.input",
-                    "unit/event/captured:text",
-                    text_payload.byte_length,
-                ),
-            )
+        assert captured_source["eligibility_state"] == "REGISTERED"
 
         captured_selection = {
             "status": "BATCH",
@@ -288,17 +302,6 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 )
             assert captured["qualified_count"] == 1
             assert captured["pending_count"] == 0
-
-        async with store.pool.connection() as conn, conn.transaction():
-            await conn.execute(
-                sql.SQL(
-                    "UPDATE {}.source_units SET eligibility_state='ELIGIBLE',"
-                    "eligibility_revision=eligibility_revision+1,"
-                    "eligible_at=clock_timestamp(),updated_at=clock_timestamp() "
-                    "WHERE bot_id=%s AND source_unit_id=%s"
-                ).format(sql.Identifier(namespace)),
-                (store.bot_id, "unit/event/captured"),
-            )
 
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.2.0"
+version = "1.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -30,8 +30,24 @@ stop_timeout_s = 15
 requests = [
   "payload.read",
   "payload.write",
-  "domain.query:memory.read-exact-sources"
+  "domain.query:memory.read-exact-sources",
+  "uow.execute:memory.capture-source",
+  "uow.execute:memory.mark-source-unavailable"
 ]
+
+[[components.provides]]
+name = "memory.source.capture"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/capture-service-input.json"
+output_schema = "schemas/capture-output.json"
+
+[[components.provides]]
+name = "memory.source.unavailable"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/unavailable-input.json"
+output_schema = "schemas/unavailable-output.json"
 
 [[components.provides]]
 name = "memory.profile.describe"
@@ -65,9 +81,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.0.0"
+schema_version = "3.1.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "96a00c5bbadf4d750520237d3350f43cfc0df4c1d812fa617f3d45ad8342ea39"
+baseline_sha256 = "20c3ea579e6690f8195cd75bd8a8deccf25cc28f9a01d765f536ad31de61e907"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -80,8 +96,55 @@ input_schema = "schemas/read-exact-input.json"
 output_schema = "schemas/read-exact-output.json"
 
 [[components.unit_of_work_participants]]
+name = "memory.capture-source-record"
+contract = "1.0"
+function = "memory_capture_source"
+input_schema = "schemas/capture-envelope.json"
+output_schema = "schemas/capture-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/capture/author"
+owner_component_path = "/input/capture/author/owner_component_id"
+owner_kind_path = "/input/capture/author/owner_kind"
+owner_id_path = "/input/capture/author/owner_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/capture/parts/*/payload"
+owner_component_path = "/input/capture/parts/*/payload/owner_component_id"
+owner_kind_path = "/input/capture/parts/*/payload/owner_kind"
+owner_id_path = "/input/capture/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "memory.mark-source-unavailable-record"
+contract = "1.0"
+function = "memory_mark_source_unavailable"
+input_schema = "schemas/unavailable-envelope.json"
+output_schema = "schemas/unavailable-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.qualify-input-batch"
 contract = "1.0"
 function = "memory_qualify_input_batch"
 input_schema = "schemas/qualify-input-batch-envelope.json"
 output_schema = "schemas/qualify-input-batch-output.json"
+
+[[components.unit_of_work_plans]]
+name = "memory.capture-source"
+contract = "1.0"
+input_schema = "schemas/capture-plan.json"
+output_schema = "schemas/capture-output.json"
+timeout_s = 15
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.mark-source-unavailable"
+contract = "1.0"
+input_schema = "schemas/unavailable-input.json"
+output_schema = "schemas/unavailable-output.json"
+timeout_s = 10
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.mark-source-unavailable-record" }
+]
