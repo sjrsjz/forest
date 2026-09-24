@@ -417,19 +417,27 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "attempt_id": "model-attempt/package/1",
                 "effect_operation_ref": "model-effect/package/1",
                 "provider_service_id": "provider.model.dispatch",
-                "wire": wire.canonical(),
+                "effect_step_id": "effect",
             },
             "prior": {
+                "authorization": {
+                    "protocol": "forest.authorization-issued/1",
+                    "ticket": {},
+                },
                 "effect": {
-                    "protocol": "forest.effect-permit/1",
-                    "effect_operation_id": "model-effect/package/1",
-                    "attempt_id": "model-attempt/package/1",
-                    "wire_payload_id": wire.payload_id,
-                    "wire_payload_digest": wire.digest,
-                    "executor_component_id": "provider.chat",
-                    "executor_generation_id": "generation/provider/package-test",
-                    "fence_kind": "runtime.graph",
-                }
+                    "protocol": "forest.effect-command-permit/1",
+                    "wire_payload": wire.canonical(),
+                    "permit": {
+                        "protocol": "forest.effect-permit/1",
+                        "effect_operation_id": "model-effect/package/1",
+                        "attempt_id": "model-attempt/package/1",
+                        "wire_payload_id": wire.payload_id,
+                        "wire_payload_digest": wire.digest,
+                        "executor_component_id": "provider.chat",
+                        "executor_generation_id": "generation/provider/package-test",
+                        "fence_kind": "runtime.graph",
+                    },
+                },
             },
         }
         async with store.pool.connection() as conn, conn.transaction():
@@ -669,18 +677,26 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "attempt_id": "model-attempt/package/repair",
                 "effect_operation_ref": "model-effect/package/repair",
                 "provider_service_id": "provider.model.dispatch",
-                "wire": repair_wire.canonical(),
+                "effect_step_id": "effect",
             },
             "prior": {
+                "authorization": {
+                    "protocol": "forest.authorization-issued/1",
+                    "ticket": {},
+                },
                 "effect": {
-                    "protocol": "forest.effect-permit/1",
-                    "effect_operation_id": "model-effect/package/repair",
-                    "attempt_id": "model-attempt/package/repair",
-                    "wire_payload_id": repair_wire.payload_id,
-                    "wire_payload_digest": repair_wire.digest,
-                    "executor_component_id": "provider.chat",
-                    "executor_generation_id": "generation/provider/package-test",
-                    "fence_kind": "runtime.graph",
+                    "protocol": "forest.effect-command-permit/1",
+                    "wire_payload": repair_wire.canonical(),
+                    "permit": {
+                        "protocol": "forest.effect-permit/1",
+                        "effect_operation_id": "model-effect/package/repair",
+                        "attempt_id": "model-attempt/package/repair",
+                        "wire_payload_id": repair_wire.payload_id,
+                        "wire_payload_digest": repair_wire.digest,
+                        "executor_component_id": "provider.chat",
+                        "executor_generation_id": "generation/provider/package-test",
+                        "fence_kind": "runtime.graph",
+                    },
                 }
             },
         }

@@ -69,7 +69,7 @@
 
 - Session/Run 创建、输入追加、owner lease、释放和热重载停车/恢复；
 - `agent.acquire-model-input/1` 由 manifest 固定 Conversation、Kernel Payload、Memory 与 Agent 四个 participant，在同一 PostgreSQL 事务内完成模型安全点消息切口、删除 epoch 冻结、Memory 资格确认和 Agent Input revision 推进；任一步拒绝都会整体回滚；
-- Provider Generation 与模型投影先冻结；授权、Kernel Effect permit、wire Payload 和 Agent Attempt 由 `agent.prepare-model-effect/1` 原子建立；
+- Provider Generation 与模型投影先冻结；授权、Kernel Effect permit、wire Payload 和 Agent Attempt 由 `agent.prepare-model-effect/1` 原子建立；其中 `kernel.effect` 的 `effect.prepare-command` participant 在协调事务内校验授权票据、父 Payload 与 Generation fence，并以自身身份写入 `effect.input`/`effect.wire`，Agent Worker 只提交声明式 command，不能伪造内核 Payload owner；
 - `agent.handoff-model-effect/1` 原子推进 Effect 与 Agent handoff，`agent.observe-model-effect/1` 原子收敛两本账及 `UNKNOWN` 对账；
 - 错误 XML 的一次协议修复、合法 ModelTurn 提交；
 - ToolCall 的准确 component/Generation/service/contract/binding 冻结；

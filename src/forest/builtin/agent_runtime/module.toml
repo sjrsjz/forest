@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "2.1.0"
+version = "2.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -67,9 +67,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.1.0"
+schema_version = "1.2.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "0e4d5d0c928dd79bca79b3b4cb416fa30e67d565693c1317c1a25fb61c7ad649"
+baseline_sha256 = "2a70cbca12532e5ca35ca7d5ed0f60bac59a6c0bc0e9817b0a395a1cef97c2bd"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -208,12 +208,6 @@ contract = "1.0"
 function = "agent_prepare_model_attempt"
 input_schema = "schemas/prepare-model-attempt-envelope.json"
 output_schema = "schemas/model-attempt-output.json"
-
-[[components.unit_of_work_participants.payload_refs]]
-path = "/input/wire"
-owner_component_path = "/input/wire/owner_component_id"
-owner_kind = "effect.wire"
-owner_id_path = "/input/wire/owner_id"
 
 [[components.unit_of_work_participants]]
 name = "agent.mark-model-handoff-record"
@@ -381,7 +375,7 @@ output_schema = "schemas/model-attempt-output.json"
 timeout_s = 10
 steps = [
   { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
-  { id = "effect", component_id = "kernel.effect", participant = "effect.prepare", input_path = "/effect" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prepare-command", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-model-attempt-record", input_path = "/agent" }
 ]
 

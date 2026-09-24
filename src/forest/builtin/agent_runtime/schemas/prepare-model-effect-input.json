@@ -1,49 +1,38 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "additionalProperties": false,
   "required": ["authorization", "effect", "agent"],
   "properties": {
     "authorization": {"$ref": "#/$defs/authorization"},
     "effect": {"$ref": "#/$defs/effect"},
     "agent": {"$ref": "#/$defs/agent"}
   },
-  "additionalProperties": false,
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 256},
     "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "owner": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": ["run_id", "owner_id", "epoch"],
       "properties": {
         "run_id": {"$ref": "#/$defs/id"},
         "owner_id": {"$ref": "#/$defs/id"},
         "epoch": {"type": "integer", "minimum": 1}
-      },
-      "additionalProperties": false
+      }
     },
-    "payload": {
-      "type": "object",
-      "required": ["payload_id", "digest"],
-      "properties": {
-        "payload_id": {"$ref": "#/$defs/id"},
-        "digest": {"$ref": "#/$defs/digest"}
-      },
-      "additionalProperties": false
-    },
-    "wire": {
-      "type": "object",
+    "payload_ref": {
+      "type": "object", "additionalProperties": false,
       "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
       "properties": {
         "payload_id": {"$ref": "#/$defs/id"},
         "digest": {"$ref": "#/$defs/digest"},
-        "owner_component_id": {"const": "kernel.effect"},
-        "owner_kind": {"const": "effect.wire"},
+        "owner_component_id": {"$ref": "#/$defs/id"},
+        "owner_kind": {"$ref": "#/$defs/id"},
         "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
-      },
-      "additionalProperties": false
+      }
     },
     "authorization": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": [
         "protocol", "ticket_id", "issuance_operation_id", "operation_id", "action",
         "resource_kind", "resource_id", "input_digest", "plan_digest", "expires_at",
@@ -60,62 +49,67 @@
         "input_digest": {"$ref": "#/$defs/digest"},
         "plan_digest": {"$ref": "#/$defs/digest"},
         "expires_at": {"type": "string", "minLength": 1, "maxLength": 64},
-        "audience_component_id": {"$ref": "#/$defs/id"},
+        "audience_component_id": {"const": "provider.chat-completions"},
         "audience_generation_id": {"$ref": "#/$defs/id"}
-      },
-      "additionalProperties": false
+      }
     },
     "effect": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": [
         "protocol", "effect_operation_id", "input_digest", "effect_kind", "target_kind",
-        "target_id", "input_payload", "attempt_id", "permit_operation_id", "wire_payload",
-        "authorization", "executor", "deadline_at"
+        "target_id", "attempt_id", "permit_operation_id", "authorization_step_id",
+        "authorization", "executor", "deadline_at", "command"
       ],
       "properties": {
-        "protocol": {"const": "forest.effect-prepare/1"},
+        "protocol": {"const": "forest.effect-command-prepare/1"},
         "effect_operation_id": {"$ref": "#/$defs/id"},
         "input_digest": {"$ref": "#/$defs/digest"},
         "effect_kind": {"const": "provider.model.dispatch"},
         "target_kind": {"const": "component.service"},
-        "target_id": {"$ref": "#/$defs/id"},
-        "input_payload": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/payload"}]},
+        "target_id": {"const": "provider.chat-completions/provider.model.dispatch"},
         "attempt_id": {"$ref": "#/$defs/id"},
         "permit_operation_id": {"$ref": "#/$defs/id"},
-        "wire_payload": {"$ref": "#/$defs/payload"},
+        "authorization_step_id": {"const": "authorization"},
         "authorization": {
-          "type": "object",
-          "required": ["ticket_id", "action", "resource_kind", "resource_id", "plan_digest"],
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "resource_kind", "resource_id", "plan_digest"],
           "properties": {
-            "ticket_id": {"$ref": "#/$defs/id"},
             "action": {"const": "provider.invoke"},
             "resource_kind": {"const": "bot"},
             "resource_id": {"$ref": "#/$defs/id"},
             "plan_digest": {"$ref": "#/$defs/digest"}
-          },
-          "additionalProperties": false
+          }
         },
         "executor": {
-          "type": "object",
+          "type": "object", "additionalProperties": false,
           "required": ["component_id", "generation_id", "fence_kind", "fence_id", "fence_epoch"],
           "properties": {
-            "component_id": {"$ref": "#/$defs/id"},
+            "component_id": {"const": "provider.chat-completions"},
             "generation_id": {"$ref": "#/$defs/id"},
             "fence_kind": {"const": "runtime.graph"},
             "fence_id": {"$ref": "#/$defs/id"},
             "fence_epoch": {"type": "integer", "minimum": 1}
-          },
-          "additionalProperties": false
+          }
         },
-        "deadline_at": {"type": "string", "minLength": 1, "maxLength": 64}
-      },
-      "additionalProperties": false
+        "deadline_at": {"type": "string", "minLength": 1, "maxLength": 64},
+        "command": {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "parents"],
+          "properties": {
+            "value": {"type": "object"},
+            "parents": {
+              "type": "array", "maxItems": 64,
+              "items": {"$ref": "#/$defs/payload_ref"}
+            }
+          }
+        }
+      }
     },
     "agent": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": [
         "owner", "request_id", "attempt_id", "effect_operation_ref",
-        "provider_service_id", "wire"
+        "provider_service_id", "effect_step_id"
       ],
       "properties": {
         "owner": {"$ref": "#/$defs/owner"},
@@ -123,9 +117,8 @@
         "attempt_id": {"$ref": "#/$defs/id"},
         "effect_operation_ref": {"$ref": "#/$defs/id"},
         "provider_service_id": {"const": "provider.model.dispatch"},
-        "wire": {"$ref": "#/$defs/wire"}
-      },
-      "additionalProperties": false
+        "effect_step_id": {"const": "effect"}
+      }
     }
   }
 }

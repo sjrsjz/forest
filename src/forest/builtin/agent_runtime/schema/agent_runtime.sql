@@ -1315,7 +1315,9 @@ AS $$
 DECLARE
     body jsonb := envelope->'input';
     owner_value jsonb := body->'owner';
-    wire_value jsonb := body->'wire';
+    effect_preparation jsonb := envelope->'prior'->(body->>'effect_step_id');
+    effect_permit jsonb := effect_preparation->'permit';
+    wire_value jsonb := effect_preparation->'wire_payload';
     requested_bot text := context->>'bot_id';
     requested_run text := owner_value->>'run_id';
     requested_owner text := owner_value->>'owner_id';
@@ -1324,7 +1326,6 @@ DECLARE
       requested_attempt text := body->>'attempt_id';
       requested_effect text := body->>'effect_operation_ref';
       requested_service text := body->>'provider_service_id';
-      effect_permit jsonb := envelope->'prior'->'effect';
     run_row record;
     request_row record;
     existing record;
@@ -1333,6 +1334,9 @@ BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
          OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
          OR requested_service IS DISTINCT FROM 'provider.model.dispatch'
+         OR body->>'effect_step_id' IS DISTINCT FROM 'effect'
+         OR effect_preparation->>'protocol'
+            IS DISTINCT FROM 'forest.effect-command-permit/1'
          OR effect_permit->>'protocol' IS DISTINCT FROM 'forest.effect-permit/1'
          OR effect_permit->>'effect_operation_id' IS DISTINCT FROM requested_effect
          OR effect_permit->>'attempt_id' IS DISTINCT FROM requested_attempt

@@ -294,8 +294,28 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
 class PreparedEffectAuthorityModule(PreparedAuthorityModule):
     """Publish only the typed Kernel Effect UnitOfWork participant ABI."""
 
+    def __init__(
+        self,
+        component_id,
+        service,
+        configuration,
+        grants,
+        services,
+        generation_authority,
+        payloads,
+    ) -> None:
+        super().__init__(
+            component_id,
+            service,
+            configuration,
+            grants,
+            services,
+            generation_authority,
+        )
+        self.payloads = payloads
+
     def unit_of_work_participant(self):
-        return KernelEffectUnitOfWorkParticipant(self)
+        return KernelEffectUnitOfWorkParticipant(self, self.payloads)
 
 
 class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
@@ -428,30 +448,34 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         )
 
     artifact = official_artifact("bot")
+
+    def authority_factory(component_id, definition):
+        prepared_type = {
+            "kernel.audit": PreparedAuditAuthorityModule,
+            "kernel.authorization": PreparedAuthorizationAuthorityModule,
+            "kernel.payload": PreparedPayloadAuthorityModule,
+        }.get(component_id, PreparedAuthorityModule)
+
+        def create(_runtime, _modules):
+            arguments = (
+                component_id,
+                services[component_id],
+                configurations[component_id],
+                grants[component_id],
+                definition["services"],
+                runtime,
+            )
+            if component_id == "kernel.effect":
+                return PreparedEffectAuthorityModule(*arguments, payload)
+            return prepared_type(*arguments)
+
+        return create
+
     descriptors = tuple(
         RuntimeModuleDescriptor(
             component_id,
             definition["requires"],
-            lambda _runtime, _modules, identity=component_id, service=services[component_id], configuration=configurations[component_id], grant=grants[component_id], provided_services=definition["services"], generation_authority=runtime: (
-                (
-                    PreparedAuditAuthorityModule
-                    if identity == "kernel.audit"
-                    else PreparedPayloadAuthorityModule
-                    if identity == "kernel.payload"
-                    else PreparedAuthorizationAuthorityModule
-                    if identity == "kernel.authorization"
-                    else PreparedEffectAuthorityModule
-                    if identity == "kernel.effect"
-                    else PreparedAuthorityModule
-                )(
-                    identity,
-                    service,
-                    configuration,
-                    grant,
-                    provided_services,
-                    generation_authority,
-                )
-            ),
+            authority_factory(component_id, definition),
             artifact,
             management=(
                 (

@@ -1,52 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "additionalProperties": false,
   "required": ["protocol", "caller", "input", "prior"],
   "properties": {
     "protocol": {"const": "forest.uow-step/1"},
     "caller": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": ["component_id", "generation_id"],
       "properties": {
         "component_id": {"const": "agent.runtime"},
         "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
-      },
-      "additionalProperties": false
-    },
-    "input": {"$ref": "#/$defs/input"},
-    "prior": {"type": "object"}
-  },
-  "additionalProperties": false,
-  "$defs": {
-    "id": {"type": "string", "minLength": 1, "maxLength": 256},
-    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
-    "owner": {
-      "type": "object",
-      "required": ["run_id", "owner_id", "epoch"],
-      "properties": {
-        "run_id": {"$ref": "#/$defs/id"},
-        "owner_id": {"$ref": "#/$defs/id"},
-        "epoch": {"type": "integer", "minimum": 1}
-      },
-      "additionalProperties": false
-    },
-    "wire": {
-      "type": "object",
-      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
-      "properties": {
-        "payload_id": {"$ref": "#/$defs/id"},
-        "digest": {"$ref": "#/$defs/digest"},
-        "owner_component_id": {"const": "kernel.effect"},
-        "owner_kind": {"const": "effect.wire"},
-        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
-      },
-      "additionalProperties": false
+      }
     },
     "input": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": [
         "owner", "request_id", "attempt_id", "effect_operation_ref",
-        "provider_service_id", "wire"
+        "provider_service_id", "effect_step_id"
       ],
       "properties": {
         "owner": {"$ref": "#/$defs/owner"},
@@ -54,9 +25,21 @@
         "attempt_id": {"$ref": "#/$defs/id"},
         "effect_operation_ref": {"$ref": "#/$defs/id"},
         "provider_service_id": {"const": "provider.model.dispatch"},
-        "wire": {"$ref": "#/$defs/wire"}
-      },
-      "additionalProperties": false
+        "effect_step_id": {"const": "effect"}
+      }
+    },
+    "prior": {"type": "object", "required": ["authorization", "effect"]}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "owner": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "owner_id", "epoch"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      }
     }
   }
 }
