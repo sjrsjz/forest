@@ -55,6 +55,7 @@ class FrozenContributionDirectories:
             "job-types",
             "shell-commands",
             "routing-routes",
+            "agent-tools",
         }:
             raise ForestError(
                 "CONTRIBUTION_DIRECTORY_UNSUPPORTED",
@@ -74,6 +75,8 @@ class FrozenContributionDirectories:
                         "A routing contribution exceeds the consumer execution budget",
                         500,
                     )
+                continue
+            if kind == "agent-tools":
                 continue
             if any(
                 contribution.timeout_seconds
@@ -166,7 +169,10 @@ class FrozenContributionDirectories:
             required.extend(
                 {
                     "service_id": contribution.service_id,
-                    "version": contribution.service_version,
+                    "version": (
+                        getattr(contribution, "service_version", None)
+                        or contribution.version
+                    ),
                 }
                 for _owner, contribution, _service in routed
             )
@@ -197,6 +203,7 @@ class FrozenContributionDirectories:
                 },
             )
             for kind in self.kinds
+            if "synchronization_command" in self._declarations[kind]
         )
 
     def cleanup_requests(self, graph_identity) -> tuple[tuple[str, dict], ...]:
@@ -217,6 +224,7 @@ class FrozenContributionDirectories:
                 },
             )
             for kind in self.kinds
+            if "cleanup_command" in self._declarations[kind]
         )
 
     async def invoke(

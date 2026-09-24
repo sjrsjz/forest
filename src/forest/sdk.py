@@ -1071,6 +1071,31 @@ class ShellCommandsDirectoryHandle:
         )
 
 
+class AgentToolsDirectoryHandle:
+    """Read the exact RuntimeGraph-frozen Agent tool directory."""
+
+    def __init__(
+        self,
+        rpc: Callable[[str, dict], Awaitable[Any]] | None,
+        scope: CallScope | None,
+    ) -> None:
+        self._rpc = rpc
+        self._scope = scope
+
+    async def list(self) -> dict:
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError(
+                "CAPABILITY_DENIED",
+                "No contribution directory gateway is available",
+                403,
+            )
+        return await self._rpc(
+            scope.call_id,
+            {"kind": "agent-tools", "action": "list"},
+        )
+
+
 class RoutingRoutesDirectoryHandle:
     """Invoke targets from the RuntimeGraph-frozen routing contribution directory."""
 
@@ -1159,6 +1184,9 @@ class PluginContext:
         self.jobs = JobsHandle(job_rpc, scope)
         self.job_types = JobTypesDirectoryHandle(contribution_directory_rpc, scope)
         self.shell_commands = ShellCommandsDirectoryHandle(
+            contribution_directory_rpc, scope
+        )
+        self.agent_tools = AgentToolsDirectoryHandle(
             contribution_directory_rpc, scope
         )
         self.routing_routes = RoutingRoutesDirectoryHandle(

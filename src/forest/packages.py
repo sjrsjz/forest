@@ -207,18 +207,14 @@ MANIFEST_SCHEMA = {
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": [
-                                "kind",
-                                "max_execution_timeout_s",
-                                "synchronization_command",
-                                "cleanup_command",
-                            ],
+                            "required": ["kind", "max_execution_timeout_s"],
                             "properties": {
                                 "kind": {
                                     "enum": [
                                         "job-types",
                                         "shell-commands",
                                         "routing-routes",
+                                        "agent-tools",
                                     ]
                                 },
                                 "cancellation_query": {"type": "string"},
@@ -1390,17 +1386,35 @@ def _manifest(files: dict[str, bytes]) -> dict:
         kind = declaration.get("kind")
         if (
             kind in directory_kinds
-            or kind not in {"job-types", "shell-commands", "routing-routes"}
-            or declaration.get("synchronization_command") not in command_ports
-            or declaration.get("cleanup_command") not in command_ports
-            or declaration.get("cleanup_command")
-            == declaration.get("synchronization_command")
+            or kind
+            not in {"job-types", "shell-commands", "routing-routes", "agent-tools"}
+            or (
+                kind != "agent-tools"
+                and (
+                    declaration.get("synchronization_command") not in command_ports
+                    or declaration.get("cleanup_command") not in command_ports
+                    or declaration.get("cleanup_command")
+                    == declaration.get("synchronization_command")
+                )
+            )
+            or (
+                kind == "agent-tools"
+                and any(
+                    field in declaration
+                    for field in (
+                        "synchronization_command",
+                        "cleanup_command",
+                        "cancellation_query",
+                        "synchronize_configuration",
+                    )
+                )
+            )
             or (
                 kind == "job-types"
                 and declaration.get("cancellation_query") not in query_ports
             )
             or (
-                kind == "shell-commands"
+                kind in {"shell-commands", "routing-routes"}
                 and "cancellation_query" in declaration
             )
             or (

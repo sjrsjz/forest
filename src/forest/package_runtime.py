@@ -611,7 +611,18 @@ class PackageGenerationAdapter:
     async def _synchronize_contribution_directories(self) -> None:
         identity = self.generation_identity
         prepared = self._prepared_binding
-        if not self._contribution_directories.kinds:
+        if identity is None:
+            if not self._contribution_directories.kinds:
+                return
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Contribution directory has no bound Generation",
+                500,
+            )
+        requests = self._contribution_directories.synchronization_requests(
+            identity, configuration=self._configuration or {}
+        )
+        if not requests:
             return
         if identity is None or prepared is None or self._domain_commands is None:
             raise ForestError(
@@ -629,9 +640,7 @@ class PackageGenerationAdapter:
                 "Contribution directory synchronization has no frozen configuration",
                 500,
             )
-        for command_name, payload in self._contribution_directories.synchronization_requests(
-            identity, configuration=self._configuration
-        ):
+        for command_name, payload in requests:
             declaration = declarations[command_name]
             input_validator, output_validator = self._service_schemas[command_name]
             if not input_validator.is_valid(payload):
@@ -671,7 +680,16 @@ class PackageGenerationAdapter:
     async def _release_contribution_directories(self) -> None:
         identity = self.generation_identity
         prepared = self._prepared_binding
-        if not self._contribution_directories.kinds:
+        if identity is None:
+            if not self._contribution_directories.kinds:
+                return
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_BINDING_INVALID",
+                "Contribution directory has no bound Generation",
+                500,
+            )
+        requests = self._contribution_directories.cleanup_requests(identity)
+        if not requests:
             return
         if identity is None or prepared is None or self._domain_commands is None:
             raise ForestError(
@@ -683,9 +701,7 @@ class PackageGenerationAdapter:
             item["name"]: item
             for item in self.component.get("domain_commands", ())
         }
-        for command_name, payload in self._contribution_directories.cleanup_requests(
-            identity
-        ):
+        for command_name, payload in requests:
             declaration = declarations[command_name]
             input_validator, output_validator = self._service_schemas[command_name]
             if not input_validator.is_valid(payload):
@@ -2357,6 +2373,8 @@ def package_runtime_descriptor(
                 contribution_directories[kind] = contracts.job_types()
             elif kind == "shell-commands":
                 contribution_directories[kind] = contracts.shell_commands()
+            elif kind == "agent-tools":
+                contribution_directories[kind] = contracts.agent_tools()
             elif kind == "routing-routes":
                 contribution_directories[kind] = {
                     "publications": contracts.event_publications(),

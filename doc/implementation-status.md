@@ -1,198 +1,94 @@
-# Forest 当前实现状态
+# Forest 实现状态
 
-更新日期：2026-09-24。
+> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配仍是混合图，Forest 尚不可发布。
 
-> 本页只记录当前工作树事实，不定义目标架构。发生冲突时依次以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净 Schema 与载荷来源](14-clean-schema-and-payload-provenance.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。Forest 尚不可发布。
+## 1. 判定标准
 
-## 不可改变的当前语义
+只有同时满足以下条件的组件才记为“已包化”：
 
-- Agent 是 `agent.runtime` 模块中的单会话状态机，不存在产品子 Agent。
-- 每群至多一条活动 Agent 响应链；群之间可以并行。新触发在下一次模型调用边界接入截至最后一个触发的连续消息前缀，普通尾部在终止后静默排空。
-- 每个 Bot 只有一个全局记忆域，每个群是一条独立主干；联想可以跨主干，召回必须携带来源群和作者。
-- 裁剪不调用 LLM，也不生成记忆摘要。文本与图片均进入权威载荷、嵌入和检索；text-only Provider 只在单次请求投影中移除图片。
-- `conversation.scheduler` 已实现持久 ContextView 裁剪：lane 维护活动/归档单元计数，高水位时在 Actor 事务内发布不可变 `context_compactions` 与逐单元 `context_compaction_units`，保留原 `context_units`、作者、群来源和多模态 Payload 不变。`context_snapshot()` 只读取活动单元和一个机器可读归档引用；策略由该模块自己的 WebUI 配置贡献管理。当前请求只把实际 trigger 原文设为不可裁剪，触发前的同批普通消息仍进入 canonical Context 并参与正常预算裁剪。
-- VL 嵌入空间与 Bot 生命周期绑定，只允许更换兼容 endpoint 或凭据。
-- WebUI 壳只负责身份、作用域、模块发现和受控工作区；业务页面、schema、查询和动作由准确模块 Generation 贡献。
-- 未发布结构直接删改并重建开发数据库，不新增迁移、兼容读取、双写、旧 API 转发或 fallback。
+- 组件由 `src/forest/builtin/<package>/module.toml` 描述，并从不可变 `PackageSnapshot` 构建；
+- 业务代码只在隔离 `python-worker` 中执行；
+- 对外调用只经过 manifest 声明的版本化 Service、Domain、UnitOfWork、Effect 或贡献目录端口；
+- 私有状态只由包声明的 storage baseline 和 participant/query/command 访问；
+- 配置、Worker、Effect Driver、管理贡献和资源属于同一个 Generation 生命周期；
+- 生产组合根只调用 `bootstrap_builtin_package()`，不存在同组件的宿主 Runtime 或 Repository 旁路。
 
-设计文档已经先于后续代码完成语义纠偏：00 明确列出被废止的 Bot/Agent 中心组合根、产品子 Agent、固定业务后台、模糊记忆关系、第二套执行链和开发期兼容迁移；10 固定百万级来源的服务端组合筛选、快照键集分页与可解释关系 DTO；12 固定 PC 工作台的有界 pane 布局和模块 UI 尺寸协议。仍存在的旧代码和旧页面均列入删除范围，不能反向解释这些目标契约。
+目录名位于 `builtin`、Python import 路径中包含 `builtin`、或者有独立测试，均不能单独证明组件已经包化。
 
-## 仍阻塞发布的插件架构缺口
+## 2. 已工作的微内核与包运行时
 
-`PackageGenerationAdapter` 已闭合不可变 `PackageSnapshot`、隔离 `PythonWorker` 与 `RuntimeModuleRegistry`/`kernel.runtime` Generation 的生产路径。`conversation.trigger-policy`、`codec.onebot`、`provider.chat-completions`、`embedding.multimodal`、`vector.index` 与 `process.executor` 已进入 builtin 包目录并携带 manifest、配置/输入/输出 schema 和 Worker 入口；旧 Provider、Embedding、Vector Index、Process Executor 的 `clean_*_module.py`、`clean_*_runtime.py` 及其旧 transport/storage baseline 已物理删除。Provider、Embedding 与 Vector Index 的外部 I/O 绑定 Generation 专属 `chat-completions.http`、`embedding.multimodal.http`、`vector-index.milvus` 效果驱动。`process.executor` 的 `native.execute` 现在先进入包内 `@job` handler，由 Worker 完成 profile 选择、argv 投影和公开结果解释，再经声明并授权的 `process.native.spawn` effect service 请求宿主最小进程 capability；`job_types` 不再携带 effect kind，旧 `PackageJobEffectDriver` 已删除。嵌套 effect 复用调用树的因果根、父 call、剩余 deadline 和 Job 取消探针，但获得独立 call ID 与稳定 operation，并经过 schema、授权、Generation fence、持久操作账本和在途排空。Secret、远端 client 和子进程句柄均不进入 Worker。效果驱动与 Worker 共同 start/quiesce/resume/close，候选启动失败会同时回收两者。manifest 对效果显式区分 `at-most-once`、`idempotent` 与 `read`，只有不可安全重复的副作用进入持久操作账本。每次 `prepare_generation` 都会对实际 desired revision 重跑包配置 schema 与领域/安全 validator，任何直接配置写入都不能绕过候选代门禁。候选 Worker 和效果驱动在 route 发布前完成准备、启动和健康检查，本地 admission gate 保持关闭；旧 Generation 先冻结并排空，持久 route 提交后新 gate 才同步打开。失败发布会先恢复旧 Worker/驱动，再恢复旧 gate；ACTIVE Generation 不允许绕过 QUIESCENT 直接清理。
+以下机制已经进入通用运行时，而不是某个业务模块的特例：
 
-插件宿主已删除读写合一的 `PackageCapabilityGateway`。State Query 与 State Command 分别由 `PackageStateQueries`、`PackageStateCommands` 端口和独立宿主对象承载；Adapter 构造时分别取得端口，缺少包所声明的任一端口会在描述符编译阶段失败。写入事务同时完成当前 Generation 成员围栏、稳定操作重放、key 级串行、revision CAS、受管 Payload、不可变 step 与 head 推进。相同操作跨执行尝试返回原回执，输入变化明确冲突；同 revision 并发写确定地只有一个成功。获得副作用能力的插件服务现在先进入持久 `service_operations/service_call_attempts`：稳定 operation 固定输入与因果根，每个 call 固定准确 Generation/Worker/图/父调用/deadline，最多一次 Worker 派发，成功或失败终态保存为 Payload 并可跨 call 重放，过期无终态只落 `UNKNOWN`。Adapter 排空覆盖账本准入、Worker 和终态提交。纯 Codec/Trigger 不写账本。真实 `forest.counter` 包已在隔离 Worker 与完整 RuntimeGraph 中证明重复服务 operation 返回原结果且状态只推进一次。Event 与 ComponentJob 不再伪装成 Gateway 回调，而是通过 package runtime contract 中声明的两个冻结 routing 服务句柄进入独立 authority。
+- 不可变包构建、manifest/schema 校验和包摘要；
+- 隔离 Python Worker 与有界 RPC、任务、资源和队列；
+- RuntimeGraph 中精确到 component/Generation/contract 的路由；
+- 候选代预热、原子发布、旧代冻结、排空、失败回滚和资源回收；
+- 包私有 Domain Query/Command、manifest UnitOfWork、durable owned work；
+- Generation 专属 Effect Driver，Secret、socket、子进程和远端客户端不进入 Worker；
+- 包自带管理 UI 与配置贡献；
+- Job、Shell 和 Routing 三类冻结贡献目录。
 
-包级领域状态现已具备独立 Query/Command ABI。manifest 冻结端口名、契约、SQL 函数和输入/输出 schema；Worker 只能分别通过 `ctx.queries` 与 `ctx.commands` 请求已声明且已授权的端口。宿主的 PostgreSQL Domain Authority Driver 不导入包 Python、不识别业务 DTO 或表名，只校验准确 Generation/member、storage identity、函数签名/波动性/`SECURITY INVOKER`/固定 `search_path`，然后调用包 namespace 内的二参数 JSONB 函数。Query 在 repeatable-read 只读快照中执行；Command 使用稳定 operation ID 并由包私有表封闭幂等语义。只有 official 包可启用函数型 storage baseline。`forest.counter` 已完成该路径切换，并证明领域状态只写入包 namespace，内核通用 `state_heads` 保持为空；这一路径是后续有状态 builtin 迁移的基础机制，不是总 Repository Gateway。
+这些能力构成 builtin 模块系统本身。业务组件只有经过这些端口运行，才算使用了该系统。
 
-包级私有持久工作现已具备独立 `owned_work_handlers` ABI。manifest 冻结 claim/settle SQL 函数、包内 `@job` handler、业务输入/输出 schema、并发、轮询、三段 deadline 与覆盖执行/结算的 lease；Package Adapter 自动声明 `FREEZE_DRAIN` 并运行与业务无关的通用泵。claim 在同一事务复核 active Generation，返回固定 claim envelope；Worker 调用以 work 的稳定 operation 进入持久服务调用账本，settle 按 claim token 和 member fence 在包 namespace 内幂等收敛。Adapter 不读取队列表、不决定重试或终态。`forest.counter` 参考包已在真实 PostgreSQL 中完成后台入队、领取、隔离 Worker `@job` 执行、嵌套 domain Command、账本落地、包内结算和 Registry 关闭排空；这条机制尚未等同于 Media/Memory 已完成迁移，它们仍需把现有表和循环改写为各自包声明后删除宿主实现。
+## 3. 当前生产装配
 
-包级 Event subscription 与 ComponentJob 使用不同的封闭 contribution、内容寻址 handler service 和 Worker 投递协议；PackageAdapter 只持有冻结的 `routing.event.publish/1`、`routing.component-job.schedule/1` 服务句柄，不持有 routing Repository。双向运行关系不进入启动 DAG：发布/调度组件单向依赖 `routing.graph` authority，dispatcher 到 handler 依靠持久 claim 和冻结 Contract Route。Registry 已实现描述符声明的两阶段 owned-work 排空；局部 Generation 激活不开放领取，整张图 ACTIVE 且 Router 开放后才由 Registry 统一打开 owned-work gate。失败恢复先恢复模块和本地门，最后开放持久 graph admission，FAILED/STOPPED 的半恢复图不能重新接纳工作。Event/ComponentJob 没有映射到通用 `job.scheduler`。
+`CleanBotHost._assemble_registry()` 当前直接以真实 builtin 包装入下列业务组件：
 
-`routing.graph` 的干净存储 baseline 已定义不可变 Route publication、发布/订阅/ComponentJob 路由、Event 与逐订阅 delivery/attempt、ComponentJob 与逐次 attempt；数据库 trigger 封闭 delivery、Job 和 attempt 的合法转移。claim 现在同时保存 routing 所有者 Generation 与目标插件 Generation，结算必须匹配 token、attempt、routing Generation、目标 Generation 和未过期 lease。过期且无法证明外部结果的 attempt 只进入 `UNKNOWN`，不自动重复副作用。目录发布、Event 和 ComponentJob 分属三个 Command authority，共享层只有不可变 Route/Claim 值。
+| 组件 | builtin 包 | 当前边界 |
+|---|---|---|
+| Provider | `provider_chat_completions` | Worker 拥有 profile；Generation Effect Driver 拥有 HTTP/Secret |
+| 多模态 Embedding | `embedding_multimodal` | Worker 拥有模型投影；VL profile 随 Bot 生命周期冻结 |
+| 向量索引 | `vector_index_milvus` | Milvus 只保存派生向量；Bot 库保存 ref 与权威来源 |
+| Media | `media_capture` | Worker/owned work 管理抓取状态；Effect Driver 管理外部下载 |
+| Routing | `routing_graph` | 路由事实和投递工作由包私有 SQL 与 Worker 管理 |
+| Trigger policy | `trigger_policy` | 群/私聊触发判定由包服务提供 |
+| OneBot codec | `onebot_codec` | 纯规范化与发送投影服务 |
+| Job scheduler | `job_scheduler` | 持久任务与 Job 贡献目录 |
+| Process executor | `process_executor` | Worker 投影受限 profile；Effect Driver 执行最小 native capability |
+| Delivery | `delivery` | SendIntent、Effect handoff、结果收敛与管理 UI |
+| Group shell | `shell_command` | P0/P1/P2 授权、审计、持久执行与 Shell 贡献目录 |
+| OneBot adapter | `adapter_onebot` | Binding、入站投影与发送语义在 Worker；WebSocket 在 Generation Driver |
 
-`routing.graph` 已迁入 `builtin/routing_graph`：manifest 声明 `routing.event.publish`、`routing.component-job.schedule`、`routing-routes` 冻结贡献目录、四个私有 Domain Command 和两个 owned-work handler；候选 Generation 在隔离 Worker 启动期间把准确 RuntimeGraph publication/subscription/ComponentJob 事实同步进包 namespace，整图提交后才开放 claim。Event、delivery、ComponentJob、attempt、重放和结算状态全部由包私有 SQL 封闭，Worker 只通过 `ctx.routing_routes` 按 claim 中冻结的组件、Generation、服务和版本调用目标 Contract Handle。真实 PostgreSQL 17 验证已由测试组件完成 Event 发布与订阅投递、ComponentJob 调度与结果回写，二者均收敛到 `SUCCEEDED`；空队列返回类型化 `null`，替换排空仍由通用 Package owned-work 生命周期管理。旧 `RoutingGraphRuntime`、`RoutingDispatcher`、`RoutingDirectoryCommands`、`ComponentEventCommands`、`ComponentJobCommands`、Route/Claim 宿主类型和旧 official baseline 已物理删除，没有宿主接管积压的 fallback。
+内核的 Runtime、Payload、Authorization、Effect 与 Audit Authority 仍是可信微内核组件。它们不是可卸载业务插件，也不应迁入 `builtin`。
 
-包级双向 Effect ingress 已实现并由 `adapter.onebot` 使用：`effect_services.ingress` 声明只对所属驱动开放的私有 Worker 端口，冻结 handler、输入/输出 schema、重放语义和 deadline。候选驱动可以连接和有界缓冲，但只有 RuntimeGraph 提交后的 `activate_ingress` 才打开接纳；排空先执行 `freeze_ingress`，再等待已接纳 Worker 调用和服务账本归零，随后 quiesce 驱动并在 stop 时回收资源。恢复后的驱动仍保持待命，必须随图重新激活。同一原始 frame 的并发投递先按稳定 `frame_id` 在驱动入口单飞合流，唯一 leader 进入持久服务操作，followers 等待同一结果；冻结还会等待这组入口调用排空。
+## 4. 尚未切换的生产组件
 
-`adapter.onebot` 已切换为 `builtin/adapter_onebot` 的真实不可变包。manifest 声明隔离 Worker、配置 schema、两个 Delivery 服务、OneBot WebSocket effect/私有 frame ingress、Payload bytes effect、平台事件 UoW participant、私有 SQL 和包自带管理 UI。Worker 独占 Binding 业务配置、入站规范投影、Shell/Trigger 调用、Memory/Media DTO 和 Delivery prepare/dispatch；驱动只独占凭据解析、账号探测、WebSocket 资源和 wire 交接。发送前同时复核准确 Adapter Generation、RuntimeGraph、Binding/connection/client identity、transport digest、Kernel Effect `DISPATCHING` attempt、wire digest与目标群/用户。旧 `CleanOneBotRuntime`、`OneBotAdapterRepository`、专用 Management contract、旧 official baseline 及对应静态页面已经物理删除，没有双运行或旧 API 转发。
+当前生产图仍通过宿主组合根构造以下组件，因此它们尚未完成包化：
 
-该路径已经以真实 Worker 进程和临时 PostgreSQL 验证：包入口未进入宿主 `sys.modules`，候选 gate 在发布前拒绝调用，调用结果携带精确 Generation，排空/恢复/再次激活后仍由同一生命周期管理，最终 Worker 进程退出；真实 RuntimeGraph 能安装、发布并关闭包 Generation。验证只作为这些跨进程与事务边界的实现证据，不替代架构不变量。
+| 组件 | 当前生产入口 | 已有候选 | 缺口 |
+|---|---|---|---|
+| Agent | `bootstrap_clean_agent()` | `builtin/agent_runtime` | Worker 内 `agent.execute/2`、Provider/Tool/Payload 端口、管理贡献、Conversation 原子交接、生产切换 |
+| Conversation | `bootstrap_clean_messaging()` | `builtin/conversation_scheduler` | Agent 调度入口、final-reply/session-handoff plans、生产 poller/owned work 切换 |
+| Memory | `bootstrap_clean_memory()` | 尚无完整 builtin 包 | 图写入/召回/归档 Worker、工具和管理贡献、生产切换 |
 
-Agent、Memory 与 Conversation 仍由宿主 `bootstrap_clean_*` 或等价宿主组合根构造，因此整张生产图仍不是完整可安装插件图，当前实现仍禁止发布。Routing、Delivery、Media、Job、Shell 与 Adapter 已经切到包级隔离 Worker 和各自所需的 Domain/UoW/Effect ABI；其旧宿主业务 Repository、Runtime、dispatcher、Management 与静态 UI 实现已按各自完成范围物理删除。OneBot 入站的跨模块事务当前仍由固定的 `kernel.uow.onebot.ingress` 协调器承接，因为 Conversation 与 Memory participant 尚未全部包化；它不是 Adapter 宿主运行时，也不允许读取 Adapter 私表。剩余迁移必须把 Agent、Memory、Conversation 的实际端口、SQL、Worker handler 与管理 UI 声明进包，并把该固定协调器收敛为 manifest `unit_of_work_plans`，不能把公共 ABI 已存在误报为模块已经迁移。
+`clean_*` 是重构期间遗留的宿主实现名称，不是新的模块层。对应 builtin 完成生产切换后，应直接删除这些文件和旧 baseline，不保留兼容转发。
 
-Conversation 包化正在按最终 ABI 前进：`builtin/conversation_scheduler` 已能由通用包构建器捕获为独立 `forest.python-worker/1` 工件，其私有 baseline 已实现 `conversation.admit-message/1`、`conversation.complete-classification/1` 与 `conversation.select-input/1` 三个事务 participant；Payload 声明可以从受类型约束的输入路径解析 owner component/kind，因此不同 Adapter 的受管内容仍由内核逐项复核，Conversation 不需要硬编码 OneBot 或取得 Payload Repository。输入选择在包事务内复核 actor epoch 与 Session/Run fence，按连续分类水位只截取到最后一个待处理 trigger，原子建立 InputBatch、带真实作者的 Context 单元和 trigger claim，并以稳定 operation 重放原结果。包还声明了 `conversation.silent-drain.pending` owned-work：SQL claim 只取得无 Session、无待处理 trigger 且存在连续普通消息的 lane，隔离 Worker 通过自身 manifest UoW 提交 `SILENT_DRAIN`，settlement 幂等释放 actor；冻结新 claim 后只排空已经接纳的调用，新 Generation 可继续领取遗留 backlog。包内还以 manifest 四步 UoW 封闭 ContextView 裁剪：Conversation 先发布精确成员计划，`kernel.payload` 的通用 participant 仅按调用方身份写入受管 JSON Payload，Conversation 再原子发布不可变 compaction 与成员关系；InputBatch 保留选取时的 view revision，最终 UoW 回执携带新 revision 和 Memory archive 引用。裁剪不调用 LLM、不生成摘要，不改写原 Context、作者或多模态 Payload。`conversation.context.snapshot/1` 也已由隔离 Worker 通过包私有 Domain Query 导出，查询以 actor owner、epoch 和 lease 为强制栅栏，返回精确作者来源、活跃 Context 单元及归档引用，Agent 无需也不得取得 Conversation Repository。真实 PostgreSQL 已验证普通消息在没有 Agent 的情况下进入 Context、越过水位后裁剪、归档 Payload 可按精确 owner 验证、快照来源保持完整，且 actor 最终释放。该候选尚未进入生产 RuntimeGraph：Agent lane、回复/Session participant 和 `agent.execute/2` 仍未迁完，现有宿主 Conversation 不能因此标为已替换。
+## 5. Agent 候选包已经拥有的部分
 
-Agent 包化已建立不可伪装的第一条所有权边界：`ForestCorePrompt`、ModelTurn XML 解析器、协议修复视图和 Agent 私有 baseline 已从宿主目录物理移入 `builtin/agent_runtime`，旧路径不存在兼容转发；仍在使用旧宿主执行链的代码也引用这份包源码，因而不会产生第二套 Prompt 或解析规则。包 manifest 声明真实 `python-worker`、配置 schema、私有 storage bundle 和只读 `agent.protocol.describe/1`；隔离 Generation 返回的 Prompt、digest 与 parser revision 已与包内常量逐字验证，入口模块不会导入宿主进程。Run 的读取与执行所有权也开始进入最终端口：公开 `agent.run.query/1` 只经包私有 `agent.run-snapshot/1` Domain Query 返回管理所需稳定 DTO；执行恢复另由私有 `agent.run-recovery/1` 返回最小状态机事实，只包含 Run 阶段、步号、取消请求以及当前 Model、Tool、Turn、协议错误头，宿主数据库表行与 checkpoint 布局不构成 Worker ABI。创建、模型安全边界输入追加、领取、续租和释放分别由窄 UoW participant 封闭，并由 Agent 自身的单步 manifest plan 调用，不能把连接、Repository 或宽泛 action 传进 Worker。Model 写端口现已开始收回包内：`agent.prepare-model-request/1` 冻结 Provider Generation、投影与输入 fence，`agent.prepare-model-attempt/1` 冻结 wire Payload 与 Effect operation，`agent.mark-model-handoff/1` 才原子推进 Attempt、Request 和 Run；`agent.observe-model-result/1` 以不可变 observation 收敛外部结果，明确区分成功、未发送和未知，且只允许查询证据把 `UNKNOWN` 收敛为成功或未发送；`agent.record-protocol-failure/1` 在成功响应的唯一 `PARSING` 边界原子写 failure 与 checkpoint，第一次进入 `REPAIR_READY` 即持久消耗唯一修复配额，错误 XML 不存在容错解析旁路；`agent.record-model-turn/1` 是合法解析结果的唯一提交口，并在同一事务内把 FunctionCall 固定为带真实 trigger principal、目标 component、目标 Generation、service、契约摘要、binding 摘要、审批/查询能力和 Effect operation 的 ToolCall，旧的“一个综合摘要冒充完整工具绑定”语义已从首发基线与恢复 DTO 删除。上述端口均校验当前 owner epoch、lease、阶段、稳定身份和 Payload provenance，已提交 handoff 不能在热重载后伪装为未发送。创建时由包 baseline 固定 CorePrompt digest 和 parser revision，并逐项复核配置、Preset PayloadRef；输入追加只接受推进切口和 Context revision 的新 InputBatch，保留每个 trigger 的 principal。`agent.park-reload/1` 只允许持有当前 owner epoch 的 Run 从 `PREPARING_MODEL`、`WAIT_TOOL` 或 `WAIT_APPROVAL` 原子写入 checkpoint 并进入 `RELOAD_WAIT`，同时保存精确 reload operation、恢复阶段和停车 Generation；它不会把已交接外部调用伪装成未执行。包声明的 `agent.reload-resume.pending` durable owned-work 只允许不同的新 Generation 认领停车记录，claim 取得精确 owner epoch 后通过 `agent.resume-reload/1` 恢复原阶段，settlement 幂等释放 lease；旧 Generation 由持久 Generation fence 禁止认领自己停下的 Run。最终回复和 Session 交接所需的 Agent 写口也已进入包 manifest：`agent.complete-run-record` 只接受 `conversation.scheduler` 在持有准确 Run owner epoch 时把 `FINAL_READY` 提交为 `COMPLETED`；`agent.start-successor-record` 只从当前活动 Session 的已完成头复制冻结 Agent profile 并建立单一后继 Run；`agent.close-session-record` 只在同一已完成头仍为空闲时关闭 Session。三者均由包私有 SQL 封闭输入摘要、单向状态、作者 trigger、deadline、操作重放与 payload provenance，Agent 自己没有可绕过 Conversation 决策的单步 plan。真实 PostgreSQL 已验证“创建 → 领取 → Model 请求/Attempt/handoff → 成功 observation → PARSING → 协议失败 → REPAIR_READY/repair_count=1 → REPAIR 请求 → 成功 ModelTurn → SAFE_BOUNDARY”，并单独验证 ToolCall 精确冻结 trigger principal 与完整 Generation binding；热重载链继续覆盖“追加 → 续租 → 安全点停放 → 释放 → 候选预热 → 旧代排空 → 新代发布并自动恢复 → 最终完成 → 同 Session 后继 → 最终关闭”。`agent.observe-tool-result/1` 也已进入包内：它封闭审批等待、Effect handoff、成功/失败/取消/未知与查询对账，结果 Payload 必须属于 ToolCall 冻结的目标组件，只有 `supports_query=true` 的准确 binding 才能从 `UNKNOWN` 收敛。真实 PostgreSQL 已验证 `WAIT_APPROVAL → DISPATCHING → SUCCEEDED → PREPARING_MODEL`，并确认终态原子清除当前 ToolCall。该候选目前仍缺少 `agent.execute/2`、Conversation 包内跨组件 final-reply/session-handoff plan 和包级管理贡献；因此生产仍由 `bootstrap_clean_agent` 构造旧 Runtime，不得把本段解释成 Agent 已完成切换。
+`builtin/agent_runtime` 已拥有唯一 CorePrompt 与 XML 协议解析器，并以私有 SQL 和 manifest UoW 封闭以下状态转换：
 
-## 已落地但尚未接入插件 Worker 的运行时切片
+- Session/Run 创建、输入追加、owner lease、释放和热重载停车/恢复；
+- Provider Generation、模型投影、wire Payload 与 Effect operation 冻结；
+- 模型 handoff、结果观察和 `UNKNOWN` 对账；
+- 错误 XML 的一次协议修复、合法 ModelTurn 提交；
+- ToolCall 的准确 component/Generation/service/contract/binding 冻结；
+- 工具审批、handoff、终态观察和可查询 `UNKNOWN` 对账；
+- 最终完成、同 Session 后继 Run 和 Session 关闭的私有 participant。
 
-### 最小 Bootstrap 与五个内核模块
+这些端口证明 Agent 状态所有权可以进入包，但当前 Worker 只提供 `agent.protocol.describe/1`、`agent.run.query/1` 和 reload-resume job。它还没有提供生产需要的 `agent.execute/2`，所以 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“包内状态端口完成”表述成“Agent 已完成生产包化”。
 
-`forest_kernel` 只保存 Bot 身份和 schema bundle 账本。以下模块各自拥有独立 namespace、baseline、Repository、模块配置和真实 grant set：
+## 6. Conversation 候选包已经拥有的部分
 
-- `kernel.runtime`
-- `kernel.payload`
-- `kernel.authorization`
-- `kernel.effect`
-- `kernel.audit`
+`builtin/conversation_scheduler` 已封闭消息接纳、连续分类水位、截至最后 trigger 的输入选择、带作者来源的 Context、无 LLM 摘要的窗口裁剪、静默排空和 `conversation.context.snapshot/1`。同群串行和跨群并行依靠数据库 actor lease，而不是进程锁。
 
-`bootstrap_clean_kernel()` 可以从空数据库安装这五个模块并把它们作为普通 Generation 发布，不依赖旧 `public` 业务表。
+该候选尚未拥有完整 Agent 调用与回复/Session 交接，所以尚未加入生产组合根。现有 `bootstrap_clean_messaging()` 仍是旁路，应在对应端口完成后删除。
 
-### 精确 Generation 与 RuntimeGraph
+## 7. 下一切换顺序
 
-干净 Registry 已执行以下固定协议：
+1. 在 `agent_runtime` Worker 中实现可序列化的 `agent.execute/2`，只使用声明式 Service、Effect、Payload、UnitOfWork 和工具贡献目录；禁止 callback、Repository、数据库连接和宿主 Agent adapter。
+2. 在 `conversation_scheduler` manifest 中补齐 acquire-model-input、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
+3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
+4. 将 Memory 权威状态与召回执行迁入独立 builtin 包，再删除 `bootstrap_clean_memory()` 路径。
+5. 从空开发库启动完整图，验证热重载安全点、失败回滚、群并发、Provider/Tool 不确定结果、真实 OneBot 单次低频交互和 WebUI 管理贡献。
 
-1. `prepare_generation` 冻结包、配置、授权、存储和状态契约；
-2. `kernel.runtime` 持久化候选图并分配精确 `generation_id`；
-3. `bind_generation` 把数据库分配的身份交给模块；
-4. `start` 只预热待命资源；
-5. 模块 publication participant、配置 effective、Generation ACTIVE、Route 和 graph head 在一个 Bot 数据库事务中提交；
-6. `activate_generation` 只打开本地 admission gate，不执行 I/O；
-7. 关闭先原子冻结所有 route admission，保留当前 graph head 供已持 lease 的工作以 member fence 排空；逆依赖达到 QUIESCENT 后才撤下 head并落 STOPPED/FAILED。
-
-同一 HostLease 下的热替换主链已经改为先排空再发布：候选图及其 Generation 所属 OneBot 驱动先连接并有界缓冲，但不取得服务路由或 frame ingress；旧图随后原子冻结 DATA/CONTROL 顶层准入，并按反向依赖顺序排空仍拥有持久工作的 Worker、已接纳 frame、服务操作和终态提交。Conversation 会在下一次模型或工具外部调用前观察排空信号，在已有持久边界释放 Run/actor；确认排空后 RuntimeGraph publication 事务才切换准确 Generation route，候选连接随后打开事件流。候选在发布前失败时，authority 恢复旧图原声明的准入位和 route epoch，本地 Worker/驱动按正向依赖顺序恢复；发布成功后旧 Generation 的 Worker、effect driver 与 socket 才关闭并记录 `STOPPED`。宿主用单一替换锁串行这些阶段，配置 revision 可在不停 HostLease 的情况下生效。
-
-新工作通过 `verify_active_generation_in()` 在最终事务内复核准确组件、Generation、RuntimeGraph、Route epoch 和 DATA/CONTROL admission；已经领取的排空工作只能通过 `verify_generation_member_in()` 继续，并同时复核自己的 actor/run/call lease。绑定身份失败、预热失败、图提交失败、本地 activation 不变量失败和 freeze 后新准入拒绝都有回收测试，不会遗留可接纳工作的部分图。
-
-### Provider、Agent、Conversation 与 OneBot Messaging 图
-
-> **生产接线状态：** Conversation Worker、单 Agent 执行、Context 投影、Provider 调用、最终回复与 Session 交接已经进入同一干净 RuntimeGraph。Agent→Provider 与 Conversation→Agent 使用冻结到准确图/代际/契约版本的 Contract Router 句柄；Conversation 只调用输入选择、最终回复和 Session 交接三个内核 UoW 服务，Agent、Conversation、Memory、Delivery participant 由内核按声明解析。生产模块不再通过共享模块字典、直接运行实例或 bound participant 完成这条链。PostgreSQL 集成测试已从真实 OneBot 入站事实自动生成回复、原子提交 Context/SendIntent、经 Delivery 发送并静默关闭 Session。
-当前候选 RuntimeGraph 共 20 个成员：五个内核模块，以及 `routing.graph`、`provider.chat-completions`、`embedding.multimodal`、`vector.index`、`memory.graph`、`media.capture`、`agent.runtime`、`conversation.scheduler`、`conversation.trigger-policy`、`codec.onebot`、`adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command` 十五个平级业务模块：
-- `provider.chat-completions` builtin 的 Worker 独占公开 profile/模型能力快照；Agent 按该快照完成单次 `ModelInputProjection`，Provider Generation 的受限效果驱动独占端点、Secret 解析与 HTTP client。每个请求绑定精确 Provider Generation 与能力摘要；Agent→Effect 的事务同时提交授权票据消费、RuntimeGraph fence、Effect handoff 与 Agent attempt handoff，驱动在实际 HTTP 发送前再次复核 Effect 和 Generation；
-- text-only Provider 的请求投影会递归移除图片、受管媒体 URL/base64/file 字段，同时保留作者、来源群、trigger 与不可见模态标记；该投影不修改权威多模态 Context；
-- `agent.runtime` 的全部状态变更经准确 Agent Generation 在最终数据库事务内复核；
-- Agent `COMPLETED` Run 不再擅自关闭 Session；Conversation 排空决定显式关闭，或在同一 Session 下原子推进唯一后继 Run；
-- `conversation.scheduler` 的接纳与分类端口检查自身准确 Generation；
-- `adapter.onebot` 包只拥有 Binding 业务配置、Generation 所属网络资源、平台事件和 OneBot transport；标准模块配置账本仍由通用 Package Adapter 提供；
-- `codec.onebot` 在隔离 Worker 中执行纯规范化与发送编码，通过 schema 和 Adapter 最终 wire guard 双重约束输出；
-- Adapter 不拥有 Conversation lane、Shell、Agent、Memory、Delivery 或发送账本；
-- Delivery 已有独立私有 schema、配置、grant set、Generation 与包内发送 Worker，通过 Adapter 的公开 prepare/dispatch 服务及 Kernel Effect 端口发送，不读取 Adapter 私有表。Worker 从持久队列领取 part，将不可变业务载荷投影成 OneBot wire，在交接前写入 Effect permit 并复核当前 RuntimeGraph 与 Adapter Generation；网络交接后只接受 `SENT`、明确 `NOT_SENT` 或 `UNKNOWN` 观察。重启时，过期 `PREPARED` attempt 会经 Effect abandonment 回到队列，过期 `DISPATCHING` attempt 只能落为 `UNKNOWN`，不能猜测未发送或自动重发。动态 part 不再诱导内核创建逐 part grant，`delivery.send` 票据绑定 Bot 能力、part semantic digest、准确 Adapter Generation 和 transport digest，最终 operation 的单次消费仍防止跨 part/参数重放。
-- `kernel.effect` 的 fence verifier 已按 `fence_kind` 注册且禁止覆盖；工具与 Delivery 都使用 RuntimeGraph fence，OneBot 驱动再复核包内确定性派生的 Binding/connection/client/transport identity，调用方不能自行拼出可用连接 fence。
-- OneBot 客户端在 effect driver `start` 中绑定冻结配置 revision、Adapter Generation 和 RuntimeGraph identity；
-- RuntimeGraph publication 原子切换服务 route，随后同步打开候选 driver ingress；客户端本身不另设第二个发布账本；
-- WebSocket 在预热期只缓存，图提交后才打开事件流；
-- 旧 Adapter Generation 即使仍持有 Binding epoch，也不能接纳事件或发送；
-- raw event、normalized parts 和 author snapshot 先成为带来源闭包的 payload；文本消息再生成独立 UTF-8 Memory part，由一个调用方 UoW 原子提交 Adapter platform event、Conversation Inbox、群主干和 Memory occurrence；
-- frame ingress 以稳定 frame operation 合流，平台事件 participant 与 Conversation/Memory/Media/Shell 在同一调用方事务提交；同一账号不同群可以并行。
-
-Conversation 已增加受精确 Generation 约束的 Worker 内核：它从持久 lane 领取 actor，同群依靠数据库 lease/epoch 串行，不同群受有界并发槽并行；注入的单一 `AgentExecutionPort` 只能在下一次模型调用回调取得新的 `InputBatch`。最终候选后到达的 trigger 会创建同一 Session 的后继 Run，普通尾部在 Session 结束时静默排空。Worker 已不再直接追加回复 Context 或自行提交 `SESSION_END` 选择，也不会在执行异常后擅自把仍有持久 Agent Session 的 Run 退回空闲；它强制依赖 `ConversationCompletionPort` 和 `SessionDecisionPort`。`TransactionalConversationCompletionPort` 逐项核对 Agent completion 与 `FinalReplyPlan` 后调用三方 UoW；`TransactionalSessionDecisionPort` 从已完成 Run 固定 deadline 和稳定操作 ID 后调用 Agent/Conversation 交接 UoW。领取、续租、输入选择和释放仍在调用方事务内复核 Conversation Generation。活跃 Session 本身已作为恢复候选；Worker 重启后读取持久 `session_ref/run_ref` 并恢复原执行链，Agent authority 也能枚举包含已完成但尚未排空 Session 的活动 Run 头。`WAIT_APPROVAL` 不再作为 Worker 失败高频重领：Conversation lane 持久化短期 `resume_not_before` 和原因，释放 actor/并发槽但保留逻辑 Session；期限到达后恢复同一 Run，新消息只继续入队。完成端口必须显式返回实际回答的 trigger 集合，不能依赖丢失即不可恢复的进程内累计列表。`FinalReplyUnitOfWork` 已在写入前复核 Agent、Conversation、Delivery、Memory 四个精确 Generation，并在一个 Bot PostgreSQL 事务中把 Run 从 `FINAL_READY` 置为 `COMPLETED`、追加正式 `REPLY`/终结明确 trigger、创建 CHAT SendIntent，并登记只含实际投影直接种子的关联 journal；任一 participant 失败时四者整体回滚。`SessionHandoffUnitOfWork` 也已把 `SESSION_END` 的输入选择与 Agent Session 的后继 Run 建立/显式关闭放入同一事务；InputBatch 现在冻结 `context_view_revision`，后继 Run 不再从后来状态猜测模型视图。`DurableAgentModelExecutor` 已按持久 Run 输入 fence 构造 Provider 投影，写入 ModelRequest/TransportAttempt，在 Provider 的发送前许可事务中原子标记 Agent handoff，持久化 SUCCEEDED/NOT_APPLIED/UNKNOWN 观察，解析固定 CorePrompt 协议并把终止回答推进到 `FINAL_READY`；输入版本、trigger 和 InputBatch 任一不符都会在调用前拒绝。FunctionCall 现在冻结准确工具 component/Generation/service/contract 绑定和原触发 principal，并持久化单个 ToolProposal；`DurableAgentToolExecutor` 只接受回显相同输入摘要和 audience Generation 的授权票据收据，通过 Effect 端口的事务回调原子标记 `DISPATCHING`，结果丢失后由新 owner 查询原 effect，不能重新 dispatch；成功载荷必须由工具组件以自身身份发布，协调器不能冒充工具写 payload。`KernelToolAuthorizationPort` 已把可委托的 `tool.invoke` grant 收窄为目标工具的精确 Generation，按策略建立通用批准信封，并在同一事务中单次消费已批准对象和签发短票；批准决定也必须消费准确 scope、决定摘要、计划和主体的 `approval.decide` 票据。票据已经拆分唯一 issuance operation 与最终 effect operation；handoff 前过期会形成新签发 attempt，同一 effect 的并发票据消费由 operation advisory lock 和唯一消费事实确定地收敛。`KernelToolExecutionPort` 已把票据消费、当前 RuntimeGraph fence、Effect handoff 和 Agent `DISPATCHING` 放入一个事务，外部返回丢失时持久化 `UNKNOWN`，恢复只查询原效果；工具结果引用随 Effect evidence 持久化且保持工具组件所有权。恢复投影会携带当前 request/attempt/tool/checkpoint；无法查询的 `DISPATCHING` 模型或工具 attempt 幂等落为 `BLOCKED_UNKNOWN`。协议解析失败会原子保存失败 request/attempt、候选摘要、有界原候选与 checkpoint；同一 Run 只允许一次绑定原失败请求的 `REPAIR` 调用。该调用由 Agent Protocol 从持久失败事实构造独立 `ProtocolRepairView`，不再重新投影 Context、Preset、Memory 或媒体，Provider 只发送定型视图；重启后从 `REPAIR_READY` 确定性继续，修复耗尽则准确终结已领取 trigger 并释放 lane。`conversation.scheduler` 只拥有调度权威；生命周期 Worker 经冻结的 agent.execute/1 句柄调用单一 Agent 状态机，并把最终回复与 Session 交接交给内核 UoW 服务。内核协调器按声明解析 participant，业务模块不持有其他运行实例。PARSING、REPAIR_READY 和 SAFE_BOUNDARY 已支持从持久事实确定性自动重放；RuntimeGraph 现从各模块描述符汇总工具贡献并拒绝全图重名，`agent.runtime` 只消费受限目录和冻结服务句柄。首个只读 `runtime_status` 工具由 `kernel.runtime` 自身贡献，已贯通真实模型调用、授权、Effect、工具所有载荷和结果查询重放。WAIT_APPROVAL 现由跨模块事务先锁定批准对象，再写入带 approval_ref 的精确持久阻塞；批准提交后只提前唤醒匹配的 Conversation，若决定抢先提交则 Worker 在同一 actor 内立即续跑，进程丢失仍由恢复期限兜底。热替换现用 lifecycle activation ID 把旧 Worker 的安全点交接持久化为 `RELOAD_WAIT`，记录原执行阶段和检查点，候选发布或发布失败恢复旧图时只以同一 operation 精确释放 Agent 与 Conversation 阻塞；新宿主启动后也会回收崩溃遗留的交接等待。目标设计不增加拥有聊天语义的生产执行模块。
-
-当前真实网络模块支持正向 Universal WebSocket 与 HTTP action 客户端，启动时调用 `get_login_info` 校验账号。HTTP 上报通过模块端口接入，尚未接入新的生产 Web transport 宿主。
-
-`memory.graph`、`embedding.multimodal` 与 `vector.index` 已作为三个独立成员进入干净 RuntimeGraph，其中 Embedding 与 Vector Index 已迁为真实 builtin，Memory 仍是待迁移的宿主领域模块。Memory 独占图 schema、facet/claim、预算、请求投影、稳定 `index_ref_id`、召回语义和删除 outbox；Embedding 包独占 Bot 终身 profile identity，并通过同代 Effect Driver 持有 endpoint、凭据与 HTTP client；通用 `kernel.effect` 独占外部 transport operation/attempt/observation；Vector Index 包独占 Bot 终身空间身份，其三个同代 Effect Driver 分别持有 Milvus upsert、search、delete client 和 Bot collection。Memory 只持有冻结的 `embedding.profile.bind/1`、`embedding.encode/1` 和 `vector.index.upsert/search/delete` 服务句柄，不持有 Milvus client，也不允许 Vector Index 读取 Memory 私有表。Memory 在 JSON ABI 边界把内部不可变向量投影为数组，Vector Index 只接收带稳定 ref 的索引 DTO；每次外部 I/O 前再次复核准确 Generation membership。Memory 在本地完成含来源的多模态请求投影，并在同一数据库事务中消费授权票据、提交通用 Effect handoff 与自己的 batch handoff；准确 Embedding Generation 的驱动复核 wire 摘要和 Effect fence 后才发生 HTTP 交接。Embedding 成功先把 facet 结算为 `EMBEDDED`，以相同 ref 幂等发布 Milvus 成功后才转为 `READY`；召回只接收候选 ref，并在 PostgreSQL 快照中重新验证来源、资格、空间与删除状态。默认冻结 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维 L2 空间；Bot 首次初始化后模型、维度和向量空间由 Provider/Memory/Vector Index 三重拒绝变更，endpoint/凭据/连接参数可经配置 plan/apply 和新 Generation 替换。`memory.recall/1` 把精确 InputBatch 物化为 `QUERY` facet；只有 Scheduler 已提交的确定性 archive 才把源从 `REGISTERED/ADMITTED` 提升为长期 `ELIGIBLE` 并创建 DOCUMENT facet。Milvus 只选直接种子，随后按 QiYu 的最大乘积路径扩散时序/联想图；每节点联想边超过配置上限时按查询种子伪随机抽样后再扩散。检索包、关系区域和实际模型投影回执保持不可变，Evidence 逐项标注原始群聊、主干、作者、直接种子和路径。Memory 另贡献 `memory_recall_exact` Agent 工具，按稳定 source ID 绕过 ANN 精确读取已归档单元。
-
-Embedding 批处理现先完成本地分面物化和输入校验，再预留每日预算；交接前失败会将已领取 attempt 明确结算为 `NOT_SENT`，不会遗留 `PREPARED` attempt 或 `RESERVED` 预算。纯空白文本和超过单图上限的图片会保留为可查询的 `SUPPRESSED` facet，不进入 Provider；批次领取同时限制累计图片字节。单批数据、Provider 或存储错误只使 Worker 有界退避并公开最近错误，不再结束模块所属任务，下一轮仍会执行过期 attempt 与预算恢复。
-
-`media.capture` 现已作为真实 builtin 包和独立 Generation 进入生产图。其 manifest 冻结 Worker 入口、能力、依赖、资源、私有 schema、Domain 端口、owned-work handler、受限 effect 与包内管理 UI；业务代码由隔离 Worker 执行，随 RuntimeGraph Generation 完整热替换。Adapter/Conversation/Media 四参与者 ingress UoW 原子登记图片任务，规范 Context 只保存稳定 `media_ref`，临时 URL 仅留在 Media 私有 schema。通用 owned-work supervisor 管理领取与结算，包内 job 使用租约、重试和资源上限下载并验证图片，把像素保存为 Kernel Payload 后通过 Memory 公共端口发布保持原始段序的 TEXT/IMAGE parts；InputBatch 或 archive 先于图片完成时分别保留 pending admission/archive，来源完成后按顺序收敛，最终失败使两类待定事实显式成为 `UNAVAILABLE`。当前 Context 图片由 `media.context.resolve/1` 在模型调用边界物化，历史图片由 EvidenceBundle 物化，二者均使用来源绑定的 `MediaSnapshot`。旧宿主 Media runtime、Repository 与 official baseline 已物理删除。
-
-`shell.command` 现由 `builtin/shell_command` 的不可变包快照提供。隔离 Worker 独占直接 `#forest` 前缀识别、schema 驱动解析、目标服务调用和结果投影；包私有 SQL 独占按 Shell Generation 分区的管理员策略、命令目录、请求、claim/lease 与结算账本。命令目录和配置快照在候选发布前物化，入站请求同时绑定准确 Shell Generation、目标命令 Generation、平台事件、Binding 与真实用户；控制消息仍经 Adapter、Conversation、Memory、Media、Shell 的同一入站 UoW 进入带作者的群 Context 和全局记忆，但不会触发 Agent。参数属于 Shell 聚合，作为有界私有 JSON 保存；拒绝和执行结果由准确 Shell Generation 创建受管 Payload。执行授权 UoW 原子完成一次性 `management.invoke` 票据签发、消费与 claim 转移，终态 UoW 原子提交 Shell 结算、CONTROL Delivery intent 和 Kernel Audit envelope。入口冻结后旧代按 `backlog` 排空已接纳请求；候选失败恢复旧代，成功后反向生命周期保证 Shell 先于 Delivery、Adapter 退役。旧 `clean_shell_*`、Shell Repository/Gate/Authorization port 和官方旧 baseline 已物理删除。
-
-Adapter→Shell 是整图发布后才能使用的冻结 RuntimeGraph service handle，而不是 Adapter 的启动依赖：启动顺序为 Adapter transport、Delivery、Shell，退役顺序反向为 Shell backlog、Delivery、Adapter。Adapter 在入站事务中一次复核准确 transport fence 并把接纳事实持久化；已接纳的旧请求不会在执行时重新依赖仍存活的 Adapter Generation。Shell Worker 不持有 Adapter、Delivery、Authorization 或 Audit 实例，只能通过 manifest 声明的 service、payload effect 和 UoW plan 访问这些边界。当前包使用通用 schema 配置面；Shell 专用管理 Query/Action/UI 仍待作为包工件补齐。
-
-`job.scheduler` 现由 `builtin/job_scheduler` 的不可变包快照提供，生产宿主通过通用 `bootstrap_builtin_package` 安装；旧 `clean_job_*`、`builtin_job_shell.py`、`JobSchedulerRepository` 和官方旧 baseline 已删除。任务类型由执行模块以 `RuntimeJobTypeContribution` 发布版本、输入 schema、服务、超时、最大尝试和并发约束；Scheduler manifest 用 `contribution_directories = job-types` 显式声明消费目录。RuntimeGraph 构建时冻结贡献者和准确目标 Generation，Adapter 只向 Worker 投影 JSON 目录并校验每次执行携带的完整冻结目标，既不把 `RuntimeServiceHandle`、Repository 或连接池交给插件，也不按名称重新解析当前路由。
-
-Job 包私有 baseline 独占类型目录快照、队列、取消和幂等结算。候选 Generation 在发布前以受 PREPARED graph 与 HostLease 约束的 preparation Command 物化自己的目录分区，因此旧活动代不受污染，而新图发布后 `jobs.types/run` 无轮询空窗；启动回滚和旧代退役则在确认准确 Generation 已无开放 route 后，经包声明的 cleanup Command 删除该分区，目录与创建它的 Generation 同生共灭。领取再用 `FOR UPDATE SKIP LOCKED` 冻结执行目标，已排队但在新图退役的类型显式失败。Worker 经窄 `ctx.job_types.execute` IPC 调用准确执行代，协作取消由包声明的只读 `job.cancellation-requested` Query 提供。租约过期不自动重试，而是保留目标身份并进入 `UNKNOWN/JOB_RESULT_UNKNOWN_AFTER_LEASE`。输入和结果是 Job 私有业务状态，直接作为有界 JSONB 存在包 namespace，不借用 Kernel Payload 伪造跨模块正文所有权。群聊 `jobs list/inspect/run/cancel` 的命令声明、参数 schema、权限、服务和实现全部随包发布；Web Query/Action 与紧凑 UI 同样来自包，通用沙箱壳只代理当前组件的声明操作，`requested_by` 由管理网关按 manifest 注入而不是由 iframe 伪造。真实 PostgreSQL 验证已经完成空库安装、预发布目录物化、立即可用的管理端口、`runtime.health-snapshot` 执行、成功结算、候选预热不污染旧目录、旧代 owned-work 冻结排空、新图原子发布、私有目录回收和旧 Worker 回收。
-
-`process.executor` 由 `builtin/process_executor` 的不可变包快照以独立 Generation 贡献 `native.execute`，并复用上述 Job 权威链。`job.scheduler` 只持有冻结服务句柄；请求进入包内 `native.execute` handler，Worker 从冻结配置选择 ExecutionProfile、投影无 shell argv，并通过 `process.native.spawn` effect service 提交完整且有界的执行计划。宿主 capability 逐字段复核该计划没有超出同一 Generation 的安全 profile，再负责可执行文件摘要、身份/资源限制、进程组取消、有界 I/O 和 Payload 工件。Worker 把原始 effect receipt 投影为公开 Job 结果。配置、Worker 代码、效果驱动实例、Job route 与 UI 摘要一起换代；真实 PostgreSQL 的完整 20 成员图启动、热替换、退役与重启回归通过。
-
-### 已有干净业务 Authority
-
-以下模块均有独立官方 baseline、Repository 和定向 PostgreSQL 测试；其生产接线范围以上文逐项说明为准：
-
-- `memory.graph`、`embedding.multimodal`、`vector.index` 与 `media.capture`：生命周期 Worker、Bot 级冻结语义空间、Milvus 派生向量索引、稳定 ref、每日请求/Token 预算、每群主干、图文来源摄入、archive-only 长期资格、最大乘积图扩散、高出度联想抽样、成功回复关联 journal、Agent 向量召回与精确 ID 工具、当前图片投影及跨主干关系查询已进入 RuntimeGraph；
-- `delivery`：CHAT/CONTROL lane、顺序、Effect 与 Adapter 双 fence、生命周期 Worker、崩溃恢复与 UNKNOWN 对账；
-- `shell.command`：Binding/群/主体策略、RuntimeGraph 命令注册表、P0/P1 claim、双阶段授权复核、CONTROL 回执和撤权后安全终结；
-- `conversation.scheduler`：连续分类水位、同群 actor lease、安全边界、trigger cut、静默排空和恢复领取。
-- `job.scheduler`：模块任务目录、持久排队、租约/代次 fence、重试、取消意图、结果载荷和有界管理查询。
-
-Repository 测试证明各自权威状态机；生产启动链是否切换只按上文列出的 20 成员 RuntimeGraph 与集成测试判断。
-
-## 已删除的旧实现
-
-激进切换已经完成源码级删除，不保留桥接层：
-
-- `BotStore`、`PostgresStore`、`public` 大表 authority 与旧部署/每 Bot schema；
-- `migration_v1`—`migration_v26`、`storage/migrations`、`storage/bot_migrations` 与全部数据迁移夹具；
-- 旧 OneBot、Agent、Memory、Delivery、Shell、Job、Routing 与 Kernel 业务组合根；
-- 旧 RuntimeGraph store、`legacy-module-factory/1` 及第二套启动/回滚状态机；
-- 旧固定业务管理栈、备份/恢复组合根和 writer-fence 升级路径。
-
-生产 `CleanBotHost` 仅使用固定 Bot 身份和受限 PostgreSQL 连接池的 `CleanBotStore`。`RuntimeModuleRegistry` 只接受 Generation contract factory，并且启动生命周期必须取得 `KernelRuntimeRepository` Generation authority。开发数据库在切换时直接重建；历史数据如需进入新框架，必须走未来独立导入产品，而不是在生产进程恢复旧 schema 语义。
-
-可执行 CLI 现发布生产入口 `forest supervisor`、显式诊断入口 `forest bot` 与离线 `forest plugin init/check/build/lock/export/import`。会启动旧固定业务后台的 `forest serve`、调用旧迁移 Kernel 的 `forest dev`、旧 setup/recovery 命令均已从命令面删除；控制台由准确作用域的模块贡献承载。插件 watch 将在接入同一 Generation publication 协议后重新提供，不能复活旧开发宿主。
-
-## 后续增强与最终验收
-
-1. 继续扩展模块贡献式 Shell 命令集合。描述符目录、通用 schema 解析、准确贡献 Generation 路由，以及 `core.status`、`core.pause/resume`、`core.reload`、`module.list` 已进入生产路径；`memory.graph` 已独立贡献主干、来源和关系的有界查询，`kernel.audit` 已独立贡献带组合筛选和稳定游标的审计元数据查询；`agent.runtime` 已贡献 `run.inspect` 与 P0 `run.cancel`；`job.scheduler` 已贡献 `jobs list/inspect/run/cancel`。`process.executor` 已通过同一 Job 目录贡献受 ExecutionProfile 约束的 `native.execute`，固定路径/摘要、参数 schema、argv、UID/GID、环境、网络与资源上限，不暴露宿主 shell。短回执明确标注来源群或审计主体/资源/操作。目录贡献者自动进入 Shell/Agent/Job 的生命周期依赖与 Generation 描述，图构建会拒绝动态依赖环，旧图按消费者先排空、提供者后退出的顺序关闭。
-2. 扩展模块贡献式工具目录的实际工具集合；协议失败、PARSING、REPAIR_READY、SAFE_BOUNDARY、WAIT_APPROVAL 与 RELOAD_WAIT 的生产恢复已落地。热替换已具备候选预热、旧 Worker 安全点排空、带 lifecycle activation ID/CAS 的持久 `RELOAD_WAIT`、候选发布或回滚后的精确释放、宿主崩溃后的遗留等待回收，以及发布后旧资源回收。`WAIT_APPROVAL` 已用带精确批准引用的持久恢复期限替代失败热循环，批准决策提交后会直接提前唤醒匹配阻塞，决定先提交时也不会在其后安装丢失唤醒的阻塞。目录发现、全图冲突拒绝、贡献者所有权核对和动态 Agent service requirements 已落地，`runtime_status` 已贯通真实模型 FunctionCall、准确 Generation 绑定、授权票据、Effect handoff、工具所有结果载荷、下一轮模型输入及查询重放。Adapter 入站已经改由内核 UoW 服务提交，Delivery→Adapter 已使用冻结服务句柄；旧 Bot 组合根和旧业务 `contract.router` 已删除。
-3. 继续把多模态 Memory 的规模验证从十万来源扩到百万来源，并补图片字节负载、并发查询和资源上限测试。十万来源的组合筛选、快照稳定分页、两端点关系展开及逐证据群/主干标注已经由真实 PostgreSQL 执行计划测试覆盖；基线索引与公共查询的复合游标顺序一致。
-4. 继续扩展模块贡献式管理协议与紧凑 WebUI 壳：当前切片已经从 Registry 动态发现贡献，并提供配置 plan/apply、Generation 热替换、Memory 的主干/来源/关系有界查询、`kernel.audit` 自有的脱敏审计筛选/游标工作区、`agent.runtime` 自有的 PresetContext/CorePrompt 与 Run 控制工作区、`job.scheduler` 自有的类型发现/筛选/详情/运行/取消工作区、`adapter.onebot` 自有的 Binding 状态/fence/端点工作区，以及 `delivery` 自有的 UNKNOWN 筛选、发送链详情和证据核对工作区。deployment scope 由 Catalog、Secret、Provisioning、Accounts 和 Audit 五个组件贡献紧凑工作区；壳层通过注册的 deployment/Bot `ManagementScopeProvider` 在同一工作台切换准确作用域，不合并注册表或代签模块操作。Agent Run、Job 和 Delivery UNKNOWN 列表均使用服务端组合筛选、快照与复合游标；Memory 工作区逐边显示类型、端点、权重和带群/主干/作者的证据。持久 ADMIN/AUDITOR 身份、scrypt 密码、随机服务端 Session、CSRF、注销、账户管理、会话撤销和最后管理员约束已经落地；登录失败按 HMAC 身份与直连 peer 双桶在 PostgreSQL 中串行合流，重启后仍执行窗口封禁并返回 `Retry-After`。管理请求现在从再次验证的当前 Session 签发最长 30 秒的 `WebAuthorityTicket`，绑定版本化密钥、主体/角色、Session revision、目标 scope、组件、当前 Generation/graph revision、稳定 operation、action、输入与 plan 摘要；deployment 和 Bot 目标网关均自行验签并执行读写角色约束，热替换后的旧 Generation 票据不能命中新图。Bot 模块配置 plan/apply、Agent Run 取消、Job 入队/取消、OneBot Binding plan/apply 及 Delivery UNKNOWN 核对已把再次验签、当前 policy revision、CONTROL Generation fence、不可变 `web_authority_receipt` 与业务事实放进各自 authority 的同一个 PostgreSQL 事务，冲突时整体回滚；同一事务还通过通用 Bot 写入守卫向 `kernel.audit` 追加脱敏 `web.management` envelope，记录准确组件代际、Web 主体、动作、资源、operation 及最终接纳的 ticket ID。OneBot apply 还把准确 `plan_id` 摘要纳入票据。Delivery 只接受带类型、引用和记录主体的显式证据，将 `SENT` 或 `NOT_APPLIED` 与 Effect、Attempt、Part、Intent 同时收敛；相反结论并发时只有一个赢家，不提供无证据重发。deployment 写动作也已从统一控制面代际改为绑定贡献模块的准确固定代际；Catalog、Secret、Account、Storage/Bootstrap Profile 与 Provisioning Job authority 在业务事务内复验并接纳 `forest_deployment.web_authority_receipts`，并通过 `deployment.audit` 写入稳定、脱敏且引用收据的审计 envelope，失败与重放分别整体回滚和收敛。Audit 查询使用稳定时间游标，并在前后复核当前会话。`kernel.authorization` 现拥有版本化 Bot Web operation policy 及独立紧凑设置界面；规则精确匹配组件与动作，只能按启用状态、角色和稳定 Web 主体收窄原有门禁。读请求在目标网关读取当前 effective policy，写请求在最终业务事务内再次读取；policy plan/apply 触发 RuntimeGraph 替换并使旧图票据失效。首次 setup 配对由安装器交付短时高熵配对码；Supervisor 只把摘要装入唯一部署状态，浏览器经精确 Origin 提交首管理员资料，数据库在同一事务创建 ADMIN、记录操作、消费并清除摘要。并发请求只有一个赢家，完成状态在重启后不可重新开放。旧固定业务 DOM、专用 API 和旧大页面已经删除。
-5. 继续把多 Bot provisioning 和恢复控制面切到干净宿主；独立 `deployment.bot-catalog` baseline、稳定 Bot 身份、存储 profile 引用、组件级 bootstrap profile、持久供应 Job、官方 provisioner、动态 PostgreSQL 数据库分配、deployment/Bot 作用域路由、runtime intent CAS、运行观测、Supervisor lease/fence、多宿主独立启停、`forest supervisor` 入口、默认 Compose 编排、多版本主密钥 keyring 和真实双 Bot 验收已经落地。单 Bot `forest bot` 只作为显式 CLI 诊断入口，不再作为 Compose 服务。
-6. 自动化边界已覆盖 OneBot loopback 长连接断开、在途 action 的 `UNKNOWN`、1000 条事件顺序消费、队列过载显式失败、候选 publication 回滚、owned task 崩溃隔离，以及新宿主对遗留客户端的失败结算。真实实例已连续完成两次 Binding 配置换代并恢复原配置，revision 从 1 推进至 3，每次均建立新 RuntimeGraph 和 client incarnation，最终保持 ONLINE；后续只保留树莓派与 PC 间长时实网抖动和真实持续流量观测。
-7. 旧 schema、迁移、固定管理栈、旧 Bot 组合根、兼容测试与历史迁移夹具已经删除。Memory→Provider 只接受当前精确 evidence 投影，额外的历史 retrieval 形状会在模型调用前拒绝；Embedding 传输也不再导出旧协议别名。
-8. 完成真实 QQ 许可群 `933179609` 的低频消息/图片/排队验收；`forest-clean` 的 Supervisor 与 PostgreSQL 当前健康，`forest-main` 已供应并进入 ONLINE，OneBot Binding `binding/main` 为 ONLINE 且接收已启用。树莓派 `alicebot.service` 保持停止，当前等待人工触发而不由验收脚本主动发送群消息。
-
-## 最近可复现证据
-
-- 文档权威链与 CorePrompt：`14 passed`。
-- Runtime Registry、Schema authority、干净 Conversation/OneBot/Delivery/Shell、OneBot codec/WebSocket 和 Agent 协议相关组合：上一基线 `183 passed`。
-- Agent/Conversation Worker、持久调度 Repository、十成员 Messaging RuntimeGraph、Provider、Delivery 与生命周期相关定向组合：`124 passed`；其中 Worker 单元用例验证同群互斥、跨群并行、安全点接入、原 Session/Run 恢复、强制事务完成端口、稳定 Session 决策计划，以及 quiesce 时释放正在等待新输入的群 actor；PostgreSQL 用例验证 Agent/Conversation/Provider Generation fence、同 Session 后继 Run、最终回复 Agent/Conversation/Delivery/Memory 四参与者事务回滚、Delivery Bot 能力到精确 Adapter Generation 的票据、PREPARED abandonment/requeue、DISPATCHING 崩溃后 UNKNOWN、通用批准的受权决定/单次消费、可委托能力到准确 audience Generation、Effect 与 Agent 原子交接、交接后结果丢失与只查询恢复、Adapter 持久 binding fence、freeze 后拒绝新准入、member fence 排空、来源作者与 trigger 所有权。
-- 十一成员 Kernel + Provider + Memory + Agent + Conversation + OneBot + Delivery RuntimeGraph 集成：真实 PostgreSQL 下通过，验证准确代际、text-only 多模态请求投影、OneBot 文本来源/群主干登记、InputBatch 与 Memory eligibility 原子提交、发送前许可、生命周期所属 Delivery Worker 的真实 OneBot wire 调用与 SENT 落账、作者/群来源和逆序关闭。最新 clean authority/RuntimeGraph 定向组合为 `68 passed`；并发测试覆盖 InputBatch 与延迟媒体来源两种完成顺序，最终没有未解析的 `PENDING_CAPTURE`。
-- OneBot 单模块生命周期集成：真实 PostgreSQL 下通过，验证 BUFFERING、首次 publication、运行中候选预热、原子客户端换代、旧连接 fence、旧连接异步关闭、新连接继续接纳、quiesce 和 CLOSED。
-- [单 Bot 生产宿主](operations-clean-production-launch.md)与自动触发策略：真实 PostgreSQL 下通过。20 成员图可以从空库启动、在同一 HostLease 下热替换并排空旧图、退休、显式释放 HostLease 并立即以新 incarnation 重启；Embedding endpoint 配置 revision 可通过候选 Generation 立即生效而冻结 profile 变更被拒绝；OneBot 图文混排经独立 Media Worker 保序发布，归档后可作为 VL 文档召回且临时 URL 不进入规范 Context；许可群的 mention 由独立 `conversation.trigger-policy` 分类并在 ingress UoW 内原子提交，不再由测试手工制造 Trigger；群 Shell 在 DATA admission 关闭时仍能完成受权状态查询和拒绝回执，普通 DATA 消息保持未接纳；Job Worker 通过模块目录执行 `runtime.health-snapshot` 与 `native.execute` 并持久化结果。
-- Shell、干净模块、RuntimeGraph、Schema bundle、Delivery 与 CONTROL/DATA 准入定向组合：`170 passed`；覆盖原子控制入站、P0/P1、授权重验、撤权后安全失败、CONTROL 优先发送、群聊 pause/resume 及 DATA 维护态隔离。
-- Shell 审计垂直切片：`28 passed`；真实 PostgreSQL 验证 Shell 终态、CONTROL SendIntent 与 `kernel.audit` envelope 原子合流，失败整体回滚；完整生产图验证 `audit.tail` 的服务句柄归属准确 `kernel.audit` Generation，而不是壳层或 `shell.command`。
-- `kernel.audit` 管理贡献：真实 PostgreSQL 宿主集成通过；Registry 只为该准确 Generation 发布审计工作区，通用模块查询网关提供动作、生产者、来源、资源、操作及游标筛选，页面在工作区内分页滚动且不读取详情载荷正文。
-- 干净管理面首个垂直切片：真实 PostgreSQL 宿主集成通过，验证管理 token、模块 Generation 贡献发现、Memory 主干/来源筛选、结构错误 422、VL profile 不可变约束、Embedding endpoint plan/apply、RuntimeGraph 原子热替换、固定 `100dvh` PC 工作台及 CSP；Docker Compose 使用完整占位环境变量可通过配置解析。
-- `agent.runtime` 管理贡献：真实 PostgreSQL 宿主集成通过，完整 CorePrompt 正文、协议版本、parser revision 与固定摘要可见且不可编辑；PresetContext 经 Agent 自有 Payload authority 生成带来源的新 PayloadRef，再通过配置 CAS 和完整 RuntimeGraph 替换生效。不存在子 Agent、Agent 目录或第二套聊天执行链。Preset bootstrap 只在未初始化 authority 中创建受管 Payload 和 revision 1，宿主重启时外部 seed 漂移不会覆盖模块状态。
-- Chat Provider 配置现与 VL Embedding 一样只保存版本化 `credential_ref`，Generation 启动时按引用与配置 revision 解析凭据，不再把密钥绑定在无引用的进程闭包中。`adapter.onebot` 的设置界面由包工件贡献，支持同一 Bot 的最多 16 条 Binding；编辑形成标准模块配置 plan/apply，候选 Worker 与 transport driver 以冻结配置验证账号并随 RuntimeGraph 原子换代。页面只显示 opaque `credential_ref`，访问令牌不进入配置或回显；Binding/connection/client/transport identity 由准确 Generation 确定性派生，不另建一套宿主 Binding 管理 API。
-- 多 Bot 部署控制面首个切片：独立空库 baseline 保存不可复用 Bot 身份、opaque storage profile、期望运行状态和实际运行观测，三者不压成 Bot 配置行；目录操作支持幂等重放与 revision CAS，Supervisor lease 使用 owner epoch 阻止旧进程写观测。`CleanMultiBotSupervisor` 只解析 profile 并管理独立 `CleanBotHost` 生命周期，一个 Bot 启动失败进入带期限退避的 FAILED 观测，不终止其他 Bot。部署 Secret authority 使用 AES-GCM、部署/引用/用途/版本关联数据与主密钥 ID 保存不可变密文版本，写入按 operation 幂等并以 revision CAS 轮换；普通 metadata 不暴露明文或明文摘要。Storage profile authority 将每个 profile 不可变绑定到准确 Bot、storage generation 与 PostgreSQL DSN secret_ref；Catalog 外键和 Supervisor 解析边界同时复核该绑定，settings resolver 不能替换 DSN。不可变 bootstrap profile 同时绑定准确 Bot、storage profile 和 generation，把每个组件的 schema/config 分行保存并校验组件摘要与整单摘要；它只接受非敏感配置和已经存在的 `secret_ref`，模块安装后由各模块自己的配置 authority 接管，部署目录不成为长期巨型 Bot 配置。真实 PostgreSQL 定向组合为 `7 passed`。
-- 部署供应 Job：部署库按 Bot 永久保留唯一供应身份，任务冻结 storage/bootstrap profile 与 manifest digest；领取同时受当前 Supervisor lease 和任务 lease epoch 围栏，续租不推进公开 revision，过期 owner 无法结算，失败按有界次数进入 `RETRY_WAIT` 或终态。官方 profile 对 Provider、VL Embedding、触发策略、Shell、Agent preset 和 OneBot Binding 执行准确 schema digest 与 JSON Schema 校验，只通过 Secret authority 解析三类凭据；provisioner 先按 Bot ID 的 SHA-256 派生稳定数据库名和独立无特权 login role，用随机口令构造只存入 Secret authority 的 Bot DSN，在批准的部署 PostgreSQL 集群内经咨询锁并发收敛 role/建库与 owner 复核，再于目标空库安装 20 个模块 authority、写入模块自有 revision 1 与 Binding 配置，但不发布 RuntimeGraph 或建立网络连接。Web/API 只返回引用。成功后才以稳定 operation 发布带 bootstrap profile/manifest 来源的 Bot `READY`；正式 `forest supervisor` 同时监督供应 Worker 和各 Bot Host。真实 PostgreSQL 定向组合为 `13 passed`，覆盖四路并发建库重放、目标越界拒绝、并发唯一 claim、无语义续租、重试接管、陈旧 claim 拒绝、目标库无活动图和发布顺序。
-- 多作用域 WebUI：Supervisor 挂载与单 Bot 相同的紧凑壳，deployment 模块目录由 `deployment.catalog`、`deployment.secrets` 和 `deployment.provisioning` 三个控制面组件贡献；在线 Bot 的目录来自该 Bot 准确 RuntimeGraph。`ManagementScopeRegistry` 只注册 provider，通用 `/scopes/{scope_kind}/{scope_id}` 路由不判断 Bot 业务；Bot 下线时先撤销新管理准入，等待已接纳请求排空后才关闭 Host。Catalog 工作区投影 Bot desired/observed 状态并以 intent revision 切换启停；Secret 工作区写入版本化密文且只列出引用、用途、revision 和 key ID。创建期配置现由组合根注入的 `BootstrapConfigurationRegistry` 发现：六个官方模块分别发布 schema 摘要、纯校验器、初值和 setup surface，Provisioning 只冻结贡献结果，客户端不能提交 schema digest；页面已删除六组件大 JSON 文本框，按模块挂载可替换的设置 UI。API 用例验证未授权拒绝、deployment/Bot 注册表不合并、通用配置/query/action 路由、稳定 Bot 幂等身份、下线排空、Secret 值不回显、本地 storage 生成、模块 Bootstrap 目录和服务端摘要所有权。
-- Supervisor Compose：唯一默认服务集合是 `initialize + postgres + supervisor`，旧单 Bot Compose 服务、固定 `forest_bot` 数据库、应用数据卷和文件式 Bot 凭据入口已删除；镜像默认命令也是 `forest supervisor`。PostgreSQL 新卷只创建 `forest_deployment`，Bot 库由供应器动态创建；Supervisor 从受保护的数据库口令文件构造部署 DSN，并从独占 `0400` 文件加载有协议、active key 和最多 32 个版本的主密钥 keyring。新 Secret 版本只使用 active key，历史版本按固化 key ID 解密；错误协议、重复 JSON key、非规范 Base64、重复 key material、缺失 active key 都在联网前拒绝。keyring、数据库口令和 Web 配对码不进入容器环境或对象 repr。独立 `forest_allocator_smoke` project 从空卷真实冷启动，PostgreSQL/Supervisor 均为 healthy；deployment API 使用虚构凭据创建 storage/bootstrap/job 后得到 `SUCCEEDED` 和 `READY/OFFLINE`，派生 Bot 库含 16 个 schema bundle。最终 `forest_role_smoke` 镜像再次 healthy，容器内分配的 Bot role 系统目录实测为 `LOGIN=true`且 `SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS=false`，并与派生数据库 owner 一致。`forest_keyring_smoke` 又以双 key 文件冷启动，真实 API 写入使用 active `master/smoke/2` 且不回显明文。`forest_multibot_smoke` 在同一 Supervisor 中并行供应并启动两个各含 16 个模块的独立 RuntimeGraph；两个 Bot scope 同时可用，下线 alpha 后 beta 继续 ONLINE 且工作区可查询。OneBot 假服务只接受 `get_login_info`，因此验收没有产生外部消息。验收后均已定向清理隔离容器、网络和卷；现有旧实例未被重启或改动。
-- 干净生产存储入口：真实 PostgreSQL 下 `CleanBotStore` 从空库完成 kernel baseline、20 个模块 bundle、运行图多次热替换和重启；定向导入探针确认生产宿主不加载旧 `BotStore` 或 26 代迁移 helper。
-- 干净 CLI/镜像入口：本地 Docker runtime 镜像 `forest:local` 与 test target 构建成功，容器直接从不可变的 `/app/src` 启动 `python -m forest supervisor`；依赖按 lock 在源码复制前安装，源码变化不再触发未锁定的 `hatchling` 下载。CLI 暴露 `supervisor`、显式诊断用 `bot` 与离线 `plugin` 制品命令；旧 `serve/dev/setup/recovery` 不再能启动错误架构。Compose 只通过无网络 bootstrap 容器原子安装 deployment master-key keyring 和管理 token；模型、Embedding 与 OneBot 凭据改由 deployment Secret authority 写入加密存储，不再作为容器文件。安装器在每次启动前复核文件类型、所有权、权限、大小和单行可打印 ASCII 约束，并会移除 Windows PowerShell 管道添加的单个 UTF-8 BOM。
-- 旧管理栈切除：`src/forest/management`、旧 Bot 默认模块图与组合根、旧业务 `contract.router`、固定页面/API 测试、兼容迁移测试及历史夹具已物理删除；`RuntimeModuleRegistry` 必须显式接收 Generation 描述符，不再存在旧图 fallback。当前权威套件在独立 Linux 容器与临时 PostgreSQL 17 上为 `615 passed, 2 skipped`，Ruff、Python 编译、管理端 JavaScript 语法和干净导入边界均通过；测试使用独立网络和退出即删除的数据库，未连接真实 deployment/Bot 库。该次回归覆盖持久 ContextView 的精确成员归档、活动视图上界、无摘要载荷、触发 pin 与幂等重放，Embedding 本地失败的 attempt/预算合流、坏分面隔离和生命周期 Worker 存活、当前图 owned task 的宿主级失败传播，并保留插件篡改测试在 Linux 只读包制品上的正确行为，生产包冻结语义未放宽。`forest:local` 最终 runtime 镜像构建成功。该基线包含模块贡献式 Agent 工具、Shell 命令和 Job 类型目录及其派生生命周期依赖、Memory 主干/来源/关系群聊查询、`module.list`、`audit.tail`、`run.inspect`、`run.cancel`、`core.reload` 与 `jobs list/inspect/run/cancel` 群聊控制命令、Shell 结果/回执/审计三方原子合流、Agent Run 和 Job 管理工作区、`kernel.authorization` 贡献的精确 Web 操作策略工作区、首次 Web 配对的并发/过期/重启封闭状态机，以及 `runtime_status` 的真实模型调用、RuntimeGraph、授权、Effect、结果载荷、下一轮模型输入和查询重放集成验证。Job authority 增加幂等入队、并发唯一 claim、Generation/member fence、租约接管、revision CAS 取消、重试、受管输入/结果和不确定终态；租约续期不推进公开语义版本，过期 owner 无法续租或结算，取消与成功按同一任务行锁确定唯一终态。RuntimeGraph 重载请求继续使用 graph revision CAS、稳定 activation ID、持久领取租约和宿主监督任务。Conversation poller 在 DATA 维护态关闭期间保持存活，恢复后可继续领取持久 trigger；协议错误保留准确 request/attempt、候选摘要、有界反馈与 checkpoint，只允许一次可跨重启恢复的 REPAIR；热替换在候选发布前冻结并排空旧 Worker，Agent 以 operation 绑定的 `RELOAD_WAIT` 检查点持久交接；`WAIT_APPROVAL` 使用精确批准引用和提交后通知提前唤醒，同时保留期限恢复。
-- `process.executor` Linux 专项：同一测试镜像实际执行固定 profile，确认含 `$()` 的参数按原样进入 argv 而不经 shell 展开，stdout/stderr 成为有界 `kernel.payload` 工件，seccomp `deny` 使 socket syscall 返回 `EPERM`，持久取消意图触发进程组 TERM/KILL 收敛。可执行文件必须是 root 拥有、非符号链接且不可被 group/world 写入的常规文件；UID/GID、POSIX limit 或 libseccomp 不满足声明时，配置拒绝激活。专项 `5 passed`。
-- 当前 Process Executor Job/Effect 边界重构后，完整权威套件在临时 PostgreSQL 17 上为 `578 passed, 8 skipped`；重建后的 Linux 镜像中，包运行时与原生进程定向组合为 `9 passed`。这些结果只验证 Worker handler、嵌套 effect、Generation/取消传播及安全 profile 复核的实现，没有把测试当作业务所有权或状态约束的来源。
-- OneBot WebSocket 抖动与流量专项：真实 loopback WebSocket 完成账号探测后由服务端主动断连，Reader 以 `ONEBOT_WEBSOCKET_CLOSED` 终结并作为 Adapter Generation 的 owned task 暴露给宿主监督；已经交接但未取得回执的 action 收敛为 `UNKNOWN`，不自动重发。内存传输夹具在激活前连续推入 1000 个事件后验证一次、有序消费；超过配置容量时以 `ONEBOT_WEBSOCKET_BACKPRESSURE` 明确失败并排空已接纳事件，不丢弃后继续运行。专项 `4 passed`。
-- Memory 十万来源规模基线：单个真实 PostgreSQL 测试库写入 `100,000` 个来源单元及内容部件、`20,000` 个关系贡献和证据，验证主干/作者/模态/类型组合筛选、消息与关系的快照复合游标续页、无重复页、每条关系证据的群号与主干标注。`EXPLAIN (FORMAT JSON)` 证明来源查询不对 `source_units` 做顺序扫描，关系查询同时使用左右端点索引；定向用例约 `18s`。
-- Linux 容器调度复核发现并修复 Conversation Worker 的唤醒串扰：Runtime 激活只唤醒全局 durable-work poller，入站/退出另用 active-session 输入信号，避免新 Session 的 `WAIT_INPUT` 消费遗留激活 Event 后无消息空转。Agent/Conversation 组合在三个并行 Linux 容器中各自 `20 passed`。
-- Bot Host 已把当前 RuntimeGraph 的全部模块 owned task、HostLease 续租和图替换任务纳入持续监督：当前图任务异常、取消或提前正常返回都会终止该 Bot 宿主，并由多 Bot Supervisor 以原始安全错误码写入该 Bot 的 `FAILED` 观测；替换锁下重新核对任务所有权，旧图正常退出不会误伤候选图。单元与真实 PostgreSQL 定向回归分别为 `4 passed` 和 `11 passed`。
-- 当前队列与恢复复核：Linux Worker 定向用例重新验证同群串行、跨群并行、下一次模型调用吸收截至最后新触发的消息，以及最终候选后新触发进入同 Session 的后继 Run，`3 passed`。一次性私有 PostgreSQL 17 上，最后触发截断、无触发尾部 `SILENT_DRAIN`、Agent 安全边界输入 revision 单调、终局候选的排空围栏、Worker 丢失后的精确 trigger 重领和完整 17 成员图重启共 `6 passed`；测试库、容器与隔离网络均已删除。`process.executor` Linux 专项再次 `5 passed`；另外按当前 `forest:local` 的真实 `/usr/local/bin/python3.11` 摘要和 `10001:10001` 身份生成 `diagnostic.echo` profile，在无网络、只读、无 capability 容器中实际执行成功，`$()` 保持普通 argv 且没有 shell 副作用。该 Profile 随后通过模块 WebUI 正式发布为 desired/effective revision `2/2`：可执行文件 SHA-256 为 `92d7e40…7886b79`，网络策略 `deny` 且强制 POSIX limits。首条在发布前创建的 Job 以 `PROCESS_PROFILE_NOT_FOUND` 明确失败并保留审计；发布后新建的 `native.execute` Job `7c4e…ebf5` 一次尝试即 `SUCCEEDED`，退出码 0、耗时约 0.152 秒，stdout 20 字节、stderr 0 字节且均未截断，stdout 作为独立受管 Payload 保存。任务页现会自动追踪终态，并把 Profile 前置条件与失败原因置于原始记录之前。
-- 运行/存储制品身份拆分：Runtime artifact 继续覆盖完整受信代码和管理 UI；每个 official Storage artifact 只由自己的 baseline、schema/contract 与执行策略寻址。`RuntimeStorageBinding` 和 `runtime_graph_modules` 现在单独冻结 storage package digest，图发布时以该值核对 schema ledger，不再把 Runtime digest 当成 Storage digest。隔离容器中只覆盖一份 UI 文件后 Runtime digest 从 `a1ad…` 变为 `929b…`，`process.executor` Storage digest 保持 `696d…`；真实新图 17/17 个 storage binding 都与 ledger 相等且与 Runtime digest 分离。一次性 PostgreSQL 的 schema/runtime 定向套件为 `34 passed`，完整套件为 `596 passed, 7 skipped`。
-- 专用 RAG 数据库与 builtin Adapter 切换（当前）：冻结 bootstrap profile 含独立 `vector.index`，Bot 库只保存稳定 `index_ref_id`、来源事实和图关系，不保存向量列。2026-09-24 按预发布策略删除派生 Bot 库并从空库安装 20 个 baseline，没有兼容列、迁移或双写；deployment catalog、加密 Secret、Web 管理账号、bootstrap profile v2 和 storage generation 1 保留。部署 Bootstrap seed schema 已与模块运行配置 schema 分离，历史冻结 seed 只在 Resolver 边界投影成当前包配置，不随包版本漂移。Compose 现运行 PostgreSQL、etcd、MinIO、Milvus 与 `forest:local`（`sha256:74e62c5666fca7aa3ecac0d2a91fd34b7698422471edd57d82e3c8e1a7730578`）；deployment 为 `READY/ONLINE/ONLINE`，发布 `runtime-graph:c70c6f83-d28b-4a71-8478-c3e3892c7ea9` revision 1，20/20 成员 `ACTIVE`。`adapter.onebot` 的 package digest 为 `sha256:113dc7e37d5f554d97cd81c42b76e315f746afcc578a689ee78f82d7de0f411a`，启动时已经完成 OneBot 账号探测并打开准确 Generation 的 frame ingress；验收只做数据库与健康状态读取，没有主动发送 QQ 消息。冻结空间仍为 QiYu VL 的 4096 维 COSINE；DOCUMENT facet 只在来源进入 Context archive 后建立，并在 Milvus upsert 成功后以 ref 发布为 READY。
-- 上一 PostgreSQL 向量候选的历史切换记录：`scripts/rebuild_bot_database.py` 曾安装 17 个 baseline，并发布 `runtime-graph:c4dc6dfb-b3f4-4bac-9ba5-693932b4d5c4`。该图及其 17/17 观察数据只保留为恢复/稳定性历史证据，已由上述 18 成员 Milvus 图替换。
-- 真实单 Bot 实例（当前）：树莓派旧 `alicebot.service` 保持 `inactive`，PC 上 `forest-clean-supervisor-1` 通过局域网正向 WebSocket 连接其 OneBot。Provider 仍固化为已验证文本与图片输入的 `deepseek-v4-flash-vision-exp`；独立 VL Embedding 仍固化为 QiYu 使用的 `Qwen/Qwen3-VL-Embedding-8B`、4096 维和原 space ID，Bot 创建后没有改变模型种类。群触发限制仍为仅许可群 `933179609` 的 mention，私聊关闭，管理员为 `qq:3244658766`。本次归档语义重构后的新库从 0 条来源、0 个主干、0 个 facet 启动，等待真实入站重新形成 Context 与 archive；自动探针没有读取正文或主动发送 QQ 消息。低频 mention、工作中追加消息进入下一次模型调用、单群串行排队和静默排空继续由真人验收。
-- 切换前 Embedding 收敛修复（历史验收）：上一代 16 成员图曾在真实自然入站上得到 3 个 TEXT 与 3 个 IMAGE facet 全部 READY，6 个 attempt 全部 SUCCEEDED、6 个预算预留全部 CHARGED，且无 Agent Run、Delivery SendIntent 或 trigger；这组数据随本次获准的预发布 Bot 库重建删除，只作为实现证据，不再描述当前数据库。
-- 真实群聊 Shell publication（当前）：registry head revision 1 发布 15 个模块贡献命令，所有 route 都绑定当前 RuntimeGraph 的准确 owner Generation；`core.status/pause/resume`、`run.cancel` 与 `jobs.cancel` 使用 P0，其余查询、运行和重载命令使用 P1。`process.executor` 通过 `native.execute/1` Job 类型接入 `job.scheduler`，不向 Shell 核心写死额外业务命令。
-- 真实 Memory 流式状态（当前快照）：新库尚无入站来源。长期资格现与 QiYu 对齐为 `REGISTERED -> ADMITTED -> ELIGIBLE`：InputBatch 只证明消息已进入短期上下文，只有 Context archive 才发布 DOCUMENT facet；因此当前 0 来源/0 facet 是重建后的预期空状态，不再把未归档流式消息称为“可召回”。历史 523 个来源和 663 个 facet 已随获准的预发布重建删除。
-- 真实一小时连续观察（历史候选）：旧 storage-identity 候选曾由只读 sidecar 连续采样 121 次且无违反项；它使用旧 17 成员图和归档前资格语义，只保留为宿主稳定性证据，不描述当前 RuntimeGraph 或当前 Memory 数据。
-- 真实宿主恢复：一次 Compose 优雅重启把旧 OneBot client 收敛为 `CLOSED`，发布 RuntimeGraph revision 3 并恢复 17/17 `ACTIVE`；随后 120 秒、13 个样本的只读观察无违规。之后对 Supervisor 发送 `SIGKILL`，再启动同一容器，旧 client 精确收敛为 `FAILED/HOST_RESTARTED`，新 client 为 `ACTIVE`，发布 RuntimeGraph revision 4 并再次恢复 17/17 `ACTIVE`；恢复后的 60 秒、7 个样本继续无违规。两条路径中 Binding 都保持 desired/effective revision 1、`ONLINE` 且接收启用，没有重叠活动 Run、陈旧 Embedding 工作、活动 Job 或待发送 Intent，也没有主动发送 QQ 消息。
-- 真实模块 UI 装配（当前）：deployment/Bot 两个作用域分别发布 5/20 个模块；Bot 图包含 `vector.index`、`codec.onebot` 与真实包 `adapter.onebot`，具体页面仍由模块描述符发现，Web 壳不含 Milvus、OneBot、Agent、Memory 或 Bot 业务字段。`process.executor` 与 `adapter.onebot` 的结构化工作区均由各自包内单文件 UI 提供；控制台按当前 Generation 声明的 SHA-256 从认证端点读取、浏览器再次验摘要，再以无 `allow-same-origin` 的 sandbox iframe 和一次性 nonce `MessageChannel` 承载。iframe 没有 Cookie、父 DOM 或网络能力，只能提交有界草稿/计划消息，最终 apply 仍由宿主原生控制条执行。真实 PostgreSQL Host 已验证 Adapter endpoint 配置 apply 会发布新图、关闭旧 socket 并由新 Generation 接管。
-- 桌面布局历史实渲染：本机 Edge 无头渲染上一 17 成员 Web 壳时，1440×900 和接近此前问题截图的 480×900 两种视口均通过；18 成员图新增的是同一通用配置工作区协议，不改变壳层布局。后续 UI 样式变更仍需重新执行浏览器实渲染，不能沿用该历史结果冒充新页面截图。
-- 真实并发配置合流：针对 OneBot Binding desired revision 3 创建两个不同 timeout 计划并同时 apply，只有一个提交为 revision 4；另一个在旧 Runtime Generation 被原子替换后以 `409 RUNTIME_GENERATION_NOT_ACTIVE` 失败，没有发生最后写覆盖或双发布。随后基于 revision 4 创建恢复计划并提交 revision 5，原配置逐字段恢复，Binding 保持 ONLINE 且无错误码。
-- 切换前真实 Bot Web 审计（历史验收）：管理写入守卫把 `web_authority_receipt` 与 `kernel.audit` envelope 放入模块业务事务；OneBot 并发配置 apply 的赢家提交唯一 revision、收据与审计，输家以 `409 RUNTIME_GENERATION_NOT_ACTIVE` 失败且不留记录，恢复操作后原配置逐字段一致。相关旧图审计数据随本次获准的 Bot 库重建删除；实现、并发回归与 deployment 侧身份数据保留。自动探针没有发送 QQ 消息。
-
-测试数字只对应相应提交和命令。多 Bot/WebUI 控制面、20 成员 RuntimeGraph、OneBot、群聊 Shell、多模态记忆链、Milvus ref-only ANN 路径、十万来源关系/管理查询规模测试和受控原生 `ExecutionProfile` 真实 Job 已 cut over；上一镜像的一小时持续实网观察仍是历史证据。当前 Milvus 图仍需完成许可群低频触发时延、排队交互、长时观察以及百万级记忆规模验收。
+在第 3 步完成前，生产图仍是“微内核包系统 + 三个宿主业务模块”的混合图；在第 4 步完成前，目标重型 Bot 框架仍未完成。

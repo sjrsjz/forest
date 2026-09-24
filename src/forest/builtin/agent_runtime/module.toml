@@ -46,6 +46,10 @@ requests = [
   "uow.execute:agent.observe-tool-result"
 ]
 
+[[components.contribution_directories]]
+kind = "agent-tools"
+max_execution_timeout_s = 900
+
 [[components.provides]]
 name = "agent.protocol.describe"
 contract = "1.0"

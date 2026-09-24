@@ -66,6 +66,7 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
         state_commands=None,
         owned_work_authority=_NoOwnedWorkAuthority(),
         service_operation_ledger=_NoServiceLedger(),
+        contribution_directories={"agent-tools": ()},
     )
     context = PreparedGenerationContext(
         activation_id="agent-package-generation",
