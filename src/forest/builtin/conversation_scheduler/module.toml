@@ -11,7 +11,6 @@ scope = "bot"
 state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
-provides = []
 
 [components.resources]
 max_frame_bytes = 262144
@@ -28,16 +27,33 @@ drain_timeout_s = 960
 stop_timeout_s = 10
 
 [components.capabilities]
-requests = ["uow.execute:conversation.commit-silent-input"]
+requests = [
+  "domain.query:conversation.context-snapshot",
+  "uow.execute:conversation.commit-silent-input"
+]
+
+[[components.provides]]
+name = "conversation.context.snapshot"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/context-snapshot-input.json"
+output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
 schema_version = "2.0.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "e2db7e5a8557d08ca43519793f7d5e0e0d7816a407ee19ab0759c7fe95ddcbbd"
+baseline_sha256 = "001ca7c78ae8845738d6d6482668d83167bd627535455305a9b19214ebb549db"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/2"
 execution_profile = "official"
+
+[[components.domain_queries]]
+name = "conversation.context-snapshot"
+contract = "1.0"
+function = "conversation_context_snapshot"
+input_schema = "schemas/context-snapshot-input.json"
+output_schema = "schemas/context-snapshot-output.json"
 
 [[components.unit_of_work_participants]]
 name = "conversation.admit-message"

@@ -14,6 +14,7 @@ from test_schema_bundles import clean_authority as clean_authority
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.packages import PackageCatalog
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 
 
@@ -498,5 +499,60 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 owner_id=archive["compaction_id"],
             )
         assert verified.content_digest == archive["archive_payload_digest"]
+        async with store.pool.connection() as conn, conn.transaction():
+            snapshot_actor = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.conversation_lanes SET actor_owner_id=%s,"
+                        "actor_epoch=actor_epoch+1,"
+                        "actor_expires_at=clock_timestamp()+interval '5 minutes' "
+                        "WHERE bot_id=%s AND conversation_id=%s "
+                        "RETURNING conversation_id,actor_owner_id,actor_epoch"
+                    ).format(sql.Identifier(namespace)),
+                    (
+                        "claim/context-snapshot",
+                        store.bot_id,
+                        "conversation/onebot/group/silent",
+                    ),
+                )
+            ).fetchone()
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 1)]
+        route = FrozenServiceRoute(
+            service_id="conversation.context.snapshot",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="conversation.scheduler",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=False,
+        )
+        snapshot = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "conversation:snapshot:1",
+                10,
+                "test.conversation",
+                "conversation/onebot/group/silent",
+            ),
+            (
+                {
+                    "actor": {
+                        "conversation_id": snapshot_actor["conversation_id"],
+                        "owner_id": snapshot_actor["actor_owner_id"],
+                        "epoch": snapshot_actor["actor_epoch"],
+                    }
+                },
+            ),
+            {},
+        )
+        assert snapshot["context_view_revision"] == 1
+        assert snapshot["archive"]["compaction_id"] == archive["compaction_id"]
+        assert [unit["source_kind"] for unit in snapshot["units"]] == [
+            "context.archive",
+            "conversation.input",
+        ]
+        assert snapshot["units"][1]["author_subject_ref"] == "qq:43"
     finally:
         assert await registry.close() == []

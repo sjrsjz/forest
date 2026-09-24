@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "conversation_id", "context_applied_seq", "classified_through_seq",
+    "context_revision", "context_view_revision", "source_component_id",
+    "binding_ref", "platform", "channel_kind", "channel_ref", "thread_ref",
+    "context_view_unit_count", "context_archived_unit_count", "archive", "units"
+  ],
+  "properties": {
+    "conversation_id": {"type": "string"},
+    "context_applied_seq": {"type": "integer", "minimum": 0},
+    "classified_through_seq": {"type": "integer", "minimum": 0},
+    "context_revision": {"type": "integer", "minimum": 0},
+    "context_view_revision": {"type": "integer", "minimum": 0},
+    "source_component_id": {"type": "string"},
+    "binding_ref": {"type": "string"},
+    "platform": {"type": "string"},
+    "channel_kind": {"enum": ["GROUP", "PRIVATE", "SYSTEM"]},
+    "channel_ref": {"type": "string"},
+    "thread_ref": {"type": ["string", "null"]},
+    "context_view_unit_count": {"type": "integer", "minimum": 0},
+    "context_archived_unit_count": {"type": "integer", "minimum": 0},
+    "archive": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": [
+            "compaction_id", "published_view_revision", "source_set_digest",
+            "policy_revision", "archived_unit_count", "cumulative_archived_unit_count",
+            "first_context_revision", "last_context_revision"
+          ],
+          "properties": {
+            "compaction_id": {"type": "string"},
+            "published_view_revision": {"type": "integer", "minimum": 1},
+            "source_set_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+            "policy_revision": {"type": "string"},
+            "archived_unit_count": {"type": "integer", "minimum": 1},
+            "cumulative_archived_unit_count": {"type": "integer", "minimum": 1},
+            "first_context_revision": {"type": "integer", "minimum": 1},
+            "last_context_revision": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "units": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/unit"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "nullable_string": {"type": ["string", "null"]},
+    "unit": {
+      "type": "object",
+      "required": [
+        "conversation_id", "unit_id", "context_revision", "unit_index", "kind",
+        "source_component_id", "source_kind", "source_id", "input_batch_id", "event_id",
+        "ingress_seq", "payload_id", "payload_digest", "payload_owner_component_id",
+        "payload_owner_kind", "payload_owner_id", "author_payload_id",
+        "author_payload_digest", "author_owner_component_id", "author_owner_kind",
+        "author_owner_id", "author_subject_ref", "trigger_decision"
+      ],
+      "properties": {
+        "conversation_id": {"type": "string"},
+        "unit_id": {"type": "string"},
+        "context_revision": {"type": "integer", "minimum": 1},
+        "unit_index": {"type": "integer", "minimum": 0},
+        "kind": {"enum": ["INPUT", "AGENT_STEP", "REPLY", "CONTROL", "EFFECT"]},
+        "source_component_id": {"type": "string"},
+        "source_kind": {"type": "string"},
+        "source_id": {"type": "string"},
+        "input_batch_id": {"$ref": "#/$defs/nullable_string"},
+        "event_id": {"$ref": "#/$defs/nullable_string"},
+        "ingress_seq": {"type": ["integer", "null"], "minimum": 1},
+        "payload_id": {"type": "string"},
+        "payload_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "payload_owner_component_id": {"type": "string"},
+        "payload_owner_kind": {"type": "string"},
+        "payload_owner_id": {"type": "string"},
+        "author_payload_id": {"$ref": "#/$defs/nullable_string"},
+        "author_payload_digest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "author_owner_component_id": {"$ref": "#/$defs/nullable_string"},
+        "author_owner_kind": {"$ref": "#/$defs/nullable_string"},
+        "author_owner_id": {"$ref": "#/$defs/nullable_string"},
+        "author_subject_ref": {"$ref": "#/$defs/nullable_string"},
+        "trigger_decision": {
+          "type": ["string", "null"],
+          "enum": [null, "NO_TRIGGER", "TRIGGER", "CONTROL_COMMAND", "ROUTED", "FAILED"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

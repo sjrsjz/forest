@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, job
+from forest.sdk import Plugin, job, service
 
 
 class ConversationScheduler(Plugin):
@@ -32,6 +32,10 @@ class ConversationScheduler(Plugin):
                 422,
             )
         self._context_view = view
+
+    @service("conversation.context.snapshot", semantics="read")
+    async def context_snapshot(self, payload, ctx):
+        return await ctx.queries.call("conversation.context-snapshot", payload)
 
     @job("conversation.silent-drain")
     async def silent_drain(self, task, ctx):

@@ -1352,6 +1352,136 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_context_snapshot(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    actor jsonb := input->'actor';
+    requested_bot text := context->>'bot_id';
+    requested_conversation text := actor->>'conversation_id';
+    requested_owner text := actor->>'owner_id';
+    requested_epoch bigint := (actor->>'epoch')::bigint;
+    lane record;
+    compaction record;
+    units jsonb;
+    archive_value jsonb := NULL;
+BEGIN
+    IF actor IS NULL OR requested_conversation IS NULL OR requested_owner IS NULL
+       OR requested_epoch IS NULL OR requested_epoch<1 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_SNAPSHOT_INPUT_INVALID',
+                'message','Context snapshot actor is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    IF lane IS NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_NOT_FOUND',
+                'message','Conversation lane does not exist','status',404
+            )
+        );
+    END IF;
+    IF lane.actor_owner_id IS DISTINCT FROM requested_owner
+       OR lane.actor_epoch IS DISTINCT FROM requested_epoch
+       OR lane.actor_expires_at IS NULL
+       OR lane.actor_expires_at<=CURRENT_TIMESTAMP THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_CONVERSATION_ACTOR',
+                'message','Conversation actor is stale','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO compaction
+    FROM __forest_module_schema__.context_compactions
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+    ORDER BY published_view_revision DESC LIMIT 1;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'conversation_id',u.conversation_id,'unit_id',u.unit_id,
+        'context_revision',u.context_revision,'unit_index',u.unit_index,
+        'kind',u.kind,'source_component_id',u.source_component_id,
+        'source_kind',u.source_kind,'source_id',u.source_id,
+        'input_batch_id',u.input_batch_id,'event_id',u.event_id,
+        'ingress_seq',u.ingress_seq,'payload_id',u.payload_id,
+        'payload_digest',u.payload_digest,
+        'payload_owner_component_id',u.payload_owner_component_id,
+        'payload_owner_kind',u.payload_owner_kind,
+        'payload_owner_id',u.payload_owner_id,
+        'author_payload_id',u.author_payload_id,
+        'author_payload_digest',u.author_payload_digest,
+        'author_owner_component_id',u.author_owner_component_id,
+        'author_owner_kind',u.author_owner_kind,
+        'author_owner_id',u.author_owner_id,
+        'author_subject_ref',u.author_subject_ref,
+        'trigger_decision',u.trigger_decision
+    ) ORDER BY u.context_revision,u.unit_index),'[]'::jsonb)
+    INTO units
+    FROM __forest_module_schema__.context_units u
+    WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
+          WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
+            AND cu.unit_id=u.unit_id
+      );
+    IF compaction IS NOT NULL THEN
+        archive_value := jsonb_build_object(
+            'compaction_id',compaction.compaction_id,
+            'published_view_revision',compaction.published_view_revision,
+            'source_set_digest',compaction.source_set_digest,
+            'policy_revision',compaction.policy_revision,
+            'archived_unit_count',compaction.archived_unit_count,
+            'cumulative_archived_unit_count',compaction.cumulative_archived_unit_count,
+            'first_context_revision',compaction.first_context_revision,
+            'last_context_revision',compaction.last_context_revision
+        );
+        units := jsonb_build_array(jsonb_build_object(
+            'conversation_id',requested_conversation,
+            'unit_id','archive:' || replace(compaction.compaction_id,'compaction:',''),
+            'context_revision',compaction.first_context_revision,'unit_index',0,
+            'kind','CONTROL','source_component_id','conversation.scheduler',
+            'source_kind','context.archive','source_id',compaction.compaction_id,
+            'input_batch_id',NULL,'event_id',NULL,'ingress_seq',NULL,
+            'payload_id',compaction.archive_payload_id,
+            'payload_digest',compaction.archive_payload_digest,
+            'payload_owner_component_id','conversation.scheduler',
+            'payload_owner_kind','context.archive',
+            'payload_owner_id',compaction.compaction_id,
+            'author_payload_id',NULL,'author_payload_digest',NULL,
+            'author_owner_component_id',NULL,'author_owner_kind',NULL,
+            'author_owner_id',NULL,'author_subject_ref',NULL,'trigger_decision',NULL
+        )) || units;
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'conversation_id',requested_conversation,
+            'context_applied_seq',lane.context_applied_seq,
+            'classified_through_seq',lane.classified_through_seq,
+            'context_revision',lane.context_revision,
+            'context_view_revision',lane.context_view_revision,
+            'source_component_id',lane.source_component_id,
+            'binding_ref',lane.binding_ref,'platform',lane.platform,
+            'channel_kind',lane.channel_kind,'channel_ref',lane.channel_ref,
+            'thread_ref',lane.thread_ref,
+            'context_view_unit_count',lane.context_view_unit_count,
+            'context_archived_unit_count',lane.context_archived_unit_count,
+            'archive',archive_value,'units',units
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION conversation_prepare_context_compaction(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
