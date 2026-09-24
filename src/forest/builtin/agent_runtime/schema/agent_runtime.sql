@@ -2542,6 +2542,105 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_finalize_candidate(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    candidate_value jsonb := body->'candidate';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_turn text := body->>'turn_id';
+    run_row record;
+    turn_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR envelope->'prior' IS DISTINCT FROM '{}'::jsonb
+       OR candidate_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR candidate_value->>'owner_kind' IS DISTINCT FROM 'assistant.candidate'
+       OR candidate_value->>'owner_id' IS DISTINCT FROM requested_turn THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_FINAL_CANDIDATE_INPUT_INVALID',
+                'message','Final candidate envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO turn_row
+    FROM __forest_module_schema__.model_turns
+    WHERE bot_id=requested_bot AND run_id=requested_run
+    ORDER BY step_seq DESC LIMIT 1;
+    IF turn_row.turn_id IS NULL
+       OR turn_row.turn_id IS DISTINCT FROM requested_turn
+       OR turn_row.terminal IS DISTINCT FROM true
+       OR turn_row.assistant_payload_id IS DISTINCT FROM candidate_value->>'payload_id'
+       OR turn_row.assistant_payload_digest IS DISTINCT FROM candidate_value->>'digest' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_FINAL_CANDIDATE_CONFLICT',
+                'message','Final candidate is not the latest terminal ModelTurn','status',409
+            )
+        );
+    END IF;
+    IF run_row.state='FINAL_READY' THEN
+        IF run_row.final_candidate_payload_id IS DISTINCT FROM candidate_value->>'payload_id'
+           OR run_row.final_candidate_payload_digest IS DISTINCT FROM candidate_value->>'digest' THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_FINAL_CANDIDATE_CONFLICT',
+                    'message','Run already froze another final candidate','status',409
+                )
+            );
+        END IF;
+        RETURN __forest_module_schema__.agent_run_snapshot(
+            context,jsonb_build_object('run_id',requested_run)
+        );
+    END IF;
+    IF run_row.state IS DISTINCT FROM 'SAFE_BOUNDARY' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_FINAL_CANDIDATE_BOUNDARY_CLOSED',
+                'message','Run is not at a terminal model-safe boundary','status',409
+            )
+        );
+    END IF;
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='FINAL_READY',
+        final_candidate_payload_id=candidate_value->>'payload_id',
+        final_candidate_payload_digest=candidate_value->>'digest',
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

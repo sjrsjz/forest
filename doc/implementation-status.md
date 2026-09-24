@@ -70,18 +70,21 @@
 - Session/Run 创建、输入追加、owner lease、释放和热重载停车/恢复；
 - `agent.acquire-model-input/1` 由 manifest 固定 Conversation、Kernel Payload、Memory 与 Agent 四个 participant，在同一 PostgreSQL 事务内完成模型安全点消息切口、删除 epoch 冻结、Memory 资格确认和 Agent Input revision 推进；任一步拒绝都会整体回滚；
 - `agent.start-from-conversation/1` 使用相同四方 participant，在初始 `IDLE` 边界把 trigger 选择、删除 epoch、Memory 资格确认与首个 Agent Run 建立合并为一个事务；Conversation 不再需要先提交 InputBatch 再用 callback 启动宿主 Agent，选择与建 Run 之间不存在可见裂缝；
-- Provider Generation 与模型投影先冻结；授权、Kernel Effect permit、wire Payload 和 Agent Attempt 由 `agent.prepare-model-effect/1` 原子建立；其中 `kernel.effect` 的 `effect.prepare-command` participant 在协调事务内校验授权票据、父 Payload 与 Generation fence，并以自身身份写入 `effect.input`/`effect.wire`，Agent Worker 只提交声明式 command，不能伪造内核 Payload owner；
+- Provider Generation 与模型投影先冻结；授权、Kernel Effect permit、wire Payload 和 Agent Attempt 由 `agent.prepare-model-effect/1` 原子建立；其中 `kernel.effect` 的 `effect.prepare-command` participant 在协调事务内校验授权票据、父 Payload 与 Generation fence，并以自身身份写入 `effect.input`/`effect.wire`，Agent Worker 只提交声明式 command，不能伪造内核 Payload owner；该 UoW 的最终结果保留完整 authorization ticket、input/wire PayloadRef 和 permit，后续 handoff 不从宿主取旁路凭据，也不重新猜测 Effect 事实；
 - `agent.handoff-model-effect/1` 原子推进 Effect 与 Agent handoff；`agent.observe-model-effect/1` 通过 `effect.observe-command-result` 让内核校验 Provider 结果引用并以自身身份冻结 `effect.evidence`，Agent participant 同时核对 evidence 摘要、父引用集合与观察状态，随后原子收敛两本账及 `UNKNOWN` 对账；
 - 错误 XML 的一次协议修复、合法 ModelTurn 提交；
 - ToolCall 的准确 component/Generation/service/contract/binding 冻结；
 - 工具审批、handoff、终态观察和可查询 `UNKNOWN` 对账；
+- terminal ModelTurn 先停在 `SAFE_BOUNDARY`；确认没有新触发批次后，`agent.finalize-candidate/1` 只接受该 Run 最新 terminal turn 的准确 `assistant.candidate` PayloadRef，并原子推进到 `FINAL_READY`；
 - 最终完成、同 Session 后继 Run 和 Session 关闭的私有 participant。
 
-这些端口证明 Agent 状态所有权可以进入包，但当前 Worker 只提供 `agent.protocol.describe/1`、`agent.run.query/1` 和 reload-resume job。它还没有提供生产需要的 `agent.execute/2`，所以 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“包内状态端口完成”表述成“Agent 已完成生产包化”。
+包内已加入 `model_execution.py`，模型 attempt 的 profile bind、`model.input` 写入、Provider materialize、授权与 Effect prepare、原子 handoff、Provider dispatch、Effect/Agent 原子 observe 及 Provider 结果读取均只经过 `ctx.services`、`ctx.uow`、`ctx.payloads` 与冻结的 `ctx.identity`。它没有 Repository、数据库连接或宿主 Agent adapter；Provider 异常或回执 fence 不一致在 handoff 后统一收敛为 `UNKNOWN`，不会盲目重发。
+
+这段模型 attempt 尚未接入公开 `agent.execute/2` 循环。当前 Worker 对外仍只提供 `agent.protocol.describe/1`、`agent.run.query/1` 和 reload-resume job，工具 Effect 链、协议修复续调、最终回复计划与 Conversation owned-work 也尚未闭合，所以 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“模型 attempt 已进入包”表述成“Agent 已完成生产包化”。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
-Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；旧宿主 Agent 过渡执行器也只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。这个边界已经由真实 PostgreSQL 完整消息执行链验证，但 Agent 执行循环本身仍待迁入 Worker。
+Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；旧宿主 Agent 过渡执行器和新的包内 model attempt 都只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。Effect/Agent 私有 schema 已用独立 PostgreSQL 重建验证；完整 Agent 执行循环仍待接入 Worker 公共服务。
 
 ## 6. Conversation 候选包已经拥有的部分
 
