@@ -30,6 +30,8 @@
 
 这些能力构成 builtin 模块系统本身。业务组件只有经过这些端口运行，才算使用了该系统。
 
+包 manifest 现在同时支持消费 `agent-tools` 冻结目录和通过 `components.agent_tools` 发布工具。发布项必须静态绑定本包声明的 service major 与不可变工具声明，随后进入 descriptor digest、RuntimeGraph 唯一路由和 Generation 动态依赖；宿主不能再替 builtin 模块注入工具贡献。工具 Effect 执行网关尚未完成，因而这项只表示发布元模型已经闭合，不表示 Agent 工具主链已经可用。
+
 ## 3. 当前生产装配
 
 `CleanBotHost._assemble_registry()` 当前直接以真实 builtin 包装入下列业务组件：

@@ -482,6 +482,34 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "agent_tools": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "name",
+                                "service_id",
+                                "service_version",
+                                "declaration_schema",
+                                "approval_required",
+                                "supports_query",
+                            ],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "service_id": {"type": "string"},
+                                "service_version": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 2147483647,
+                                },
+                                "declaration_schema": {"type": "string"},
+                                "approval_required": {"type": "boolean"},
+                                "supports_query": {"type": "boolean"},
+                            },
+                        },
+                    },
                     "owned_work_handlers": {
                         "type": "array",
                         "maxItems": 32,
@@ -1161,6 +1189,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     unit_of_work_plans = component.get("unit_of_work_plans", [])
     job_types = component.get("job_types", [])
     shell_commands = component.get("shell_commands", [])
+    agent_tools = component.get("agent_tools", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
@@ -1180,6 +1209,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         and not unit_of_work_plans
         and not job_types
         and not shell_commands
+        and not agent_tools
         and not owned_work_handlers
         and not commands
         and not message_handlers
@@ -1485,6 +1515,38 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Shell command must bind one declared service and matching argument schema",
             )
         shell_command_keys.add(key)
+    agent_tool_names = set()
+    agent_tool_services = set()
+    for declaration in agent_tools:
+        name = declaration.get("name", "")
+        target = (
+            declaration.get("service_id"),
+            declaration.get("service_version"),
+        )
+        tool_declaration = _schema(files, declaration.get("declaration_schema"))
+        parameters = tool_declaration.get("parameters")
+        try:
+            Draft202012Validator.check_schema(parameters)
+        except (SchemaError, TypeError) as exc:
+            _fail("INVALID_AGENT_TOOL", f"Agent tool parameters are invalid: {exc.message}")
+        if (
+            name in agent_tool_names
+            or target in agent_tool_services
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}", name)
+            or target not in service_contracts
+            or set(tool_declaration) - {"name", "description", "parameters", "strict"}
+            or tool_declaration.get("name") != name
+            or not isinstance(tool_declaration.get("description"), str)
+            or not tool_declaration["description"].strip()
+            or not isinstance(parameters, dict)
+            or tool_declaration.get("strict", True) is not True
+        ):
+            _fail(
+                "INVALID_AGENT_TOOL",
+                "Agent tool must bind one declared service and a matching strict declaration",
+            )
+        agent_tool_names.add(name)
+        agent_tool_services.add(target)
     for definition in owned_work_handlers:
         handler = definition["handler"]
         if handler in contributed_job_handlers:

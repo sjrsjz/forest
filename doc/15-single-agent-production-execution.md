@@ -64,6 +64,14 @@ ToolCall 固定目标 component、Generation、service、契约摘要、完整 b
 
 工具目录由各执行模块通过 `RuntimeModuleDescriptor.agent_tools` 贡献，不写死在 Agent 工厂或 Bot 组合根。贡献冻结工具名、模型声明、服务 ID/版本、审批要求和查询能力，并作为模块 descriptor digest 的一部分进入 RuntimeGraph；同一图中的工具名与服务键都必须唯一。`agent.runtime` 只能通过受限 factory context 枚举贡献并请求对应服务句柄，随后把贡献者的准确 component/Generation、service 和 contract digest 冻结为 `AgentToolBinding`。Contract Router sealing 必须确认该服务确实由声明贡献的模块提供；所有权不符时整张候选图拒绝发布。工具结果仍由执行模块拥有，Agent 只持有 PayloadRef，并统一经 Authorization 与 Effect Gateway 完成 handoff 和恢复。
 
+工具执行不是 contribution directory 上的普通 `execute` 便捷调用。Agent Worker 只能提交可序列化的 `forest.agent-tool-command/1`，命令包含冻结 ToolCall、binding、authority trigger/principal、参数摘要和稳定 operation identity。`agent.prepare-tool-effect/1` 在同一事务内依次完成 Authorization 决策、`kernel.effect` command/wire 冻结和 Agent ToolCall 状态推进；三方输出必须指向同一个 executor component/Generation、service contract、binding digest、tool call 和 operation。需要审批时只写持久 approval intent 并进入 `WAIT_APPROVAL`，不会建立可交接 Effect。
+
+授权完成后，`agent.handoff-tool-effect/1` 在同一事务内把 Kernel Effect 与 Agent ToolCall 推进到 `DISPATCHING`。提交成功后，受限工具网关才可调用 RuntimeGraph 中已冻结的目标服务；网关必须复核 Effect permit、wire digest、目标 Generation、service/version、binding digest 和当前调用因果根，不能按工具名重新发现路由。工具服务接收 `forest.agent-tool-execute/1` DTO，返回自身拥有的 `tool.result` 精确 PayloadRef 或类型化失败；它不能取得 Agent Repository、授权对象或回调。
+
+执行回执只能进入 `agent.observe-tool-effect/1`：`kernel.effect` 先冻结 executor evidence，Agent participant 在同一事务内复核 evidence 与当前 ToolCall 后收敛状态。handoff 后超时、断连或 Worker/Generation 切换一律进入 `UNKNOWN`；只有 manifest 声明 `supports_query=true` 时，才允许通过同一冻结服务的 `forest.agent-tool-query/1` 查询原 operation，并以 `RECONCILIATION` evidence 收敛。查询不是重发。目标 Generation 必须在已 handoff Effect 得出可证明终态之前保留恢复端口和资源租约；无法证明时 Run 保持 `BLOCKED_UNKNOWN`。
+
+Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_handed_off` 三种能力。后两者都要求内核签发的精确 permit，不能接受裸工具名、临时 service handle 或 Worker 提供的“已授权”布尔值。旧 `KernelToolExecutionPort` 的进程内 callback、直接 Python `ToolDispatchResult` 和宿主工具映射不属于生产协议，builtin 工具迁移完成后直接删除。
+
 ## 3. 单 Agent 执行循环
 
 每个群的执行顺序固定如下：

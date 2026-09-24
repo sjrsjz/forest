@@ -14,6 +14,21 @@
 - “业务命令策略”是路由入口的组件命令授权，“执行链”是一次消息在注册路由中的 dispatch trace。两者分别属于安全/路由和可观测性，不是两套独立业务后台。
 - WebUI 不知道 Agent、Memory 或 OneBot 的具体配置字段。模块注册表决定当前实例可配置的能力，模块包决定是否使用自带 UI。
 
+### 1.1 `builtin` 是发行来源，不是第二套运行模型
+
+`src/forest/builtin/<package>` 中的每个目录都是一个完整插件包。`builtin` 只表示该包随 Forest 一起发行并采用官方信任策略；它不允许包绕过发现、校验、Generation、Worker 隔离、Contract Router、UnitOfWork、Effect、授权或排空协议。官方包和第三方包必须由同一个 `PackageCatalog -> PackageSnapshot -> PackageDescriptorCompiler -> PackageGenerationAdapter` 链路装载，区别只能存在于签名来源、信任级别和允许申请的 capability。
+
+一个目录只有同时满足以下条件才是模块：
+
+- `module.toml` 是组件、契约、配置、存储、管理贡献、资源和生命周期的唯一声明源；宿主不再 import 其业务 Runtime 或调用专用 `bootstrap_*` 工厂；
+- 业务代码只在该包的隔离 Worker 中运行，只能使用 manifest 授予的 SDK 端口；跨组件调用使用可序列化、带版本的公开契约；
+- 每次装载产生新的 Generation，配置、Worker、Effect Driver、owned work、管理 UI 和资源租约共同开始、共同排空、共同销毁；
+- 状态只写组件私有 schema；跨组件原子变更只通过 manifest UnitOfWork participant，不能共享 Repository、ORM、数据库连接或可变 Python 对象；
+- 热重载发布完整候选 RuntimeGraph。新图校验、预热或发布失败时旧图继续服务；成功后新调用只进入新图，旧 Generation 在安全点排空，释放连接、子进程、socket、Secret materialization 和 Effect Driver 后进入终态；
+- 包删除后，内核中不存在该业务的隐藏工厂、后台循环、路由分支或 WebUI 专页。控制面只能枚举其声明贡献。
+
+`clean_*`、宿主 Runtime、直接 Repository 装配和为某个 builtin 特设的路由都是重构期间的待删除对象。把 Python 文件移动进 `builtin`、从宿主 import 一个包内类、或给旧对象外面套一个 descriptor，都不构成插件化。生产组合根完成切换前，系统应明确报告为混合图，不得宣称 builtin 模块系统已经闭合。
+
 ## 2. 本阶段重构策略
 
 Forest 尚未上线，本阶段采用直接重构：允许删除错误抽象、端点、表和测试，允许重建开发数据库，不增加旧 DTO、旧表或旧页面的兼容层。只有真实外部边界保留稳定性，包括 OneBot 协议、包工件校验、群消息身份/顺序、外部副作用账本和已经验证的安全不变量。

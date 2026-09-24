@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +49,61 @@ class Configuration:
             payload_digest=digest_json(value),
             value=value if include_value else None,
         )
+
+
+def test_package_publishes_agent_tool_from_its_own_service(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(Path(__file__).parents[1] / "examples/counter", source)
+    (source / "schemas/tool-declaration.json").write_text(
+        json.dumps(
+            {
+                "name": "counter_increment",
+                "description": "Increment the package-owned counter.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"increment": {"type": "integer", "minimum": 1}},
+                    "required": ["increment"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with (source / "module.toml").open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n[[components.agent_tools]]\n"
+            'name = "counter_increment"\n'
+            'service_id = "counter.increment"\n'
+            "service_version = 1\n"
+            'declaration_schema = "schemas/tool-declaration.json"\n'
+            "approval_required = true\n"
+            "supports_query = false\n"
+        )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    descriptor = package_runtime_descriptor(
+        snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        resolved_contracts={},
+        startup_components=(),
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=SimpleNamespace(),
+        state_commands=SimpleNamespace(),
+        service_operation_ledger=NoServiceLedger(),
+    )
+    assert descriptor.agent_tools[0].as_fact() == {
+        "protocol": "forest.agent-tool-contribution/1",
+        "name": "counter_increment",
+        "service_id": "counter.increment",
+        "version": 1,
+        "declaration": snapshot.schema("schemas/tool-declaration.json"),
+        "contract_digest": descriptor.agent_tools[0].contract_digest,
+        "approval_required": True,
+        "supports_query": False,
+    }
 
 
 def test_installed_package_cannot_enable_official_domain_storage(tmp_path):

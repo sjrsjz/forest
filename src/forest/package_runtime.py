@@ -56,6 +56,7 @@ from forest.runtime_contracts import (
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationBinding
 from forest.runtime_modules import (
     OwnedWorkLifecycle,
+    RuntimeAgentToolContribution,
     RuntimeArtifactIdentity,
     RuntimeComponentJobContribution,
     RuntimeEventPublicationContribution,
@@ -2620,6 +2621,17 @@ def package_runtime_descriptor(
         )
         for item in component.get("shell_commands", ())
     )
+    agent_tools = tuple(
+        RuntimeAgentToolContribution(
+            name=item["name"],
+            service_id=item["service_id"],
+            version=item["service_version"],
+            declaration=snapshot.schema(item["declaration_schema"]),
+            approval_required=item["approval_required"],
+            supports_query=item["supports_query"],
+        )
+        for item in component.get("agent_tools", ())
+    )
 
     def factory(_runtime, contracts):
         routes = {
@@ -2752,6 +2764,7 @@ def package_runtime_descriptor(
         event_subscriptions=event_subscriptions,
         component_jobs=component_jobs,
         job_types=job_types,
+        agent_tools=agent_tools,
         shell_commands=shell_commands,
         wakes_on_work=bool(component.get("owned_work_handlers")),
         owned_work_lifecycle=(
