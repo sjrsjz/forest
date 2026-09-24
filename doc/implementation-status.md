@@ -31,7 +31,7 @@
 
 这些能力构成 builtin 模块系统本身。业务组件只有经过这些端口运行，才算使用了该系统。
 
-包 manifest 现在同时支持消费 `agent-tools` 冻结目录和通过 `components.agent_tools` 发布工具。发布项必须静态绑定本包声明的 service major 与不可变工具声明，随后进入 descriptor digest、RuntimeGraph 唯一路由和 Generation 动态依赖；宿主不能再替 builtin 模块注入工具贡献。冻结目录已有 `dispatch-prepared` 端口：它逐项复核 binding、目标 component/Generation/service、Kernel Effect `DISPATCHING` attempt、permit 和规范 command digest 后才调用包 service。Agent 侧已有工具 prepare/handoff/observe UoW，Memory 精确召回已成为首个通过该边界发布的 builtin 工具；审批和 handoff 后查询恢复仍未完成。
+包 manifest 现在同时支持消费 `agent-tools` 冻结目录和通过 `components.agent_tools` 发布工具。发布项必须静态绑定本包声明的 service major 与不可变工具声明，随后进入 descriptor digest、RuntimeGraph 唯一路由和 Generation 动态依赖；宿主不能再替 builtin 模块注入工具贡献。冻结目录提供 `dispatch-prepared` 与 `query-handed-off` 两个不同端口：前者逐项复核 binding、目标 component/Generation/service、Kernel Effect `DISPATCHING` attempt、permit 和规范 command digest 后才首次调用包 service；后者只允许 `supports_query=true` 的同一冻结 binding，在 Effect 已经 `DISPATCHING/UNKNOWN` 后查询原 operation，并以 `RECONCILIATION` evidence 收敛，不能重发首次命令。Agent 侧已有工具 prepare/handoff/observe UoW，Memory 精确召回是首个完整实现执行与查询协议的 builtin 工具；持久审批协议仍未完成。
 
 ## 3. 当前生产装配
 
@@ -85,7 +85,7 @@
 
 Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复、非审批 ToolCall 的 Effect 执行以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
 
-这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，handoff 后的 `UNKNOWN` 尚未通过 `query_handed_off` 对账，宿主 Runtime 状态工具尚未迁成可序列化 builtin 服务。Conversation 候选包已经贡献 `conversation.agent-run.pending`，并以 manifest UnitOfWork 完成最终回复、Delivery Intent、Session 后继 Run/关闭和失败终态触发器收敛；这些端口尚未替换 `clean_bot_host.py` 的旧宿主执行器。不得把“候选包主链已闭合”表述成“生产主链已经切换”。
+这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，宿主 Runtime 状态工具尚未迁成可序列化 builtin 服务。支持查询的 ToolCall 已经能够在 handoff 后通过冻结目录的 `query_handed_off` 查询原 operation，并用 `RECONCILIATION` 收敛；不支持查询的工具继续保持 `BLOCKED_UNKNOWN`，不会盲目重发。Conversation 候选包已经贡献 `conversation.agent-run.pending`，并以 manifest UnitOfWork 完成最终回复、Delivery Intent、Session 后继 Run/关闭和失败终态触发器收敛；这些端口尚未替换 `clean_bot_host.py` 的旧宿主执行器。不得把“候选包主链已闭合”表述成“生产主链已经切换”。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；提交结果由 SDK 强制收敛为五字段 PayloadRef，传输元数据不能混入跨模块引用。单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
@@ -110,7 +110,7 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 ## 8. 下一切换顺序
 
 1. 将 Runtime 状态工具迁成 manifest 发布的可序列化服务；补齐持久审批决策与 `query_handed_off` 恢复，禁止保留宿主 `ToolDispatchResult` 旁路。
-2. 补齐持久审批决策与 handoff 后 `UNKNOWN` 对账，使现有 Agent owned-work、final-reply、terminal 和 session-handoff plans 覆盖全部恢复分支。
+2. 补齐持久审批请求、决策消费与 Conversation 唤醒，使现有 Agent owned-work、final-reply、terminal 和 session-handoff plans 覆盖全部恢复分支。
 3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
 4. 补齐 `memory_graph` 的捕获、嵌入、图扩散、召回和管理端口，用包内权威状态替换 `bootstrap_clean_memory()`，随后删除宿主 Memory Runtime、Repository 装配和旧 baseline。
 5. 从空开发库启动完整图，验证热重载安全点、失败回滚、群并发、Provider/Tool 不确定结果、真实 OneBot 单次低频交互和 WebUI 管理贡献。

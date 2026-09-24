@@ -86,17 +86,13 @@ class ToolExecution:
 
     async def invoke(self, *, owner: dict, tool: dict, binding: dict) -> dict:
         graph_id, graph_revision, bot_id = self._identity()
-        if tool["state"] == "DISPATCHING":
-            return {"status": "UNKNOWN", "error_code": "AGENT_TOOL_RESULT_UNKNOWN"}
-        if tool["state"] == "UNKNOWN":
-            return {"status": "UNKNOWN", "error_code": "AGENT_TOOL_RESULT_UNKNOWN"}
         if tool["state"] == "WAIT_APPROVAL" or tool["approval_required"]:
             return {
                 "status": "WAIT_APPROVAL",
                 "approval_ref": tool.get("approval_ref"),
                 "error_code": None,
             }
-        if tool["state"] != "PROPOSED":
+        if tool["state"] not in {"PROPOSED", "DISPATCHING", "UNKNOWN"}:
             raise ForestError(
                 "AGENT_TOOL_STATE_INVALID", "ToolCall is not executable", 409
             )
@@ -154,6 +150,98 @@ class ToolExecution:
             "authority_principal_ref": tool["authority_principal_ref"],
             "arguments": wrapper["arguments"],
         }
+        if tool["state"] in {"DISPATCHING", "UNKNOWN"}:
+            if not tool["supports_query"]:
+                return {
+                    "status": "UNKNOWN",
+                    "approval_ref": None,
+                    "error_code": "AGENT_TOOL_RESULT_UNKNOWN",
+                }
+            command["protocol"] = "forest.agent-tool-query/1"
+            try:
+                raw = await self.ctx.agent_tools.query_handed_off(
+                    {
+                        "tool_name": tool["tool_name"],
+                        "target_component_id": tool["tool_component_id"],
+                        "target_generation_id": tool["tool_generation_id"],
+                        "target_service_id": tool["tool_service_id"],
+                        "target_service_version": binding["service_version"],
+                        "contract_digest": tool["tool_contract_digest"],
+                        "binding_digest": tool["tool_binding_digest"],
+                        "effect_operation_id": tool["effect_operation_ref"],
+                        "attempt_id": attempt_id,
+                        "command": command,
+                        "operation_id": self.ctx.operations.stable(
+                            f"query-tool-effect:{tool['tool_call_id']}"
+                        ),
+                        "timeout": 30,
+                    }
+                )
+                receipt = self._receipt(raw, tool=tool, attempt_id=attempt_id)
+            except Exception:
+                receipt = {
+                    "protocol": "forest.agent-tool-receipt/1",
+                    "status": "UNKNOWN",
+                    "tool_call_id": tool["tool_call_id"],
+                    "effect_operation_id": tool["effect_operation_ref"],
+                    "effect_attempt_id": attempt_id,
+                    "result": None,
+                    "error_code": None,
+                    "observation_ref": self.ctx.operations.stable(
+                        f"tool-query-unknown:{tool['tool_call_id']}"
+                    ),
+                }
+            observed_state = receipt["status"]
+            result = receipt["result"]
+            if observed_state == "UNKNOWN" and tool["state"] == "UNKNOWN":
+                return {
+                    "status": "UNKNOWN",
+                    "approval_ref": None,
+                    "error_code": "AGENT_TOOL_RESULT_UNKNOWN",
+                }
+            result_observation_id = self.ctx.operations.stable(
+                f"tool-reconciliation:{tool['tool_call_id']}"
+            )
+            await self.ctx.uow.call(
+                "agent.observe-tool-effect",
+                {
+                    "effect": {
+                        "protocol": "forest.effect-command-result/1",
+                        "effect_operation_id": tool["effect_operation_ref"],
+                        "attempt_id": attempt_id,
+                        "observation_operation_id": result_observation_id,
+                        "status": "UNKNOWN" if observed_state == "UNKNOWN" else "SUCCEEDED",
+                        "evidence_kind": "reconciliation",
+                        "evidence": {
+                            "value": receipt,
+                            "parents": [] if result is None else [result],
+                        },
+                    },
+                    "agent": {
+                        "owner": owner,
+                        "observation_operation_id": result_observation_id,
+                        "tool_call_id": tool["tool_call_id"],
+                        "effect_attempt_id": attempt_id,
+                        "observed_state": observed_state,
+                        "evidence_kind": "RECONCILIATION",
+                        "effect_observation_ref": receipt["observation_ref"],
+                        "approval_ref": None,
+                        "error_code": receipt["error_code"],
+                        "results": [] if result is None else [result],
+                        "effect_step_id": "effect",
+                        "evidence_digest": digest_json(receipt),
+                    },
+                },
+                operation_id=self.ctx.operations.stable(
+                    f"observe-tool-reconciliation:{tool['tool_call_id']}"
+                ),
+                timeout=15,
+            )
+            return {
+                "status": observed_state,
+                "approval_ref": None,
+                "error_code": receipt["error_code"],
+            }
         command_digest = digest_json(command)
         permit_operation_id = self.ctx.operations.stable(
             f"tool-permit:{tool['tool_call_id']}"

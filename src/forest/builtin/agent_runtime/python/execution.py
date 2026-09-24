@@ -388,6 +388,28 @@ class AgentExecution:
                         approval_ref=invoked_tool.get("approval_ref"),
                         error_code=invoked_tool.get("error_code"),
                     )
+                if state == "BLOCKED_UNKNOWN" and isinstance(
+                    recovery.get("tool_call"), dict
+                ):
+                    tool = recovery["tool_call"]
+                    binding = bindings.get(tool["tool_name"])
+                    if binding is None:
+                        raise ForestError(
+                            "AGENT_TOOL_ROUTE_STALE",
+                            "Durable ToolCall is absent from the frozen directory",
+                            409,
+                        )
+                    reconciled = await self.tools.invoke(
+                        owner=owner, tool=tool, binding=binding
+                    )
+                    if reconciled["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                        continue
+                    return self._result(
+                        request,
+                        "BLOCKED_UNKNOWN",
+                        run,
+                        error_code=reconciled.get("error_code"),
+                    )
                 if state in {"BLOCKED_UNKNOWN", "MODEL_PENDING"}:
                     return self._result(
                         request,

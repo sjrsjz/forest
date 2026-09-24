@@ -291,6 +291,13 @@ class FrozenContributionDirectories:
                 remaining_timeout=remaining_timeout,
             )
         if kind == "agent-tools":
+            if request.get("action") == "query-handed-off":
+                return await self._query_handed_off_agent_tool(
+                    request,
+                    scope=scope,
+                    parent_call_id=parent_call_id,
+                    remaining_timeout=remaining_timeout,
+                )
             return await self._dispatch_agent_tool(
                 request,
                 scope=scope,
@@ -492,6 +499,142 @@ class FrozenContributionDirectories:
             raise ForestError(
                 "AGENT_TOOL_RESULT_INVALID",
                 "Agent tool executor returned no object",
+                502,
+            )
+        return result
+
+    async def _query_handed_off_agent_tool(
+        self,
+        request: dict,
+        *,
+        scope: PackageCallScope,
+        parent_call_id: str,
+        remaining_timeout: Callable[[float], float],
+    ) -> dict:
+        expected = {
+            "kind", "action", "tool_name", "target_component_id",
+            "target_generation_id", "target_service_id", "target_service_version",
+            "contract_digest", "binding_digest", "effect_operation_id", "attempt_id",
+            "command", "operation_id", "timeout",
+        }
+        if set(request) != expected:
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                "Agent tool reconciliation request contains unsupported fields",
+                422,
+            )
+        strings = tuple(
+            request[field]
+            for field in (
+                "tool_name", "target_component_id", "target_generation_id",
+                "target_service_id", "contract_digest", "binding_digest",
+                "effect_operation_id", "attempt_id", "operation_id",
+            )
+        )
+        timeout = request["timeout"]
+        if (
+            any(not isinstance(value, str) or not 1 <= len(value) <= 512 for value in strings)
+            or type(request["target_service_version"]) is not int
+            or request["target_service_version"] < 1
+            or not isinstance(request["command"], dict)
+            or isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 0 < timeout <= self._declarations["agent-tools"]["max_execution_timeout_s"]
+        ):
+            raise ForestError(
+                "CONTRIBUTION_DIRECTORY_REQUEST_INVALID",
+                "Agent tool reconciliation request is invalid",
+                422,
+            )
+        selected = self._agent_tool_routes.get(request["tool_name"])
+        if selected is None:
+            raise ForestError("AGENT_TOOL_NOT_FOUND", "Agent tool is not available", 404)
+        owner, contribution, service = selected
+        route = service.route
+        binding = {
+            "name": contribution.name,
+            "component_id": owner,
+            "generation_id": route.provider_generation_id,
+            "service_id": contribution.service_id,
+            "contract_digest": contribution.contract_digest,
+            "approval_required": contribution.approval_required,
+            "supports_query": contribution.supports_query,
+        }
+        if not contribution.supports_query:
+            raise ForestError(
+                "AGENT_TOOL_QUERY_UNSUPPORTED",
+                "Agent tool does not declare reconciliation query support",
+                409,
+            )
+        if (
+            request["target_component_id"], request["target_generation_id"],
+            request["target_service_id"], request["target_service_version"],
+            request["contract_digest"], request["binding_digest"],
+        ) != (
+            owner, route.provider_generation_id, route.service_id, route.version,
+            contribution.contract_digest, digest_json(binding),
+        ):
+            raise ForestError(
+                "AGENT_TOOL_ROUTE_STALE",
+                "Agent tool reconciliation differs from the frozen contribution route",
+                409,
+            )
+        command = request["command"]
+        command_fields = {
+            "protocol", "tool_call_id", "effect_operation_id", "effect_attempt_id",
+            "component_id", "generation_id", "service_id", "contract_digest",
+            "binding_digest", "authority_trigger_ref", "authority_principal_ref",
+            "arguments",
+        }
+        if (
+            set(command) != command_fields
+            or command.get("protocol") != "forest.agent-tool-query/1"
+            or command.get("effect_operation_id") != request["effect_operation_id"]
+            or command.get("effect_attempt_id") != request["attempt_id"]
+            or command.get("component_id") != owner
+            or command.get("generation_id") != route.provider_generation_id
+            or command.get("service_id") != contribution.service_id
+            or command.get("contract_digest") != contribution.contract_digest
+            or command.get("binding_digest") != request["binding_digest"]
+            or not isinstance(command.get("arguments"), dict)
+            or any(not isinstance(command.get(field), str) or not command[field]
+                   for field in ("tool_call_id", "authority_trigger_ref", "authority_principal_ref"))
+        ):
+            raise ForestError(
+                "AGENT_TOOL_QUERY_INVALID",
+                "Agent tool reconciliation command differs from the frozen binding",
+                422,
+            )
+        if self._agent_tool_effects is None:
+            raise ForestError("CAPABILITY_UNAVAILABLE", "Agent tool Effect authority is unavailable", 503)
+        loaded = await self._agent_tool_effects.load(request["effect_operation_id"])
+        effect = loaded.get("effect") if isinstance(loaded, dict) else None
+        attempt = loaded.get("attempt") if isinstance(loaded, dict) else None
+        if (
+            not isinstance(effect, dict) or not isinstance(attempt, dict)
+            or effect.get("state") not in {"DISPATCHING", "UNKNOWN"}
+            or attempt.get("state") not in {"DISPATCHING", "UNKNOWN"}
+            or attempt.get("attempt_id") != request["attempt_id"]
+            or attempt.get("executor_component_id") != owner
+            or attempt.get("executor_generation_id") != route.provider_generation_id
+        ):
+            raise ForestError(
+                "AGENT_TOOL_EFFECT_FENCE_MISMATCH",
+                "Kernel Effect is not at a queryable handed-off boundary",
+                409,
+            )
+        result = await service.invoke(
+            command,
+            operation_id=request["operation_id"],
+            causal_root_kind=scope.causal_root_kind,
+            causal_root_id=scope.causal_root_id,
+            timeout_seconds=min(float(timeout), remaining_timeout(float(timeout))),
+            parent_call_id=parent_call_id,
+        )
+        if not isinstance(result, dict):
+            raise ForestError(
+                "AGENT_TOOL_RESULT_INVALID",
+                "Agent tool reconciliation returned no object",
                 502,
             )
         return result

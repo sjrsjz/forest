@@ -27,7 +27,7 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
             "strict": True,
         },
         approval_required=False,
-        supports_query=False,
+        supports_query=True,
     )
     command = {
         "protocol": "forest.agent-tool-execute/1",
@@ -50,7 +50,7 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         "service_id": "module.inspect",
         "contract_digest": contribution.contract_digest,
         "approval_required": False,
-        "supports_query": False,
+        "supports_query": True,
     }
     command["binding_digest"] = digest_json(binding)
     wire_digest = digest_json(command)
@@ -132,6 +132,29 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
     )
     assert result == {"status": "SUCCEEDED"}
     assert invoked[0][0] == command
+
+    query_command = {**command, "protocol": "forest.agent-tool-query/1"}
+    query_request = {
+        key: value
+        for key, value in request.items()
+        if key != "permit"
+    }
+    query_request.update(
+        {
+            "action": "query-handed-off",
+            "command": query_command,
+            "operation_id": "query:effect:1",
+        }
+    )
+    queried = await directory.invoke(
+        query_request,
+        graph_identity=SimpleNamespace(graph_id="graph:1", graph_revision=1),
+        scope=scope,
+        parent_call_id="call:1",
+        remaining_timeout=lambda value: value,
+    )
+    assert queried == {"status": "SUCCEEDED"}
+    assert invoked[1][0] == query_command
 
     request["target_generation_id"] = "generation:owner:2"
     with pytest.raises(ForestError) as caught:

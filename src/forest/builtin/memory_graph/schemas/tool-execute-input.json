@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false,
   "required": ["protocol", "tool_call_id", "effect_operation_id", "effect_attempt_id", "component_id", "generation_id", "service_id", "contract_digest", "binding_digest", "authority_trigger_ref", "authority_principal_ref", "arguments"],
   "properties": {
-    "protocol": {"const": "forest.agent-tool-execute/1"}, "tool_call_id": {"$ref": "#/$defs/id"}, "effect_operation_id": {"$ref": "#/$defs/id"},
+    "protocol": {"enum": ["forest.agent-tool-execute/1", "forest.agent-tool-query/1"]}, "tool_call_id": {"$ref": "#/$defs/id"}, "effect_operation_id": {"$ref": "#/$defs/id"},
     "effect_attempt_id": {"$ref": "#/$defs/id"},
     "component_id": {"const": "memory.graph"}, "generation_id": {"$ref": "#/$defs/id"}, "service_id": {"const": "agent.tool.memory-exact-recall"},
     "contract_digest": {"$ref": "#/$defs/digest"}, "binding_digest": {"$ref": "#/$defs/digest"}, "authority_trigger_ref": {"$ref": "#/$defs/id"},
