@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "status", "run_id", "input_batch_ref", "input_revision",
+    "selected_input_end_seq", "context_revision", "context_view_revision",
+    "memory_qualified_count", "memory_pending_count"
+  ],
+  "properties": {
+    "protocol": {"const": "forest.agent-input-acquisition/1"},
+    "status": {"enum": ["BATCH", "WAIT_INPUT", "CONTINUE", "IDLE"]},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "input_batch_ref": {"type": ["string", "null"], "maxLength": 256},
+    "input_revision": {"type": ["integer", "null"], "minimum": 1},
+    "selected_input_end_seq": {"type": "integer", "minimum": 0},
+    "context_revision": {"type": ["integer", "null"], "minimum": 1},
+    "context_view_revision": {"type": ["integer", "null"], "minimum": 0},
+    "memory_qualified_count": {"type": "integer", "minimum": 0, "maximum": 100000},
+    "memory_pending_count": {"type": "integer", "minimum": 0, "maximum": 100000}
+  }
+}

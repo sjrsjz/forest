@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "2.0.0"
+version = "2.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -32,6 +32,7 @@ requests = [
   "domain.query:agent.run-recovery",
   "uow.execute:agent.start-run",
   "uow.execute:agent.append-run-input",
+  "uow.execute:agent.acquire-model-input",
   "uow.execute:agent.park-reload",
   "uow.execute:agent.resume-reload",
   "uow.execute:agent.acquire-run-lease",
@@ -66,9 +67,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.0.0"
+schema_version = "1.1.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "5136321cbc470264172ef76a5f1f6385af08c0ddc1c892c2a0dfe34f71d19182"
+baseline_sha256 = "0e4d5d0c928dd79bca79b3b4cb416fa30e67d565693c1317c1a25fb61c7ad649"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -112,6 +113,13 @@ contract = "1.0"
 function = "agent_append_run_input"
 input_schema = "schemas/append-run-input-envelope.json"
 output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.accept-selected-input-record"
+contract = "1.0"
+function = "agent_accept_selected_input"
+input_schema = "schemas/acquire-model-input-envelope.json"
+output_schema = "schemas/acquire-model-input-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.park-reload-record"
@@ -290,6 +298,19 @@ output_schema = "schemas/run-snapshot-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.append-run-input-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.acquire-model-input"
+contract = "1.0"
+input_schema = "schemas/acquire-model-input.json"
+output_schema = "schemas/acquire-model-input-output.json"
+timeout_s = 20
+steps = [
+  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.select-input", input_path = "/conversation" },
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.qualify-input-batch", input_path = "/memory" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.accept-selected-input-record", input_path = "/agent" }
 ]
 
 [[components.unit_of_work_plans]]

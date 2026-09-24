@@ -2718,6 +2718,168 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_accept_selected_input(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    owner_value jsonb := body->'owner';
+    requested_run text := owner_value->>'run_id';
+    selection jsonb := prior->(body->>'selection_step_id');
+    memory_value jsonb := prior->(body->>'memory_step_id');
+    selection_status text;
+    source_manifest jsonb;
+    source_digest text;
+    batch_value jsonb;
+    triggers_value jsonb;
+    append_result jsonb;
+    snapshot jsonb;
+    event_count integer;
+    qualified_count integer;
+    pending_count integer;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body IS NULL OR prior IS NULL OR owner_value IS NULL
+       OR selection IS NULL OR memory_value IS NULL
+       OR body->>'selection_step_id' IS DISTINCT FROM 'conversation'
+       OR body->>'memory_step_id' IS DISTINCT FROM 'memory'
+       OR memory_value->>'protocol' IS DISTINCT FROM 'forest.memory-input-qualified/1' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_ACQUISITION_INVALID',
+                'message','Agent input acquisition envelope is invalid','status',422
+            )
+        );
+    END IF;
+    selection_status := selection->>'status';
+    qualified_count := (memory_value->>'qualified_count')::integer;
+    pending_count := (memory_value->>'pending_count')::integer;
+    IF selection_status IS NULL
+       OR selection_status NOT IN ('BATCH','WAIT_INPUT','CONTINUE','IDLE')
+       OR selection->>'selected_input_end_seq' IS NULL
+       OR selection->>'conversation_id' IS NULL
+       OR qualified_count < 0 OR pending_count < 0 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_ACQUISITION_INVALID',
+                'message','Conversation selection is invalid','status',422
+            )
+        );
+    END IF;
+    IF selection_status <> 'BATCH' THEN
+        IF memory_value->>'input_batch_ref' IS NOT NULL
+           OR qualified_count <> 0 OR pending_count <> 0 THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_INPUT_ACQUISITION_CONFLICT',
+                    'message','Memory qualification differs from empty selection','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.agent-input-acquisition/1',
+                'status',selection_status,'run_id',requested_run,
+                'input_batch_ref',NULL,'input_revision',NULL,
+                'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
+                'context_revision',NULL,'context_view_revision',NULL,
+                'memory_qualified_count',0,'memory_pending_count',0
+            )
+        );
+    END IF;
+    IF selection->>'boundary' IS DISTINCT FROM 'MODEL_SAFE_POINT'
+       OR selection->>'run_ref' IS DISTINCT FROM requested_run
+       OR selection->>'input_batch_id' IS NULL
+       OR selection->>'context_revision' IS NULL
+       OR selection->>'context_view_revision' IS NULL
+       OR jsonb_typeof(selection->'event_ids') IS DISTINCT FROM 'array'
+       OR jsonb_typeof(selection->'triggers') IS DISTINCT FROM 'array'
+       OR memory_value->>'input_batch_ref' IS DISTINCT FROM selection->>'input_batch_id' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_ACQUISITION_CONFLICT',
+                'message','Selected InputBatch fences do not agree','status',409
+            )
+        );
+    END IF;
+    event_count := jsonb_array_length(selection->'event_ids');
+    IF qualified_count + pending_count <> event_count THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_ACQUISITION_CONFLICT',
+                'message','Memory qualification does not cover the InputBatch','status',409
+            )
+        );
+    END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'trigger_ref',item->>'trigger_id',
+        'principal_ref',item->>'principal_ref',
+        'ingress_seq',(item->>'ingress_seq')::bigint
+    ) ORDER BY ordinal),'[]'::jsonb)
+    INTO triggers_value
+    FROM jsonb_array_elements(selection->'triggers') WITH ORDINALITY AS t(item,ordinal);
+    source_manifest := jsonb_build_object(
+        'conversation_id',selection->>'conversation_id',
+        'input_batch_ref',selection->>'input_batch_id',
+        'event_ids',selection->'event_ids',
+        'triggers',selection->'triggers',
+        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
+        'context_revision',(selection->>'context_revision')::bigint,
+        'context_view_revision',(selection->>'context_view_revision')::bigint
+    );
+    source_digest := 'sha256:' || encode(
+        sha256(convert_to(source_manifest::text,'UTF8')),'hex'
+    );
+    batch_value := jsonb_build_object(
+        'input_batch_ref',selection->>'input_batch_id',
+        'input_batch_digest',source_digest,
+        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
+        'context_revision',(selection->>'context_revision')::bigint,
+        'context_view_revision',(selection->>'context_view_revision')::bigint,
+        'source_manifest_digest',source_digest,
+        'triggers',triggers_value
+    );
+    append_result := __forest_module_schema__.agent_append_run_input(
+        context,
+        jsonb_build_object(
+            'protocol','forest.uow-step/1',
+            'caller',envelope->'caller',
+            'input',jsonb_build_object('owner',owner_value,'input_batch',batch_value),
+            'prior',jsonb_build_object()
+        )
+    );
+    IF append_result->>'ok' IS DISTINCT FROM 'true' THEN
+        RETURN append_result;
+    END IF;
+    snapshot := append_result->'value';
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.agent-input-acquisition/1',
+            'status','BATCH','run_id',requested_run,
+            'input_batch_ref',selection->>'input_batch_id',
+            'input_revision',(snapshot#>>'{progress,input_revision}')::bigint,
+            'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
+            'context_revision',(selection->>'context_revision')::bigint,
+            'context_view_revision',(selection->>'context_view_revision')::bigint,
+            'memory_qualified_count',qualified_count,
+            'memory_pending_count',pending_count
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_park_reload(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

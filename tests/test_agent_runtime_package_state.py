@@ -5,11 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
+from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -84,6 +86,58 @@ async def _advance_to_final_ready(repository, kernel, owner, prefix: str):
 async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_authority, tmp_path):
     store, installer = clean_authority
     kernel = await bootstrap_clean_kernel(store, installer)
+    conversation_package = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
+        PackageCatalog(tmp_path / "conversation-packages"),
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={
+            "protocol": "forest.conversation.scheduler/2",
+            "context_view": {
+                "high_watermark_units": 1024,
+                "retain_units": 768,
+                "policy_revision": "context-view-unit-window-v1",
+            },
+        },
+    )
+    memory_package = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/memory_graph"))),
+        PackageCatalog(tmp_path / "memory-packages"),
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={
+            "protocol": "forest.memory.graph/2",
+            "embedding": {
+                "model_kind": "TEXT_IMAGE",
+                "deployment_id": "embedding.multimodal/test/default",
+                "model_revision": "test/1",
+                "model": "Qwen/Qwen3-VL-Embedding-8B",
+                "dimensions": 4096,
+                "normalization": "L2",
+            },
+            "fusion_policy_revision": "independent-facets/1",
+            "retrieval": {
+                "policy_revision": "qiyu-graph-region/1",
+                "seed_limit": 4,
+                "candidate_limit_per_facet": 64,
+                "min_similarity": 0.35,
+                "min_graph_relevance": 0.05,
+                "max_graph_nodes": 32,
+                "max_association_edges_per_node": 32,
+                "max_retrieval_chars": 24000,
+                "sequence_weight": 0.55,
+                "association_weight": 0.9,
+            },
+            "embedding_budget": {
+                "policy_revision": "daily-cost-cap/1",
+                "daily_request_limit": 1000,
+                "daily_token_limit": 10000000,
+                "reservation_tokens": 32768,
+            },
+        },
+    )
     preset = await _payload(
         kernel,
         owner_kind="preset.context",
@@ -123,7 +177,15 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    registry = RuntimeModuleRegistry(
+        host,
+        (
+            *kernel.descriptors,
+            conversation_package.descriptor,
+            memory_package.descriptor,
+            package.descriptor,
+        ),
+    )
     await registry.start()
     try:
         instance = registry.get("agent.runtime")
@@ -921,43 +983,167 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             )
         assert renewed["epoch"] == owner["epoch"]
 
+        conversation_namespace = conversation_package.descriptor.storage.spec.namespace
+        digest = "sha256:" + "7" * 64
         async with store.pool.connection() as conn, conn.transaction():
-            appended = await participant.invoke_in(
-                conn,
-                "agent.append-run-input-record",
-                {
-                    "protocol": "forest.uow-step/1",
-                    "caller": caller,
-                    "input": {
-                        "owner": {
-                            "run_id": owner["run_id"],
-                            "owner_id": owner["owner_id"],
-                            "epoch": owner["epoch"],
-                        },
-                        "input_batch": {
-                            "input_batch_ref": "input-batch/agent-package/2",
-                            "input_batch_digest": digest_json({"batch": 2}),
-                            "selected_input_end_seq": 3,
-                            "context_revision": 2,
-                            "context_view_revision": 1,
-                            "source_manifest_digest": digest_json({"source": 2}),
-                            "triggers": [
-                                {
-                                    "trigger_ref": "trigger/2",
-                                    "principal_ref": "qq:43",
-                                    "ingress_seq": 3,
-                                }
-                            ],
-                        },
-                    },
-                    "prior": {},
-                },
-                operation_id="agent-run-append/package/1",
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.conversation_lanes("
+                    "bot_id,conversation_id,conversation_key_digest,source_component_id,"
+                    "binding_ref,platform,channel_kind,channel_ref,next_ingress_seq,"
+                    "classified_through_seq,context_applied_seq,context_revision,"
+                    "context_view_revision,context_view_unit_count,actor_owner_id,actor_epoch,"
+                    "actor_expires_at,active_session_ref,active_run_ref) VALUES ("
+                    "%s,%s,%s,'adapter.onebot','binding/main','onebot-v11','GROUP',"
+                    "'933179609',4,3,1,1,1,1,%s,1,clock_timestamp()+interval '5 minutes',%s,%s)"
+                ).format(sql.Identifier(conversation_namespace)),
+                (
+                    store.bot_id,
+                    "conversation/onebot/group/933179609",
+                    digest_json({"conversation": "933179609"}),
+                    "conversation-owner/package/1",
+                    "session/agent-package/1",
+                    "run/agent-package/1",
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.context_units("
+                    "bot_id,conversation_id,unit_id,context_revision,unit_index,kind,"
+                    "source_component_id,source_kind,source_id,payload_id,payload_digest,"
+                    "payload_owner_component_id,payload_owner_kind,payload_owner_id) VALUES ("
+                    "%s,%s,'context/initial',1,0,'AGENT_STEP','agent.runtime','model.turn',"
+                    "'turn/initial','payload/context/initial',%s,'agent.runtime',"
+                    "'model.turn','turn/initial')"
+                ).format(sql.Identifier(conversation_namespace)),
+                (store.bot_id, "conversation/onebot/group/933179609", digest),
+            )
+            for ingress_seq, event_id, decision in (
+                (2, "event/package/2", "NO_TRIGGER"),
+                (3, "event/package/3", "TRIGGER"),
+            ):
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.inbox_messages("
+                        "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
+                        "input_digest,source_component_id,source_event_ref,event_kind,"
+                        "platform_message_ref,author_subject_ref,content_payload_id,"
+                        "content_payload_digest,content_owner_component_id,content_owner_kind,"
+                        "content_owner_id,author_payload_id,author_payload_digest,"
+                        "author_owner_component_id,author_owner_kind,author_owner_id,"
+                        "context_disposition,classification_state,trigger_decision,"
+                        "classification_operation_id,classification_input_digest,"
+                        "classifier_component_id,classifier_generation_id,rule_revision,"
+                        "reason_code,received_at,classification_deadline,classified_at) VALUES ("
+                        "%s,%s,%s,%s,%s,%s,'adapter.onebot',%s,'message.group',%s,'qq:43',"
+                        "%s,%s,'adapter.onebot','onebot.normalized-event',%s,%s,%s,"
+                        "'adapter.onebot','onebot.author-snapshot',%s,'MATERIALIZE','FINAL',%s,"
+                        "%s,%s,'conversation.trigger-policy','generation/trigger/test',"
+                        "'rule/1','test',clock_timestamp(),clock_timestamp()+interval '1 minute',"
+                        "clock_timestamp())"
+                    ).format(sql.Identifier(conversation_namespace)),
+                    (
+                        store.bot_id,
+                        "conversation/onebot/group/933179609",
+                        event_id,
+                        ingress_seq,
+                        f"admit/{event_id}",
+                        digest,
+                        f"source/{event_id}",
+                        f"message/{ingress_seq}",
+                        f"payload/content/{event_id}",
+                        digest,
+                        event_id,
+                        f"payload/author/{event_id}",
+                        digest,
+                        event_id,
+                        decision,
+                        f"classify/{event_id}",
+                        digest,
+                    ),
+                )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.conversation_triggers("
+                    "bot_id,conversation_id,trigger_id,event_id,ingress_seq,principal_ref,"
+                    "input_digest) VALUES (%s,%s,'trigger/2','event/package/3',3,'qq:43',%s)"
+                ).format(sql.Identifier(conversation_namespace)),
+                (store.bot_id, "conversation/onebot/group/933179609", digest),
+            )
+
+        acquisition_declaration = next(
+            item
+            for item in instance.component["unit_of_work_plans"]
+            if item["name"] == "agent.acquire-model-input"
+        )
+        binding = instance._prepared_binding
+        acquisition = await instance._unit_of_work_coordinator.execute(
+            PackageCallScope(
+                bot_id=store.bot_id,
+                component_id="agent.runtime",
+                generation_id=generation_id,
+                instance_id=binding.instance_id,
+                worker_incarnation=binding.worker_incarnation,
+                call_id="call:agent-package/acquire-model-input",
+                call_operation_id="agent-acquire-model-input/package/1",
                 causal_root_kind="agent.model-safe-point",
                 causal_root_id="run/agent-package/1",
-                parent_call_id="call:agent-package/append",
-                timeout_seconds=10,
-            )
+            ),
+            acquisition_declaration,
+            {
+                "conversation": {
+                    "actor": {
+                        "conversation_id": "conversation/onebot/group/933179609",
+                        "owner_id": "conversation-owner/package/1",
+                        "epoch": 1,
+                    },
+                    "boundary": "MODEL_SAFE_POINT",
+                    "selection_mode": "ANY",
+                    "session_ref": "session/agent-package/1",
+                    "run_ref": "run/agent-package/1",
+                    "next_run_ref": None,
+                },
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {
+                    "selection_step_id": "conversation",
+                    "deletion_epoch_step_id": "payload_epoch",
+                },
+                "agent": {
+                    "owner": {
+                        "run_id": owner["run_id"],
+                        "owner_id": owner["owner_id"],
+                        "epoch": owner["epoch"],
+                    },
+                    "selection_step_id": "conversation",
+                    "memory_step_id": "memory",
+                },
+            },
+            parent_call_id="call:agent-package/acquire-model-input",
+            timeout_seconds=20,
+        )
+        assert acquisition == {
+            "protocol": "forest.agent-input-acquisition/1",
+            "status": "BATCH",
+            "run_id": "run/agent-package/1",
+            "input_batch_ref": acquisition["input_batch_ref"],
+            "input_revision": 2,
+            "selected_input_end_seq": 3,
+            "context_revision": 2,
+            "context_view_revision": 1,
+            "memory_qualified_count": 0,
+            "memory_pending_count": 2,
+        }
+        appended = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "agent-run-query/package/after-acquisition",
+                10,
+                "test.agent-runtime-package",
+                "run/agent-package/1",
+            ),
+            ({"run_id": "run/agent-package/1"},),
+            {},
+        )
         assert appended["progress"] == {
             "input_revision": 2,
             "selected_input_end_seq": 3,
@@ -1055,7 +1241,15 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 )
         assert stale.value.code == "STALE_AGENT_RUN_OWNER"
 
-        candidate = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+        candidate = RuntimeModuleRegistry(
+            host,
+            (
+                *kernel.descriptors,
+                conversation_package.descriptor,
+                memory_package.descriptor,
+                package.descriptor,
+            ),
+        )
         await candidate.prewarm()
         await registry.drain_owned_work_for_replacement(candidate.activation_id)
         await candidate.start()
