@@ -966,6 +966,84 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_execution_history(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_run text := input->>'run_id';
+    history_value jsonb;
+BEGIN
+    IF requested_run IS NULL OR octet_length(requested_run) NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_HISTORY_INPUT_INVALID',
+                'message','Agent execution history input is invalid','status',422
+            )
+        );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.agent_runs
+        WHERE bot_id=requested_bot AND run_id=requested_run
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_NOT_FOUND','message','Agent Run does not exist','status',404
+            )
+        );
+    END IF;
+    SELECT COALESCE(jsonb_agg(row_value ORDER BY step_seq,turn_id),'[]'::jsonb)
+    INTO history_value
+    FROM (
+        SELECT t.step_seq,t.turn_id,jsonb_build_object(
+            'turn_id',t.turn_id,
+            'request_id',t.request_id,
+            'step_seq',t.step_seq,
+            'input_revision',r.input_revision,
+            'provider_component_id',r.provider_component_id,
+            'model_attempt_id',a.attempt_id,
+            'model_result_payload_id',a.result_payload_id,
+            'model_result_payload_digest',a.result_payload_digest,
+            'tool_call_id',c.tool_call_id,
+            'tool_name',c.tool_name,
+            'tool_component_id',c.tool_component_id,
+            'tool_state',c.state,
+            'function_call_payload_id',t.function_call_payload_id,
+            'function_call_payload_digest',t.function_call_payload_digest,
+            'result_payload_id',c.result_payload_id,
+            'result_payload_digest',c.result_payload_digest,
+            'tool_error_code',c.error_code
+        ) AS row_value
+        FROM __forest_module_schema__.model_turns t
+        JOIN __forest_module_schema__.model_requests r
+          ON r.bot_id=t.bot_id AND r.request_id=t.request_id
+        LEFT JOIN __forest_module_schema__.tool_calls c
+          ON c.bot_id=t.bot_id AND c.turn_id=t.turn_id
+        LEFT JOIN LATERAL (
+            SELECT x.attempt_id,x.result_payload_id,x.result_payload_digest
+            FROM __forest_module_schema__.model_transport_attempts x
+            WHERE x.bot_id=t.bot_id AND x.request_id=t.request_id
+              AND x.state='SUCCEEDED'
+            ORDER BY x.attempt_no DESC LIMIT 1
+        ) a ON TRUE
+        WHERE t.bot_id=requested_bot AND t.run_id=requested_run
+    ) history_rows;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.agent-execution-history/1',
+            'run_id',requested_run,
+            'turns',history_value
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_acquire_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

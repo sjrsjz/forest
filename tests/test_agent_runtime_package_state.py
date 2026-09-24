@@ -285,6 +285,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             for item in instance.component["domain_queries"]
             if item["name"] == "agent.run-recovery"
         )
+        history_declaration = next(
+            item
+            for item in instance.component["domain_queries"]
+            if item["name"] == "agent.execution-history"
+        )
         recovery = await instance.invoke_management_query(
             recovery_declaration,
             {"run_id": "run/agent-package/1"},
@@ -980,6 +985,23 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         assert tool_recovery["state"] == "PREPARING_MODEL"
         assert tool_recovery["tool_call"] is None
+        execution_history = await instance.invoke_management_query(
+            history_declaration,
+            {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert execution_history["protocol"] == "forest.agent-execution-history/1"
+        assert execution_history["run_id"] == "run/agent-package/model-port"
+        assert len(execution_history["turns"]) == 1
+        history_turn = execution_history["turns"][0]
+        assert history_turn["turn_id"] == "model-turn/package/repair"
+        assert history_turn["input_revision"] == 1
+        assert history_turn["model_attempt_id"] == "model-attempt/package/repair"
+        assert history_turn["model_result_payload_id"] == repair_result.payload_id
+        assert history_turn["function_call_payload_id"] == tool_arguments.payload_id
+        assert history_turn["tool_component_id"] == "tool.echo"
+        assert history_turn["tool_state"] == "SUCCEEDED"
+        assert history_turn["result_payload_id"] == tool_result.payload_id
 
         acquire_envelope = {
             "protocol": "forest.uow-step/1",
