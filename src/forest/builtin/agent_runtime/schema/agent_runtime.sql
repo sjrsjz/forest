@@ -1127,6 +1127,427 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_prepare_model_request(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    request_value jsonb := body->'request';
+    projection_value jsonb := request_value->'projection';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_request text := request_value->>'request_id';
+    run_row record;
+    existing record;
+    semantic_digest_value text;
+    has_repair boolean;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR context->>'participant_input_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR projection_value->>'owner_component_id'
+            IS DISTINCT FROM request_value->>'provider_component_id'
+       OR projection_value->>'owner_kind' IS DISTINCT FROM 'model.projection'
+       OR projection_value->>'owner_id' IS DISTINCT FROM requested_request THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_REQUEST_INPUT_INVALID',
+                'message','Model request envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/model-request/' || requested_bot || '/' || requested_request,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR UPDATE;
+    IF FOUND THEN
+        IF existing.run_id IS DISTINCT FROM requested_run
+           OR existing.request_kind IS DISTINCT FROM request_value->>'request_kind'
+           OR existing.provider_component_id IS DISTINCT FROM request_value->>'provider_component_id'
+           OR existing.provider_generation_id IS DISTINCT FROM request_value->>'provider_generation_id'
+           OR existing.provider_profile_ref IS DISTINCT FROM request_value->>'provider_profile_ref'
+           OR existing.model_ref IS DISTINCT FROM request_value->>'model_ref'
+           OR existing.instruction_channel IS DISTINCT FROM request_value->>'instruction_channel'
+           OR existing.capability_digest IS DISTINCT FROM request_value->>'capability_digest'
+           OR existing.projection_payload_id IS DISTINCT FROM projection_value->>'payload_id'
+           OR existing.projection_payload_digest IS DISTINCT FROM projection_value->>'digest'
+           OR existing.projection_owner_component_id
+                IS DISTINCT FROM projection_value->>'owner_component_id'
+           OR existing.projection_owner_kind IS DISTINCT FROM projection_value->>'owner_kind'
+           OR existing.projection_owner_id IS DISTINCT FROM projection_value->>'owner_id'
+           OR existing.projected_content_digest
+                IS DISTINCT FROM request_value->>'projected_content_digest'
+           OR existing.source_manifest_digest
+                IS DISTINCT FROM request_value->>'source_manifest_digest'
+           OR existing.output_token_budget
+                IS DISTINCT FROM (request_value->>'output_token_budget')::integer THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','MODEL_REQUEST_ID_CONFLICT',
+                    'message','Model request identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'request_id',existing.request_id,'step_seq',existing.step_seq,
+                'request_kind',existing.request_kind,'state',existing.state,
+                'attempt_count',existing.attempt_count
+            )
+        );
+    END IF;
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.protocol_failures f
+        WHERE f.bot_id=requested_bot AND f.run_id=requested_run
+          AND f.repair_step_seq=run_row.next_step_seq
+    ) INTO has_repair;
+    IF run_row.state NOT IN ('PREPARING_MODEL','REPAIR_READY') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_REQUEST_BOUNDARY_CLOSED',
+                'message','Run is not preparing a model request','status',409
+            )
+        );
+    END IF;
+    IF has_repair IS DISTINCT FROM (request_value->>'request_kind'='REPAIR') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_REQUEST_KIND_CONFLICT',
+                'message','Model request kind differs from durable repair state','status',409
+            )
+        );
+    END IF;
+    semantic_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'run_id',requested_run,'step_seq',run_row.next_step_seq,
+        'input_revision',run_row.input_revision,'context_revision',run_row.context_revision,
+        'context_view_revision',run_row.context_view_revision,
+        'core_protocol_version',run_row.core_protocol_version,
+        'core_prompt_digest',run_row.core_prompt_digest,
+        'preset_revision',run_row.preset_revision,
+        'preset_payload_digest',run_row.preset_payload_digest,
+        'request',request_value
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.model_requests(
+        bot_id,request_id,run_id,step_seq,request_kind,semantic_request_digest,
+        input_revision,context_revision,context_view_revision,core_protocol_version,
+        core_prompt_digest,preset_revision,preset_payload_digest,provider_component_id,
+        provider_generation_id,provider_profile_ref,model_ref,instruction_channel,
+        capability_digest,projection_payload_id,projection_payload_digest,
+        projection_owner_component_id,projection_owner_kind,projection_owner_id,
+        projected_content_digest,source_manifest_digest,output_token_budget
+    ) VALUES (
+        requested_bot,requested_request,requested_run,run_row.next_step_seq,
+        request_value->>'request_kind',semantic_digest_value,run_row.input_revision,
+        run_row.context_revision,run_row.context_view_revision,run_row.core_protocol_version,
+        run_row.core_prompt_digest,run_row.preset_revision,run_row.preset_payload_digest,
+        request_value->>'provider_component_id',request_value->>'provider_generation_id',
+        request_value->>'provider_profile_ref',request_value->>'model_ref',
+        request_value->>'instruction_channel',request_value->>'capability_digest',
+        projection_value->>'payload_id',projection_value->>'digest',
+        projection_value->>'owner_component_id',projection_value->>'owner_kind',
+        projection_value->>'owner_id',request_value->>'projected_content_digest',
+        request_value->>'source_manifest_digest',
+        (request_value->>'output_token_budget')::integer
+    );
+    IF run_row.state='REPAIR_READY' THEN
+        UPDATE __forest_module_schema__.agent_runs
+        SET state='PREPARING_MODEL',current_model_request_id=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND run_id=requested_run;
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'request_id',requested_request,'step_seq',run_row.next_step_seq,
+            'request_kind',request_value->>'request_kind','state','READY','attempt_count',0
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_prepare_model_attempt(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    wire_value jsonb := body->'wire';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_request text := body->>'request_id';
+    requested_attempt text := body->>'attempt_id';
+    requested_effect text := body->>'effect_operation_ref';
+    run_row record;
+    request_row record;
+    existing record;
+    attempt_no_value integer;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR wire_value->>'owner_kind' IS DISTINCT FROM 'model.wire'
+       OR wire_value->>'owner_id' IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_ATTEMPT_INPUT_INVALID',
+                'message','Model attempt envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/model-attempt/' || requested_bot || '/' || requested_attempt,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR UPDATE;
+    IF FOUND THEN
+        IF existing.request_id IS DISTINCT FROM requested_request
+           OR existing.effect_operation_ref IS DISTINCT FROM requested_effect
+           OR existing.wire_payload_id IS DISTINCT FROM wire_value->>'payload_id'
+           OR existing.wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
+           OR existing.wire_owner_component_id IS DISTINCT FROM wire_value->>'owner_component_id'
+           OR existing.wire_owner_kind IS DISTINCT FROM wire_value->>'owner_kind'
+           OR existing.wire_owner_id IS DISTINCT FROM wire_value->>'owner_id' THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','MODEL_ATTEMPT_ID_CONFLICT',
+                    'message','Model attempt identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'attempt_id',existing.attempt_id,'request_id',existing.request_id,
+                'attempt_no',existing.attempt_no,
+                'effect_operation_ref',existing.effect_operation_ref,'state',existing.state
+            )
+        );
+    END IF;
+    SELECT * INTO request_row
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR UPDATE;
+    IF NOT FOUND OR request_row.run_id IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_REQUEST_NOT_FOUND','message','Model request does not exist','status',404
+            )
+        );
+    END IF;
+    IF wire_value->>'owner_component_id'
+       IS DISTINCT FROM request_row.provider_component_id THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_ATTEMPT_INPUT_INVALID',
+                'message','Model wire owner differs from the frozen provider','status',422
+            )
+        );
+    END IF;
+    IF run_row.state IS DISTINCT FROM 'PREPARING_MODEL'
+       OR request_row.state NOT IN ('READY','NOT_APPLIED') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_ATTEMPT_BOUNDARY_CLOSED',
+                'message','Model request cannot prepare an attempt','status',409
+            )
+        );
+    END IF;
+    attempt_no_value := request_row.attempt_count+1;
+    INSERT INTO __forest_module_schema__.model_transport_attempts(
+        bot_id,attempt_id,request_id,attempt_no,effect_operation_ref,
+        wire_payload_id,wire_payload_digest,wire_owner_component_id,
+        wire_owner_kind,wire_owner_id
+    ) VALUES (
+        requested_bot,requested_attempt,requested_request,attempt_no_value,requested_effect,
+        wire_value->>'payload_id',wire_value->>'digest',wire_value->>'owner_component_id',
+        wire_value->>'owner_kind',wire_value->>'owner_id'
+    );
+    UPDATE __forest_module_schema__.model_requests
+    SET state='ATTEMPT_PREPARED',current_attempt_id=requested_attempt,
+        attempt_count=attempt_no_value,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=requested_request;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'attempt_id',requested_attempt,'request_id',requested_request,
+            'attempt_no',attempt_no_value,'effect_operation_ref',requested_effect,
+            'state','PREPARED'
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_mark_model_handoff(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_request text := body->>'request_id';
+    requested_attempt text := body->>'attempt_id';
+    run_row record;
+    request_row record;
+    attempt_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_HANDOFF_INPUT_INVALID',
+                'message','Model handoff envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+        WHERE c.bot_id=requested_bot AND c.run_id=requested_run
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_CANCEL_REQUESTED',
+                'message','Agent Run cancellation won the external handoff race','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO request_row
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR UPDATE;
+    SELECT * INTO attempt_row
+    FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR UPDATE;
+    IF request_row.request_id IS NULL OR attempt_row.attempt_id IS NULL
+       OR request_row.run_id IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_ATTEMPT_NOT_FOUND','message','Model attempt does not exist','status',404
+            )
+        );
+    END IF;
+    IF request_row.current_attempt_id IS DISTINCT FROM requested_attempt
+       OR attempt_row.request_id IS DISTINCT FROM requested_request THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_ATTEMPT_CONFLICT','message','Current model attempt differs','status',409
+            )
+        );
+    END IF;
+    IF request_row.state='DISPATCHING' AND attempt_row.state='DISPATCHING' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'attempt_id',attempt_row.attempt_id,'request_id',attempt_row.request_id,
+                'attempt_no',attempt_row.attempt_no,
+                'effect_operation_ref',attempt_row.effect_operation_ref,
+                'state',attempt_row.state
+            )
+        );
+    END IF;
+    IF run_row.state IS DISTINCT FROM 'PREPARING_MODEL'
+       OR request_row.state IS DISTINCT FROM 'ATTEMPT_PREPARED'
+       OR attempt_row.state IS DISTINCT FROM 'PREPARED' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_ATTEMPT_CONFLICT','message','Model handoff boundary closed','status',409
+            )
+        );
+    END IF;
+    UPDATE __forest_module_schema__.model_transport_attempts
+    SET state='DISPATCHING',started_at=run_row.database_now
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
+    UPDATE __forest_module_schema__.model_requests
+    SET state='DISPATCHING',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=requested_request;
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='MODEL_PENDING',current_model_request_id=requested_request,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'attempt_id',attempt_row.attempt_id,'request_id',attempt_row.request_id,
+            'attempt_no',attempt_row.attempt_no,
+            'effect_operation_ref',attempt_row.effect_operation_ref,'state','DISPATCHING'
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

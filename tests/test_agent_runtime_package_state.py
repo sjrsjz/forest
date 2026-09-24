@@ -16,9 +16,16 @@ from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.agent_runtime_authority import AgentPayloadRef, AgentRuntimeRepository
 
 
-async def _payload(kernel, *, owner_kind: str, owner_id: str, value: bytes) -> AgentPayloadRef:
+async def _payload(
+    kernel,
+    *,
+    owner_kind: str,
+    owner_id: str,
+    value: bytes,
+    owner_component_id: str = "agent.runtime",
+) -> AgentPayloadRef:
     saved = await kernel.payload.put_bytes(
-        owner_component_id="agent.runtime",
+        owner_component_id=owner_component_id,
         owner_kind=owner_kind,
         owner_id=owner_id,
         media_type="application/json",
@@ -28,7 +35,7 @@ async def _payload(kernel, *, owner_kind: str, owner_id: str, value: bytes) -> A
     return AgentPayloadRef(
         saved.payload_id,
         saved.content_digest,
-        "agent.runtime",
+        owner_component_id,
         owner_kind,
         owner_id,
     )
@@ -231,6 +238,172 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "tool_call": None,
             "latest_turn": None,
             "protocol_failure": None,
+        }
+
+        model_start = {
+            **start_envelope,
+            "input": {
+                **start_envelope["input"],
+                "conversation_ref": "conversation/onebot/group/model-port",
+                "session_id": "session/agent-package/model-port",
+                "run_id": "run/agent-package/model-port",
+                "input_batch": {
+                    **start_envelope["input"]["input_batch"],
+                    "input_batch_ref": "input-batch/agent-package/model-port",
+                    "input_batch_digest": digest_json({"batch": "model-port"}),
+                    "source_manifest_digest": digest_json({"source": "model-port"}),
+                    "triggers": [
+                        {
+                            "trigger_ref": "trigger/model-port",
+                            "principal_ref": "qq:43",
+                            "ingress_seq": 1,
+                        }
+                    ],
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn,
+                "agent.start-run-record",
+                model_start,
+                operation_id="agent-run-start/package/model-port",
+                causal_root_kind="conversation.run",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/start",
+                timeout_seconds=10,
+            )
+        model_acquire = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "run_id": "run/agent-package/model-port",
+                "owner_id": "agent-worker/model-port",
+                "lease_seconds": 120,
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            model_owner = await participant.invoke_in(
+                conn,
+                "agent.acquire-run-record",
+                model_acquire,
+                operation_id="agent-run-acquire/package/model-port",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/acquire",
+                timeout_seconds=10,
+            )
+        projection = await _payload(
+            kernel,
+            owner_component_id="provider.chat",
+            owner_kind="model.projection",
+            owner_id="model-request/package/1",
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        request_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": {
+                    "run_id": model_owner["run_id"],
+                    "owner_id": model_owner["owner_id"],
+                    "epoch": model_owner["epoch"],
+                },
+                "request": {
+                    "request_id": "model-request/package/1",
+                    "request_kind": "PRIMARY",
+                    "provider_component_id": "provider.chat",
+                    "provider_generation_id": "generation/provider/package-test",
+                    "provider_profile_ref": "profile/provider/package-test",
+                    "model_ref": "model/package-test",
+                    "instruction_channel": "SYSTEM",
+                    "capability_digest": digest_json({"capability": "text"}),
+                    "projection": projection.canonical(),
+                    "projected_content_digest": digest_json({"content": "A"}),
+                    "source_manifest_digest": digest_json({"source": "context"}),
+                    "output_token_budget": 256,
+                },
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            prepared_request = await participant.invoke_in(
+                conn,
+                "agent.prepare-model-request-record",
+                request_envelope,
+                operation_id="agent-model-request/package/1",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/request",
+                timeout_seconds=10,
+            )
+        assert prepared_request["state"] == "READY"
+        wire = await _payload(
+            kernel,
+            owner_component_id="provider.chat",
+            owner_kind="model.wire",
+            owner_id="model-attempt/package/1",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        attempt_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "request_id": "model-request/package/1",
+                "attempt_id": "model-attempt/package/1",
+                "effect_operation_ref": "model-effect/package/1",
+                "wire": wire.canonical(),
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            prepared_attempt = await participant.invoke_in(
+                conn,
+                "agent.prepare-model-attempt-record",
+                attempt_envelope,
+                operation_id="agent-model-attempt/package/1",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/attempt",
+                timeout_seconds=10,
+            )
+        assert prepared_attempt["state"] == "PREPARED"
+        handoff_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "request_id": "model-request/package/1",
+                "attempt_id": "model-attempt/package/1",
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            handed_off = await participant.invoke_in(
+                conn,
+                "agent.mark-model-handoff-record",
+                handoff_envelope,
+                operation_id="agent-model-handoff/package/1",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/handoff",
+                timeout_seconds=10,
+            )
+        assert handed_off["state"] == "DISPATCHING"
+        model_recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert model_recovery["state"] == "MODEL_PENDING"
+        assert model_recovery["model_request"]["request_id"] == "model-request/package/1"
+        assert model_recovery["model_attempt"] == {
+            "attempt_id": "model-attempt/package/1",
+            "effect_operation_ref": "model-effect/package/1",
+            "result_payload_id": None,
+            "state": "DISPATCHING",
         }
 
         acquire_envelope = {

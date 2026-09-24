@@ -36,7 +36,10 @@ requests = [
   "uow.execute:agent.resume-reload",
   "uow.execute:agent.acquire-run-lease",
   "uow.execute:agent.renew-run-lease",
-  "uow.execute:agent.release-run-lease"
+  "uow.execute:agent.release-run-lease",
+  "uow.execute:agent.prepare-model-request",
+  "uow.execute:agent.prepare-model-attempt",
+  "uow.execute:agent.mark-model-handoff"
 ]
 
 [[components.provides]]
@@ -57,7 +60,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "f582de189787e30c10a8f4315a1bbf407d3d2e469974cc93d2b20217bcad8e1f"
+baseline_sha256 = "02945a5a8c62602256d00e274cd916729cd582cacebe7d92531de360099d6772"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -170,6 +173,39 @@ function = "agent_release_run"
 input_schema = "schemas/release-run-envelope.json"
 output_schema = "schemas/release-run-output.json"
 
+[[components.unit_of_work_participants]]
+name = "agent.prepare-model-request-record"
+contract = "1.0"
+function = "agent_prepare_model_request"
+input_schema = "schemas/prepare-model-request-envelope.json"
+output_schema = "schemas/model-request-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/request/projection"
+owner_component_path = "/input/request/provider_component_id"
+owner_kind = "model.projection"
+owner_id_path = "/input/request/projection/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.prepare-model-attempt-record"
+contract = "1.0"
+function = "agent_prepare_model_attempt"
+input_schema = "schemas/prepare-model-attempt-envelope.json"
+output_schema = "schemas/model-attempt-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/wire"
+owner_component_path = "/input/wire/owner_component_id"
+owner_kind = "model.wire"
+owner_id_path = "/input/wire/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.mark-model-handoff-record"
+contract = "1.0"
+function = "agent_mark_model_handoff"
+input_schema = "schemas/mark-model-handoff-envelope.json"
+output_schema = "schemas/model-attempt-output.json"
+
 [[components.unit_of_work_plans]]
 name = "agent.start-run"
 contract = "1.0"
@@ -238,6 +274,36 @@ output_schema = "schemas/release-run-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.release-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.prepare-model-request"
+contract = "1.0"
+input_schema = "schemas/prepare-model-request-input.json"
+output_schema = "schemas/model-request-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-model-request-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.prepare-model-attempt"
+contract = "1.0"
+input_schema = "schemas/prepare-model-attempt-input.json"
+output_schema = "schemas/model-attempt-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-model-attempt-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.mark-model-handoff"
+contract = "1.0"
+input_schema = "schemas/mark-model-handoff-input.json"
+output_schema = "schemas/model-attempt-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.mark-model-handoff-record" }
 ]
 
 [[components.owned_work_handlers]]

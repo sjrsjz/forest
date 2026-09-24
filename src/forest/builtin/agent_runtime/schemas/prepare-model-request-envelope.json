@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object",
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "agent.runtime"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "input": {"$ref": "#/$defs/input"},
+    "prior": {"type": "object"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "owner": {
+      "type": "object",
+      "required": ["run_id", "owner_id", "epoch"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "payload": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"$ref": "#/$defs/id"},
+        "owner_kind": {"const": "model.projection"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "request_id", "request_kind", "provider_component_id", "provider_generation_id",
+        "provider_profile_ref", "model_ref", "instruction_channel", "capability_digest",
+        "projection", "projected_content_digest", "source_manifest_digest", "output_token_budget"
+      ],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/id"},
+        "request_kind": {"enum": ["PRIMARY", "CONTINUATION", "REPAIR"]},
+        "provider_component_id": {"$ref": "#/$defs/id"},
+        "provider_generation_id": {"$ref": "#/$defs/id"},
+        "provider_profile_ref": {"$ref": "#/$defs/id"},
+        "model_ref": {"$ref": "#/$defs/id"},
+        "instruction_channel": {"enum": ["SYSTEM", "DEVELOPER", "INSTRUCTIONS", "DEGRADED_USER"]},
+        "capability_digest": {"$ref": "#/$defs/digest"},
+        "projection": {"$ref": "#/$defs/payload"},
+        "projected_content_digest": {"$ref": "#/$defs/digest"},
+        "source_manifest_digest": {"$ref": "#/$defs/digest"},
+        "output_token_budget": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": ["owner", "request"],
+      "properties": {
+        "owner": {"$ref": "#/$defs/owner"},
+        "request": {"$ref": "#/$defs/request"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

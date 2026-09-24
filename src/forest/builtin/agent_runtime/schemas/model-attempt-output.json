@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["attempt_id", "request_id", "attempt_no", "effect_operation_ref", "state"],
+  "properties": {
+    "attempt_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "attempt_no": {"type": "integer", "minimum": 1},
+    "effect_operation_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "state": {"enum": ["PREPARED", "DISPATCHING", "SUCCEEDED", "NOT_APPLIED", "UNKNOWN", "ABANDONED"]}
+  },
+  "additionalProperties": false
+}
