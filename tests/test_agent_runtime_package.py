@@ -36,6 +36,10 @@ class _Configuration:
             value=value if include_value else None,
         )
 
+    async def owner_id(self, revision):
+        assert revision == 1
+        return "revision:1"
+
 
 class _NoServiceLedger:
     pass
@@ -97,6 +101,26 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
     await adapter.bind_generation(identity)
     await adapter.start()
     try:
+        assert adapter._worker.identity.configuration_payload_id == (
+            "payload:agent-configuration:1"
+        )
+        assert adapter._worker.identity.configuration_payload_digest == digest_json(
+            {
+                "protocol": "forest.agent.runtime/1",
+                "agent_spec_revision": "agent-spec/1",
+                "preset_revision": "preset/1",
+                "preset": {
+                    "payload_id": "payload:preset:1",
+                    "digest": "sha256:" + "1" * 64,
+                    "owner_id": "preset:1",
+                },
+                "run_timeout_seconds": 300,
+                "max_steps": 32,
+                "output_tokens": 4096,
+                "stream": True,
+            }
+        )
+        assert adapter._worker.identity.configuration_owner_id == "revision:1"
         adapter.activate_generation()
         endpoint = adapter.runtime_service_handlers()[("agent.protocol.describe", 1)]
         route = FrozenServiceRoute(

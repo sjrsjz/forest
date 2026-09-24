@@ -62,6 +62,9 @@ class WorkerIdentity:
     bot_id: str
     graph_id: str | None = None
     graph_revision: int | None = None
+    configuration_payload_id: str | None = None
+    configuration_payload_digest: str | None = None
+    configuration_owner_id: str | None = None
 
     def __post_init__(self):
         if any(
@@ -78,6 +81,29 @@ class WorkerIdentity:
         ) or (
             self.graph_revision is not None
             and (type(self.graph_revision) is not int or self.graph_revision < 1)
+        ) or (
+            any(
+                value is not None and (not isinstance(value, str) or not value or len(value) > 512)
+                for value in (
+                    self.configuration_payload_id,
+                    self.configuration_payload_digest,
+                    self.configuration_owner_id,
+                )
+            )
+        ) or (
+            (self.configuration_payload_id is None)
+            != (self.configuration_payload_digest is None)
+            or (self.configuration_payload_id is None) != (self.configuration_owner_id is None)
+        ) or (
+            self.configuration_payload_digest is not None
+            and (
+                len(self.configuration_payload_digest) != 71
+                or not self.configuration_payload_digest.startswith("sha256:")
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in self.configuration_payload_digest[7:]
+                )
+            )
         ):
             raise ValueError("Worker identity fields must contain 1 to 128 characters")
 

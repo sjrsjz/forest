@@ -2216,15 +2216,28 @@ class PackageGenerationAdapter:
             raise ForestError(
                 "LIFECYCLE_INVALID", "Package Generation is not ready to start", 409
             )
+        owner_resolver = getattr(self.module_configuration, "owner_id", None)
+        configuration_owner_id = (
+            await owner_resolver(self._prepared_binding.config_revision)
+            if callable(owner_resolver)
+            else None
+        )
         worker = self._worker_factory(
             self.snapshot,
             WorkerIdentity(
-                self._prepared_binding.instance_id,
-                self.generation_identity.generation_id,
-                self._prepared_binding.worker_incarnation,
-                self.bot_id,
-                self.generation_identity.graph_id,
-                self.generation_identity.graph_revision,
+                instance_id=self._prepared_binding.instance_id,
+                generation_id=self.generation_identity.generation_id,
+                incarnation=self._prepared_binding.worker_incarnation,
+                bot_id=self.bot_id,
+                graph_id=self.generation_identity.graph_id,
+                graph_revision=self.generation_identity.graph_revision,
+                configuration_payload_id=(
+                    self._prepared_binding.config_payload_id if configuration_owner_id else None
+                ),
+                configuration_payload_digest=(
+                    self._prepared_binding.config_payload_digest if configuration_owner_id else None
+                ),
+                configuration_owner_id=configuration_owner_id,
             ),
             self._state_gateway,
             limits=_worker_limits(self.component),
