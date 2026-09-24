@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.provider.chat-completions"
-version = "3.0.0"
+version = "4.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "provider:ChatCompletionsProvider"
@@ -43,7 +43,7 @@ output_schema = "schemas/materialize-output.json"
 
 [[components.effect_services]]
 name = "provider.model.dispatch"
-contract = "1.0"
+contract = "2.0"
 kind = "chat-completions.http"
 semantics = "at-most-once"
 input_schema = "schemas/dispatch-input.json"

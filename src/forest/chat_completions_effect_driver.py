@@ -91,7 +91,7 @@ class ChatCompletionsEffectDriver:
             )
         return value
 
-    async def _load_prepared(self, raw: dict) -> PreparedModelRequest:
+    async def _load_prepared(self, raw: dict) -> tuple[PreparedModelRequest, dict, dict]:
         projection = self._reference(
             raw.get("projection"),
             owner_kind="model.projection",
@@ -145,7 +145,92 @@ class ChatCompletionsEffectDriver:
                 "Prepared wire digest differs from its managed payload",
                 409,
             )
-        return prepared
+        return prepared, projection, wire
+
+    @staticmethod
+    def _payload_ref(saved, *, owner_kind: str, owner_id: str) -> dict:
+        return {
+            "payload_id": saved.payload_id,
+            "digest": saved.content_digest,
+            "owner_component_id": "provider.chat-completions",
+            "owner_kind": owner_kind,
+            "owner_id": owner_id,
+        }
+
+    async def _materialize_result(
+        self,
+        result,
+        *,
+        projection: dict,
+        wire: dict,
+    ) -> dict:
+        value = result.as_dict()
+        receipt = {
+            "status": value["status"],
+            "request_id": value["request_id"],
+            "transport_attempt_id": value["transport_attempt_id"],
+            "payload_digest": value["payload_digest"],
+            "result": None,
+            "usage": None,
+            "error_code": value["error_code"],
+        }
+        if value["status"] != "RESPONDED":
+            return receipt
+
+        result_document = {
+            "protocol": "forest.provider-model-result/1",
+            "status": value["status"],
+            "request_id": value["request_id"],
+            "transport_attempt_id": value["transport_attempt_id"],
+            "payload_digest": value["payload_digest"],
+            "text": value["text"],
+            "tool_calls": value["tool_calls"],
+            "finish_reason": value["finish_reason"],
+            "provider_response_id": value["provider_response_id"],
+            "provider_model": value["provider_model"],
+            "error_code": value["error_code"],
+        }
+        async with self.payloads.store.pool.connection() as conn, conn.transaction():
+            epoch = await self.payloads.epoch_in(conn)
+            saved_result = await self.payloads.put_bytes_in(
+                conn,
+                owner_component_id=self.identity.component_id,
+                owner_kind="model.result",
+                owner_id=value["transport_attempt_id"],
+                media_type="application/json",
+                content=_canonical(result_document),
+                parents=(projection["payload_id"], wire["payload_id"]),
+                expected_deletion_epoch=epoch,
+            )
+            receipt["result"] = self._payload_ref(
+                saved_result,
+                owner_kind="model.result",
+                owner_id=value["transport_attempt_id"],
+            )
+            if value["usage"] is not None:
+                saved_usage = await self.payloads.put_bytes_in(
+                    conn,
+                    owner_component_id=self.identity.component_id,
+                    owner_kind="model.usage",
+                    owner_id=value["transport_attempt_id"],
+                    media_type="application/json",
+                    content=_canonical(
+                        {
+                            "protocol": "forest.provider-model-usage/1",
+                            "request_id": value["request_id"],
+                            "transport_attempt_id": value["transport_attempt_id"],
+                            "usage": value["usage"],
+                        }
+                    ),
+                    parents=(saved_result.payload_id,),
+                    expected_deletion_epoch=epoch,
+                )
+                receipt["usage"] = self._payload_ref(
+                    saved_usage,
+                    owner_kind="model.usage",
+                    owner_id=value["transport_attempt_id"],
+                )
+        return receipt
 
     async def start(self) -> None:
         credential = await _call(
@@ -204,7 +289,7 @@ class ChatCompletionsEffectDriver:
                 "Prepared request belongs to another Provider Generation",
                 409,
             )
-        prepared = await self._load_prepared(payload["prepared"])
+        prepared, projection, wire = await self._load_prepared(payload["prepared"])
 
         async def permitcheck(candidate):
             if candidate is not prepared:
@@ -213,7 +298,12 @@ class ChatCompletionsEffectDriver:
                 )
             await self._verify_effect(payload)
 
-        return (await self.client.dispatch(prepared, permitcheck=permitcheck)).as_dict()
+        result = await self.client.dispatch(prepared, permitcheck=permitcheck)
+        return await self._materialize_result(
+            result,
+            projection=projection,
+            wire=wire,
+        )
 
     async def quiesce(self) -> None:
         self.accepting = False

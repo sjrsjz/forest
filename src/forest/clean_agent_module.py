@@ -459,7 +459,7 @@ async def bootstrap_clean_agent(
             "provider.profile.bind", 1, owned_work=True
         )
         provider_dispatch = contracts.service(
-            "provider.model.dispatch", 1, owned_work=True
+            "provider.model.dispatch", 2, owned_work=True
         )
         provider_materialize = contracts.service(
             "provider.request.materialize", 1, owned_work=True

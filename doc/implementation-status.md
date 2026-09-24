@@ -36,7 +36,7 @@
 
 | 组件 | builtin 包 | 当前边界 |
 |---|---|---|
-| Provider | `provider_chat_completions` | Worker 拥有 profile；同代 materialize/dispatch driver 通过 PayloadRef 生成模型投影、读取媒体并执行 HTTP；Secret 不进入 Worker |
+| Provider | `provider_chat_completions` | Worker 拥有 profile；同代 materialize/dispatch driver 通过 PayloadRef 生成模型投影、读取媒体并执行 HTTP；响应正文和 usage 由 Provider Generation 保存，dispatch/Effect/Agent observation 只传精确引用；Secret 不进入 Worker |
 | 多模态 Embedding | `embedding_multimodal` | Worker 拥有模型投影；VL profile 随 Bot 生命周期冻结 |
 | 向量索引 | `vector_index_milvus` | Milvus 只保存派生向量；Bot 库保存 ref 与权威来源 |
 | Media | `media_capture` | Worker/owned work 管理抓取状态；Effect Driver 管理外部下载 |
@@ -78,6 +78,8 @@
 这些端口证明 Agent 状态所有权可以进入包，但当前 Worker 只提供 `agent.protocol.describe/1`、`agent.run.query/1` 和 reload-resume job。它还没有提供生产需要的 `agent.execute/2`，所以 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“包内状态端口完成”表述成“Agent 已完成生产包化”。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
+
+Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；旧宿主 Agent 过渡执行器也只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。这个边界已经由真实 PostgreSQL 完整消息执行链验证，但 Agent 执行循环本身仍待迁入 Worker。
 
 ## 6. Conversation 候选包已经拥有的部分
 

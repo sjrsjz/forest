@@ -68,7 +68,7 @@ class CleanAgentRuntime:
         "requires": [
             {"service_id": "provider.profile.bind", "version": 1},
             {"service_id": "provider.request.materialize", "version": 1},
-            {"service_id": "provider.model.dispatch", "version": 1},
+            {"service_id": "provider.model.dispatch", "version": 2},
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "media.context.resolve", "version": 1},
             {"service_id": "kernel.uow.agent.cancel-wake", "version": 1},

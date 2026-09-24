@@ -151,36 +151,27 @@ class DurableAgentModelExecutor:
                 "Run has no unqueryable in-flight model attempt",
                 409,
             )
-        result = None
+        materialized = None
         if self.model_effects is not None:
             try:
-                result = await self.model_effects.query(attempt["effect_operation_ref"])
+                materialized = await self.model_effects.query(attempt["effect_operation_ref"])
             except ForestError as exc:
                 if exc.code != "PROVIDER_RESULT_UNQUERYABLE":
                     raise
         observed_state = "UNKNOWN"
         result_ref = None
         usage_ref = None
-        if result is not None:
+        if materialized is not None:
+            result = materialized.outcome
             observed_state = {
                 "RESPONDED": "SUCCEEDED",
                 "NOT_SENT": "NOT_APPLIED",
                 "UNKNOWN": "UNKNOWN",
             }[result.status]
             if result.status == "RESPONDED":
-                result_ref = await self._payload(
-                    request["provider_component_id"],
-                    "model.result",
-                    attempt["attempt_id"],
-                    _canonical(result.as_dict()),
-                )
-                if result.usage is not None:
-                    usage_ref = await self._payload(
-                        request["provider_component_id"],
-                        "model.usage",
-                        attempt["attempt_id"],
-                        _canonical(result.usage),
-                    )
+                result_ref = AgentPayloadRef(**materialized.result.as_dict())
+                if materialized.usage is not None:
+                    usage_ref = AgentPayloadRef(**materialized.usage.as_dict())
         await self.agent.observe_model(
             owner,
             observation_operation_id=_stable(
@@ -189,14 +180,15 @@ class DurableAgentModelExecutor:
             request_id=request["request_id"],
             attempt_id=attempt["attempt_id"],
             observed_state=observed_state,
-            evidence_kind="RECONCILIATION" if result is not None else "EXECUTOR",
+            evidence_kind="RECONCILIATION" if materialized is not None else "EXECUTOR",
             effect_observation_ref=_stable(
                 "effect-observation", attempt["effect_operation_ref"], observed_state
             ),
             result=result_ref,
             usage=usage_ref,
         )
-        if result is not None:
+        if materialized is not None:
+            result = materialized.outcome
             return AgentModelStepResult(observed_state, text=result.text)
         return AgentModelStepResult(
             "UNKNOWN",
@@ -664,13 +656,14 @@ class DurableAgentModelExecutor:
                 "Agent model execution requires the kernel Effect port",
                 503,
             )
-        result = await self.model_effects.dispatch(
+        materialized = await self.model_effects.dispatch(
             bound,
             owner=owner,
             request_id=step.request_id,
             attempt_id=step.attempt_id,
             effect_id=step.effect_operation_ref,
         )
+        result = materialized.outcome
         observed_state = {
             "RESPONDED": "SUCCEEDED",
             "NOT_SENT": "NOT_APPLIED",
@@ -679,19 +672,9 @@ class DurableAgentModelExecutor:
         result_ref = None
         usage_ref = None
         if result.status == "RESPONDED":
-            result_ref = await self._payload(
-                bound.component_id,
-                "model.result",
-                step.attempt_id,
-                _canonical(result.as_dict()),
-            )
-            if result.usage is not None:
-                usage_ref = await self._payload(
-                    bound.component_id,
-                    "model.usage",
-                    step.attempt_id,
-                    _canonical(result.usage),
-                )
+            result_ref = AgentPayloadRef(**materialized.result.as_dict())
+            if materialized.usage is not None:
+                usage_ref = AgentPayloadRef(**materialized.usage.as_dict())
         await self.agent.observe_model(
             owner,
             observation_operation_id=f"observe:{step.attempt_id}",

@@ -2,18 +2,59 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "request_id", "transport_attempt_id", "payload_digest", "text", "tool_calls", "usage", "finish_reason", "provider_response_id", "provider_model", "error_code"],
+  "required": ["status", "request_id", "transport_attempt_id", "payload_digest", "result", "usage", "error_code"],
   "properties": {
     "status": {"enum": ["RESPONDED", "NOT_SENT", "UNKNOWN"]},
-    "request_id": {"type": "string"},
-    "transport_attempt_id": {"type": "string"},
-    "payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "text": {"type": "string"},
-    "tool_calls": {"type": "array", "items": {"type": "object"}},
-    "finish_reason": {"type": ["string", "null"]},
-    "usage": {"type": ["object", "null"]},
-    "provider_response_id": {"type": ["string", "null"]},
-    "provider_model": {"type": ["string", "null"]},
-    "error_code": {"type": ["string", "null"]}
+    "request_id": {"$ref": "#/$defs/id"},
+    "transport_attempt_id": {"$ref": "#/$defs/id"},
+    "payload_digest": {"$ref": "#/$defs/digest"},
+    "result": {"oneOf": [{"$ref": "#/$defs/result"}, {"type": "null"}]},
+    "usage": {"oneOf": [{"$ref": "#/$defs/usage"}, {"type": "null"}]},
+    "error_code": {"type": ["string", "null"], "maxLength": 256}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "RESPONDED"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "result": {"$ref": "#/$defs/result"},
+          "error_code": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "result": {"type": "null"},
+          "usage": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "provider.chat-completions"},
+        "owner_kind": {"enum": ["model.result", "model.usage"]},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "result": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "model.result"}}}
+      ]
+    },
+    "usage": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "model.usage"}}}
+      ]
+    }
   }
 }
