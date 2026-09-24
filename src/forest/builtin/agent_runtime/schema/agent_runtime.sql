@@ -1395,6 +1395,7 @@ DECLARE
     owner_value jsonb := body->'owner';
     effect_preparation jsonb := envelope->'prior'->(body->>'effect_step_id');
     effect_permit jsonb := effect_preparation->'permit';
+    input_value jsonb := effect_preparation->'input_payload';
     wire_value jsonb := effect_preparation->'wire_payload';
     requested_bot text := context->>'bot_id';
     requested_run text := owner_value->>'run_id';
@@ -1415,11 +1416,15 @@ BEGIN
          OR body->>'effect_step_id' IS DISTINCT FROM 'effect'
          OR effect_preparation->>'protocol'
             IS DISTINCT FROM 'forest.effect-command-permit/1'
+         OR NULLIF(effect_preparation->>'authorization_ticket_id','') IS NULL
          OR effect_permit->>'protocol' IS DISTINCT FROM 'forest.effect-permit/1'
          OR effect_permit->>'effect_operation_id' IS DISTINCT FROM requested_effect
          OR effect_permit->>'attempt_id' IS DISTINCT FROM requested_attempt
          OR effect_permit->>'wire_payload_id' IS DISTINCT FROM wire_value->>'payload_id'
          OR effect_permit->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest'
+         OR input_value->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+         OR input_value->>'owner_kind' IS DISTINCT FROM 'effect.input'
+         OR input_value->>'owner_id' IS DISTINCT FROM requested_effect
          OR wire_value->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
          OR wire_value->>'owner_kind' IS DISTINCT FROM 'effect.wire'
        OR wire_value->>'owner_id' IS DISTINCT FROM requested_attempt THEN
@@ -1454,6 +1459,7 @@ BEGIN
     IF FOUND THEN
         IF existing.request_id IS DISTINCT FROM requested_request
            OR existing.effect_operation_ref IS DISTINCT FROM requested_effect
+           OR effect_permit->>'attempt_no' IS DISTINCT FROM existing.attempt_no::text
            OR existing.wire_payload_id IS DISTINCT FROM wire_value->>'payload_id'
            OR existing.wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
            OR existing.wire_owner_component_id IS DISTINCT FROM wire_value->>'owner_component_id'
@@ -1470,9 +1476,12 @@ BEGIN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
+                'protocol','forest.agent-model-effect-prepared/1',
                 'attempt_id',existing.attempt_id,'request_id',existing.request_id,
                 'attempt_no',existing.attempt_no,
-                'effect_operation_ref',existing.effect_operation_ref,'state',existing.state
+                'effect_operation_ref',existing.effect_operation_ref,'state',existing.state,
+                'authorization_ticket_id',effect_preparation->>'authorization_ticket_id',
+                'input_payload',input_value,'wire_payload',wire_value,'permit',effect_permit
             )
         );
     END IF;
@@ -1511,6 +1520,15 @@ BEGIN
         );
     END IF;
     attempt_no_value := request_row.attempt_count+1;
+    IF effect_permit->>'attempt_no' IS DISTINCT FROM attempt_no_value::text THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_ATTEMPT_INPUT_INVALID',
+                'message','Effect and model attempt numbers differ','status',422
+            )
+        );
+    END IF;
     INSERT INTO __forest_module_schema__.model_transport_attempts(
         bot_id,attempt_id,request_id,attempt_no,effect_operation_ref,
         wire_payload_id,wire_payload_digest,wire_owner_component_id,
@@ -1527,9 +1545,12 @@ BEGIN
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
+            'protocol','forest.agent-model-effect-prepared/1',
             'attempt_id',requested_attempt,'request_id',requested_request,
             'attempt_no',attempt_no_value,'effect_operation_ref',requested_effect,
-            'state','PREPARED'
+            'state','PREPARED',
+            'authorization_ticket_id',effect_preparation->>'authorization_ticket_id',
+            'input_payload',input_value,'wire_payload',wire_value,'permit',effect_permit
         )
     );
 END;

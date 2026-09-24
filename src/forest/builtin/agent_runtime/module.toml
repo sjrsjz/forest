@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "2.5.0"
+version = "2.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -69,9 +69,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.5.0"
+schema_version = "1.6.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "c8d525635d2386fcdf3055bfc635c4c6bf07fc238a87a7e6d428fd5e4f1e0937"
+baseline_sha256 = "00a2af0547480158ad92c97bfdd39541a9eb36836528a6c8d5dd339fc22ad373"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -235,7 +235,7 @@ name = "agent.prepare-model-attempt-record"
 contract = "1.0"
 function = "agent_prepare_model_attempt"
 input_schema = "schemas/prepare-model-attempt-envelope.json"
-output_schema = "schemas/model-attempt-output.json"
+output_schema = "schemas/model-effect-prepared-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.mark-model-handoff-record"
@@ -412,7 +412,7 @@ steps = [
 name = "agent.prepare-model-effect"
 contract = "1.0"
 input_schema = "schemas/prepare-model-effect-input.json"
-output_schema = "schemas/model-attempt-output.json"
+output_schema = "schemas/model-effect-prepared-output.json"
 timeout_s = 10
 steps = [
   { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },

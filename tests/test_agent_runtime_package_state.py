@@ -414,6 +414,13 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="model-attempt/package/1",
             value=b'{"model":"model/package-test","messages":[]}',
         )
+        effect_input = await _payload(
+            kernel,
+            owner_component_id="kernel.effect",
+            owner_kind="effect.input",
+            owner_id="model-effect/package/1",
+            value=b'{"request_id":"model-request/package/1"}',
+        )
         attempt_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -432,16 +439,22 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 },
                 "effect": {
                     "protocol": "forest.effect-command-permit/1",
+                    "authorization_ticket_id": "ticket/model/package/1",
+                    "input_payload": effect_input.canonical(),
                     "wire_payload": wire.canonical(),
                     "permit": {
                         "protocol": "forest.effect-permit/1",
                         "effect_operation_id": "model-effect/package/1",
                         "attempt_id": "model-attempt/package/1",
+                        "attempt_no": 1,
                         "wire_payload_id": wire.payload_id,
                         "wire_payload_digest": wire.digest,
                         "executor_component_id": "provider.chat",
                         "executor_generation_id": "generation/provider/package-test",
                         "fence_kind": "runtime.graph",
+                        "fence_id": "graph/package-test",
+                        "fence_epoch": 1,
+                        "deadline_at": "2030-01-01T00:00:00+00:00",
                     },
                 },
             },
@@ -458,6 +471,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert prepared_attempt["state"] == "PREPARED"
+        assert prepared_attempt["protocol"] == "forest.agent-model-effect-prepared/1"
+        assert prepared_attempt["authorization_ticket_id"] == "ticket/model/package/1"
+        assert prepared_attempt["input_payload"] == effect_input.canonical()
+        assert prepared_attempt["wire_payload"] == wire.canonical()
+        assert prepared_attempt["permit"]["attempt_id"] == "model-attempt/package/1"
         handoff_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -698,6 +716,13 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="model-attempt/package/repair",
             value=b'{"model":"model/package-test","repair":true}',
         )
+        repair_effect_input = await _payload(
+            kernel,
+            owner_component_id="kernel.effect",
+            owner_kind="effect.input",
+            owner_id="model-effect/package/repair",
+            value=b'{"request_id":"model-request/package/repair"}',
+        )
         repair_attempt_envelope = {
             **attempt_envelope,
             "input": {
@@ -715,16 +740,22 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 },
                 "effect": {
                     "protocol": "forest.effect-command-permit/1",
+                    "authorization_ticket_id": "ticket/model/package/repair",
+                    "input_payload": repair_effect_input.canonical(),
                     "wire_payload": repair_wire.canonical(),
                     "permit": {
                         "protocol": "forest.effect-permit/1",
                         "effect_operation_id": "model-effect/package/repair",
                         "attempt_id": "model-attempt/package/repair",
+                        "attempt_no": 1,
                         "wire_payload_id": repair_wire.payload_id,
                         "wire_payload_digest": repair_wire.digest,
                         "executor_component_id": "provider.chat",
                         "executor_generation_id": "generation/provider/package-test",
                         "fence_kind": "runtime.graph",
+                        "fence_id": "graph/package-test",
+                        "fence_epoch": 1,
+                        "deadline_at": "2030-01-01T00:00:00+00:00",
                     },
                 }
             },
