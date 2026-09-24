@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "observation_operation_id", "attempt_id", "evidence_kind", "observed_state",
+    "accepted", "previous_state", "resulting_state", "conflict_code"
+  ],
+  "properties": {
+    "observation_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "attempt_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "evidence_kind": {"enum": ["EXECUTOR", "RECONCILIATION"]},
+    "observed_state": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+    "accepted": {"type": "boolean"},
+    "previous_state": {"enum": ["DISPATCHING", "SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+    "resulting_state": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+    "conflict_code": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

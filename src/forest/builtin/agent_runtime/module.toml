@@ -39,7 +39,8 @@ requests = [
   "uow.execute:agent.release-run-lease",
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.prepare-model-attempt",
-  "uow.execute:agent.mark-model-handoff"
+  "uow.execute:agent.mark-model-handoff",
+  "uow.execute:agent.observe-model-result"
 ]
 
 [[components.provides]]
@@ -60,7 +61,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "02945a5a8c62602256d00e274cd916729cd582cacebe7d92531de360099d6772"
+baseline_sha256 = "8c0917037cf682f5fc4c253847d4648fc1507b0eb4050421a3f35f240e371746"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -206,6 +207,19 @@ function = "agent_mark_model_handoff"
 input_schema = "schemas/mark-model-handoff-envelope.json"
 output_schema = "schemas/model-attempt-output.json"
 
+[[components.unit_of_work_participants]]
+name = "agent.observe-model-result-record"
+contract = "1.0"
+function = "agent_observe_model_result"
+input_schema = "schemas/observe-model-result-envelope.json"
+output_schema = "schemas/model-observation-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/payloads/*/payload"
+owner_component_path = "/input/payloads/*/payload/owner_component_id"
+owner_kind_path = "/input/payloads/*/payload/owner_kind"
+owner_id_path = "/input/payloads/*/payload/owner_id"
+
 [[components.unit_of_work_plans]]
 name = "agent.start-run"
 contract = "1.0"
@@ -304,6 +318,16 @@ output_schema = "schemas/model-attempt-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.mark-model-handoff-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.observe-model-result"
+contract = "1.0"
+input_schema = "schemas/observe-model-result-input.json"
+output_schema = "schemas/model-observation-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.observe-model-result-record" }
 ]
 
 [[components.owned_work_handlers]]

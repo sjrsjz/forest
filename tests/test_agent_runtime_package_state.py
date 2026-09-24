@@ -405,6 +405,62 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "result_payload_id": None,
             "state": "DISPATCHING",
         }
+        observation_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "observation_operation_id": "model-observation/package/1",
+                "request_id": "model-request/package/1",
+                "attempt_id": "model-attempt/package/1",
+                "observed_state": "NOT_APPLIED",
+                "evidence_kind": "EXECUTOR",
+                "effect_observation_ref": "model-effect-observation/package/1",
+                "payloads": [],
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            observation = await participant.invoke_in(
+                conn,
+                "agent.observe-model-result-record",
+                observation_envelope,
+                operation_id="agent-model-observation/package/1",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/observation",
+                timeout_seconds=10,
+            )
+        assert observation == {
+            "observation_operation_id": "model-observation/package/1",
+            "attempt_id": "model-attempt/package/1",
+            "evidence_kind": "EXECUTOR",
+            "observed_state": "NOT_APPLIED",
+            "accepted": True,
+            "previous_state": "DISPATCHING",
+            "resulting_state": "NOT_APPLIED",
+            "conflict_code": None,
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            replayed_request = await participant.invoke_in(
+                conn,
+                "agent.prepare-model-request-record",
+                request_envelope,
+                operation_id="agent-model-request/package/replay",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/request-replay",
+                timeout_seconds=10,
+            )
+        assert replayed_request["state"] == "NOT_APPLIED"
+        observed_recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert observed_recovery["state"] == "PREPARING_MODEL"
+        assert observed_recovery["model_request"]["state"] == "NOT_APPLIED"
+        assert observed_recovery["model_attempt"]["state"] == "NOT_APPLIED"
 
         acquire_envelope = {
             "protocol": "forest.uow-step/1",

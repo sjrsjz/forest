@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object",
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "agent.runtime"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "input": {"$ref": "#/$defs/input"},
+    "prior": {"type": "object"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "owner": {
+      "type": "object",
+      "required": ["run_id", "owner_id", "epoch"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "payload": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"$ref": "#/$defs/id"},
+        "owner_kind": {"enum": ["model.result", "model.usage"]},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "payload_entry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["role", "payload"],
+          "properties": {
+            "role": {"const": "RESULT"},
+            "payload": {"$ref": "#/$defs/payload", "properties": {"owner_kind": {"const": "model.result"}}}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["role", "payload"],
+          "properties": {
+            "role": {"const": "USAGE"},
+            "payload": {"$ref": "#/$defs/payload", "properties": {"owner_kind": {"const": "model.usage"}}}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "owner", "observation_operation_id", "request_id", "attempt_id",
+        "observed_state", "evidence_kind", "effect_observation_ref", "payloads"
+      ],
+      "properties": {
+        "owner": {"$ref": "#/$defs/owner"},
+        "observation_operation_id": {"$ref": "#/$defs/id"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "observed_state": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+        "evidence_kind": {"enum": ["EXECUTOR", "RECONCILIATION"]},
+        "effect_observation_ref": {"$ref": "#/$defs/id"},
+        "payloads": {"type": "array", "items": {"$ref": "#/$defs/payload_entry"}, "maxItems": 2}
+      },
+      "additionalProperties": false
+    }
+  }
+}

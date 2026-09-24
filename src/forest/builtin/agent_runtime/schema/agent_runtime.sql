@@ -1548,6 +1548,209 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_observe_model_result(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_operation text := body->>'observation_operation_id';
+    requested_request text := body->>'request_id';
+    requested_attempt text := body->>'attempt_id';
+    observed_state_value text := body->>'observed_state';
+    evidence_kind_value text := body->>'evidence_kind';
+    effect_observation_value text := body->>'effect_observation_ref';
+    result_value jsonb := NULL;
+    usage_value jsonb := NULL;
+    input_digest_value text;
+    run_row record;
+    request_row record;
+    attempt_row record;
+    replay record;
+    previous_value text;
+    resulting_value text;
+    accepted_value boolean := false;
+    conflict_value text := NULL;
+    settled_value timestamptz;
+    resolved_value timestamptz := NULL;
+    run_state_value text;
+BEGIN
+    SELECT item->'payload' INTO result_value
+    FROM jsonb_array_elements(body->'payloads') item
+    WHERE item->>'role'='RESULT' LIMIT 1;
+    SELECT item->'payload' INTO usage_value
+    FROM jsonb_array_elements(body->'payloads') item
+    WHERE item->>'role'='USAGE' LIMIT 1;
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR (SELECT count(*)<>count(DISTINCT item->>'role')
+           FROM jsonb_array_elements(body->'payloads') item)
+       OR (observed_state_value='SUCCEEDED' AND result_value IS NULL)
+       OR (result_value IS NOT NULL AND result_value->>'owner_kind' IS DISTINCT FROM 'model.result')
+       OR (usage_value IS NOT NULL AND usage_value->>'owner_kind' IS DISTINCT FROM 'model.usage')
+       OR (result_value IS NOT NULL AND result_value->>'owner_id' IS DISTINCT FROM requested_attempt)
+       OR (usage_value IS NOT NULL AND usage_value->>'owner_id' IS DISTINCT FROM requested_attempt) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_OBSERVATION_INPUT_INVALID',
+                'message','Model observation envelope is invalid','status',422
+            )
+        );
+    END IF;
+    input_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'request_id',requested_request,'attempt_id',requested_attempt,
+        'observed_state',observed_state_value,'evidence_kind',evidence_kind_value,
+        'effect_observation_ref',effect_observation_value,
+        'result',result_value,'usage',usage_value
+    )::text,'UTF8')),'hex');
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/model-observation/' || requested_bot || '/' || requested_operation,0
+    ));
+    SELECT * INTO replay
+    FROM __forest_module_schema__.model_observations
+    WHERE bot_id=requested_bot AND observation_operation_id=requested_operation;
+    IF FOUND THEN
+        IF replay.input_digest IS DISTINCT FROM input_digest_value THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','MODEL_OBSERVATION_CONFLICT',
+                    'message','Model observation input differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'observation_operation_id',replay.observation_operation_id,
+                'attempt_id',replay.attempt_id,'evidence_kind',replay.evidence_kind,
+                'observed_state',replay.observed_state,'accepted',replay.accepted,
+                'previous_state',replay.previous_state,
+                'resulting_state',replay.resulting_state,
+                'conflict_code',replay.conflict_code
+            )
+        );
+    END IF;
+    SELECT * INTO request_row
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR UPDATE;
+    SELECT * INTO attempt_row
+    FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR UPDATE;
+    IF request_row.request_id IS NULL OR attempt_row.attempt_id IS NULL
+       OR request_row.run_id IS DISTINCT FROM requested_run
+       OR request_row.current_attempt_id IS DISTINCT FROM requested_attempt
+       OR attempt_row.request_id IS DISTINCT FROM requested_request THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_ATTEMPT_NOT_FOUND','message','Model attempt does not exist','status',404
+            )
+        );
+    END IF;
+    IF (result_value IS NOT NULL AND result_value->>'owner_component_id'
+            IS DISTINCT FROM request_row.provider_component_id)
+       OR (usage_value IS NOT NULL AND usage_value->>'owner_component_id'
+            IS DISTINCT FROM request_row.provider_component_id) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_RESULT_IDENTITY_CONFLICT',
+                'message','Model result owner differs from the frozen provider','status',409
+            )
+        );
+    END IF;
+    previous_value := attempt_row.state;
+    IF previous_value NOT IN ('DISPATCHING','SUCCEEDED','NOT_APPLIED','UNKNOWN') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_OBSERVATION_BOUNDARY_CLOSED',
+                'message','Model attempt has not crossed dispatch','status',409
+            )
+        );
+    END IF;
+    IF previous_value='DISPATCHING' THEN
+        accepted_value := true;
+    ELSIF previous_value='UNKNOWN' AND evidence_kind_value='RECONCILIATION'
+          AND observed_state_value IN ('SUCCEEDED','NOT_APPLIED') THEN
+        accepted_value := true;
+    ELSE
+        conflict_value := 'MODEL_RESULT_ALREADY_SETTLED';
+    END IF;
+    resulting_value := CASE WHEN accepted_value THEN observed_state_value ELSE previous_value END;
+    INSERT INTO __forest_module_schema__.model_observations(
+        bot_id,observation_operation_id,attempt_id,input_digest,evidence_kind,
+        observed_state,effect_observation_ref,result_payload_id,result_payload_digest,
+        usage_payload_id,usage_payload_digest,accepted,previous_state,resulting_state,
+        conflict_code
+    ) VALUES (
+        requested_bot,requested_operation,requested_attempt,input_digest_value,
+        evidence_kind_value,observed_state_value,effect_observation_value,
+        result_value->>'payload_id',result_value->>'digest',
+        usage_value->>'payload_id',usage_value->>'digest',accepted_value,
+        previous_value,resulting_value,conflict_value
+    );
+    IF accepted_value THEN
+        settled_value := run_row.database_now;
+        IF previous_value='UNKNOWN' THEN
+            resolved_value := settled_value;
+        END IF;
+        UPDATE __forest_module_schema__.model_transport_attempts
+        SET state=observed_state_value,
+            result_payload_id=result_value->>'payload_id',
+            result_payload_digest=result_value->>'digest',
+            usage_payload_id=usage_value->>'payload_id',
+            usage_payload_digest=usage_value->>'digest',
+            settled_at=COALESCE(settled_at,settled_value),resolved_at=resolved_value
+        WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
+        UPDATE __forest_module_schema__.model_requests
+        SET state=observed_state_value,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=requested_request;
+        run_state_value := CASE observed_state_value
+            WHEN 'SUCCEEDED' THEN 'PARSING'
+            WHEN 'NOT_APPLIED' THEN 'PREPARING_MODEL'
+            ELSE 'BLOCKED_UNKNOWN'
+        END;
+        UPDATE __forest_module_schema__.agent_runs
+        SET state=run_state_value,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND run_id=requested_run;
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'observation_operation_id',requested_operation,
+            'attempt_id',requested_attempt,'evidence_kind',evidence_kind_value,
+            'observed_state',observed_state_value,'accepted',accepted_value,
+            'previous_state',previous_value,'resulting_state',resulting_value,
+            'conflict_code',conflict_value
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
