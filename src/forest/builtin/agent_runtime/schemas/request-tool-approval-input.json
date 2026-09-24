@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["approval", "agent"],
+  "properties": {
+    "approval": {"type": "object", "additionalProperties": false, "required": ["protocol", "approval_id", "request_kind", "request_id", "action", "input_digest", "plan_digest", "expires_at"], "properties": {"protocol": {"const": "forest.approval-request/1"}, "approval_id": {"$ref": "#/$defs/id"}, "request_kind": {"const": "agent.tool"}, "request_id": {"$ref": "#/$defs/id"}, "action": {"const": "tool.invoke"}, "input_digest": {"$ref": "#/$defs/digest"}, "plan_digest": {"$ref": "#/$defs/digest"}, "expires_at": {"type": "string", "minLength": 1, "maxLength": 64}}},
+    "agent": {"$ref": "#/$defs/agent"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512}, "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "owner": {"type": "object", "additionalProperties": false, "required": ["run_id", "owner_id", "epoch"], "properties": {"run_id": {"$ref": "#/$defs/id"}, "owner_id": {"$ref": "#/$defs/id"}, "epoch": {"type": "integer", "minimum": 1}}},
+    "agent": {"type": "object", "additionalProperties": false, "required": ["owner", "tool_call_id", "command_digest", "observation_operation_id", "approval_step_id"], "properties": {"owner": {"$ref": "#/$defs/owner"}, "tool_call_id": {"$ref": "#/$defs/id"}, "command_digest": {"$ref": "#/$defs/digest"}, "observation_operation_id": {"$ref": "#/$defs/id"}, "approval_step_id": {"const": "approval"}}}
+  }
+}

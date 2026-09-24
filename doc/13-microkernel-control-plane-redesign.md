@@ -279,6 +279,8 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。`shell.command` 对保留管理前缀的检查先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。
 
+Agent 工具审批是 Kernel Authorization Authority 的窄 UnitOfWork participant 协议，不是 Host callback。业务包只能提交稳定的 approval/request/action/input/plan identity；内核从 UoW caller Generation 推导 requester，从 Bot Authority 推导 approver scope，并从该 Generation 的冻结 grant set 推导 policy revision。申请、检查与消费分别使用 `authorization.approval.request`、`authorization.approval.inspect` 和 `authorization.approval.consume`。批准后的 approval 消费、工具 ticket 签发、Effect 准备和 Agent attempt 冻结必须处于同一事务；拒绝或过期则由 Agent participant 写不可变 observation 并关闭等待状态。WebUI 决策只写授权事实，不得反向调用 Agent、Conversation 或宿主监听器。
+
 dispatch trace 是观测记录，不是可编辑“执行链”。`routing.graph` 从 Inbox、Shell 请求、业务命令、消息 Handler chain/item/attempt/result/failure 和 Agent trigger/run 的权威事实投影统一记录，不维护第二份可变状态。它再沿不可变身份扩展 Kernel call 的 parent/root 树、调用发布的 component event、每个 subscriber delivery、调用创建的 component job、Job/Event 实际生成的后续 call，以及外部 SendIntent/SendPart/transport attempt/resolution。每条扩展记录必须携带类型化 `caused_by={kind,id}`；发送意图必须在创建事务中保存 `cause_kind/cause_id`，禁止用 operation 字符串前缀、正文或时间邻近猜测来源。
 
 控制台可按 Bot、会话、Binding、群/频道、消息、组件、代际、结果和时间筛选，并按消息的 `graph_digest` 打开当时冻结的路由图。Adapter、Shell 和 Agent 条目从该消息的冻结图解析 `runtime:*` 节点与 Generation；实际 Kernel call 使用其冻结 Generation；尚未执行的 Event/Job/Delivery 不借用当前 head 伪造代际。外部发送逐 part 显示 `PENDING/CLAIMED/PREPARED/DISPATCHING/SENT/FAILED/UNKNOWN/CANCELLED`；`CANCELLED` 只适用于未交接 attempt，`UNKNOWN` 只能由带 evidence 的显式 resolution 收敛，不提供跳过 lane 的状态。Trace 只返回身份、状态、摘要、时间和因果引用，不返回消息正文、事件/任务载荷、wire body 或平台 receipt 正文。

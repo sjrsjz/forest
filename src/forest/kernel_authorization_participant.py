@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from forest.errors import ForestError
@@ -72,6 +72,83 @@ class KernelAuthorizationUnitOfWorkParticipant:
             )
         return identity.generation_id
 
+    async def _caller_grant_set(self, conn, caller: dict[str, str]):
+        grant_digest = await self.runtime.generation_authority.generation_capability_grants_digest_in(
+            conn,
+            component_id=caller["component_id"],
+            generation_id=caller["generation_id"],
+        )
+        return await self.service.grant_set_by_digest_in(
+            conn,
+            grantee_kind="component",
+            grantee_id=caller["component_id"],
+            grant_set_digest=grant_digest,
+        )
+
+    @staticmethod
+    def _approval_state(row: dict) -> dict:
+        state = row["state"]
+        expires_at = row["expires_at"]
+        if isinstance(expires_at, str):
+            expires_at = _datetime(expires_at)
+        if state == "PENDING" and expires_at <= datetime.now(UTC):
+            state = "EXPIRED"
+        return {
+            "protocol": "forest.approval-state/1",
+            "approval_id": row["approval_id"],
+            "request_kind": row["request_kind"],
+            "request_id": row["request_id"],
+            "action": row["action"],
+            "input_digest": row["input_digest"],
+            "plan_digest": row["plan_digest"],
+            "state": state,
+            "expires_at": _json(expires_at),
+        }
+
+    @staticmethod
+    def _approval_request(value: object, *, consume: bool = False) -> dict[str, Any]:
+        fields = {
+            "protocol",
+            "approval_id",
+            "request_kind",
+            "request_id",
+            "action",
+            "input_digest",
+            "plan_digest",
+        }
+        if consume:
+            fields.add("consume_operation_id")
+        request = _object(value, fields)
+        expected_protocol = (
+            "forest.approval-consume/1" if consume else "forest.approval-inspect/1"
+        )
+        if request["protocol"] != expected_protocol:
+            raise ForestError(
+                "AUTHORIZATION_UOW_INPUT_INVALID",
+                "Approval protocol is invalid",
+                422,
+            )
+        return request
+
+    @staticmethod
+    def _assert_approval_identity(row: dict, request: dict, caller: dict) -> None:
+        expected = {
+            "approval_id": request["approval_id"],
+            "request_kind": request["request_kind"],
+            "request_id": request["request_id"],
+            "action": request["action"],
+            "input_digest": request["input_digest"],
+            "plan_digest": request["plan_digest"],
+            "requester_kind": "component",
+            "requester_id": caller["component_id"],
+        }
+        if any(row.get(key) != value for key, value in expected.items()):
+            raise ForestError(
+                "APPROVAL_IDENTITY_CONFLICT",
+                "Approval identity differs from the caller request",
+                409,
+            )
+
     async def invoke_in(
         self,
         conn,
@@ -79,7 +156,13 @@ class KernelAuthorizationUnitOfWorkParticipant:
         payload: dict,
         **_invocation,
     ) -> dict:
-        if name not in {"authorization.issue", "authorization.consume"}:
+        if name not in {
+            "authorization.issue",
+            "authorization.consume",
+            "authorization.approval.request",
+            "authorization.approval.inspect",
+            "authorization.approval.consume",
+        }:
             raise ForestError(
                 "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
                 "Authorization participant operation is undeclared",
@@ -93,6 +176,65 @@ class KernelAuthorizationUnitOfWorkParticipant:
                 422,
             )
         caller = _object(envelope["caller"], {"component_id", "generation_id"})
+        if name == "authorization.approval.request":
+            request = _object(
+                envelope["input"],
+                {
+                    "protocol",
+                    "approval_id",
+                    "request_kind",
+                    "request_id",
+                    "action",
+                    "input_digest",
+                    "plan_digest",
+                    "expires_at",
+                },
+            )
+            if request["protocol"] != "forest.approval-request/1":
+                raise ForestError(
+                    "AUTHORIZATION_UOW_INPUT_INVALID",
+                    "Approval request protocol is invalid",
+                    422,
+                )
+            grant_set = await self._caller_grant_set(conn, caller)
+            row = await self.service.request_approval_in(
+                conn,
+                approval_id=request["approval_id"],
+                request_kind=request["request_kind"],
+                request_id=request["request_id"],
+                action=request["action"],
+                input_digest=request["input_digest"],
+                plan_digest=request["plan_digest"],
+                requester_kind="component",
+                requester_id=caller["component_id"],
+                approver_scope_kind="bot",
+                approver_scope_id=self.service.store.bot_id,
+                expected_policy_revision=grant_set.policy_revision,
+                expires_at=_datetime(request["expires_at"]),
+            )
+            return self._approval_state(row)
+        if name == "authorization.approval.inspect":
+            request = self._approval_request(envelope["input"])
+            row = await self.service.approval_in(
+                conn, request["approval_id"], update=False
+            )
+            self._assert_approval_identity(row, request, caller)
+            return self._approval_state(row)
+        if name == "authorization.approval.consume":
+            request = self._approval_request(envelope["input"], consume=True)
+            row = await self.service.consume_approval_in(
+                conn,
+                approval_id=request["approval_id"],
+                request_kind=request["request_kind"],
+                request_id=request["request_id"],
+                action=request["action"],
+                input_digest=request["input_digest"],
+                plan_digest=request["plan_digest"],
+                requester_kind="component",
+                requester_id=caller["component_id"],
+                consume_operation_id=request["consume_operation_id"],
+            )
+            return self._approval_state(row)
         if name == "authorization.consume":
             request = _object(
                 envelope["input"],
@@ -163,17 +305,7 @@ class KernelAuthorizationUnitOfWorkParticipant:
                 "Authorization issue protocol is invalid",
                 422,
             )
-        grant_digest = await self.runtime.generation_authority.generation_capability_grants_digest_in(
-            conn,
-            component_id=caller["component_id"],
-            generation_id=caller["generation_id"],
-        )
-        grant_set = await self.service.grant_set_by_digest_in(
-            conn,
-            grantee_kind="component",
-            grantee_id=caller["component_id"],
-            grant_set_digest=grant_digest,
-        )
+        grant_set = await self._caller_grant_set(conn, caller)
         issued = await self.service.issue_ticket_in(
             conn,
             ticket_id=request["ticket_id"],

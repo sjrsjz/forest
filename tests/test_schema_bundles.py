@@ -2527,13 +2527,9 @@ async def test_kernel_authorization_approval_requires_ticketed_decision_and_sing
         audience_component_id="kernel.authorization",
         audience_generation_id="generation/authorization-one",
     )
-    decision_notifications = []
-    authority.register_approval_decision_listener(decision_notifications.append)
     approved = await authority.decide_approval(**decision_args)
     assert approved["state"] == "APPROVED"
-    assert decision_notifications == [approved]
     assert await authority.decide_approval(**decision_args) == approved
-    assert decision_notifications == [approved, approved]
 
     consume_args = dict(
         approval_id="approval/tool/one",

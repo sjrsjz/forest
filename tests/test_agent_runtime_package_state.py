@@ -910,7 +910,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "service_id": "tool.echo.execute",
                     "tool_contract_digest": digest_json({"contract": "tool.echo/1"}),
                     "tool_binding_digest": digest_json({"binding": "tool.echo/1"}),
-                    "approval_required": False,
+                    "approval_required": True,
                     "supports_query": True,
                     "authority_trigger_ref": "trigger/model-port",
                     "effect_operation_ref": "tool-effect/package/repair",
@@ -991,6 +991,60 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "fence_epoch": 1,
             "deadline_at": "2030-01-01T00:00:00+00:00",
         }
+        approval_state = {
+            "protocol": "forest.approval-state/1",
+            "approval_id": "approval/tool/package/repair",
+            "request_kind": "agent.tool",
+            "request_id": "tool-call/package/repair",
+            "action": "tool.invoke",
+            "input_digest": tool_wire.digest,
+            "plan_digest": digest_json({"binding": "tool.echo/1"}),
+            "state": "PENDING",
+            "expires_at": "2030-01-01T00:00:00+00:00",
+        }
+        approval_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "tool_call_id": "tool-call/package/repair",
+                "command_digest": tool_wire.digest,
+                "observation_operation_id": "tool-approval-observation/package/request",
+                "approval_step_id": "approval",
+            },
+            "prior": {"approval": approval_state},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            requested_approval = await participant.invoke_in(
+                conn,
+                "agent.record-tool-approval-request",
+                approval_envelope,
+                operation_id="agent-tool-approval/package/request",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/tool-approval-request",
+                timeout_seconds=10,
+            )
+        assert requested_approval["resulting_state"] == "WAIT_APPROVAL"
+        approval_envelope["prior"]["approval"] = {
+            **approval_state,
+            "state": "APPROVED",
+        }
+        approval_envelope["input"]["observation_operation_id"] = (
+            "tool-approval-observation/package/inspect"
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            approved_tool = await participant.invoke_in(
+                conn,
+                "agent.resolve-tool-approval",
+                approval_envelope,
+                operation_id="agent-tool-approval/package/inspect",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/tool-approval-inspect",
+                timeout_seconds=10,
+            )
+        assert approved_tool["approval_state"] == "APPROVED"
         prepare_tool_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -1001,8 +1055,10 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "effect_attempt_id": "tool-attempt/package/repair",
                 "command_digest": tool_wire.digest,
                 "effect_step_id": "effect",
+                "approval_step_id": "approval",
             },
             "prior": {
+                "approval": {**approval_state, "state": "CONSUMED"},
                 "effect": {
                     "protocol": "forest.effect-command-permit/1",
                     "authorization_ticket_id": "ticket/tool/package/repair",

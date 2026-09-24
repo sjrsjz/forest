@@ -279,50 +279,6 @@ async def test_bot_host_supervision_ignores_tasks_from_superseded_graph():
 
 
 @pytest.mark.asyncio
-async def test_approval_decision_wakes_only_its_exact_conversation_blocker():
-    class FakeAgent:
-        async def approval_context(self, approval_ref):
-            assert approval_ref == "approval/tool/one"
-            return {"conversation_ref": "group/one"}
-
-    class FakeConversation:
-        def __init__(self):
-            self.calls = []
-
-        async def resume_deferred(self, conversation_id, **values):
-            self.calls.append((conversation_id, values))
-            return {"resumed": True}
-
-    conversation = FakeConversation()
-
-    class FakeRegistry:
-        def get(self, component_id):
-            return {
-                "agent.runtime": FakeAgent(),
-                "conversation.scheduler": conversation,
-            }[component_id]
-
-    host = object.__new__(CleanBotHost)
-    host.registry = FakeRegistry()
-    await host._approval_decided(
-        {
-            "approval_id": "approval/tool/one",
-            "request_kind": "agent.tool",
-        }
-    )
-
-    assert conversation.calls == [
-        (
-            "group/one",
-            {
-                "reason_code": "AGENT_WAITING_APPROVAL",
-                "reason_ref": "approval/tool/one",
-            },
-        )
-    ]
-
-
-@pytest.mark.asyncio
 async def test_runtime_replacement_prewarms_then_drains_before_publication():
     events = []
 

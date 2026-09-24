@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -83,7 +82,6 @@ class KernelAuthorizationRepository:
     def __init__(self, store, *, namespace: str | None = None) -> None:
         self.store = store
         self.namespace = namespace or module_schema_namespace("forest.kernel.authorization")
-        self._approval_decision_listeners = []
 
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
@@ -852,12 +850,6 @@ class KernelAuthorizationRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.request_approval_in(conn, **values)
 
-    def register_approval_decision_listener(self, listener) -> None:
-        if not callable(listener):
-            raise TypeError("Approval decision listener must be callable")
-        if listener not in self._approval_decision_listeners:
-            self._approval_decision_listeners.append(listener)
-
     async def approval_in(self, conn, approval_id: str, *, update: bool = False) -> dict:
         _bounded(approval_id, "approval_id", 256)
         row = await (
@@ -990,17 +982,7 @@ class KernelAuthorizationRepository:
 
     async def decide_approval(self, **values) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
-            decided = await self.decide_approval_in(conn, **values)
-        for listener in tuple(self._approval_decision_listeners):
-            try:
-                notified = listener(decided)
-                if inspect.isawaitable(notified):
-                    await notified
-            except Exception:
-                # The durable decision is authoritative. A listener is only an
-                # acceleration hint; the Conversation deadline remains recovery.
-                continue
-        return decided
+            return await self.decide_approval_in(conn, **values)
 
     async def consume_approval_in(
         self,

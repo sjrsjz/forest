@@ -86,13 +86,12 @@ class ToolExecution:
 
     async def invoke(self, *, owner: dict, tool: dict, binding: dict) -> dict:
         graph_id, graph_revision, bot_id = self._identity()
-        if tool["state"] == "WAIT_APPROVAL" or tool["approval_required"]:
-            return {
-                "status": "WAIT_APPROVAL",
-                "approval_ref": tool.get("approval_ref"),
-                "error_code": None,
-            }
-        if tool["state"] not in {"PROPOSED", "DISPATCHING", "UNKNOWN"}:
+        if tool["state"] not in {
+            "PROPOSED",
+            "WAIT_APPROVAL",
+            "DISPATCHING",
+            "UNKNOWN",
+        }:
             raise ForestError(
                 "AGENT_TOOL_STATE_INVALID", "ToolCall is not executable", 409
             )
@@ -150,6 +149,79 @@ class ToolExecution:
             "authority_principal_ref": tool["authority_principal_ref"],
             "arguments": wrapper["arguments"],
         }
+        command_digest = digest_json(command)
+        approval_ref = tool.get("approval_ref")
+        approved = False
+        if tool["state"] in {"PROPOSED", "WAIT_APPROVAL"} and tool[
+            "approval_required"
+        ]:
+            approval_id = self.ctx.operations.stable(
+                f"tool-approval:{tool['tool_call_id']}"
+            )
+            approval = {
+                "approval_id": approval_id,
+                "request_kind": "agent.tool",
+                "request_id": tool["tool_call_id"],
+                "action": "tool.invoke",
+                "input_digest": command_digest,
+                "plan_digest": tool["tool_binding_digest"],
+            }
+            agent = {
+                "owner": owner,
+                "tool_call_id": tool["tool_call_id"],
+                "command_digest": command_digest,
+                "observation_operation_id": self.ctx.operations.stable(
+                    f"tool-approval-observation:{tool['tool_call_id']}:{tool['state']}"
+                ),
+                "approval_step_id": "approval",
+            }
+            if tool["state"] == "PROPOSED":
+                approval["protocol"] = "forest.approval-request/1"
+                approval["expires_at"] = (
+                    datetime.now(UTC) + timedelta(minutes=15)
+                ).isoformat()
+                state = await self.ctx.uow.call(
+                    "agent.request-tool-approval",
+                    {"approval": approval, "agent": agent},
+                    operation_id=self.ctx.operations.stable(
+                        f"request-tool-approval:{tool['tool_call_id']}"
+                    ),
+                    timeout=15,
+                )
+            else:
+                if approval_ref != approval_id:
+                    raise ForestError(
+                        "AGENT_TOOL_APPROVAL_CONFLICT",
+                        "Durable ToolCall has an unexpected approval identity",
+                        409,
+                    )
+                approval["protocol"] = "forest.approval-inspect/1"
+                state = await self.ctx.uow.call(
+                    "agent.inspect-tool-approval",
+                    {"approval": approval, "agent": agent},
+                    operation_id=self.ctx.operations.stable(
+                        f"inspect-tool-approval:{tool['tool_call_id']}"
+                    ),
+                    timeout=15,
+                )
+            approval_ref = state["approval_ref"]
+            if state["approval_state"] == "PENDING":
+                return {
+                    "status": "WAIT_APPROVAL",
+                    "approval_ref": approval_ref,
+                    "error_code": None,
+                }
+            if state["approval_state"] in {"REJECTED", "EXPIRED"}:
+                return {
+                    "status": "CANCELLED",
+                    "approval_ref": approval_ref,
+                    "error_code": (
+                        "AGENT_TOOL_APPROVAL_REJECTED"
+                        if state["approval_state"] == "REJECTED"
+                        else "AGENT_TOOL_APPROVAL_EXPIRED"
+                    ),
+                }
+            approved = True
         if tool["state"] in {"DISPATCHING", "UNKNOWN"}:
             if not tool["supports_query"]:
                 return {
@@ -242,7 +314,6 @@ class ToolExecution:
                 "approval_ref": None,
                 "error_code": receipt["error_code"],
             }
-        command_digest = digest_json(command)
         permit_operation_id = self.ctx.operations.stable(
             f"tool-permit:{tool['tool_call_id']}"
         )
@@ -250,9 +321,7 @@ class ToolExecution:
             f"tool-authorization:{tool['tool_call_id']}"
         )
         expires_at = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
-        prepared = await self.ctx.uow.call(
-            "agent.prepare-tool-effect",
-            {
+        prepare_input = {
                 "authorization": {
                     "protocol": "forest.authorization-issue/1",
                     "ticket_id": ticket_id,
@@ -303,7 +372,28 @@ class ToolExecution:
                     "command_digest": command_digest,
                     "effect_step_id": "effect",
                 },
-            },
+            }
+        if approved:
+            prepare_input["approval"] = {
+                "protocol": "forest.approval-consume/1",
+                "approval_id": approval_ref,
+                "request_kind": "agent.tool",
+                "request_id": tool["tool_call_id"],
+                "action": "tool.invoke",
+                "input_digest": command_digest,
+                "plan_digest": tool["tool_binding_digest"],
+                "consume_operation_id": self.ctx.operations.stable(
+                    f"consume-tool-approval:{tool['tool_call_id']}"
+                ),
+            }
+            prepare_input["agent"]["approval_step_id"] = "approval"
+        prepared = await self.ctx.uow.call(
+            (
+                "agent.prepare-approved-tool-effect"
+                if approved
+                else "agent.prepare-tool-effect"
+            ),
+            prepare_input,
             operation_id=self.ctx.operations.stable(
                 f"prepare-tool-effect:{tool['tool_call_id']}"
             ),

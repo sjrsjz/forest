@@ -724,10 +724,11 @@ BEGIN
         ) THEN
         RETURN NEW;
     END IF;
-    IF OLD.state='PROPOSED' AND NEW.state='PROPOSED'
+    IF OLD.state=NEW.state AND OLD.state IN ('PROPOSED','WAIT_APPROVAL')
        AND OLD.effect_attempt_id IS NULL AND NEW.effect_attempt_id IS NOT NULL
        AND NEW.authorization_ticket_id IS NOT NULL
        AND NEW.wire_payload_id IS NOT NULL AND NEW.wire_payload_digest IS NOT NULL
+       AND (NEW.state='PROPOSED' OR (NEW.approval_required AND NEW.approval_ref IS NOT NULL))
        AND ROW(NEW.approval_ref,NEW.result_payload_id,NEW.result_payload_digest,NEW.error_code)
            IS NOT DISTINCT FROM
            ROW(OLD.approval_ref,OLD.result_payload_id,OLD.result_payload_digest,OLD.error_code) THEN
@@ -2468,6 +2469,142 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_record_tool_approval_request(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input'; owner_value jsonb := body->'owner';
+    approval_value jsonb := envelope->'prior'->(body->>'approval_step_id');
+    requested_bot text := context->>'bot_id'; requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id'; requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_tool text := body->>'tool_call_id'; requested_digest text := body->>'command_digest';
+    requested_observation text := body->>'observation_operation_id';
+    run_row record; tool_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body->>'approval_step_id' IS DISTINCT FROM 'approval'
+       OR approval_value->>'protocol' IS DISTINCT FROM 'forest.approval-state/1'
+       OR approval_value->>'request_kind' IS DISTINCT FROM 'agent.tool'
+       OR approval_value->>'request_id' IS DISTINCT FROM requested_tool
+       OR approval_value->>'action' IS DISTINCT FROM 'tool.invoke'
+       OR approval_value->>'input_digest' IS DISTINCT FROM requested_digest
+       OR requested_observation IS NULL
+       OR approval_value->>'state' IS DISTINCT FROM 'PENDING' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_APPROVAL_INPUT_INVALID','message','Tool approval request envelope is invalid','status',422));
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409));
+    END IF;
+    SELECT * INTO tool_row FROM __forest_module_schema__.tool_calls
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
+    IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run
+       OR run_row.current_tool_call_id IS DISTINCT FROM requested_tool
+       OR NOT tool_row.approval_required
+       OR approval_value->>'plan_digest' IS DISTINCT FROM tool_row.tool_binding_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_APPROVAL_BINDING_CONFLICT','message','Approval differs from the frozen ToolCall','status',409));
+    END IF;
+    IF run_row.state='WAIT_APPROVAL' AND tool_row.state='WAIT_APPROVAL'
+       AND tool_row.approval_ref=approval_value->>'approval_id' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+            'protocol','forest.agent-tool-approval/1','tool_call_id',requested_tool,
+            'approval_ref',tool_row.approval_ref,'approval_state','PENDING','resulting_state','WAIT_APPROVAL'));
+    END IF;
+    IF run_row.state IS DISTINCT FROM 'WAIT_TOOL' OR tool_row.state IS DISTINCT FROM 'PROPOSED'
+       OR tool_row.approval_ref IS NOT NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_APPROVAL_BOUNDARY_CLOSED','message','ToolCall is not at the approval boundary','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.tool_observations(
+        bot_id,observation_operation_id,tool_call_id,input_digest,observed_state,evidence_kind,
+        approval_ref,accepted,previous_state,resulting_state)
+    VALUES(requested_bot,requested_observation,requested_tool,requested_digest,'WAIT_APPROVAL',
+        'AUTHORIZATION',approval_value->>'approval_id',true,'PROPOSED','WAIT_APPROVAL');
+    UPDATE __forest_module_schema__.tool_calls SET state='WAIT_APPROVAL',
+        approval_ref=approval_value->>'approval_id',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool;
+    UPDATE __forest_module_schema__.agent_runs SET state='WAIT_APPROVAL',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.agent-tool-approval/1','tool_call_id',requested_tool,
+        'approval_ref',approval_value->>'approval_id','approval_state','PENDING','resulting_state','WAIT_APPROVAL'));
+END;
+$$;
+
+CREATE FUNCTION agent_resolve_tool_approval(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input'; owner_value jsonb := body->'owner';
+    approval_value jsonb := envelope->'prior'->(body->>'approval_step_id');
+    requested_bot text := context->>'bot_id'; requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id'; requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_tool text := body->>'tool_call_id'; requested_digest text := body->>'command_digest';
+    requested_observation text := body->>'observation_operation_id';
+    approval_state text := approval_value->>'state'; resulting_state text;
+    run_row record; tool_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body->>'approval_step_id' IS DISTINCT FROM 'approval'
+       OR approval_value->>'protocol' IS DISTINCT FROM 'forest.approval-state/1'
+       OR approval_value->>'request_kind' IS DISTINCT FROM 'agent.tool'
+       OR approval_value->>'request_id' IS DISTINCT FROM requested_tool
+       OR approval_value->>'action' IS DISTINCT FROM 'tool.invoke'
+       OR approval_value->>'input_digest' IS DISTINCT FROM requested_digest
+       OR requested_observation IS NULL
+       OR approval_state NOT IN ('PENDING','APPROVED','REJECTED','EXPIRED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_APPROVAL_INPUT_INVALID','message','Tool approval inspection envelope is invalid','status',422));
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409));
+    END IF;
+    SELECT * INTO tool_row FROM __forest_module_schema__.tool_calls
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
+    IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run
+       OR run_row.current_tool_call_id IS DISTINCT FROM requested_tool
+       OR run_row.state IS DISTINCT FROM 'WAIT_APPROVAL'
+       OR tool_row.state IS DISTINCT FROM 'WAIT_APPROVAL'
+       OR tool_row.approval_ref IS DISTINCT FROM approval_value->>'approval_id'
+       OR approval_value->>'plan_digest' IS DISTINCT FROM tool_row.tool_binding_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_APPROVAL_BINDING_CONFLICT','message','Approval differs from the waiting ToolCall','status',409));
+    END IF;
+    IF approval_state IN ('REJECTED','EXPIRED') THEN
+        INSERT INTO __forest_module_schema__.tool_observations(
+            bot_id,observation_operation_id,tool_call_id,input_digest,observed_state,evidence_kind,
+            approval_ref,error_code,accepted,previous_state,resulting_state)
+        VALUES(requested_bot,requested_observation,requested_tool,requested_digest,'CANCELLED',
+            'AUTHORIZATION',approval_value->>'approval_id',
+            CASE approval_state WHEN 'REJECTED' THEN 'AGENT_TOOL_APPROVAL_REJECTED' ELSE 'AGENT_TOOL_APPROVAL_EXPIRED' END,
+            true,'WAIT_APPROVAL','CANCELLED');
+        UPDATE __forest_module_schema__.tool_calls SET state='CANCELLED',
+            error_code=CASE approval_state WHEN 'REJECTED' THEN 'AGENT_TOOL_APPROVAL_REJECTED' ELSE 'AGENT_TOOL_APPROVAL_EXPIRED' END,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND tool_call_id=requested_tool;
+        UPDATE __forest_module_schema__.agent_runs SET state='PREPARING_MODEL',current_tool_call_id=NULL,
+            updated_at=clock_timestamp() WHERE bot_id=requested_bot AND run_id=requested_run;
+        resulting_state := 'PREPARING_MODEL';
+    ELSE
+        resulting_state := 'WAIT_APPROVAL';
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.agent-tool-approval/1','tool_call_id',requested_tool,
+        'approval_ref',approval_value->>'approval_id','approval_state',approval_state,'resulting_state',resulting_state));
+END;
+$$;
+
 CREATE FUNCTION agent_prepare_tool_effect(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -2479,6 +2616,7 @@ DECLARE
     requested_epoch bigint := (owner_value->>'epoch')::bigint;
     requested_tool text := body->>'tool_call_id'; requested_effect text := body->>'effect_operation_ref';
     requested_attempt text := body->>'effect_attempt_id'; requested_digest text := body->>'command_digest';
+    approval_step text := body->>'approval_step_id'; approval_value jsonb := envelope->'prior'->approval_step;
     run_row record; tool_row record;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
@@ -2496,7 +2634,15 @@ BEGIN
        OR permit_value->>'effect_operation_id' IS DISTINCT FROM requested_effect
        OR permit_value->>'attempt_id' IS DISTINCT FROM requested_attempt
        OR permit_value->>'wire_payload_id' IS DISTINCT FROM wire_value->>'payload_id'
-       OR permit_value->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest' THEN
+       OR permit_value->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest'
+       OR (approval_step IS NOT NULL AND (
+            approval_step IS DISTINCT FROM 'approval'
+            OR approval_value->>'protocol' IS DISTINCT FROM 'forest.approval-state/1'
+            OR approval_value->>'request_kind' IS DISTINCT FROM 'agent.tool'
+            OR approval_value->>'request_id' IS DISTINCT FROM requested_tool
+            OR approval_value->>'action' IS DISTINCT FROM 'tool.invoke'
+            OR approval_value->>'input_digest' IS DISTINCT FROM requested_digest
+            OR approval_value->>'state' IS DISTINCT FROM 'CONSUMED')) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','AGENT_TOOL_EFFECT_INPUT_INVALID','message','Tool Effect preparation envelope is invalid','status',422));
     END IF;
@@ -2513,16 +2659,19 @@ BEGIN
     WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
     IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run
        OR run_row.current_tool_call_id IS DISTINCT FROM requested_tool
-       OR run_row.state IS DISTINCT FROM 'WAIT_TOOL'
+       OR run_row.state IS DISTINCT FROM (CASE WHEN approval_step IS NULL THEN 'WAIT_TOOL' ELSE 'WAIT_APPROVAL' END)
        OR tool_row.effect_operation_ref IS DISTINCT FROM requested_effect
        OR permit_value->>'executor_component_id' IS DISTINCT FROM tool_row.tool_component_id
        OR permit_value->>'executor_generation_id' IS DISTINCT FROM tool_row.tool_generation_id THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','AGENT_TOOL_EFFECT_BINDING_CONFLICT','message','Tool Effect differs from the current frozen ToolCall','status',409));
     END IF;
-    IF tool_row.approval_required THEN
+    IF tool_row.approval_required IS DISTINCT FROM (approval_step IS NOT NULL)
+       OR (approval_step IS NOT NULL AND (
+            tool_row.approval_ref IS DISTINCT FROM approval_value->>'approval_id'
+            OR approval_value->>'plan_digest' IS DISTINCT FROM tool_row.tool_binding_digest)) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
-            'code','AGENT_TOOL_APPROVAL_REQUIRED','message','Tool requires a durable approval before Effect preparation','status',409));
+            'code','AGENT_TOOL_APPROVAL_CONFLICT','message','Tool approval does not match Effect preparation','status',409));
     END IF;
     IF tool_row.effect_attempt_id IS NOT NULL THEN
         IF tool_row.effect_attempt_id IS DISTINCT FROM requested_attempt
@@ -2532,7 +2681,7 @@ BEGIN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
                 'code','AGENT_TOOL_EFFECT_PREPARATION_CONFLICT','message','Tool Effect preparation identity differs','status',409));
         END IF;
-    ELSIF tool_row.state IS DISTINCT FROM 'PROPOSED' THEN
+    ELSIF tool_row.state IS DISTINCT FROM (CASE WHEN approval_step IS NULL THEN 'PROPOSED' ELSE 'WAIT_APPROVAL' END) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','AGENT_TOOL_EFFECT_BOUNDARY_CLOSED','message','ToolCall is not at the preparation boundary','status',409));
     ELSE
@@ -2606,7 +2755,9 @@ BEGIN
     WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
     IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run
        OR run_row.current_tool_call_id IS DISTINCT FROM requested_tool
-       OR run_row.state IS DISTINCT FROM 'WAIT_TOOL' OR tool_row.state IS DISTINCT FROM 'PROPOSED'
+       OR run_row.state IS DISTINCT FROM (CASE WHEN tool_row.approval_required THEN 'WAIT_APPROVAL' ELSE 'WAIT_TOOL' END)
+       OR tool_row.state IS DISTINCT FROM (CASE WHEN tool_row.approval_required THEN 'WAIT_APPROVAL' ELSE 'PROPOSED' END)
+       OR (tool_row.approval_required AND tool_row.approval_ref IS NULL)
        OR tool_row.effect_attempt_id IS DISTINCT FROM requested_attempt
        OR tool_row.effect_operation_ref IS DISTINCT FROM effect_value->>'effect_operation_id'
        OR tool_row.wire_payload_id IS DISTINCT FROM effect_value->>'wire_payload_id'
@@ -2620,13 +2771,17 @@ BEGIN
         bot_id,observation_operation_id,tool_call_id,input_digest,observed_state,evidence_kind,
         effect_observation_ref,accepted,previous_state,resulting_state)
     VALUES(requested_bot,requested_operation,requested_tool,digest_value,'DISPATCHING','EXECUTOR',
-        requested_attempt,true,'PROPOSED','DISPATCHING');
+        requested_attempt,true,tool_row.state,'DISPATCHING');
     UPDATE __forest_module_schema__.tool_calls SET state='DISPATCHING',updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND tool_call_id=requested_tool;
+    IF run_row.state='WAIT_APPROVAL' THEN
+        UPDATE __forest_module_schema__.agent_runs SET state='WAIT_TOOL',updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND run_id=requested_run;
+    END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
         'observation_operation_id',requested_operation,'tool_call_id',requested_tool,
         'observed_state','DISPATCHING','evidence_kind','EXECUTOR','accepted',true,
-        'previous_state','PROPOSED','resulting_state','DISPATCHING','conflict_code',NULL));
+        'previous_state',tool_row.state,'resulting_state','DISPATCHING','conflict_code',NULL));
 END;
 $$;
 

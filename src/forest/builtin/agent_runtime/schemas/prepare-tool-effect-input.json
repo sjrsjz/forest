@@ -3,6 +3,7 @@
   "type": "object", "additionalProperties": false,
   "required": ["authorization", "effect", "agent"],
   "properties": {
+    "approval": {"$ref": "#/$defs/approval"},
     "authorization": {"$ref": "#/$defs/authorization"},
     "effect": {"$ref": "#/$defs/effect"},
     "agent": {"$ref": "#/$defs/agent"}
@@ -25,6 +26,16 @@
         "payload_id": {"$ref": "#/$defs/id"}, "digest": {"$ref": "#/$defs/digest"},
         "owner_component_id": {"$ref": "#/$defs/id"}, "owner_kind": {"$ref": "#/$defs/id"},
         "owner_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "approval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "approval_id", "request_kind", "request_id", "action", "input_digest", "plan_digest", "consume_operation_id"],
+      "properties": {
+        "protocol": {"const": "forest.approval-consume/1"}, "approval_id": {"$ref": "#/$defs/id"},
+        "request_kind": {"const": "agent.tool"}, "request_id": {"$ref": "#/$defs/id"},
+        "action": {"const": "tool.invoke"}, "input_digest": {"$ref": "#/$defs/digest"},
+        "plan_digest": {"$ref": "#/$defs/digest"}, "consume_operation_id": {"$ref": "#/$defs/id"}
       }
     },
     "authorization": {
@@ -71,7 +82,8 @@
       "properties": {
         "owner": {"$ref": "#/$defs/owner"}, "tool_call_id": {"$ref": "#/$defs/id"},
         "effect_operation_ref": {"$ref": "#/$defs/id"}, "effect_attempt_id": {"$ref": "#/$defs/id"},
-        "command_digest": {"$ref": "#/$defs/digest"}, "effect_step_id": {"const": "effect"}
+        "command_digest": {"$ref": "#/$defs/digest"}, "effect_step_id": {"const": "effect"},
+        "approval_step_id": {"const": "approval"}
       }
     }
   }

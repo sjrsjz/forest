@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.2.0"
+version = "4.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -51,10 +51,13 @@ requests = [
   "uow.execute:agent.handoff-model-effect",
   "uow.execute:agent.observe-model-effect",
   "uow.execute:agent.prepare-tool-effect",
+  "uow.execute:agent.prepare-approved-tool-effect",
   "uow.execute:agent.handoff-tool-effect",
   "uow.execute:agent.observe-tool-effect",
   "uow.execute:agent.record-protocol-failure",
   "uow.execute:agent.record-model-turn",
+  "uow.execute:agent.request-tool-approval",
+  "uow.execute:agent.inspect-tool-approval",
   "uow.execute:agent.finalize-candidate",
 ]
 
@@ -116,9 +119,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.1.0"
+schema_version = "2.2.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "5e89e9f3eee53ca7dc1a95743d04fb16bbf2634a364f9ec5a02708b3d005d220"
+baseline_sha256 = "cd209b179709b66e0b239a2e663c3d3d351759d4117c28229dfb674d935a1323"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -357,6 +360,20 @@ owner_kind_path = "/input/artifacts/*/payload/owner_kind"
 owner_id_path = "/input/artifacts/*/payload/owner_id"
 
 [[components.unit_of_work_participants]]
+name = "agent.record-tool-approval-request"
+contract = "1.0"
+function = "agent_record_tool_approval_request"
+input_schema = "schemas/tool-approval-envelope.json"
+output_schema = "schemas/tool-approval-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.resolve-tool-approval"
+contract = "1.0"
+function = "agent_resolve_tool_approval"
+input_schema = "schemas/tool-approval-envelope.json"
+output_schema = "schemas/tool-approval-output.json"
+
+[[components.unit_of_work_participants]]
 name = "agent.prepare-tool-effect-record"
 contract = "1.0"
 function = "agent_prepare_tool_effect"
@@ -576,12 +593,47 @@ steps = [
 ]
 
 [[components.unit_of_work_plans]]
+name = "agent.request-tool-approval"
+contract = "1.0"
+input_schema = "schemas/request-tool-approval-input.json"
+output_schema = "schemas/tool-approval-output.json"
+timeout_s = 10
+steps = [
+  { id = "approval", component_id = "kernel.authorization", participant = "authorization.approval.request", input_path = "/approval" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.record-tool-approval-request", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.inspect-tool-approval"
+contract = "1.0"
+input_schema = "schemas/inspect-tool-approval-input.json"
+output_schema = "schemas/tool-approval-output.json"
+timeout_s = 10
+steps = [
+  { id = "approval", component_id = "kernel.authorization", participant = "authorization.approval.inspect", input_path = "/approval" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.resolve-tool-approval", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
 name = "agent.prepare-tool-effect"
 contract = "1.0"
 input_schema = "schemas/prepare-tool-effect-input.json"
 output_schema = "schemas/tool-effect-prepared-output.json"
 timeout_s = 10
 steps = [
+  { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prepare-command", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-tool-effect-record", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.prepare-approved-tool-effect"
+contract = "1.0"
+input_schema = "schemas/prepare-tool-effect-input.json"
+output_schema = "schemas/tool-effect-prepared-output.json"
+timeout_s = 10
+steps = [
+  { id = "approval", component_id = "kernel.authorization", participant = "authorization.approval.consume", input_path = "/approval" },
   { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
   { id = "effect", component_id = "kernel.effect", participant = "effect.prepare-command", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-tool-effect-record", input_path = "/agent" }

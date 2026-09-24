@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "tool_call_id", "approval_ref", "approval_state", "resulting_state"],
+  "properties": {
+    "protocol": {"const": "forest.agent-tool-approval/1"},
+    "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "approval_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+    "approval_state": {"enum": ["PENDING", "APPROVED", "REJECTED", "EXPIRED"]},
+    "resulting_state": {"enum": ["WAIT_APPROVAL", "PREPARING_MODEL"]}
+  }
+}

@@ -350,12 +350,31 @@ class AgentExecution:
                 if state == "WAIT_INPUT":
                     return self._result(request, "WAIT_INPUT", run)
                 if state == "WAIT_APPROVAL":
-                    tool = recovery.get("tool_call") or {}
+                    tool = recovery.get("tool_call")
+                    if not isinstance(tool, dict):
+                        raise ForestError(
+                            "AGENT_HISTORY_INCOMPLETE",
+                            "Agent approval boundary has no durable ToolCall",
+                            500,
+                        )
+                    binding = bindings.get(tool["tool_name"])
+                    if binding is None:
+                        raise ForestError(
+                            "AGENT_TOOL_ROUTE_STALE",
+                            "Durable ToolCall is absent from the frozen directory",
+                            409,
+                        )
+                    resolved = await self.tools.invoke(
+                        owner=owner, tool=tool, binding=binding
+                    )
+                    if resolved["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                        continue
                     return self._result(
                         request,
                         state,
                         run,
-                        approval_ref=tool.get("approval_ref"),
+                        approval_ref=resolved.get("approval_ref"),
+                        error_code=resolved.get("error_code"),
                     )
                 if state == "WAIT_TOOL":
                     tool = recovery.get("tool_call")

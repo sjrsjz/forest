@@ -9,6 +9,6 @@
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 512}, "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "owner": {"type": "object", "additionalProperties": false, "required": ["run_id", "owner_id", "epoch"], "properties": {"run_id": {"$ref": "#/$defs/id"}, "owner_id": {"$ref": "#/$defs/id"}, "epoch": {"type": "integer", "minimum": 1}}},
-    "input": {"type": "object", "additionalProperties": false, "required": ["owner", "tool_call_id", "effect_operation_ref", "effect_attempt_id", "command_digest", "effect_step_id"], "properties": {"owner": {"$ref": "#/$defs/owner"}, "tool_call_id": {"$ref": "#/$defs/id"}, "effect_operation_ref": {"$ref": "#/$defs/id"}, "effect_attempt_id": {"$ref": "#/$defs/id"}, "command_digest": {"$ref": "#/$defs/digest"}, "effect_step_id": {"const": "effect"}}}
+    "input": {"type": "object", "additionalProperties": false, "required": ["owner", "tool_call_id", "effect_operation_ref", "effect_attempt_id", "command_digest", "effect_step_id"], "properties": {"owner": {"$ref": "#/$defs/owner"}, "tool_call_id": {"$ref": "#/$defs/id"}, "effect_operation_ref": {"$ref": "#/$defs/id"}, "effect_attempt_id": {"$ref": "#/$defs/id"}, "command_digest": {"$ref": "#/$defs/digest"}, "effect_step_id": {"const": "effect"}, "approval_step_id": {"const": "approval"}}}
   }
 }

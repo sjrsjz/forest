@@ -101,6 +101,122 @@ async def test_authorization_participant_derives_grants_from_caller_generation()
 
 
 @pytest.mark.asyncio
+async def test_authorization_participant_owns_approval_scope_and_requester_identity():
+    runtime_repository = SimpleNamespace(
+        generation_capability_grants_digest_in=AsyncMock(
+            return_value="sha256:" + "1" * 64
+        )
+    )
+    runtime = SimpleNamespace(
+        generation_identity=SimpleNamespace(generation_id="generation/auth"),
+        generation_authority=runtime_repository,
+    )
+    grant_set = SimpleNamespace(policy_revision=7)
+    approval = {
+        "approval_id": "approval/tool/1",
+        "request_kind": "agent.tool",
+        "request_id": "tool/1",
+        "action": "tool.invoke",
+        "input_digest": "sha256:" + "2" * 64,
+        "plan_digest": "sha256:" + "3" * 64,
+        "requester_kind": "component",
+        "requester_id": "agent.runtime",
+        "state": "PENDING",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+    }
+    authority = SimpleNamespace(
+        store=SimpleNamespace(bot_id="bot/1"),
+        grant_set_by_digest_in=AsyncMock(return_value=grant_set),
+        request_approval_in=AsyncMock(return_value=approval),
+    )
+    participant = KernelAuthorizationUnitOfWorkParticipant(runtime, authority)
+    result = await participant.invoke_in(
+        object(),
+        "authorization.approval.request",
+        {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "agent.runtime",
+                "generation_id": "generation/agent",
+            },
+            "input": {
+                "protocol": "forest.approval-request/1",
+                "approval_id": "approval/tool/1",
+                "request_kind": "agent.tool",
+                "request_id": "tool/1",
+                "action": "tool.invoke",
+                "input_digest": "sha256:" + "2" * 64,
+                "plan_digest": "sha256:" + "3" * 64,
+                "expires_at": "2030-01-01T00:00:00+00:00",
+            },
+            "prior": {},
+        },
+    )
+    assert result == {
+        "protocol": "forest.approval-state/1",
+        "approval_id": "approval/tool/1",
+        "request_kind": "agent.tool",
+        "request_id": "tool/1",
+        "action": "tool.invoke",
+        "input_digest": "sha256:" + "2" * 64,
+        "plan_digest": "sha256:" + "3" * 64,
+        "state": "PENDING",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+    }
+    assert authority.request_approval_in.await_args.kwargs["requester_id"] == "agent.runtime"
+    assert authority.request_approval_in.await_args.kwargs["approver_scope_id"] == "bot/1"
+    assert authority.request_approval_in.await_args.kwargs["expected_policy_revision"] == 7
+
+
+@pytest.mark.asyncio
+async def test_authorization_participant_consumes_only_exact_caller_approval():
+    approval = {
+        "approval_id": "approval/tool/1",
+        "request_kind": "agent.tool",
+        "request_id": "tool/1",
+        "action": "tool.invoke",
+        "input_digest": "sha256:" + "2" * 64,
+        "plan_digest": "sha256:" + "3" * 64,
+        "requester_kind": "component",
+        "requester_id": "agent.runtime",
+        "state": "CONSUMED",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+    }
+    authority = SimpleNamespace(
+        consume_approval_in=AsyncMock(return_value=approval),
+    )
+    participant = KernelAuthorizationUnitOfWorkParticipant(
+        SimpleNamespace(generation_identity=SimpleNamespace(generation_id="generation/auth")),
+        authority,
+    )
+    result = await participant.invoke_in(
+        object(),
+        "authorization.approval.consume",
+        {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "agent.runtime",
+                "generation_id": "generation/agent",
+            },
+            "input": {
+                "protocol": "forest.approval-consume/1",
+                "approval_id": "approval/tool/1",
+                "request_kind": "agent.tool",
+                "request_id": "tool/1",
+                "action": "tool.invoke",
+                "input_digest": "sha256:" + "2" * 64,
+                "plan_digest": "sha256:" + "3" * 64,
+                "consume_operation_id": "consume/tool/1",
+            },
+            "prior": {},
+        },
+    )
+    assert result["state"] == "CONSUMED"
+    assert authority.consume_approval_in.await_args.kwargs["requester_kind"] == "component"
+    assert authority.consume_approval_in.await_args.kwargs["requester_id"] == "agent.runtime"
+
+
+@pytest.mark.asyncio
 async def test_effect_payload_materializer_seals_kernel_effect_ownership():
     payloads = SimpleNamespace(
         epoch=AsyncMock(return_value=7),
