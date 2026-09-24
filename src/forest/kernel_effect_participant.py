@@ -169,6 +169,8 @@ class KernelEffectUnitOfWorkParticipant:
             return await self._handoff(conn, value)
         if name == "effect.observe":
             return await self._observe(conn, value)
+        if name == "effect.observe-command-result":
+            return await self._observe_command_result(conn, value)
         if name == "effect.abandon":
             return await self._abandon(conn, value)
         raise ForestError(
@@ -515,6 +517,78 @@ class KernelEffectUnitOfWorkParticipant:
                 evidence_payload_digest=evidence_digest,
             )
         )
+
+    async def _observe_command_result(self, conn, value: object) -> dict:
+        if self.payloads is None:
+            raise ForestError(
+                "EFFECT_PAYLOAD_AUTHORITY_UNAVAILABLE",
+                "Kernel Effect result freezing requires Payload authority",
+                503,
+            )
+        request = _object(
+            value,
+            {
+                "protocol",
+                "effect_operation_id",
+                "attempt_id",
+                "observation_operation_id",
+                "status",
+                "evidence_kind",
+                "evidence",
+            },
+            "EFFECT_UOW_INPUT_INVALID",
+        )
+        if request["protocol"] != "forest.effect-command-result/1":
+            raise ForestError("EFFECT_UOW_INPUT_INVALID", "Effect protocol is invalid", 422)
+        evidence = _object(
+            request["evidence"],
+            {"value", "parents"},
+            "EFFECT_UOW_INPUT_INVALID",
+        )
+        if not isinstance(evidence["value"], dict) or not isinstance(evidence["parents"], list):
+            raise ForestError(
+                "EFFECT_UOW_INPUT_INVALID", "Effect result evidence is invalid", 422
+            )
+        if len(evidence["parents"]) > 64:
+            raise ForestError(
+                "EFFECT_UOW_INPUT_INVALID", "Effect result has too many parents", 422
+            )
+        parents = []
+        for raw in evidence["parents"]:
+            reference = self._payload_ref(raw, "EFFECT_UOW_INPUT_INVALID")
+            await self.payloads.verify_in(conn, **reference)
+            parents.append(reference["payload_id"])
+        epoch = await self.payloads.epoch_in(conn)
+        saved = await self.payloads.put_json_in(
+            conn,
+            owner_component_id="kernel.effect",
+            owner_kind="effect.evidence",
+            owner_id=request["observation_operation_id"],
+            value=evidence["value"],
+            parents=tuple(parents),
+            sources=(),
+            expected_deletion_epoch=epoch,
+        )
+        observation = await self.runtime.service.observe_in(
+            conn,
+            effect_operation_id=request["effect_operation_id"],
+            attempt_id=request["attempt_id"],
+            observation_operation_id=request["observation_operation_id"],
+            status=request["status"],
+            evidence_kind=request["evidence_kind"],
+            evidence_payload_id=saved.payload_id,
+            evidence_payload_digest=saved.content_digest,
+        )
+        return {
+            "protocol": "forest.effect-command-observation/1",
+            "evidence_payload": self._saved_ref(
+                saved,
+                owner_kind="effect.evidence",
+                owner_id=request["observation_operation_id"],
+            ),
+            "evidence_parents": [dict(item) for item in evidence["parents"]],
+            "observation": _json_value(observation),
+        }
 
     async def _abandon(self, conn, value: object) -> dict:
         request = _object(

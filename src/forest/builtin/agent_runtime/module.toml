@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "2.2.0"
+version = "2.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -67,9 +67,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.2.0"
+schema_version = "1.3.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "2a70cbca12532e5ca35ca7d5ed0f60bac59a6c0bc0e9817b0a395a1cef97c2bd"
+baseline_sha256 = "c7c1f63837d976c2f90678f8c1b323c0d1409d171c69f43aab85898504093fc1"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -397,7 +397,7 @@ input_schema = "schemas/observe-model-effect-input.json"
 output_schema = "schemas/model-observation-output.json"
 timeout_s = 10
 steps = [
-  { id = "effect", component_id = "kernel.effect", participant = "effect.observe", input_path = "/effect" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.observe-command-result", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.observe-model-result-record", input_path = "/agent" }
 ]
 

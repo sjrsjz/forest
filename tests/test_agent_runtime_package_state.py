@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -504,6 +505,22 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="model-attempt/package/1",
             value=b'{"status":"RESPONDED","text":"<broken>"}',
         )
+        receipt = {
+            "status": "RESPONDED",
+            "request_id": "model-request/package/1",
+            "transport_attempt_id": "model-attempt/package/1",
+            "payload_digest": digest_json({"wire": "package/1"}),
+            "result": result_payload.canonical(),
+            "usage": None,
+            "error_code": None,
+        }
+        evidence = await _payload(
+            kernel,
+            owner_component_id="kernel.effect",
+            owner_kind="effect.evidence",
+            owner_id="model-observation/package/1",
+            value=json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(),
+        )
         observation_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -515,18 +532,25 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "observed_state": "SUCCEEDED",
                 "evidence_kind": "EXECUTOR",
                 "effect_observation_ref": "model-effect-observation/package/1",
+                "effect_step_id": "effect",
+                "evidence_digest": evidence.digest,
                 "payloads": [
                     {"role": "RESULT", "payload": result_payload.canonical()}
                 ],
             },
             "prior": {
                 "effect": {
-                    "attempt_id": "model-attempt/package/1",
-                    "observation_operation_id": "model-observation/package/1",
-                    "observed_status": "SUCCEEDED",
-                    "evidence_kind": "executor",
-                    "accepted": True,
-                    "resulting_state": "SUCCEEDED",
+                    "protocol": "forest.effect-command-observation/1",
+                    "evidence_payload": evidence.canonical(),
+                    "evidence_parents": [result_payload.canonical()],
+                    "observation": {
+                        "attempt_id": "model-attempt/package/1",
+                        "observation_operation_id": "model-observation/package/1",
+                        "observed_status": "SUCCEEDED",
+                        "evidence_kind": "executor",
+                        "accepted": True,
+                        "resulting_state": "SUCCEEDED",
+                    },
                 }
             },
         }
@@ -748,6 +772,22 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="model-attempt/package/repair",
             value=b'{"status":"RESPONDED","text":"valid"}',
         )
+        repair_receipt = {
+            "status": "RESPONDED",
+            "request_id": "model-request/package/repair",
+            "transport_attempt_id": "model-attempt/package/repair",
+            "payload_digest": digest_json({"wire": "package/repair"}),
+            "result": repair_result.canonical(),
+            "usage": None,
+            "error_code": None,
+        }
+        repair_evidence = await _payload(
+            kernel,
+            owner_component_id="kernel.effect",
+            owner_kind="effect.evidence",
+            owner_id="model-observation/package/repair",
+            value=json.dumps(repair_receipt, sort_keys=True, separators=(",", ":")).encode(),
+        )
         repair_observation = {
             **observation_envelope,
             "input": {
@@ -758,16 +798,23 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "observed_state": "SUCCEEDED",
                 "evidence_kind": "EXECUTOR",
                 "effect_observation_ref": "model-effect-observation/package/repair",
+                "effect_step_id": "effect",
+                "evidence_digest": repair_evidence.digest,
                 "payloads": [{"role": "RESULT", "payload": repair_result.canonical()}],
             },
             "prior": {
                 "effect": {
-                    "attempt_id": "model-attempt/package/repair",
-                    "observation_operation_id": "model-observation/package/repair",
-                    "observed_status": "SUCCEEDED",
-                    "evidence_kind": "executor",
-                    "accepted": True,
-                    "resulting_state": "SUCCEEDED",
+                    "protocol": "forest.effect-command-observation/1",
+                    "evidence_payload": repair_evidence.canonical(),
+                    "evidence_parents": [repair_result.canonical()],
+                    "observation": {
+                        "attempt_id": "model-attempt/package/repair",
+                        "observation_operation_id": "model-observation/package/repair",
+                        "observed_status": "SUCCEEDED",
+                        "evidence_kind": "executor",
+                        "accepted": True,
+                        "resulting_state": "SUCCEEDED",
+                    },
                 }
             },
         }

@@ -154,5 +154,82 @@ async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(clean
             "protocol": "forest.test-command/1",
             "value": "A",
         }
+        async with store.pool.connection() as conn, conn.transaction():
+            handoff = await registry.get("kernel.effect").unit_of_work_participant().invoke_in(
+                conn,
+                "effect.handoff",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "kernel.runtime",
+                        "generation_id": caller.generation_id,
+                    },
+                    "input": {
+                        "protocol": "forest.effect-handoff/1",
+                        "permit": result["permit"],
+                        "handoff_operation_id": "handoff/effect-command/1",
+                    },
+                    "prior": {},
+                },
+                operation_id="uow-step/effect-command-handoff/1",
+                causal_root_kind="test.effect-command",
+                causal_root_id="effect-command/1",
+                parent_call_id="call/effect-command-handoff/1",
+                timeout_seconds=10,
+            )
+        assert handoff["state"] == "DISPATCHING"
+        provider_result = await kernel.payload.put_bytes(
+            owner_component_id="kernel.runtime",
+            owner_kind="test.command-result",
+            owner_id="effect-command-result/1",
+            media_type="application/json",
+            content=b'{"status":"ok"}',
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        parent_ref = {
+            "payload_id": provider_result.payload_id,
+            "digest": provider_result.content_digest,
+            "owner_component_id": "kernel.runtime",
+            "owner_kind": "test.command-result",
+            "owner_id": "effect-command-result/1",
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            observed = await registry.get("kernel.effect").unit_of_work_participant().invoke_in(
+                conn,
+                "effect.observe-command-result",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "kernel.runtime",
+                        "generation_id": caller.generation_id,
+                    },
+                    "input": {
+                        "protocol": "forest.effect-command-result/1",
+                        "effect_operation_id": "effect-command/1",
+                        "attempt_id": "effect-command-attempt/1",
+                        "observation_operation_id": "observe/effect-command/1",
+                        "status": "SUCCEEDED",
+                        "evidence_kind": "executor",
+                        "evidence": {
+                            "value": {"status": "ok", "result": parent_ref},
+                            "parents": [parent_ref],
+                        },
+                    },
+                    "prior": {},
+                },
+                operation_id="uow-step/effect-command-observe/1",
+                causal_root_kind="test.effect-command",
+                causal_root_id="effect-command/1",
+                parent_call_id="call/effect-command-observe/1",
+                timeout_seconds=10,
+            )
+        assert observed["protocol"] == "forest.effect-command-observation/1"
+        assert observed["evidence_payload"]["owner_kind"] == "effect.evidence"
+        assert observed["evidence_parents"] == [parent_ref]
+        assert observed["observation"]["accepted"] is True
+        assert observed["observation"]["resulting_state"] == "SUCCEEDED"
+        assert json.loads(
+            await kernel.payload.read_bytes(observed["evidence_payload"]["payload_id"])
+        ) == {"status": "ok", "result": parent_ref}
     finally:
         assert await registry.close() == []

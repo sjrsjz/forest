@@ -1633,7 +1633,10 @@ DECLARE
     settled_value timestamptz;
     resolved_value timestamptz := NULL;
       run_state_value text;
-      effect_observation jsonb := envelope->'prior'->'effect';
+      effect_preparation jsonb := envelope->'prior'->(body->>'effect_step_id');
+      effect_observation jsonb := effect_preparation->'observation';
+      effect_evidence jsonb := effect_preparation->'evidence_payload';
+      effect_evidence_parents jsonb := effect_preparation->'evidence_parents';
 BEGIN
     SELECT item->'payload' INTO result_value
     FROM jsonb_array_elements(body->'payloads') item
@@ -1643,6 +1646,13 @@ BEGIN
     WHERE item->>'role'='USAGE' LIMIT 1;
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
          OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+         OR body->>'effect_step_id' IS DISTINCT FROM 'effect'
+         OR effect_preparation->>'protocol'
+            IS DISTINCT FROM 'forest.effect-command-observation/1'
+         OR effect_evidence->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+         OR effect_evidence->>'owner_kind' IS DISTINCT FROM 'effect.evidence'
+         OR effect_evidence->>'owner_id' IS DISTINCT FROM requested_operation
+         OR effect_evidence->>'digest' IS DISTINCT FROM body->>'evidence_digest'
          OR effect_observation->>'attempt_id' IS DISTINCT FROM requested_attempt
          OR effect_observation->>'observation_operation_id'
             IS DISTINCT FROM requested_operation
@@ -1653,6 +1663,23 @@ BEGIN
          OR (effect_observation->>'accepted')::boolean IS DISTINCT FROM true
          OR effect_observation->>'resulting_state'
             IS DISTINCT FROM observed_state_value
+         OR jsonb_typeof(effect_evidence_parents) IS DISTINCT FROM 'array'
+         OR jsonb_array_length(effect_evidence_parents)
+            IS DISTINCT FROM jsonb_array_length(body->'payloads')
+         OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(body->'payloads') item
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM jsonb_array_elements(effect_evidence_parents) parent
+                 WHERE parent = item->'payload'
+             )
+         )
+         OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(effect_evidence_parents) parent
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM jsonb_array_elements(body->'payloads') item
+                 WHERE item->'payload' = parent
+             )
+         )
          OR (SELECT count(*)<>count(DISTINCT item->>'role')
            FROM jsonb_array_elements(body->'payloads') item)
        OR (observed_state_value='SUCCEEDED' AND result_value IS NULL)
