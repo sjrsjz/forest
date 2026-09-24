@@ -40,7 +40,8 @@ requests = [
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.prepare-model-attempt",
   "uow.execute:agent.mark-model-handoff",
-  "uow.execute:agent.observe-model-result"
+  "uow.execute:agent.observe-model-result",
+  "uow.execute:agent.record-protocol-failure"
 ]
 
 [[components.provides]]
@@ -61,7 +62,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "8c0917037cf682f5fc4c253847d4648fc1507b0eb4050421a3f35f240e371746"
+baseline_sha256 = "f8765061174d983361242255888aee6657ff3e57252f7b3226a4e1c702a1a0dc"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -220,6 +221,25 @@ owner_component_path = "/input/payloads/*/payload/owner_component_id"
 owner_kind_path = "/input/payloads/*/payload/owner_kind"
 owner_id_path = "/input/payloads/*/payload/owner_id"
 
+[[components.unit_of_work_participants]]
+name = "agent.record-protocol-failure-record"
+contract = "1.0"
+function = "agent_record_protocol_failure"
+input_schema = "schemas/record-protocol-failure-envelope.json"
+output_schema = "schemas/protocol-failure-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/feedback"
+owner_component = "agent.runtime"
+owner_kind = "protocol.repair.feedback"
+owner_id_path = "/input/failure_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/checkpoint_state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/checkpoint_id"
+
 [[components.unit_of_work_plans]]
 name = "agent.start-run"
 contract = "1.0"
@@ -328,6 +348,16 @@ output_schema = "schemas/model-observation-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.observe-model-result-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.record-protocol-failure"
+contract = "1.0"
+input_schema = "schemas/record-protocol-failure-input.json"
+output_schema = "schemas/protocol-failure-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.record-protocol-failure-record" }
 ]
 
 [[components.owned_work_handlers]]

@@ -47,6 +47,8 @@
 
 Agent 的恢复读取和模型写入都属于 `agent.runtime` 包内端口，不能由宿主 Repository 暴露表行。`agent.run-recovery/1` 只返回状态机继续执行所需的稳定事实；建立一次模型调用必须依次提交 `agent.prepare-model-request/1`、`agent.prepare-model-attempt/1` 和 `agent.mark-model-handoff/1`。三个 UoW 均复核当前 Run owner/epoch 与 lease，前两步冻结 Provider Generation、投影 Payload、wire Payload 和 Effect operation，最后一步才把 Attempt、Request 和 Run 原子推进到 `DISPATCHING/DISPATCHING/MODEL_PENDING`。一旦 handoff 提交，重启或热重载只能查询 Effect 结果，再由 `agent.observe-model-result/1` 以不可变 observation 收敛为 `PARSING`、`PREPARING_MODEL` 或 `BLOCKED_UNKNOWN`，不能再次发送；`UNKNOWN` 只有带查询证据的 `RECONCILIATION` 可以收敛成成功或明确未发送。相同稳定身份与相同内容可重放原事实，任何字段变化都冲突；PayloadRef 由 manifest 声明的 provenance 规则在进入包 SQL 前验证。Provider 只负责请求投影和网络效果，不读取或裁决上下文预算。
 
+解析失败只能提交 `agent.record-protocol-failure/1`。该端口在同一事务中验证当前成功 Attempt、写入不可变 failure 与 checkpoint、清除当前 Model 请求，并把 Run 推进到 `REPAIR_READY` 或 `FAILED`；第一次进入 `REPAIR_READY` 即持久消耗唯一 repair 配额并固定下一步号，后续候选不能再次申请修复。修复输入仅从 failure 引用的有界 feedback Payload 恢复，禁止容错解析、从错误 XML 猜字段或在 Provider 层重试协议。
+
 工具目录由各执行模块通过 `RuntimeModuleDescriptor.agent_tools` 贡献，不写死在 Agent 工厂或 Bot 组合根。贡献冻结工具名、模型声明、服务 ID/版本、审批要求和查询能力，并作为模块 descriptor digest 的一部分进入 RuntimeGraph；同一图中的工具名与服务键都必须唯一。`agent.runtime` 只能通过受限 factory context 枚举贡献并请求对应服务句柄，随后把贡献者的准确 component/Generation、service 和 contract digest 冻结为 `AgentToolBinding`。Contract Router sealing 必须确认该服务确实由声明贡献的模块提供；所有权不符时整张候选图拒绝发布。工具结果仍由执行模块拥有，Agent 只持有 PayloadRef，并统一经 Authorization 与 Effect Gateway 完成 handoff 和恢复。
 
 ## 3. 单 Agent 执行循环

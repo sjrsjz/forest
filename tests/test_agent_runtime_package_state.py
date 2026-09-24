@@ -405,6 +405,13 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "result_payload_id": None,
             "state": "DISPATCHING",
         }
+        result_payload = await _payload(
+            kernel,
+            owner_component_id="provider.chat",
+            owner_kind="model.result",
+            owner_id="model-attempt/package/1",
+            value=b'{"status":"RESPONDED","text":"<broken>"}',
+        )
         observation_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -413,10 +420,12 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "observation_operation_id": "model-observation/package/1",
                 "request_id": "model-request/package/1",
                 "attempt_id": "model-attempt/package/1",
-                "observed_state": "NOT_APPLIED",
+                "observed_state": "SUCCEEDED",
                 "evidence_kind": "EXECUTOR",
                 "effect_observation_ref": "model-effect-observation/package/1",
-                "payloads": [],
+                "payloads": [
+                    {"role": "RESULT", "payload": result_payload.canonical()}
+                ],
             },
             "prior": {},
         }
@@ -435,10 +444,10 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "observation_operation_id": "model-observation/package/1",
             "attempt_id": "model-attempt/package/1",
             "evidence_kind": "EXECUTOR",
-            "observed_state": "NOT_APPLIED",
+            "observed_state": "SUCCEEDED",
             "accepted": True,
             "previous_state": "DISPATCHING",
-            "resulting_state": "NOT_APPLIED",
+            "resulting_state": "SUCCEEDED",
             "conflict_code": None,
         }
         async with store.pool.connection() as conn, conn.transaction():
@@ -452,15 +461,74 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 parent_call_id="call:agent-package/model-port/request-replay",
                 timeout_seconds=10,
             )
-        assert replayed_request["state"] == "NOT_APPLIED"
+        assert replayed_request["state"] == "SUCCEEDED"
         observed_recovery = await instance.invoke_management_query(
             recovery_declaration,
             {"run_id": "run/agent-package/model-port"},
             timeout_seconds=10,
         )
-        assert observed_recovery["state"] == "PREPARING_MODEL"
-        assert observed_recovery["model_request"]["state"] == "NOT_APPLIED"
-        assert observed_recovery["model_attempt"]["state"] == "NOT_APPLIED"
+        assert observed_recovery["state"] == "PARSING"
+        assert observed_recovery["model_request"]["state"] == "SUCCEEDED"
+        assert observed_recovery["model_attempt"]["state"] == "SUCCEEDED"
+        feedback = await _payload(
+            kernel,
+            owner_kind="protocol.repair.feedback",
+            owner_id="protocol-failure/package/1",
+            value=b'{"repair_count":1,"error_code":"AGENT_PROTOCOL_ROOT"}',
+        )
+        failure_checkpoint = await _payload(
+            kernel,
+            owner_kind="checkpoint.state",
+            owner_id="checkpoint/protocol-failure/package/1",
+            value=b'{"phase":"REPAIR_READY"}',
+        )
+        candidate_digest = digest_json({"candidate": "<broken>"})
+        failure_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "failure_id": "protocol-failure/package/1",
+                "request_id": "model-request/package/1",
+                "attempt_id": "model-attempt/package/1",
+                "error_code": "AGENT_PROTOCOL_ROOT",
+                "candidate_digest": candidate_digest,
+                "feedback": feedback.canonical(),
+                "checkpoint_id": "checkpoint/protocol-failure/package/1",
+                "checkpoint_state": failure_checkpoint.canonical(),
+                "allow_repair": True,
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            failure = await participant.invoke_in(
+                conn,
+                "agent.record-protocol-failure-record",
+                failure_envelope,
+                operation_id="agent-protocol-failure/package/1",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/protocol-failure",
+                timeout_seconds=10,
+            )
+        assert failure == {
+            "failure_id": "protocol-failure/package/1",
+            "failed_request_id": "model-request/package/1",
+            "error_code": "AGENT_PROTOCOL_ROOT",
+            "candidate_digest": candidate_digest,
+            "resulting_state": "REPAIR_READY",
+            "repair_step_seq": 2,
+        }
+        failed_recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert failed_recovery["state"] == "REPAIR_READY"
+        assert failed_recovery["repair_count"] == 1
+        assert failed_recovery["protocol_failure"]["failed_request_id"] == (
+            "model-request/package/1"
+        )
 
         acquire_envelope = {
             "protocol": "forest.uow-step/1",

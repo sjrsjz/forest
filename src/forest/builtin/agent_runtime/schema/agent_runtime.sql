@@ -1751,6 +1751,207 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_record_protocol_failure(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    feedback_value jsonb := body->'feedback';
+    checkpoint_value jsonb := body->'checkpoint_state';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_failure text := body->>'failure_id';
+    requested_request text := body->>'request_id';
+    requested_attempt text := body->>'attempt_id';
+    requested_error text := body->>'error_code';
+    requested_candidate_digest text := body->>'candidate_digest';
+    requested_checkpoint text := body->>'checkpoint_id';
+    allow_repair_value boolean := (body->>'allow_repair')::boolean;
+    target_phase text := CASE WHEN allow_repair_value THEN 'REPAIR_READY' ELSE 'FAILED' END;
+    input_digest_value text;
+    checkpoint_digest_value text;
+    checksum_value text;
+    run_row record;
+    request_row record;
+    attempt_row record;
+    existing record;
+    next_step_value integer;
+    repair_step_value integer := NULL;
+    sequence_value bigint;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR feedback_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR feedback_value->>'owner_kind' IS DISTINCT FROM 'protocol.repair.feedback'
+       OR feedback_value->>'owner_id' IS DISTINCT FROM requested_failure
+       OR checkpoint_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR checkpoint_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
+       OR checkpoint_value->>'owner_id' IS DISTINCT FROM requested_checkpoint THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_PROTOCOL_FAILURE_INPUT_INVALID',
+                'message','Protocol failure envelope is invalid','status',422
+            )
+        );
+    END IF;
+    input_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'run_id',requested_run,'owner_id',requested_owner,'owner_epoch',requested_epoch,
+        'failure_id',requested_failure,'request_id',requested_request,
+        'attempt_id',requested_attempt,'error_code',requested_error,
+        'candidate_digest',requested_candidate_digest,'feedback',feedback_value,
+        'checkpoint_id',requested_checkpoint,'checkpoint_state',checkpoint_value,
+        'allow_repair',allow_repair_value
+    )::text,'UTF8')),'hex');
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/protocol-failure/' || requested_bot || '/' || requested_request,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.protocol_failures
+    WHERE bot_id=requested_bot
+      AND (failure_id=requested_failure OR failed_request_id=requested_request)
+    ORDER BY CASE WHEN failure_id=requested_failure THEN 0 ELSE 1 END
+    LIMIT 1;
+    IF FOUND THEN
+        IF existing.failure_id IS DISTINCT FROM requested_failure
+           OR existing.input_digest IS DISTINCT FROM input_digest_value THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_PROTOCOL_FAILURE_CONFLICT',
+                    'message','Protocol failure identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'failure_id',existing.failure_id,
+                'failed_request_id',existing.failed_request_id,
+                'error_code',existing.error_code,
+                'candidate_digest',existing.candidate_digest,
+                'resulting_state',existing.resulting_state,
+                'repair_step_seq',existing.repair_step_seq
+            )
+        );
+    END IF;
+    SELECT * INTO request_row
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR UPDATE;
+    SELECT * INTO attempt_row
+    FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR SHARE;
+    IF request_row.request_id IS NULL OR attempt_row.attempt_id IS NULL
+       OR run_row.state IS DISTINCT FROM 'PARSING'
+       OR run_row.current_model_request_id IS DISTINCT FROM requested_request
+       OR request_row.run_id IS DISTINCT FROM requested_run
+       OR request_row.step_seq IS DISTINCT FROM run_row.next_step_seq
+       OR request_row.state IS DISTINCT FROM 'SUCCEEDED'
+       OR request_row.current_attempt_id IS DISTINCT FROM requested_attempt
+       OR attempt_row.request_id IS DISTINCT FROM requested_request
+       OR attempt_row.state IS DISTINCT FROM 'SUCCEEDED'
+       OR attempt_row.result_payload_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_PROTOCOL_FAILURE_BOUNDARY_CLOSED',
+                'message','Model response is not the current parse boundary','status',409
+            )
+        );
+    END IF;
+    IF allow_repair_value AND run_row.repair_count>=1 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_PROTOCOL_REPAIR_EXHAUSTED',
+                'message','The bounded protocol repair was already consumed','status',409
+            )
+        );
+    END IF;
+    next_step_value := run_row.next_step_seq+1;
+    IF allow_repair_value THEN
+        repair_step_value := next_step_value;
+    END IF;
+    sequence_value := run_row.checkpoint_seq+1;
+    checkpoint_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'run_id',requested_run,'failure_id',requested_failure,'phase',target_phase,
+        'input_revision',run_row.input_revision,'next_step_seq',next_step_value,
+        'state',checkpoint_value,'owner_epoch',requested_epoch
+    )::text,'UTF8')),'hex');
+    checksum_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_run,sequence_value,target_phase,run_row.input_revision,
+        next_step_value,checkpoint_value->>'digest',requested_epoch
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.run_checkpoints(
+        bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,phase,input_revision,
+        next_step_seq,state_payload_id,state_payload_digest,state_owner_component_id,
+        state_owner_kind,state_owner_id,checkpoint_checksum,owner_epoch
+    ) VALUES (
+        requested_bot,requested_run,sequence_value,requested_checkpoint,
+        checkpoint_digest_value,target_phase,run_row.input_revision,next_step_value,
+        checkpoint_value->>'payload_id',checkpoint_value->>'digest',
+        checkpoint_value->>'owner_component_id',checkpoint_value->>'owner_kind',
+        checkpoint_value->>'owner_id',checksum_value,requested_epoch
+    );
+    INSERT INTO __forest_module_schema__.protocol_failures(
+        bot_id,failure_id,input_digest,run_id,failed_request_id,failed_attempt_id,
+        error_code,candidate_digest,feedback_payload_id,feedback_payload_digest,
+        feedback_owner_component_id,feedback_owner_kind,feedback_owner_id,
+        resulting_state,repair_step_seq
+    ) VALUES (
+        requested_bot,requested_failure,input_digest_value,requested_run,requested_request,
+        requested_attempt,requested_error,requested_candidate_digest,
+        feedback_value->>'payload_id',feedback_value->>'digest',
+        feedback_value->>'owner_component_id',feedback_value->>'owner_kind',
+        feedback_value->>'owner_id',target_phase,repair_step_value
+    );
+    UPDATE __forest_module_schema__.agent_runs
+    SET state=target_phase,next_step_seq=next_step_value,checkpoint_seq=sequence_value,
+        repair_count=repair_count+CASE WHEN allow_repair_value THEN 1 ELSE 0 END,
+        current_model_request_id=NULL,
+        error_code=CASE WHEN target_phase='FAILED' THEN 'AGENT_PROTOCOL_FAILED' ELSE NULL END,
+        terminal_at=CASE WHEN target_phase='FAILED' THEN run_row.database_now ELSE NULL END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    IF target_phase='FAILED' THEN
+        UPDATE __forest_module_schema__.agent_sessions
+        SET state='FAILED',active_run_id=NULL,
+            terminal_reason_code='AGENT_PROTOCOL_FAILED',closed_at=clock_timestamp(),
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND session_id=run_row.session_id
+          AND state='ACTIVE' AND active_run_id=requested_run;
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'failure_id',requested_failure,'failed_request_id',requested_request,
+            'error_code',requested_error,'candidate_digest',requested_candidate_digest,
+            'resulting_state',target_phase,'repair_step_seq',repair_step_value
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
