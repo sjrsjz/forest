@@ -59,7 +59,7 @@
 |---|---|---|---|
 | Agent | `bootstrap_clean_agent()` | `builtin/agent_runtime` | Worker 内 `agent.execute/2`、Provider/Tool/Payload 端口、管理贡献、Conversation 原子交接、生产切换 |
 | Conversation | `bootstrap_clean_messaging()` | `builtin/conversation_scheduler` | Agent 调度入口、final-reply/session-handoff plans、生产 poller/owned work 切换 |
-| Memory | `bootstrap_clean_memory()` | 尚无完整 builtin 包 | 图写入/召回/归档 Worker、工具和管理贡献、生产切换 |
+| Memory | `bootstrap_clean_memory()` | `builtin/memory_graph` | 捕获/嵌入/召回 Worker 与端口、完整管理查询、生产切换 |
 
 `clean_*` 是重构期间遗留的宿主实现名称，不是新的模块层。对应 builtin 完成生产切换后，应直接删除这些文件和旧 baseline，不保留兼容转发。
 
@@ -87,12 +87,20 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 该候选尚未拥有完整 Agent 调用与回复/Session 交接，所以尚未加入生产组合根。现有 `bootstrap_clean_messaging()` 仍是旁路，应在对应端口完成后删除。
 
-## 7. 下一切换顺序
+## 7. Memory 候选包已经拥有的部分
+
+`builtin/memory_graph` 已经是可由 `PackageCatalog` 构建的独立包，声明自己的隔离 Worker、私有 storage baseline、Generation 配置、管理 UI 和 `memory.qualify-input-batch/1` UnitOfWork participant。嵌入配置将 `TEXT_IMAGE` 模型种类、部署标识、模型修订、维数与归一化方式绑定到 Bot 模块生命周期；端点轮换仍应由后续受限 Effect 配置承担，不能在已创建 Bot 上改换模型种类。
+
+首个私有状态边界已经封闭 Agent 输入资格确认：Conversation 给出的准确消息切口与 Kernel Payload 删除 epoch 在同一事务进入 Memory；尚未捕获的 event 只登记 `PENDING_CAPTURE`，已有来源 occurrence 从 `REGISTERED` 原子进入 `ADMITTED`，operation 重放不重复产生资格记录。该路径已用真实 PostgreSQL 安装包 baseline 并验证状态转换与 Registry 资源回收。
+
+这仍是候选而非生产切换。消息来源捕获、图片/文本 facet、嵌入预算和异步合流、独立向量索引 ref、QiYu 图区域扩散、超大关联点随机有界采样、跨主干联想、召回 Payload、遗忘，以及带筛选/关系遍历/真实召回试验的管理契约仍需迁入该包。当前 `bootstrap_clean_memory()` 继续构成宿主旁路，完成前不得把 `memory_graph` 目录存在表述为 Memory 已包化。
+
+## 8. 下一切换顺序
 
 1. 在 `agent_runtime` Worker 中实现可序列化的 `agent.execute/2`，只使用声明式 Service、Effect、Payload、UnitOfWork 和工具贡献目录；禁止 callback、Repository、数据库连接和宿主 Agent adapter。
 2. 在 `conversation_scheduler` manifest 中补齐 acquire-model-input、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
 3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
-4. 将 Memory 权威状态与召回执行迁入独立 builtin 包，再删除 `bootstrap_clean_memory()` 路径。
+4. 补齐 `memory_graph` 的捕获、嵌入、图扩散、召回和管理端口，用包内权威状态替换 `bootstrap_clean_memory()`，随后删除宿主 Memory Runtime、Repository 装配和旧 baseline。
 5. 从空开发库启动完整图，验证热重载安全点、失败回滚、群并发、Provider/Tool 不确定结果、真实 OneBot 单次低频交互和 WebUI 管理贡献。
 
 在第 3 步完成前，生产图仍是“微内核包系统 + 三个宿主业务模块”的混合图；在第 4 步完成前，目标重型 Bot 框架仍未完成。

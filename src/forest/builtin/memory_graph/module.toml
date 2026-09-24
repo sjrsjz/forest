@@ -1,0 +1,58 @@
+manifest_version = 1
+package_id = "forest.memory-graph"
+version = "0.1.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "memory_graph:MemoryGraph"
+
+[[components]]
+id = "memory.graph"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 128
+max_state_inflight = 8
+max_owned_tasks = 16
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 15
+start_timeout_s = 15
+drain_timeout_s = 960
+stop_timeout_s = 15
+
+[[components.provides]]
+name = "memory.profile.describe"
+contract = "2.0"
+semantics = "read"
+input_schema = "schemas/profile-input.json"
+output_schema = "schemas/profile-output.json"
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "memory.graph.workspace"
+label = "多模态记忆"
+group = "memory"
+order = 10
+
+[components.storage]
+schema_id = "forest.memory.graph"
+schema_version = "2.0.0"
+baseline = "schema/memory_graph.sql"
+baseline_sha256 = "359a2014a4cc796ad824cc081d6f1998dd20c1a5c33e714befe4bf78a0bb0954"
+scope = "bot"
+repository_contract = "forest.memory-graph.repository/2"
+execution_profile = "official"
+
+[[components.unit_of_work_participants]]
+name = "memory.qualify-input-batch"
+contract = "1.0"
+function = "memory_qualify_input_batch"
+input_schema = "schemas/qualify-input-batch-envelope.json"
+output_schema = "schemas/qualify-input-batch-output.json"

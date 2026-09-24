@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "input_batch_ref", "qualified_count", "pending_count", "deletion_epoch"],
+  "properties": {
+    "protocol": {"const": "forest.memory-input-qualified/1"},
+    "input_batch_ref": {"type": ["string", "null"], "maxLength": 256},
+    "qualified_count": {"type": "integer", "minimum": 0, "maximum": 100000},
+    "pending_count": {"type": "integer", "minimum": 0, "maximum": 100000},
+    "deletion_epoch": {"type": "integer", "minimum": 0}
+  }
+}

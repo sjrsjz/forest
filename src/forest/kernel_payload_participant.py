@@ -35,6 +35,32 @@ class KernelPayloadUnitOfWorkParticipant:
         return identity.generation_id
 
     async def invoke_in(self, conn, name: str, payload: dict, **_invocation) -> dict:
+        if name == "payload.capture-deletion-epoch":
+            envelope = _object(
+                payload,
+                {"protocol", "caller", "input", "prior"},
+                "PAYLOAD_UOW_INPUT_INVALID",
+            )
+            caller = _object(
+                envelope["caller"],
+                {"component_id", "generation_id"},
+                "PAYLOAD_UOW_INPUT_INVALID",
+            )
+            if (
+                envelope["protocol"] != "forest.uow-step/1"
+                or envelope["input"] != {"protocol": "forest.payload-epoch-capture/1"}
+                or any(not isinstance(value, str) or not value for value in caller.values())
+            ):
+                raise ForestError(
+                    "PAYLOAD_UOW_INPUT_INVALID",
+                    "Payload deletion epoch request is invalid",
+                    422,
+                )
+            epoch = await self.service.epoch_in(conn)
+            return {
+                "protocol": "forest.payload-epoch/1",
+                "deletion_epoch": epoch,
+            }
         if name != "payload.put-json-from-prior":
             raise ForestError(
                 "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",

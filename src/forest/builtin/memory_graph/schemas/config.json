@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "embedding", "fusion_policy_revision", "retrieval", "embedding_budget"],
+  "properties": {
+    "protocol": {"const": "forest.memory.graph/2"},
+    "embedding": {"$ref": "#/$defs/embedding"},
+    "fusion_policy_revision": {"const": "independent-facets/1"},
+    "retrieval": {"$ref": "#/$defs/retrieval"},
+    "embedding_budget": {"$ref": "#/$defs/budget"}
+  },
+  "$defs": {
+    "embedding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_kind", "deployment_id", "model_revision", "model", "dimensions", "normalization"],
+      "properties": {
+        "model_kind": {"const": "TEXT_IMAGE"},
+        "deployment_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "model_revision": {"type": "string", "minLength": 1, "maxLength": 256},
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "dimensions": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "normalization": {"enum": ["L2", "NONE"]}
+      }
+    },
+    "retrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_revision", "seed_limit", "candidate_limit_per_facet", "min_similarity", "min_graph_relevance", "max_graph_nodes", "max_association_edges_per_node", "max_retrieval_chars", "sequence_weight", "association_weight"],
+      "properties": {
+        "policy_revision": {"const": "qiyu-graph-region/1"},
+        "seed_limit": {"type": "integer", "minimum": 1, "maximum": 64},
+        "candidate_limit_per_facet": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "min_similarity": {"type": "number", "minimum": -1, "maximum": 1},
+        "min_graph_relevance": {"type": "number", "minimum": 0, "maximum": 1},
+        "max_graph_nodes": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "max_association_edges_per_node": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "max_retrieval_chars": {"type": "integer", "minimum": 256, "maximum": 1000000},
+        "sequence_weight": {"type": "number", "minimum": 0, "maximum": 100},
+        "association_weight": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_revision", "daily_request_limit", "daily_token_limit", "reservation_tokens"],
+      "properties": {
+        "policy_revision": {"const": "daily-cost-cap/1"},
+        "daily_request_limit": {"type": "integer", "minimum": 1},
+        "daily_token_limit": {"type": "integer", "minimum": 1},
+        "reservation_tokens": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}
