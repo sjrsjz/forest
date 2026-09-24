@@ -60,14 +60,18 @@
     },
     "model_attempt": {
       "type": "object",
-      "required": ["attempt_id", "effect_operation_ref", "state", "result_payload_id"],
+      "required": [
+        "attempt_id", "effect_operation_ref", "state", "result_payload_id",
+        "result_payload_digest"
+      ],
       "properties": {
         "attempt_id": {"$ref": "#/$defs/id"},
         "effect_operation_ref": {"$ref": "#/$defs/id"},
         "state": {
           "enum": ["PREPARED", "DISPATCHING", "SUCCEEDED", "NOT_APPLIED", "UNKNOWN", "ABANDONED"]
         },
-        "result_payload_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 512}
+        "result_payload_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+        "result_payload_digest": {"$ref": "#/$defs/nullable_digest"}
       },
       "additionalProperties": false
     },
@@ -102,12 +106,16 @@
     },
     "model_turn": {
       "type": "object",
-      "required": ["turn_id", "request_id", "step_seq", "assistant_payload_id", "terminal"],
+      "required": [
+        "turn_id", "request_id", "step_seq", "assistant_payload_id",
+        "assistant_payload_digest", "terminal"
+      ],
       "properties": {
         "turn_id": {"$ref": "#/$defs/id"},
         "request_id": {"$ref": "#/$defs/id"},
         "step_seq": {"type": "integer", "minimum": 1},
         "assistant_payload_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+        "assistant_payload_digest": {"$ref": "#/$defs/nullable_digest"},
         "terminal": {"type": "boolean"}
       },
       "additionalProperties": false
@@ -115,18 +123,24 @@
     "protocol_failure": {
       "type": "object",
       "required": [
-        "failed_request_id", "error_code", "candidate_digest", "feedback_payload_id",
-        "resulting_state", "repair_step_seq"
+        "failure_id", "failed_request_id", "error_code", "candidate_digest",
+        "feedback_payload_id", "feedback_payload_digest", "resulting_state",
+        "repair_step_seq"
       ],
       "properties": {
+        "failure_id": {"$ref": "#/$defs/id"},
         "failed_request_id": {"$ref": "#/$defs/id"},
         "error_code": {"$ref": "#/$defs/id"},
         "candidate_digest": {"$ref": "#/$defs/digest"},
         "feedback_payload_id": {"$ref": "#/$defs/id"},
+        "feedback_payload_digest": {"$ref": "#/$defs/digest"},
         "resulting_state": {"enum": ["REPAIR_READY", "FAILED"]},
         "repair_step_seq": {"type": ["integer", "null"], "minimum": 1}
       },
       "additionalProperties": false
+    },
+    "nullable_digest": {
+      "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
     }
   }
 }

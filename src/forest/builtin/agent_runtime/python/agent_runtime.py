@@ -1,4 +1,5 @@
 from agent_protocol import protocol_descriptor
+from execution import AgentExecution
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -15,6 +16,26 @@ class AgentRuntime(Plugin):
                 "Agent runtime protocol is unsupported",
                 422,
             )
+        self._config = {
+            key: (
+                dict(value)
+                if hasattr(value, "items")
+                else list(value)
+                if isinstance(value, (tuple, list))
+                else value
+            )
+            for key, value in config.items()
+        }
+
+    @service(
+        "agent.execute",
+        semantics="idempotent",
+        contract="2.0",
+        input_schema="schemas/execute-input.json",
+        output_schema="schemas/execute-output.json",
+    )
+    async def execute(self, payload, ctx):
+        return await AgentExecution(ctx, self._config).execute(payload)
 
     @service(
         "agent.protocol.describe",

@@ -519,6 +519,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "attempt_id": "model-attempt/package/1",
             "effect_operation_ref": "model-effect/package/1",
             "result_payload_id": None,
+            "result_payload_digest": None,
             "state": "DISPATCHING",
         }
         result_payload = await _payload(

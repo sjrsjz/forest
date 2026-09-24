@@ -122,6 +122,7 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
         )
         assert adapter._worker.identity.configuration_owner_id == "revision:1"
         adapter.activate_generation()
+        assert ("agent.execute", 2) in adapter.runtime_service_handlers()
         endpoint = adapter.runtime_service_handlers()[("agent.protocol.describe", 1)]
         route = FrozenServiceRoute(
             service_id="agent.protocol.describe",

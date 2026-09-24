@@ -414,5 +414,6 @@ class ModelExecution:
             "request_id": request_id,
             "attempt_id": attempt_id,
             "error_code": None,
+            "result_ref": receipt["result"],
             "result": result,
         }

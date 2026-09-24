@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "conversation_id", "session_ref", "run_ref", "resume",
+    "absolute_deadline", "actor"
+  ],
+  "properties": {
+    "protocol": {"const": "forest.agent-execute/2"},
+    "conversation_id": {"$ref": "#/$defs/id"},
+    "session_ref": {"$ref": "#/$defs/id"},
+    "run_ref": {"$ref": "#/$defs/id"},
+    "resume": {"type": "boolean"},
+    "absolute_deadline": {"type": "string", "minLength": 1, "maxLength": 64},
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversation_id", "owner_id", "epoch"],
+      "properties": {
+        "conversation_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256}
+  }
+}

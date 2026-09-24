@@ -905,7 +905,8 @@ BEGIN
     IF request_id_value IS NOT NULL THEN
         SELECT jsonb_build_object(
             'attempt_id',a.attempt_id,'effect_operation_ref',a.effect_operation_ref,
-            'state',a.state,'result_payload_id',a.result_payload_id
+            'state',a.state,'result_payload_id',a.result_payload_id,
+            'result_payload_digest',a.result_payload_digest
         ) INTO attempt_value
         FROM __forest_module_schema__.model_transport_attempts a
         JOIN __forest_module_schema__.model_requests m
@@ -934,7 +935,8 @@ BEGIN
 
     SELECT jsonb_build_object(
         'turn_id',t.turn_id,'request_id',t.request_id,'step_seq',t.step_seq,
-        'assistant_payload_id',t.assistant_payload_id,'terminal',t.terminal
+        'assistant_payload_id',t.assistant_payload_id,
+        'assistant_payload_digest',t.assistant_payload_digest,'terminal',t.terminal
     ) INTO turn_value
     FROM __forest_module_schema__.model_turns t
     WHERE t.bot_id=requested_bot AND t.run_id=requested_run
@@ -942,9 +944,11 @@ BEGIN
     LIMIT 1;
 
     SELECT jsonb_build_object(
-        'failed_request_id',f.failed_request_id,'error_code',f.error_code,
+        'failure_id',f.failure_id,'failed_request_id',f.failed_request_id,
+        'error_code',f.error_code,
         'candidate_digest',f.candidate_digest,
         'feedback_payload_id',f.feedback_payload_id,
+        'feedback_payload_digest',f.feedback_payload_digest,
         'resulting_state',f.resulting_state,'repair_step_seq',f.repair_step_seq
     ) INTO failure_value
     FROM __forest_module_schema__.protocol_failures f
@@ -2834,12 +2838,41 @@ BEGIN
        OR body->>'memory_step_id' IS DISTINCT FROM 'memory'
        OR selection IS NULL OR memory_value IS NULL
        OR memory_value->>'protocol' IS DISTINCT FROM 'forest.memory-input-qualified/1'
-       OR selection->>'status' IS DISTINCT FROM 'BATCH'
        OR selection->>'boundary' IS DISTINCT FROM 'IDLE'
-       OR selection->>'kind' IS DISTINCT FROM 'TRIGGER_INPUT'
        OR selection->>'conversation_id' IS DISTINCT FROM body->>'conversation_ref'
        OR selection->>'session_ref' IS DISTINCT FROM body->>'session_id'
        OR selection->>'run_ref' IS DISTINCT FROM body->>'run_id'
+       OR selection->>'status' NOT IN ('BATCH','IDLE') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_START_SELECTION_INVALID',
+                'message','Initial Agent selection is invalid','status',409
+            )
+        );
+    END IF;
+    qualified_count := (memory_value->>'qualified_count')::integer;
+    pending_count := (memory_value->>'pending_count')::integer;
+    IF selection->>'status'='IDLE' THEN
+        IF memory_value->>'input_batch_ref' IS NOT NULL
+           OR qualified_count<>0 OR pending_count<>0 THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_START_SELECTION_CONFLICT',
+                    'message','Memory qualification differs from idle selection','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.agent-start-selection/1','status','IDLE',
+                'run',NULL,'memory_qualified_count',0,'memory_pending_count',0
+            )
+        );
+    END IF;
+    IF selection->>'kind' IS DISTINCT FROM 'TRIGGER_INPUT'
        OR selection->>'input_batch_id' IS NULL
        OR jsonb_typeof(selection->'event_ids') IS DISTINCT FROM 'array'
        OR jsonb_typeof(selection->'triggers') IS DISTINCT FROM 'array'
@@ -2853,8 +2886,6 @@ BEGIN
             )
         );
     END IF;
-    qualified_count := (memory_value->>'qualified_count')::integer;
-    pending_count := (memory_value->>'pending_count')::integer;
     event_count := jsonb_array_length(selection->'event_ids');
     IF qualified_count < 0 OR pending_count < 0
        OR qualified_count+pending_count<>event_count THEN

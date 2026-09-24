@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "2.9.0"
+version = "3.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -85,6 +85,13 @@ kind = "agent-tools"
 max_execution_timeout_s = 900
 
 [[components.provides]]
+name = "agent.execute"
+contract = "2.0"
+semantics = "idempotent"
+input_schema = "schemas/execute-input.json"
+output_schema = "schemas/execute-output.json"
+
+[[components.provides]]
 name = "agent.protocol.describe"
 contract = "1.0"
 semantics = "read"
@@ -100,9 +107,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.8.0"
+schema_version = "1.9.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "c6d35267f61281252260ea6d6822f90da5cc24adb9025eef47e288489aac2c58"
+baseline_sha256 = "f939ebcdf921663c236be63645dd4d05d0b377a0b059397ca727a5394b39d20c"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"

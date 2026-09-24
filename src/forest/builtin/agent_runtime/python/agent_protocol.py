@@ -340,7 +340,10 @@ def _text_block(element: ET.Element, expected: str) -> ThinkingBlock | Assistant
 
 
 def _function_block(
-    element: ET.Element, *, allowed_tools: frozenset[str], argument_byte_limit: int
+    element: ET.Element,
+    *,
+    allowed_tools: frozenset[str] | None,
+    argument_byte_limit: int,
 ) -> FunctionCallBlock:
     if element.attrib != {"block_type": "FunctionCall"}:
         raise _error("AGENT_PROTOCOL_ATTRIBUTES", "Invalid FunctionCall attributes")
@@ -348,7 +351,7 @@ def _function_block(
     function = _children(element, "function")[0]
     if set(function.attrib) != {"name"} or not _TOOL_NAME.fullmatch(function.attrib["name"]):
         raise _error("AGENT_PROTOCOL_TOOL", "FunctionCall has an invalid tool name")
-    if allowed_tools and function.attrib["name"] not in allowed_tools:
+    if allowed_tools is not None and function.attrib["name"] not in allowed_tools:
         raise _error("AGENT_PROTOCOL_TOOL", "FunctionCall names an unavailable tool")
     _structural_text(function)
     arguments = _children(function, "arguments")[0]
@@ -361,7 +364,7 @@ def _function_block(
 def parse_model_turn(
     candidate: str,
     *,
-    allowed_tools: frozenset[str] | set[str] | tuple[str, ...] = (),
+    allowed_tools: frozenset[str] | set[str] | tuple[str, ...] | None = None,
     candidate_byte_limit: int = MAX_CANDIDATE_BYTES,
     argument_byte_limit: int = MAX_ARGUMENT_BYTES,
     max_nodes: int = MAX_XML_NODES,
@@ -398,7 +401,7 @@ def parse_model_turn(
     elements = list(blocks_element)
     if not elements:
         raise _error("AGENT_PROTOCOL_EMPTY_TURN", "ModelTurn requires at least one block")
-    allowed = frozenset(allowed_tools)
+    allowed = None if allowed_tools is None else frozenset(allowed_tools)
     blocks: list[ModelBlock] = []
     assistant_seen = False
     truncated = False

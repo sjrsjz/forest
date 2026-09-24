@@ -80,7 +80,9 @@
 
 包内已加入 `model_execution.py`，模型 attempt 的 profile bind、`model.input` 写入、Provider materialize、授权与 Effect prepare、原子 handoff、Provider dispatch、Effect/Agent 原子 observe 及 Provider 结果读取均只经过 `ctx.services`、`ctx.uow`、`ctx.payloads` 与冻结的 `ctx.identity`。它没有 Repository、数据库连接或宿主 Agent adapter；Provider 异常或回执 fence 不一致在 handoff 后统一收敛为 `UNKNOWN`，不会盲目重发。
 
-这段模型 attempt 尚未接入公开 `agent.execute/2` 循环。当前 Worker 对外仍只提供 `agent.protocol.describe/1`、`agent.run.query/1` 和 reload-resume job，工具 Effect 链、协议修复续调、最终回复计划与 Conversation owned-work 也尚未闭合，所以 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“模型 attempt 已进入包”表述成“Agent 已完成生产包化”。
+Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
+
+这仍不是 Agent 生产包化完成：FunctionCall 目前只会冻结准确工具绑定并停在 `WAIT_TOOL`，工具授权、审批、Effect handoff、查询恢复尚未接入包入口；Conversation 也尚未贡献 `conversation.agent-run.pending`、最终回复和 Session 交接 owned-work。因此 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“`agent.execute/2` 已有终端回复路径”表述成“生产主链已经切换”。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
@@ -102,8 +104,8 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 ## 8. 下一切换顺序
 
-1. 在 `agent_runtime` Worker 中实现可序列化的 `agent.execute/2`，只使用声明式 Service、Effect、Payload、UnitOfWork 和工具贡献目录；禁止 callback、Repository、数据库连接和宿主 Agent adapter。
-2. 在 `conversation_scheduler` manifest 中补齐 acquire-model-input、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
+1. 为 `agent_runtime` 的冻结工具目录补齐授权、审批、Effect handoff、执行回执与查询恢复协议；工具服务只能通过准确 component/Generation/service/binding fence 调用。
+2. 在 `conversation_scheduler` manifest 中补齐 Agent owned-work、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
 3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
 4. 补齐 `memory_graph` 的捕获、嵌入、图扩散、召回和管理端口，用包内权威状态替换 `bootstrap_clean_memory()`，随后删除宿主 Memory Runtime、Repository 装配和旧 baseline。
 5. 从空开发库启动完整图，验证热重载安全点、失败回滚、群并发、Provider/Tool 不确定结果、真实 OneBot 单次低频交互和 WebUI 管理贡献。
