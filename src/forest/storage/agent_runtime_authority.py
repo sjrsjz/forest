@@ -2346,6 +2346,7 @@ class AgentRuntimeRepository:
         final_candidate: AgentPayloadRef | None = None,
         reload_operation_id: str | None = None,
         reload_resume_phase: str | None = None,
+        reload_generation_id: str | None = None,
         _connection=None,
     ) -> dict:
         _bounded(checkpoint_id, "checkpoint_id", 256)
@@ -2373,16 +2374,24 @@ class AgentRuntimeRepository:
                 "AGENT_RUNTIME_INPUT_INVALID", "Final candidate only belongs to FINAL_READY", 422
             )
         _bounded(reload_operation_id, "reload_operation_id", 256, optional=True)
+        _bounded(reload_generation_id, "reload_generation_id", 256, optional=True)
         if target_phase == "RELOAD_WAIT":
-            if reload_operation_id is None or reload_resume_phase != expected_phase or (
-                expected_phase not in {"PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"}
+            if (
+                reload_operation_id is None
+                or reload_generation_id is None
+                or reload_resume_phase != expected_phase
+                or expected_phase not in {"PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"}
             ):
                 raise ForestError(
                     "AGENT_RUNTIME_INPUT_INVALID",
                     "RELOAD_WAIT must preserve its exact resumable phase and operation",
                     422,
                 )
-        elif reload_operation_id is not None or reload_resume_phase is not None:
+        elif (
+            reload_operation_id is not None
+            or reload_resume_phase is not None
+            or reload_generation_id is not None
+        ):
             raise ForestError(
                 "AGENT_RUNTIME_INPUT_INVALID",
                 "Reload metadata only belongs to RELOAD_WAIT",
@@ -2400,6 +2409,7 @@ class AgentRuntimeRepository:
                 "final_candidate": final_candidate.canonical() if final_candidate else None,
                 "reload_operation_id": reload_operation_id,
                 "reload_resume_phase": reload_resume_phase,
+                "reload_generation_id": reload_generation_id,
             }
         )
         async with self._transaction(_connection) as conn:
@@ -2480,7 +2490,7 @@ class AgentRuntimeRepository:
             )
             await conn.execute(
                 sql.SQL("UPDATE {} SET state=%s,checkpoint_seq=%s,error_code=%s,"
-                        "reload_operation_id=%s,reload_resume_phase=%s,"
+                        "reload_operation_id=%s,reload_resume_phase=%s,reload_generation_id=%s,"
                         "final_candidate_payload_id=%s,final_candidate_payload_digest=%s,"
                         "terminal_at=%s,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND run_id=%s").format(self._table("agent_runs")),
@@ -2490,6 +2500,7 @@ class AgentRuntimeRepository:
                     error_code,
                     reload_operation_id,
                     reload_resume_phase,
+                    reload_generation_id,
                     final_payload_id,
                     final_payload_digest,
                     terminal_at,
@@ -2521,11 +2532,13 @@ class AgentRuntimeRepository:
         self,
         operation_id: str,
         *,
+        resuming_generation_id: str,
         _connection=None,
     ) -> tuple[dict, ...]:
         """CAS only Runs parked by one exact lifecycle replacement operation."""
 
         _bounded(operation_id, "operation_id", 256)
+        _bounded(resuming_generation_id, "resuming_generation_id", 256)
         async with self._transaction(_connection) as conn:
             await self._lock(conn, "reload-resume:" + operation_id)
             rows = await (
@@ -2535,34 +2548,42 @@ class AgentRuntimeRepository:
                         "s.conversation_ref FROM {} r JOIN {} s ON s.bot_id=r.bot_id "
                         "AND s.session_id=r.session_id WHERE r.bot_id=%s "
                         "AND r.state='RELOAD_WAIT' AND r.reload_operation_id=%s "
+                        "AND r.reload_generation_id<>%s "
                         "ORDER BY r.run_id FOR UPDATE OF r"
                     ).format(
                         self._table("agent_runs"),
                         self._table("agent_sessions"),
                     ),
-                    (self.store.bot_id, operation_id),
+                    (self.store.bot_id, operation_id, resuming_generation_id),
                 )
             ).fetchall()
             for row in rows:
                 await conn.execute(
                     sql.SQL(
                         "UPDATE {} SET state=%s,reload_operation_id=NULL,"
-                        "reload_resume_phase=NULL,updated_at=clock_timestamp() "
+                        "reload_resume_phase=NULL,reload_generation_id=NULL,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND run_id=%s AND state='RELOAD_WAIT' "
-                        "AND reload_operation_id=%s"
+                        "AND reload_operation_id=%s AND reload_generation_id<>%s"
                     ).format(self._table("agent_runs")),
                     (
                         row["reload_resume_phase"],
                         self.store.bot_id,
                         row["run_id"],
                         operation_id,
+                        resuming_generation_id,
                     ),
                 )
             return tuple(dict(row) for row in rows)
 
-    async def recover_reload_waits(self, *, _connection=None) -> tuple[dict, ...]:
+    async def recover_reload_waits(
+        self,
+        *,
+        resuming_generation_id: str,
+        _connection=None,
+    ) -> tuple[dict, ...]:
         """Release reload waits abandoned by a prior host incarnation."""
 
+        _bounded(resuming_generation_id, "resuming_generation_id", 256)
         async with self._transaction(_connection) as conn:
             await self._lock(conn, "reload-recover:all")
             rows = await (
@@ -2571,27 +2592,29 @@ class AgentRuntimeRepository:
                         "SELECT r.run_id,r.reload_operation_id,r.reload_resume_phase,"
                         "s.conversation_ref FROM {} r JOIN {} s ON s.bot_id=r.bot_id "
                         "AND s.session_id=r.session_id WHERE r.bot_id=%s "
-                        "AND r.state='RELOAD_WAIT' ORDER BY r.run_id FOR UPDATE OF r"
+                        "AND r.state='RELOAD_WAIT' AND r.reload_generation_id<>%s "
+                        "ORDER BY r.run_id FOR UPDATE OF r"
                     ).format(
                         self._table("agent_runs"),
                         self._table("agent_sessions"),
                     ),
-                    (self.store.bot_id,),
+                    (self.store.bot_id, resuming_generation_id),
                 )
             ).fetchall()
             for row in rows:
                 await conn.execute(
                     sql.SQL(
                         "UPDATE {} SET state=%s,reload_operation_id=NULL,"
-                        "reload_resume_phase=NULL,updated_at=clock_timestamp() "
+                        "reload_resume_phase=NULL,reload_generation_id=NULL,updated_at=clock_timestamp() "
                         "WHERE bot_id=%s AND run_id=%s AND state='RELOAD_WAIT' "
-                        "AND reload_operation_id=%s"
+                        "AND reload_operation_id=%s AND reload_generation_id<>%s"
                     ).format(self._table("agent_runs")),
                     (
                         row["reload_resume_phase"],
                         self.store.bot_id,
                         row["run_id"],
                         row["reload_operation_id"],
+                        resuming_generation_id,
                     ),
                 )
             return tuple(dict(row) for row in rows)

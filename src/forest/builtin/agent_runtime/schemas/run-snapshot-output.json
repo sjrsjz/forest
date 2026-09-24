@@ -107,7 +107,8 @@
     "current": {
       "type": "object",
       "required": [
-        "model_request_id", "tool_call_id", "reload_operation_id", "reload_resume_phase"
+        "model_request_id", "tool_call_id", "reload_operation_id", "reload_resume_phase",
+        "reload_generation_id"
       ],
       "properties": {
         "model_request_id": {"$ref": "#/$defs/nullable_string"},
@@ -116,7 +117,8 @@
         "reload_resume_phase": {
           "type": ["string", "null"],
           "enum": [null, "PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"]
-        }
+        },
+        "reload_generation_id": {"$ref": "#/$defs/nullable_string"}
       },
       "additionalProperties": false
     },

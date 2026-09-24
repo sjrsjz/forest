@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object",
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "agent.runtime"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "input": {"$ref": "#/$defs/input"},
+    "prior": {"type": "object"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "input": {
+      "type": "object",
+      "required": ["owner", "reload_operation_id", "resume_phase", "parked_generation_id"],
+      "properties": {
+        "owner": {
+          "type": "object",
+          "required": ["run_id", "owner_id", "epoch"],
+          "properties": {
+            "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "epoch": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "reload_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "resume_phase": {"enum": ["PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"]},
+        "parked_generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    }
+  }
+}

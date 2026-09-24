@@ -16,7 +16,7 @@ config_schema = "schemas/config.json"
 max_frame_bytes = 262144
 max_inflight = 16
 max_queue_items = 64
-max_state_inflight = 1
+max_state_inflight = 16
 max_owned_tasks = 16
 max_owned_resources = 4
 
@@ -32,6 +32,7 @@ requests = [
   "uow.execute:agent.start-run",
   "uow.execute:agent.append-run-input",
   "uow.execute:agent.park-reload",
+  "uow.execute:agent.resume-reload",
   "uow.execute:agent.acquire-run-lease",
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease"
@@ -55,7 +56,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "7e87da2d0fbb5ae12d69c476406f6425fd60023318985706a97b05893289b530"
+baseline_sha256 = "cae8737ef0e630f46a06a1bb040f02077b1c11dd927c2a2d171f11ea50b7bf71"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -114,6 +115,13 @@ input_schema = "schemas/acquire-run-envelope.json"
 output_schema = "schemas/run-owner-output.json"
 
 [[components.unit_of_work_participants]]
+name = "agent.resume-reload-record"
+contract = "1.0"
+function = "agent_resume_reload"
+input_schema = "schemas/reload-resume-envelope.json"
+output_schema = "schemas/reload-resume-output.json"
+
+[[components.unit_of_work_participants]]
 name = "agent.renew-run-record"
 contract = "1.0"
 function = "agent_renew_run"
@@ -168,6 +176,16 @@ steps = [
 ]
 
 [[components.unit_of_work_plans]]
+name = "agent.resume-reload"
+contract = "1.0"
+input_schema = "schemas/reload-resume-input.json"
+output_schema = "schemas/reload-resume-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.resume-reload-record" }
+]
+
+[[components.unit_of_work_plans]]
 name = "agent.renew-run-lease"
 contract = "1.0"
 input_schema = "schemas/renew-run-input.json"
@@ -186,3 +204,19 @@ timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.release-run-record" }
 ]
+
+[[components.owned_work_handlers]]
+name = "agent.reload-resume.pending"
+contract = "1.0"
+handler = "agent.reload-resume"
+claim_function = "agent_claim_reload_resume"
+settle_function = "agent_settle_reload_resume"
+input_schema = "schemas/reload-resume-input.json"
+output_schema = "schemas/reload-resume-output.json"
+max_concurrency = 4
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 15
+settle_timeout_s = 5
+lease_seconds = 45
+drain_policy = "inflight"

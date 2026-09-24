@@ -1,7 +1,7 @@
 from agent_protocol import protocol_descriptor
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 class AgentRuntime(Plugin):
@@ -35,3 +35,11 @@ class AgentRuntime(Plugin):
     )
     async def query_run(self, payload, ctx):
         return await ctx.queries.call("agent.run-snapshot", payload)
+
+    @job("agent.reload-resume")
+    async def resume_reload(self, task, ctx):
+        return await ctx.uow.call(
+            "agent.resume-reload",
+            task["payload"],
+            operation_id=ctx.operations.stable("resume-reload:v1"),
+        )

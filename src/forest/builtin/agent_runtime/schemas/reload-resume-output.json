@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "run_id", "reload_operation_id", "resumed_phase",
+    "parked_generation_id", "resuming_generation_id"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "reload_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "resumed_phase": {"enum": ["PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"]},
+    "parked_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "resuming_generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+  },
+  "additionalProperties": false
+}

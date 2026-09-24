@@ -826,6 +826,7 @@ async def test_reload_wait_is_bound_to_one_lifecycle_operation_and_resume_phase(
         state=state,
         reload_operation_id="replacement/one",
         reload_resume_phase="PREPARING_MODEL",
+        reload_generation_id="generation/agent-runtime/old",
     )
     assert checkpoint["phase"] == "RELOAD_WAIT"
     parked = await agent.load("run/one")
@@ -833,9 +834,19 @@ async def test_reload_wait_is_bound_to_one_lifecycle_operation_and_resume_phase(
     assert parked["reload_resume_phase"] == "PREPARING_MODEL"
     await agent.release_run(owner)
 
-    assert await agent.resume_reload_wait("replacement/wrong") == ()
+    assert await agent.resume_reload_wait(
+        "replacement/one",
+        resuming_generation_id="generation/agent-runtime/old",
+    ) == ()
+    assert await agent.resume_reload_wait(
+        "replacement/wrong",
+        resuming_generation_id="generation/agent-runtime/new",
+    ) == ()
     assert (await agent.load("run/one"))["state"] == "RELOAD_WAIT"
-    exact = await agent.resume_reload_wait("replacement/one")
+    exact = await agent.resume_reload_wait(
+        "replacement/one",
+        resuming_generation_id="generation/agent-runtime/new",
+    )
     assert [(item["run_id"], item["conversation_ref"]) for item in exact] == [
         ("run/one", "group/one")
     ]
@@ -843,7 +854,11 @@ async def test_reload_wait_is_bound_to_one_lifecycle_operation_and_resume_phase(
     assert resumed["state"] == "PREPARING_MODEL"
     assert resumed["reload_operation_id"] is None
     assert resumed["reload_resume_phase"] is None
-    assert await agent.resume_reload_wait("replacement/one") == ()
+    assert resumed["reload_generation_id"] is None
+    assert await agent.resume_reload_wait(
+        "replacement/one",
+        resuming_generation_id="generation/agent-runtime/new",
+    ) == ()
 
     recovery_owner = await agent.acquire_run("run/one", "worker/recovery")
     recovery_state = await _payload(
@@ -861,9 +876,12 @@ async def test_reload_wait_is_bound_to_one_lifecycle_operation_and_resume_phase(
         state=recovery_state,
         reload_operation_id="replacement/abandoned",
         reload_resume_phase="PREPARING_MODEL",
+        reload_generation_id="generation/agent-runtime/abandoned",
     )
     await agent.release_run(recovery_owner)
-    recovered = await agent.recover_reload_waits()
+    recovered = await agent.recover_reload_waits(
+        resuming_generation_id="generation/agent-runtime/recovered"
+    )
     assert [item["reload_operation_id"] for item in recovered] == [
         "replacement/abandoned"
     ]

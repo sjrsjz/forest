@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -323,6 +324,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "tool_call_id": None,
             "reload_operation_id": "runtime-reload/agent-package/1",
             "reload_resume_phase": "PREPARING_MODEL",
+            "reload_generation_id": generation_id,
         }
 
         release_envelope = {
@@ -363,5 +365,54 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     timeout_seconds=10,
                 )
         assert stale.value.code == "STALE_AGENT_RUN_OWNER"
+
+        candidate = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+        await candidate.prewarm()
+        await registry.drain_owned_work_for_replacement(candidate.activation_id)
+        await candidate.start()
+        replacement = candidate.get("agent.runtime")
+        replacement_generation = replacement.generation_identity.generation_id
+        assert replacement_generation != generation_id
+        assert await registry.close() == []
+        registry = candidate
+
+        replacement_endpoint = replacement.runtime_service_handlers()[
+            ("agent.run.query", 1)
+        ]
+        replacement_route = FrozenServiceRoute(
+            service_id="agent.run.query",
+            version=1,
+            caller_component_id="kernel.management",
+            provider_component_id="agent.runtime",
+            provider_generation_id=replacement_generation,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="CONTROL",
+            owned_work=False,
+        )
+        for poll in range(200):
+            resumed = await replacement_endpoint.invoke_routed(
+                replacement_route,
+                RuntimeServiceInvocation(
+                    f"agent-run-query/package/replacement/{poll}",
+                    10,
+                    "test.agent-runtime-package",
+                    "run/agent-package/1",
+                ),
+                ({"run_id": "run/agent-package/1"},),
+                {},
+            )
+            if resumed["state"] == "PREPARING_MODEL" and resumed["owner"] is None:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("replacement Agent Generation did not resume parked Run")
+        assert resumed["current"] == {
+            "model_request_id": None,
+            "tool_call_id": None,
+            "reload_operation_id": None,
+            "reload_resume_phase": None,
+            "reload_generation_id": None,
+        }
     finally:
         assert await registry.close() == []

@@ -517,10 +517,20 @@ class CleanAgentRuntime:
         return await self._call("checkpoint", owner=owner, owned_work=True, **values)
 
     async def transition(self, owner, **values):
+        if values.get("target_phase") == "RELOAD_WAIT" and "reload_generation_id" not in values:
+            if self.generation_identity is None:
+                raise ForestError(
+                    "RUNTIME_GENERATION_IDENTITY_UNAVAILABLE",
+                    "Agent Generation identity is unavailable",
+                    503,
+                )
+            values["reload_generation_id"] = self.generation_identity.generation_id
         return await self._call("transition", owner=owner, owned_work=True, **values)
 
     async def transition_in(self, conn, owner, **values):
         await self._verify_member_in(conn)
+        if values.get("target_phase") == "RELOAD_WAIT" and "reload_generation_id" not in values:
+            values["reload_generation_id"] = self.generation_identity.generation_id
         return await self.repository.transition(owner, _connection=conn, **values)
 
     async def request_cancel(self, **values):
@@ -550,15 +560,32 @@ class CleanAgentRuntime:
         )
 
     async def resume_reload_wait(self, operation_id: str):
+        if self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_IDENTITY_UNAVAILABLE",
+                "Agent Generation identity is unavailable",
+                503,
+            )
         resumed = await self._call(
             "resume_reload_wait",
             operation_id=operation_id,
+            resuming_generation_id=self.generation_identity.generation_id,
             owned_work=True,
         )
         return resumed
 
     async def recover_reload_waits(self):
-        return await self._call("recover_reload_waits", owned_work=True)
+        if self.generation_identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_IDENTITY_UNAVAILABLE",
+                "Agent Generation identity is unavailable",
+                503,
+            )
+        return await self._call(
+            "recover_reload_waits",
+            resuming_generation_id=self.generation_identity.generation_id,
+            owned_work=True,
+        )
 
     async def close_session(self, **values):
         return await self._call("close_session", owned_work=True, **values)

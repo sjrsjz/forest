@@ -41,6 +41,11 @@ class _NoServiceLedger:
     pass
 
 
+class _NoOwnedWorkAuthority:
+    async def invoke_owned_work(self, *_args, **_kwargs):
+        return None
+
+
 async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_path):
     source = Path(__file__).parents[1] / "src/forest/builtin/agent_runtime"
     snapshot = PackageCatalog(tmp_path / "catalog").build(source)
@@ -59,6 +64,7 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
         generation_member_verifier=verify_generation,
         state_queries=None,
         state_commands=None,
+        owned_work_authority=_NoOwnedWorkAuthority(),
         service_operation_ledger=_NoServiceLedger(),
     )
     context = PreparedGenerationContext(

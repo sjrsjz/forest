@@ -84,6 +84,9 @@ CREATE TABLE agent_runs (
         reload_resume_phase IS NULL
         OR reload_resume_phase IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL')
     ),
+    reload_generation_id text CHECK (
+        reload_generation_id IS NULL OR octet_length(reload_generation_id) BETWEEN 1 AND 256
+    ),
     final_candidate_payload_id text,
     final_candidate_payload_digest text CHECK (
         final_candidate_payload_digest IS NULL
@@ -106,6 +109,7 @@ CREATE TABLE agent_runs (
     CHECK (
         (state='RELOAD_WAIT') = (reload_operation_id IS NOT NULL)
         AND (reload_operation_id IS NULL) = (reload_resume_phase IS NULL)
+        AND (reload_operation_id IS NULL) = (reload_generation_id IS NULL)
     ),
     CHECK (
         (state IN ('COMPLETED','FAILED','CANCELLED') AND terminal_at IS NOT NULL)
@@ -568,6 +572,16 @@ CREATE TRIGGER model_turns_immutable BEFORE UPDATE OR DELETE ON model_turns
 CREATE TRIGGER tool_observations_immutable BEFORE UPDATE OR DELETE ON tool_observations
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
 
+CREATE TABLE agent_reload_resume_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TRIGGER agent_reload_resume_settlements_immutable
+    BEFORE UPDATE OR DELETE ON agent_reload_resume_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
+
 CREATE FUNCTION guard_model_request() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
@@ -805,7 +819,8 @@ BEGIN
                 'model_request_id',run_row.current_model_request_id,
                 'tool_call_id',run_row.current_tool_call_id,
                 'reload_operation_id',run_row.reload_operation_id,
-                'reload_resume_phase',run_row.reload_resume_phase
+                'reload_resume_phase',run_row.reload_resume_phase,
+                'reload_generation_id',run_row.reload_generation_id
             ),
             'final_candidate',final_value,'error_code',run_row.error_code,
             'session',jsonb_build_object(
@@ -1357,7 +1372,8 @@ BEGIN
            OR run_row.owner_expires_at<=run_row.database_now
            OR existing.run_id IS DISTINCT FROM requested_run
            OR existing.input_digest IS DISTINCT FROM requested_digest
-           OR existing.phase IS DISTINCT FROM 'RELOAD_WAIT' THEN
+           OR existing.phase IS DISTINCT FROM 'RELOAD_WAIT'
+           OR run_row.reload_generation_id IS DISTINCT FROM context->>'generation_id' THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -1413,10 +1429,240 @@ BEGIN
     UPDATE __forest_module_schema__.agent_runs
     SET state='RELOAD_WAIT',checkpoint_seq=next_sequence,
         reload_operation_id=requested_reload,reload_resume_phase=requested_resume,
+        reload_generation_id=context->>'generation_id',
         updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND run_id=requested_run;
     RETURN __forest_module_schema__.agent_run_snapshot(
         context,jsonb_build_object('run_id',requested_run)
     );
+END;
+$$;
+
+CREATE FUNCTION agent_resume_reload(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_reload text := body->>'reload_operation_id';
+    requested_resume text := body->>'resume_phase';
+    parked_generation text := body->>'parked_generation_id';
+    resuming_generation text := context->>'generation_id';
+    run_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR requested_resume NOT IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL')
+       OR resuming_generation IS NULL
+       OR resuming_generation IS NOT DISTINCT FROM parked_generation THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_GENERATION_INVALID',
+                'message','Only a replacement Agent Generation may resume parked work',
+                'status',409
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    IF run_row.state IS DISTINCT FROM 'RELOAD_WAIT'
+       OR run_row.reload_operation_id IS DISTINCT FROM requested_reload
+       OR run_row.reload_resume_phase IS DISTINCT FROM requested_resume
+       OR run_row.reload_generation_id IS DISTINCT FROM parked_generation THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_CLAIM_CONFLICT',
+                'message','Parked Agent Run identity differs from the claimed work',
+                'status',409
+            )
+        );
+    END IF;
+    UPDATE __forest_module_schema__.agent_runs
+    SET state=requested_resume,reload_operation_id=NULL,reload_resume_phase=NULL,
+        reload_generation_id=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'run_id',requested_run,'reload_operation_id',requested_reload,
+            'resumed_phase',requested_resume,'parked_generation_id',parked_generation,
+            'resuming_generation_id',resuming_generation
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_claim_reload_resume(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_generation text := context->>'generation_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    run_row record;
+    next_epoch bigint;
+    identity_digest text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_generation IS NULL
+       OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 3600 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_CLAIM_INPUT_INVALID',
+                'message','Agent reload claim is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND state='RELOAD_WAIT'
+      AND reload_generation_id IS DISTINCT FROM requested_generation
+      AND owner_id=requested_token AND owner_expires_at>clock_timestamp()
+    FOR UPDATE;
+    IF run_row IS NULL THEN
+        SELECT candidate.* INTO run_row
+        FROM __forest_module_schema__.agent_runs candidate
+        WHERE candidate.bot_id=requested_bot AND candidate.state='RELOAD_WAIT'
+          AND candidate.reload_generation_id IS DISTINCT FROM requested_generation
+          AND (candidate.owner_id IS NULL OR candidate.owner_expires_at<=clock_timestamp())
+        ORDER BY candidate.updated_at,candidate.run_id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1;
+        IF run_row IS NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',true,'value',NULL
+            );
+        END IF;
+        next_epoch := run_row.owner_epoch+1;
+        UPDATE __forest_module_schema__.agent_runs
+        SET owner_id=requested_token,owner_epoch=next_epoch,
+            owner_expires_at=clock_timestamp()+(requested_lease*interval '1 second'),
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND run_id=run_row.run_id
+        RETURNING * INTO run_row;
+    END IF;
+    identity_digest := encode(sha256(convert_to(jsonb_build_array(
+        requested_bot,run_row.run_id,run_row.owner_epoch,run_row.reload_operation_id
+    )::text,'UTF8')),'hex');
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',run_row.run_id,
+            'claim_token',requested_token,
+            'attempt',run_row.owner_epoch,
+            'operation_id','agent-reload-resume:' || identity_digest,
+            'causal_root_kind','agent.reload-resume',
+            'causal_root_id',run_row.run_id,
+            'payload',jsonb_build_object(
+                'owner',jsonb_build_object(
+                    'run_id',run_row.run_id,'owner_id',requested_token,
+                    'epoch',run_row.owner_epoch
+                ),
+                'reload_operation_id',run_row.reload_operation_id,
+                'resume_phase',run_row.reload_resume_phase,
+                'parked_generation_id',run_row.reload_generation_id
+            )
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_settle_reload_resume(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_work text := input->>'work_id';
+    requested_token text := input->>'claim_token';
+    requested_attempt bigint := (input->>'attempt')::bigint;
+    existing record;
+    run_row record;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_work IS NULL OR requested_token IS NULL
+       OR requested_attempt IS NULL OR requested_attempt<1
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_SETTLEMENT_INPUT_INVALID',
+                'message','Agent reload settlement is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT * INTO existing
+    FROM __forest_module_schema__.agent_reload_resume_settlements
+    WHERE claim_token=requested_token;
+    IF existing IS NOT NULL THEN
+        IF existing.input_payload=input THEN
+            RETURN existing.result_payload;
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RELOAD_SETTLEMENT_CONFLICT',
+                'message','Agent reload claim was settled with another outcome','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_work FOR UPDATE;
+    IF run_row IS NULL
+       OR run_row.owner_id IS DISTINCT FROM requested_token
+       OR run_row.owner_epoch IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    UPDATE __forest_module_schema__.agent_runs
+    SET owner_id=NULL,owner_expires_at=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_work;
+    result_value := jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-settled/1','work_id',requested_work
+        )
+    );
+    INSERT INTO __forest_module_schema__.agent_reload_resume_settlements(
+        claim_token,input_payload,result_payload
+    ) VALUES (requested_token,input,result_value);
+    RETURN result_value;
 END;
 $$;
