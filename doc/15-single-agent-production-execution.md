@@ -51,6 +51,8 @@ Agent 的恢复读取和模型写入都属于 `agent.runtime` 包内端口，不
 
 解析成功只能提交 `agent.record-model-turn/1`。它接收包内解析器生成的规范块和受管 PayloadRef，在单个 Agent 事务中复核 `PARSING` 头、repair 来源、块顺序及 FunctionCall 的 trigger authority；随后一次性写入 ModelTurn，并在存在 FunctionCall 时同时写入 ToolCall 与真实 principal。Run 只能据此进入 `PREPARING_MODEL`、`WAIT_TOOL` 或 `SAFE_BOUNDARY`。宿主不能先保存“差不多合法”的回复，再补写工具或修改终止语义。
 
+ToolCall 固定目标 component、Generation、service、契约摘要、完整 binding 摘要、审批要求和查询能力。授权等待、Effect handoff 与结果收敛只能提交 `agent.observe-tool-result/1`；成功结果的 Payload owner 必须等于冻结目标组件，`UNKNOWN` 只有声明 `supports_query=true` 的 binding 才能通过 `RECONCILIATION` 收敛。终态 observation 在同一事务内清除当前 ToolCall 并让 Run 回到 `PREPARING_MODEL`，宿主和工具模块都不能直接改 Agent 表。
+
 工具目录由各执行模块通过 `RuntimeModuleDescriptor.agent_tools` 贡献，不写死在 Agent 工厂或 Bot 组合根。贡献冻结工具名、模型声明、服务 ID/版本、审批要求和查询能力，并作为模块 descriptor digest 的一部分进入 RuntimeGraph；同一图中的工具名与服务键都必须唯一。`agent.runtime` 只能通过受限 factory context 枚举贡献并请求对应服务句柄，随后把贡献者的准确 component/Generation、service 和 contract digest 冻结为 `AgentToolBinding`。Contract Router sealing 必须确认该服务确实由声明贡献的模块提供；所有权不符时整张候选图拒绝发布。工具结果仍由执行模块拥有，Agent 只持有 PayloadRef，并统一经 Authorization 与 Effect Gateway 完成 handoff 和恢复。
 
 ## 3. 单 Agent 执行循环

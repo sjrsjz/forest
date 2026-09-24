@@ -643,14 +643,22 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             kernel,
             owner_kind="model.turn",
             owner_id="model-turn/package/repair",
-            value=b'{"protocol_version":1,"blocks":[{"block_type":"Assistant","text":"done"}]}',
+            value=b'{"protocol_version":1,"blocks":[{"block_type":"FunctionCall","name":"lookup"}]}',
         )
-        assistant_payload = await _payload(
+        tool_arguments = await _payload(
             kernel,
-            owner_kind="assistant.candidate",
-            owner_id="model-turn/package/repair",
-            value=b'{"text":"done"}',
+            owner_kind="tool.arguments",
+            owner_id="tool-call/package/repair",
+            value=b'{"authority_trigger_id":"trigger/model-port","arguments":{"q":"A"}}',
         )
+        function_block = {
+            "block_type": "FunctionCall",
+            "name": "lookup",
+            "arguments": {
+                "authority_trigger_id": "trigger/model-port",
+                "arguments": {"q": "A"},
+            },
+        }
         turn_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -660,15 +668,26 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "request_id": "model-request/package/repair",
                 "turn": {
                     "protocol_version": 1,
-                    "blocks": [{"block_type": "Assistant", "text": "done"}],
+                    "blocks": [function_block],
                     "raw_candidate_digest": digest_json({"candidate": "valid"}),
                     "truncated_after_function_call": False,
                 },
                 "artifacts": [
                     {"role": "TURN", "payload": turn_payload.canonical()},
-                    {"role": "ASSISTANT", "payload": assistant_payload.canonical()},
+                    {"role": "TOOL_ARGUMENTS", "payload": tool_arguments.canonical()},
                 ],
-                "tool": None,
+                "tool": {
+                    "tool_call_id": "tool-call/package/repair",
+                    "component_id": "tool.echo",
+                    "generation_id": "generation/tool/package-test",
+                    "service_id": "tool.echo.execute",
+                    "tool_contract_digest": digest_json({"contract": "tool.echo/1"}),
+                    "tool_binding_digest": digest_json({"binding": "tool.echo/1"}),
+                    "approval_required": True,
+                    "supports_query": True,
+                    "authority_trigger_ref": "trigger/model-port",
+                    "effect_operation_ref": "tool-effect/package/repair",
+                },
                 "repair_of_request_id": "model-request/package/1",
             },
             "prior": {},
@@ -688,19 +707,89 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "turn_id": "model-turn/package/repair",
             "request_id": "model-request/package/repair",
             "step_seq": 2,
-            "terminal": True,
+            "terminal": False,
             "thinking_only": False,
             "truncated_after_function_call": False,
-            "next_state": "SAFE_BOUNDARY",
-            "tool_call_id": None,
+            "next_state": "WAIT_TOOL",
+            "tool_call_id": "tool-call/package/repair",
         }
         repaired_recovery = await instance.invoke_management_query(
             recovery_declaration,
             {"run_id": "run/agent-package/model-port"},
             timeout_seconds=10,
         )
-        assert repaired_recovery["state"] == "SAFE_BOUNDARY"
+        assert repaired_recovery["state"] == "WAIT_TOOL"
         assert repaired_recovery["latest_turn"]["turn_id"] == "model-turn/package/repair"
+        assert repaired_recovery["tool_call"]["tool_generation_id"] == (
+            "generation/tool/package-test"
+        )
+        wait_tool_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "observation_operation_id": "tool-observation/package/wait",
+                "tool_call_id": "tool-call/package/repair",
+                "observed_state": "WAIT_APPROVAL",
+                "evidence_kind": "AUTHORIZATION",
+                "effect_observation_ref": None,
+                "approval_ref": "approval/package/repair",
+                "error_code": None,
+                "results": [],
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            waiting_tool = await participant.invoke_in(
+                conn, "agent.observe-tool-result-record", wait_tool_envelope,
+                operation_id="agent-tool-observation/package/wait",
+                causal_root_kind="agent.execute", causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/tool-wait", timeout_seconds=10,
+            )
+        assert waiting_tool["accepted"] is True
+        dispatch_tool_envelope = {
+            **wait_tool_envelope,
+            "input": {
+                **wait_tool_envelope["input"],
+                "observation_operation_id": "tool-observation/package/dispatch",
+                "observed_state": "DISPATCHING",
+                "effect_observation_ref": "tool-handoff/package/repair",
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.observe-tool-result-record", dispatch_tool_envelope,
+                operation_id="agent-tool-observation/package/dispatch",
+                causal_root_kind="agent.execute", causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/tool-dispatch", timeout_seconds=10,
+            )
+        tool_result = await _payload(
+            kernel, owner_component_id="tool.echo", owner_kind="tool.result",
+            owner_id="tool-call/package/repair", value=b'{"value":"A"}',
+        )
+        settle_tool_envelope = {
+            **wait_tool_envelope,
+            "input": {
+                **wait_tool_envelope["input"],
+                "observation_operation_id": "tool-observation/package/success",
+                "observed_state": "SUCCEEDED", "evidence_kind": "EXECUTOR",
+                "effect_observation_ref": "tool-result/package/repair",
+                "error_code": None, "results": [tool_result.canonical()],
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            settled_tool = await participant.invoke_in(
+                conn, "agent.observe-tool-result-record", settle_tool_envelope,
+                operation_id="agent-tool-observation/package/success",
+                causal_root_kind="agent.execute", causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/tool-success", timeout_seconds=10,
+            )
+        assert settled_tool["resulting_state"] == "SUCCEEDED"
+        tool_recovery = await instance.invoke_management_query(
+            recovery_declaration, {"run_id": "run/agent-package/model-port"}, timeout_seconds=10
+        )
+        assert tool_recovery["state"] == "PREPARING_MODEL"
+        assert tool_recovery["tool_call"] is None
 
         acquire_envelope = {
             "protocol": "forest.uow-step/1",

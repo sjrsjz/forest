@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$ref": "#/$defs/input",
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "owner": {"type": "object", "required": ["run_id", "owner_id", "epoch"], "properties": {"run_id": {"$ref": "#/$defs/id"}, "owner_id": {"$ref": "#/$defs/id"}, "epoch": {"type": "integer", "minimum": 1}}, "additionalProperties": false},
+    "result": {"type": "object", "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"], "properties": {"payload_id": {"$ref": "#/$defs/id"}, "digest": {"$ref": "#/$defs/digest"}, "owner_component_id": {"$ref": "#/$defs/id"}, "owner_kind": {"const": "tool.result"}, "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}}, "additionalProperties": false},
+    "input": {
+      "type": "object", "required": ["owner", "observation_operation_id", "tool_call_id", "observed_state", "evidence_kind", "effect_observation_ref", "approval_ref", "error_code", "results"],
+      "properties": {
+        "owner": {"$ref": "#/$defs/owner"}, "observation_operation_id": {"$ref": "#/$defs/id"}, "tool_call_id": {"$ref": "#/$defs/id"},
+        "observed_state": {"enum": ["WAIT_APPROVAL", "DISPATCHING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]},
+        "evidence_kind": {"enum": ["EXECUTOR", "RECONCILIATION", "AUTHORIZATION"]},
+        "effect_observation_ref": {"type": ["string", "null"], "minLength": 1, "maxLength": 256},
+        "approval_ref": {"type": ["string", "null"], "minLength": 1, "maxLength": 256},
+        "error_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+        "results": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/result"}}
+      }, "additionalProperties": false
+    }
+  }
+}

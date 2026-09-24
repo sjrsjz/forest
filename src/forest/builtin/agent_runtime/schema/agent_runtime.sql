@@ -2262,6 +2262,111 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_observe_tool_result(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input'; owner_value jsonb := body->'owner';
+    result_value jsonb := body#>'{results,0}'; requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id'; requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_operation text := body->>'observation_operation_id'; requested_tool text := body->>'tool_call_id';
+    observed_value text := body->>'observed_state'; evidence_value text := body->>'evidence_kind';
+    effect_value text := body->>'effect_observation_ref'; approval_value text := body->>'approval_ref';
+    error_value text := body->>'error_code'; digest_value text; run_row record; tool_row record; replay record;
+    previous_value text; resulting_value text; accepted_value boolean := false;
+    conflict_value text := NULL; run_state_value text; terminal_value boolean;
+BEGIN
+    IF jsonb_array_length(body->'results')=0 THEN result_value := NULL; END IF;
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR (observed_value='WAIT_APPROVAL' AND approval_value IS NULL)
+       OR (observed_value IN ('DISPATCHING','SUCCEEDED','FAILED','CANCELLED','UNKNOWN') AND effect_value IS NULL)
+       OR (observed_value='SUCCEEDED' AND (result_value IS NULL OR error_value IS NOT NULL))
+       OR (observed_value IN ('FAILED','CANCELLED') AND error_value IS NULL)
+       OR (observed_value NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND (result_value IS NOT NULL OR error_value IS NOT NULL))
+       OR (result_value IS NOT NULL AND (result_value->>'owner_kind' IS DISTINCT FROM 'tool.result'
+            OR result_value->>'owner_id' IS DISTINCT FROM requested_tool)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_OBSERVATION_INPUT_INVALID','message','Tool observation envelope is invalid','status',422));
+    END IF;
+    digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'tool_call_id',requested_tool,'observed_state',observed_value,'evidence_kind',evidence_value,
+        'effect_observation_ref',effect_value,'approval_ref',approval_value,'result',result_value,
+        'error_code',error_value)::text,'UTF8')),'hex');
+    SELECT *,clock_timestamp() AS database_now INTO run_row FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('forest.agent.runtime/tool-observation/' || requested_bot || '/' || requested_operation,0));
+    SELECT * INTO replay FROM __forest_module_schema__.tool_observations
+    WHERE bot_id=requested_bot AND observation_operation_id=requested_operation;
+    IF FOUND THEN
+        IF replay.input_digest IS DISTINCT FROM digest_value THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+                'code','TOOL_OBSERVATION_CONFLICT','message','Tool observation input differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+            'observation_operation_id',replay.observation_operation_id,'tool_call_id',replay.tool_call_id,
+            'observed_state',replay.observed_state,'evidence_kind',replay.evidence_kind,
+            'accepted',replay.accepted,'previous_state',replay.previous_state,
+            'resulting_state',replay.resulting_state,'conflict_code',replay.conflict_code));
+    END IF;
+    IF observed_value='DISPATCHING' AND EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests
+        WHERE bot_id=requested_bot AND run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_CANCEL_REQUESTED','message','Agent cancellation won the tool handoff race','status',409));
+    END IF;
+    SELECT * INTO tool_row FROM __forest_module_schema__.tool_calls
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
+    IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_NOT_FOUND','message','Tool call does not exist','status',404));
+    END IF;
+    IF run_row.current_tool_call_id IS DISTINCT FROM requested_tool THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_STALE','message','Tool call is no longer current','status',409));
+    END IF;
+    IF result_value IS NOT NULL AND result_value->>'owner_component_id' IS DISTINCT FROM tool_row.tool_component_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','TOOL_RESULT_IDENTITY_CONFLICT','message','Tool result owner differs from frozen binding','status',409));
+    END IF;
+    previous_value := tool_row.state;
+    IF (previous_value='PROPOSED' AND observed_value IN ('WAIT_APPROVAL','DISPATCHING','FAILED','CANCELLED'))
+       OR (previous_value='WAIT_APPROVAL' AND observed_value IN ('DISPATCHING','FAILED','CANCELLED'))
+       OR (previous_value='DISPATCHING' AND observed_value IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
+       OR (previous_value='UNKNOWN' AND tool_row.supports_query AND evidence_value='RECONCILIATION'
+           AND observed_value IN ('SUCCEEDED','FAILED','CANCELLED')) THEN accepted_value := true;
+    ELSE conflict_value := 'TOOL_RESULT_ALREADY_SETTLED'; END IF;
+    resulting_value := CASE WHEN accepted_value THEN observed_value ELSE previous_value END;
+    INSERT INTO __forest_module_schema__.tool_observations(bot_id,observation_operation_id,tool_call_id,
+        input_digest,observed_state,evidence_kind,effect_observation_ref,approval_ref,result_payload_id,
+        result_payload_digest,error_code,accepted,previous_state,resulting_state,conflict_code)
+    VALUES(requested_bot,requested_operation,requested_tool,digest_value,observed_value,evidence_value,
+        effect_value,approval_value,result_value->>'payload_id',result_value->>'digest',error_value,
+        accepted_value,previous_value,resulting_value,conflict_value);
+    IF accepted_value THEN
+        UPDATE __forest_module_schema__.tool_calls SET state=observed_value,
+            approval_ref=COALESCE(approval_value,approval_ref),result_payload_id=result_value->>'payload_id',
+            result_payload_digest=result_value->>'digest',error_code=error_value,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND tool_call_id=requested_tool;
+        run_state_value := CASE observed_value WHEN 'WAIT_APPROVAL' THEN 'WAIT_APPROVAL'
+            WHEN 'DISPATCHING' THEN 'WAIT_TOOL' WHEN 'UNKNOWN' THEN 'BLOCKED_UNKNOWN'
+            ELSE 'PREPARING_MODEL' END;
+        terminal_value := observed_value IN ('SUCCEEDED','FAILED','CANCELLED');
+        UPDATE __forest_module_schema__.agent_runs SET state=run_state_value,
+            current_tool_call_id=CASE WHEN terminal_value THEN NULL ELSE requested_tool END,
+            updated_at=clock_timestamp() WHERE bot_id=requested_bot AND run_id=requested_run;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'observation_operation_id',requested_operation,'tool_call_id',requested_tool,
+        'observed_state',observed_value,'evidence_kind',evidence_value,'accepted',accepted_value,
+        'previous_state',previous_value,'resulting_state',resulting_value,'conflict_code',conflict_value));
+END;
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

@@ -42,7 +42,8 @@ requests = [
   "uow.execute:agent.mark-model-handoff",
   "uow.execute:agent.observe-model-result",
   "uow.execute:agent.record-protocol-failure",
-  "uow.execute:agent.record-model-turn"
+  "uow.execute:agent.record-model-turn",
+  "uow.execute:agent.observe-tool-result"
 ]
 
 [[components.provides]]
@@ -63,7 +64,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "938087eaa82e59bcdfc719369800f4f5899c5c6ed19f4799ed97b6c545d9783c"
+baseline_sha256 = "31480468606724a56b00655e0a30bf0af6eca46d37eb73a94d579a8113667488"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -254,6 +255,19 @@ owner_component = "agent.runtime"
 owner_kind_path = "/input/artifacts/*/payload/owner_kind"
 owner_id_path = "/input/artifacts/*/payload/owner_id"
 
+[[components.unit_of_work_participants]]
+name = "agent.observe-tool-result-record"
+contract = "1.0"
+function = "agent_observe_tool_result"
+input_schema = "schemas/observe-tool-result-envelope.json"
+output_schema = "schemas/tool-observation-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/results/*"
+owner_component_path = "/input/results/*/owner_component_id"
+owner_kind = "tool.result"
+owner_id_path = "/input/results/*/owner_id"
+
 [[components.unit_of_work_plans]]
 name = "agent.start-run"
 contract = "1.0"
@@ -382,6 +396,16 @@ output_schema = "schemas/model-turn-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.record-model-turn-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.observe-tool-result"
+contract = "1.0"
+input_schema = "schemas/observe-tool-result-input.json"
+output_schema = "schemas/tool-observation-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.observe-tool-result-record" }
 ]
 
 [[components.owned_work_handlers]]
