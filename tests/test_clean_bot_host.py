@@ -15,7 +15,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
-from forest.agent_protocol import CORE_PROMPT_SHA256
+from forest.builtin.agent_runtime.python.agent_protocol import CORE_PROMPT_SHA256
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.clean_management_app import create_clean_management_app
 from forest.embeddings import EmbeddingResult, EmbeddingVector

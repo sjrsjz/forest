@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import pytest
 
-from forest.agent_protocol import ProtocolRepairView
+from forest.builtin.agent_runtime.python.agent_protocol import ProtocolRepairView
 from forest.errors import ForestError
 from forest.models import (
     ChatCompletionsClient,

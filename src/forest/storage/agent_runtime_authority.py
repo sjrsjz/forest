@@ -12,7 +12,7 @@ from typing import Awaitable, Callable
 
 from psycopg import sql
 
-from forest.agent_protocol import (
+from forest.builtin.agent_runtime.python.agent_protocol import (
     CORE_PROMPT_SHA256,
     PARSER_REVISION,
     PROTOCOL_ID,

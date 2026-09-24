@@ -1,0 +1,27 @@
+from agent_protocol import protocol_descriptor
+
+from forest.errors import ForestError
+from forest.sdk import Plugin, service
+
+
+class AgentRuntime(Plugin):
+    """Own the immutable single-Agent protocol inside an isolated Generation."""
+
+    async def prepare(self, ctx, config, restored_state=None):
+        await super().prepare(ctx, config, restored_state)
+        if config["protocol"] != "forest.agent.runtime/1":
+            raise ForestError(
+                "AGENT_CONFIGURATION_INVALID",
+                "Agent runtime protocol is unsupported",
+                422,
+            )
+
+    @service(
+        "agent.protocol.describe",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/protocol-describe-input.json",
+        output_schema="schemas/protocol-describe-output.json",
+    )
+    async def describe_protocol(self, payload, ctx):
+        return protocol_descriptor()

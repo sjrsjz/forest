@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from forest.agent_execution import DurableSingleAgentExecution
-from forest.agent_protocol import ProtocolRepairView
+from forest.builtin.agent_runtime.python.agent_protocol import ProtocolRepairView
 from forest.conversation_worker import AgentExecutionRequest
 
 

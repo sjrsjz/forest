@@ -15,7 +15,7 @@ from psycopg import sql
 
 from forest.agent_execution import DurableSingleAgentExecution
 from forest.agent_model_executor import AgentModelStep, DurableAgentModelExecutor
-from forest.agent_protocol import (
+from forest.builtin.agent_runtime.python.agent_protocol import (
     CORE_PROMPT,
     CORE_PROMPT_SHA256,
     PARSER_REVISION,
@@ -66,7 +66,7 @@ async def clean_agent_runtime():
         "agent.runtime",
         "forest.agent.runtime",
         "forest.agent-runtime.repository/1",
-        "storage/official/agent_runtime.sql",
+        "builtin/agent_runtime/schema/agent_runtime.sql",
     )
     for storage in (payload_storage, agent_storage):
         await installer.install(

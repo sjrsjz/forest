@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from forest.agent_protocol import (
+from forest.builtin.agent_runtime.python.agent_protocol import (
     CORE_PROMPT,
     CORE_PROMPT_SHA256,
     AssistantBlock,

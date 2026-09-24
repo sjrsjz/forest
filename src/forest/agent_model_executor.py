@@ -6,7 +6,11 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from forest.agent_protocol import ModelTurn, ProtocolRepairView, parse_model_turn
+from forest.builtin.agent_runtime.python.agent_protocol import (
+    ModelTurn,
+    ProtocolRepairView,
+    parse_model_turn,
+)
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.agent_runtime_authority import (

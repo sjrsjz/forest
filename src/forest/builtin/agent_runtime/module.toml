@@ -1,0 +1,43 @@
+manifest_version = 1
+package_id = "forest.agent-runtime"
+version = "2.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "agent_runtime:AgentRuntime"
+
+[[components]]
+id = "agent.runtime"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 64
+max_state_inflight = 1
+max_owned_tasks = 16
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 15
+drain_timeout_s = 960
+stop_timeout_s = 15
+
+[[components.provides]]
+name = "agent.protocol.describe"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/protocol-describe-input.json"
+output_schema = "schemas/protocol-describe-output.json"
+
+[components.storage]
+schema_id = "forest.agent.runtime"
+schema_version = "1.0.0"
+baseline = "schema/agent_runtime.sql"
+baseline_sha256 = "12fc330e2661210855dee39a532c00936b019c6e78a4332ec32727f45b67ccb2"
+scope = "bot"
+repository_contract = "forest.agent-runtime.repository/1"
+execution_profile = "official"

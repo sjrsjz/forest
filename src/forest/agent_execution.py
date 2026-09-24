@@ -14,8 +14,8 @@ from forest.agent_model_executor import (
     AgentToolBinding,
     DurableAgentModelExecutor,
 )
-from forest.agent_protocol import ProtocolRepairView
 from forest.agent_tool_executor import DurableAgentToolExecutor
+from forest.builtin.agent_runtime.python.agent_protocol import ProtocolRepairView
 from forest.conversation_worker import (
     AgentExecutionCompletion,
     AgentExecutionRequest,

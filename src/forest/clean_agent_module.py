@@ -226,7 +226,7 @@ async def bootstrap_clean_agent(
         "agent.runtime",
         "forest.agent.runtime",
         "forest.agent-runtime.repository/1",
-        "storage/official/agent_runtime.sql",
+        "builtin/agent_runtime/schema/agent_runtime.sql",
     )
     await installer.install(
         storage.spec,
