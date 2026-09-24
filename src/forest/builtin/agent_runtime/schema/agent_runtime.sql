@@ -997,3 +997,309 @@ BEGIN
     );
 END;
 $$;
+
+CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    batch jsonb := body->'input_batch';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_conversation text := body->>'conversation_ref';
+    requested_session text := body->>'session_id';
+    requested_run text := body->>'run_id';
+    deadline_value timestamptz;
+    now_value timestamptz;
+    existing record;
+    trigger_value jsonb;
+    trigger_index integer := 0;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR body#>>'{config,owner_component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body#>>'{config,owner_kind}' IS DISTINCT FROM 'module.configuration'
+       OR body#>>'{preset,owner_component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body#>>'{preset,owner_kind}' IS DISTINCT FROM 'preset.context' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUNTIME_INPUT_INVALID',
+                'message','Agent Run start envelope is invalid','status',422
+            )
+        );
+    END IF;
+    BEGIN
+        deadline_value := (body->>'absolute_deadline')::timestamptz;
+    EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUNTIME_INPUT_INVALID',
+                'message','Agent Run deadline is invalid','status',422
+            )
+        );
+    END;
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(batch->'triggers') item
+        WHERE (item->>'ingress_seq')::bigint>(batch->>'selected_input_end_seq')::bigint
+    ) OR (
+        SELECT count(*)<>count(DISTINCT item->>'trigger_ref')
+        FROM jsonb_array_elements(batch->'triggers') item
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUNTIME_INPUT_INVALID',
+                'message','Agent input trigger set is invalid','status',422
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/start/' || requested_bot || '/' || requested_operation,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot
+      AND (start_operation_id=requested_operation OR run_id=requested_run)
+    FOR UPDATE;
+    IF FOUND THEN
+        IF existing.start_operation_id IS DISTINCT FROM requested_operation
+           OR existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_START_OPERATION_CONFLICT',
+                    'message','Agent start input differs','status',409
+                )
+            );
+        END IF;
+        RETURN __forest_module_schema__.agent_run_snapshot(
+            context,jsonb_build_object('run_id',requested_run)
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/conversation/' || requested_bot || '/' || requested_conversation,0
+    ));
+    SELECT clock_timestamp() INTO now_value;
+    IF deadline_value<=now_value OR deadline_value>now_value+interval '24 hours' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUNTIME_INPUT_INVALID',
+                'message','Run deadline is outside its bound','status',422
+            )
+        );
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.agent_sessions
+        WHERE bot_id=requested_bot
+          AND (session_id=requested_session OR (conversation_ref=requested_conversation AND state='ACTIVE'))
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_SESSION_CONFLICT',
+                'message','Conversation already has an Agent Session','status',409
+            )
+        );
+    END IF;
+    INSERT INTO __forest_module_schema__.agent_sessions(
+        bot_id,session_id,conversation_ref,start_operation_id,input_digest,active_run_id
+    ) VALUES (
+        requested_bot,requested_session,requested_conversation,
+        requested_operation,requested_digest,requested_run
+    );
+    INSERT INTO __forest_module_schema__.agent_runs(
+        bot_id,run_id,session_id,start_operation_id,input_digest,state,
+        agent_spec_revision,config_payload_id,config_payload_digest,
+        config_owner_component_id,config_owner_kind,config_owner_id,
+        preset_revision,preset_payload_id,preset_payload_digest,
+        preset_owner_component_id,preset_owner_kind,preset_owner_id,
+        core_protocol_id,core_protocol_version,core_prompt_digest,parser_revision,
+        absolute_deadline,input_revision,selected_input_end_seq,
+        context_revision,context_view_revision
+    ) VALUES (
+        requested_bot,requested_run,requested_session,requested_operation,requested_digest,
+        'PREPARING_MODEL',body->>'agent_spec_revision',body#>>'{config,payload_id}',
+        body#>>'{config,digest}',body#>>'{config,owner_component_id}',
+        body#>>'{config,owner_kind}',body#>>'{config,owner_id}',body->>'preset_revision',
+        body#>>'{preset,payload_id}',body#>>'{preset,digest}',
+        body#>>'{preset,owner_component_id}',body#>>'{preset,owner_kind}',
+        body#>>'{preset,owner_id}','forest-agent-protocol',1,
+        'sha256:12e2de79a35becbe0b62687bdb7a26aa7c4eb91134c5ed1770ddc93828891f8c',
+        'forest-model-turn-xml-v1.2',deadline_value,1,
+        (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
+        (batch->>'context_view_revision')::bigint
+    );
+    INSERT INTO __forest_module_schema__.run_inputs(
+        bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
+        selected_input_end_seq,context_revision,context_view_revision,
+        source_manifest_digest,trigger_count
+    ) VALUES (
+        requested_bot,requested_run,1,batch->>'input_batch_ref',batch->>'input_batch_digest',
+        (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
+        (batch->>'context_view_revision')::bigint,batch->>'source_manifest_digest',
+        jsonb_array_length(batch->'triggers')
+    );
+    FOR trigger_value IN SELECT value FROM jsonb_array_elements(batch->'triggers') LOOP
+        INSERT INTO __forest_module_schema__.run_input_triggers(
+            bot_id,run_id,input_revision,trigger_index,trigger_ref,principal_ref,ingress_seq
+        ) VALUES (
+            requested_bot,requested_run,1,trigger_index,trigger_value->>'trigger_ref',
+            trigger_value->>'principal_ref',(trigger_value->>'ingress_seq')::bigint
+        );
+        trigger_index := trigger_index+1;
+    END LOOP;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_append_run_input(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    batch jsonb := body->'input_batch';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    run_row record;
+    existing record;
+    next_revision bigint;
+    trigger_value jsonb;
+    trigger_index integer := 0;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUNTIME_INPUT_INVALID',
+                'message','Agent input append envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO existing
+    FROM __forest_module_schema__.run_inputs
+    WHERE bot_id=requested_bot AND input_batch_ref=batch->>'input_batch_ref';
+    IF FOUND THEN
+        IF existing.run_id IS DISTINCT FROM requested_run
+           OR existing.input_batch_digest IS DISTINCT FROM batch->>'input_batch_digest'
+           OR existing.selected_input_end_seq IS DISTINCT FROM (batch->>'selected_input_end_seq')::bigint
+           OR existing.context_revision IS DISTINCT FROM (batch->>'context_revision')::bigint
+           OR existing.context_view_revision IS DISTINCT FROM (batch->>'context_view_revision')::bigint
+           OR existing.source_manifest_digest IS DISTINCT FROM batch->>'source_manifest_digest'
+           OR existing.trigger_count IS DISTINCT FROM jsonb_array_length(batch->'triggers') THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_INPUT_CONFLICT','message','InputBatch identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN __forest_module_schema__.agent_run_snapshot(
+            context,jsonb_build_object('run_id',requested_run)
+        );
+    END IF;
+    IF run_row.state NOT IN ('WAIT_INPUT','PREPARING_MODEL','SAFE_BOUNDARY','FINAL_READY') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_BOUNDARY_CLOSED',
+                'message','Run is not at a model-safe input boundary','status',409
+            )
+        );
+    END IF;
+    IF run_row.state='PREPARING_MODEL' AND EXISTS (
+        SELECT 1 FROM __forest_module_schema__.model_requests
+        WHERE bot_id=requested_bot AND run_id=requested_run
+          AND step_seq=run_row.next_step_seq
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_BOUNDARY_CLOSED',
+                'message','The next model request already froze its input','status',409
+            )
+        );
+    END IF;
+    IF (batch->>'selected_input_end_seq')::bigint<=run_row.selected_input_end_seq
+       OR (batch->>'context_revision')::bigint<=run_row.context_revision
+       OR (batch->>'context_view_revision')::bigint<run_row.context_view_revision
+       OR EXISTS (
+           SELECT 1 FROM jsonb_array_elements(batch->'triggers') item
+           WHERE (item->>'ingress_seq')::bigint>(batch->>'selected_input_end_seq')::bigint
+       )
+       OR (
+           SELECT count(*)<>count(DISTINCT item->>'trigger_ref')
+           FROM jsonb_array_elements(batch->'triggers') item
+       ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_INPUT_CONFLICT','message','InputBatch does not advance safely','status',409
+            )
+        );
+    END IF;
+    next_revision := run_row.input_revision+1;
+    INSERT INTO __forest_module_schema__.run_inputs(
+        bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
+        selected_input_end_seq,context_revision,context_view_revision,
+        source_manifest_digest,trigger_count
+    ) VALUES (
+        requested_bot,requested_run,next_revision,batch->>'input_batch_ref',
+        batch->>'input_batch_digest',(batch->>'selected_input_end_seq')::bigint,
+        (batch->>'context_revision')::bigint,(batch->>'context_view_revision')::bigint,
+        batch->>'source_manifest_digest',jsonb_array_length(batch->'triggers')
+    );
+    FOR trigger_value IN SELECT value FROM jsonb_array_elements(batch->'triggers') LOOP
+        INSERT INTO __forest_module_schema__.run_input_triggers(
+            bot_id,run_id,input_revision,trigger_index,trigger_ref,principal_ref,ingress_seq
+        ) VALUES (
+            requested_bot,requested_run,next_revision,trigger_index,
+            trigger_value->>'trigger_ref',trigger_value->>'principal_ref',
+            (trigger_value->>'ingress_seq')::bigint
+        );
+        trigger_index := trigger_index+1;
+    END LOOP;
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='PREPARING_MODEL',input_revision=next_revision,
+        selected_input_end_seq=(batch->>'selected_input_end_seq')::bigint,
+        context_revision=(batch->>'context_revision')::bigint,
+        context_view_revision=(batch->>'context_view_revision')::bigint,
+        final_candidate_payload_id=NULL,final_candidate_payload_digest=NULL,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;

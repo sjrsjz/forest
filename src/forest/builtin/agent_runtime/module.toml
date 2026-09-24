@@ -29,6 +29,8 @@ stop_timeout_s = 15
 [components.capabilities]
 requests = [
   "domain.query:agent.run-snapshot",
+  "uow.execute:agent.start-run",
+  "uow.execute:agent.append-run-input",
   "uow.execute:agent.acquire-run-lease",
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease"
@@ -52,7 +54,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "a635b11eb12365ebbd06baad0c72f3ff945abaa373338f5adb7b5a065d1b13ef"
+baseline_sha256 = "33377ac05fc5c4704c8df7965fdbc5742f15be44c7a28f0828c119aa9359cb39"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -62,6 +64,32 @@ name = "agent.run-snapshot"
 contract = "1.0"
 function = "agent_run_snapshot"
 input_schema = "schemas/run-query-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.start-run-record"
+contract = "1.0"
+function = "agent_start_run"
+input_schema = "schemas/start-run-envelope.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/config"
+owner_component = "agent.runtime"
+owner_kind = "module.configuration"
+owner_id_path = "/input/config/owner_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/preset"
+owner_component = "agent.runtime"
+owner_kind = "preset.context"
+owner_id_path = "/input/preset/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.append-run-input-record"
+contract = "1.0"
+function = "agent_append_run_input"
+input_schema = "schemas/append-run-input-envelope.json"
 output_schema = "schemas/run-snapshot-output.json"
 
 [[components.unit_of_work_participants]]
@@ -84,6 +112,26 @@ contract = "1.0"
 function = "agent_release_run"
 input_schema = "schemas/release-run-envelope.json"
 output_schema = "schemas/release-run-output.json"
+
+[[components.unit_of_work_plans]]
+name = "agent.start-run"
+contract = "1.0"
+input_schema = "schemas/start-run-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.start-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.append-run-input"
+contract = "1.0"
+input_schema = "schemas/append-run-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.append-run-input-record" }
+]
 
 [[components.unit_of_work_plans]]
 name = "agent.acquire-run-lease"

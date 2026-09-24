@@ -12,12 +12,7 @@ from forest.errors import ForestError
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
-from forest.storage.agent_runtime_authority import (
-    AgentInputBatch,
-    AgentPayloadRef,
-    AgentRuntimeRepository,
-    AgentTriggerInput,
-)
+from forest.storage.agent_runtime_authority import AgentPayloadRef
 
 
 async def _payload(kernel, *, owner_kind: str, owner_id: str, value: bytes) -> AgentPayloadRef:
@@ -88,32 +83,52 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="configuration/agent-package/1",
             value=b'{"protocol":"forest.agent.runtime/1"}',
         )
-        repository = AgentRuntimeRepository(
-            store,
-            namespace=package.configuration.namespace,
-            payload_verifier=kernel.payload.verify_in,
-        )
-        batch = AgentInputBatch(
-            "input-batch/agent-package/1",
-            digest_json({"batch": 1}),
-            1,
-            1,
-            0,
-            digest_json({"source": 1}),
-            (AgentTriggerInput("trigger/1", "qq:42", 1),),
-        )
-        await repository.start_run(
-            operation_id="agent-run-start/package/1",
-            conversation_ref="conversation/onebot/group/933179609",
-            session_id="session/agent-package/1",
-            run_id="run/agent-package/1",
-            input_batch=batch,
-            agent_spec_revision="agent-spec/1",
-            config=config,
-            preset_revision="preset/1",
-            preset=preset,
-            absolute_deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
-        )
+        participant = instance.unit_of_work_participant()
+        caller = {"component_id": "agent.runtime", "generation_id": generation_id}
+        start_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "conversation_ref": "conversation/onebot/group/933179609",
+                "session_id": "session/agent-package/1",
+                "run_id": "run/agent-package/1",
+                "input_batch": {
+                    "input_batch_ref": "input-batch/agent-package/1",
+                    "input_batch_digest": digest_json({"batch": 1}),
+                    "selected_input_end_seq": 1,
+                    "context_revision": 1,
+                    "context_view_revision": 0,
+                    "source_manifest_digest": digest_json({"source": 1}),
+                    "triggers": [
+                        {
+                            "trigger_ref": "trigger/1",
+                            "principal_ref": "qq:42",
+                            "ingress_seq": 1,
+                        }
+                    ],
+                },
+                "agent_spec_revision": "agent-spec/1",
+                "config": config.canonical(),
+                "preset_revision": "preset/1",
+                "preset": preset.canonical(),
+                "absolute_deadline": (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat(),
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            started = await participant.invoke_in(
+                conn,
+                "agent.start-run-record",
+                start_envelope,
+                operation_id="agent-run-start/package/1",
+                causal_root_kind="conversation.run",
+                causal_root_id="run/agent-package/1",
+                parent_call_id="call:agent-package/start",
+                timeout_seconds=10,
+            )
+        assert started["state"] == "PREPARING_MODEL"
 
         endpoint = instance.runtime_service_handlers()[("agent.run.query", 1)]
         route = FrozenServiceRoute(
@@ -151,8 +166,6 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             }
         ]
 
-        participant = instance.unit_of_work_participant()
-        caller = {"component_id": "agent.runtime", "generation_id": generation_id}
         acquire_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -217,6 +230,59 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert renewed["epoch"] == owner["epoch"]
+
+        async with store.pool.connection() as conn, conn.transaction():
+            appended = await participant.invoke_in(
+                conn,
+                "agent.append-run-input-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": caller,
+                    "input": {
+                        "owner": {
+                            "run_id": owner["run_id"],
+                            "owner_id": owner["owner_id"],
+                            "epoch": owner["epoch"],
+                        },
+                        "input_batch": {
+                            "input_batch_ref": "input-batch/agent-package/2",
+                            "input_batch_digest": digest_json({"batch": 2}),
+                            "selected_input_end_seq": 3,
+                            "context_revision": 2,
+                            "context_view_revision": 1,
+                            "source_manifest_digest": digest_json({"source": 2}),
+                            "triggers": [
+                                {
+                                    "trigger_ref": "trigger/2",
+                                    "principal_ref": "qq:43",
+                                    "ingress_seq": 3,
+                                }
+                            ],
+                        },
+                    },
+                    "prior": {},
+                },
+                operation_id="agent-run-append/package/1",
+                causal_root_kind="agent.model-safe-point",
+                causal_root_id="run/agent-package/1",
+                parent_call_id="call:agent-package/append",
+                timeout_seconds=10,
+            )
+        assert appended["progress"] == {
+            "input_revision": 2,
+            "selected_input_end_seq": 3,
+            "context_revision": 2,
+            "context_view_revision": 1,
+            "next_step_seq": 1,
+            "checkpoint_seq": 0,
+            "repair_count": 0,
+            "tool_count": 0,
+            "thinking_count": 0,
+        }
+        assert [item["principal_ref"] for item in appended["triggers"]] == [
+            "qq:42",
+            "qq:43",
+        ]
 
         release_envelope = {
             "protocol": "forest.uow-step/1",
