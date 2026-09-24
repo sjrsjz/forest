@@ -41,7 +41,8 @@ requests = [
   "uow.execute:agent.prepare-model-attempt",
   "uow.execute:agent.mark-model-handoff",
   "uow.execute:agent.observe-model-result",
-  "uow.execute:agent.record-protocol-failure"
+  "uow.execute:agent.record-protocol-failure",
+  "uow.execute:agent.record-model-turn"
 ]
 
 [[components.provides]]
@@ -62,7 +63,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "f8765061174d983361242255888aee6657ff3e57252f7b3226a4e1c702a1a0dc"
+baseline_sha256 = "32dba3930825839549f203fe276022cb47428696080d90e4d4cc4a295042d0a4"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -240,6 +241,19 @@ owner_component = "agent.runtime"
 owner_kind = "checkpoint.state"
 owner_id_path = "/input/checkpoint_id"
 
+[[components.unit_of_work_participants]]
+name = "agent.record-model-turn-record"
+contract = "1.0"
+function = "agent_record_model_turn"
+input_schema = "schemas/record-model-turn-envelope.json"
+output_schema = "schemas/model-turn-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/artifacts/*/payload"
+owner_component = "agent.runtime"
+owner_kind_path = "/input/artifacts/*/payload/owner_kind"
+owner_id_path = "/input/artifacts/*/payload/owner_id"
+
 [[components.unit_of_work_plans]]
 name = "agent.start-run"
 contract = "1.0"
@@ -358,6 +372,16 @@ output_schema = "schemas/protocol-failure-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.record-protocol-failure-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.record-model-turn"
+contract = "1.0"
+input_schema = "schemas/record-model-turn-input.json"
+output_schema = "schemas/model-turn-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.record-model-turn-record" }
 ]
 
 [[components.owned_work_handlers]]

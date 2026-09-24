@@ -529,6 +529,178 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert failed_recovery["protocol_failure"]["failed_request_id"] == (
             "model-request/package/1"
         )
+        repair_projection = await _payload(
+            kernel,
+            owner_component_id="provider.chat",
+            owner_kind="model.projection",
+            owner_id="model-request/package/repair",
+            value=b'{"messages":[{"role":"user","content":"repair"}]}',
+        )
+        repair_request_envelope = {
+            **request_envelope,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "request": {
+                    **request_envelope["input"]["request"],
+                    "request_id": "model-request/package/repair",
+                    "request_kind": "REPAIR",
+                    "projection": repair_projection.canonical(),
+                    "projected_content_digest": digest_json({"content": "repair"}),
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            repair_request = await participant.invoke_in(
+                conn,
+                "agent.prepare-model-request-record",
+                repair_request_envelope,
+                operation_id="agent-model-request/package/repair",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/repair-request",
+                timeout_seconds=10,
+            )
+        assert repair_request["step_seq"] == 2
+        repair_wire = await _payload(
+            kernel,
+            owner_component_id="provider.chat",
+            owner_kind="model.wire",
+            owner_id="model-attempt/package/repair",
+            value=b'{"model":"model/package-test","repair":true}',
+        )
+        repair_attempt_envelope = {
+            **attempt_envelope,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "request_id": "model-request/package/repair",
+                "attempt_id": "model-attempt/package/repair",
+                "effect_operation_ref": "model-effect/package/repair",
+                "wire": repair_wire.canonical(),
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn,
+                "agent.prepare-model-attempt-record",
+                repair_attempt_envelope,
+                operation_id="agent-model-attempt/package/repair",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/repair-attempt",
+                timeout_seconds=10,
+            )
+        repair_handoff = {
+            **handoff_envelope,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "request_id": "model-request/package/repair",
+                "attempt_id": "model-attempt/package/repair",
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn,
+                "agent.mark-model-handoff-record",
+                repair_handoff,
+                operation_id="agent-model-handoff/package/repair",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/repair-handoff",
+                timeout_seconds=10,
+            )
+        repair_result = await _payload(
+            kernel,
+            owner_component_id="provider.chat",
+            owner_kind="model.result",
+            owner_id="model-attempt/package/repair",
+            value=b'{"status":"RESPONDED","text":"valid"}',
+        )
+        repair_observation = {
+            **observation_envelope,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "observation_operation_id": "model-observation/package/repair",
+                "request_id": "model-request/package/repair",
+                "attempt_id": "model-attempt/package/repair",
+                "observed_state": "SUCCEEDED",
+                "evidence_kind": "EXECUTOR",
+                "effect_observation_ref": "model-effect-observation/package/repair",
+                "payloads": [{"role": "RESULT", "payload": repair_result.canonical()}],
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn,
+                "agent.observe-model-result-record",
+                repair_observation,
+                operation_id="agent-model-observation/package/repair",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/repair-observation",
+                timeout_seconds=10,
+            )
+        turn_payload = await _payload(
+            kernel,
+            owner_kind="model.turn",
+            owner_id="model-turn/package/repair",
+            value=b'{"protocol_version":1,"blocks":[{"block_type":"Assistant","text":"done"}]}',
+        )
+        assistant_payload = await _payload(
+            kernel,
+            owner_kind="assistant.candidate",
+            owner_id="model-turn/package/repair",
+            value=b'{"text":"done"}',
+        )
+        turn_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "turn_id": "model-turn/package/repair",
+                "request_id": "model-request/package/repair",
+                "turn": {
+                    "protocol_version": 1,
+                    "blocks": [{"block_type": "Assistant", "text": "done"}],
+                    "raw_candidate_digest": digest_json({"candidate": "valid"}),
+                    "truncated_after_function_call": False,
+                },
+                "artifacts": [
+                    {"role": "TURN", "payload": turn_payload.canonical()},
+                    {"role": "ASSISTANT", "payload": assistant_payload.canonical()},
+                ],
+                "tool": None,
+                "repair_of_request_id": "model-request/package/1",
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            repaired_turn = await participant.invoke_in(
+                conn,
+                "agent.record-model-turn-record",
+                turn_envelope,
+                operation_id="agent-model-turn/package/repair",
+                causal_root_kind="agent.execute",
+                causal_root_id="run/agent-package/model-port",
+                parent_call_id="call:agent-package/model-port/repair-turn",
+                timeout_seconds=10,
+            )
+        assert repaired_turn == {
+            "turn_id": "model-turn/package/repair",
+            "request_id": "model-request/package/repair",
+            "step_seq": 2,
+            "terminal": True,
+            "thinking_only": False,
+            "truncated_after_function_call": False,
+            "next_state": "SAFE_BOUNDARY",
+            "tool_call_id": None,
+        }
+        repaired_recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert repaired_recovery["state"] == "SAFE_BOUNDARY"
+        assert repaired_recovery["latest_turn"]["turn_id"] == "model-turn/package/repair"
 
         acquire_envelope = {
             "protocol": "forest.uow-step/1",

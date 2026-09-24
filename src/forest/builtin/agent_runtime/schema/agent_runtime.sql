@@ -1952,6 +1952,287 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_record_model_turn(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    turn_value jsonb := body->'turn';
+    blocks_value jsonb := turn_value->'blocks';
+    tool_value jsonb := NULLIF(body->'tool','null'::jsonb);
+    turn_artifact jsonb := NULL;
+    assistant_artifact jsonb := NULL;
+    arguments_artifact jsonb := NULL;
+    function_value jsonb := NULL;
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_turn text := body->>'turn_id';
+    requested_request text := body->>'request_id';
+    repair_request_value text := body->>'repair_of_request_id';
+    assistant_count integer;
+    function_count integer;
+    thinking_count_value integer;
+    max_thinking_position bigint;
+    min_assistant_position bigint;
+    function_position bigint;
+    terminal_value boolean;
+    thinking_only_value boolean;
+    next_state_value text;
+    run_row record;
+    request_row record;
+    existing record;
+    stored_tool record;
+    repair_row record;
+    trigger_row record;
+    principal_value text := NULL;
+BEGIN
+    SELECT item->'payload' INTO turn_artifact
+    FROM jsonb_array_elements(body->'artifacts') item WHERE item->>'role'='TURN' LIMIT 1;
+    SELECT item->'payload' INTO assistant_artifact
+    FROM jsonb_array_elements(body->'artifacts') item WHERE item->>'role'='ASSISTANT' LIMIT 1;
+    SELECT item->'payload' INTO arguments_artifact
+    FROM jsonb_array_elements(body->'artifacts') item
+    WHERE item->>'role'='TOOL_ARGUMENTS' LIMIT 1;
+    SELECT count(*) FILTER (WHERE item->>'block_type'='Assistant'),
+           count(*) FILTER (WHERE item->>'block_type'='FunctionCall'),
+           count(*) FILTER (WHERE item->>'block_type'='Thinking'),
+           max(position) FILTER (WHERE item->>'block_type'='Thinking'),
+           min(position) FILTER (WHERE item->>'block_type'='Assistant'),
+           max(position) FILTER (WHERE item->>'block_type'='FunctionCall')
+    INTO assistant_count,function_count,thinking_count_value,
+         max_thinking_position,min_assistant_position,function_position
+    FROM jsonb_array_elements(blocks_value) WITH ORDINALITY AS block(item,position);
+    SELECT item INTO function_value
+    FROM jsonb_array_elements(blocks_value) item
+    WHERE item->>'block_type'='FunctionCall' LIMIT 1;
+    terminal_value := function_count=0 AND assistant_count>0;
+    thinking_only_value := thinking_count_value=jsonb_array_length(blocks_value);
+    next_state_value := CASE
+        WHEN function_count=1 THEN 'WAIT_TOOL'
+        WHEN terminal_value THEN 'SAFE_BOUNDARY'
+        ELSE 'PREPARING_MODEL'
+    END;
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR (SELECT count(*)<>count(DISTINCT item->>'role')
+           FROM jsonb_array_elements(body->'artifacts') item)
+       OR turn_artifact IS NULL
+       OR turn_artifact->>'owner_kind' IS DISTINCT FROM 'model.turn'
+       OR turn_artifact->>'owner_id' IS DISTINCT FROM requested_turn
+       OR function_count>1
+       OR (function_count=1 AND function_position<>jsonb_array_length(blocks_value))
+       OR (min_assistant_position IS NOT NULL AND max_thinking_position IS NOT NULL
+           AND max_thinking_position>min_assistant_position)
+       OR ((assistant_count>0) IS DISTINCT FROM (assistant_artifact IS NOT NULL))
+       OR (assistant_artifact IS NOT NULL
+           AND (assistant_artifact->>'owner_kind' IS DISTINCT FROM 'assistant.candidate'
+                OR assistant_artifact->>'owner_id' IS DISTINCT FROM requested_turn))
+       OR ((function_count=1) IS DISTINCT FROM (tool_value IS NOT NULL))
+       OR ((function_count=1) IS DISTINCT FROM (arguments_artifact IS NOT NULL))
+       OR (arguments_artifact IS NOT NULL
+           AND (arguments_artifact->>'owner_kind' IS DISTINCT FROM 'tool.arguments'
+                OR arguments_artifact->>'owner_id'
+                   IS DISTINCT FROM tool_value->>'tool_call_id'))
+       OR ((turn_value->>'truncated_after_function_call')::boolean AND function_count<>1)
+       OR (function_count=1 AND (
+            function_value->>'name' IS NULL
+            OR function_value#>>'{arguments,authority_trigger_id}'
+                IS DISTINCT FROM tool_value->>'authority_trigger_ref')) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_MODEL_TURN_INPUT_INVALID',
+                'message','ModelTurn envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/model-turn/' || requested_bot || '/' || requested_request,0
+    ));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.model_turns
+    WHERE bot_id=requested_bot AND request_id=requested_request;
+    IF FOUND THEN
+        SELECT * INTO stored_tool
+        FROM __forest_module_schema__.tool_calls
+        WHERE bot_id=requested_bot AND turn_id=existing.turn_id;
+        IF existing.turn_id IS DISTINCT FROM requested_turn
+           OR existing.turn_payload_id IS DISTINCT FROM turn_artifact->>'payload_id'
+           OR existing.turn_payload_digest IS DISTINCT FROM turn_artifact->>'digest'
+           OR existing.assistant_payload_id
+                IS DISTINCT FROM assistant_artifact->>'payload_id'
+           OR existing.assistant_payload_digest
+                IS DISTINCT FROM assistant_artifact->>'digest'
+           OR existing.function_call_payload_id
+                IS DISTINCT FROM arguments_artifact->>'payload_id'
+           OR existing.function_call_payload_digest
+                IS DISTINCT FROM arguments_artifact->>'digest'
+           OR existing.terminal IS DISTINCT FROM terminal_value
+           OR existing.thinking_only IS DISTINCT FROM thinking_only_value
+           OR existing.truncated_after_function_call
+                IS DISTINCT FROM (turn_value->>'truncated_after_function_call')::boolean
+           OR existing.repair_of_request_id IS DISTINCT FROM repair_request_value
+           OR ((stored_tool.tool_call_id IS NOT NULL) IS DISTINCT FROM (tool_value IS NOT NULL))
+           OR (tool_value IS NOT NULL AND (
+                stored_tool.tool_call_id IS DISTINCT FROM tool_value->>'tool_call_id'
+                OR stored_tool.tool_name IS DISTINCT FROM function_value->>'name'
+                OR stored_tool.arguments_payload_id
+                    IS DISTINCT FROM arguments_artifact->>'payload_id'
+                OR stored_tool.arguments_payload_digest
+                    IS DISTINCT FROM arguments_artifact->>'digest'
+                OR stored_tool.authority_trigger_ref
+                    IS DISTINCT FROM tool_value->>'authority_trigger_ref'
+                OR stored_tool.tool_contract_digest
+                    IS DISTINCT FROM tool_value->>'tool_contract_digest'
+                OR stored_tool.effect_operation_ref
+                    IS DISTINCT FROM tool_value->>'effect_operation_ref')) THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','MODEL_TURN_ID_CONFLICT','message','ModelTurn identity differs','status',409
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'turn_id',existing.turn_id,'request_id',existing.request_id,
+                'step_seq',existing.step_seq,'terminal',existing.terminal,
+                'thinking_only',existing.thinking_only,
+                'truncated_after_function_call',existing.truncated_after_function_call,
+                'next_state',CASE WHEN stored_tool.tool_call_id IS NOT NULL THEN 'WAIT_TOOL'
+                    WHEN existing.terminal THEN 'SAFE_BOUNDARY' ELSE 'PREPARING_MODEL' END,
+                'tool_call_id',stored_tool.tool_call_id
+            )
+        );
+    END IF;
+    SELECT * INTO request_row
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR SHARE;
+    IF request_row.request_id IS NULL OR request_row.run_id IS DISTINCT FROM requested_run
+       OR request_row.state IS DISTINCT FROM 'SUCCEEDED'
+       OR request_row.step_seq IS DISTINCT FROM run_row.next_step_seq
+       OR run_row.state IS DISTINCT FROM 'PARSING' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_TURN_BOUNDARY_CLOSED','message','ModelTurn boundary closed','status',409
+            )
+        );
+    END IF;
+    IF request_row.request_kind='REPAIR' THEN
+        SELECT * INTO repair_row
+        FROM __forest_module_schema__.protocol_failures
+        WHERE bot_id=requested_bot AND run_id=requested_run
+          AND repair_step_seq=request_row.step_seq;
+        IF repair_row.failure_id IS NULL
+           OR repair_request_value IS DISTINCT FROM repair_row.failed_request_id THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','MODEL_TURN_REPAIR_CONFLICT',
+                    'message','Repair ModelTurn does not name its failed request','status',409
+                )
+            );
+        END IF;
+    ELSIF repair_request_value IS NOT NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MODEL_TURN_REPAIR_CONFLICT',
+                'message','Non-repair ModelTurn names a failed request','status',409
+            )
+        );
+    END IF;
+    IF tool_value IS NOT NULL THEN
+        SELECT * INTO trigger_row
+        FROM __forest_module_schema__.run_input_triggers
+        WHERE bot_id=requested_bot AND run_id=requested_run
+          AND trigger_ref=tool_value->>'authority_trigger_ref'
+        ORDER BY input_revision DESC LIMIT 1;
+        IF trigger_row.trigger_ref IS NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','AGENT_TOOL_AUTHORITY_INVALID',
+                    'message','Tool trigger is not owned by this Run','status',403
+                )
+            );
+        END IF;
+        principal_value := trigger_row.principal_ref;
+    END IF;
+    INSERT INTO __forest_module_schema__.model_turns(
+        bot_id,turn_id,run_id,request_id,step_seq,protocol_version,
+        raw_candidate_digest,turn_payload_id,turn_payload_digest,
+        turn_owner_component_id,turn_owner_kind,turn_owner_id,
+        assistant_payload_id,assistant_payload_digest,function_call_payload_id,
+        function_call_payload_digest,terminal,thinking_only,
+        truncated_after_function_call,repair_of_request_id
+    ) VALUES (
+        requested_bot,requested_turn,requested_run,requested_request,request_row.step_seq,
+        (turn_value->>'protocol_version')::integer,turn_value->>'raw_candidate_digest',
+        turn_artifact->>'payload_id',turn_artifact->>'digest',
+        turn_artifact->>'owner_component_id',turn_artifact->>'owner_kind',
+        turn_artifact->>'owner_id',assistant_artifact->>'payload_id',
+        assistant_artifact->>'digest',arguments_artifact->>'payload_id',
+        arguments_artifact->>'digest',terminal_value,thinking_only_value,
+        (turn_value->>'truncated_after_function_call')::boolean,repair_request_value
+    );
+    IF tool_value IS NOT NULL THEN
+        INSERT INTO __forest_module_schema__.tool_calls(
+            bot_id,tool_call_id,run_id,turn_id,step_seq,tool_name,
+            arguments_payload_id,arguments_payload_digest,authority_trigger_ref,
+            authority_principal_ref,tool_contract_digest,effect_operation_ref
+        ) VALUES (
+            requested_bot,tool_value->>'tool_call_id',requested_run,requested_turn,
+            request_row.step_seq,function_value->>'name',arguments_artifact->>'payload_id',
+            arguments_artifact->>'digest',tool_value->>'authority_trigger_ref',
+            principal_value,tool_value->>'tool_contract_digest',
+            tool_value->>'effect_operation_ref'
+        );
+    END IF;
+    UPDATE __forest_module_schema__.agent_runs
+    SET state=next_state_value,next_step_seq=next_step_seq+1,
+        current_model_request_id=NULL,
+        current_tool_call_id=tool_value->>'tool_call_id',
+        tool_count=tool_count+CASE WHEN tool_value IS NULL THEN 0 ELSE 1 END,
+        thinking_count=thinking_count+CASE WHEN thinking_only_value THEN 1 ELSE 0 END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'turn_id',requested_turn,'request_id',requested_request,
+            'step_seq',request_row.step_seq,'terminal',terminal_value,
+            'thinking_only',thinking_only_value,
+            'truncated_after_function_call',
+                (turn_value->>'truncated_after_function_call')::boolean,
+            'next_state',next_state_value,'tool_call_id',tool_value->>'tool_call_id'
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

@@ -49,6 +49,8 @@ Agent 的恢复读取和模型写入都属于 `agent.runtime` 包内端口，不
 
 解析失败只能提交 `agent.record-protocol-failure/1`。该端口在同一事务中验证当前成功 Attempt、写入不可变 failure 与 checkpoint、清除当前 Model 请求，并把 Run 推进到 `REPAIR_READY` 或 `FAILED`；第一次进入 `REPAIR_READY` 即持久消耗唯一 repair 配额并固定下一步号，后续候选不能再次申请修复。修复输入仅从 failure 引用的有界 feedback Payload 恢复，禁止容错解析、从错误 XML 猜字段或在 Provider 层重试协议。
 
+解析成功只能提交 `agent.record-model-turn/1`。它接收包内解析器生成的规范块和受管 PayloadRef，在单个 Agent 事务中复核 `PARSING` 头、repair 来源、块顺序及 FunctionCall 的 trigger authority；随后一次性写入 ModelTurn，并在存在 FunctionCall 时同时写入 ToolCall 与真实 principal。Run 只能据此进入 `PREPARING_MODEL`、`WAIT_TOOL` 或 `SAFE_BOUNDARY`。宿主不能先保存“差不多合法”的回复，再补写工具或修改终止语义。
+
 工具目录由各执行模块通过 `RuntimeModuleDescriptor.agent_tools` 贡献，不写死在 Agent 工厂或 Bot 组合根。贡献冻结工具名、模型声明、服务 ID/版本、审批要求和查询能力，并作为模块 descriptor digest 的一部分进入 RuntimeGraph；同一图中的工具名与服务键都必须唯一。`agent.runtime` 只能通过受限 factory context 枚举贡献并请求对应服务句柄，随后把贡献者的准确 component/Generation、service 和 contract digest 冻结为 `AgentToolBinding`。Contract Router sealing 必须确认该服务确实由声明贡献的模块提供；所有权不符时整张候选图拒绝发布。工具结果仍由执行模块拥有，Agent 只持有 PayloadRef，并统一经 Authorization 与 Effect Gateway 完成 handoff 和恢复。
 
 ## 3. 单 Agent 执行循环
