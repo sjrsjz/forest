@@ -1071,6 +1071,64 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             )
             await conn.execute(
                 sql.SQL(
+                    "INSERT INTO {}.conversation_lanes("
+                    "bot_id,conversation_id,conversation_key_digest,source_component_id,"
+                    "binding_ref,platform,channel_kind,channel_ref,next_ingress_seq,"
+                    "classified_through_seq,context_applied_seq,context_revision,"
+                    "context_view_revision,context_view_unit_count,actor_owner_id,actor_epoch,"
+                    "actor_expires_at) VALUES ("
+                    "%s,%s,%s,'adapter.onebot','binding/main','onebot-v11','GROUP',"
+                    "'start-atomic',2,1,0,0,0,0,%s,1,clock_timestamp()+interval '5 minutes')"
+                ).format(sql.Identifier(conversation_namespace)),
+                (
+                    store.bot_id,
+                    "conversation/onebot/group/start-atomic",
+                    digest_json({"conversation": "start-atomic"}),
+                    "conversation-owner/start-atomic",
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.inbox_messages("
+                    "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
+                    "input_digest,source_component_id,source_event_ref,event_kind,"
+                    "platform_message_ref,author_subject_ref,content_payload_id,"
+                    "content_payload_digest,content_owner_component_id,content_owner_kind,"
+                    "content_owner_id,author_payload_id,author_payload_digest,"
+                    "author_owner_component_id,author_owner_kind,author_owner_id,"
+                    "context_disposition,classification_state,trigger_decision,"
+                    "classification_operation_id,classification_input_digest,"
+                    "classifier_component_id,classifier_generation_id,rule_revision,"
+                    "reason_code,received_at,classification_deadline,classified_at) VALUES ("
+                    "%s,%s,'event/start-atomic',1,'admit/start-atomic',%s,'adapter.onebot',"
+                    "'source/start-atomic','message.group','message/start-atomic','qq:99',"
+                    "'payload/content/start-atomic',%s,'adapter.onebot','onebot.normalized-event',"
+                    "'event/start-atomic','payload/author/start-atomic',%s,'adapter.onebot',"
+                    "'onebot.author-snapshot','event/start-atomic','MATERIALIZE','FINAL','TRIGGER',"
+                    "'classify/start-atomic',%s,'conversation.trigger-policy',"
+                    "'generation/trigger/test','rule/1','test',clock_timestamp(),"
+                    "clock_timestamp()+interval '1 minute',clock_timestamp())"
+                ).format(sql.Identifier(conversation_namespace)),
+                (
+                    store.bot_id,
+                    "conversation/onebot/group/start-atomic",
+                    digest,
+                    digest,
+                    digest,
+                    digest,
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.conversation_triggers("
+                    "bot_id,conversation_id,trigger_id,event_id,ingress_seq,principal_ref,"
+                    "input_digest) VALUES (%s,%s,'trigger/start-atomic',"
+                    "'event/start-atomic',1,'qq:99',%s)"
+                ).format(sql.Identifier(conversation_namespace)),
+                (store.bot_id, "conversation/onebot/group/start-atomic", digest),
+            )
+            await conn.execute(
+                sql.SQL(
                     "INSERT INTO {}.context_units("
                     "bot_id,conversation_id,unit_id,context_revision,unit_index,kind,"
                     "source_component_id,source_kind,source_id,payload_id,payload_digest,"
@@ -1222,6 +1280,76 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "qq:42",
             "qq:43",
         ]
+
+        start_declaration = next(
+            item
+            for item in instance.component["unit_of_work_plans"]
+            if item["name"] == "agent.start-from-conversation"
+        )
+        atomic_start = await instance._unit_of_work_coordinator.execute(
+            PackageCallScope(
+                bot_id=store.bot_id,
+                component_id="agent.runtime",
+                generation_id=generation_id,
+                instance_id=binding.instance_id,
+                worker_incarnation=binding.worker_incarnation,
+                call_id="call:agent-package/start-from-conversation",
+                call_operation_id="agent-start-from-conversation/package/1",
+                causal_root_kind="conversation.agent-run",
+                causal_root_id="conversation/onebot/group/start-atomic",
+            ),
+            start_declaration,
+            {
+                "conversation": {
+                    "actor": {
+                        "conversation_id": "conversation/onebot/group/start-atomic",
+                        "owner_id": "conversation-owner/start-atomic",
+                        "epoch": 1,
+                    },
+                    "boundary": "IDLE",
+                    "selection_mode": "ANY",
+                    "session_ref": "session/start-atomic",
+                    "run_ref": "run/start-atomic",
+                    "next_run_ref": None,
+                },
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {
+                    "selection_step_id": "conversation",
+                    "deletion_epoch_step_id": "payload_epoch",
+                },
+                "agent": {
+                    "conversation_ref": "conversation/onebot/group/start-atomic",
+                    "session_id": "session/start-atomic",
+                    "run_id": "run/start-atomic",
+                    "agent_spec_revision": "agent-spec/1",
+                    "config": config.canonical(),
+                    "preset_revision": "preset/1",
+                    "preset": preset.canonical(),
+                    "absolute_deadline": (
+                        datetime.now(timezone.utc) + timedelta(minutes=5)
+                    ).isoformat(),
+                    "selection_step_id": "conversation",
+                    "memory_step_id": "memory",
+                },
+            },
+            parent_call_id="call:agent-package/start-from-conversation",
+            timeout_seconds=20,
+        )
+        assert atomic_start["protocol"] == "forest.agent-start-selection/1"
+        assert atomic_start["status"] == "STARTED"
+        assert atomic_start["run"]["run_id"] == "run/start-atomic"
+        assert atomic_start["run"]["progress"]["selected_input_end_seq"] == 1
+        assert atomic_start["run"]["triggers"] == [
+            {
+                "input_revision": 1,
+                "trigger_index": 0,
+                "trigger_ref": "trigger/start-atomic",
+                "principal_ref": "qq:99",
+                "ingress_seq": 1,
+            }
+        ]
+        assert atomic_start["memory_qualified_count"] == 0
+        assert atomic_start["memory_pending_count"] == 1
 
         checkpoint = await _payload(
             kernel,
