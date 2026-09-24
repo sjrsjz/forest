@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["owner", "lease_seconds"],
+  "properties": {
+    "owner": {"$ref": "#/$defs/owner"},
+    "lease_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "owner": {
+      "type": "object",
+      "required": ["run_id", "owner_id", "epoch"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "epoch": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}

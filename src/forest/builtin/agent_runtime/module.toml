@@ -26,6 +26,14 @@ start_timeout_s = 15
 drain_timeout_s = 960
 stop_timeout_s = 15
 
+[components.capabilities]
+requests = [
+  "domain.query:agent.run-snapshot",
+  "uow.execute:agent.acquire-run-lease",
+  "uow.execute:agent.renew-run-lease",
+  "uow.execute:agent.release-run-lease"
+]
+
 [[components.provides]]
 name = "agent.protocol.describe"
 contract = "1.0"
@@ -33,11 +41,76 @@ semantics = "read"
 input_schema = "schemas/protocol-describe-input.json"
 output_schema = "schemas/protocol-describe-output.json"
 
+[[components.provides]]
+name = "agent.run.query"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/run-query-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+
 [components.storage]
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "12fc330e2661210855dee39a532c00936b019c6e78a4332ec32727f45b67ccb2"
+baseline_sha256 = "a635b11eb12365ebbd06baad0c72f3ff945abaa373338f5adb7b5a065d1b13ef"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
+
+[[components.domain_queries]]
+name = "agent.run-snapshot"
+contract = "1.0"
+function = "agent_run_snapshot"
+input_schema = "schemas/run-query-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.acquire-run-record"
+contract = "1.0"
+function = "agent_acquire_run"
+input_schema = "schemas/acquire-run-envelope.json"
+output_schema = "schemas/run-owner-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.renew-run-record"
+contract = "1.0"
+function = "agent_renew_run"
+input_schema = "schemas/renew-run-envelope.json"
+output_schema = "schemas/run-owner-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.release-run-record"
+contract = "1.0"
+function = "agent_release_run"
+input_schema = "schemas/release-run-envelope.json"
+output_schema = "schemas/release-run-output.json"
+
+[[components.unit_of_work_plans]]
+name = "agent.acquire-run-lease"
+contract = "1.0"
+input_schema = "schemas/acquire-run-input.json"
+output_schema = "schemas/run-owner-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.acquire-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.renew-run-lease"
+contract = "1.0"
+input_schema = "schemas/renew-run-input.json"
+output_schema = "schemas/run-owner-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.renew-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.release-run-lease"
+contract = "1.0"
+input_schema = "schemas/release-run-input.json"
+output_schema = "schemas/release-run-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.release-run-record" }
+]

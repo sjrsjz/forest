@@ -696,3 +696,304 @@ CREATE TRIGGER model_observations_immutable BEFORE UPDATE OR DELETE ON model_obs
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
 CREATE TRIGGER protocol_failures_immutable BEFORE UPDATE OR DELETE ON protocol_failures
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
+
+CREATE FUNCTION agent_run_snapshot(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_run text := input->>'run_id';
+    run_row record;
+    session_row record;
+    inputs_value jsonb;
+    triggers_value jsonb;
+    cancel_value jsonb;
+    owner_value jsonb := NULL;
+    final_value jsonb := NULL;
+BEGIN
+    SELECT * INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_NOT_FOUND','message','Agent Run does not exist','status',404
+            )
+        );
+    END IF;
+    SELECT * INTO session_row
+    FROM __forest_module_schema__.agent_sessions
+    WHERE bot_id=requested_bot AND session_id=run_row.session_id;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'input_revision',i.input_revision,'input_batch_ref',i.input_batch_ref,
+        'input_batch_digest',i.input_batch_digest,
+        'selected_input_end_seq',i.selected_input_end_seq,
+        'context_revision',i.context_revision,'context_view_revision',i.context_view_revision,
+        'source_manifest_digest',i.source_manifest_digest,'trigger_count',i.trigger_count,
+        'created_at',i.created_at
+    ) ORDER BY i.input_revision),'[]'::jsonb)
+    INTO inputs_value
+    FROM __forest_module_schema__.run_inputs i
+    WHERE i.bot_id=requested_bot AND i.run_id=requested_run;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'input_revision',t.input_revision,'trigger_index',t.trigger_index,
+        'trigger_ref',t.trigger_ref,'principal_ref',t.principal_ref,'ingress_seq',t.ingress_seq
+    ) ORDER BY t.input_revision,t.trigger_index),'[]'::jsonb)
+    INTO triggers_value
+    FROM __forest_module_schema__.run_input_triggers t
+    WHERE t.bot_id=requested_bot AND t.run_id=requested_run;
+    SELECT CASE WHEN count(*)=0 THEN NULL ELSE jsonb_build_object(
+        'operation_id',min(c.operation_id),'input_digest',min(c.input_digest),
+        'expected_checkpoint_seq',min(c.expected_checkpoint_seq),
+        'requested_by',min(c.requested_by),'reason_code',min(c.reason_code),
+        'created_at',min(c.created_at)
+    ) END
+    INTO cancel_value
+    FROM __forest_module_schema__.run_cancel_requests c
+    WHERE c.bot_id=requested_bot AND c.run_id=requested_run;
+    IF run_row.owner_id IS NOT NULL THEN
+        owner_value := jsonb_build_object(
+            'owner_id',run_row.owner_id,'epoch',run_row.owner_epoch,
+            'expires_at',run_row.owner_expires_at
+        );
+    END IF;
+    IF run_row.final_candidate_payload_id IS NOT NULL THEN
+        final_value := jsonb_build_object(
+            'payload_id',run_row.final_candidate_payload_id,
+            'digest',run_row.final_candidate_payload_digest
+        );
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'run_id',run_row.run_id,'session_id',run_row.session_id,
+            'conversation_ref',session_row.conversation_ref,'state',run_row.state,
+            'profile',jsonb_build_object(
+                'agent_spec_revision',run_row.agent_spec_revision,
+                'config',jsonb_build_object(
+                    'payload_id',run_row.config_payload_id,'digest',run_row.config_payload_digest,
+                    'owner_component_id',run_row.config_owner_component_id,
+                    'owner_kind',run_row.config_owner_kind,'owner_id',run_row.config_owner_id
+                ),
+                'preset_revision',run_row.preset_revision,
+                'preset',jsonb_build_object(
+                    'payload_id',run_row.preset_payload_id,'digest',run_row.preset_payload_digest,
+                    'owner_component_id',run_row.preset_owner_component_id,
+                    'owner_kind',run_row.preset_owner_kind,'owner_id',run_row.preset_owner_id
+                ),
+                'core_protocol_id',run_row.core_protocol_id,
+                'core_protocol_version',run_row.core_protocol_version,
+                'core_prompt_digest',run_row.core_prompt_digest,
+                'parser_revision',run_row.parser_revision
+            ),
+            'absolute_deadline',run_row.absolute_deadline,
+            'progress',jsonb_build_object(
+                'input_revision',run_row.input_revision,
+                'selected_input_end_seq',run_row.selected_input_end_seq,
+                'context_revision',run_row.context_revision,
+                'context_view_revision',run_row.context_view_revision,
+                'next_step_seq',run_row.next_step_seq,'checkpoint_seq',run_row.checkpoint_seq,
+                'repair_count',run_row.repair_count,'tool_count',run_row.tool_count,
+                'thinking_count',run_row.thinking_count
+            ),
+            'owner',owner_value,
+            'current',jsonb_build_object(
+                'model_request_id',run_row.current_model_request_id,
+                'tool_call_id',run_row.current_tool_call_id,
+                'reload_operation_id',run_row.reload_operation_id,
+                'reload_resume_phase',run_row.reload_resume_phase
+            ),
+            'final_candidate',final_value,'error_code',run_row.error_code,
+            'session',jsonb_build_object(
+                'state',session_row.state,'active_run_id',session_row.active_run_id,
+                'session_epoch',session_row.session_epoch,
+                'terminal_reason_code',session_row.terminal_reason_code,
+                'created_at',session_row.created_at,'updated_at',session_row.updated_at,
+                'closed_at',session_row.closed_at
+            ),
+            'inputs',inputs_value,'triggers',triggers_value,'cancel_request',cancel_value,
+            'created_at',run_row.created_at,'updated_at',run_row.updated_at,
+            'terminal_at',run_row.terminal_at
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_acquire_run(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_run text := body->>'run_id';
+    requested_owner text := body->>'owner_id';
+    requested_seconds integer := (body->>'lease_seconds')::integer;
+    run_row record;
+    next_epoch bigint;
+    next_expiry timestamptz;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_LEASE_INPUT_INVALID',
+                'message','Agent Run lease envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_NOT_FOUND','message','Agent Run does not exist','status',404
+            )
+        );
+    END IF;
+    IF run_row.state IN ('COMPLETED','FAILED','CANCELLED') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_TERMINAL','message','Agent Run is terminal','status',409
+            )
+        );
+    END IF;
+    IF run_row.owner_id IS NOT NULL AND run_row.owner_expires_at>run_row.database_now
+       AND run_row.owner_id IS DISTINCT FROM requested_owner THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_BUSY','message','Agent Run lease is busy','status',409
+            )
+        );
+    END IF;
+    next_epoch := CASE
+        WHEN run_row.owner_id=requested_owner AND run_row.owner_expires_at>run_row.database_now
+        THEN run_row.owner_epoch ELSE run_row.owner_epoch+1 END;
+    next_expiry := run_row.database_now + make_interval(secs=>requested_seconds);
+    UPDATE __forest_module_schema__.agent_runs
+    SET owner_id=requested_owner,owner_epoch=next_epoch,owner_expires_at=next_expiry,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'run_id',requested_run,'owner_id',requested_owner,
+            'epoch',next_epoch,'expires_at',next_expiry
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_renew_run(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_seconds integer := (body->>'lease_seconds')::integer;
+    run_row record;
+    next_expiry timestamptz;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_LEASE_INPUT_INVALID',
+                'message','Agent Run lease envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    next_expiry := run_row.database_now + make_interval(secs=>requested_seconds);
+    UPDATE __forest_module_schema__.agent_runs
+    SET owner_expires_at=next_expiry,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'run_id',requested_run,'owner_id',requested_owner,
+            'epoch',requested_epoch,'expires_at',next_expiry
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_release_run(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    owner_value jsonb := envelope#>'{input,owner}';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    run_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_RUN_LEASE_INPUT_INVALID',
+                'message','Agent Run lease envelope is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    UPDATE __forest_module_schema__.agent_runs
+    SET owner_id=NULL,owner_expires_at=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('run_id',requested_run,'released',true)
+    );
+END;
+$$;

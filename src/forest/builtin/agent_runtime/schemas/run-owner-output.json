@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["run_id", "owner_id", "epoch", "expires_at"],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "epoch": {"type": "integer", "minimum": 1},
+    "expires_at": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

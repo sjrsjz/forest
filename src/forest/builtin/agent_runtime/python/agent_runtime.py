@@ -25,3 +25,13 @@ class AgentRuntime(Plugin):
     )
     async def describe_protocol(self, payload, ctx):
         return protocol_descriptor()
+
+    @service(
+        "agent.run.query",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/run-query-input.json",
+        output_schema="schemas/run-snapshot-output.json",
+    )
+    async def query_run(self, payload, ctx):
+        return await ctx.queries.call("agent.run-snapshot", payload)

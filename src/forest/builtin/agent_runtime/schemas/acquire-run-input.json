@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["run_id", "owner_id", "lease_seconds"],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "lease_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
+  },
+  "additionalProperties": false
+}
