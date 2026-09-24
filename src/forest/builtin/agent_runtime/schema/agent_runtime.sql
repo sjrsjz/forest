@@ -2551,6 +2551,7 @@ AS $$
 DECLARE
     body jsonb := envelope->'input';
     owner_value jsonb := body->'owner';
+    source_value jsonb := body->'source_candidate';
     candidate_value jsonb := body->'candidate';
     requested_bot text := context->>'bot_id';
     requested_run text := owner_value->>'run_id';
@@ -2563,9 +2564,11 @@ BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
        OR envelope->'prior' IS DISTINCT FROM '{}'::jsonb
+       OR source_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR source_value->>'owner_kind' IS DISTINCT FROM 'assistant.candidate'
+       OR source_value->>'owner_id' IS DISTINCT FROM requested_turn
        OR candidate_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
-       OR candidate_value->>'owner_kind' IS DISTINCT FROM 'assistant.candidate'
-       OR candidate_value->>'owner_id' IS DISTINCT FROM requested_turn THEN
+       OR candidate_value->>'owner_kind' IS DISTINCT FROM 'final.reply' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -2595,8 +2598,8 @@ BEGIN
     IF turn_row.turn_id IS NULL
        OR turn_row.turn_id IS DISTINCT FROM requested_turn
        OR turn_row.terminal IS DISTINCT FROM true
-       OR turn_row.assistant_payload_id IS DISTINCT FROM candidate_value->>'payload_id'
-       OR turn_row.assistant_payload_digest IS DISTINCT FROM candidate_value->>'digest' THEN
+       OR turn_row.assistant_payload_id IS DISTINCT FROM source_value->>'payload_id'
+       OR turn_row.assistant_payload_digest IS DISTINCT FROM source_value->>'digest' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(

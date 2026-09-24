@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["owner", "turn_id", "candidate"],
+  "required": ["owner", "turn_id", "source_candidate", "candidate"],
   "properties": {
     "owner": {"$ref": "#/$defs/owner"},
     "turn_id": {"$ref": "#/$defs/id"},
-    "candidate": {"$ref": "#/$defs/candidate"}
+    "source_candidate": {"$ref": "#/$defs/source_candidate"},
+    "candidate": {"$ref": "#/$defs/final_candidate"}
   },
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 512},
@@ -21,7 +22,7 @@
         "epoch": {"type": "integer", "minimum": 1}
       }
     },
-    "candidate": {
+    "payload": {
       "type": "object",
       "additionalProperties": false,
       "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
@@ -29,9 +30,21 @@
         "payload_id": {"$ref": "#/$defs/id"},
         "digest": {"$ref": "#/$defs/digest"},
         "owner_component_id": {"const": "agent.runtime"},
-        "owner_kind": {"const": "assistant.candidate"},
+        "owner_kind": {"enum": ["assistant.candidate", "final.reply"]},
         "owner_id": {"$ref": "#/$defs/id"}
       }
+    },
+    "source_candidate": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "assistant.candidate"}}}
+      ]
+    },
+    "final_candidate": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "final.reply"}}}
+      ]
     }
   }
 }

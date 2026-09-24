@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "2.8.0"
+version = "2.9.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -100,9 +100,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.7.0"
+schema_version = "1.8.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "e82cb88b319e73251a16f0497f60d7ee4b772312855835bd4ef0f333e95a4e93"
+baseline_sha256 = "c6d35267f61281252260ea6d6822f90da5cc24adb9025eef47e288489aac2c58"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -342,6 +342,12 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/candidate"
+owner_component = "agent.runtime"
+owner_kind = "final.reply"
+owner_id_path = "/input/candidate/owner_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/source_candidate"
 owner_component = "agent.runtime"
 owner_kind = "assistant.candidate"
 owner_id_path = "/input/turn_id"

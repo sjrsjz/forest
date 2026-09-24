@@ -75,7 +75,7 @@
 - 错误 XML 的一次协议修复、合法 ModelTurn 提交；
 - ToolCall 的准确 component/Generation/service/contract/binding 冻结；
 - 工具审批、handoff、终态观察和可查询 `UNKNOWN` 对账；
-- terminal ModelTurn 先停在 `SAFE_BOUNDARY`；确认没有新触发批次后，`agent.finalize-candidate/1` 只接受该 Run 最新 terminal turn 的准确 `assistant.candidate` PayloadRef，并原子推进到 `FINAL_READY`；
+- terminal ModelTurn 先停在 `SAFE_BOUNDARY`；确认没有新触发批次后，Worker 以最新 terminal turn 的准确 `assistant.candidate` 为父边生成独立 `final.reply`，`agent.finalize-candidate/1` 同时核对来源与正式候选并原子推进到 `FINAL_READY`；内部解析候选不会直接交给 Delivery；
 - 最终完成、同 Session 后继 Run 和 Session 关闭的私有 participant。
 
 包内已加入 `model_execution.py`，模型 attempt 的 profile bind、`model.input` 写入、Provider materialize、授权与 Effect prepare、原子 handoff、Provider dispatch、Effect/Agent 原子 observe 及 Provider 结果读取均只经过 `ctx.services`、`ctx.uow`、`ctx.payloads` 与冻结的 `ctx.identity`。它没有 Repository、数据库连接或宿主 Agent adapter；Provider 异常或回执 fence 不一致在 handoff 后统一收敛为 `UNKNOWN`，不会盲目重发。
