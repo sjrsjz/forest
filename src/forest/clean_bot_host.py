@@ -383,6 +383,13 @@ class CleanBotHost:
         provider_driver_options = {}
         if self._model_client_factory is not None:
             provider_driver_options["client_factory"] = self._model_client_factory
+        provider_effect_factory = chat_completions_effect_driver_factory(
+            effects=self._kernel.effect,
+            payloads=self._kernel.payload,
+            runtime=self._kernel.runtime,
+            credential_resolver=resolve_provider_secret,
+            **provider_driver_options,
+        )
         provider = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/provider_chat_completions"))),
             self.package_catalog,
@@ -399,12 +406,8 @@ class CleanBotHost:
             },
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
-                    "chat-completions.http": chat_completions_effect_driver_factory(
-                        effects=self._kernel.effect,
-                        runtime=self._kernel.runtime,
-                        credential_resolver=resolve_provider_secret,
-                        **provider_driver_options,
-                    )
+                    "chat-completions.materialize": provider_effect_factory,
+                    "chat-completions.http": provider_effect_factory,
                 }
             ),
         )

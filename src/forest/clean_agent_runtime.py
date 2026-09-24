@@ -67,6 +67,7 @@ class CleanAgentRuntime:
         ],
         "requires": [
             {"service_id": "provider.profile.bind", "version": 1},
+            {"service_id": "provider.request.materialize", "version": 1},
             {"service_id": "provider.model.dispatch", "version": 1},
             {"service_id": "memory.recall", "version": 1},
             {"service_id": "media.context.resolve", "version": 1},
@@ -474,6 +475,14 @@ class CleanAgentRuntime:
     async def prepare_model_attempt(self, owner, **values):
         return await self._call(
             "prepare_model_attempt", owner=owner, owned_work=True, **values
+        )
+
+    async def prepare_model_attempt_in(self, conn, owner, **values):
+        await self._verify_member_in(conn)
+        return await self.repository.prepare_model_attempt(
+            owner,
+            _connection=conn,
+            **values,
         )
 
     async def mark_model_handoff(self, owner, **values):

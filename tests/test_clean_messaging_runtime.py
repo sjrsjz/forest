@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -400,20 +401,27 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
         return client
 
     package_catalog = PackageCatalog(tmp_path / "package-catalog")
+    provider_configuration = default_provider_configuration()
+    provider_configuration["capabilities"]["input_modalities"] = ["text", "image"]
     provider = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/provider_chat_completions",
         package_catalog,
         store,
         installer,
         kernel=kernel,
-        initial_configuration=default_provider_configuration(),
+        initial_configuration=provider_configuration,
         effect_driver_registry=PackageEffectDriverRegistry(
             {
-                "chat-completions.http": chat_completions_effect_driver_factory(
+                kind: chat_completions_effect_driver_factory(
                     effects=kernel.effect,
+                    payloads=kernel.payload,
                     runtime=kernel.runtime,
                     credential_resolver=lambda _secret_ref, _revision: "test-model-key",
                     client_factory=create_model_client,
+                )
+                for kind in (
+                    "chat-completions.materialize",
+                    "chat-completions.http",
                 )
             }
         ),
@@ -1048,6 +1056,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                         "parts": [
                             {"type": "text", "text": "look"},
                             {
+                                "part_id": "message:88:1",
                                 "type": "image",
                                 "media_ref": "media:88",
                                 "url": "https://secret.invalid/image-token",
@@ -1056,10 +1065,40 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
                     }
                 ],
             }
+        image_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+            "x8AAwMCAO+jD1sAAAAASUVORK5CYII="
+        )
+        image_saved = await kernel.payload.put_bytes(
+            owner_component_id="media.capture",
+            owner_kind="media.asset",
+            owner_id="media:88",
+            media_type="image/png",
+            content=image_bytes,
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        image_asset = {
+            "source_unit_id": "message:88",
+            "part_id": "message:88:1",
+            "media_ref": "media:88",
+            "media_revision": 1,
+            "payload": {
+                "payload_id": image_saved.payload_id,
+                "digest": image_saved.content_digest,
+                "owner_component_id": "media.capture",
+                "owner_kind": "media.asset",
+                "owner_id": "media:88",
+            },
+            "media_type": "image/png",
+            "width": 1,
+            "height": 1,
+            "byte_length": len(image_bytes),
+        }
         request = await agent_runtime.provider.prepare_request(
             model_snapshot,
             request_id="model-request:test",
             transport_attempt_id="model-attempt:test",
+            media={"media:88": image_asset},
             stream=False,
         )
         assert request.component_id == "provider.chat-completions"
@@ -1067,6 +1106,7 @@ async def test_kernel_and_messaging_publish_one_exact_runtime_graph(clean_author
             "provider.chat-completions"
         ]
         assert "secret.invalid" not in request.prepared.body.decode()
+        assert "data:image/png;base64," in request.prepared.body.decode()
         owner = await agent_runtime.acquire_run("agent/run/test", "agent-worker/test")
         executor = DurableAgentModelExecutor(
             agent=agent_runtime,

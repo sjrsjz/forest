@@ -634,11 +634,12 @@ class DurableAgentModelExecutor:
             repair_view=repair_view,
         )
         manifest = bound.prepared.manifest
-        projection = await self._payload(
-            bound.component_id,
-            "model.projection",
-            step.request_id,
-            bound.prepared.manifest_json.encode("utf-8"),
+        projection = AgentPayloadRef(
+            bound.projection.payload_id,
+            bound.projection.digest,
+            bound.projection.owner_component_id,
+            bound.projection.owner_kind,
+            bound.projection.owner_id,
         )
         await self.agent.prepare_model_request(
             owner,
@@ -657,20 +658,6 @@ class DurableAgentModelExecutor:
                 output_token_budget=bound.prepared.max_output_tokens,
             ),
         )
-        wire = await self._payload(
-            bound.component_id,
-            "model.wire",
-            step.attempt_id,
-            bound.prepared.body,
-        )
-        await self.agent.prepare_model_attempt(
-            owner,
-            request_id=step.request_id,
-            attempt_id=step.attempt_id,
-            effect_operation_ref=step.effect_operation_ref,
-            wire=wire,
-        )
-
         if self.model_effects is None:
             raise ForestError(
                 "MODEL_EFFECT_PORT_UNAVAILABLE",

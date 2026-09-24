@@ -68,7 +68,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "1.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "a002dc612f37e0050d4bd89310ea9bb7c49101a85f29a3291498e2b62fc43214"
+baseline_sha256 = "5136321cbc470264172ef76a5f1f6385af08c0ddc1c892c2a0dfe34f71d19182"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -204,7 +204,7 @@ output_schema = "schemas/model-attempt-output.json"
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/wire"
 owner_component_path = "/input/wire/owner_component_id"
-owner_kind = "model.wire"
+owner_kind = "effect.wire"
 owner_id_path = "/input/wire/owner_id"
 
 [[components.unit_of_work_participants]]

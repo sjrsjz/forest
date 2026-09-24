@@ -13,9 +13,9 @@ from forest.clean_agent_management import CleanAgentManagementContract
 from forest.clean_agent_runtime import CleanAgentRuntime
 from forest.errors import ForestError
 from forest.model_effect_execution import KernelModelEffectExecutionPort
-from forest.models import MediaSnapshot, ModelCapabilities, prepare_model_request
+from forest.models import ModelCapabilities, PreparedModelRequest
 from forest.packages import digest_json
-from forest.provider_protocol import BoundProviderRequest
+from forest.provider_protocol import BoundProviderRequest, ProviderPayloadRef
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_modules import (
     RuntimeManagementContribution,
@@ -40,10 +40,47 @@ class CleanAgentModule:
 
 
 class _RoutedChatProvider:
-    """Agent-owned projection bound to an immutable Provider profile."""
+    """Bind Agent input refs to one immutable Provider Generation."""
 
-    def __init__(self, bind) -> None:
+    def __init__(self, bind, materialize, payloads) -> None:
         self._bind = bind
+        self._materialize = materialize
+        self._payloads = payloads
+
+    async def _put_input(self, owner_id: str, value: dict) -> ProviderPayloadRef:
+        epoch = await self._payloads.epoch()
+        saved = await self._payloads.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="model.input",
+            owner_id=owner_id,
+            media_type="application/json",
+            content=json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8"),
+            expected_deletion_epoch=epoch,
+        )
+        return ProviderPayloadRef(
+            saved.payload_id,
+            saved.content_digest,
+            "agent.runtime",
+            "model.input",
+            owner_id,
+        )
+
+    @staticmethod
+    def _payload_ref(value: dict) -> ProviderPayloadRef:
+        try:
+            return ProviderPayloadRef(**value)
+        except (TypeError, ValueError) as exc:
+            raise ForestError(
+                "PROVIDER_MATERIALIZATION_INVALID",
+                "Provider returned an invalid managed payload reference",
+                502,
+            ) from exc
 
     async def prepare_request(
         self,
@@ -85,19 +122,92 @@ class _RoutedChatProvider:
                 "Provider profile differs from its routed Generation",
                 409,
             )
-        prepared = prepare_model_request(
-            snapshot,
-            capabilities,
-            request_id=request_id,
-            transport_attempt_id=transport_attempt_id,
-            preset_context=preset_context,
-            tools=tools,
-            media=media,
-            output_tokens=output_tokens,
-            stream=stream,
-            evidence=evidence,
-            repair_view=repair_view,
+        input_ref = await self._put_input(
+            transport_attempt_id,
+            {
+                "protocol": "forest.agent-model-input/1",
+                "request_id": request_id,
+                "transport_attempt_id": transport_attempt_id,
+                "snapshot": snapshot,
+                "preset_context": list(preset_context),
+                "tools": list(tools),
+                "evidence": evidence,
+                "repair": (
+                    {
+                        "repair_count": repair_view.repair_count,
+                        "error_code": repair_view.error_code,
+                        "validation_reason": repair_view.validation_reason,
+                        "candidate_digest": repair_view.candidate_digest,
+                        "feedback": repair_view.invalid_candidate,
+                    }
+                    if repair_view is not None
+                    else None
+                ),
+                "output_tokens": output_tokens,
+                "stream": stream,
+            },
         )
+        assets = []
+        seen = set()
+        for asset in (media or {}).values():
+            identity = (asset["source_unit_id"], asset["part_id"])
+            if identity not in seen:
+                assets.append(asset)
+                seen.add(identity)
+        materialized = await self._materialize.invoke(
+            {
+                "protocol": "forest.provider-materialize/1",
+                "component_id": profile["component_id"],
+                "generation_id": profile["generation_id"],
+                "profile_ref": profile["profile_ref"],
+                "capability_digest": profile["capability_digest"],
+                "request_id": request_id,
+                "transport_attempt_id": transport_attempt_id,
+                "input": input_ref.as_dict(),
+                "media": assets,
+            },
+            operation_id="provider-materialize:" + digest_json(transport_attempt_id)[7:],
+            causal_root_kind="agent.model",
+            causal_root_id=request_id,
+            timeout_seconds=30,
+        )
+        if any(
+            materialized.get(key) != expected
+            for key, expected in {
+                "component_id": profile["component_id"],
+                "generation_id": profile["generation_id"],
+                "profile_ref": profile["profile_ref"],
+                "capability_digest": profile["capability_digest"],
+                "request_id": request_id,
+                "transport_attempt_id": transport_attempt_id,
+            }.items()
+        ):
+            raise ForestError(
+                "PROVIDER_MATERIALIZATION_FENCE_MISMATCH",
+                "Provider materialization differs from its bound Generation",
+                409,
+            )
+        projection = self._payload_ref(materialized["projection"])
+        wire = self._payload_ref(materialized["wire"])
+        bodies = await self._payloads.read_verified_batch((projection, wire))
+        try:
+            prepared = PreparedModelRequest(
+                request_id,
+                transport_attempt_id,
+                bodies[1],
+                bodies[0].decode("utf-8"),
+                wire.digest,
+                materialized["max_output_tokens"],
+                materialized["stream"],
+                materialized["serializer_revision"],
+            )
+            prepared.verify()
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ForestError(
+                "PROVIDER_MATERIALIZATION_INVALID",
+                "Provider materialized an invalid model request",
+                502,
+            ) from exc
         return BoundProviderRequest(
             component_id=profile["component_id"],
             generation_id=profile["generation_id"],
@@ -105,6 +215,8 @@ class _RoutedChatProvider:
             capability_digest=profile["capability_digest"],
             capabilities=capabilities,
             prepared=prepared,
+            projection=projection,
+            wire=wire,
         )
 
 
@@ -119,10 +231,8 @@ class _RoutedMemory:
 
 
 class _RoutedMedia:
-    def __init__(self, resolve_context, payloads, bot_id: str) -> None:
+    def __init__(self, resolve_context) -> None:
         self._resolve_context = resolve_context
-        self._payloads = payloads
-        self._bot_id = bot_id
 
     async def resolve_context(self, snapshot):
         items = []
@@ -157,37 +267,9 @@ class _RoutedMedia:
             timeout_seconds=20,
         )
         result = {}
-        async with self._payloads.store.pool.connection() as conn, conn.transaction():
-            epoch = await self._payloads.epoch_in(conn)
-            for asset in resolved["assets"]:
-                reference = asset["payload"]
-                await self._payloads.verify_in(
-                    conn,
-                    payload_id=reference["payload_id"],
-                    digest=reference["digest"],
-                    owner_component_id=reference["owner_component_id"],
-                    owner_kind=reference["owner_kind"],
-                    owner_id=reference["owner_id"],
-                )
-                content = await self._payloads.read_bytes_in(
-                    conn,
-                    reference["payload_id"],
-                    expected_deletion_epoch=epoch,
-                )
-                image = MediaSnapshot(
-                    self._bot_id,
-                    asset["media_ref"],
-                    asset["media_revision"],
-                    asset["source_unit_id"],
-                    asset["part_id"],
-                    asset["media_type"],
-                    content,
-                    reference["digest"],
-                    asset["width"],
-                    asset["height"],
-                )
-                result[(asset["source_unit_id"], asset["part_id"])] = image
-                result[asset["media_ref"]] = image
+        for asset in resolved["assets"]:
+            result[(asset["source_unit_id"], asset["part_id"])] = asset
+            result[asset["media_ref"]] = asset
         return result
 
 
@@ -379,19 +461,24 @@ async def bootstrap_clean_agent(
         provider_dispatch = contracts.service(
             "provider.model.dispatch", 1, owned_work=True
         )
+        provider_materialize = contracts.service(
+            "provider.request.materialize", 1, owned_work=True
+        )
         runtime = CleanAgentRuntime(
             repository=repository,
             module_configuration=configuration,
             grants=grants,
             payloads=kernel.payload,
-            provider=_RoutedChatProvider(provider_bind),
+            provider=_RoutedChatProvider(
+                provider_bind,
+                provider_materialize,
+                kernel.payload,
+            ),
             memory=_RoutedMemory(
                 contracts.service("memory.recall", 1, owned_work=True),
             ),
             media=_RoutedMedia(
                 contracts.service("media.context.resolve", 1, owned_work=True),
-                kernel.payload,
-                store.bot_id,
             ),
             cancel_wake=contracts.service(
                 "kernel.uow.agent.cancel-wake",

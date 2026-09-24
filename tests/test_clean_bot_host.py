@@ -742,8 +742,10 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         }
                     ]
                     image = resolved_media[("input:image-test", "input:image-test:0")]
-                    assert image.content == b"fake-png-bytes"
-                    assert (image.width, image.height) == (2, 3)
+                    assert await host.kernel.payload.read_bytes(
+                        image["payload"]["payload_id"]
+                    ) == b"fake-png-bytes"
+                    assert (image["width"], image["height"]) == (2, 3)
                     async with host.store.pool.connection() as conn:
                         inbox = await (
                             await conn.execute(

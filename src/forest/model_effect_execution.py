@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -10,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from forest.errors import ForestError
 from forest.models import ModelResult
 from forest.packages import digest_json
+from forest.storage.agent_runtime_authority import AgentPayloadRef
 
 
 def _canonical(value: dict) -> bytes:
@@ -122,8 +122,8 @@ class KernelModelEffectExecutionPort:
             "prepared": {
                 "request_id": prepared.request_id,
                 "transport_attempt_id": prepared.transport_attempt_id,
-                "body_base64": base64.b64encode(prepared.body).decode("ascii"),
-                "manifest_json": prepared.manifest_json,
+                "projection": bound.projection.as_dict(),
+                "wire": bound.wire.as_dict(),
                 "payload_digest": prepared.payload_digest,
                 "max_output_tokens": prepared.max_output_tokens,
                 "stream": prepared.stream,
@@ -133,24 +133,25 @@ class KernelModelEffectExecutionPort:
         wire = _canonical(dispatch)
         input_payload = await self._payload("effect.input", effect_id, wire)
         wire_payload = await self._payload("effect.wire", attempt_id, wire)
-        await self.effects.admit(
-            effect_operation_id=effect_id,
-            input_digest=input_digest,
-            effect_kind="provider.model.dispatch",
-            target_kind="component.service",
-            target_id=f"{bound.component_id}/provider.model.dispatch",
-            producer_component_id="agent.runtime",
-            producer_generation_id=self.agent.generation_identity.generation_id,
-            root_operation_kind="agent.model",
-            root_operation_id=request_id,
-            input_payload_id=input_payload.payload_id,
-            input_payload_digest=input_payload.content_digest,
-        )
         graph = await self.runtime.verify_generation_member(
             component_id=bound.component_id,
             generation_id=bound.generation_id,
         )
         async with self.effects.store.pool.connection() as conn, conn.transaction():
+            await self.effects.admit_in(
+                conn,
+                effect_operation_id=effect_id,
+                input_digest=input_digest,
+                effect_kind="provider.model.dispatch",
+                target_kind="component.service",
+                target_id=f"{bound.component_id}/provider.model.dispatch",
+                producer_component_id="agent.runtime",
+                producer_generation_id=self.agent.generation_identity.generation_id,
+                root_operation_kind="agent.model",
+                root_operation_id=request_id,
+                input_payload_id=input_payload.payload_id,
+                input_payload_digest=input_payload.content_digest,
+            )
             permit = await self.effects.permit_in(
                 conn,
                 effect_operation_id=effect_id,
@@ -169,6 +170,20 @@ class KernelModelEffectExecutionPort:
                 fence_id=graph.graph_id,
                 fence_epoch=graph.graph_revision,
                 deadline_at=expires_at,
+            )
+            await self.agent.prepare_model_attempt_in(
+                conn,
+                owner,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                effect_operation_ref=effect_id,
+                wire=AgentPayloadRef(
+                    wire_payload.payload_id,
+                    wire_payload.content_digest,
+                    "kernel.effect",
+                    "effect.wire",
+                    attempt_id,
+                ),
             )
             await self.effects.mark_handoff_in(
                 conn,

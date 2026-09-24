@@ -36,7 +36,7 @@
 
 | 组件 | builtin 包 | 当前边界 |
 |---|---|---|
-| Provider | `provider_chat_completions` | Worker 拥有 profile；Generation Effect Driver 拥有 HTTP/Secret |
+| Provider | `provider_chat_completions` | Worker 拥有 profile；同代 materialize/dispatch driver 通过 PayloadRef 生成模型投影、读取媒体并执行 HTTP；Secret 不进入 Worker |
 | 多模态 Embedding | `embedding_multimodal` | Worker 拥有模型投影；VL profile 随 Bot 生命周期冻结 |
 | 向量索引 | `vector_index_milvus` | Milvus 只保存派生向量；Bot 库保存 ref 与权威来源 |
 | Media | `media_capture` | Worker/owned work 管理抓取状态；Effect Driver 管理外部下载 |

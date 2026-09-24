@@ -456,11 +456,11 @@ async def test_cancel_request_fences_a_prepared_model_attempt_before_handoff(
     await agent.prepare_model_request(owner, plan)
     wire = await _payload(
         payloads,
-        owner_kind="model.wire",
+        owner_kind="effect.wire",
         owner_id="attempt/cancel-fence",
         body=b'{"wire":"exact"}',
         source_id="run/one",
-        owner_component_id="provider.test",
+        owner_component_id="kernel.effect",
     )
     await agent.prepare_model_attempt(
         owner,
@@ -561,11 +561,11 @@ async def test_recovered_model_retry_limit_fails_without_another_dispatch(
         attempt_id = f"attempt/retry-limit/{attempt_number}"
         wire = await _payload(
             payloads,
-            owner_kind="model.wire",
+            owner_kind="effect.wire",
             owner_id=attempt_id,
             body=b'{"wire":"exact"}',
             source_id="run/retry-limit",
-            owner_component_id="provider.test",
+            owner_component_id="kernel.effect",
         )
         await repository.prepare_model_attempt(
             owner,
@@ -676,11 +676,11 @@ async def test_cancel_and_model_handoff_race_has_one_durable_order(
     await agent.prepare_model_request(owner, plan)
     wire = await _payload(
         payloads,
-        owner_kind="model.wire",
+        owner_kind="effect.wire",
         owner_id="attempt/cancel-race",
         body=b'{"wire":"exact"}',
         source_id="run/one",
-        owner_component_id="provider.test",
+        owner_component_id="kernel.effect",
     )
     await agent.prepare_model_attempt(
         owner,
@@ -1105,11 +1105,11 @@ async def _prepare_dispatched(agent, payloads, owner, suffix: str):
     assert caught.value.code == "AGENT_INPUT_BOUNDARY_CLOSED"
     wire = await _payload(
         payloads,
-        owner_kind="model.wire",
+        owner_kind="effect.wire",
         owner_id=f"attempt/{suffix}",
         body=b'{"wire":"exact"}',
         source_id="run/one",
-        owner_component_id="provider.test",
+        owner_component_id="kernel.effect",
     )
     attempt = await agent.prepare_model_attempt(
         owner,
@@ -1150,11 +1150,11 @@ async def _prepare_repair_dispatched(agent, payloads, owner, suffix: str):
     request = await agent.prepare_model_request(owner, plan)
     wire = await _payload(
         payloads,
-        owner_kind="model.wire",
+        owner_kind="effect.wire",
         owner_id=f"attempt/{suffix}",
         body=b'{"wire":"repair"}',
         source_id="run/one",
-        owner_component_id="provider.test",
+        owner_component_id="kernel.effect",
     )
     attempt = await agent.prepare_model_attempt(
         owner,

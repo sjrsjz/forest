@@ -11,19 +11,47 @@
     "generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "profile_ref": {"type": "string", "pattern": "^profile:[0-9a-f]{64}$"},
     "capability_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "prepared": {"$ref": "#/$defs/prepared"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "provider.chat-completions"},
+        "owner_kind": {"enum": ["model.projection", "model.wire"]},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    },
     "prepared": {
       "type": "object", "additionalProperties": false,
-      "required": ["request_id", "transport_attempt_id", "body_base64", "manifest_json", "payload_digest", "max_output_tokens", "stream", "serializer_revision"],
+      "required": ["request_id", "transport_attempt_id", "projection", "wire", "payload_digest", "max_output_tokens", "stream", "serializer_revision"],
       "properties": {
-        "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "transport_attempt_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "body_base64": {"type": "string", "minLength": 1, "maxLength": 8388608},
-        "manifest_json": {"type": "string", "minLength": 2, "maxLength": 8388608},
-        "payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "transport_attempt_id": {"$ref": "#/$defs/id"},
+        "projection": {"$ref": "#/$defs/projection"},
+        "wire": {"$ref": "#/$defs/wire"},
+        "payload_digest": {"$ref": "#/$defs/digest"},
         "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 262144},
         "stream": {"type": "boolean"},
         "serializer_revision": {"type": "string", "minLength": 1, "maxLength": 256}
       }
+    },
+    "projection": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "model.projection"}}}
+      ]
+    },
+    "wire": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "model.wire"}}}
+      ]
     }
   }
 }

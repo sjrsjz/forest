@@ -36,8 +36,8 @@
       "properties": {
         "payload_id": {"$ref": "#/$defs/id"},
         "digest": {"$ref": "#/$defs/digest"},
-        "owner_component_id": {"$ref": "#/$defs/id"},
-        "owner_kind": {"const": "model.wire"},
+        "owner_component_id": {"const": "kernel.effect"},
+        "owner_kind": {"const": "effect.wire"},
         "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
       },
       "additionalProperties": false

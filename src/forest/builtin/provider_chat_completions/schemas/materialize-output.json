@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "component_id", "generation_id", "profile_ref", "capability_digest",
+    "request_id", "transport_attempt_id", "projection", "wire",
+    "projected_content_digest", "source_manifest_digest", "max_output_tokens",
+    "stream", "serializer_revision"
+  ],
+  "properties": {
+    "protocol": {"const": "forest.provider-materialized/1"},
+    "component_id": {"const": "provider.chat-completions"},
+    "generation_id": {"$ref": "#/$defs/id"},
+    "profile_ref": {"type": "string", "pattern": "^profile:[0-9a-f]{64}$"},
+    "capability_digest": {"$ref": "#/$defs/digest"},
+    "request_id": {"$ref": "#/$defs/id"},
+    "transport_attempt_id": {"$ref": "#/$defs/id"},
+    "projection": {"$ref": "#/$defs/projection"},
+    "wire": {"$ref": "#/$defs/wire"},
+    "projected_content_digest": {"$ref": "#/$defs/digest"},
+    "source_manifest_digest": {"$ref": "#/$defs/digest"},
+    "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 262144},
+    "stream": {"type": "boolean"},
+    "serializer_revision": {"type": "string", "minLength": 1, "maxLength": 256}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "provider.chat-completions"},
+        "owner_kind": {"enum": ["model.projection", "model.wire"]},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "projection": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "model.projection"}}}
+      ]
+    },
+    "wire": {
+      "allOf": [
+        {"$ref": "#/$defs/payload"},
+        {"properties": {"owner_kind": {"const": "model.wire"}}}
+      ]
+    }
+  }
+}

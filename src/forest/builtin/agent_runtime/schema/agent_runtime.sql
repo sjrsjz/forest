@@ -1338,7 +1338,8 @@ BEGIN
          OR effect_permit->>'attempt_id' IS DISTINCT FROM requested_attempt
          OR effect_permit->>'wire_payload_id' IS DISTINCT FROM wire_value->>'payload_id'
          OR effect_permit->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest'
-         OR wire_value->>'owner_kind' IS DISTINCT FROM 'model.wire'
+         OR wire_value->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+         OR wire_value->>'owner_kind' IS DISTINCT FROM 'effect.wire'
        OR wire_value->>'owner_id' IS DISTINCT FROM requested_attempt THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -1404,9 +1405,7 @@ BEGIN
             )
         );
     END IF;
-      IF wire_value->>'owner_component_id'
-         IS DISTINCT FROM request_row.provider_component_id
-         OR effect_permit->>'executor_component_id'
+      IF effect_permit->>'executor_component_id'
             IS DISTINCT FROM request_row.provider_component_id
          OR effect_permit->>'executor_generation_id'
             IS DISTINCT FROM request_row.provider_generation_id
@@ -1415,7 +1414,7 @@ BEGIN
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','AGENT_MODEL_ATTEMPT_INPUT_INVALID',
-                'message','Model wire owner differs from the frozen provider','status',422
+                'message','Model executor differs from the frozen provider','status',422
             )
         );
     END IF;

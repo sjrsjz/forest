@@ -341,8 +341,8 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert prepared_request["state"] == "READY"
         wire = await _payload(
             kernel,
-            owner_component_id="provider.chat",
-            owner_kind="model.wire",
+            owner_component_id="kernel.effect",
+            owner_kind="effect.wire",
             owner_id="model-attempt/package/1",
             value=b'{"model":"model/package-test","messages":[]}',
         )
@@ -594,8 +594,8 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert repair_request["step_seq"] == 2
         repair_wire = await _payload(
             kernel,
-            owner_component_id="provider.chat",
-            owner_kind="model.wire",
+            owner_component_id="kernel.effect",
+            owner_kind="effect.wire",
             owner_id="model-attempt/package/repair",
             value=b'{"model":"model/package-test","repair":true}',
         )

@@ -248,6 +248,22 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
         async def close(self):
             events.append("close")
 
+    class MaterializeDriver:
+        async def start(self):
+            pass
+
+        async def invoke(self, payload, *, scope, invocation):
+            return payload
+
+        async def quiesce(self):
+            pass
+
+        async def resume(self):
+            pass
+
+        async def close(self):
+            pass
+
     adapter = PackageGenerationAdapter(
         snapshot=snapshot,
         bot_id="bot-package-runtime",
@@ -259,10 +275,11 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
         generation_member_verifier=lambda **_values: None,
         state_queries=None,
         state_commands=None,
-        service_operation_ledger=EffectServiceLedger(),
-        effect_driver_factories={
-            "provider.model.dispatch": lambda *_values: Driver()
-        },
+            service_operation_ledger=EffectServiceLedger(),
+            effect_driver_factories={
+                "provider.request.materialize": lambda *_values: MaterializeDriver(),
+                "provider.model.dispatch": lambda *_values: Driver()
+            },
     )
     context = PreparedGenerationContext(
         activation_id="effect-generation",
