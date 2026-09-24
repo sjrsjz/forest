@@ -63,3 +63,103 @@ class MemoryGraph(Plugin):
             "fusion_policy_revision": self.profile["fusion_policy_revision"],
             "retrieval": self.profile["retrieval"],
         }
+
+    @service(
+        "agent.tool.memory-exact-recall",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/tool-execute-input.json",
+        output_schema="schemas/tool-execute-output.json",
+    )
+    async def exact_recall(self, payload, ctx):
+        if (
+            payload["generation_id"] != ctx.identity["generation_id"]
+            or payload["component_id"] != "memory.graph"
+            or payload["service_id"] != "agent.tool.memory-exact-recall"
+        ):
+            raise ForestError(
+                "MEMORY_TOOL_FENCE_MISMATCH",
+                "Exact recall command belongs to another Memory Generation",
+                409,
+            )
+        exact = await ctx.queries.call(
+            "memory.read-exact-sources",
+            {"source_unit_ids": payload["arguments"]["source_unit_ids"]},
+            timeout=15,
+        )
+        parents = []
+        evidence = []
+        for unit in exact["evidence"]:
+            parts = []
+            for part in unit["parts"]:
+                reference = part["payload"]
+                parents.append(reference)
+                if part["part_kind"] == "TEXT":
+                    try:
+                        text = (await ctx.payloads.read_bytes(reference)).decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ForestError(
+                            "MEMORY_TEXT_INVALID",
+                            "Archived text memory is not valid UTF-8",
+                            409,
+                        ) from exc
+                    parts.append(
+                        {
+                            "part_id": part["part_id"],
+                            "type": "text",
+                            "text": text,
+                        }
+                    )
+                else:
+                    parts.append(
+                        {
+                            "part_id": part["part_id"],
+                            "type": "image",
+                            "media_ref": reference,
+                            "media_type": part["media_type"],
+                            "width": part["width"],
+                            "height": part["height"],
+                        }
+                    )
+            source = {
+                "source_id": unit["source_id"],
+                "source_kind": unit["source_kind"],
+                "platform": unit["platform"],
+                "realm_id": unit["realm_id"],
+                "group_id": unit["external_group_id"],
+                "trunk_id": unit["trunk_id"],
+            }
+            evidence.append(
+                {
+                    "source_unit_id": unit["source_unit_id"],
+                    "source_revision": unit["source_revision"],
+                    "source": source,
+                    "author": {
+                        "principal_ref": unit["author_subject_ref"],
+                        "identity_origin": "memory_verified",
+                    },
+                    "occurred_at": unit["occurred_at"],
+                    "parts": parts,
+                }
+            )
+        result = await ctx.payloads.put_json(
+            {
+                "protocol": "forest.memory-exact-recall-result/2",
+                "retrieval_method": "exact_source_unit_id",
+                "evidence": evidence,
+                "missing_source_unit_ids": exact["missing_source_unit_ids"],
+            },
+            owner_kind="tool.result",
+            owner_id=payload["tool_call_id"],
+            parents=tuple(parents),
+        )
+        return {
+            "protocol": "forest.agent-tool-receipt/1",
+            "status": "SUCCEEDED",
+            "tool_call_id": payload["tool_call_id"],
+            "effect_operation_id": payload["effect_operation_id"],
+            "effect_attempt_id": payload["effect_attempt_id"],
+            "result": result,
+            "error_code": None,
+            "observation_ref": "memory-exact-recall:" + payload["tool_call_id"],
+        }

@@ -30,7 +30,7 @@
 
 这些能力构成 builtin 模块系统本身。业务组件只有经过这些端口运行，才算使用了该系统。
 
-包 manifest 现在同时支持消费 `agent-tools` 冻结目录和通过 `components.agent_tools` 发布工具。发布项必须静态绑定本包声明的 service major 与不可变工具声明，随后进入 descriptor digest、RuntimeGraph 唯一路由和 Generation 动态依赖；宿主不能再替 builtin 模块注入工具贡献。冻结目录已有 `dispatch-prepared` 端口：它逐项复核 binding、目标 component/Generation/service、Kernel Effect `DISPATCHING` attempt、permit 和规范 command digest 后才调用包 service。Agent 侧的工具 prepare/handoff/observe UoW 和 builtin 工具迁移尚未完成，因而主链仍不可用。
+包 manifest 现在同时支持消费 `agent-tools` 冻结目录和通过 `components.agent_tools` 发布工具。发布项必须静态绑定本包声明的 service major 与不可变工具声明，随后进入 descriptor digest、RuntimeGraph 唯一路由和 Generation 动态依赖；宿主不能再替 builtin 模块注入工具贡献。冻结目录已有 `dispatch-prepared` 端口：它逐项复核 binding、目标 component/Generation/service、Kernel Effect `DISPATCHING` attempt、permit 和规范 command digest 后才调用包 service。Agent 侧已有工具 prepare/handoff/observe UoW，Memory 精确召回已成为首个通过该边界发布的 builtin 工具；审批和 handoff 后查询恢复仍未完成。
 
 ## 3. 当前生产装配
 
@@ -61,7 +61,7 @@
 |---|---|---|---|
 | Agent | `bootstrap_clean_agent()` | `builtin/agent_runtime` | Worker 内 `agent.execute/2`、Provider/Tool/Payload 端口、管理贡献、Conversation 原子交接、生产切换 |
 | Conversation | `bootstrap_clean_messaging()` | `builtin/conversation_scheduler` | Agent 调度入口、final-reply/session-handoff plans、生产 poller/owned work 切换 |
-| Memory | `bootstrap_clean_memory()` | `builtin/memory_graph` | 捕获/嵌入/召回 Worker 与端口、完整管理查询、生产切换 |
+| Memory | `bootstrap_clean_memory()` | `builtin/memory_graph` | 捕获/嵌入/图召回 Worker 与端口、完整管理查询、生产切换；精确来源召回已迁入包 |
 
 `clean_*` 是重构期间遗留的宿主实现名称，不是新的模块层。对应 builtin 完成生产切换后，应直接删除这些文件和旧 baseline，不保留兼容转发。
 
@@ -84,9 +84,9 @@
 
 Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复、非审批 ToolCall 的 Effect 执行以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
 
-这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，handoff 后的 `UNKNOWN` 尚未通过 `query_handed_off` 对账，现有宿主 Memory/Runtime 工具也尚未迁成可序列化 builtin 服务；Conversation 仍未贡献 `conversation.agent-run.pending`、最终回复和 Session 交接 owned-work。因此 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“`agent.execute/2` 已有正常非审批工具路径”表述成“生产主链已经切换”。
+这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，handoff 后的 `UNKNOWN` 尚未通过 `query_handed_off` 对账，宿主 Runtime 状态工具尚未迁成可序列化 builtin 服务；Conversation 仍未贡献 `conversation.agent-run.pending`、最终回复和 Session 交接 owned-work。因此 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“`agent.execute/2` 已有正常非审批工具路径”表述成“生产主链已经切换”。
 
-包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
+包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；提交结果由 SDK 强制收敛为五字段 PayloadRef，传输元数据不能混入跨模块引用。单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
 Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；旧宿主 Agent 过渡执行器和新的包内 model attempt 都只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。Effect/Agent 私有 schema 已用独立 PostgreSQL 重建验证；完整 Agent 执行循环仍待接入 Worker 公共服务。
 
@@ -98,15 +98,17 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 ## 7. Memory 候选包已经拥有的部分
 
-`builtin/memory_graph` 已经是可由 `PackageCatalog` 构建的独立包，声明自己的隔离 Worker、私有 storage baseline、Generation 配置、管理 UI 和 `memory.qualify-input-batch/1` UnitOfWork participant。嵌入配置将 `TEXT_IMAGE` 模型种类、部署标识、模型修订、维数与归一化方式绑定到 Bot 模块生命周期；端点轮换仍应由后续受限 Effect 配置承担，不能在已创建 Bot 上改换模型种类。
+`builtin/memory_graph` 已经是可由 `PackageCatalog` 构建的独立包，声明自己的隔离 Worker、私有 storage baseline、Generation 配置、管理 UI、`memory.qualify-input-batch/1` UnitOfWork participant 和 `memory_recall_exact` Agent 工具。嵌入配置将 `TEXT_IMAGE` 模型种类、部署标识、模型修订、维数与归一化方式绑定到 Bot 模块生命周期；端点轮换仍应由后续受限 Effect 配置承担，不能在已创建 Bot 上改换模型种类。
 
 首个私有状态边界已经封闭 Agent 输入资格确认：Conversation 给出的准确消息切口与 Kernel Payload 删除 epoch 在同一事务进入 Memory；尚未捕获的 event 只登记 `PENDING_CAPTURE`，已有来源 occurrence 从 `REGISTERED` 原子进入 `ADMITTED`，operation 重放不重复产生资格记录。该路径已用真实 PostgreSQL 安装包 baseline 并验证状态转换与 Registry 资源回收。
 
-这仍是候选而非生产切换。消息来源捕获、图片/文本 facet、嵌入预算和异步合流、独立向量索引 ref、QiYu 图区域扩散、超大关联点随机有界采样、跨主干联想、召回 Payload、遗忘，以及带筛选/关系遍历/真实召回试验的管理契约仍需迁入该包。当前 `bootstrap_clean_memory()` 继续构成宿主旁路，完成前不得把 `memory_graph` 目录存在表述为 Memory 已包化。
+精确召回不再调用宿主 `builtin_memory_tool.py`：工具声明由 Memory manifest 发布并静态绑定本包 service，隔离 Worker 经只读 Domain Query 获取最多八个归档稳定 source unit，只有 ACTIVE 来源、`ELIGIBLE` unit 和完整 part 集可见。Worker 按精确 PayloadRef 读取文本、保留图片引用，结果明确携带 source/trunk/group/author provenance，并以原始 part 为父边写入 Memory 所有的 `tool.result`。真实 PostgreSQL 测试已覆盖群主干来源、缺失 ID、Payload 读取/写入、Generation 路由与资源回收。
+
+这仍是候选而非生产切换。消息来源捕获、图片/文本 facet、嵌入预算和异步合流、独立向量索引 ref、QiYu 图区域扩散、超大关联点随机有界采样、跨主干联想、语义召回、遗忘，以及带筛选/关系遍历/真实召回试验的管理契约仍需迁入该包。当前 `bootstrap_clean_memory()` 和旧宿主精确工具注册仍构成生产旁路，完成切换后必须直接删除。
 
 ## 8. 下一切换顺序
 
-1. 将 Memory 精确召回和 Runtime 状态工具迁成 manifest 发布的可序列化服务；补齐持久审批决策与 `query_handed_off` 恢复，禁止保留宿主 `ToolDispatchResult` 旁路。
+1. 将 Runtime 状态工具迁成 manifest 发布的可序列化服务；补齐持久审批决策与 `query_handed_off` 恢复，禁止保留宿主 `ToolDispatchResult` 旁路。
 2. 在 `conversation_scheduler` manifest 中补齐 Agent owned-work、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
 3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
 4. 补齐 `memory_graph` 的捕获、嵌入、图扩散、召回和管理端口，用包内权威状态替换 `bootstrap_clean_memory()`，随后删除宿主 Memory Runtime、Repository 装配和旧 baseline。

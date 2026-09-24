@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from test_schema_bundles import clean_authority as clean_authority
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.packages import PackageCatalog
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 
 
@@ -101,6 +103,14 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         generation_id = instance.generation_identity.generation_id
         participant = instance.unit_of_work_participant()
         payload_participant = registry.get("kernel.payload").unit_of_work_participant()
+        text_payload = await kernel.payload.put_bytes(
+            owner_component_id="conversation.scheduler",
+            owner_kind="context.input",
+            owner_id="unit/event/captured:text",
+            media_type="text/plain; charset=utf-8",
+            content="来自 933179609 群的原始消息".encode(),
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
 
         pending_selection = {
             "status": "BATCH",
@@ -212,6 +222,27 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                     "event/captured",
                 ),
             )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.source_parts("
+                    "bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
+                    "payload_id,payload_digest,payload_owner_component_id,"
+                    "payload_owner_kind,payload_owner_id,byte_length) VALUES ("
+                    "%s,%s,%s,0,'TEXT',%s,%s,%s,%s,%s,%s,%s)"
+                ).format(sql.Identifier(namespace)),
+                (
+                    store.bot_id,
+                    "unit/event/captured",
+                    "part/event/captured/text",
+                    text_payload.media_type,
+                    text_payload.payload_id,
+                    text_payload.content_digest,
+                    "conversation.scheduler",
+                    "context.input",
+                    "unit/event/captured:text",
+                    text_payload.byte_length,
+                ),
+            )
 
         captured_selection = {
             "status": "BATCH",
@@ -257,6 +288,93 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 )
             assert captured["qualified_count"] == 1
             assert captured["pending_count"] == 0
+
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.source_units SET eligibility_state='ELIGIBLE',"
+                    "eligibility_revision=eligibility_revision+1,"
+                    "eligible_at=clock_timestamp(),updated_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND source_unit_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "unit/event/captured"),
+            )
+
+        identity = instance.generation_identity
+        endpoint = instance.runtime_service_handlers()[
+            ("agent.tool.memory-exact-recall", 1)
+        ]
+        receipt = await endpoint.invoke_routed(
+            FrozenServiceRoute(
+                service_id="agent.tool.memory-exact-recall",
+                version=1,
+                caller_component_id="agent.runtime",
+                provider_component_id="memory.graph",
+                provider_generation_id=identity.generation_id,
+                graph_id=identity.graph_id,
+                graph_revision=identity.graph_revision,
+                admission_lane="DATA",
+                owned_work=False,
+            ),
+            RuntimeServiceInvocation(
+                "memory-exact-recall/package-test",
+                20,
+                "agent.tool",
+                "tool-call/memory/package-test",
+            ),
+            (),
+            {
+                "protocol": "forest.agent-tool-execute/1",
+                "tool_call_id": "tool-call/memory/package-test",
+                "effect_operation_id": "effect/memory/package-test",
+                "effect_attempt_id": "attempt/memory/package-test/1",
+                "component_id": "memory.graph",
+                "generation_id": identity.generation_id,
+                "service_id": "agent.tool.memory-exact-recall",
+                "contract_digest": "sha256:" + "5" * 64,
+                "binding_digest": "sha256:" + "6" * 64,
+                "authority_trigger_ref": "event/captured",
+                "authority_principal_ref": "qq:42",
+                "arguments": {
+                    "source_unit_ids": [
+                        "unit/event/captured",
+                        "unit/event/missing",
+                    ]
+                },
+            },
+        )
+        assert receipt["status"] == "SUCCEEDED"
+        assert receipt["effect_attempt_id"] == "attempt/memory/package-test/1"
+        result = json.loads(
+            (await kernel.payload.read_bytes(receipt["result"]["payload_id"])).decode()
+        )
+        assert result["missing_source_unit_ids"] == ["unit/event/missing"]
+        assert result["evidence"] == [
+            {
+                "source_unit_id": "unit/event/captured",
+                "source_revision": 1,
+                "source": {
+                    "source_id": "source/group/933179609",
+                    "source_kind": "GROUP",
+                    "platform": "onebot-v11",
+                    "realm_id": "qq",
+                    "group_id": "933179609",
+                    "trunk_id": "trunk/group/933179609",
+                },
+                "author": {
+                    "principal_ref": "qq:42",
+                    "identity_origin": "memory_verified",
+                },
+                "occurred_at": result["evidence"][0]["occurred_at"],
+                "parts": [
+                    {
+                        "part_id": "part/event/captured/text",
+                        "type": "text",
+                        "text": "来自 933179609 群的原始消息",
+                    }
+                ],
+            }
+        ]
 
         async with store.pool.connection() as conn:
             occurrence = await (

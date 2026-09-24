@@ -957,6 +957,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "protocol": "forest.agent-tool-execute/1",
             "tool_call_id": "tool-call/package/repair",
             "effect_operation_id": "tool-effect/package/repair",
+            "effect_attempt_id": "tool-attempt/package/repair",
             "component_id": "tool.echo",
             "generation_id": "generation/tool/package-test",
             "service_id": "tool.echo.execute",

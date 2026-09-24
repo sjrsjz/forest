@@ -902,9 +902,11 @@ class PayloadsHandle:
                         "data_base64": base64.b64encode(chunk).decode("ascii"),
                     },
                 )
-            return await self._rpc(
-                scope.call_id,
-                {"action": "commit-write", "upload_id": upload_id},
+            return self._reference(
+                await self._rpc(
+                    scope.call_id,
+                    {"action": "commit-write", "upload_id": upload_id},
+                )
             )
         except BaseException:
             try:

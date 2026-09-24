@@ -406,6 +406,7 @@ class FrozenContributionDirectories:
             "protocol",
             "tool_call_id",
             "effect_operation_id",
+            "effect_attempt_id",
             "component_id",
             "generation_id",
             "service_id",
@@ -419,6 +420,7 @@ class FrozenContributionDirectories:
             set(command) != command_fields
             or command.get("protocol") != "forest.agent-tool-execute/1"
             or command.get("effect_operation_id") != request["effect_operation_id"]
+            or command.get("effect_attempt_id") != request["attempt_id"]
             or command.get("component_id") != owner
             or command.get("generation_id") != route.provider_generation_id
             or command.get("service_id") != contribution.service_id

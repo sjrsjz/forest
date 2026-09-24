@@ -162,8 +162,6 @@ async def test_payload_port_moves_large_bodies_by_exact_chunked_reference(tmp_pa
                 "owner_component_id": "probe.component",
                 "owner_kind": declaration["owner_kind"],
                 "owner_id": declaration["owner_id"],
-                "media_type": declaration["media_type"],
-                "byte_length": declaration["byte_length"],
             }
         if action == "abort-write":
             uploads.pop(key, None)

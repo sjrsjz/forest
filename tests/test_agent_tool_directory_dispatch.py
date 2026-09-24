@@ -33,6 +33,7 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         "protocol": "forest.agent-tool-execute/1",
         "tool_call_id": "tool:1",
         "effect_operation_id": "effect:1",
+        "effect_attempt_id": "attempt:1",
         "component_id": "module.owner",
         "generation_id": "generation:owner:1",
         "service_id": "module.inspect",

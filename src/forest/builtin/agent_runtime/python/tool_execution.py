@@ -144,6 +144,7 @@ class ToolExecution:
             "protocol": "forest.agent-tool-execute/1",
             "tool_call_id": tool["tool_call_id"],
             "effect_operation_id": tool["effect_operation_ref"],
+            "effect_attempt_id": attempt_id,
             "component_id": tool["tool_component_id"],
             "generation_id": tool["tool_generation_id"],
             "service_id": tool["tool_service_id"],

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "0.1.0"
+version = "1.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -26,12 +26,34 @@ start_timeout_s = 15
 drain_timeout_s = 960
 stop_timeout_s = 15
 
+[components.capabilities]
+requests = [
+  "payload.read",
+  "payload.write",
+  "domain.query:memory.read-exact-sources"
+]
+
 [[components.provides]]
 name = "memory.profile.describe"
 contract = "2.0"
 semantics = "read"
 input_schema = "schemas/profile-input.json"
 output_schema = "schemas/profile-output.json"
+
+[[components.provides]]
+name = "agent.tool.memory-exact-recall"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/tool-execute-input.json"
+output_schema = "schemas/tool-execute-output.json"
+
+[[components.agent_tools]]
+name = "memory_recall_exact"
+service_id = "agent.tool.memory-exact-recall"
+service_version = 1
+declaration_schema = "schemas/memory-exact-recall-tool.json"
+approval_required = false
+supports_query = false
 
 [components.management_ui]
 entrypoint = "ui/index.html"
@@ -43,12 +65,19 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "2.0.0"
+schema_version = "3.0.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "359a2014a4cc796ad824cc081d6f1998dd20c1a5c33e714befe4bf78a0bb0954"
+baseline_sha256 = "96a00c5bbadf4d750520237d3350f43cfc0df4c1d812fa617f3d45ad8342ea39"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
+
+[[components.domain_queries]]
+name = "memory.read-exact-sources"
+contract = "1.0"
+function = "memory_read_exact_sources"
+input_schema = "schemas/read-exact-input.json"
+output_schema = "schemas/read-exact-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.qualify-input-batch"

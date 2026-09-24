@@ -130,6 +130,4 @@ class KernelPackagePayloadAuthority:
             "owner_component_id": scope.component_id,
             "owner_kind": owner_kind,
             "owner_id": owner_id,
-            "media_type": result.media_type,
-            "byte_length": result.byte_length,
         }

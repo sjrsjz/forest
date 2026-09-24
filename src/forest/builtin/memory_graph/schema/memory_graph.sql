@@ -1295,3 +1295,103 @@ BEGIN
     );
 END;
 $$;
+
+CREATE FUNCTION memory_read_exact_sources(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_ids jsonb := input->'source_unit_ids';
+    evidence_value jsonb;
+    missing_value jsonb;
+BEGIN
+    IF jsonb_typeof(requested_ids) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(requested_ids) NOT BETWEEN 1 AND 8
+       OR (SELECT count(*)<>count(DISTINCT value)
+           FROM jsonb_array_elements_text(requested_ids)) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','MEMORY_EXACT_RECALL_INPUT_INVALID',
+                'message','Exact recall requires one to eight unique source unit IDs',
+                'status',422
+            )
+        );
+    END IF;
+    WITH requested AS (
+        SELECT value AS source_unit_id,ordinality
+        FROM jsonb_array_elements_text(requested_ids) WITH ORDINALITY
+    ), found AS (
+        SELECT r.ordinality,jsonb_build_object(
+            'source_unit_id',u.source_unit_id,
+            'source_revision',u.source_revision,
+            'trunk_id',u.trunk_id,
+            'source_id',u.source_id,
+            'source_kind',s.source_kind,
+            'platform',s.platform,
+            'realm_id',s.realm_id,
+            'external_group_id',s.external_group_id,
+            'author_subject_ref',u.author_subject_ref,
+            'occurred_at',u.occurred_at,
+            'parts',COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'part_id',p.part_id,
+                    'part_index',p.part_index,
+                    'part_kind',p.part_kind,
+                    'media_type',p.media_type,
+                    'payload',jsonb_build_object(
+                        'payload_id',p.payload_id,
+                        'digest',p.payload_digest,
+                        'owner_component_id',p.payload_owner_component_id,
+                        'owner_kind',p.payload_owner_kind,
+                        'owner_id',p.payload_owner_id
+                    ),
+                    'width',p.width,
+                    'height',p.height
+                ) ORDER BY p.part_index,p.part_id)
+                FROM __forest_module_schema__.source_parts p
+                WHERE p.bot_id=requested_bot AND p.source_unit_id=u.source_unit_id
+            ),'[]'::jsonb)
+        ) AS document
+        FROM requested r
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=requested_bot AND u.source_unit_id=r.source_unit_id
+             AND u.eligibility_state='ELIGIBLE'
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+        WHERE (SELECT count(*) FROM __forest_module_schema__.source_parts p
+               WHERE p.bot_id=requested_bot AND p.source_unit_id=u.source_unit_id)
+              = u.part_count
+    )
+    SELECT COALESCE(jsonb_agg(document ORDER BY ordinality),'[]'::jsonb)
+    INTO evidence_value FROM found;
+    WITH requested AS (
+        SELECT value AS source_unit_id,ordinality
+        FROM jsonb_array_elements_text(requested_ids) WITH ORDINALITY
+    )
+    SELECT COALESCE(jsonb_agg(r.source_unit_id ORDER BY r.ordinality)
+        FILTER (WHERE u.source_unit_id IS NULL),'[]'::jsonb)
+    INTO missing_value
+    FROM requested r
+    LEFT JOIN (
+        SELECT u.source_unit_id
+        FROM __forest_module_schema__.source_units u
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+        WHERE u.bot_id=requested_bot AND u.eligibility_state='ELIGIBLE'
+          AND (SELECT count(*) FROM __forest_module_schema__.source_parts p
+               WHERE p.bot_id=requested_bot AND p.source_unit_id=u.source_unit_id)
+              = u.part_count
+    ) u ON u.source_unit_id=r.source_unit_id;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'evidence',evidence_value,
+            'missing_source_unit_ids',missing_value
+        )
+    );
+END;
+$$;
