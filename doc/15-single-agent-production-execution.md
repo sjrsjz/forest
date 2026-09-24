@@ -25,7 +25,7 @@
 | 项目 | 契约 |
 |---|---|
 | owner / namespace | 仅拥有会话连续序、分类水位、trigger、InputBatch、Context、actor lease 和 Worker 任务；写 `conversation_scheduler` 私有 namespace |
-| provides | `conversation.context.snapshot/1`；`conversation.admit-message/1`、`conversation.complete-classification/1`、`conversation.select-input/1`、`conversation.append-context/1`、`conversation.terminal-run/1` 等 participant |
+| provides | `conversation.context.snapshot/2`；`conversation.admit-message/1`、`conversation.complete-classification/1`、`conversation.select-input/1`、`conversation.append-context/1`、`conversation.terminal-run/1` 等 participant |
 | requires | 内核 lifecycle/Contract Router/UnitOfWork，冻结分类结果，`agent.execute/2`；Scheduler 不直接依赖或持有 `delivery` 运行实例 |
 | Generation fence | 本 Generation 控制 Worker admission；每次领取、选批次、追加 Context 和最终提交都校验 actor epoch 与 member generation |
 | concurrency | 数据库 actor lease 保证同群单链；有界 semaphore 只控制跨群并发，进程锁不构成权威 |
@@ -37,14 +37,16 @@
 |---|---|
 | owner / namespace | 仅拥有单 Agent Session/Run、模型轮次、工具步骤、attempt、checkpoint 与 FinalCandidate；写 `agent_runtime` 私有 namespace |
 | provides | `agent.execute/2`、`agent.run-query/1`、`agent.finalize-participant/1` |
-| requires | Provider、工具、Authorization、Effect Gateway、Payload Authority、`conversation.context.snapshot/1`；模型安全点通过 `agent.acquire-model-input/1` UnitOfWork 调用 Conversation 与 Memory 的精确 Generation participant |
+| requires | Provider、工具、Authorization、Effect Gateway、Payload Authority、`conversation.context.snapshot/2`；模型安全点通过 `agent.acquire-model-input/1` UnitOfWork 调用 Conversation 与 Memory 的精确 Generation participant |
 | Generation fence | Run 冻结 Agent spec、Preset、Provider/tool contract 引用；每次外部 handoff 和事务 participant 调用复核 member generation 与 Run owner epoch |
 | concurrency | 同一 Run 只有一个 owner epoch；模型调用和工具因果组顺序闭合，不产生分支 Agent |
 | recovery | 从持久 checkpoint 继续；不可查询的已派发模型/工具进入 `UNKNOWN/BLOCKED_UNKNOWN`，不能换 operation 重发 |
 
 两个模块只交换类型化 DTO、稳定引用和受管 PayloadRef。Scheduler 不持有 Agent Repository 或运行实例；Agent 不持有 Scheduler Repository 或运行实例。Contract Router 句柄不是 Python bound method，必须冻结目标 Generation、契约版本和 admission fence。跨模块原子提交由内核 UnitOfWork 根据计划解析已注册 participant；不能把 participant 对象注入 Scheduler，也不能由任一业务模块直接写其他 namespace。
 
-`agent.execute/2` 的输入是可序列化 DTO，只包含 `conversation_id`、`session_ref`、`run_ref`、初始 `input_batch`、恢复标记以及 Scheduler 签发的 actor lease fence。禁止传递 Python callback、Repository、数据库连接、participant 或宿主对象。Agent 到达下一次模型调用安全点时，用确定性的 step identity 调用自身包声明的 `agent.acquire-model-input/1`；该计划在一个 Bot 数据库事务内依次调用 Conversation 的输入选择 participant 与 Memory 的批次资格 participant。Conversation participant 复核 actor owner/epoch、Session/Run、当前 Scheduler Generation 和连续分类水位，只发布截至最后一个新 trigger 的连续前缀。Agent 随后通过 `conversation.context.snapshot/1` 读取该批次绑定的不可变 ContextView。运行时调用可以形成 `conversation.scheduler -> agent.runtime -> conversation.scheduler` 服务环，但两个方向都必须经过 Contract Router；只有启动依赖边参与无环拓扑，Agent 对 Context 服务的要求声明 `startup_dependency=false`。
+`agent.execute/2` 的输入是可序列化 DTO，只包含 `conversation_id`、`session_ref`、`run_ref`、初始 `input_batch`、恢复标记以及 Scheduler 签发的 actor lease fence。禁止传递 Python callback、Repository、数据库连接、participant 或宿主对象。Agent 到达下一次模型调用安全点时，用确定性的 step identity 调用自身包声明的 `agent.acquire-model-input/1`；该计划在一个 Bot 数据库事务内依次调用 Conversation 的输入选择 participant 与 Memory 的批次资格 participant。Conversation participant 复核 actor owner/epoch、Session/Run、当前 Scheduler Generation 和连续分类水位，只发布截至最后一个新 trigger 的连续前缀。Agent 随后通过 `conversation.context.snapshot/2` 取得不可变 ContextView 的精确 PayloadRef。运行时调用可以形成 `conversation.scheduler -> agent.runtime -> conversation.scheduler` 服务环，但两个方向都必须经过 Contract Router；只有启动依赖边参与无环拓扑，Agent 对 Context 服务的要求声明 `startup_dependency=false`。
+
+Context 快照正文不穿过 Worker 控制帧。Conversation Worker 以最多 32 个活动单元为一页读取自己的权威，逐页写入 `context.snapshot.page`，并把每个正文与作者的完整 PayloadRef 固定为父边；超过 128 页时继续写入 `context.snapshot.index` 中间节点，最终 `context.snapshot` manifest 只引用根节点。每页查询都复核同一 actor lease，Worker 还必须比较所有页的 Context revision、View revision、lane 身份与归档头；分页期间任一 fence 变化就放弃整个调用。这样数月历史经裁剪后仍可有界传输，来源、作者和 archive 关系也不会因序列化大对象而丢失。
 
 模型大载荷不穿过 Worker 控制帧。Agent 先把最终、不可再裁剪的规范输入写为 `agent.runtime/model.input` Payload；Provider Generation 的 `provider.request.materialize/1` 在删除 epoch 栅栏内校验该引用及每个媒体引用，生成 Provider-owned `model.projection` 和 `model.wire`。内核随后把只含精确引用、Provider Generation fence 与授权票据的 dispatch 命令冻结为 `kernel.effect/effect.wire`。Agent model attempt 与 Effect permit 必须在同一 UnitOfWork 中绑定这个 `effect.wire`；Provider driver 复核 Effect permit 后才读取 `model.wire` 并进行 HTTP handoff。`model.wire` 是 Provider HTTP 正文，`effect.wire` 是内核冻结的副作用命令，两者不可混用或声明双重 owner。
 

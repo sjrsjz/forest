@@ -1352,7 +1352,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION conversation_context_snapshot(context jsonb, input jsonb)
+CREATE FUNCTION conversation_context_page(context jsonb, input jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
 STABLE
@@ -1364,18 +1364,25 @@ DECLARE
     requested_conversation text := actor->>'conversation_id';
     requested_owner text := actor->>'owner_id';
     requested_epoch bigint := (actor->>'epoch')::bigint;
+    requested_offset integer := (input->>'offset')::integer;
+    requested_limit integer := (input->>'limit')::integer;
     lane record;
     compaction record;
     units jsonb;
     archive_value jsonb := NULL;
+    total_units bigint;
+    returned_count integer;
+    next_offset integer := NULL;
 BEGIN
     IF actor IS NULL OR requested_conversation IS NULL OR requested_owner IS NULL
-       OR requested_epoch IS NULL OR requested_epoch<1 THEN
+       OR requested_epoch IS NULL OR requested_epoch<1
+       OR requested_offset IS NULL OR requested_offset<0 OR requested_offset>1000000
+       OR requested_limit IS NULL OR requested_limit<1 OR requested_limit>32 THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
-                'code','CONTEXT_SNAPSHOT_INPUT_INVALID',
-                'message','Context snapshot actor is invalid','status',422
+                'code','CONTEXT_PAGE_INPUT_INVALID',
+                'message','Context page request is invalid','status',422
             )
         );
     END IF;
@@ -1407,6 +1414,14 @@ BEGIN
     FROM __forest_module_schema__.context_compactions
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
     ORDER BY published_view_revision DESC LIMIT 1;
+    SELECT count(*) INTO total_units
+    FROM __forest_module_schema__.context_units u
+    WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
+          WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
+            AND cu.unit_id=u.unit_id
+      );
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'conversation_id',u.conversation_id,'unit_id',u.unit_id,
         'context_revision',u.context_revision,'unit_index',u.unit_index,
@@ -1427,13 +1442,22 @@ BEGIN
         'trigger_decision',u.trigger_decision
     ) ORDER BY u.context_revision,u.unit_index),'[]'::jsonb)
     INTO units
-    FROM __forest_module_schema__.context_units u
-    WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
-      AND NOT EXISTS (
-          SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
-          WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
-            AND cu.unit_id=u.unit_id
-      );
+    FROM (
+        SELECT u.*
+        FROM __forest_module_schema__.context_units u
+        WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
+              WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
+                AND cu.unit_id=u.unit_id
+          )
+        ORDER BY u.context_revision,u.unit_index
+        OFFSET requested_offset LIMIT requested_limit
+    ) u;
+    returned_count := jsonb_array_length(units);
+    IF requested_offset+returned_count<total_units THEN
+        next_offset := requested_offset+returned_count;
+    END IF;
     IF compaction IS NOT NULL THEN
         archive_value := jsonb_build_object(
             'compaction_id',compaction.compaction_id,
@@ -1443,24 +1467,15 @@ BEGIN
             'archived_unit_count',compaction.archived_unit_count,
             'cumulative_archived_unit_count',compaction.cumulative_archived_unit_count,
             'first_context_revision',compaction.first_context_revision,
-            'last_context_revision',compaction.last_context_revision
+            'last_context_revision',compaction.last_context_revision,
+            'payload',jsonb_build_object(
+                'payload_id',compaction.archive_payload_id,
+                'digest',compaction.archive_payload_digest,
+                'owner_component_id','conversation.scheduler',
+                'owner_kind','context.archive',
+                'owner_id',compaction.compaction_id
+            )
         );
-        units := jsonb_build_array(jsonb_build_object(
-            'conversation_id',requested_conversation,
-            'unit_id','archive:' || replace(compaction.compaction_id,'compaction:',''),
-            'context_revision',compaction.first_context_revision,'unit_index',0,
-            'kind','CONTROL','source_component_id','conversation.scheduler',
-            'source_kind','context.archive','source_id',compaction.compaction_id,
-            'input_batch_id',NULL,'event_id',NULL,'ingress_seq',NULL,
-            'payload_id',compaction.archive_payload_id,
-            'payload_digest',compaction.archive_payload_digest,
-            'payload_owner_component_id','conversation.scheduler',
-            'payload_owner_kind','context.archive',
-            'payload_owner_id',compaction.compaction_id,
-            'author_payload_id',NULL,'author_payload_digest',NULL,
-            'author_owner_component_id',NULL,'author_owner_kind',NULL,
-            'author_owner_id',NULL,'author_subject_ref',NULL,'trigger_decision',NULL
-        )) || units;
     END IF;
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
@@ -1476,7 +1491,8 @@ BEGIN
             'thread_ref',lane.thread_ref,
             'context_view_unit_count',lane.context_view_unit_count,
             'context_archived_unit_count',lane.context_archived_unit_count,
-            'archive',archive_value,'units',units
+            'archive',archive_value,'offset',requested_offset,
+            'next_offset',next_offset,'total_units',total_units,'units',units
         )
     );
 END;

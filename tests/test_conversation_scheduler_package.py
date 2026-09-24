@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -516,10 +517,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 1)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 2)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=1,
+            version=2,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -547,12 +548,22 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/2"
         assert snapshot["context_view_revision"] == 1
-        assert snapshot["archive"]["compaction_id"] == archive["compaction_id"]
-        assert [unit["source_kind"] for unit in snapshot["units"]] == [
+        assert snapshot["unit_count"] == 2
+        manifest = json.loads(
+            await kernel.payload.read_bytes(snapshot["snapshot"]["payload_id"])
+        )
+        assert manifest["archive"]["compaction_id"] == archive["compaction_id"]
+        assert manifest["tree_depth"] == 0
+        assert len(manifest["roots"]) == 1
+        page = json.loads(
+            await kernel.payload.read_bytes(manifest["roots"][0]["payload_id"])
+        )
+        assert [unit["source_kind"] for unit in page["units"]] == [
             "context.archive",
             "conversation.input",
         ]
-        assert snapshot["units"][1]["author_subject_ref"] == "qq:43"
+        assert page["units"][1]["author_subject_ref"] == "qq:43"
     finally:
         assert await registry.close() == []

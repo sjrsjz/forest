@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "2.0.0"
+version = "3.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -28,32 +28,33 @@ stop_timeout_s = 10
 
 [components.capabilities]
 requests = [
-  "domain.query:conversation.context-snapshot",
+  "payload.write",
+  "domain.query:conversation.context-page",
   "uow.execute:conversation.commit-silent-input"
 ]
 
 [[components.provides]]
 name = "conversation.context.snapshot"
-contract = "1.0"
-semantics = "read"
+contract = "2.0"
+semantics = "idempotent"
 input_schema = "schemas/context-snapshot-input.json"
 output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "2.0.0"
+schema_version = "3.0.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "001ca7c78ae8845738d6d6482668d83167bd627535455305a9b19214ebb549db"
+baseline_sha256 = "aef209abbd71b26366c187f75a6ced87f6122937d19274615dca74464e8237a6"
 scope = "bot"
-repository_contract = "forest.conversation-scheduler.repository/2"
+repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
 
 [[components.domain_queries]]
-name = "conversation.context-snapshot"
+name = "conversation.context-page"
 contract = "1.0"
-function = "conversation_context_snapshot"
-input_schema = "schemas/context-snapshot-input.json"
-output_schema = "schemas/context-snapshot-output.json"
+function = "conversation_context_page"
+input_schema = "schemas/context-page-input.json"
+output_schema = "schemas/context-page-output.json"
 
 [[components.unit_of_work_participants]]
 name = "conversation.admit-message"
