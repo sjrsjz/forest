@@ -910,7 +910,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "service_id": "tool.echo.execute",
                     "tool_contract_digest": digest_json({"contract": "tool.echo/1"}),
                     "tool_binding_digest": digest_json({"binding": "tool.echo/1"}),
-                    "approval_required": True,
+                    "approval_required": False,
                     "supports_query": True,
                     "authority_trigger_ref": "trigger/model-port",
                     "effect_operation_ref": "tool-effect/package/repair",
@@ -950,63 +950,156 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert repaired_recovery["tool_call"]["tool_generation_id"] == (
             "generation/tool/package-test"
         )
-        wait_tool_envelope = {
+        assert repaired_recovery["tool_call"]["arguments_payload_digest"] == (
+            tool_arguments.digest
+        )
+        tool_command = {
+            "protocol": "forest.agent-tool-execute/1",
+            "tool_call_id": "tool-call/package/repair",
+            "effect_operation_id": "tool-effect/package/repair",
+            "component_id": "tool.echo",
+            "generation_id": "generation/tool/package-test",
+            "service_id": "tool.echo.execute",
+            "contract_digest": digest_json({"contract": "tool.echo/1"}),
+            "binding_digest": digest_json({"binding": "tool.echo/1"}),
+            "authority_trigger_ref": "trigger/model-port",
+            "authority_principal_ref": "qq:43",
+            "arguments": {"q": "A"},
+        }
+        tool_effect_input = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.input",
+            owner_id="tool-effect/package/repair",
+            value=json.dumps(tool_command, sort_keys=True, separators=(",", ":")).encode(),
+        )
+        tool_wire = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.wire",
+            owner_id="tool-attempt/package/repair",
+            value=json.dumps(tool_command, sort_keys=True, separators=(",", ":")).encode(),
+        )
+        tool_permit = {
+            "protocol": "forest.effect-permit/1",
+            "effect_operation_id": "tool-effect/package/repair",
+            "attempt_id": "tool-attempt/package/repair",
+            "attempt_no": 1,
+            "wire_payload_id": tool_wire.payload_id,
+            "wire_payload_digest": tool_wire.digest,
+            "executor_component_id": "tool.echo",
+            "executor_generation_id": "generation/tool/package-test",
+            "fence_kind": "runtime.graph",
+            "fence_id": "graph/package-test",
+            "fence_epoch": 1,
+            "deadline_at": "2030-01-01T00:00:00+00:00",
+        }
+        prepare_tool_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
             "input": {
                 "owner": request_envelope["input"]["owner"],
-                "observation_operation_id": "tool-observation/package/wait",
                 "tool_call_id": "tool-call/package/repair",
-                "observed_state": "WAIT_APPROVAL",
-                "evidence_kind": "AUTHORIZATION",
-                "effect_observation_ref": None,
-                "approval_ref": "approval/package/repair",
-                "error_code": None,
-                "results": [],
+                "effect_operation_ref": "tool-effect/package/repair",
+                "effect_attempt_id": "tool-attempt/package/repair",
+                "command_digest": tool_wire.digest,
+                "effect_step_id": "effect",
             },
-            "prior": {},
+            "prior": {
+                "effect": {
+                    "protocol": "forest.effect-command-permit/1",
+                    "authorization_ticket_id": "ticket/tool/package/repair",
+                    "input_payload": tool_effect_input.canonical(),
+                    "wire_payload": tool_wire.canonical(),
+                    "permit": tool_permit,
+                }
+            },
         }
         async with store.pool.connection() as conn, conn.transaction():
-            waiting_tool = await participant.invoke_in(
-                conn, "agent.observe-tool-result-record", wait_tool_envelope,
-                operation_id="agent-tool-observation/package/wait",
+            prepared_tool = await participant.invoke_in(
+                conn, "agent.prepare-tool-effect-record", prepare_tool_envelope,
+                operation_id="agent-tool-prepare/package/repair",
                 causal_root_kind="agent.execute", causal_root_id="run/agent-package/model-port",
-                parent_call_id="call:agent-package/model-port/tool-wait", timeout_seconds=10,
+                parent_call_id="call:agent-package/model-port/tool-prepare", timeout_seconds=10,
             )
-        assert waiting_tool["accepted"] is True
-        dispatch_tool_envelope = {
-            **wait_tool_envelope,
+        assert prepared_tool["permit"] == tool_permit
+        prepared_recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert prepared_recovery["tool_call"]["effect_attempt_id"] == (
+            "tool-attempt/package/repair"
+        )
+        handoff_tool_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
             "input": {
-                **wait_tool_envelope["input"],
+                "owner": request_envelope["input"]["owner"],
                 "observation_operation_id": "tool-observation/package/dispatch",
-                "observed_state": "DISPATCHING",
-                "effect_observation_ref": "tool-handoff/package/repair",
+                "tool_call_id": "tool-call/package/repair",
+                "effect_attempt_id": "tool-attempt/package/repair",
+                "effect_step_id": "effect",
             },
+            "prior": {"effect": {**tool_permit, "state": "DISPATCHING"}},
         }
         async with store.pool.connection() as conn, conn.transaction():
-            await participant.invoke_in(
-                conn, "agent.observe-tool-result-record", dispatch_tool_envelope,
-                operation_id="agent-tool-observation/package/dispatch",
+            handed_off_tool = await participant.invoke_in(
+                conn, "agent.mark-tool-handoff-record", handoff_tool_envelope,
+                operation_id="agent-tool-handoff/package/dispatch",
                 causal_root_kind="agent.execute", causal_root_id="run/agent-package/model-port",
                 parent_call_id="call:agent-package/model-port/tool-dispatch", timeout_seconds=10,
             )
+        assert handed_off_tool["resulting_state"] == "DISPATCHING"
         tool_result = await _payload(
             kernel, owner_component_id="tool.echo", owner_kind="tool.result",
             owner_id="tool-call/package/repair", value=b'{"value":"A"}',
         )
+        tool_receipt = {
+            "protocol": "forest.agent-tool-receipt/1",
+            "status": "SUCCEEDED",
+            "tool_call_id": "tool-call/package/repair",
+            "effect_operation_id": "tool-effect/package/repair",
+            "effect_attempt_id": "tool-attempt/package/repair",
+            "result": tool_result.canonical(),
+            "error_code": None,
+            "observation_ref": "tool-result/package/repair",
+        }
+        tool_evidence = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.evidence",
+            owner_id="tool-observation/package/success",
+            value=json.dumps(tool_receipt, sort_keys=True, separators=(",", ":")).encode(),
+        )
         settle_tool_envelope = {
-            **wait_tool_envelope,
+            "protocol": "forest.uow-step/1",
+            "caller": caller,
             "input": {
-                **wait_tool_envelope["input"],
+                "owner": request_envelope["input"]["owner"],
                 "observation_operation_id": "tool-observation/package/success",
+                "tool_call_id": "tool-call/package/repair",
+                "effect_attempt_id": "tool-attempt/package/repair",
                 "observed_state": "SUCCEEDED", "evidence_kind": "EXECUTOR",
                 "effect_observation_ref": "tool-result/package/repair",
+                "approval_ref": None,
                 "error_code": None, "results": [tool_result.canonical()],
+                "effect_step_id": "effect",
+                "evidence_digest": tool_evidence.digest,
+            },
+            "prior": {
+                "effect": {
+                    "protocol": "forest.effect-command-observation/1",
+                    "evidence_payload": tool_evidence.canonical(),
+                    "evidence_parents": [tool_result.canonical()],
+                    "observation": {
+                        "attempt_id": "tool-attempt/package/repair",
+                        "observation_operation_id": "tool-observation/package/success",
+                        "observed_status": "SUCCEEDED",
+                        "evidence_kind": "executor",
+                        "accepted": True,
+                        "resulting_state": "SUCCEEDED",
+                    },
+                }
             },
         }
         async with store.pool.connection() as conn, conn.transaction():
             settled_tool = await participant.invoke_in(
-                conn, "agent.observe-tool-result-record", settle_tool_envelope,
+                conn, "agent.observe-tool-effect-record", settle_tool_envelope,
                 operation_id="agent-tool-observation/package/success",
                 causal_root_kind="agent.execute", causal_root_id="run/agent-package/model-port",
                 parent_call_id="call:agent-package/model-port/tool-success", timeout_seconds=10,

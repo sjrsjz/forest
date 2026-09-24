@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {"protocol": {"const": "forest.uow-step/1"}, "caller": {"type": "object", "additionalProperties": false, "required": ["component_id", "generation_id"], "properties": {"component_id": {"const": "agent.runtime"}, "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}}}, "input": {"$ref": "#/$defs/input"}, "prior": {"type": "object"}},
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 512}, "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "owner": {"type": "object", "additionalProperties": false, "required": ["run_id", "owner_id", "epoch"], "properties": {"run_id": {"$ref": "#/$defs/id"}, "owner_id": {"$ref": "#/$defs/id"}, "epoch": {"type": "integer", "minimum": 1}}},
+    "result": {"type": "object", "additionalProperties": false, "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"], "properties": {"payload_id": {"$ref": "#/$defs/id"}, "digest": {"$ref": "#/$defs/digest"}, "owner_component_id": {"$ref": "#/$defs/id"}, "owner_kind": {"const": "tool.result"}, "owner_id": {"$ref": "#/$defs/id"}}},
+    "input": {"type": "object", "additionalProperties": false, "required": ["owner", "observation_operation_id", "tool_call_id", "effect_attempt_id", "observed_state", "evidence_kind", "effect_observation_ref", "approval_ref", "error_code", "results", "effect_step_id", "evidence_digest"], "properties": {"owner": {"$ref": "#/$defs/owner"}, "observation_operation_id": {"$ref": "#/$defs/id"}, "tool_call_id": {"$ref": "#/$defs/id"}, "effect_attempt_id": {"$ref": "#/$defs/id"}, "observed_state": {"enum": ["SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]}, "evidence_kind": {"enum": ["EXECUTOR", "RECONCILIATION"]}, "effect_observation_ref": {"$ref": "#/$defs/id"}, "approval_ref": {"type": "null"}, "error_code": {"type": ["string", "null"], "maxLength": 128}, "results": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/result"}}, "effect_step_id": {"const": "effect"}, "evidence_digest": {"$ref": "#/$defs/digest"}}}
+  }
+}

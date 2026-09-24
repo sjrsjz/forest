@@ -431,6 +431,12 @@ CREATE TABLE tool_calls (
     supports_query boolean NOT NULL,
     effect_operation_ref text NOT NULL
         CHECK (octet_length(effect_operation_ref) BETWEEN 1 AND 256),
+    effect_attempt_id text,
+    authorization_ticket_id text,
+    wire_payload_id text,
+    wire_payload_digest text CHECK (
+        wire_payload_digest IS NULL OR wire_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     approval_ref text,
     state text NOT NULL DEFAULT 'PROPOSED' CHECK (
         state IN ('PROPOSED','WAIT_APPROVAL','DISPATCHING','SUCCEEDED','FAILED',
@@ -449,6 +455,13 @@ CREATE TABLE tool_calls (
     FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id),
     FOREIGN KEY (bot_id,turn_id) REFERENCES model_turns(bot_id,turn_id),
     CHECK ((result_payload_id IS NULL) = (result_payload_digest IS NULL)),
+    CHECK (
+        (effect_attempt_id IS NULL AND authorization_ticket_id IS NULL
+            AND wire_payload_id IS NULL AND wire_payload_digest IS NULL)
+        OR
+        (effect_attempt_id IS NOT NULL AND authorization_ticket_id IS NOT NULL
+            AND wire_payload_id IS NOT NULL AND wire_payload_digest IS NOT NULL)
+    ),
     CHECK (state NOT IN ('FAILED','CANCELLED') OR error_code IS NOT NULL)
 );
 
@@ -711,6 +724,15 @@ BEGIN
         ) THEN
         RETURN NEW;
     END IF;
+    IF OLD.state='PROPOSED' AND NEW.state='PROPOSED'
+       AND OLD.effect_attempt_id IS NULL AND NEW.effect_attempt_id IS NOT NULL
+       AND NEW.authorization_ticket_id IS NOT NULL
+       AND NEW.wire_payload_id IS NOT NULL AND NEW.wire_payload_digest IS NOT NULL
+       AND ROW(NEW.approval_ref,NEW.result_payload_id,NEW.result_payload_digest,NEW.error_code)
+           IS NOT DISTINCT FROM
+           ROW(OLD.approval_ref,OLD.result_payload_id,OLD.result_payload_digest,OLD.error_code) THEN
+        RETURN NEW;
+    END IF;
     RAISE EXCEPTION 'Illegal tool call transition' USING ERRCODE='55000';
 END;
 $$;
@@ -921,12 +943,17 @@ BEGIN
             'tool_component_id',t.tool_component_id,
             'tool_generation_id',t.tool_generation_id,'tool_service_id',t.tool_service_id,
             'arguments_payload_id',t.arguments_payload_id,
+            'arguments_payload_digest',t.arguments_payload_digest,
             'authority_trigger_ref',t.authority_trigger_ref,
             'authority_principal_ref',t.authority_principal_ref,
             'tool_contract_digest',t.tool_contract_digest,
             'tool_binding_digest',t.tool_binding_digest,
             'approval_required',t.approval_required,'supports_query',t.supports_query,
             'effect_operation_ref',t.effect_operation_ref,
+            'effect_attempt_id',t.effect_attempt_id,
+            'authorization_ticket_id',t.authorization_ticket_id,
+            'wire_payload_id',t.wire_payload_id,
+            'wire_payload_digest',t.wire_payload_digest,
             'approval_ref',t.approval_ref,'state',t.state
         ) INTO tool_value
         FROM __forest_module_schema__.tool_calls t
@@ -2441,14 +2468,181 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_prepare_tool_effect(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input'; owner_value jsonb := body->'owner';
+    effect_value jsonb := envelope->'prior'->(body->>'effect_step_id');
+    input_value jsonb := effect_value->'input_payload'; wire_value jsonb := effect_value->'wire_payload';
+    permit_value jsonb := effect_value->'permit'; requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id'; requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_tool text := body->>'tool_call_id'; requested_effect text := body->>'effect_operation_ref';
+    requested_attempt text := body->>'effect_attempt_id'; requested_digest text := body->>'command_digest';
+    run_row record; tool_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body->>'effect_step_id' IS DISTINCT FROM 'effect'
+       OR effect_value->>'protocol' IS DISTINCT FROM 'forest.effect-command-permit/1'
+       OR input_value->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+       OR input_value->>'owner_kind' IS DISTINCT FROM 'effect.input'
+       OR input_value->>'owner_id' IS DISTINCT FROM requested_effect
+       OR wire_value->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+       OR wire_value->>'owner_kind' IS DISTINCT FROM 'effect.wire'
+       OR wire_value->>'owner_id' IS DISTINCT FROM requested_attempt
+       OR wire_value->>'digest' IS DISTINCT FROM requested_digest
+       OR permit_value->>'protocol' IS DISTINCT FROM 'forest.effect-permit/1'
+       OR permit_value->>'effect_operation_id' IS DISTINCT FROM requested_effect
+       OR permit_value->>'attempt_id' IS DISTINCT FROM requested_attempt
+       OR permit_value->>'wire_payload_id' IS DISTINCT FROM wire_value->>'payload_id'
+       OR permit_value->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_EFFECT_INPUT_INVALID','message','Tool Effect preparation envelope is invalid','status',422));
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409));
+    END IF;
+    SELECT * INTO tool_row FROM __forest_module_schema__.tool_calls
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
+    IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run
+       OR run_row.current_tool_call_id IS DISTINCT FROM requested_tool
+       OR run_row.state IS DISTINCT FROM 'WAIT_TOOL'
+       OR tool_row.effect_operation_ref IS DISTINCT FROM requested_effect
+       OR permit_value->>'executor_component_id' IS DISTINCT FROM tool_row.tool_component_id
+       OR permit_value->>'executor_generation_id' IS DISTINCT FROM tool_row.tool_generation_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_EFFECT_BINDING_CONFLICT','message','Tool Effect differs from the current frozen ToolCall','status',409));
+    END IF;
+    IF tool_row.approval_required THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_APPROVAL_REQUIRED','message','Tool requires a durable approval before Effect preparation','status',409));
+    END IF;
+    IF tool_row.effect_attempt_id IS NOT NULL THEN
+        IF tool_row.effect_attempt_id IS DISTINCT FROM requested_attempt
+           OR tool_row.authorization_ticket_id IS DISTINCT FROM effect_value->>'authorization_ticket_id'
+           OR tool_row.wire_payload_id IS DISTINCT FROM wire_value->>'payload_id'
+           OR tool_row.wire_payload_digest IS DISTINCT FROM wire_value->>'digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+                'code','AGENT_TOOL_EFFECT_PREPARATION_CONFLICT','message','Tool Effect preparation identity differs','status',409));
+        END IF;
+    ELSIF tool_row.state IS DISTINCT FROM 'PROPOSED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_EFFECT_BOUNDARY_CLOSED','message','ToolCall is not at the preparation boundary','status',409));
+    ELSE
+        UPDATE __forest_module_schema__.tool_calls
+        SET effect_attempt_id=requested_attempt,
+            authorization_ticket_id=effect_value->>'authorization_ticket_id',
+            wire_payload_id=wire_value->>'payload_id',wire_payload_digest=wire_value->>'digest',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND tool_call_id=requested_tool;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.agent-tool-effect-prepared/1','tool_call_id',requested_tool,
+        'effect_operation_ref',requested_effect,'effect_attempt_id',requested_attempt,
+        'state','PREPARED','authorization_ticket_id',effect_value->>'authorization_ticket_id',
+        'input_payload',input_value,'wire_payload',wire_value,'permit',permit_value));
+END;
+$$;
+
+CREATE FUNCTION agent_mark_tool_handoff(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input'; owner_value jsonb := body->'owner';
+    effect_value jsonb := envelope->'prior'->(body->>'effect_step_id');
+    requested_bot text := context->>'bot_id'; requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id'; requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_operation text := body->>'observation_operation_id'; requested_tool text := body->>'tool_call_id';
+    requested_attempt text := body->>'effect_attempt_id'; digest_value text;
+    run_row record; tool_row record; replay record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR body->>'effect_step_id' IS DISTINCT FROM 'effect'
+       OR effect_value->>'state' IS DISTINCT FROM 'DISPATCHING'
+       OR effect_value->>'attempt_id' IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_HANDOFF_INPUT_INVALID','message','Tool handoff envelope is invalid','status',422));
+    END IF;
+    digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'tool_call_id',requested_tool,'effect_attempt_id',requested_attempt,
+        'effect_operation_id',effect_value->>'effect_operation_id',
+        'wire_payload_digest',effect_value->>'wire_payload_digest')::text,'UTF8')),'hex');
+    SELECT *,clock_timestamp() AS database_now INTO run_row FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/tool-handoff/' || requested_bot || '/' || requested_operation,0));
+    SELECT * INTO replay FROM __forest_module_schema__.tool_observations
+    WHERE bot_id=requested_bot AND observation_operation_id=requested_operation;
+    IF FOUND THEN
+        IF replay.input_digest IS DISTINCT FROM digest_value THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+                'code','TOOL_OBSERVATION_CONFLICT','message','Tool handoff input differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+            'observation_operation_id',replay.observation_operation_id,'tool_call_id',replay.tool_call_id,
+            'observed_state',replay.observed_state,'evidence_kind',replay.evidence_kind,
+            'accepted',replay.accepted,'previous_state',replay.previous_state,
+            'resulting_state',replay.resulting_state,'conflict_code',replay.conflict_code));
+    END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests
+        WHERE bot_id=requested_bot AND run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_CANCEL_REQUESTED','message','Agent cancellation won the tool handoff race','status',409));
+    END IF;
+    SELECT * INTO tool_row FROM __forest_module_schema__.tool_calls
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool FOR UPDATE;
+    IF NOT FOUND OR tool_row.run_id IS DISTINCT FROM requested_run
+       OR run_row.current_tool_call_id IS DISTINCT FROM requested_tool
+       OR run_row.state IS DISTINCT FROM 'WAIT_TOOL' OR tool_row.state IS DISTINCT FROM 'PROPOSED'
+       OR tool_row.effect_attempt_id IS DISTINCT FROM requested_attempt
+       OR tool_row.effect_operation_ref IS DISTINCT FROM effect_value->>'effect_operation_id'
+       OR tool_row.wire_payload_id IS DISTINCT FROM effect_value->>'wire_payload_id'
+       OR tool_row.wire_payload_digest IS DISTINCT FROM effect_value->>'wire_payload_digest'
+       OR tool_row.tool_component_id IS DISTINCT FROM effect_value->>'executor_component_id'
+       OR tool_row.tool_generation_id IS DISTINCT FROM effect_value->>'executor_generation_id' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_HANDOFF_CONFLICT','message','Effect handoff differs from the prepared ToolCall','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.tool_observations(
+        bot_id,observation_operation_id,tool_call_id,input_digest,observed_state,evidence_kind,
+        effect_observation_ref,accepted,previous_state,resulting_state)
+    VALUES(requested_bot,requested_operation,requested_tool,digest_value,'DISPATCHING','EXECUTOR',
+        requested_attempt,true,'PROPOSED','DISPATCHING');
+    UPDATE __forest_module_schema__.tool_calls SET state='DISPATCHING',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND tool_call_id=requested_tool;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'observation_operation_id',requested_operation,'tool_call_id',requested_tool,
+        'observed_state','DISPATCHING','evidence_kind','EXECUTOR','accepted',true,
+        'previous_state','PROPOSED','resulting_state','DISPATCHING','conflict_code',NULL));
+END;
+$$;
+
 CREATE FUNCTION agent_observe_tool_result(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input'; owner_value jsonb := body->'owner';
     result_value jsonb := body#>'{results,0}'; requested_bot text := context->>'bot_id';
+    effect_command_value jsonb := envelope->'prior'->(body->>'effect_step_id');
+    effect_evidence jsonb := effect_command_value->'evidence_payload';
+    effect_observation jsonb := effect_command_value->'observation';
+    effect_parents jsonb := effect_command_value->'evidence_parents';
     requested_run text := owner_value->>'run_id'; requested_owner text := owner_value->>'owner_id';
     requested_epoch bigint := (owner_value->>'epoch')::bigint;
     requested_operation text := body->>'observation_operation_id'; requested_tool text := body->>'tool_call_id';
+    requested_attempt text := body->>'effect_attempt_id';
     observed_value text := body->>'observed_state'; evidence_value text := body->>'evidence_kind';
     effect_value text := body->>'effect_observation_ref'; approval_value text := body->>'approval_ref';
     error_value text := body->>'error_code'; digest_value text; run_row record; tool_row record; replay record;
@@ -2513,6 +2707,33 @@ BEGIN
             'code','TOOL_RESULT_IDENTITY_CONFLICT','message','Tool result owner differs from frozen binding','status',409));
     END IF;
     previous_value := tool_row.state;
+    IF previous_value IN ('DISPATCHING','UNKNOWN') AND (
+          body->>'effect_step_id' IS DISTINCT FROM 'effect'
+          OR body->>'evidence_digest' IS NULL
+          OR requested_attempt IS DISTINCT FROM tool_row.effect_attempt_id
+          OR effect_command_value->>'protocol' IS DISTINCT FROM 'forest.effect-command-observation/1'
+          OR effect_evidence->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+          OR effect_evidence->>'owner_kind' IS DISTINCT FROM 'effect.evidence'
+          OR effect_evidence->>'owner_id' IS DISTINCT FROM requested_operation
+          OR effect_evidence->>'digest' IS DISTINCT FROM body->>'evidence_digest'
+          OR effect_observation->>'attempt_id' IS DISTINCT FROM requested_attempt
+          OR effect_observation->>'observation_operation_id' IS DISTINCT FROM requested_operation
+          OR lower(effect_observation->>'evidence_kind') IS DISTINCT FROM lower(evidence_value)
+          OR (effect_observation->>'accepted')::boolean IS DISTINCT FROM true
+          OR effect_observation->>'resulting_state' IS DISTINCT FROM
+             CASE WHEN observed_value='UNKNOWN' THEN 'UNKNOWN' ELSE 'SUCCEEDED' END
+          OR jsonb_typeof(effect_parents) IS DISTINCT FROM 'array'
+          OR jsonb_array_length(effect_parents) IS DISTINCT FROM jsonb_array_length(body->'results')
+          OR EXISTS (SELECT 1 FROM jsonb_array_elements(body->'results') item
+              WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(effect_parents) parent
+                  WHERE parent=item))
+          OR EXISTS (SELECT 1 FROM jsonb_array_elements(effect_parents) parent
+              WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(body->'results') item
+                  WHERE item=parent))
+       ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_TOOL_EFFECT_OBSERVATION_INVALID','message','Tool observation is not backed by the matching Kernel Effect evidence','status',409));
+    END IF;
     IF (previous_value='PROPOSED' AND observed_value IN ('WAIT_APPROVAL','DISPATCHING','FAILED','CANCELLED'))
        OR (previous_value='WAIT_APPROVAL' AND observed_value IN ('DISPATCHING','FAILED','CANCELLED'))
        OR (previous_value='DISPATCHING' AND observed_value IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN'))
@@ -2544,6 +2765,11 @@ BEGIN
         'observed_state',observed_value,'evidence_kind',evidence_value,'accepted',accepted_value,
         'previous_state',previous_value,'resulting_state',resulting_value,'conflict_code',conflict_value));
 END;
+$$;
+
+CREATE FUNCTION agent_observe_tool_effect(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path = pg_catalog AS $$
+    SELECT __forest_module_schema__.agent_observe_tool_result(context,envelope)
 $$;
 
 CREATE FUNCTION agent_finalize_candidate(context jsonb, envelope jsonb)

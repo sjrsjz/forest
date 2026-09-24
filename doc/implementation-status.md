@@ -75,16 +75,16 @@
 - Provider Generation 与模型投影先冻结；授权、Kernel Effect permit、wire Payload 和 Agent Attempt 由 `agent.prepare-model-effect/1` 原子建立；其中 `kernel.effect` 的 `effect.prepare-command` participant 在协调事务内校验授权票据、父 Payload 与 Generation fence，并以自身身份写入 `effect.input`/`effect.wire`，Agent Worker 只提交声明式 command，不能伪造内核 Payload owner；该 UoW 的最终结果保留完整 authorization ticket、input/wire PayloadRef 和 permit，后续 handoff 不从宿主取旁路凭据，也不重新猜测 Effect 事实；
 - `agent.handoff-model-effect/1` 原子推进 Effect 与 Agent handoff；`agent.observe-model-effect/1` 通过 `effect.observe-command-result` 让内核校验 Provider 结果引用并以自身身份冻结 `effect.evidence`，Agent participant 同时核对 evidence 摘要、父引用集合与观察状态，随后原子收敛两本账及 `UNKNOWN` 对账；
 - 错误 XML 的一次协议修复、合法 ModelTurn 提交；
-- ToolCall 的准确 component/Generation/service/contract/binding 冻结；
-- 工具审批、handoff、终态观察和可查询 `UNKNOWN` 对账；
+- ToolCall 的准确 component/Generation/service/contract/binding 冻结；非审批工具由 `agent.prepare-tool-effect/1` 在同一事务内建立 Authorization ticket、Kernel Effect permit 和 Agent 侧 wire/attempt 事实，再由 `agent.handoff-tool-effect/1` 原子进入 `DISPATCHING`；目标只能通过冻结工具目录的 `dispatch-prepared` 端口调用；
+- `agent.observe-tool-effect/1` 让 Kernel Effect 冻结 executor receipt 后，由 Agent participant 在同一事务内复核 evidence、父结果引用和冻结 attempt，再收敛 ToolCall；旧的裸 `agent.observe-tool-result` 计划已撤出 Worker capability，不能绕过 Effect 账本提交派发结果；
 - terminal ModelTurn 先停在 `SAFE_BOUNDARY`；确认没有新触发批次后，Worker 以最新 terminal turn 的准确 `assistant.candidate` 为父边生成独立 `final.reply`，`agent.finalize-candidate/1` 同时核对来源与正式候选并原子推进到 `FINAL_READY`；内部解析候选不会直接交给 Delivery；
 - 最终完成、同 Session 后继 Run 和 Session 关闭的私有 participant。
 
 包内已加入 `model_execution.py`，模型 attempt 的 profile bind、`model.input` 写入、Provider materialize、授权与 Effect prepare、原子 handoff、Provider dispatch、Effect/Agent 原子 observe 及 Provider 结果读取均只经过 `ctx.services`、`ctx.uow`、`ctx.payloads` 与冻结的 `ctx.identity`。它没有 Repository、数据库连接或宿主 Agent adapter；Provider 异常或回执 fence 不一致在 handoff 后统一收敛为 `UNKNOWN`，不会盲目重发。
 
-Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
+Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复、非审批 ToolCall 的 Effect 执行以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
 
-这仍不是 Agent 生产包化完成：FunctionCall 目前只会冻结准确工具绑定并停在 `WAIT_TOOL`，工具授权、审批、Effect handoff、查询恢复尚未接入包入口；Conversation 也尚未贡献 `conversation.agent-run.pending`、最终回复和 Session 交接 owned-work。因此 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“`agent.execute/2` 已有终端回复路径”表述成“生产主链已经切换”。
+这仍不是 Agent 生产包化完成：需要审批的工具尚未接入持久 approval intent/决策，handoff 后的 `UNKNOWN` 尚未通过 `query_handed_off` 对账，现有宿主 Memory/Runtime 工具也尚未迁成可序列化 builtin 服务；Conversation 仍未贡献 `conversation.agent-run.pending`、最终回复和 Session 交接 owned-work。因此 `clean_bot_host.py` 仍使用旧宿主执行器。不得把“`agent.execute/2` 已有正常非审批工具路径”表述成“生产主链已经切换”。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
@@ -106,7 +106,7 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 ## 8. 下一切换顺序
 
-1. 为 `agent_runtime` 的冻结工具目录补齐授权、审批、Effect handoff、执行回执与查询恢复协议；工具服务只能通过准确 component/Generation/service/binding fence 调用。
+1. 将 Memory 精确召回和 Runtime 状态工具迁成 manifest 发布的可序列化服务；补齐持久审批决策与 `query_handed_off` 恢复，禁止保留宿主 `ToolDispatchResult` 旁路。
 2. 在 `conversation_scheduler` manifest 中补齐 Agent owned-work、final-reply 和 session-handoff plans，使 Agent 与 Conversation 只交换 DTO、PayloadRef 和 owner fence。
 3. 用 `bootstrap_builtin_package()` 替换 `bootstrap_clean_agent()` 与 `bootstrap_clean_messaging()`，随后删除宿主 Agent/Conversation Runtime、Repository 装配和旧 baseline。
 4. 补齐 `memory_graph` 的捕获、嵌入、图扩散、召回和管理端口，用包内权威状态替换 `bootstrap_clean_memory()`，随后删除宿主 Memory Runtime、Repository 装配和旧 baseline。

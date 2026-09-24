@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from context_projection import ContextSnapshotReader
 from model_execution import ModelExecution
+from tool_execution import ToolExecution
 from turn_recording import TurnRecorder, stable, tool_directory
 
 from forest.errors import ForestError
@@ -55,6 +56,7 @@ class AgentExecution:
         self.ctx = ctx
         self.config = config
         self.model = ModelExecution(ctx)
+        self.tools = ToolExecution(ctx)
         self.turns = TurnRecorder(ctx)
 
     def _configuration_ref(self) -> dict:
@@ -337,13 +339,44 @@ class AgentExecution:
                     return self._result(request, "FINAL_READY", run)
                 if state == "WAIT_INPUT":
                     return self._result(request, "WAIT_INPUT", run)
-                if state in {"WAIT_TOOL", "WAIT_APPROVAL"}:
+                if state == "WAIT_APPROVAL":
                     tool = recovery.get("tool_call") or {}
                     return self._result(
                         request,
                         state,
                         run,
                         approval_ref=tool.get("approval_ref"),
+                    )
+                if state == "WAIT_TOOL":
+                    tool = recovery.get("tool_call")
+                    if not isinstance(tool, dict):
+                        raise ForestError(
+                            "AGENT_HISTORY_INCOMPLETE",
+                            "Agent tool boundary has no durable ToolCall",
+                            500,
+                        )
+                    binding = bindings.get(tool["tool_name"])
+                    if binding is None:
+                        raise ForestError(
+                            "AGENT_TOOL_ROUTE_STALE",
+                            "Durable ToolCall is absent from the frozen directory",
+                            409,
+                        )
+                    invoked_tool = await self.tools.invoke(
+                        owner=owner, tool=tool, binding=binding
+                    )
+                    if invoked_tool["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                        continue
+                    return self._result(
+                        request,
+                        (
+                            "WAIT_APPROVAL"
+                            if invoked_tool["status"] == "WAIT_APPROVAL"
+                            else "BLOCKED_UNKNOWN"
+                        ),
+                        run,
+                        approval_ref=invoked_tool.get("approval_ref"),
+                        error_code=invoked_tool.get("error_code"),
                     )
                 if state in {"BLOCKED_UNKNOWN", "MODEL_PENDING"}:
                     return self._result(

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "3.0.0"
+version = "4.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -50,10 +50,12 @@ requests = [
   "uow.execute:agent.prepare-model-effect",
   "uow.execute:agent.handoff-model-effect",
   "uow.execute:agent.observe-model-effect",
+  "uow.execute:agent.prepare-tool-effect",
+  "uow.execute:agent.handoff-tool-effect",
+  "uow.execute:agent.observe-tool-effect",
   "uow.execute:agent.record-protocol-failure",
   "uow.execute:agent.record-model-turn",
   "uow.execute:agent.finalize-candidate",
-  "uow.execute:agent.observe-tool-result"
 ]
 
 [[components.requires]]
@@ -107,9 +109,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "1.9.0"
+schema_version = "2.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "f939ebcdf921663c236be63645dd4d05d0b377a0b059397ca727a5394b39d20c"
+baseline_sha256 = "a39703478ab14f8b0f0afee9a0ff6b5b561c5a80521ab6e7f27623ecd7908603"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -328,6 +330,33 @@ owner_kind_path = "/input/artifacts/*/payload/owner_kind"
 owner_id_path = "/input/artifacts/*/payload/owner_id"
 
 [[components.unit_of_work_participants]]
+name = "agent.prepare-tool-effect-record"
+contract = "1.0"
+function = "agent_prepare_tool_effect"
+input_schema = "schemas/prepare-tool-effect-envelope.json"
+output_schema = "schemas/tool-effect-prepared-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.mark-tool-handoff-record"
+contract = "1.0"
+function = "agent_mark_tool_handoff"
+input_schema = "schemas/mark-tool-handoff-envelope.json"
+output_schema = "schemas/tool-observation-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.observe-tool-effect-record"
+contract = "1.0"
+function = "agent_observe_tool_effect"
+input_schema = "schemas/observe-tool-effect-envelope.json"
+output_schema = "schemas/tool-observation-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/results/*"
+owner_component_path = "/input/results/*/owner_component_id"
+owner_kind = "tool.result"
+owner_id_path = "/input/results/*/owner_id"
+
+[[components.unit_of_work_participants]]
 name = "agent.observe-tool-result-record"
 contract = "1.0"
 function = "agent_observe_tool_result"
@@ -520,13 +549,37 @@ steps = [
 ]
 
 [[components.unit_of_work_plans]]
-name = "agent.observe-tool-result"
+name = "agent.prepare-tool-effect"
 contract = "1.0"
-input_schema = "schemas/observe-tool-result-input.json"
+input_schema = "schemas/prepare-tool-effect-input.json"
+output_schema = "schemas/tool-effect-prepared-output.json"
+timeout_s = 10
+steps = [
+  { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prepare-command", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-tool-effect-record", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.handoff-tool-effect"
+contract = "1.0"
+input_schema = "schemas/handoff-tool-effect-input.json"
 output_schema = "schemas/tool-observation-output.json"
 timeout_s = 10
 steps = [
-  { id = "agent", component_id = "agent.runtime", participant = "agent.observe-tool-result-record" }
+  { id = "effect", component_id = "kernel.effect", participant = "effect.handoff", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.mark-tool-handoff-record", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.observe-tool-effect"
+contract = "1.0"
+input_schema = "schemas/observe-tool-effect-input.json"
+output_schema = "schemas/tool-observation-output.json"
+timeout_s = 10
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.observe-command-result", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.observe-tool-effect-record", input_path = "/agent" }
 ]
 
 [[components.unit_of_work_plans]]
