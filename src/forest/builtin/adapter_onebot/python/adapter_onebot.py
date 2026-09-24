@@ -352,23 +352,120 @@ class AdapterOneBot(Plugin):
             "classification_deadline": (received_at + timedelta(minutes=2)).isoformat(),
             "sent_at": sent_at,
         }
-        await ctx.services.call(
-            "kernel.uow.onebot.ingress",
-            {
-                "protocol": "forest.onebot-ingress-plan/2",
+        conversation_event_id = "onebot:" + event_id
+        plan = {
+            "adapter": {
                 "operation_id": "onebot-admit:" + event_hash,
+                "binding_ref": binding["binding_ref"],
+                "binding_epoch": binding["binding_epoch"],
+                "client_incarnation": frame["client_incarnation"],
+                "event": event,
+            },
+            "conversation": {
+                "conversation_id": conversation_ref,
+                "source_component_id": "adapter.onebot",
+                "binding_ref": binding["binding_ref"],
+                "platform": "onebot-v11",
+                "channel_kind": event["channel_kind"],
+                "channel_ref": channel_ref,
+                "thread_ref": None,
+                "event_id": conversation_event_id,
+                "source_event_ref": event_id,
+                "event_kind": event["event_kind"],
+                "platform_message_ref": message_ref,
+                "author_subject_ref": author_subject_ref,
+                "content": normalized_saved["payload"],
+                "author": author_saved["payload"],
+                "received_at": event["received_at"],
+                "classification_deadline": event["classification_deadline"],
+                "sent_at": sent_at,
+                "context_disposition": "MATERIALIZE",
+            },
+        }
+        if memory_capture is not None:
+            plan["payload_epoch"] = {"protocol": "forest.payload-epoch-capture/1"}
+            plan["memory"] = {
+                "capture": {
+                    **memory_capture,
+                    "author_subject_ref": author_subject_ref,
+                    "occurrence": {
+                        "occurrence_id": "onebot-memory-occurrence:" + event_hash,
+                        "binding_ref": binding["binding_ref"],
+                        "conversation_ref": conversation_ref,
+                        "event_ref": conversation_event_id,
+                        "ingress_seq": None,
+                        "observed_at": event["received_at"],
+                    },
+                },
+                "conversation_step_id": "conversation",
+                "deletion_epoch_step_id": "payload_epoch",
+            }
+        else:
+            plan["media"] = {
+                "capture": {
+                    **media_capture,
+                    "author_subject_ref": author_subject_ref,
+                    "binding_ref": binding["binding_ref"],
+                    "conversation_ref": conversation_ref,
+                    "event_ref": conversation_event_id,
+                    "observed_at": event["received_at"],
+                },
+                "conversation_step_id": "conversation",
+            }
+        if shell is None:
+            is_trigger = classification["decision"] == "TRIGGER"
+            plan["classification"] = {
+                "conversation_id": conversation_ref,
+                "event_id": conversation_event_id,
+                "decision": classification["decision"],
+                "classifier_component_id": classification["classifier_component_id"],
+                "classifier_generation_id": classification["classifier_generation_id"],
+                "rule_revision": classification["rule_revision"],
+                "reason_code": classification["reason_code"],
+                "route_ref": None,
+                "trigger_id": "onebot-trigger:" + event_hash if is_trigger else None,
+                "principal_ref": author_subject_ref if is_trigger else None,
+            }
+            plan_name = (
+                "adapter.ingress-data-memory"
+                if memory_capture is not None
+                else "adapter.ingress-data-media"
+            )
+        else:
+            plan["shell"] = {
+                "protocol": "forest.shell-admission/2",
+                "request_id": shell["request_id"],
+                "shell_generation_id": shell["shell_generation_id"],
                 "binding_ref": binding["binding_ref"],
                 "binding_epoch": binding["binding_epoch"],
                 "connection_epoch": frame["connection_epoch"],
                 "client_incarnation": frame["client_incarnation"],
                 "adapter_generation_id": frame["adapter_generation_id"],
-                "transport_digest": frame["transport_digest"],
-                "event": event,
-                "memory_capture": memory_capture,
-                "media_capture": media_capture,
-                "classification": _plain(classification),
-                "shell_command": _plain(shell),
-            },
+                "executor_fence_digest": frame["transport_digest"],
+                "conversation_ref": conversation_ref,
+                "event_ref": event_id,
+                "principal_ref": author_subject_ref,
+                "command_id": shell["command_id"],
+                "command_version": shell["command_version"],
+                "arguments": shell["arguments"],
+                "rejection": shell["rejection"],
+                "received_at": event["received_at"],
+                "admission_deadline": event["classification_deadline"],
+            }
+            plan["shell_classification"] = {
+                "conversation_id": conversation_ref,
+                "event_id": conversation_event_id,
+                "conversation_step_id": "conversation",
+                "shell_step_id": "shell",
+            }
+            plan_name = (
+                "adapter.ingress-shell-memory"
+                if memory_capture is not None
+                else "adapter.ingress-shell-media"
+            )
+        await ctx.uow.call(
+            plan_name,
+            plan,
             operation_id=ctx.operations.stable("ingress-uow"),
             timeout=30,
         )

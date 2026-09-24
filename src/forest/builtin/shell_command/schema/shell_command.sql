@@ -64,7 +64,10 @@ CREATE TABLE shell_requests (
     target_service_id text,
     target_service_version integer,
     timeout_seconds integer,
-    state text NOT NULL CHECK (state IN ('QUEUED','REJECTED','CLAIMED','EXECUTING','SUCCEEDED','FAILED','UNKNOWN')),
+    state text NOT NULL CHECK (state IN (
+        'QUEUED','REJECTION_PENDING','REJECTION_CLAIMED','REJECTED',
+        'CLAIMED','EXECUTING','SUCCEEDED','FAILED','UNKNOWN'
+    )),
     rejection_code text,
     rejection jsonb NOT NULL,
     claim_token text,
@@ -76,6 +79,7 @@ CREATE TABLE shell_requests (
     error_code text,
     received_at timestamptz NOT NULL,
     admission_deadline timestamptz NOT NULL,
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     completed_at timestamptz,
@@ -89,6 +93,13 @@ CREATE INDEX shell_requests_queue_idx ON shell_requests(
 );
 
 CREATE TABLE shell_work_settlements (
+    claim_token text PRIMARY KEY,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE shell_rejection_settlements (
     claim_token text PRIMARY KEY,
     input_payload jsonb NOT NULL,
     result_payload jsonb NOT NULL,
@@ -214,7 +225,7 @@ BEGIN
     WHEN NOT allowed THEN 'SHELL_PRINCIPAL_DENIED'
     WHEN route IS NULL THEN 'SHELL_COMMAND_NOT_FOUND'
     ELSE NULL END;
-  next_state:=CASE WHEN rejection_code IS NULL THEN 'QUEUED' ELSE 'REJECTED' END;
+  next_state:=CASE WHEN rejection_code IS NULL THEN 'QUEUED' ELSE 'REJECTION_PENDING' END;
   INSERT INTO __forest_module_schema__.shell_requests(
     bot_id,request_id,admission_operation_id,admission_input_digest,shell_generation_id,
     binding_ref,binding_epoch,connection_epoch,client_incarnation,adapter_generation_id,
@@ -230,7 +241,7 @@ BEGIN
     route.service_class,route.owner_component_id,route.target_generation_id,route.target_service_id,
     route.target_service_version,route.timeout_seconds,next_state,rejection_code,input->'rejection',
     (input->>'received_at')::timestamptz,(input->>'admission_deadline')::timestamptz,
-    CASE WHEN next_state='REJECTED' THEN clock_timestamp() ELSE NULL END);
+    NULL);
   result:=jsonb_build_object('request_id',input->>'request_id','state',next_state,
     'shell_generation_id',context->>'generation_id','policy_revision',snapshot.policy_revision,
     'rejection_code',rejection_code,'rejection',input->'rejection','service_class',route.service_class);
@@ -320,6 +331,97 @@ BEGIN
         'arguments',item.arguments,'target_component_id',item.owner_component_id,
         'target_generation_id',item.target_generation_id,'target_service_id',item.target_service_id,
         'target_service_version',item.target_service_version,'timeout_seconds',item.timeout_seconds)));
+END;
+$$;
+
+CREATE FUNCTION shell_complete_rejection(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE input jsonb:=envelope->'input'; item __forest_module_schema__.shell_requests%ROWTYPE;
+BEGIN
+  IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+     OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'shell.command' THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_REJECTION_INPUT_INVALID','message','Shell rejection completion is invalid','status',422));
+  END IF;
+  SELECT * INTO item FROM __forest_module_schema__.shell_requests
+   WHERE bot_id=context->>'bot_id' AND request_id=input->>'request_id'
+     AND shell_generation_id=context->>'generation_id' AND state='REJECTION_CLAIMED'
+     AND claim_token=input->>'claim_token' AND lease_until>clock_timestamp() FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','STALE_SHELL_REJECTION_CLAIM','message','Shell rejection claim is no longer owned','status',409));
+  END IF;
+  UPDATE __forest_module_schema__.shell_requests SET state='REJECTED',result=input->'result',
+    claim_token=NULL,lease_until=NULL,updated_at=clock_timestamp(),completed_at=clock_timestamp()
+   WHERE bot_id=item.bot_id AND request_id=item.request_id;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('request_id',item.request_id,'state','REJECTED'));
+END;
+$$;
+
+CREATE FUNCTION shell_claim_rejection(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE item __forest_module_schema__.shell_requests%ROWTYPE;
+        token text:=input->>'claim_token'; lease_seconds integer:=(input->>'lease_seconds')::integer;
+BEGIN
+  UPDATE __forest_module_schema__.shell_requests SET state='REJECTION_PENDING',claim_token=NULL,
+    lease_until=NULL,next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
+   WHERE bot_id=context->>'bot_id' AND shell_generation_id=context->>'generation_id'
+     AND state='REJECTION_CLAIMED' AND lease_until<=clock_timestamp();
+  SELECT * INTO item FROM __forest_module_schema__.shell_requests
+   WHERE bot_id=context->>'bot_id' AND shell_generation_id=context->>'generation_id'
+     AND state='REJECTION_PENDING' AND next_attempt_at<=clock_timestamp()
+   ORDER BY next_attempt_at,created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+  END IF;
+  UPDATE __forest_module_schema__.shell_requests SET state='REJECTION_CLAIMED',claim_token=token,
+    attempt_count=attempt_count+1,lease_until=clock_timestamp()+lease_seconds*interval '1 second',
+    updated_at=clock_timestamp() WHERE bot_id=item.bot_id AND request_id=item.request_id RETURNING * INTO item;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.owned-work-claim/1','work_id',item.request_id,
+      'claim_token',item.claim_token,'attempt',item.attempt_count,
+      'operation_id','shell.reject:'||item.request_id||':'||item.attempt_count,
+      'causal_root_kind','shell.request','causal_root_id',item.request_id,
+      'payload',jsonb_build_object('request_id',item.request_id,'claim_token',item.claim_token,
+        'binding_ref',item.binding_ref,'conversation_ref',item.conversation_ref,
+        'principal_ref',item.principal_ref,'command_id',item.command_id,
+        'rejection_code',item.rejection_code,'rejection',item.rejection)));
+END;
+$$;
+
+CREATE FUNCTION shell_settle_rejection(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE existing record; item __forest_module_schema__.shell_requests%ROWTYPE; result jsonb;
+BEGIN
+  SELECT * INTO existing FROM __forest_module_schema__.shell_rejection_settlements
+   WHERE claim_token=input->>'claim_token';
+  IF FOUND THEN
+    IF existing.input_payload=input THEN RETURN existing.result_payload; END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_REJECTION_SETTLEMENT_CONFLICT','message','Shell rejection claim has another settlement','status',409));
+  END IF;
+  SELECT * INTO item FROM __forest_module_schema__.shell_requests
+   WHERE bot_id=context->>'bot_id' AND request_id=input->>'work_id'
+     AND shell_generation_id=context->>'generation_id' FOR UPDATE;
+  IF NOT FOUND OR (item.state='REJECTION_CLAIMED' AND item.claim_token IS DISTINCT FROM input->>'claim_token') THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','STALE_SHELL_REJECTION_CLAIM','message','Shell rejection claim is no longer owned','status',409));
+  END IF;
+  IF item.state='REJECTION_CLAIMED' THEN
+    UPDATE __forest_module_schema__.shell_requests SET state='REJECTION_PENDING',claim_token=NULL,
+      lease_until=NULL,next_attempt_at=clock_timestamp()+LEAST(60,item.attempt_count*2)*interval '1 second',
+      error_code=COALESCE(input->'outcome'->'error'->>'code','SHELL_REJECTION_DELIVERY_FAILED'),
+      updated_at=clock_timestamp() WHERE bot_id=item.bot_id AND request_id=item.request_id;
+  ELSIF item.state<>'REJECTED' THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_REJECTION_STATE_CONFLICT','message','Shell rejection has an invalid state','status',409));
+  END IF;
+  result:=jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.owned-work-settled/1','work_id',item.request_id));
+  INSERT INTO __forest_module_schema__.shell_rejection_settlements(claim_token,input_payload,result_payload)
+    VALUES(input->>'claim_token',input,result);
+  RETURN result;
 END;
 $$;
 

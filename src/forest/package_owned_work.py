@@ -63,6 +63,10 @@ class PackageOwnedWorkSupervisor:
             )
         self.drain_policy = policies.pop()
         self._handler_names = {declaration["name"] for declaration in declarations}
+        self._claim_locks = {
+            declaration["name"]: asyncio.Lock() for declaration in declarations
+        }
+        self._next_claim_at = {declaration["name"]: 0.0 for declaration in declarations}
         self._drain_empty: set[str] = set()
         self._drained = asyncio.Event()
         self.draining = False
@@ -194,6 +198,28 @@ class PackageOwnedWorkSupervisor:
             return None
         input_validator, _output_validator = self.schemas[declaration["name"]]
         return self._claim_envelope(value, input_validator)
+
+    async def _claim_when_due(self, declaration: dict) -> dict | None:
+        """Serialize empty polling while preserving concurrent work execution.
+
+        ``max_concurrency`` describes handler execution capacity. It must not
+        multiply empty database polls: one slot probes a handler queue, then a
+        successful claim immediately lets the next slot probe for more work.
+        """
+
+        name = declaration["name"]
+        async with self._claim_locks[name]:
+            delay = self._next_claim_at[name] - asyncio.get_running_loop().time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            claim = await self._claim(declaration)
+            now = asyncio.get_running_loop().time()
+            self._next_claim_at[name] = (
+                now
+                if claim is not None
+                else now + declaration["poll_interval_ms"] / 1000
+            )
+            return claim
 
     async def _settle(self, declaration: dict, claim: dict, outcome: dict) -> None:
         operation_id = "owned-settle:" + hashlib.sha256(
@@ -367,7 +393,7 @@ class PackageOwnedWorkSupervisor:
                 self.idle.clear()
                 claim = None
                 try:
-                    claim = await self._claim(declaration)
+                    claim = await self._claim_when_due(declaration)
                     if claim is not None:
                         if self.draining:
                             self._drain_empty.discard(declaration["name"])

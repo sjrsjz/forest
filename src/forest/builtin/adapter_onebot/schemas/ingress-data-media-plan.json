@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["adapter", "conversation", "media", "classification"],
+  "properties": {
+    "adapter": {"type": "object"}, "conversation": {"type": "object"},
+    "media": {"type": "object"}, "classification": {"type": "object"}
+  }
+}

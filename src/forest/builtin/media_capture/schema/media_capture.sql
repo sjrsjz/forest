@@ -82,18 +82,29 @@ CREATE TABLE media_work_settlements (
 CREATE INDEX media_capture_work_idx ON media_captures(next_attempt_at,capture_id)
 WHERE state='PENDING';
 
-CREATE FUNCTION media_register_ingress(context jsonb, input jsonb)
+CREATE FUNCTION media_register_ingress(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
+    body jsonb := envelope->'input';
+    input jsonb := body->'capture';
+    conversation_step text := body->>'conversation_step_id';
+    conversation jsonb := envelope->'prior'->conversation_step;
     requested_operation text := context->>'operation_id';
     requested_capture text := input->>'capture_id';
     existing __forest_module_schema__.media_captures%ROWTYPE;
     part jsonb;
     result_value jsonb;
 BEGIN
-    IF requested_operation IS NULL OR requested_capture IS NULL THEN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'adapter.onebot'
+       OR requested_operation IS NULL OR requested_capture IS NULL
+       OR conversation IS NULL
+       OR conversation->>'conversation_id' IS DISTINCT FROM input->>'conversation_ref'
+       OR conversation->>'event_id' IS DISTINCT FROM input->>'event_ref'
+       OR conversation->>'ingress_seq' !~ '^[0-9]+$' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object('code','MEDIA_CAPTURE_INPUT_INVALID','message','Media ingress identity is invalid','status',422));
     END IF;
+    input := input || jsonb_build_object('ingress_seq',(conversation->>'ingress_seq')::bigint);
     SELECT * INTO existing FROM __forest_module_schema__.media_captures
     WHERE capture_id=requested_capture OR operation_id=requested_operation FOR UPDATE;
     IF FOUND THEN

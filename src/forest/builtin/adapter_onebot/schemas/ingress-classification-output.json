@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["event_id", "ingress_seq", "decision", "classified_through_seq", "duplicate"],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "ingress_seq": {"type": "integer", "minimum": 1},
+    "decision": {"enum": ["NO_TRIGGER", "TRIGGER", "CONTROL_COMMAND", "ROUTED", "FAILED"]},
+    "classified_through_seq": {"type": "integer", "minimum": 0},
+    "duplicate": {"type": "boolean"}
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "adapter.onebot"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conversation_id", "event_id", "conversation_step_id", "shell_step_id"],
+      "properties": {
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "event_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "conversation_step_id": {"const": "conversation"},
+        "shell_step_id": {"const": "shell"}
+      }
+    },
+    "prior": {"type": "object"}
+  }
+}

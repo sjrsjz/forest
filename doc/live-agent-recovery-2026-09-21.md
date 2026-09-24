@@ -26,8 +26,8 @@
 
 ## 验证
 
-- `tests/test_clean_agent_runtime.py` 覆盖“恢复时已达传输上限则零 Provider 调用、持久 Run/Session 失败”的路径。
-- `tests/test_conversation_worker.py` 覆盖传输终态释放 lane。
+- 对应回归现由 `tests/test_agent_runtime_package.py` 覆盖包内模型重试与持久 Run 收敛。
+- `tests/test_conversation_scheduler_package.py` 覆盖包内 lane 释放与后继调度。
 - `tests/test_models.py` 明确断言 repair system content 为字符串并能还原 host control 记录。
 - 相关回归：`63 passed`；完整回归：`598 passed, 7 skipped`；Ruff、Python 编译与 diff whitespace 检查通过。
 - 部署镜像 `forest:local` 对应 manifest `sha256:98cd18bc39b6782d8f9fa4e8ec6a03d770ec7751fa90602c083d635161335d48`，Supervisor 为 `running/healthy`。

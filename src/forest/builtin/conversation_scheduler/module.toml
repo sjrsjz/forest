@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.1.0"
+version = "4.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -59,9 +59,9 @@ output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.1.0"
+schema_version = "4.2.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "6c8a365f82082fd166c001bc32cefc5733aca4488cf3e286878ce2369e5c7d9a"
+baseline_sha256 = "b5f6dbfabc40f3a415108068116881b6ea460602f3a5174af75fbc702d6b244d"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -84,19 +84,26 @@ output_schema = "schemas/admit-output.json"
 path = "/input/content"
 owner_component_path = "/input/source_component_id"
 owner_kind_path = "/input/content/owner_kind"
-owner_id_path = "/input/event_id"
+owner_id_path = "/input/content/owner_id"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/author"
 owner_component_path = "/input/source_component_id"
 owner_kind_path = "/input/author/owner_kind"
-owner_id_path = "/input/event_id"
+owner_id_path = "/input/author/owner_id"
 
 [[components.unit_of_work_participants]]
 name = "conversation.complete-classification"
 contract = "1.0"
 function = "conversation_complete_classification"
 input_schema = "schemas/classify-envelope.json"
+output_schema = "schemas/classify-output.json"
+
+[[components.unit_of_work_participants]]
+name = "conversation.classify-shell-ingress"
+contract = "1.0"
+function = "conversation_classify_shell_ingress"
+input_schema = "schemas/shell-classify-envelope.json"
 output_schema = "schemas/classify-output.json"
 
 [[components.unit_of_work_participants]]

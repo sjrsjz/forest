@@ -1,6 +1,6 @@
+import hashlib
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-import hashlib
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service

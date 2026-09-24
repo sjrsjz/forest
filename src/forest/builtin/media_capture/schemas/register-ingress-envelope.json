@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "adapter.onebot"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capture", "conversation_step_id"],
+      "properties": {
+        "conversation_step_id": {"const": "conversation"},
+        "capture": {"$ref": "#/$defs/capture"}
+      }
+    },
+    "prior": {"type": "object"}
+  },
+  "$defs": {
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_component_id": {"const": "adapter.onebot"},
+        "owner_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "source_kind", "identity_incarnation", "platform", "realm_id", "external_group_id", "trunk_id"],
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_kind": {"enum": ["GROUP", "DIRECT"]},
+        "identity_incarnation": {"type": "integer", "minimum": 1},
+        "platform": {"type": "string", "minLength": 1, "maxLength": 64},
+        "realm_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "external_group_id": {"type": ["string", "null"], "maxLength": 256},
+        "trunk_id": {"type": ["string", "null"], "maxLength": 256}
+      }
+    },
+    "text_part": {
+      "type": "object", "additionalProperties": false,
+      "required": ["part_id", "part_index", "part_kind", "media_type", "payload", "width", "height", "byte_length"],
+      "properties": {
+        "part_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "part_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+        "part_kind": {"const": "TEXT"},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 128},
+        "payload": {"$ref": "#/$defs/payload"},
+        "width": {"type": "null"}, "height": {"type": "null"},
+        "byte_length": {"type": "integer", "minimum": 0, "maximum": 33554432}
+      }
+    },
+    "image_part": {
+      "type": "object", "additionalProperties": false,
+      "required": ["part_id", "part_index", "media_ref", "locator"],
+      "properties": {
+        "part_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "part_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+        "media_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "locator": {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "uri", "platform_file"],
+          "properties": {
+            "kind": {"const": "onebot-source"},
+            "uri": {"type": ["string", "null"], "maxLength": 4096},
+            "platform_file": {"type": ["string", "null"], "maxLength": 1024}
+          }
+        }
+      }
+    },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "capture_id", "identity", "source_unit_id", "source_revision", "unit_kind",
+        "author_subject_ref", "author", "text_parts", "image_parts", "binding_ref",
+        "conversation_ref", "event_ref", "observed_at", "occurred_at"
+      ],
+      "properties": {
+        "capture_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "identity": {"$ref": "#/$defs/identity"},
+        "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_revision": {"type": "integer", "minimum": 1},
+        "unit_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "author_subject_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "author": {"$ref": "#/$defs/payload"},
+        "text_parts": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/text_part"}},
+        "image_parts": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/image_part"}},
+        "binding_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "conversation_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "event_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

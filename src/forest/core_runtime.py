@@ -129,7 +129,6 @@ _MODULES = {
             "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
             "kernel.uow.conversation.defer-approval",
-            "kernel.uow.onebot.ingress",
             "kernel.uow.agent.cancel-wake",
             "shell.core-runtime.execute",
             "agent.tool.runtime-status",

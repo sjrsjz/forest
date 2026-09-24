@@ -334,6 +334,75 @@ class ShellCommand(Plugin):
         )
         return {"disposition": "SUCCEEDED", "request_id": work["request_id"]}
 
+    @job("shell.rejection.publish")
+    async def publish_rejection(self, task, ctx):
+        work = _plain(task["payload"])
+        saved = await ctx.services.call(
+            "kernel.payload.json-write",
+            {
+                "protocol": "forest.payload-json-write/1",
+                "owner_kind": "shell.result",
+                "owner_id": work["rejection"]["owner_id"],
+                "value": work["rejection"]["value"],
+            },
+            operation_id=ctx.operations.stable("rejection-payload"),
+        )
+        payload_ref = saved["payload"]
+        channel_kind, channel_ref = self._channel(work["conversation_ref"])
+        await ctx.uow.call(
+            "shell.complete-rejection",
+            {
+                "shell": {
+                    "request_id": work["request_id"],
+                    "claim_token": work["claim_token"],
+                    "result": payload_ref,
+                },
+                "delivery": {
+                    "protocol": "forest.delivery-intent/1",
+                    "intent_id": _stable("rejection-intent", work["request_id"]),
+                    "binding_ref": work["binding_ref"],
+                    "lane_kind": "CONTROL",
+                    "ordering_key": work["conversation_ref"],
+                    "conversation_ref": None,
+                    "channel_kind": channel_kind,
+                    "channel_ref": channel_ref,
+                    "cause_component_id": "shell.command",
+                    "cause_kind": "shell.request",
+                    "cause_id": work["request_id"],
+                    "reply_ref": None,
+                    "parts": [
+                        {
+                            "part_operation_id": _stable(
+                                "rejection-part", work["request_id"]
+                            ),
+                            "effect_operation_ref": _stable(
+                                "rejection-effect", work["request_id"]
+                            ),
+                            "payload": payload_ref,
+                        }
+                    ],
+                },
+                "audit": {
+                    "protocol": "forest.audit-append/1",
+                    "audit_id": _stable("rejection-audit", work["request_id"]),
+                    "action": "shell.command.rejected",
+                    "origin_kind": "onebot.group-shell",
+                    "severity": "WARNING",
+                    "actor_kind": "principal",
+                    "actor_id": work["principal_ref"],
+                    "resource_kind": "shell.command",
+                    "resource_id": work["command_id"],
+                    "operation_kind": "shell.request",
+                    "operation_id": work["request_id"],
+                    "call_id": None,
+                    "details_payload_id": None,
+                    "details_payload_digest": None,
+                },
+            },
+            operation_id=ctx.operations.stable("complete-rejection"),
+        )
+        return {"disposition": "SUCCEEDED", "request_id": work["request_id"]}
+
     @staticmethod
     def _channel(conversation_ref):
         if conversation_ref.startswith("onebot:group:"):

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.shell-command"
-version = "1.0.0"
+version = "1.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "shell_command:ShellCommand"
@@ -30,7 +30,8 @@ stop_timeout_s = 10
 requests = [
   "service.call:kernel.payload.json-write",
   "uow.execute:shell.authorize-execution",
-  "uow.execute:shell.complete"
+  "uow.execute:shell.complete",
+  "uow.execute:shell.complete-rejection"
 ]
 
 [[components.contribution_directories]]
@@ -57,9 +58,9 @@ output_schema = "schemas/payload-write-output.json"
 
 [components.storage]
 schema_id = "forest.shell.command"
-schema_version = "2.0.0"
+schema_version = "2.1.0"
 baseline = "schema/shell_command.sql"
-baseline_sha256 = "3d7f79c1bf8b27f062264832ee7a07e1afdb0901c6cd795009d5ba8e67e24483"
+baseline_sha256 = "c5b9faa2eebc8bc846add801ed435d18254649972a7e5538753e913406467905"
 scope = "bot"
 repository_contract = "forest.shell-command.repository/2"
 execution_profile = "official"
@@ -105,6 +106,19 @@ owner_component = "shell.command"
 owner_kind = "shell.result"
 owner_id_path = "/input/result/owner_id"
 
+[[components.unit_of_work_participants]]
+name = "shell.complete-rejection-record"
+contract = "1.0"
+function = "shell_complete_rejection"
+input_schema = "schemas/complete-rejection-envelope.json"
+output_schema = "schemas/complete-rejection-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/result"
+owner_component = "shell.command"
+owner_kind = "shell.result"
+owner_id_path = "/input/result/owner_id"
+
 [[components.unit_of_work_plans]]
 name = "shell.authorize-execution"
 contract = "1.0"
@@ -129,6 +143,18 @@ steps = [
   { id = "audit", component_id = "kernel.audit", participant = "audit.append", input_path = "/audit" }
 ]
 
+[[components.unit_of_work_plans]]
+name = "shell.complete-rejection"
+contract = "1.0"
+input_schema = "schemas/complete-plan.json"
+output_schema = "schemas/audit-output.json"
+timeout_s = 10
+steps = [
+  { id = "shell", component_id = "shell.command", participant = "shell.complete-rejection-record", input_path = "/shell" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.create-control-intent-uow", input_path = "/delivery", participant_generation_field = "delivery_generation_id" },
+  { id = "audit", component_id = "kernel.audit", participant = "audit.append", input_path = "/audit" }
+]
+
 [[components.owned_work_handlers]]
 name = "shell.command.pending"
 contract = "1.0"
@@ -143,4 +169,20 @@ claim_timeout_s = 5
 handler_timeout_s = 920
 settle_timeout_s = 10
 lease_seconds = 940
+drain_policy = "backlog"
+
+[[components.owned_work_handlers]]
+name = "shell.rejection.pending"
+contract = "1.0"
+handler = "shell.rejection.publish"
+claim_function = "shell_claim_rejection"
+settle_function = "shell_settle_rejection"
+input_schema = "schemas/rejection-work-input.json"
+output_schema = "schemas/work-output.json"
+max_concurrency = 1
+poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 30
+settle_timeout_s = 10
+lease_seconds = 45
 drain_policy = "backlog"

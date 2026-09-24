@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配仍是混合图，Forest 尚不可发布。
+> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配已切为微内核包图；Memory 完整主链和长期运行验收尚未完成，因此 Forest 仍不可发布。
 
 ## 1. 判定标准
 
@@ -51,22 +51,27 @@
 | Delivery | `delivery` | SendIntent、Effect handoff、结果收敛与管理 UI |
 | Group shell | `shell_command` | P0/P1/P2 授权、审计、持久执行与 Shell 贡献目录 |
 | OneBot adapter | `adapter_onebot` | Binding、入站投影与发送语义在 Worker；WebSocket 在 Generation Driver |
+| Agent | `agent_runtime` | CorePrompt、模型/工具循环、审批与 reload 恢复均在隔离 Worker 和包私有 SQL 内 |
+| Conversation | `conversation_scheduler` | 同群串行、跨群并发、安全边界合流、静默归档和上下文裁剪 |
+| Memory | `memory_graph` | 多主干来源、OneBot 多模态捕获和精确来源召回；图与语义召回仍待补齐 |
 
 内核的 Runtime、Payload、Authorization、Effect 与 Audit Authority 仍是可信微内核组件。它们不是可卸载业务插件，也不应迁入 `builtin`。
 
-## 4. 尚未切换的生产组件
+## 4. 已切换的生产 builtin
 
-当前生产图仍通过宿主组合根构造以下组件，因此它们尚未完成包化：
+生产组合根已统一通过 `bootstrap_builtin_package()` 装载以下组件。Host 只装配配置、能力授权、效果驱动和冻结契约句柄，不再构造这些组件的 Repository 或业务 Runtime：
 
-| 组件 | 当前生产入口 | 已有候选 | 缺口 |
+| 组件 | 生产包 | 当前状态 | 剩余工作 |
 |---|---|---|---|
-| Agent | `bootstrap_clean_agent()` | `builtin/agent_runtime` | 生产切换；删除旧 Runtime 状态工具与宿主执行端口 |
-| Conversation | `bootstrap_clean_messaging()` | `builtin/conversation_scheduler` | 入站 UoW 与 Memory 捕获包化后进行生产切换 |
-| Memory | `bootstrap_clean_memory()` | `builtin/memory_graph` | 捕获/嵌入/图召回 Worker 与端口、完整管理查询、生产切换；精确来源召回已迁入包 |
+| Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 删除未引用的旧宿主实现；继续补齐可观测管理面 |
+| Conversation | `builtin/conversation_scheduler` | 入站、分类、静默归档、Agent 调度与安全边界合流已接入生产图 | 扩充管理查询与长时间压力验证 |
+| Memory | `builtin/memory_graph` | OneBot 多模态来源捕获和精确召回已接入生产图 | 嵌入、向量 ref、图扩散、跨主干联想、遗忘和完整管理面 |
+
+OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
 `clean_*` 是重构期间遗留的宿主实现名称，不是新的模块层。对应 builtin 完成生产切换后，应直接删除这些文件和旧 baseline，不保留兼容转发。
 
-## 5. Agent 候选包已经拥有的部分
+## 5. Agent 生产包已经拥有的部分
 
 `builtin/agent_runtime` 已拥有唯一 CorePrompt 与 XML 协议解析器，并以私有 SQL 和 manifest UoW 封闭以下状态转换：
 
@@ -86,19 +91,19 @@
 
 Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复、非审批 ToolCall 的 Effect 执行以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
 
-这仍不是 Agent 生产包化完成：宿主 Runtime 状态工具尚未迁成可序列化 builtin 服务，生产组合根仍调用旧 bootstrap。支持查询的 ToolCall 已经能够在 handoff 后通过冻结目录的 `query_handed_off` 查询原 operation，并用 `RECONCILIATION` 收敛；不支持查询的工具继续保持 `BLOCKED_UNKNOWN`，不会盲目重发。审批决定不再触发宿主 callback；Conversation 的持久 defer deadline 负责重新调度，Agent 在恢复执行时检查审批事实。Conversation 候选包已经贡献 `conversation.agent-run.pending`，并以 manifest UnitOfWork 完成最终回复、Delivery Intent、Session 后继 Run/关闭和失败终态触发器收敛；这些端口尚未替换 `clean_bot_host.py` 的旧宿主执行器。不得把“候选包主链已闭合”表述成“生产主链已经切换”。
+Agent 已进入生产组合根。支持查询的 ToolCall 能在 handoff 后通过冻结目录的 `query_handed_off` 查询原 operation，并用 `RECONCILIATION` 收敛；不支持查询的工具保持 `BLOCKED_UNKNOWN`，不会盲目重发。审批决定不触发宿主 callback；Conversation 的持久 defer deadline 负责重新调度，Agent 在恢复执行时检查审批事实。`agent.reload-resume.pending` 负责热重载后的持久恢复，Host 不解释 Agent 状态。
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；提交结果由 SDK 强制收敛为五字段 PayloadRef，传输元数据不能混入跨模块引用。单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
 Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；旧宿主 Agent 过渡执行器和新的包内 model attempt 都只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。Effect/Agent 私有 schema 已用独立 PostgreSQL 重建验证；完整 Agent 执行循环仍待接入 Worker 公共服务。
 
-## 6. Conversation 候选包已经拥有的部分
+## 6. Conversation 生产包已经拥有的部分
 
 `builtin/conversation_scheduler` 已封闭消息接纳、连续分类水位、截至最后 trigger 的输入选择、带作者来源的 Context、无 LLM 摘要的窗口裁剪、静默排空和 `conversation.context.snapshot/2`。快照不再把完整历史塞进 Worker 帧：权威查询最多返回 32 个活动单元，Worker 写入带正文/作者父边的 `context.snapshot.page`，超过 128 页时构造 `context.snapshot.index` 树，服务只返回最终 manifest 的精确 PayloadRef。同群串行和跨群并行依靠数据库 actor lease，而不是进程锁。
 
-该候选已经拥有数据库租约驱动的 `conversation.agent-run.pending`：同一群聊只允许一个 actor claim，跨群可由多个槽并行；Worker 通过 `agent.execute/2` 驱动 Run，在模型安全边界合流，随后用事务计划原子提交 Agent 完成态、Conversation 回复单元与 Delivery Intent，再在 Session 边界选择后继输入并联动 Memory 资格确认。Agent 的 `FAILED/CANCELLED` 终态由独立事务计划核对精确 trigger 集、收敛 trigger 状态并释放 Session；`WAIT_APPROVAL` 依靠持久 defer deadline 轮询准确 approval，不需要宿主监听器。它仍未加入生产组合根；现有 `bootstrap_clean_messaging()` 是旁路，需在入站接纳与 Memory 捕获都进入包 UoW 后直接删除。
+数据库租约驱动的 `conversation.agent-run.pending` 已进入生产组合根：同一群聊只允许一个 actor claim，跨群可由多个槽并行；Worker 通过 `agent.execute/2` 驱动 Run，在模型安全边界合流，随后用事务计划原子提交 Agent 完成态、Conversation 回复单元与 Delivery Intent，再在 Session 边界选择后继输入并联动 Memory 资格确认。Agent 的 `FAILED/CANCELLED` 终态由独立事务计划核对精确 trigger 集、收敛 trigger 状态并释放 Session；`WAIT_APPROVAL` 依靠持久 defer deadline 轮询准确 approval，不需要宿主监听器。
 
-## 7. Memory 候选包已经拥有的部分
+## 7. Memory 生产包已经拥有的部分
 
 `builtin/memory_graph` 已经是可由 `PackageCatalog` 构建的独立包，声明自己的隔离 Worker、私有 storage baseline、Generation 配置、管理 UI、来源捕获与输入资格 UnitOfWork participant，以及 `memory_recall_exact` Agent 工具。嵌入配置将 `TEXT_IMAGE` 模型种类、部署标识、模型修订、维数与归一化方式绑定到 Bot 模块生命周期；端点轮换仍应由后续受限 Effect 配置承担，不能在已创建 Bot 上改换模型种类。
 
@@ -106,13 +111,13 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 精确召回不再调用宿主 `builtin_memory_tool.py`：工具声明由 Memory manifest 发布并静态绑定本包 service，隔离 Worker 经只读 Domain Query 获取最多八个归档稳定 source unit，只有 ACTIVE 来源、`ELIGIBLE` unit 和完整 part 集可见。Worker 按精确 PayloadRef 读取文本、保留图片引用，结果明确携带 source/trunk/group/author provenance，并以原始 part 为父边写入 Memory 所有的 `tool.result`。真实 PostgreSQL 测试已覆盖群主干来源、缺失 ID、Payload 读取/写入、Generation 路由与资源回收。
 
-这仍是候选而非生产切换。OneBot 入站尚未改为调用该 manifest UnitOfWork；图片/文本 facet、嵌入预算和异步合流、独立向量索引 ref、QiYu 图区域扩散、超大关联点随机有界采样、跨主干联想、语义召回、遗忘，以及带筛选/关系遍历/真实召回试验的管理契约仍需迁入该包。当前 `bootstrap_clean_memory()` 和旧宿主精确工具注册仍构成生产旁路，完成切换后必须直接删除。
+OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。尚未完成的是图片/文本 facet 嵌入、独立向量索引 ref、QiYu 图区域扩散、超大关联点随机有界采样、跨主干联想、语义召回、遗忘，以及带筛选、关系遍历和真实召回试验的管理契约。
 
 ## 8. 下一切换顺序
 
-1. 将 Runtime 状态工具迁成 manifest 发布的可序列化服务，删除宿主 `ToolDispatchResult` 与工具映射旁路。
-2. 补齐 `memory_graph` 的消息捕获、嵌入、图扩散、召回和管理端口，并把 OneBot 入站接纳编译为 manifest UnitOfWork。
-3. 用 `bootstrap_builtin_package()` 同时替换 `bootstrap_clean_agent()`、`bootstrap_clean_messaging()` 与 `bootstrap_clean_memory()`，随后直接删除宿主 Runtime、Repository 装配和旧 baseline。
-4. 从空开发库启动完整图，验证热重载安全点、失败回滚、群并发、审批、Provider/Tool 不确定结果、真实 OneBot 单次低频交互和 WebUI 管理贡献。
+1. 将旧 `clean_memory_runtime.py` 中尚未迁入包的嵌入与图算法逐项迁到 `builtin/memory_graph`，然后连同 `clean_memory_module.py` 和旧专用测试一起删除；Agent、Conversation 与旧入站 UoW 已删除。
+2. 补齐 `memory_graph` 的嵌入、向量索引 ref、图扩散、跨主干联想、遗忘和管理端口。
+3. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
+4. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
 
-在第 3 步完成前，生产图仍是“微内核包系统 + 三个宿主业务模块”的混合图；在第 4 步完成前，目标重型 Bot 框架仍未完成。
+生产图已经是微内核包系统；目标重型 Bot 框架仍需完成 Memory 主链和长期运行验证。

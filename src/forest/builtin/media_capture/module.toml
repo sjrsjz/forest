@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.media-capture"
-version = "2.0.5"
+version = "2.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "media_capture:MediaCapture"
@@ -46,9 +46,9 @@ order = 15
 
 [components.storage]
 schema_id = "forest.media.capture"
-schema_version = "2.0.2"
+schema_version = "2.1.0"
 baseline = "schema/media_capture.sql"
-baseline_sha256 = "b49209418e4b21506625da586361af3eb86f49a77b936463f3f0e296bc120abd"
+baseline_sha256 = "139256e8995616b115130cffd4e2c0327984962f4ee14a40cf09f3c1f3936f2e"
 scope = "bot"
 repository_contract = "forest.media-capture.repository/2"
 execution_profile = "official"
@@ -118,8 +118,20 @@ output_schema = "schemas/part-command-output.json"
 name = "media.register-ingress"
 contract = "1.0"
 function = "media_register_ingress"
-input_schema = "schemas/register-ingress-input.json"
+input_schema = "schemas/register-ingress-envelope.json"
 output_schema = "schemas/register-ingress-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/capture/author"
+owner_component = "adapter.onebot"
+owner_kind = "onebot.author-snapshot"
+owner_id_path = "/input/capture/author/owner_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/capture/text_parts/*/payload"
+owner_component = "adapter.onebot"
+owner_kind = "onebot.memory-text"
+owner_id_path = "/input/capture/text_parts/*/payload/owner_id"
 
 [[components.owned_work_handlers]]
 name = "media.capture.pending"

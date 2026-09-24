@@ -918,6 +918,61 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_classify_shell_ingress(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    conversation_step text := body->>'conversation_step_id';
+    shell_step text := body->>'shell_step_id';
+    admitted jsonb := prior->conversation_step;
+    shell_result jsonb := prior->shell_step;
+    rejection_code text;
+    projected jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'adapter.onebot'
+       OR admitted IS NULL OR shell_result IS NULL
+       OR admitted->>'conversation_id' IS DISTINCT FROM body->>'conversation_id'
+       OR admitted->>'event_id' IS DISTINCT FROM body->>'event_id'
+       OR shell_result->>'request_id' IS NULL
+       OR shell_result->>'shell_generation_id' IS NULL
+       OR shell_result->>'policy_revision' !~ '^[0-9]+$'
+       OR shell_result->>'state' NOT IN ('QUEUED','REJECTION_PENDING','REJECTED') THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_SHELL_CLASSIFICATION_INVALID',
+                'message','Shell admission evidence is invalid','status',422
+            )
+        );
+    END IF;
+    rejection_code := shell_result->>'rejection_code';
+    projected := jsonb_build_object(
+        'protocol','forest.uow-step/1',
+        'caller',envelope->'caller',
+        'input',jsonb_build_object(
+            'conversation_id',body->>'conversation_id',
+            'event_id',body->>'event_id',
+            'decision','CONTROL_COMMAND',
+            'classifier_component_id','shell.command',
+            'classifier_generation_id',shell_result->>'shell_generation_id',
+            'rule_revision','shell-policy:'||(shell_result->>'policy_revision'),
+            'reason_code',COALESCE(rejection_code,'SHELL_ACCEPTED'),
+            'route_ref',shell_result->>'request_id',
+            'trigger_id',NULL,
+            'principal_ref',NULL
+        ),
+        'prior',prior
+    );
+    RETURN __forest_module_schema__.conversation_complete_classification(context, projected);
+END;
+$$;
+
 CREATE FUNCTION conversation_selection_result(requested_bot text, requested_operation text)
 RETURNS jsonb
 LANGUAGE plpgsql

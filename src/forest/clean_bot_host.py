@@ -16,9 +16,6 @@ from forest.builtin_packages import bootstrap_builtin_package
 from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
-from forest.clean_agent_module import bootstrap_clean_agent
-from forest.clean_memory_module import bootstrap_clean_memory, default_memory_configuration
-from forest.clean_messaging_runtime import bootstrap_clean_messaging
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
@@ -484,13 +481,39 @@ class CleanBotHost:
                 vector_index_configuration_validator_factory(self.store)
             ),
         )
-        memory_configuration = default_memory_configuration()
-        memory_configuration["embedding"] = embedding_profile
-        memory = await bootstrap_clean_memory(
+        memory = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/memory_graph"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            initial_configuration=memory_configuration,
+            initial_configuration={
+                "protocol": "forest.memory.graph/2",
+                "embedding": {
+                    "model_kind": "TEXT_IMAGE",
+                    **embedding_profile,
+                    "normalization": "L2",
+                },
+                "fusion_policy_revision": "independent-facets/1",
+                "retrieval": {
+                    "policy_revision": "qiyu-graph-region/1",
+                    "seed_limit": 4,
+                    "candidate_limit_per_facet": 64,
+                    "min_similarity": 0.35,
+                    "min_graph_relevance": 0.05,
+                    "max_graph_nodes": 32,
+                    "max_association_edges_per_node": 32,
+                    "max_retrieval_chars": 24000,
+                    "sequence_weight": 0.55,
+                    "association_weight": 0.90,
+                },
+                "embedding_budget": {
+                    "policy_revision": "daily-cost-cap/1",
+                    "daily_request_limit": 1000,
+                    "daily_token_limit": 10000000,
+                    "reservation_tokens": 32768,
+                },
+            },
         )
         media_driver_options = {}
         if self._media_client_factory is not None:
@@ -523,18 +546,50 @@ class CleanBotHost:
                 }
             ),
         )
-        agent = await bootstrap_clean_agent(
+        preset_system = self.settings.agent_preset_system or (
+            (self.settings.agent_system_prompt,) if self.settings.agent_system_prompt else ()
+        )
+        preset_owner_id = "preset/agent.runtime/default"
+        preset_payload = await self._kernel.payload.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="preset.context",
+            owner_id=preset_owner_id,
+            media_type="application/json",
+            content=json.dumps(
+                {"system": list(preset_system)},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            expected_deletion_epoch=await self._kernel.payload.epoch(),
+        )
+        agent = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/agent_runtime"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            preset_system=(
-                self.settings.agent_preset_system
-                or (
-                    (self.settings.agent_system_prompt,)
-                    if self.settings.agent_system_prompt
-                    else ()
-                )
-            ),
+            initial_configuration={
+                "protocol": "forest.agent.runtime/1",
+                "agent_spec_revision": "agentlib-aligned/1",
+                "preset_revision": "preset/default/1",
+                "preset": {
+                    "payload_id": preset_payload.payload_id,
+                    "digest": preset_payload.content_digest,
+                    "owner_id": preset_owner_id,
+                },
+                "run_timeout_seconds": 600,
+                "max_steps": 64,
+                "output_tokens": self.settings.model_max_output_tokens,
+                "stream": True,
+            },
+            resolved_contracts={
+                "provider.profile.bind": "1.0",
+                "provider.request.materialize": "1.0",
+                "provider.model.dispatch": "2.0",
+                "conversation.context.snapshot": "2.0",
+            },
+            startup_components=("provider.chat-completions",),
         )
         routing = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/routing_graph"))),
@@ -607,10 +662,25 @@ class CleanBotHost:
                 )
             return self.settings.onebot_access_token
 
-        messaging = await bootstrap_clean_messaging(
+        conversation = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
+            self.package_catalog,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
+            initial_configuration={
+                "protocol": "forest.conversation.scheduler/2",
+                "context_view": {
+                    "high_watermark_units": 512,
+                    "retain_units": 256,
+                    "policy_revision": "context-view-unit-window-v1",
+                },
+            },
+            resolved_contracts={
+                "agent.execute": "2.0",
+                "agent.execution.policy": "1.0",
+            },
+            startup_components=("agent.runtime",),
         )
         delivery = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/delivery"))),
@@ -696,7 +766,6 @@ class CleanBotHost:
                 "onebot.codec.prepare-send": "1.0",
                 "conversation.trigger.classify": "1.0",
                 "shell.ingress.inspect": "1.0",
-                "kernel.uow.onebot.ingress": "1.0",
             },
             startup_components=(
                 "codec.onebot",
@@ -734,8 +803,7 @@ class CleanBotHost:
                 shell.descriptor,
                 adapter.descriptor,
             )
-            + messaging.descriptors
-            + (delivery.descriptor,)
+            + (conversation.descriptor, delivery.descriptor)
         )
         return RuntimeModuleRegistry(self, descriptors, activation_id=activation_id)
 
@@ -747,12 +815,15 @@ class CleanBotHost:
             self._replacement_lock = asyncio.Lock()
             registry = await self._assemble_registry()
             self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
-            await registry.start()
-            self.registry = registry
-            await self._resume_reload_waits(registry)
+            # Generation preparation can exceed the 30 second HostLease TTL on a
+            # cold install. Lease ownership starts at claim, so renewal must also
+            # start there; waiting until publication can fence the very owner that
+            # is still preparing the graph.
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
             )
+            await registry.start()
+            self.registry = registry
             self._replacement_task = asyncio.create_task(
                 self._run_graph_replacements(),
                 name=f"bot-graph-replacement:{self.settings.bot_id}",
@@ -777,29 +848,6 @@ class CleanBotHost:
             return tuple(descriptor.component_id for descriptor in registry.descriptors)
         finally:
             await self.store.close()
-
-    @staticmethod
-    async def _resume_reload_waits(
-        registry: RuntimeModuleRegistry,
-        operation_id: str | None = None,
-    ) -> tuple[dict, ...]:
-        agent = registry.get("agent.runtime")
-        resumed = (
-            await agent.recover_reload_waits()
-            if operation_id is None
-            else await agent.resume_reload_wait(operation_id)
-        )
-        if not resumed:
-            return ()
-        conversation = registry.get("conversation.scheduler")
-        for run in resumed:
-            await conversation.resume_deferred(
-                run["conversation_ref"],
-                reason_code="AGENT_RELOAD_WAIT",
-                reason_ref=run["reload_operation_id"],
-            )
-        registry.notify_work()
-        return resumed
 
     async def replace_runtime_graph(
         self,
@@ -836,7 +884,6 @@ class CleanBotHost:
                 await previous.drain_owned_work_for_replacement(candidate.activation_id)
                 previous_drained = True
                 await candidate.start()
-                await self._resume_reload_waits(candidate, candidate.activation_id)
             except BaseException as replacement_error:
                 cleanup_error = None
                 try:
@@ -1039,10 +1086,6 @@ class CleanBotHost:
         if replacement is not None:
             replacement.cancel()
             await asyncio.gather(replacement, return_exceptions=True)
-        task, self._renewal_task = self._renewal_task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
         registry, self.registry = self.registry, None
         if registry is not None:
             errors = await registry.close()
@@ -1051,8 +1094,20 @@ class CleanBotHost:
                     "RUNTIME_MODULE_CLEANUP_FAILED",
                     "Bot runtime graph did not close cleanly",
                     503,
-                    details={"errors": len(errors)},
+                    details={
+                        "errors": [
+                            getattr(error, "code", type(error).__name__)
+                            for error in errors
+                        ]
+                    },
                 )
+        # The HostLease fences every cleanup write. Keep renewing it until the
+        # graph has frozen admission, drained owned work, released contribution
+        # directories, stopped Workers, and retired its persistent Generation.
+        task, self._renewal_task = self._renewal_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         lease, self._lease = self._lease, None
         if failure is None and lease is not None:
             try:

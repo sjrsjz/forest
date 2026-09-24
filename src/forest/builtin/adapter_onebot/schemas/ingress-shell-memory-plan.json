@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["adapter", "conversation", "payload_epoch", "memory", "shell", "shell_classification"],
+  "properties": {
+    "adapter": {"type": "object"}, "conversation": {"type": "object"},
+    "payload_epoch": {"type": "object"}, "memory": {"type": "object"},
+    "shell": {"type": "object"}, "shell_classification": {"type": "object"}
+  }
+}
