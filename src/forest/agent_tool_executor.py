@@ -145,8 +145,15 @@ class DurableAgentToolExecutor:
                 "Run has no current tool proposal",
                 409,
             )
-        if tool["tool_name"] != binding.name or (
-            tool["tool_contract_digest"] != binding.binding_digest
+        if (
+            tool["tool_name"] != binding.name
+            or tool["tool_component_id"] != binding.component_id
+            or tool["tool_generation_id"] != binding.generation_id
+            or tool["tool_service_id"] != binding.service_id
+            or tool["tool_contract_digest"] != binding.contract_digest
+            or tool["tool_binding_digest"] != binding.binding_digest
+            or tool["approval_required"] is not binding.approval_required
+            or tool["supports_query"] is not binding.supports_query
         ):
             raise ForestError(
                 "AGENT_TOOL_BINDING_CONFLICT",

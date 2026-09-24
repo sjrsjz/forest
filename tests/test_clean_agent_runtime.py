@@ -1685,8 +1685,14 @@ async def test_function_call_binds_to_a_claimed_trigger_principal_without_child_
     proposal = ToolProposal(
         tool_call_id="tool-call/one",
         arguments=arguments,
+        component_id="tool.echo",
+        generation_id="generation/tool/one",
+        service_id="tool.echo.execute",
+        contract_digest="sha256:" + "b" * 64,
+        binding_digest="sha256:" + "c" * 64,
+        approval_required=True,
+        supports_query=True,
         authority_trigger_ref="trigger/one/1",
-        tool_contract_digest="sha256:" + "c" * 64,
         effect_operation_ref="effect/tool/one",
     )
     await agent.record_model_turn(
@@ -1704,7 +1710,9 @@ async def test_function_call_binds_to_a_claimed_trigger_principal_without_child_
     async with store.pool.connection() as conn:
         tool = await (
             await conn.execute(
-                sql.SQL("SELECT tool_name,authority_trigger_ref,authority_principal_ref,state "
+                sql.SQL("SELECT tool_name,tool_component_id,tool_generation_id,tool_service_id,"
+                        "tool_contract_digest,tool_binding_digest,approval_required,supports_query,"
+                        "authority_trigger_ref,authority_principal_ref,state "
                         "FROM {}.tool_calls WHERE bot_id=%s AND tool_call_id=%s").format(
                     sql.Identifier(storage.spec.namespace)
                 ),
@@ -1713,6 +1721,13 @@ async def test_function_call_binds_to_a_claimed_trigger_principal_without_child_
         ).fetchone()
         assert tool == {
             "tool_name": "lookup",
+            "tool_component_id": "tool.echo",
+            "tool_generation_id": "generation/tool/one",
+            "tool_service_id": "tool.echo.execute",
+            "tool_contract_digest": "sha256:" + "b" * 64,
+            "tool_binding_digest": "sha256:" + "c" * 64,
+            "approval_required": True,
+            "supports_query": True,
             "authority_trigger_ref": "trigger/one/1",
             "authority_principal_ref": "principal/a",
             "state": "PROPOSED",

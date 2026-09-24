@@ -264,15 +264,27 @@ class ModelRequestPlan:
 class ToolProposal:
     tool_call_id: str
     arguments: AgentPayloadRef
+    component_id: str
+    generation_id: str
+    service_id: str
+    contract_digest: str
+    binding_digest: str
+    approval_required: bool
+    supports_query: bool
     authority_trigger_ref: str
-    tool_contract_digest: str
     effect_operation_ref: str
 
     def validate(self) -> None:
         _bounded(self.tool_call_id, "tool_call_id", 256)
         self.arguments.validate("tool.arguments")
+        _bounded(self.component_id, "component_id", 128)
+        _bounded(self.generation_id, "generation_id", 256)
+        _bounded(self.service_id, "service_id", 256)
+        _validated_digest(self.contract_digest, "contract_digest")
+        _validated_digest(self.binding_digest, "binding_digest")
+        if type(self.approval_required) is not bool or type(self.supports_query) is not bool:
+            raise ForestError("AGENT_RUNTIME_INPUT_INVALID", "Invalid tool binding flags", 422)
         _bounded(self.authority_trigger_ref, "authority_trigger_ref", 256)
-        _validated_digest(self.tool_contract_digest, "tool_contract_digest")
         _bounded(self.effect_operation_ref, "effect_operation_ref", 256)
 
 
@@ -1887,7 +1899,13 @@ class AgentRuntimeRepository:
                         tool.arguments.payload_id,
                         tool.arguments.digest,
                         tool.authority_trigger_ref,
-                        tool.tool_contract_digest,
+                        tool.component_id,
+                        tool.generation_id,
+                        tool.service_id,
+                        tool.contract_digest,
+                        tool.binding_digest,
+                        tool.approval_required,
+                        tool.supports_query,
                         tool.effect_operation_ref,
                     )
                     tool_actual = None if stored_tool is None else tuple(
@@ -1898,7 +1916,13 @@ class AgentRuntimeRepository:
                             "arguments_payload_id",
                             "arguments_payload_digest",
                             "authority_trigger_ref",
+                            "tool_component_id",
+                            "tool_generation_id",
+                            "tool_service_id",
                             "tool_contract_digest",
+                            "tool_binding_digest",
+                            "approval_required",
+                            "supports_query",
                             "effect_operation_ref",
                         )
                     )
@@ -2009,9 +2033,11 @@ class AgentRuntimeRepository:
                 await conn.execute(
                     sql.SQL(
                         "INSERT INTO {}(bot_id,tool_call_id,run_id,turn_id,step_seq,tool_name,"
+                        "tool_component_id,tool_generation_id,tool_service_id,"
                         "arguments_payload_id,arguments_payload_digest,authority_trigger_ref,"
-                        "authority_principal_ref,tool_contract_digest,effect_operation_ref) VALUES "
-                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                        "authority_principal_ref,tool_contract_digest,tool_binding_digest,"
+                        "approval_required,supports_query,effect_operation_ref) VALUES "
+                        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
                     ).format(self._table("tool_calls")),
                     (
                         self.store.bot_id,
@@ -2020,11 +2046,17 @@ class AgentRuntimeRepository:
                         turn_id,
                         request["step_seq"],
                         function_call.name,
+                        tool.component_id,
+                        tool.generation_id,
+                        tool.service_id,
                         tool.arguments.payload_id,
                         tool.arguments.digest,
                         tool.authority_trigger_ref,
                         principal_ref,
-                        tool.tool_contract_digest,
+                        tool.contract_digest,
+                        tool.binding_digest,
+                        tool.approval_required,
+                        tool.supports_query,
                         tool.effect_operation_ref,
                     ),
                 )

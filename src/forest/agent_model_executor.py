@@ -398,8 +398,14 @@ class DurableAgentModelExecutor:
             proposal = ToolProposal(
                 tool_call_id=tool_call_id,
                 arguments=argument_payload,
+                component_id=binding.component_id,
+                generation_id=binding.generation_id,
+                service_id=binding.service_id,
+                contract_digest=binding.contract_digest,
+                binding_digest=binding.binding_digest,
+                approval_required=binding.approval_required,
+                supports_query=binding.supports_query,
                 authority_trigger_ref=authority_trigger,
-                tool_contract_digest=binding.binding_digest,
                 effect_operation_ref="tool-effect:" + call_digest,
             )
         await self.agent.record_model_turn(

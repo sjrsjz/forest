@@ -414,6 +414,9 @@ CREATE TABLE tool_calls (
     turn_id text NOT NULL,
     step_seq integer NOT NULL CHECK (step_seq > 0),
     tool_name text NOT NULL CHECK (octet_length(tool_name) BETWEEN 1 AND 128),
+    tool_component_id text NOT NULL CHECK (octet_length(tool_component_id) BETWEEN 1 AND 128),
+    tool_generation_id text NOT NULL CHECK (octet_length(tool_generation_id) BETWEEN 1 AND 256),
+    tool_service_id text NOT NULL CHECK (octet_length(tool_service_id) BETWEEN 1 AND 256),
     arguments_payload_id text NOT NULL
         CHECK (octet_length(arguments_payload_id) BETWEEN 1 AND 256),
     arguments_payload_digest text NOT NULL
@@ -423,6 +426,9 @@ CREATE TABLE tool_calls (
     authority_principal_ref text NOT NULL
         CHECK (octet_length(authority_principal_ref) BETWEEN 1 AND 256),
     tool_contract_digest text NOT NULL CHECK (tool_contract_digest ~ '^sha256:[a-f0-9]{64}$'),
+    tool_binding_digest text NOT NULL CHECK (tool_binding_digest ~ '^sha256:[a-f0-9]{64}$'),
+    approval_required boolean NOT NULL,
+    supports_query boolean NOT NULL,
     effect_operation_ref text NOT NULL
         CHECK (octet_length(effect_operation_ref) BETWEEN 1 AND 256),
     approval_ref text,
@@ -681,14 +687,18 @@ SET search_path FROM CURRENT AS $$
 BEGIN
     IF TG_OP='DELETE' OR
        ROW(NEW.bot_id,NEW.tool_call_id,NEW.run_id,NEW.turn_id,NEW.step_seq,
-           NEW.tool_name,NEW.arguments_payload_id,NEW.arguments_payload_digest,
+           NEW.tool_name,NEW.tool_component_id,NEW.tool_generation_id,NEW.tool_service_id,
+           NEW.arguments_payload_id,NEW.arguments_payload_digest,
            NEW.authority_trigger_ref,NEW.authority_principal_ref,
-           NEW.tool_contract_digest,NEW.effect_operation_ref,NEW.created_at)
+           NEW.tool_contract_digest,NEW.tool_binding_digest,NEW.approval_required,
+           NEW.supports_query,NEW.effect_operation_ref,NEW.created_at)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.tool_call_id,OLD.run_id,OLD.turn_id,OLD.step_seq,
-           OLD.tool_name,OLD.arguments_payload_id,OLD.arguments_payload_digest,
+           OLD.tool_name,OLD.tool_component_id,OLD.tool_generation_id,OLD.tool_service_id,
+           OLD.arguments_payload_id,OLD.arguments_payload_digest,
            OLD.authority_trigger_ref,OLD.authority_principal_ref,
-           OLD.tool_contract_digest,OLD.effect_operation_ref,OLD.created_at) THEN
+           OLD.tool_contract_digest,OLD.tool_binding_digest,OLD.approval_required,
+           OLD.supports_query,OLD.effect_operation_ref,OLD.created_at) THEN
         RAISE EXCEPTION 'Tool call identity is immutable' USING ERRCODE='55000';
     END IF;
     IF ((OLD.state='PROPOSED' AND NEW.state IN ('WAIT_APPROVAL','DISPATCHING','FAILED','CANCELLED')) OR
@@ -907,10 +917,14 @@ BEGIN
     IF run_row.current_tool_call_id IS NOT NULL THEN
         SELECT jsonb_build_object(
             'tool_call_id',t.tool_call_id,'tool_name',t.tool_name,
+            'tool_component_id',t.tool_component_id,
+            'tool_generation_id',t.tool_generation_id,'tool_service_id',t.tool_service_id,
             'arguments_payload_id',t.arguments_payload_id,
             'authority_trigger_ref',t.authority_trigger_ref,
             'authority_principal_ref',t.authority_principal_ref,
             'tool_contract_digest',t.tool_contract_digest,
+            'tool_binding_digest',t.tool_binding_digest,
+            'approval_required',t.approval_required,'supports_query',t.supports_query,
             'effect_operation_ref',t.effect_operation_ref,
             'approval_ref',t.approval_ref,'state',t.state
         ) INTO tool_value
@@ -2102,8 +2116,17 @@ BEGIN
                     IS DISTINCT FROM arguments_artifact->>'digest'
                 OR stored_tool.authority_trigger_ref
                     IS DISTINCT FROM tool_value->>'authority_trigger_ref'
+                OR stored_tool.tool_component_id IS DISTINCT FROM tool_value->>'component_id'
+                OR stored_tool.tool_generation_id IS DISTINCT FROM tool_value->>'generation_id'
+                OR stored_tool.tool_service_id IS DISTINCT FROM tool_value->>'service_id'
                 OR stored_tool.tool_contract_digest
                     IS DISTINCT FROM tool_value->>'tool_contract_digest'
+                OR stored_tool.tool_binding_digest
+                    IS DISTINCT FROM tool_value->>'tool_binding_digest'
+                OR stored_tool.approval_required
+                    IS DISTINCT FROM (tool_value->>'approval_required')::boolean
+                OR stored_tool.supports_query
+                    IS DISTINCT FROM (tool_value->>'supports_query')::boolean
                 OR stored_tool.effect_operation_ref
                     IS DISTINCT FROM tool_value->>'effect_operation_ref')) THEN
             RETURN jsonb_build_object(
@@ -2201,13 +2224,19 @@ BEGIN
     IF tool_value IS NOT NULL THEN
         INSERT INTO __forest_module_schema__.tool_calls(
             bot_id,tool_call_id,run_id,turn_id,step_seq,tool_name,
+            tool_component_id,tool_generation_id,tool_service_id,
             arguments_payload_id,arguments_payload_digest,authority_trigger_ref,
-            authority_principal_ref,tool_contract_digest,effect_operation_ref
+            authority_principal_ref,tool_contract_digest,tool_binding_digest,
+            approval_required,supports_query,effect_operation_ref
         ) VALUES (
             requested_bot,tool_value->>'tool_call_id',requested_run,requested_turn,
-            request_row.step_seq,function_value->>'name',arguments_artifact->>'payload_id',
+            request_row.step_seq,function_value->>'name',tool_value->>'component_id',
+            tool_value->>'generation_id',tool_value->>'service_id',
+            arguments_artifact->>'payload_id',
             arguments_artifact->>'digest',tool_value->>'authority_trigger_ref',
             principal_value,tool_value->>'tool_contract_digest',
+            tool_value->>'tool_binding_digest',(tool_value->>'approval_required')::boolean,
+            (tool_value->>'supports_query')::boolean,
             tool_value->>'effect_operation_ref'
         );
     END IF;
