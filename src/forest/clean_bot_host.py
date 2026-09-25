@@ -515,7 +515,11 @@ class CleanBotHost:
                     "reservation_tokens": 32768,
                 },
             },
-            resolved_contracts={"embedding.profile.bind": "1.0"},
+            resolved_contracts={
+                "embedding.profile.bind": "1.0",
+                "embedding.request.materialize": "1.0",
+                "embedding.encode": "2.0",
+            },
             additional_grants=(
                 CapabilityGrant("embedding.invoke", "bot", self.store.bot_id),
             ),

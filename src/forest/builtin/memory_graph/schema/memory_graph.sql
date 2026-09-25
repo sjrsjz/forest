@@ -506,6 +506,7 @@ CREATE TABLE embedding_facets (
         state IN ('PENDING','PREPARED','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED','SUPPRESSED')
     ),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     current_attempt_id text,
     index_ref_id text CHECK (index_ref_id IS NULL OR octet_length(index_ref_id) BETWEEN 1 AND 256),
     vector_digest text CHECK (vector_digest IS NULL OR vector_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -621,6 +622,33 @@ CREATE TABLE embedding_batch_attempts (
     CHECK ((state IN ('PREPARED','DISPATCHED')) = (settled_at IS NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL))
+);
+
+CREATE TABLE embedding_recovery_work (
+    bot_id text NOT NULL,
+    claim_id text NOT NULL,
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','CLAIMED','SETTLED')),
+    claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    claim_payload jsonb,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_id),
+    UNIQUE (bot_id,claim_token),
+    FOREIGN KEY (bot_id,claim_id) REFERENCES embedding_claims(bot_id,claim_id),
+    CHECK ((state='CLAIMED') =
+        (claim_token IS NOT NULL AND claim_payload IS NOT NULL AND lease_deadline IS NOT NULL))
+);
+
+CREATE TABLE embedding_work_settlements (
+    bot_id text NOT NULL,
+    claim_token text NOT NULL,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,claim_token)
 );
 
 ALTER TABLE embedding_facets ADD CONSTRAINT embedding_facet_current_attempt_fk
@@ -851,7 +879,7 @@ CREATE INDEX relation_right_idx ON relation_contributions(
     bot_id,right_kind,right_id,active,relation_id,contribution_id
 );
 CREATE INDEX embedding_facets_work_idx ON embedding_facets(
-    bot_id,state,purpose,created_at,facet_id
+    bot_id,state,purpose,next_attempt_at,created_at,facet_id
 );
 CREATE INDEX facet_preparation_work_idx ON facet_preparation_work(
     bot_id,state,next_attempt_at,source_unit_id
@@ -867,6 +895,9 @@ CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
 );
 CREATE INDEX embedding_batch_attempts_recovery_idx ON embedding_batch_attempts(
     bot_id,state,deadline_at,attempt_id
+);
+CREATE INDEX embedding_recovery_work_poll_idx ON embedding_recovery_work(
+    bot_id,state,next_attempt_at,claim_id
 );
 CREATE INDEX vector_index_deletions_work_idx ON vector_index_deletions(
     bot_id,state,created_at,index_ref_id
@@ -1013,6 +1044,15 @@ BEGIN
         RAISE EXCEPTION 'Embedding facet identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='PENDING' AND NEW.state IN ('PREPARED','SUPPRESSED') THEN RETURN NEW; END IF;
+    IF OLD.state='PENDING' AND NEW.state='PENDING'
+       AND NEW.next_attempt_at>=OLD.next_attempt_at
+       AND ROW(NEW.attempt_count,NEW.current_attempt_id,NEW.index_ref_id,
+               NEW.vector_digest,NEW.result_payload_id,NEW.result_payload_digest,
+               NEW.published_at)
+           IS NOT DISTINCT FROM
+           ROW(OLD.attempt_count,OLD.current_attempt_id,OLD.index_ref_id,
+               OLD.vector_digest,OLD.result_payload_id,OLD.result_payload_digest,
+               OLD.published_at) THEN RETURN NEW; END IF;
     IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','PENDING','SUPPRESSED') THEN RETURN NEW; END IF;
     IF OLD.state='DISPATCHED' AND NEW.state IN (
         'EMBEDDED','UNKNOWN','FAILED','PENDING','SUPPRESSED'
@@ -1996,7 +2036,9 @@ BEGIN
         error_code=body->>'reason_code',settled_at=clock_timestamp()
     WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
     UPDATE __forest_module_schema__.embedding_facets f
-    SET state='PENDING',current_attempt_id=NULL,updated_at=clock_timestamp()
+    SET state='PENDING',current_attempt_id=NULL,
+        next_attempt_at=clock_timestamp()+interval '1 minute',
+        updated_at=clock_timestamp()
     FROM __forest_module_schema__.embedding_claim_items ci
     WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
       AND f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
@@ -2164,6 +2206,8 @@ BEGIN
                     ELSE 'UNKNOWN' END,
                 current_attempt_id=CASE observed_state WHEN 'NOT_APPLIED' THEN NULL
                     ELSE current_attempt_id END,
+                next_attempt_at=CASE observed_state WHEN 'NOT_APPLIED' THEN
+                    clock_timestamp()+interval '1 minute' ELSE next_attempt_at END,
                 updated_at=clock_timestamp()
             WHERE bot_id=requested_bot AND facet_id=facet_row.facet_id;
         END IF;
@@ -3237,8 +3281,10 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_INVALID',
                 'message','Embedding batch claim is invalid','status',422));
     END IF;
+    -- The exclusion join cannot see a concurrent transaction's new claim.
+    -- Serialize batch selection for this Bot before reading candidates.
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-        requested_bot||'/'||requested_token,0));
+        requested_bot||'/memory.embedding.claim',0));
     SELECT * INTO prior_claim FROM __forest_module_schema__.embedding_claims
     WHERE bot_id=requested_bot AND claim_id=requested_token;
     IF FOUND THEN
@@ -3287,6 +3333,7 @@ BEGIN
         ) o ON true
         WHERE f.bot_id=requested_bot AND f.purpose='DOCUMENT'
           AND f.state='PENDING' AND f.space_id=domain_space
+          AND f.next_attempt_at<=clock_timestamp()
           AND NOT EXISTS (
               SELECT 1 FROM __forest_module_schema__.embedding_claim_items ci
               JOIN __forest_module_schema__.embedding_claims c
@@ -3350,6 +3397,215 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
         'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_INVALID',
             'message','Embedding batch claim is invalid','status',422));
 END;
+$$;
+
+CREATE FUNCTION memory_claim_active_embedding_batch(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+BEGIN
+    -- A stored domain alone is insufficient: only a successful provider-backed
+    -- domain.bind owned task activates autonomous embedding dispatch.
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_domain_bind_work
+        WHERE bot_id=context->>'bot_id' AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',NULL);
+    END IF;
+    RETURN __forest_module_schema__.memory_claim_embedding_batch(context,input);
+END;
+$$;
+
+CREATE FUNCTION memory_claim_embedding_recovery(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.embedding_recovery_work%ROWTYPE;
+    attempt_row __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+    task_payload jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_RECOVERY_CLAIM_INVALID',
+                'message','Embedding recovery claim is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.embedding_recovery_work
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',work_row.claim_payload);
+    END IF;
+    INSERT INTO __forest_module_schema__.embedding_recovery_work(bot_id,claim_id)
+    SELECT a.bot_id,a.claim_id
+    FROM __forest_module_schema__.embedding_batch_attempts a
+    JOIN __forest_module_schema__.embedding_claims c
+      ON c.bot_id=a.bot_id AND c.claim_id=a.claim_id
+    WHERE a.bot_id=requested_bot AND a.state IN ('PREPARED','DISPATCHED')
+      AND c.state='CLAIMED' AND c.lease_deadline<=clock_timestamp()
+    ORDER BY c.lease_deadline,a.attempt_id LIMIT 32
+    ON CONFLICT (bot_id,claim_id) DO NOTHING;
+    SELECT w.* INTO work_row
+    FROM __forest_module_schema__.embedding_recovery_work w
+    JOIN __forest_module_schema__.embedding_batch_attempts a
+      ON a.bot_id=w.bot_id AND a.claim_id=w.claim_id
+    WHERE w.bot_id=requested_bot AND a.state IN ('PREPARED','DISPATCHED')
+      AND w.next_attempt_at<=clock_timestamp()
+      AND (w.state='PENDING'
+           OR (w.state='CLAIMED' AND w.lease_deadline<=clock_timestamp()))
+    ORDER BY w.next_attempt_at,w.claim_id
+    LIMIT 1 FOR UPDATE OF w SKIP LOCKED;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',NULL);
+    END IF;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+    WHERE bot_id=requested_bot AND claim_id=work_row.claim_id FOR UPDATE;
+    IF attempt_row.state NOT IN ('PREPARED','DISPATCHED') THEN
+        UPDATE __forest_module_schema__.embedding_recovery_work
+        SET state='SETTLED',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND claim_id=work_row.claim_id;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',NULL);
+    END IF;
+    task_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',work_row.claim_id,'claim_token',requested_token,
+        'attempt',work_row.attempt_count+1,
+        'operation_id','memory-embedding-recovery:'||encode(sha256(convert_to(
+            requested_bot||'/'||requested_token,'UTF8')),'hex'),
+        'causal_root_kind','memory.embedding.batch',
+        'causal_root_id',work_row.claim_id,
+        'payload',jsonb_build_object(
+            'mode',CASE attempt_row.state WHEN 'PREPARED' THEN 'ABANDON'
+                ELSE 'OBSERVE_UNKNOWN' END,
+            'claim_id',work_row.claim_id,
+            'attempt_id',attempt_row.attempt_id,
+            'effect_operation_id',attempt_row.effect_operation_id,
+            'reservation_id',attempt_row.reservation_id));
+    UPDATE __forest_module_schema__.embedding_recovery_work
+    SET state='CLAIMED',claim_token=requested_token,claim_payload=task_payload,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND claim_id=work_row.claim_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',task_payload);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_RECOVERY_CLAIM_INVALID',
+            'message','Embedding recovery claim is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_embedding_work(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    prior_input jsonb;
+    prior_result jsonb;
+    result_value jsonb;
+    recovery_row __forest_module_schema__.embedding_recovery_work%ROWTYPE;
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    attempt_row __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR input->>'work_id' IS NULL
+       OR input->>'attempt' !~ '^[1-9][0-9]*$'
+       OR input#>>'{outcome,status}' IS NULL
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_SETTLEMENT_INVALID',
+                'message','Embedding work settlement is invalid','status',422));
+    END IF;
+    SELECT input_payload,result_payload INTO prior_input,prior_result
+    FROM __forest_module_schema__.embedding_work_settlements
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        IF prior_input=input THEN RETURN prior_result; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_SETTLEMENT_CONFLICT',
+                'message','Embedding work was settled differently','status',409));
+    END IF;
+    SELECT * INTO recovery_row FROM __forest_module_schema__.embedding_recovery_work
+    WHERE bot_id=requested_bot AND claim_token=requested_token FOR UPDATE;
+    IF FOUND THEN
+        IF recovery_row.state<>'CLAIMED'
+           OR input->>'work_id' IS DISTINCT FROM recovery_row.claim_id
+           OR (input->>'attempt')::integer IS DISTINCT FROM recovery_row.attempt_count THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_RECOVERY_CLAIM_LOST',
+                    'message','Embedding recovery claim is no longer current','status',409));
+        END IF;
+        SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+        WHERE bot_id=requested_bot AND claim_id=recovery_row.claim_id FOR UPDATE;
+        IF attempt_row.state IN ('PREPARED','DISPATCHED') THEN
+            UPDATE __forest_module_schema__.embedding_recovery_work
+            SET state='PENDING',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+                next_attempt_at=clock_timestamp()+
+                    (LEAST(power(2,LEAST(attempt_count,8)),300)*interval '1 second'),
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND claim_id=recovery_row.claim_id;
+        ELSE
+            UPDATE __forest_module_schema__.embedding_recovery_work
+            SET state='SETTLED',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND claim_id=recovery_row.claim_id;
+        END IF;
+    ELSE
+        SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+        WHERE bot_id=requested_bot AND claim_id=requested_token FOR UPDATE;
+        IF claim_row IS NULL OR input->>'work_id' IS DISTINCT FROM requested_token
+           OR input->>'attempt' IS DISTINCT FROM '1' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_LOST',
+                    'message','Embedding batch claim is no longer current','status',409));
+        END IF;
+        SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+        WHERE bot_id=requested_bot AND claim_id=requested_token FOR UPDATE;
+        IF attempt_row IS NULL AND claim_row.state='CLAIMED' THEN
+            UPDATE __forest_module_schema__.embedding_claims
+            SET state='EXPIRED' WHERE bot_id=requested_bot AND claim_id=requested_token;
+            UPDATE __forest_module_schema__.embedding_facets f
+            SET next_attempt_at=CASE
+                    WHEN input#>>'{outcome,error,code}'='MEMORY_EMBEDDING_BUDGET_EXHAUSTED'
+                    THEN (date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC')
+                          +interval '1 day') AT TIME ZONE 'UTC'
+                    ELSE clock_timestamp()+interval '1 minute' END,
+                updated_at=clock_timestamp()
+            FROM __forest_module_schema__.embedding_claim_items ci
+            WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_token
+              AND f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+              AND f.state='PENDING';
+        END IF;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',input->>'work_id'));
+    INSERT INTO __forest_module_schema__.embedding_work_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,requested_token,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_SETTLEMENT_INVALID',
+            'message','Embedding work settlement is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_embedding_batch(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path = pg_catalog AS $$
+    SELECT __forest_module_schema__.memory_settle_embedding_work(context,input)
+$$;
+
+CREATE FUNCTION memory_settle_embedding_recovery(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path = pg_catalog AS $$
+    SELECT __forest_module_schema__.memory_settle_embedding_work(context,input)
 $$;
 
 CREATE FUNCTION memory_read_embedding_candidates(context jsonb, input jsonb)

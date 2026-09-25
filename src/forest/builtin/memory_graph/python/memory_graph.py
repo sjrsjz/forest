@@ -1,6 +1,8 @@
 import hashlib
 import json
 
+from embedding_work import dispatch as dispatch_embedding
+from embedding_work import recover as recover_embedding
 from facet_preparation import (
     FACET_BATCH_SIZE,
     MAX_DOCUMENT_FACETS,
@@ -187,6 +189,14 @@ class MemoryGraph(Plugin):
                 timeout=20,
             )
         return {"disposition": "READY", "facet_count": len(facets), "error_code": None}
+
+    @job("memory.embedding.dispatch")
+    async def dispatch_embedding_batch(self, task, ctx):
+        return await dispatch_embedding(ctx, task, self.profile)
+
+    @job("memory.embedding.recover")
+    async def recover_embedding_batch(self, task, ctx):
+        return await recover_embedding(ctx, task)
 
     @service(
         "memory.profile.describe",

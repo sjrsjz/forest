@@ -1119,7 +1119,19 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                        for row in states)
             retry_claim = await claim_batch("embedding/claim/after-abandon", lease_seconds=360)
             assert retry_claim["ok"] is True
-            assert len(retry_claim["value"]["payload"]["facets"]) == 2
+            assert retry_claim["value"] is None
+            async with store.pool.connection() as conn:
+                cooldown = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT count(*) AS n FROM {}.embedding_facets "
+                            "WHERE bot_id=%s AND state='PENDING' "
+                            "AND next_attempt_at>clock_timestamp()"
+                        ).format(sql.Identifier(namespace)),
+                        (store.bot_id,),
+                    )
+                ).fetchone()
+            assert cooldown["n"] == 2
             return
 
         async def handoff(epoch):
@@ -1186,6 +1198,45 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 )
             ).fetchone()
         assert dispatched_facets["n"] == 2
+
+        if resolution == "HANDOFF":
+            failed_work = {
+                "protocol": "forest.owned-work-settle-request/1",
+                "work_id": claim_id,
+                "claim_token": claim_id,
+                "attempt": 1,
+                "outcome": {
+                    "status": "FAILED",
+                    "error": {
+                        "code": "WORKER_RESTARTED",
+                        "status": 503,
+                        "retryable": False,
+                        "unknown": True,
+                    },
+                },
+            }
+            async with store.pool.connection() as conn, conn.transaction():
+                settled = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_settle_embedding_batch("
+                            "%s::jsonb,%s::jsonb) AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (Jsonb({"bot_id": store.bot_id}), Jsonb(failed_work)),
+                    )
+                ).fetchone()
+                persisted = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT c.state AS claim_state,a.state AS attempt_state "
+                            "FROM {}.embedding_claims c JOIN {}.embedding_batch_attempts a "
+                            "USING(bot_id,claim_id) WHERE c.bot_id=%s AND c.claim_id=%s"
+                        ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                        (store.bot_id, claim_id),
+                    )
+                ).fetchone()
+            assert settled["result"]["value"]["work_id"] == claim_id
+            assert persisted == {"claim_state": "CLAIMED", "attempt_state": "DISPATCHED"}
 
         if resolution != "HANDOFF":
             observed_state = {
@@ -1325,7 +1376,19 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                     "embedding/claim/after-not-sent", lease_seconds=360
                 )
                 assert retry_claim["ok"] is True
-                assert len(retry_claim["value"]["payload"]["facets"]) == 2
+                assert retry_claim["value"] is None
+                async with store.pool.connection() as conn:
+                    cooldown = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT count(*) AS n FROM {}.embedding_facets "
+                                "WHERE bot_id=%s AND state='PENDING' "
+                                "AND next_attempt_at>clock_timestamp()"
+                            ).format(sql.Identifier(namespace)),
+                            (store.bot_id,),
+                        )
+                    ).fetchone()
+                assert cooldown["n"] == 2
             else:
                 assert len(facet_states) == 2
                 assert all(row["state"] == (

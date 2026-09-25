@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.15.0"
+version = "1.16.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -32,6 +32,8 @@ requests = [
   "payload.read",
   "payload.write",
   "service.call:embedding.profile.bind",
+  "service.call:embedding.request.materialize",
+  "service.call:embedding.encode",
   "domain.query:memory.read-exact-sources",
   "domain.query:memory.read-facet-source",
   "domain.query:memory.read-embedding-candidates",
@@ -53,6 +55,18 @@ requests = [
 [[components.requires]]
 name = "embedding.profile.bind"
 contract = ">=1.0,<2.0"
+required = false
+startup_dependency = false
+
+[[components.requires]]
+name = "embedding.request.materialize"
+contract = ">=1.0,<2.0"
+required = false
+startup_dependency = false
+
+[[components.requires]]
+name = "embedding.encode"
+contract = ">=2.0,<3.0"
 required = false
 startup_dependency = false
 
@@ -155,9 +169,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.13.0"
+schema_version = "3.14.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "e81d85854dd66218f9c1a102af5d3f774970dc563a9949b06ab777f2d6e94a7a"
+baseline_sha256 = "d0493e4b1761122fc4de65d0b8f487105b23959eae2fe84068ab4e24e5edcf95"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -455,6 +469,36 @@ claim_timeout_s = 5
 handler_timeout_s = 30
 settle_timeout_s = 5
 lease_seconds = 45
+
+[[components.owned_work_handlers]]
+name = "memory.embedding.dispatch"
+contract = "1.0"
+handler = "memory.embedding.dispatch"
+claim_function = "memory_claim_active_embedding_batch"
+settle_function = "memory_settle_embedding_batch"
+input_schema = "schemas/embedding-work-input.json"
+output_schema = "schemas/embedding-work-output.json"
+max_concurrency = 2
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 300
+settle_timeout_s = 5
+lease_seconds = 360
+
+[[components.owned_work_handlers]]
+name = "memory.embedding.recover"
+contract = "1.0"
+handler = "memory.embedding.recover"
+claim_function = "memory_claim_embedding_recovery"
+settle_function = "memory_settle_embedding_recovery"
+input_schema = "schemas/embedding-recovery-input.json"
+output_schema = "schemas/embedding-work-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 60
+settle_timeout_s = 5
+lease_seconds = 90
 
 [[components.unit_of_work_plans]]
 name = "memory.mark-source-unavailable"

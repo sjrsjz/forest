@@ -117,15 +117,15 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。Memory 包现提供只读主干、来源、关系查询端口；来源查询按群主干、作者、模态、单元类型和发生时间筛选，使用快照加稳定游标分页；关系查询返回节点两端和有界证据，逐条标明来源群、主干及作者。WebUI 与群聊 Shell 都经包声明访问这些端口，Host 不再拥有 Memory 浏览逻辑。真实 PostgreSQL 测试已覆盖包安装、来源筛选及关系证据来源。
 
-Memory 包在首次合格归档后登记持久 facet 准备任务：Worker 按原始 part 生成确定性文本跨度和独立图片 facet，并经包内事务写入 `PENDING`；只读候选查询返回这些 facet 的精确 payload、主干、会话和作者。排他批次 claim SQL 已按 facet 行锁、有效来源和空间选择最多 32 个 facet，保留来源删除 epoch 高水位与租约，同 token 幂等重放；PostgreSQL 测试覆盖并发不重复领取与租约到期重领。Memory 的 transport attempt 已改为一批 facet 共享一个 attempt、一个 Effect 和一个预算 reservation 的持久模型，不再把一次网络请求拆成逐 facet 的 attempt。`memory.prepare-embedding-effect` 已把 Kernel Payload epoch、预算预留、授权签发、Effect permit 和 Memory attempt 登记组成单事务计划；Memory participant 的 PostgreSQL 测试验证两个 facet 共享一个 attempt 并复核来源资格。claim 与 prepare 仍未在 owned-work manifest 中接入派发 Worker，整条事务计划尚待真实 Effect 集成验证。`embedding.multimodal` 包的 Worker 可从精确来源引用物化 Jina 或 Qwen VL 的图文 DOCUMENT/QUERY 请求，固定请求体与 manifest 分开保存；Effect Driver 通过精确引用读取和校验，避免图片超出 Worker 控制帧，成功结果向量也写入独立受管 payload，服务回执仅传引用。Memory 包的每日预算预留/结算事务已经通过 PostgreSQL 并发验证，同 batch 只记一次，不确定结果保留占额。**尚无把候选 claim、预算、Effect 派发、结果结算和 Milvus ref 发布连成一条链的 owned-work handler；普通群聊消息目前不会自动获得语义向量索引。**
+Memory 包已注册 `memory.embedding.dispatch` 和 `memory.embedding.recover` 两类 owned-work：Provider 成功绑定并完成 domain.bind 后才自动领取最多 32 个图文 facet；Memory 持有预算、Kernel Effect 与 facet 的 prepare/handoff/observe 事务，Provider 包只物化请求并执行 HTTP。原 claim 在 Bot 级事务锁下合流，避免并发重复领取；失败和明确未发送有冷却时间，预算耗尽延至下一 UTC 日。过期 PREPARED attempt 只放弃并释放预算，DISPATCHED attempt 只观察 UNKNOWN，恢复任务绝不重发网络请求。PostgreSQL 域状态测试和宿主启动/重启测试已通过；真正从归档消息到向量落库的端到端验收尚未完成。
 
-旧 `clean_memory_module.py`、`clean_memory_runtime.py`、宿主嵌入 Worker、Memory Repository、旧 baseline 和只验证该未接入生产图路径的测试已移除；图区域扩散算法及其检验移入 `builtin/memory_graph/python/graph_region.py`。这次删除的是不可达的旧执行栈，不表示新包已有语义召回。仍未完成图片/文本 facet 的真实 Effect 派发、独立向量索引 ref、图扩散与有界随机采样在生产调用链的接入、跨主干联想写入、语义召回、遗忘和真实召回试验。上述能力在接入前不能由管理 UI 宣称可用。
+旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发和崩溃恢复已在 Memory 包中接线，但尚未通过真实跨包 Effect 与重启恢复端到端验收；独立向量索引 ref 发布、图扩散与有界随机采样的生产接入、跨主干联想写入、语义召回、遗忘及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
 
-Memory 现在还声明 `memory.handoff-embedding-effect`：同一 UnitOfWork 先锁住 Kernel Payload 删除时钟，再由 Kernel Effect 进入 `DISPATCHING`，最后由 Memory 复核 claim 租约、来源资格、批次身份和删除 epoch，并将 attempt 与全部 facet 推进为 `DISPATCHED`。Memory 参与者的 PostgreSQL 测试已覆盖删除 epoch 改变时拒绝 handoff、正常批次状态推进；完整 Kernel Effect/Memory 联合执行及失败回滚仍待集成验证。该计划尚未接入 owned-work Worker，也尚未实现结果收敛与向量索引发布。
+Memory 的 handoff 事务现由 `memory.embedding.dispatch` owned-work Worker 调用；prepare/handoff/observe 之间仍须通过真实跨包集成和故障注入验收。
 
-Memory 新增 `memory.abandon-embedding-effect`：只有 Kernel Effect 确认 attempt 仍处于 `PREPARED`、从未 handoff，才在同一事务内放弃 Effect、释放预算、标记 Memory attempt 为 `NOT_SENT` 并将本批 facet 退回 `PENDING`。带 attempt 的过期 claim 不会被普通领取循环直接标为 `EXPIRED`；恢复计划负责释放它。已 handoff 或状态不确定的批次不能走此路径。PostgreSQL 参与者测试已验证退回与预算状态，真实 Kernel Effect 联合事务及崩溃恢复 Worker 仍未接线。
+过期 PREPARED attempt 由 `memory.embedding.recover` 放弃并释放预算；已 handoff 的 attempt 只转 UNKNOWN，不重发 HTTP。真实跨包事务及故障注入仍待验收。
 
-Memory 还声明了 `memory.observe-embedding-effect`：Kernel Effect 将小型回执冻结为 `effect.evidence` 并验证结果 Payload 父引用，预算结算与 Memory 批次状态在同一事务内提交。`SUCCEEDED` 按 claim 顺序核对每个 facet 的向量摘要，将仍可用的 facet 标为 `EMBEDDED`；`NOT_APPLIED` 退回 `PENDING` 并释放预算；`UNKNOWN` 保持不可重发状态与预算占额。Memory participant 的 PostgreSQL 测试覆盖三种状态及明确未发送后的重新领取；测试尚以合成 Effect 前序结果调用 SQL，真实跨包事务和 Worker 尚待接入。向量索引发布及语义召回未完成。
+Memory owned-work Worker 已接入结果观察；成功回执依 claim 顺序验证向量和实际 token 用量，再由单一 UnitOfWork 同时结算 Effect、预算与 facet。独立向量索引发布和语义召回仍未完成；跨包真实请求及崩溃恢复的端到端测试仍待完成。
 
 ## 8. 下一切换顺序
 
