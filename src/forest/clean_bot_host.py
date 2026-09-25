@@ -472,6 +472,7 @@ class CleanBotHost:
                 {
                     "vector-index.milvus": milvus_vector_index_effect_driver_factory(
                         bot_id=self.store.bot_id,
+                        store=self.store,
                         runtime=self._kernel.runtime,
                         token_resolver=resolve_vector_index_token,
                         **vector_index_driver_options,

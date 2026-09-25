@@ -179,6 +179,8 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 发布顺序是“先写派生索引，后发布权威引用”。进程在两步之间崩溃时，Worker 以同一 `ref_id` 重放 Milvus upsert；重复成功不会产生第二条记忆。抑制或删除先在 PostgreSQL 提交不可见事实并写 `vector_index_deletions`，查询立即回表过滤；后台再按 outbox 删除 Milvus 条目。即使删除暂时失败，旧向量也只能成为被 PostgreSQL 拒绝的无效候选，不能复活正文。
 
+删除 outbox 必须覆盖曾经可能发出 upsert 的 facet，包括仍为 `EMBEDDED`、尚未提交 `READY` 的 facet。`vector.index` 包按 `(bot_id, ref_id)` 串行处理写入与删除，保留不可逆 tombstone；删除先到时也要建立 tombstone，后到的同 ref upsert 必须拒绝。Milvus 在客户端超时后仍可能迟到提交，所以事务锁本身不足以证明物理删除：索引包还要周期性重放 tombstone 删除，Memory 的召回始终回查 PostgreSQL 的来源资格、facet 状态和修订。Memory 发布 Worker 只有在复核来源仍有效后才能提交 `READY`；若复核失败，它必须留下删除 outbox，不能仅放弃提交。向量包的 ref 围栏和周期清扫已经实现；Memory 的发布、抑制和 outbox Worker 仍待接入。
+
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
 `memory.graph` 在包清单中声明 `/embedding` 为 Bot 生命周期内不可变配置。通用模块配置仓库在规划和应用配置时按当前有效修订核验这个路径，启动时也拒绝与已有 Memory 有效配置冲突的模型身份；检索参数和嵌入预算可以通过新 Generation 调整。模型 endpoint 与凭据属于 `embedding.multimodal` 的连接配置，不放进 Memory 的模型身份字段。

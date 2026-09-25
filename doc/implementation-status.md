@@ -119,7 +119,7 @@ OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 
 
 Memory 包已注册 `memory.embedding.dispatch` 和 `memory.embedding.recover` 两类 owned-work：Provider 成功绑定并完成 domain.bind 后才自动领取最多 32 个图文 facet；Memory 持有预算、Kernel Effect 与 facet 的 prepare/handoff/observe 事务，Provider 包只物化请求并执行 HTTP。原 claim 在 Bot 级事务锁下合流，避免并发重复领取；失败和明确未发送有冷却时间，预算耗尽延至下一 UTC 日。过期 PREPARED attempt 只放弃并释放预算，DISPATCHED attempt 只观察 UNKNOWN，恢复任务绝不重发网络请求。PostgreSQL 域状态测试和宿主启动/重启测试已通过；真实宿主图已用假 HTTP 客户端验证一条归档群消息的文本与图片 facet 全部进入 `EMBEDDED`，但尚未发布到独立向量索引。
 
-旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引 ref 发布、图扩散与有界随机采样的生产接入、跨主干联想写入、语义召回、遗忘及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
+旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。隔离 PostgreSQL 加真实 Milvus 的往返测试，以及宿主启动、热替换、重启测试已通过。Memory 的 ref 发布和删除 outbox Worker、图扩散与有界随机采样的生产接入、跨主干联想写入、语义召回、遗忘及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
 
 Memory 的 handoff 事务现由 `memory.embedding.dispatch` owned-work Worker 调用；prepare/handoff/observe 已通过假 HTTP 客户端的真实跨包事务验证，故障注入仍待验收。
 

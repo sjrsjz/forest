@@ -5,18 +5,26 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import math
 import re
 from collections.abc import Mapping
 
+import psycopg
 from pymilvus import AsyncMilvusClient, DataType
 from pymilvus.exceptions import MilvusException
 
 from forest.errors import ForestError
-from forest.storage.vector_index_authority import VectorIndexIdentityRepository
+from forest.packages import digest_json
+from forest.schema_bundles import module_schema_namespace
+from forest.storage.vector_index_authority import (
+    VectorIndexIdentityRepository,
+    VectorIndexRefRepository,
+)
 from forest.vector_index_builtin import validate_vector_index_configuration
 
 _REF = re.compile(r"[^\x00]{1,256}\Z")
+_LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
     {"vector.index.upsert", "vector.index.search", "vector.index.delete"}
 )
@@ -25,6 +33,13 @@ _SERVICES = frozenset(
 async def _call(port, *args):
     result = port(*args)
     return await result if inspect.isawaitable(result) else result
+
+
+def _valid_ref(value: str) -> bool:
+    try:
+        return _REF.fullmatch(value) is not None and len(value.encode("utf-8")) <= 256
+    except UnicodeError:
+        return False
 
 
 class MilvusVectorIndexEffectDriver:
@@ -36,6 +51,7 @@ class MilvusVectorIndexEffectDriver:
         declaration,
         *,
         bot_id,
+        store,
         runtime,
         token_resolver,
         client_factory=AsyncMilvusClient,
@@ -54,6 +70,9 @@ class MilvusVectorIndexEffectDriver:
         self.identity = identity
         self.service_id = declaration["name"]
         self.bot_id = bot_id
+        self.refs = VectorIndexRefRepository(
+            store, namespace=module_schema_namespace("forest.vector.index")
+        )
         self.runtime = runtime
         self.token_resolver = token_resolver
         self.client_factory = client_factory
@@ -62,6 +81,7 @@ class MilvusVectorIndexEffectDriver:
         )
         self.client = None
         self.accepting = False
+        self._sweep_task = None
 
     async def start(self) -> None:
         token = await _call(
@@ -82,6 +102,37 @@ class MilvusVectorIndexEffectDriver:
         )
         await self._ensure_collection()
         self.accepting = True
+        self._start_sweeper()
+
+    def _start_sweeper(self) -> None:
+        if self.service_id == "vector.index.delete" and self._sweep_task is None:
+            self._sweep_task = asyncio.create_task(self._sweep_tombstones())
+
+    async def _stop_sweeper(self) -> None:
+        task, self._sweep_task = self._sweep_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _sweep_tombstones(self) -> None:
+        while True:
+            try:
+                refs = await self.refs.claim_due_sweep()
+                if refs:
+                    async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                        await self.client.delete(
+                            collection_name=self.collection_name, ids=refs
+                        )
+                else:
+                    await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOG.warning("Vector tombstone sweep failed: %s", type(exc).__name__)
+                await asyncio.sleep(10)
 
     async def _ensure_collection(self) -> None:
         try:
@@ -170,8 +221,8 @@ class MilvusVectorIndexEffectDriver:
     async def _upsert(self, payload):
         values = tuple(float(item) for item in payload["vector"])
         if (
-            _REF.fullmatch(payload["ref_id"]) is None
-            or _REF.fullmatch(payload["source_unit_id"]) is None
+            not _valid_ref(payload["ref_id"])
+            or not _valid_ref(payload["source_unit_id"])
             or len(values) != self.configuration["dimensions"]
             or any(not math.isfinite(item) for item in values)
         ):
@@ -188,10 +239,28 @@ class MilvusVectorIndexEffectDriver:
             "modality": payload["modality"],
             "embedding": list(values),
         }
+        input_digest = digest_json(row)
         try:
-            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                await self.client.upsert(collection_name=self.collection_name, data=[row])
-        except (TimeoutError, MilvusException, OSError) as exc:
+            async with self.refs.store.pool.connection() as conn, conn.transaction():
+                existing = await self.refs.lock(conn, payload["ref_id"])
+                if existing is not None:
+                    if existing["state"] == "TOMBSTONED":
+                        raise ForestError(
+                            "VECTOR_INDEX_REF_DELETED", "Deleted vector ref cannot be published", 409
+                        )
+                    if existing["input_digest"] != input_digest:
+                        raise ForestError(
+                            "VECTOR_INDEX_REF_CONFLICT", "Vector ref was bound to other data", 409
+                        )
+                async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                    await self.client.upsert(collection_name=self.collection_name, data=[row])
+                if existing is None:
+                    await self.refs.record_active(
+                        conn, ref_id=payload["ref_id"], input_digest=input_digest
+                    )
+        except ForestError:
+            raise
+        except (TimeoutError, MilvusException, OSError, psycopg.Error) as exc:
             raise ForestError(
                 "VECTOR_INDEX_UPSERT_UNAVAILABLE", "Milvus upsert failed", 503
             ) from exc
@@ -267,16 +336,24 @@ class MilvusVectorIndexEffectDriver:
 
     async def _delete(self, payload):
         refs = tuple(payload["ref_ids"])
-        if any(_REF.fullmatch(item) is None for item in refs):
+        if any(not _valid_ref(item) for item in refs):
             raise ForestError(
                 "VECTOR_INDEX_INPUT_INVALID", "Vector deletion refs are invalid", 422
             )
         try:
-            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                await self.client.delete(
-                    collection_name=self.collection_name, ids=list(refs)
-                )
-        except (TimeoutError, MilvusException, OSError) as exc:
+            async with self.refs.store.pool.connection() as conn, conn.transaction():
+                for ref_id in sorted(set(refs)):
+                    existing = await self.refs.lock(conn, ref_id)
+                    await self.refs.record_tombstone(
+                        conn, ref_id=ref_id, existing=existing
+                    )
+                async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                    await self.client.delete(
+                        collection_name=self.collection_name, ids=list(refs)
+                    )
+        except ForestError:
+            raise
+        except (TimeoutError, MilvusException, OSError, psycopg.Error) as exc:
             raise ForestError(
                 "VECTOR_INDEX_DELETE_UNAVAILABLE", "Milvus deletion failed", 503
             ) from exc
@@ -284,22 +361,25 @@ class MilvusVectorIndexEffectDriver:
 
     async def quiesce(self) -> None:
         self.accepting = False
+        await self._stop_sweeper()
 
     async def resume(self) -> None:
         if self.client is None:
             await self.start()
         else:
             self.accepting = True
+            self._start_sweeper()
 
     async def close(self) -> None:
         self.accepting = False
+        await self._stop_sweeper()
         client, self.client = self.client, None
         if client is not None:
             await client.close()
 
 
 def milvus_vector_index_effect_driver_factory(
-    *, bot_id, runtime, token_resolver, client_factory=AsyncMilvusClient
+    *, bot_id, store, runtime, token_resolver, client_factory=AsyncMilvusClient
 ):
     def create(configuration, configuration_revision, identity, declaration):
         return MilvusVectorIndexEffectDriver(
@@ -308,6 +388,7 @@ def milvus_vector_index_effect_driver_factory(
             identity,
             declaration,
             bot_id=bot_id,
+            store=store,
             runtime=runtime,
             token_resolver=token_resolver,
             client_factory=client_factory,
