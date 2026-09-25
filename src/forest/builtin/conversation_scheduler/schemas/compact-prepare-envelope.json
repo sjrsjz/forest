@@ -16,7 +16,7 @@
     "input": {"type": "object"},
     "prior": {
       "type": "object",
-      "required": ["select"],
+      "maxProperties": 1,
       "properties": {"select": {"type": "object", "required": ["status", "conversation_id"]}},
       "additionalProperties": false
     }

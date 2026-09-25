@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["anchor", "context_view", "payload", "payload_epoch", "memory"],
+  "properties": {
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "conversation_id", "actor"],
+      "properties": {
+        "protocol": {"const": "forest.conversation-pre-run-anchor/1"},
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["conversation_id", "owner_id", "epoch"],
+          "properties": {
+            "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "epoch": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "context_view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["high_watermark_units", "retain_units", "policy_revision"],
+      "properties": {
+        "high_watermark_units": {"type": "integer", "minimum": 2, "maximum": 1000000},
+        "retain_units": {"type": "integer", "minimum": 1, "maximum": 999999},
+        "policy_revision": {"const": "context-view-unit-window-v1"}
+      }
+    },
+    "payload": {
+      "const": {"protocol": "forest.payload-json-from-prior/1", "prior_step_id": "prepare"}
+    },
+    "payload_epoch": {"const": {"protocol": "forest.payload-epoch-capture/1"}},
+    "memory": {"type": "object", "maxProperties": 0}
+  }
+}

@@ -1562,11 +1562,13 @@ AS $$
 DECLARE
     body jsonb := envelope->'input';
     selected jsonb := envelope#>'{prior,select}';
+    anchor jsonb := body->'anchor';
+    pre_run boolean := anchor IS NOT NULL;
     policy jsonb := body->'context_view';
     requested_bot text := context->>'bot_id';
     requested_operation text := context->>'operation_id';
     requested_digest text := context->>'participant_input_digest';
-    requested_conversation text := selected->>'conversation_id';
+    requested_conversation text := COALESCE(selected->>'conversation_id',anchor->>'conversation_id');
     high_watermark integer := (policy->>'high_watermark_units')::integer;
     retain_units integer := (policy->>'retain_units')::integer;
     policy_revision text := policy->>'policy_revision';
@@ -1586,7 +1588,12 @@ DECLARE
     commit_value jsonb;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
-       OR selected IS NULL OR policy IS NULL
+       OR (selected IS NULL AND NOT pre_run) OR policy IS NULL
+       OR (pre_run AND (selected IS NOT NULL
+           OR anchor->>'protocol' IS DISTINCT FROM 'forest.conversation-pre-run-anchor/1'
+           OR anchor->>'conversation_id' IS DISTINCT FROM anchor#>>'{actor,conversation_id}'
+           OR anchor#>>'{actor,owner_id}' IS NULL
+           OR anchor#>>'{actor,epoch}' !~ '^[1-9][0-9]*$'))
        OR requested_operation IS NULL
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR high_watermark NOT BETWEEN 2 AND 1000000
@@ -1600,13 +1607,32 @@ BEGIN
             )
         );
     END IF;
-    IF selected->>'status' <> 'BATCH' THEN
+    IF NOT pre_run AND selected->>'status' <> 'BATCH' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
                 'protocol','forest.payload-json-plan/1','status','SKIP'
             )
         );
+    END IF;
+    IF pre_run THEN
+        SELECT * INTO lane
+        FROM __forest_module_schema__.conversation_lanes
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+        FOR UPDATE;
+        IF lane IS NULL
+           OR lane.actor_owner_id IS DISTINCT FROM anchor#>>'{actor,owner_id}'
+           OR lane.actor_epoch IS DISTINCT FROM (anchor#>>'{actor,epoch}')::bigint
+           OR lane.actor_expires_at IS NULL
+           OR lane.actor_expires_at<=clock_timestamp() THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','STALE_CONVERSATION_ACTOR',
+                    'message','Pre-run Context compaction requires the current Actor fence','status',409
+                )
+            );
+        END IF;
     END IF;
     SELECT * INTO replay
     FROM __forest_module_schema__.context_compactions
@@ -1685,16 +1711,26 @@ BEGIN
             )
         );
     END IF;
-    SELECT * INTO lane
-    FROM __forest_module_schema__.conversation_lanes
-    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-    FOR UPDATE;
+    IF NOT pre_run THEN
+        SELECT * INTO lane
+        FROM __forest_module_schema__.conversation_lanes
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+        FOR UPDATE;
+    END IF;
     IF lane IS NULL THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','CONVERSATION_NOT_FOUND',
                 'message','Conversation lane does not exist','status',404
+            )
+        );
+    END IF;
+    IF pre_run AND lane.active_session_ref IS NOT NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.payload-json-plan/1','status','SKIP'
             )
         );
     END IF;
@@ -1827,6 +1863,8 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     selected jsonb := envelope#>'{prior,select}';
+    anchor jsonb := envelope#>'{input,anchor}';
+    pre_run boolean := anchor IS NOT NULL;
     plan jsonb := envelope#>'{prior,prepare}';
     payload_result jsonb := envelope#>'{prior,payload}';
     commit_value jsonb;
@@ -1839,7 +1877,8 @@ DECLARE
     result_value jsonb;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
-       OR selected IS NULL OR plan IS NULL OR payload_result IS NULL
+       OR (selected IS NULL AND NOT pre_run) OR plan IS NULL OR payload_result IS NULL
+       OR (pre_run AND selected IS NOT NULL)
        OR plan->>'protocol' IS DISTINCT FROM 'forest.payload-json-plan/1'
        OR payload_result->>'protocol' IS DISTINCT FROM 'forest.payload-json-put/1' THEN
         RETURN jsonb_build_object(
@@ -1860,9 +1899,16 @@ BEGIN
                 )
             );
         END IF;
-        RETURN jsonb_build_object(
-            'protocol','forest.domain-result/1','ok',true,'value',selected
-        );
+        IF pre_run THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',true,
+                'value',jsonb_build_object(
+                    'protocol','forest.context-pre-run-compaction/1',
+                    'status','SKIPPED','conversation_id',anchor->>'conversation_id'
+                )
+            );
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',selected);
     END IF;
     commit_value := plan->'commit';
     payload_ref := payload_result->'payload';
@@ -1872,6 +1918,7 @@ BEGIN
        OR payload_ref->>'owner_component_id' IS DISTINCT FROM 'conversation.scheduler'
        OR payload_ref->>'owner_kind' IS DISTINCT FROM 'context.archive'
        OR payload_ref->>'owner_id' IS DISTINCT FROM commit_value->>'compaction_id'
+       OR (pre_run AND commit_value->>'conversation_id' IS DISTINCT FROM anchor->>'conversation_id')
        OR payload_ref->>'digest' !~ '^sha256:[a-f0-9]{64}$' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -1968,6 +2015,21 @@ BEGIN
                     FILTER (WHERE item->>'event_id' IS NOT NULL),'[]'::jsonb)
     INTO event_refs
     FROM jsonb_array_elements(commit_value->'units') WITH ORDINALITY AS u(item,ordinality);
+    IF pre_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.context-pre-run-compaction/1',
+                'status','COMPACTED',
+                'conversation_id',commit_value->>'conversation_id',
+                'context_view_revision',(commit_value->>'published_view_revision')::bigint,
+                'memory_archive',jsonb_build_object(
+                    'compaction_ref',commit_value->>'compaction_id',
+                    'event_refs',event_refs
+                )
+            )
+        );
+    END IF;
     result_value := jsonb_set(
         selected,'{context_view_revision}',
         to_jsonb((commit_value->>'published_view_revision')::bigint),true

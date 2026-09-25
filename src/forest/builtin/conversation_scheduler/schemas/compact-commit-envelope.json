@@ -16,7 +16,7 @@
     "input": {"type": "object"},
     "prior": {
       "type": "object",
-      "required": ["select", "prepare", "payload"],
+      "required": ["prepare", "payload"],
       "properties": {
         "select": {"type": "object", "required": ["status", "conversation_id"]},
         "prepare": {"type": "object", "required": ["protocol", "status"]},

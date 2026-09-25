@@ -15,6 +15,7 @@ from test_schema_bundles import clean_authority as clean_authority
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.packages import PackageCatalog
+from forest.package_capabilities import PackageCallScope
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 
@@ -380,6 +381,120 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "active_session_ref": None,
             "active_run_ref": None,
         }
+
+        async with store.pool.connection() as conn, conn.transaction():
+            for revision in (2, 3):
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.context_units (bot_id,conversation_id,unit_id,"
+                        "context_revision,unit_index,kind,source_component_id,source_kind,"
+                        "source_id,payload_id,payload_digest,payload_owner_component_id,"
+                        "payload_owner_kind,payload_owner_id) "
+                        "SELECT bot_id,conversation_id,%s,%s,0,'CONTROL',"
+                        "source_component_id,'context.control',%s,payload_id,payload_digest,"
+                        "payload_owner_component_id,payload_owner_kind,payload_owner_id "
+                        "FROM {}.context_units WHERE bot_id=%s AND conversation_id=%s "
+                        "AND event_id=%s"
+                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                    (
+                        f"control/pre-run/{revision}", revision,
+                        f"control/pre-run/{revision}", store.bot_id,
+                        actor["conversation_id"], event_id,
+                    ),
+                )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.conversation_lanes SET context_revision=3,"
+                    "context_view_unit_count=3 WHERE bot_id=%s AND conversation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, actor["conversation_id"]),
+            )
+        compact_plan = next(
+            item for item in instance.component["unit_of_work_plans"]
+            if item["name"] == "conversation.compact-before-run"
+        )
+        binding = instance._prepared_binding
+        pre_run_input = {
+            "anchor": {
+                "protocol": "forest.conversation-pre-run-anchor/1",
+                "conversation_id": actor["conversation_id"],
+                "actor": actor,
+            },
+            "context_view": {
+                "high_watermark_units": 2,
+                "retain_units": 1,
+                "policy_revision": "context-view-unit-window-v1",
+            },
+            "payload": {
+                "protocol": "forest.payload-json-from-prior/1",
+                "prior_step_id": "prepare",
+            },
+            "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+            "memory": {},
+        }
+        pre_run = await instance._unit_of_work_coordinator.execute(
+            PackageCallScope(
+                bot_id=store.bot_id,
+                component_id="conversation.scheduler",
+                generation_id=participant.generation_id,
+                instance_id=binding.instance_id,
+                worker_incarnation=binding.worker_incarnation,
+                call_id="call:conversation/pre-run",
+                call_operation_id="conversation/pre-run/test",
+                causal_root_kind="conversation.agent-run",
+                causal_root_id="run/pre-run/test",
+            ),
+            compact_plan,
+            pre_run_input,
+            parent_call_id="call:conversation/pre-run/root",
+            timeout_seconds=20,
+        )
+        assert pre_run["protocol"] == "forest.context-pre-run-compaction/1"
+        assert pre_run["status"] == "COMPACTED"
+        assert pre_run["context_view_revision"] == 1
+        assert pre_run["memory_archive"]["event_refs"] == [event_id]
+        async with store.pool.connection() as conn:
+            view = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT context_view_revision,context_view_unit_count,"
+                        "context_archived_unit_count FROM {}.conversation_lanes "
+                        "WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"]),
+                )
+            ).fetchone()
+        assert view == {
+            "context_view_revision": 1,
+            "context_view_unit_count": 1,
+            "context_archived_unit_count": 2,
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.conversation_lanes SET active_session_ref=%s,"
+                    "active_run_ref=%s WHERE bot_id=%s AND conversation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                ("session/pre-run", "run/pre-run", store.bot_id, actor["conversation_id"]),
+            )
+        replayed_pre_run = await instance._unit_of_work_coordinator.execute(
+            PackageCallScope(
+                bot_id=store.bot_id,
+                component_id="conversation.scheduler",
+                generation_id=participant.generation_id,
+                instance_id=binding.instance_id,
+                worker_incarnation=binding.worker_incarnation,
+                call_id="call:conversation/pre-run/replay",
+                call_operation_id="conversation/pre-run/test",
+                causal_root_kind="conversation.agent-run",
+                causal_root_id="run/pre-run/test",
+            ),
+            compact_plan,
+            pre_run_input,
+            parent_call_id="call:conversation/pre-run/replay-root",
+            timeout_seconds=20,
+        )
+        assert replayed_pre_run == pre_run
 
         silent_event_id = "event/onebot/silent-1"
         silent_content = await _payload(

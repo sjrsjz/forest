@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "status",
+    "conversation_id"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.context-pre-run-compaction/1"
+    },
+    "status": {
+      "enum": [
+        "SKIPPED",
+        "COMPACTED"
+      ]
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "context_view_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "memory_archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compaction_ref",
+        "event_refs"
+      ],
+      "properties": {
+        "compaction_ref": {
+          "type": "string"
+        },
+        "event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "COMPACTED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "context_view_revision",
+          "memory_archive"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "context_view_revision"
+              ]
+            },
+            {
+              "required": [
+                "memory_archive"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

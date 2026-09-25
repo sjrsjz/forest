@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.3.0"
+version = "4.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -33,6 +33,7 @@ requests = [
   "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
   "uow.execute:conversation.commit-silent-input",
+  "uow.execute:conversation.compact-before-run",
   "uow.execute:conversation.commit-final-reply",
   "uow.execute:conversation.session-handoff",
   "uow.execute:conversation.commit-terminal-run"
@@ -59,9 +60,9 @@ output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.2.0"
+schema_version = "4.3.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "b5f6dbfabc40f3a415108068116881b6ea460602f3a5174af75fbc702d6b244d"
+baseline_sha256 = "e062414a70eb24c1b2ce368dd17f36f368708500ecc6bda4b958dd371d28d22d"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -125,7 +126,7 @@ name = "conversation.commit-context-compaction"
 contract = "1.0"
 function = "conversation_commit_context_compaction"
 input_schema = "schemas/compact-commit-envelope.json"
-output_schema = "schemas/select-input-output.json"
+output_schema = "schemas/compact-commit-output.json"
 
 [[components.unit_of_work_participants]]
 name = "conversation.append-final-reply"
@@ -146,6 +147,20 @@ contract = "1.0"
 function = "conversation_terminalize_run"
 input_schema = "schemas/terminalize-run-envelope.json"
 output_schema = "schemas/terminalize-run-output.json"
+
+[[components.unit_of_work_plans]]
+name = "conversation.compact-before-run"
+contract = "1.0"
+input_schema = "schemas/pre-run-compaction-input.json"
+output_schema = "schemas/pre-run-compaction-output.json"
+timeout_s = 20
+steps = [
+  { id = "prepare", component_id = "conversation.scheduler", participant = "conversation.prepare-context-compaction" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
+  { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" },
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.qualify-archive", input_path = "/memory" }
+]
 
 [[components.unit_of_work_plans]]
 name = "conversation.commit-silent-input"

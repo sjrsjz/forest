@@ -422,6 +422,25 @@ class ConversationScheduler(Plugin):
         ).isoformat()
         run_ref = work["run_ref"]
         resume = work["resume"]
+        if not resume:
+            await ctx.uow.call(
+                "conversation.compact-before-run",
+                {
+                    "anchor": {
+                        "protocol": "forest.conversation-pre-run-anchor/1",
+                        "conversation_id": work["conversation_id"],
+                        "actor": work["actor"],
+                    },
+                    "context_view": self._context_view,
+                    "payload": {
+                        "protocol": "forest.payload-json-from-prior/1",
+                        "prior_step_id": "prepare",
+                    },
+                    "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                    "memory": {},
+                },
+                operation_id=ctx.operations.stable(f"compact-before-run:{run_ref}"),
+            )
         while True:
             execution = await ctx.services.call(
                 "agent.execute",
