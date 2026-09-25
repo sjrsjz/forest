@@ -66,7 +66,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `FOREST_AGENT_SYSTEM_PROMPT` 是 Agent 模块拥有的 PresetContext。不可修改的核心协议仍来自 `agent_protocol.CORE_PROMPT`，包含单 Agent 身份、作者隔离、工具调用和输出语法约束。
 
-`memory.graph` 拥有 VL facet、来源投影、claim 和批次 handoff；`embedding.multimodal` 是带 manifest、schema、隔离 Worker 与同代 Effect Driver 的 builtin 包，只公开 `embedding.profile.bind/1` 和 `embedding.encode/1`。Memory 在一个事务中消费准确授权票据、提交 `kernel.effect` transport handoff 与自身 batch handoff；驱动复核当前 RuntimeGraph、Embedding Generation、wire 摘要和 profile 后才读取凭据并执行 HTTP。外部 attempt 与观察由通用 Effect authority 保存，不再存在第二套 Embedding transport 表。Embedding 的 deployment、模型版本、模型种类、维度与派生 space 在 Bot 首次初始化时冻结；配置 plan/apply 可以替换 endpoint、凭据引用、超时和连接数，新 Generation 会采用新传输配置。候选代会重新验证实际 desired revision，改变冻结 profile 会以 `EMBEDDING_PROFILE_IMMUTABLE` 拒绝启动。
+`memory.graph` 拥有 VL facet、来源投影、claim 和批次 handoff；`embedding.multimodal` 是带 manifest、schema、隔离 Worker 与同代 Effect Driver 的 builtin 包，只公开 `embedding.profile.bind/1` 和 `embedding.encode/2`。Memory 在一个事务中消费准确授权票据、提交 `kernel.effect` transport handoff 与自身 batch handoff；驱动复核当前 RuntimeGraph、Embedding Generation、wire 摘要和 profile 后才读取凭据并执行 HTTP。外部 attempt 与观察由通用 Effect authority 保存，不再存在第二套 Embedding transport 表。Embedding 的 deployment、模型版本、模型种类、维度与派生 space 在 Bot 首次初始化时冻结；配置 plan/apply 可以替换 endpoint、凭据引用、超时和连接数，新 Generation 会采用新传输配置。候选代会重新验证实际 desired revision，改变冻结 profile 会以 `EMBEDDING_PROFILE_IMMUTABLE` 拒绝启动。
 
 `vector.index` 独占 Milvus client 和 Bot collection，提供 `upsert/search/delete` 三个冻结服务。PostgreSQL 不再保存可查询向量列或执行全量余弦扫描，只保存稳定 `index_ref_id` 与权威内容、来源和关系；Milvus 命中必须回 PostgreSQL 复核后才能进入 EvidenceBundle。`space_id`、维度和度量与 Bot 生命周期绑定，配置只允许替换兼容 endpoint、凭据引用和超时。
 

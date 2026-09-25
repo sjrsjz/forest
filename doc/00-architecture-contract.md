@@ -64,7 +64,7 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 模块只能经版本化契约交换 DTO、稳定引用和受管 `PayloadRef`。模块不得持有另一模块的 Repository、数据库表、客户端或运行实例，也不得把进程内模块对象、Repository bound method 或共享 `modules` 字典伪装成“端口注入”。普通调用由 Contract Router 返回绑定准确 RuntimeGraph/Generation 的有界句柄；跨模块原子提交由内核 UnitOfWork 协调器解析并调用已注册 participant。每个 participant 仍只写自己的 namespace，业务模块只提交计划和稳定引用，不取得其他 participant 对象。
 
-多模态索引同样遵守该边界：`memory.graph` 拥有来源资格、facet/claim、索引发布、召回和删除屏障；`embedding.*` 拥有 endpoint 客户端、请求投影、批量传输、费用/usage 观察与外部 attempt。Memory 的生命周期 Worker 领取自己的 facet 后，只能经冻结的 `embedding.encode/1` 句柄提交受管内容引用和准确空间身份；Embedding 不读取 Memory 表，Memory 不持有 Embedding 客户端。返回向量先成为 Embedding 所有的受管结果载荷，再由 Memory 在自己的最终事务中复核 claim、Generation、空间、来源修订和删除 epoch 后发布。两者不能重新合并成一个直接拿 Repository 和 HTTP Client 的运行对象。
+多模态索引同样遵守该边界：`memory.graph` 拥有来源资格、facet/claim、索引发布、召回和删除屏障；`embedding.*` 拥有 endpoint 客户端、请求投影、批量传输、费用/usage 观察与外部 attempt。Memory 的生命周期 Worker 领取自己的 facet 后，只能经冻结的 `embedding.encode/2` 句柄提交受管内容引用和准确空间身份；Embedding 不读取 Memory 表，Memory 不持有 Embedding 客户端。返回向量先成为 Embedding 所有的受管结果载荷，服务回执只传准确受管引用与用量，避免批量向量溢出 Worker 帧；Memory 再在自己的最终事务中复核 claim、Generation、空间、来源修订和删除 epoch 后发布。两者不能重新合并成一个直接拿 Repository 和 HTTP Client 的运行对象。
 
 `BotRuntimeSupervisor` 只监督冻结的模块图、宿主 lease、资源和健康，不得 import、构造或保存具体 Agent、Memory、Adapter、Shell、Scheduler、Job 或 Delivery 对象。`BindingRuntime`、巨型 `BotStore`/`MessageStore` 和类似业务组合根属于必须删除的错误抽象。
 

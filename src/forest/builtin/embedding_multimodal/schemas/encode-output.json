@@ -1,23 +1,34 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object", "additionalProperties": false,
-  "required": ["status", "request_id", "transport_attempt_id", "payload_digest", "space_id", "vectors", "usage", "error_code", "http_status"],
+  "required": ["status", "request_id", "transport_attempt_id", "payload_digest", "space_id", "result", "usage", "error_code", "http_status"],
   "properties": {
     "status": {"enum": ["RESPONDED", "REJECTED", "NOT_SENT", "UNKNOWN"]},
     "request_id": {"type": "string"},
     "transport_attempt_id": {"type": "string"},
     "payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "space_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "vectors": {"type": "array", "maxItems": 32, "items": {
-      "type": "object", "additionalProperties": false,
-      "required": ["facet_id", "index", "values"],
-      "properties": {
-        "facet_id": {"type": "string"}, "index": {"type": "integer", "minimum": 0},
-        "values": {"type": "array", "maxItems": 4096, "items": {"type": "number"}}
-      }
-    }},
+    "result": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/result"}]},
     "usage": {"type": ["object", "null"]},
     "error_code": {"type": ["string", "null"]},
     "http_status": {"type": ["integer", "null"]}
+  },
+  "allOf": [{
+    "if": {"properties": {"status": {"const": "RESPONDED"}}, "required": ["status"]},
+    "then": {"properties": {"result": {"$ref": "#/$defs/result"}, "error_code": {"type": "null"}}},
+    "else": {"properties": {"result": {"type": "null"}}}
+  }],
+  "$defs": {
+    "result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "owner_component_id": {"const": "embedding.multimodal"},
+        "owner_kind": {"const": "embedding.result"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    }
   }
 }

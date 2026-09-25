@@ -164,7 +164,48 @@ class MultimodalEmbeddingEffectDriver:
                 )
             await self._verify_effect(payload)
 
-        return (await self.client.dispatch(prepared, permitcheck=permitcheck)).as_dict()
+        result = await self.client.dispatch(prepared, permitcheck=permitcheck)
+        value = result.as_dict()
+        if (
+            value["request_id"] != prepared.request_id
+            or value["transport_attempt_id"] != prepared.transport_attempt_id
+            or value["payload_digest"] != prepared.payload_digest
+            or value["space_id"] != prepared.space_id
+        ):
+            raise ForestError(
+                "EMBEDDING_RESULT_FENCE_MISMATCH",
+                "Embedding result differs from the dispatched request",
+                409,
+            )
+        receipt = {
+            "status": value["status"],
+            "request_id": value["request_id"],
+            "transport_attempt_id": value["transport_attempt_id"],
+            "payload_digest": value["payload_digest"],
+            "space_id": value["space_id"],
+            "result": None,
+            "usage": value["usage"],
+            "error_code": value["error_code"],
+            "http_status": value["http_status"],
+        }
+        if value["status"] == "RESPONDED":
+            saved = await self.payloads.put_bytes(
+                owner_component_id=self.identity.component_id,
+                owner_kind="embedding.result",
+                owner_id=prepared.transport_attempt_id,
+                media_type="application/json",
+                content=_canonical({"protocol": "forest.embedding-result/1", **value}),
+                parents=(body_ref["payload_id"], manifest_ref["payload_id"]),
+                expected_deletion_epoch=await self.payloads.epoch(),
+            )
+            receipt["result"] = {
+                "payload_id": saved.payload_id,
+                "digest": saved.content_digest,
+                "owner_component_id": self.identity.component_id,
+                "owner_kind": "embedding.result",
+                "owner_id": prepared.transport_attempt_id,
+            }
+        return receipt
 
     async def quiesce(self) -> None:
         self.accepting = False
