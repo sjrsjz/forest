@@ -185,6 +185,8 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 Memory 包的持久域绑定任务在运行时通过冻结的 `embedding.profile.bind` 服务读取实际模型身份，逐字段对照自己的不可变配置，再以包拥有的 UnitOfWork 写入 `memory_domains`。相同空间的重试幂等，身份不一致显式冲突；绑定失败按持久租约退避重试，不在归档事务中调用 Embedding 服务，也不阻塞消息归档。这一步只绑定身份，不调用嵌入模型 API。
 
+归档事务首次把源单元提升为 `ELIGIBLE` 时，仅幂等登记 `facet_preparation_work`。Memory 自有的持久 Worker 在域绑定完成后按源单元租约读取有界的 part 分页，使用固定 `unicode-codepoints-2048-128/1` 规则把非空文本切成 2048 字符、重叠 128 字符的片段，并为每张图片保留一个独立 facet。facet ID 包含来源、修订、part、原始内容摘要、空间和跨度；每批最多 64 个，经包内 UnitOfWork 再次核验归档资格、原始 payload 引用和空间后写入 `PENDING`。崩溃重试复用相同批次操作 ID，不会把重复消息写成多份 facet。这一步尚不发起嵌入或向量索引请求；后续派发仍必须先通过预算预留和删除屏障。
+
 一次召回先把当前 InputBatch 的文本/图片 parts 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与相似度。`memory.graph` 随后在冻结可见性时间点回 PostgreSQL 批量验证 `READY`、space、来源修订、`ELIGIBLE`、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。各查询 facet 的候选用 RRF 只确定直接种子顺序，向量相似度不再与图激活值混成一个分数。直接种子的激活值统一为 `1.0`，再沿同主干前后邻接边和 `ASSOCIATES_WITH` 边执行最大乘积扩散；最终 EvidenceBundle 始终从 PostgreSQL 事实库物化，并逐项附原始群聊、主干、作者和命中路径。
 
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。

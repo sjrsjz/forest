@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.6.0"
+version = "1.7.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -33,11 +33,13 @@ requests = [
   "payload.write",
   "service.call:embedding.profile.bind",
   "domain.query:memory.read-exact-sources",
+  "domain.query:memory.read-facet-source",
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
   "domain.query:memory.query-relations",
   "uow.execute:memory.capture-source",
   "uow.execute:memory.bind-domain",
+  "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.mark-source-unavailable"
 ]
 
@@ -146,12 +148,19 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.4.0"
+schema_version = "3.5.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "fd4309774f3f9b60e2bcf9bef6846f821c9a0f630d52226d29a56a5c7cf03ed8"
+baseline_sha256 = "f1df6692ada75123c46ac6b84da9c15d579735f6beb27199932bfa6ec43906a6"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
+
+[[components.domain_queries]]
+name = "memory.read-facet-source"
+contract = "1.0"
+function = "memory_read_facet_source"
+input_schema = "schemas/read-facet-source-input.json"
+output_schema = "schemas/read-facet-source-output.json"
 
 [[components.domain_queries]]
 name = "memory.read-exact-sources"
@@ -208,6 +217,19 @@ input_schema = "schemas/domain-bind-envelope.json"
 output_schema = "schemas/domain-record-output.json"
 
 [[components.unit_of_work_participants]]
+name = "memory.prepare-document-facets-record"
+contract = "1.0"
+function = "memory_prepare_document_facets"
+input_schema = "schemas/prepare-document-facets-envelope.json"
+output_schema = "schemas/prepare-document-facets-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/facets/*/input_payload"
+owner_component_path = "/input/facets/*/input_payload/owner_component_id"
+owner_kind_path = "/input/facets/*/input_payload/owner_kind"
+owner_id_path = "/input/facets/*/input_payload/owner_id"
+
+[[components.unit_of_work_participants]]
 name = "memory.capture-source-record"
 contract = "1.0"
 function = "memory_capture_source"
@@ -258,6 +280,16 @@ steps = [
 ]
 
 [[components.unit_of_work_plans]]
+name = "memory.prepare-document-facets"
+contract = "1.0"
+input_schema = "schemas/prepare-document-facets-input.json"
+output_schema = "schemas/prepare-document-facets-output.json"
+timeout_s = 15
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.prepare-document-facets-record" }
+]
+
+[[components.unit_of_work_plans]]
 name = "memory.capture-source"
 contract = "1.0"
 input_schema = "schemas/capture-plan.json"
@@ -267,6 +299,21 @@ steps = [
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" }
 ]
+
+[[components.owned_work_handlers]]
+name = "memory.facets.prepare"
+contract = "1.0"
+handler = "memory.facets.prepare"
+claim_function = "memory_claim_facet_preparation"
+settle_function = "memory_settle_facet_preparation"
+input_schema = "schemas/facet-work-input.json"
+output_schema = "schemas/facet-work-output.json"
+max_concurrency = 2
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 300
+settle_timeout_s = 5
+lease_seconds = 360
 
 [[components.owned_work_handlers]]
 name = "memory.domain.bind"

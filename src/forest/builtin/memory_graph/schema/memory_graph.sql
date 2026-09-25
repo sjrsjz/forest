@@ -444,9 +444,40 @@ CREATE TABLE facet_preparation_operations (
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     target_kind text NOT NULL CHECK (target_kind IN ('SOURCE_UNIT','QUERY')),
     target_id text NOT NULL CHECK (octet_length(target_id) BETWEEN 1 AND 256),
-    facet_count integer NOT NULL CHECK (facet_count BETWEEN 1 AND 4096),
+    batch_index integer NOT NULL CHECK (batch_index BETWEEN 0 AND 65535),
+    facet_count integer NOT NULL CHECK (facet_count BETWEEN 1 AND 64),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (bot_id,operation_id)
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,target_kind,target_id,batch_index)
+);
+
+CREATE TABLE facet_preparation_work (
+    bot_id text NOT NULL,
+    source_unit_id text NOT NULL,
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','CLAIMED','READY','SUPPRESSED','FAILED')),
+    claim_token text UNIQUE,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    prepared_facet_count integer CHECK (
+        prepared_facet_count IS NULL OR prepared_facet_count BETWEEN 0 AND 4096
+    ),
+    last_error_code text,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    CHECK ((state='CLAIMED') = (claim_token IS NOT NULL AND lease_deadline IS NOT NULL)),
+    CHECK ((state='READY') = (prepared_facet_count IS NOT NULL))
+);
+
+CREATE TABLE facet_preparation_settlements (
+    bot_id text NOT NULL,
+    claim_token text NOT NULL,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_token)
 );
 
 CREATE TABLE embedding_facets (
@@ -804,6 +835,9 @@ CREATE INDEX relation_right_idx ON relation_contributions(
 );
 CREATE INDEX embedding_facets_work_idx ON embedding_facets(
     bot_id,state,purpose,created_at,facet_id
+);
+CREATE INDEX facet_preparation_work_idx ON facet_preparation_work(
+    bot_id,state,next_attempt_at,source_unit_id
 );
 CREATE INDEX embedding_facets_source_idx ON embedding_facets(
     bot_id,source_unit_id,source_revision,part_id,purpose,state
@@ -1198,6 +1232,154 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
 END;
 $$;
 
+CREATE FUNCTION memory_claim_facet_preparation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.facet_preparation_work%ROWTYPE;
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    domain_row __forest_module_schema__.memory_domains%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_CLAIM_INVALID',
+                'message','Facet preparation claim is invalid','status',422));
+    END IF;
+    SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot;
+    IF domain_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.facet_preparation_work
+    SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
+        next_attempt_at=clock_timestamp(),updated_at=clock_timestamp(),
+        last_error_code='MEMORY_FACET_LEASE_EXPIRED'
+    WHERE bot_id=requested_bot AND state='CLAIMED' AND lease_deadline<=clock_timestamp();
+    SELECT w.* INTO work_row FROM __forest_module_schema__.facet_preparation_work w
+    WHERE w.bot_id=requested_bot AND w.state='PENDING'
+      AND w.next_attempt_at<=clock_timestamp()
+    ORDER BY w.next_attempt_at,w.source_unit_id
+    FOR UPDATE OF w SKIP LOCKED LIMIT 1;
+    IF work_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+    UPDATE __forest_module_schema__.facet_preparation_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id
+    RETURNING * INTO work_row;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',work_row.source_unit_id,
+            'claim_token',work_row.claim_token,
+            'attempt',work_row.attempt_count,
+            'operation_id','memory-facet-work:'||encode(sha256(convert_to(
+                requested_bot||'/'||work_row.source_unit_id||'/'||work_row.attempt_count,
+                'UTF8')),'hex'),
+            'causal_root_kind','memory.facet',
+            'causal_root_id',work_row.source_unit_id,
+            'payload',jsonb_build_object(
+                'source_unit_id',work_row.source_unit_id,
+                'source_revision',unit_row.source_revision,
+                'space_id',domain_row.space_id
+            )
+        ));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_facet_preparation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    old_input jsonb;
+    old_result jsonb;
+    result_value jsonb;
+    work_row __forest_module_schema__.facet_preparation_work%ROWTYPE;
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    outcome jsonb := input->'outcome';
+    disposition text := input#>>'{outcome,result,disposition}';
+    reported_count integer;
+    actual_count integer;
+BEGIN
+    SELECT input_payload,result_payload INTO old_input,old_result
+    FROM __forest_module_schema__.facet_preparation_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF old_input=input THEN RETURN old_result; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_SETTLEMENT_CONFLICT',
+                'message','Facet claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.facet_preparation_work
+    WHERE bot_id=requested_bot AND source_unit_id=input->>'work_id' FOR UPDATE;
+    IF work_row IS NULL OR work_row.state<>'CLAIMED'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_CLAIM_LOST',
+                'message','Facet claim is no longer current','status',409));
+    END IF;
+    SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+    IF unit_row.eligibility_state='SUPPRESSED'
+       OR (outcome->>'status'='SUCCEEDED' AND disposition='SUPPRESSED') THEN
+        UPDATE __forest_module_schema__.facet_preparation_work
+        SET state='SUPPRESSED',claim_token=NULL,lease_deadline=NULL,
+            last_error_code=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+    ELSIF outcome->>'status'='SUCCEEDED' AND disposition='FAILED' THEN
+        UPDATE __forest_module_schema__.facet_preparation_work
+        SET state='FAILED',claim_token=NULL,lease_deadline=NULL,
+            last_error_code=COALESCE(outcome#>>'{result,error_code}',
+                'MEMORY_FACET_PREPARATION_FAILED'),updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+    ELSIF outcome->>'status'='SUCCEEDED' AND disposition='READY'
+       AND unit_row.eligibility_state='ELIGIBLE' THEN
+        reported_count := (outcome#>>'{result,facet_count}')::integer;
+        SELECT count(*) INTO actual_count FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id
+          AND source_revision=unit_row.source_revision AND purpose='DOCUMENT';
+        IF actual_count=reported_count THEN
+            UPDATE __forest_module_schema__.facet_preparation_work
+            SET state='READY',claim_token=NULL,lease_deadline=NULL,
+                prepared_facet_count=reported_count,last_error_code=NULL,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+        END IF;
+    END IF;
+    IF (SELECT state FROM __forest_module_schema__.facet_preparation_work
+        WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id)='CLAIMED' THEN
+        UPDATE __forest_module_schema__.facet_preparation_work
+        SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp()+
+                (LEAST(power(2,LEAST(attempt_count,8)),300)*interval '1 second'),
+            last_error_code=COALESCE(outcome#>>'{error,code}',
+                'MEMORY_FACET_PREPARATION_RETRY'),updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.source_unit_id));
+    INSERT INTO __forest_module_schema__.facet_preparation_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,input->>'claim_token',input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_FACET_SETTLEMENT_INVALID',
+            'message','Facet settlement is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION memory_bind_domain(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1263,6 +1445,160 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_DOMAIN_INPUT_INVALID',
             'message','Memory embedding domain input is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_prepare_document_facets(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    facets jsonb := body->'facets';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    source_id_value text := body->>'source_unit_id';
+    batch_index_value integer;
+    source_row __forest_module_schema__.source_units%ROWTYPE;
+    part_row __forest_module_schema__.source_parts%ROWTYPE;
+    domain_row __forest_module_schema__.memory_domains%ROWTYPE;
+    existing_row __forest_module_schema__.embedding_facets%ROWTYPE;
+    operation_row __forest_module_schema__.facet_preparation_operations%ROWTYPE;
+    facet jsonb;
+    reference jsonb;
+    modality_value text;
+    start_value integer;
+    end_value integer;
+    byte_count integer;
+    facet_count integer;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-document-facets/1'
+       OR requested_operation IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR source_id_value IS NULL OR octet_length(source_id_value) NOT BETWEEN 1 AND 256
+       OR body->>'source_revision' IS NULL
+       OR body->>'source_revision' !~ '^[1-9][0-9]*$'
+       OR body->>'batch_index' IS NULL OR body->>'batch_index' !~ '^[0-9]+$'
+       OR jsonb_typeof(facets) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(facets) NOT BETWEEN 1 AND 64 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
+                'message','Document facet input is invalid','status',422));
+    END IF;
+    batch_index_value := (body->>'batch_index')::integer;
+    facet_count := jsonb_array_length(facets);
+    IF batch_index_value NOT BETWEEN 0 AND 65535
+       OR (SELECT count(DISTINCT item->>'facet_id') FROM jsonb_array_elements(facets) item)
+          <> facet_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
+                'message','Document facet batch has duplicate or invalid identities','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/facet-batch/'||requested_bot||'/'||source_id_value||'/'||batch_index_value,0));
+    SELECT * INTO operation_row FROM __forest_module_schema__.facet_preparation_operations
+    WHERE bot_id=requested_bot AND target_kind='SOURCE_UNIT'
+      AND target_id=source_id_value AND batch_index=batch_index_value;
+    IF operation_row IS NOT NULL THEN
+        IF operation_row.operation_id IS DISTINCT FROM requested_operation
+           OR operation_row.input_digest IS DISTINCT FROM requested_digest
+           OR operation_row.facet_count IS DISTINCT FROM facet_count THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FACET_BATCH_CONFLICT',
+                    'message','Document facet batch was prepared differently','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-facets-prepared/1',
+                'source_unit_id',source_id_value,'batch_index',batch_index_value,
+                'facet_count',facet_count));
+    END IF;
+    SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot FOR SHARE;
+    SELECT u.* INTO source_row FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=source_id_value FOR SHARE OF u;
+    IF domain_row IS NULL OR domain_row.space_id IS DISTINCT FROM body->>'space_id'
+       OR source_row IS NULL OR source_row.eligibility_state<>'ELIGIBLE'
+       OR source_row.source_revision IS DISTINCT FROM (body->>'source_revision')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_SOURCE_INELIGIBLE',
+                'message','Document source or embedding space is unavailable','status',409));
+    END IF;
+    FOR facet IN SELECT value FROM jsonb_array_elements(facets) LOOP
+        reference := facet->'input_payload';
+        modality_value := facet->>'modality';
+        byte_count := (facet->>'input_byte_length')::integer;
+        start_value := (facet->>'selector_start_char')::integer;
+        end_value := (facet->>'selector_end_char')::integer;
+        SELECT * INTO part_row FROM __forest_module_schema__.source_parts
+        WHERE bot_id=requested_bot AND source_unit_id=source_id_value
+          AND part_id=facet->>'part_id' FOR SHARE;
+        IF part_row IS NULL OR octet_length(facet->>'facet_id') NOT BETWEEN 1 AND 256
+           OR modality_value IS DISTINCT FROM part_row.part_kind
+           OR reference->>'payload_id' IS DISTINCT FROM part_row.payload_id
+           OR reference->>'digest' IS DISTINCT FROM part_row.payload_digest
+           OR reference->>'owner_component_id' IS DISTINCT FROM part_row.payload_owner_component_id
+           OR reference->>'owner_kind' IS DISTINCT FROM part_row.payload_owner_kind
+           OR reference->>'owner_id' IS DISTINCT FROM part_row.payload_owner_id
+           OR facet->>'facet_content_digest' !~ '^sha256:[a-f0-9]{64}$'
+           OR byte_count NOT BETWEEN 1 AND 33554432
+           OR (modality_value='TEXT' AND
+               (start_value IS NULL OR end_value IS NULL OR start_value<0 OR end_value<=start_value))
+           OR (modality_value='IMAGE' AND
+               (start_value IS NOT NULL OR end_value IS NOT NULL
+                OR facet->>'facet_content_digest' IS DISTINCT FROM part_row.payload_digest
+                OR byte_count IS DISTINCT FROM part_row.byte_length)) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FACET_PART_MISMATCH',
+                    'message','Facet does not match the archived source part','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.embedding_facets(
+            bot_id,facet_id,purpose,source_unit_id,source_revision,part_id,modality,
+            selector_start_char,selector_end_char,input_payload_id,input_payload_digest,
+            facet_content_digest,input_media_type,input_byte_length,space_id,
+            accepted_deletion_epoch)
+        VALUES(requested_bot,facet->>'facet_id','DOCUMENT',source_id_value,
+            source_row.source_revision,part_row.part_id,modality_value,
+            start_value,end_value,part_row.payload_id,part_row.payload_digest,
+            facet->>'facet_content_digest',part_row.media_type,byte_count,
+            domain_row.space_id,source_row.accepted_deletion_epoch)
+        ON CONFLICT (bot_id,facet_id) DO NOTHING;
+        SELECT * INTO existing_row FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND facet_id=facet->>'facet_id';
+        IF existing_row.purpose IS DISTINCT FROM 'DOCUMENT'
+           OR existing_row.source_unit_id IS DISTINCT FROM source_id_value
+           OR existing_row.source_revision IS DISTINCT FROM source_row.source_revision
+           OR existing_row.part_id IS DISTINCT FROM part_row.part_id
+           OR existing_row.modality IS DISTINCT FROM modality_value
+           OR existing_row.selector_start_char IS DISTINCT FROM start_value
+           OR existing_row.selector_end_char IS DISTINCT FROM end_value
+           OR existing_row.input_payload_id IS DISTINCT FROM part_row.payload_id
+           OR existing_row.input_payload_digest IS DISTINCT FROM part_row.payload_digest
+           OR existing_row.input_media_type IS DISTINCT FROM part_row.media_type
+           OR existing_row.facet_content_digest IS DISTINCT FROM facet->>'facet_content_digest'
+           OR existing_row.input_byte_length IS DISTINCT FROM byte_count
+           OR existing_row.space_id IS DISTINCT FROM domain_row.space_id
+           OR existing_row.accepted_deletion_epoch IS DISTINCT FROM
+              source_row.accepted_deletion_epoch THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FACET_IDENTITY_CONFLICT',
+                    'message','Facet identity names different source content','status',409));
+        END IF;
+    END LOOP;
+    INSERT INTO __forest_module_schema__.facet_preparation_operations(
+        bot_id,operation_id,input_digest,target_kind,target_id,batch_index,facet_count)
+    VALUES(requested_bot,requested_operation,requested_digest,'SOURCE_UNIT',
+        source_id_value,batch_index_value,facet_count);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-facets-prepared/1',
+            'source_unit_id',source_id_value,'batch_index',batch_index_value,
+            'facet_count',facet_count));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
+    OR not_null_violation OR check_violation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
+            'message','Document facet input is invalid','status',422));
 END;
 $$;
 
@@ -1506,6 +1842,12 @@ BEGIN
             archive_pending_row.input_digest,archive_pending_row.compaction_ref,
             archive_pending_row.conversation_ref,archive_pending_row.event_ref,
             unit_id_value,occurrence_id_value,unit_row.eligibility_revision);
+        IF unit_row.eligibility_state='ELIGIBLE' THEN
+            INSERT INTO __forest_module_schema__.facet_preparation_work(
+                bot_id,source_unit_id)
+            VALUES(requested_bot,unit_id_value)
+            ON CONFLICT (bot_id,source_unit_id) DO NOTHING;
+        END IF;
         UPDATE __forest_module_schema__.pending_archive_events
         SET state='RESOLVED',source_unit_id=unit_id_value,
             occurrence_id=occurrence_id_value,resolved_at=clock_timestamp()
@@ -2025,9 +2367,78 @@ BEGIN
         VALUES(requested_bot,item_operation,item_digest,compaction_ref_value,
             conversation_ref_value,event_ref_value,occurrence_row.source_unit_id,
             occurrence_row.occurrence_id,unit_row.eligibility_revision);
+        INSERT INTO __forest_module_schema__.facet_preparation_work(bot_id,source_unit_id)
+        VALUES(requested_bot,occurrence_row.source_unit_id)
+        ON CONFLICT (bot_id,source_unit_id) DO NOTHING;
     END LOOP;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',committed);
+END;
+$$;
+
+CREATE FUNCTION memory_read_facet_source(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_source text := input->>'source_unit_id';
+    after_index integer := (input->>'after_part_index')::integer;
+    requested_limit integer := (input->>'limit')::integer;
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    parts_value jsonb;
+    last_index integer;
+    has_more_value boolean := false;
+BEGIN
+    IF requested_source IS NULL OR octet_length(requested_source) NOT BETWEEN 1 AND 256
+       OR after_index IS NULL OR after_index NOT BETWEEN -1 AND 4095
+       OR requested_limit IS NULL OR requested_limit NOT BETWEEN 1 AND 64 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FACET_SOURCE_INPUT_INVALID',
+                'message','Facet source page request is invalid','status',422));
+    END IF;
+    SELECT u.* INTO unit_row FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=requested_source
+      AND u.eligibility_state='ELIGIBLE';
+    IF unit_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('status','UNAVAILABLE','source_revision',NULL,
+                'parts','[]'::jsonb,'next_part_index',NULL,'has_more',false));
+    END IF;
+    SELECT COALESCE(jsonb_agg(page.part ORDER BY page.part_index),'[]'::jsonb),
+           max(page.part_index)
+    INTO parts_value,last_index
+    FROM (
+        SELECT p.part_index,jsonb_build_object(
+            'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,
+            'media_type',p.media_type,'byte_length',p.byte_length,
+            'payload',jsonb_build_object(
+                'payload_id',p.payload_id,'digest',p.payload_digest,
+                'owner_component_id',p.payload_owner_component_id,
+                'owner_kind',p.payload_owner_kind,'owner_id',p.payload_owner_id
+            )
+        ) AS part
+        FROM __forest_module_schema__.source_parts p
+        WHERE p.bot_id=requested_bot AND p.source_unit_id=requested_source
+          AND p.part_index>after_index
+        ORDER BY p.part_index LIMIT requested_limit
+    ) page;
+    IF last_index IS NOT NULL THEN
+        SELECT EXISTS(
+            SELECT 1 FROM __forest_module_schema__.source_parts p
+            WHERE p.bot_id=requested_bot AND p.source_unit_id=requested_source
+              AND p.part_index>last_index
+        ) INTO has_more_value;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('status','READY',
+            'source_revision',unit_row.source_revision,
+            'parts',parts_value,'next_part_index',last_index,
+            'has_more',has_more_value));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_FACET_SOURCE_INPUT_INVALID',
+            'message','Facet source page request is invalid','status',422));
 END;
 $$;
 

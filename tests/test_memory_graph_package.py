@@ -1,3 +1,5 @@
+import asyncio
+import base64
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -7,6 +9,7 @@ import pytest
 from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.builtin.memory_graph.python.facet_preparation import document_facets
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
@@ -47,6 +50,36 @@ def _configuration():
             "reservation_tokens": 32768,
         },
     }
+
+
+def test_document_facets_preserve_text_spans_and_image_identity():
+    text = "甲" * 4200
+    text_ref = {
+        "payload_id": "payload/text", "digest": "sha256:" + "1" * 64,
+        "owner_component_id": "adapter.onebot", "owner_kind": "context.input",
+        "owner_id": "source/text",
+    }
+    image_ref = {
+        **text_ref, "payload_id": "payload/image", "digest": "sha256:" + "2" * 64,
+        "owner_id": "source/image",
+    }
+    parts = [
+        {"part_id": "part/text", "part_kind": "TEXT", "payload": text_ref,
+         "byte_length": len(text.encode())},
+        {"part_id": "part/image", "part_kind": "IMAGE", "payload": image_ref,
+         "byte_length": 128},
+    ]
+    first = document_facets("source/1", 1, "sha256:" + "a" * 64, parts, {
+        "part/text": text,
+    })
+    assert first == document_facets("source/1", 1, "sha256:" + "a" * 64, parts, {
+        "part/text": text,
+    })
+    assert [(f["selector_start_char"], f["selector_end_char"])
+            for f in first[:3]] == [(0, 2048), (1920, 3968), (3840, 4200)]
+    assert first[3]["modality"] == "IMAGE"
+    assert first[3]["facet_content_digest"] == image_ref["digest"]
+    assert len({item["facet_id"] for item in first}) == 4
 
 
 def _envelope(
@@ -227,6 +260,16 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
             owner_id="unit/event/captured:text",
             media_type="text/plain; charset=utf-8",
             content="来自 933179609 群的原始消息".encode(),
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        image_payload = await kernel.payload.put_bytes(
+            owner_component_id="adapter.onebot",
+            owner_kind="context.image",
+            owner_id="unit/event/captured:image",
+            media_type="image/png",
+            content=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII="
+            ),
             expected_deletion_epoch=await kernel.payload.epoch(),
         )
         author_payload = await kernel.payload.put_bytes(
@@ -443,7 +486,23 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                                     "width": None,
                                     "height": None,
                                     "byte_length": text_payload.byte_length,
-                                }
+                                },
+                                {
+                                    "part_id": "part/event/captured/image",
+                                    "part_index": 1,
+                                    "part_kind": "IMAGE",
+                                    "media_type": image_payload.media_type,
+                                    "payload": {
+                                        "payload_id": image_payload.payload_id,
+                                        "digest": image_payload.content_digest,
+                                        "owner_component_id": "adapter.onebot",
+                                        "owner_kind": "context.image",
+                                        "owner_id": "unit/event/captured:image",
+                                    },
+                                    "width": 1,
+                                    "height": 1,
+                                    "byte_length": image_payload.byte_length,
+                                },
                             ],
                             "occurrence": {
                                 "occurrence_id": "occurrence/event/captured",
@@ -531,6 +590,17 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 )
             ).fetchone()
         assert active_unit["eligibility_state"] == "REGISTERED"
+        async with store.pool.connection() as conn:
+            pending_facets = await (
+                await conn.execute(
+                    sql.SQL("SELECT count(*) AS n FROM {}.facet_preparation_work "
+                            "WHERE bot_id=%s AND source_unit_id=%s").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (store.bot_id, "unit/event/captured"),
+                )
+            ).fetchone()
+        assert pending_facets["n"] == 0
 
         archived_selection = {
             "status": "BATCH",
@@ -607,6 +677,40 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
             )
         assert archive == archived_selection
 
+        async with asyncio.timeout(20):
+            while True:
+                async with store.pool.connection() as conn:
+                    prepared = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT state,prepared_facet_count,last_error_code "
+                                "FROM {}.facet_preparation_work WHERE bot_id=%s "
+                                "AND source_unit_id=%s"
+                            ).format(sql.Identifier(namespace)),
+                            (store.bot_id, "unit/event/captured"),
+                        )
+                    ).fetchone()
+                if prepared is not None and prepared["state"] == "READY":
+                    break
+                await asyncio.sleep(0.1)
+        assert prepared["prepared_facet_count"] == 2
+        async with store.pool.connection() as conn:
+            saved_facets = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT modality,purpose,state,source_unit_id,space_id "
+                        "FROM {}.embedding_facets WHERE bot_id=%s ORDER BY modality DESC"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id,),
+                )
+            ).fetchall()
+        assert [(row["modality"], row["purpose"], row["state"])
+                for row in saved_facets] == [
+                    ("TEXT", "DOCUMENT", "PENDING"),
+                    ("IMAGE", "DOCUMENT", "PENDING"),
+                ]
+        assert {row["space_id"] for row in saved_facets} == {domain_input["space_id"]}
+
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[
             ("agent.tool.memory-exact-recall", 1)
@@ -678,7 +782,21 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                         "part_id": "part/event/captured/text",
                         "type": "text",
                         "text": "来自 933179609 群的原始消息",
-                    }
+                    },
+                    {
+                        "part_id": "part/event/captured/image",
+                        "type": "image",
+                        "media_ref": {
+                            "payload_id": image_payload.payload_id,
+                            "digest": image_payload.content_digest,
+                            "owner_component_id": "adapter.onebot",
+                            "owner_kind": "context.image",
+                            "owner_id": "unit/event/captured:image",
+                        },
+                        "media_type": "image/png",
+                        "width": 1,
+                        "height": 1,
+                    },
                 ],
             }
         ]
